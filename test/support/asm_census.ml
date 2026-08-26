@@ -18,8 +18,8 @@
 
     {1 The two false readings this module is shaped around}
 
-    Re-deriving the census by hand cost gh-ocannl-621 three iterations and two wrong answers, both of
-    which a naive implementation reproduces:
+    Re-deriving the census by hand cost gh-ocannl-621 three iterations and two wrong answers, both
+    of which a naive implementation reproduces:
 
     - {b selecting an outer loop.} A reduction kernel nests: the accumulator update sits in the
       innermost loop, and counting an enclosing one dilutes every ratio. {!census} therefore selects
@@ -69,10 +69,10 @@ type toolchain = {
 
 let flags t = if String.is_empty t.march then "" else "-march=" ^ t.march
 
-(* Compiler invocations go through the shell with output captured to a file, the way
-   [Cc_backend]'s own probes do: the exit status is what decides, and the output is only wanted when
-   it is nonzero. Paths are quoted -- these sit under the build directory or the system temp
-   directory, either of which can contain whitespace. *)
+(* Compiler invocations go through the shell with output captured to a file, the way [Cc_backend]'s
+   own probes do: the exit status is what decides, and the output is only wanted when it is nonzero.
+   Paths are quoted -- these sit under the build directory or the system temp directory, either of
+   which can contain whitespace. *)
 let run_capture cmdline =
   let log = Stdlib.Filename.temp_file "ocannl_census_" ".log" in
   let rc = Stdlib.Sys.command (Printf.sprintf "%s > %s 2>&1" cmdline (Stdlib.Filename.quote log)) in
@@ -90,7 +90,8 @@ let accepts t =
      report itself [Verdict.skipped], and the golden would be green having compiled nothing. That is
      the exact failure this module's "a missing column is not a passing one" rule exists to prevent,
      so it must not be reintroduced by the probe that decides which columns exist (AGENTS.md names
-     Windows a supported environment). Writing real assembly costs a few kilobytes and is portable. *)
+     Windows a supported environment). Writing real assembly costs a few kilobytes and is
+     portable. *)
   let out = Stdlib.Filename.temp_file "ocannl_census_probe_" ".s" in
   Stdio.Out_channel.write_all src ~data:"int ocannl_census_probe(void) { return 0; }\n";
   let rc, _ =
@@ -113,31 +114,29 @@ let defines t =
   let src = Stdlib.Filename.temp_file "ocannl_census_macros_" ".c" in
   Stdio.Out_channel.write_all src ~data:"";
   let _, out =
-    run_capture
-      (Printf.sprintf "%s %s -dM -E %s" t.command (flags t) (Stdlib.Filename.quote src))
+    run_capture (Printf.sprintf "%s %s -dM -E %s" t.command (flags t) (Stdlib.Filename.quote src))
   in
   (try Stdlib.Sys.remove src with _ -> ());
   String.split_lines out
   |> List.filter_map ~f:(fun l ->
-         match String.split_on_chars (String.strip l) ~on:[ ' '; '\t' ] with
-         | "#define" :: name :: _ ->
-             (* A function-like macro's name ends at its parenthesis. *)
-             Some (match String.lsplit2 name ~on:'(' with Some (n, _) -> n | None -> name)
-         | _ -> None)
+      match String.split_on_chars (String.strip l) ~on:[ ' '; '\t' ] with
+      | "#define" :: name :: _ ->
+          (* A function-like macro's name ends at its parenthesis. *)
+          Some (match String.lsplit2 name ~on:'(' with Some (n, _) -> n | None -> name)
+      | _ -> None)
   |> Set.of_list (module String)
 
 (** [compile t ~opt_level ~src_path ~asm_path] compiles [src_path] to assembly, with [-g] so that
     {!census} can anchor on source lines. [Error output] carries the compiler's diagnostics.
 
     Assembly rather than an object file: [-S] runs the whole front end and code generator, which is
-    everything a generated kernel can trip, and it produces the census input in the same
-    invocation. *)
+    everything a generated kernel can trip, and it produces the census input in the same invocation.
+*)
 let compile t ~opt_level ~src_path ~asm_path =
   let rc, out =
     run_capture
       (Printf.sprintf "%s %s -O%d -g -S -o %s %s" t.command (flags t) opt_level
-         (Stdlib.Filename.quote asm_path)
-         (Stdlib.Filename.quote src_path))
+         (Stdlib.Filename.quote asm_path) (Stdlib.Filename.quote src_path))
   in
   if rc = 0 then Ok () else Error out
 
@@ -157,23 +156,27 @@ type t = { loop_label : string; span : int; counts : counts }
 
 let libm_names = function
   | Fma -> [ "fma"; "fmaf"; "fmal"; "fmaf16" ]
-  | Max_min ->
-      [ "fmax"; "fmaxf"; "fmaxl"; "fmaxf16"; "fmin"; "fminf"; "fminl"; "fminf16"; "fdim" ]
+  | Max_min -> [ "fmax"; "fmaxf"; "fmaxl"; "fmaxf16"; "fmin"; "fminf"; "fminl"; "fminf16"; "fdim" ]
 
 (* A GAS line, already stripped of its trailing comment. *)
-type line = Label of string | Directive of string list | Insn of { mnemonic : string; rest : string }
+type line =
+  | Label of string
+  | Directive of string list
+  | Insn of { mnemonic : string; rest : string }
 
 let strip_comment s =
   (* x86 GAS comments start with '#', aarch64 GAS with "//", and Apple's arm64 assembler with ';'.
      None appears inside the operand syntaxes we look at, and compiler-generated assembly writes one
      instruction per line, so ';' is never the statement separator GAS also allows it to be.
 
-     The ';' case is not cosmetic: Apple clang annotates loop headers as
-     [LBB0_7: ; =>This Inner Loop Header: Depth=1], and a line that does not END in ':' is not
-     classified as a label, so every backward branch to it is discarded and macOS reports no
-     recognizable loops -- the third distinct Mach-O detail to silence this census wholesale, after
-     the dot-less labels and the checksummed [.file]. *)
-  let s = match String.substr_index s ~pattern:"//" with Some i -> String.prefix s i | None -> s in
+     The ';' case is not cosmetic: Apple clang annotates loop headers as [LBB0_7: ; =>This Inner
+     Loop Header: Depth=1], and a line that does not END in ':' is not classified as a label, so
+     every backward branch to it is discarded and macOS reports no recognizable loops -- the third
+     distinct Mach-O detail to silence this census wholesale, after the dot-less labels and the
+     checksummed [.file]. *)
+  let s =
+    match String.substr_index s ~pattern:"//" with Some i -> String.prefix s i | None -> s
+  in
   let s = match String.index s ';' with Some i -> String.prefix s i | None -> s in
   match String.index s '#' with Some i -> String.prefix s i | None -> s
 
@@ -182,8 +185,7 @@ let classify_line raw =
   let trimmed = String.strip s in
   if String.is_empty trimmed then None
   else if
-    (not (Char.is_whitespace raw.[0]))
-    && String.is_suffix trimmed ~suffix:":"
+    (not (Char.is_whitespace raw.[0])) && String.is_suffix trimmed ~suffix:":"
     (* A label, including the compiler-internal [.L]/[.LVL]/[.LBB] ones, is written at column 0;
        directives and instructions are indented. *)
   then Some (Label (String.drop_suffix trimmed 1))
@@ -267,8 +269,7 @@ let is_vector_insn ~mnemonic ~rest =
   | Some (`Packed, _) -> true
   | Some (`Scalar, _) -> false
   | None ->
-      packed_integer_mnemonic mnemonic
-      || has_substr rest ~sub:"%ymm" || has_substr rest ~sub:"%zmm"
+      packed_integer_mnemonic mnemonic || has_substr rest ~sub:"%ymm" || has_substr rest ~sub:"%zmm"
       || aarch64_vector_operand rest
 
 let is_scalar_fp_insn ~mnemonic ~rest =
@@ -287,7 +288,8 @@ let is_stack_ref ~rest =
       has_substr rest ~sub:p)
 
 let call_target ~mnemonic ~rest =
-  if String.equal mnemonic "call" || String.equal mnemonic "callq" || String.equal mnemonic "bl" then
+  if String.equal mnemonic "call" || String.equal mnemonic "callq" || String.equal mnemonic "bl"
+  then
     let target = String.strip rest in
     let target =
       match String.substr_index target ~pattern:"@" with
@@ -303,16 +305,33 @@ let call_target ~mnemonic ~rest =
     Some (String.chop_prefix_if_exists target ~prefix:"_")
   else None
 
-(* The aarch64 condition codes, as an explicit list rather than a prefix test, because the
-   mnemonics a prefix test would sweep in are the ones that must NOT count: [bl] and [blr] are
-   calls, [br] is an indirect jump with no label operand. GNU as accepts both [b.ne] and [bne] and
-   gcc emits the SECOND -- which is how this started out recognizing no loop at all on either
-   aarch64 column, every anchor reported missing across three widths and two optimization levels
-   (the "no loop carried the anchor" reading is a failure precisely so that a gap like this one
-   surfaces as a red run rather than as a quiet column of absences). *)
+(* The aarch64 condition codes, as an explicit list rather than a prefix test, because the mnemonics
+   a prefix test would sweep in are the ones that must NOT count: [bl] and [blr] are calls, [br] is
+   an indirect jump with no label operand. GNU as accepts both [b.ne] and [bne] and gcc emits the
+   SECOND -- which is how this started out recognizing no loop at all on either aarch64 column,
+   every anchor reported missing across three widths and two optimization levels (the "no loop
+   carried the anchor" reading is a failure precisely so that a gap like this one surfaces as a red
+   run rather than as a quiet column of absences). *)
 let aarch64_conds =
-  [ "eq"; "ne"; "cs"; "hs"; "cc"; "lo"; "mi"; "pl"; "vs"; "vc"; "hi"; "ls"; "ge"; "lt"; "gt"; "le";
-    "al" ]
+  [
+    "eq";
+    "ne";
+    "cs";
+    "hs";
+    "cc";
+    "lo";
+    "mi";
+    "pl";
+    "vs";
+    "vc";
+    "hi";
+    "ls";
+    "ge";
+    "lt";
+    "gt";
+    "le";
+    "al";
+  ]
 
 let is_cond mnemonic ~prefix =
   match String.chop_prefix mnemonic ~prefix with
@@ -323,9 +342,7 @@ let is_branch ~mnemonic =
   (* x86 conditional and unconditional jumps; aarch64 [b], [b<cc>]/[b.<cc>] and the
      compare-and-branch forms. *)
   String.is_prefix mnemonic ~prefix:"j"
-  || String.equal mnemonic "b"
-  || is_cond mnemonic ~prefix:"b."
-  || is_cond mnemonic ~prefix:"b"
+  || String.equal mnemonic "b" || is_cond mnemonic ~prefix:"b." || is_cond mnemonic ~prefix:"b"
   || List.mem [ "cbz"; "cbnz"; "tbz"; "tbnz" ] mnemonic ~equal:String.equal
 
 (* The branch's label operand is its last one ([b .L3], [cbnz w0, .L5], [jne .L2]). It is returned
@@ -350,7 +367,7 @@ let branch_target ~rest =
 let anchor_lines ~source ~patterns =
   String.split_lines source
   |> List.filter_mapi ~f:(fun i l ->
-         if List.exists patterns ~f:(fun p -> has_substr l ~sub:p) then Some (i + 1) else None)
+      if List.exists patterns ~f:(fun p -> has_substr l ~sub:p) then Some (i + 1) else None)
   |> Set.of_list (module Int)
 
 (** {1 The census itself} *)
@@ -366,14 +383,14 @@ let source_file_numbers lines ~basename =
         | Some n ->
             (* Every QUOTED field is a candidate path, and any one of them ending in the basename
                settles it. Not [List.last_exn rest]: a [.file] directive has three shapes here --
-               [.file N "path"], gcc's two-field [.file 0 "dir" "path"], and clang's
-               [.file 0 "dir" "path" md5 0x<digest>] -- and taking the last token reads the DIGEST
-               as the path on the third, leaving no file number recognized, hence no anchor line
-               matched, hence [census] answering [None] for every row on any clang-based host.
-               Filtering on the quote is what tells a path field from the trailing metadata; the
-               checksum and the [md5] keyword are unquoted. (A directory containing a space splits
-               into tokens that no longer parse as quoted, which costs nothing: the FILENAME field
-               is the one the basename test needs, and it is a separate field in every shape.) *)
+               [.file N "path"], gcc's two-field [.file 0 "dir" "path"], and clang's [.file 0 "dir"
+               "path" md5 0x<digest>] -- and taking the last token reads the DIGEST as the path on
+               the third, leaving no file number recognized, hence no anchor line matched, hence
+               [census] answering [None] for every row on any clang-based host. Filtering on the
+               quote is what tells a path field from the trailing metadata; the checksum and the
+               [md5] keyword are unquoted. (A directory containing a space splits into tokens that
+               no longer parse as quoted, which costs nothing: the FILENAME field is the one the
+               basename test needs, and it is a separate field in every shape.) *)
             let quoted =
               List.filter_map rest ~f:(fun tok ->
                   if String.is_prefix tok ~prefix:"\"" then
@@ -398,7 +415,8 @@ let classify_asm asm = String.split_lines asm |> List.map ~f:classify_line |> Ar
 let backward_edges lines =
   let label_at = Hashtbl.create (module String) in
   Array.iteri lines ~f:(fun i -> function
-    | Some (Label l) -> Hashtbl.set label_at ~key:l ~data:i | _ -> ());
+    | Some (Label l) -> Hashtbl.set label_at ~key:l ~data:i
+    | _ -> ());
   Array.foldi lines ~init:[] ~f:(fun i acc -> function
     | Some (Insn { mnemonic; rest }) when is_branch ~mnemonic -> (
         match branch_target ~rest with
@@ -407,11 +425,11 @@ let backward_edges lines =
         | None -> acc)
     | _ -> acc)
 
-(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all,
-    which is what separates the two readings of a {!census} answering [None]: this construct was
-    hoisted or folded away (some other loop was still found), or {!is_branch} does not know this
-    ISA's spelling and no loop in the file was found. The second is a defect in this module and
-    reports every anchor missing at once, so it is worth a claim of its own. *)
+(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all, which
+    is what separates the two readings of a {!census} answering [None]: this construct was hoisted
+    or folded away (some other loop was still found), or {!is_branch} does not know this ISA's
+    spelling and no loop in the file was found. The second is a defect in this module and reports
+    every anchor missing at once, so it is worth a claim of its own. *)
 let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
 
 let census op_class ~asm ~source_basename ~anchor =
@@ -438,7 +456,9 @@ let census op_class ~asm ~source_basename ~anchor =
   in
   Option.map best ~f:(fun (label, j, i) ->
       let libm = libm_names op_class in
-      let counts = ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 } in
+      let counts =
+        ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
+      in
       for k = j to i do
         match lines.(k) with
         | Some (Insn { mnemonic; rest }) ->
@@ -465,7 +485,11 @@ let census op_class ~asm ~source_basename ~anchor =
       { loop_label = label; span = i - j; counts = !counts })
 
 (** A one-line profile, for the stderr table a census run prints. *)
-let to_line { loop_label; span; counts = { instructions; vector_ops; scalar_fp_ops; libm_calls; stack_refs } }
-    =
+let to_line
+    {
+      loop_label;
+      span;
+      counts = { instructions; vector_ops; scalar_fp_ops; libm_calls; stack_refs };
+    } =
   Printf.sprintf "%s span=%d insns=%d vector=%d scalar_fp=%d libm_calls=%d stack=%d" loop_label span
     instructions vector_ops scalar_fp_ops libm_calls stack_refs

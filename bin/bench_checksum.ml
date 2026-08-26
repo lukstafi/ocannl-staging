@@ -15,9 +15,9 @@
       checksum unchanged — and the spot cell at [1][1] is blind to other rows at the same extent, so
       both halves of the guard fail together. Operand data collapses the same way: an mb of
       [(t mod 17) - 8] over a k x n array has every row identical whenever 17 divides n, and a
-      schedule substituting the wrong row of a collapsed operand computes the right answer.
-      {!mix} keys on the (row, column) PAIR, so the row index enters the value in its own right and
-      no divisibility relation between a modulus and a stride can erase it. Mixing rather than a
+      schedule substituting the wrong row of a collapsed operand computes the right answer. {!mix}
+      keys on the (row, column) PAIR, so the row index enters the value in its own right and no
+      divisibility relation between a modulus and a stride can erase it. Mixing rather than a
       per-axis residue also removes the shift symmetry — any value drawn from [index mod p] repeats
       under [k -> k + p], so if both operands share that period every packed K panel is identical
       and a staging bug that repeats the wrong panel is invisible; the packing factors are user
@@ -66,7 +66,7 @@ open Base
     xor-shift, a multiply by an odd constant, an xor-shift — so distinct rows below 2^24 differ at
     every column, and distinct columns likewise. Provable, not swept. *)
 let mix ~salt a b =
-  let x = ((a * 73856093) lxor (b * 19349663) lxor salt) land 0xFFFFFF in
+  let x = a * 73856093 lxor (b * 19349663) lxor salt land 0xFFFFFF in
   let x = x lxor (x lsr 13) land 0xFFFFFF in
   let x = x * 1274126177 land 0xFFFFFF in
   x lxor (x lsr 7)
@@ -83,12 +83,12 @@ let residue ~salt ~row_stride ~modulus t =
     invalid_arg (Printf.sprintf "Bench_checksum.residue: modulus = %d must be positive" modulus);
   mix ~salt (t / row_stride) (t % row_stride) % modulus
 
-(** [positive_level ~salt ~row_stride ~levels ~scale t] is a producer value drawn from the
-    [levels] multiples of [scale] starting at [scale] — STRICTLY POSITIVE, never the zero an
-    accumulator is initialized to. Use it for the multiplicand whose row spans the reduction (a
-    matmul's left operand): a zero row there zeroes the whole output row, which reads exactly like a
-    schedule that dropped the row. The other operand may keep zero in its set — with this one
-    positive, no output row is systematically zero. *)
+(** [positive_level ~salt ~row_stride ~levels ~scale t] is a producer value drawn from the [levels]
+    multiples of [scale] starting at [scale] — STRICTLY POSITIVE, never the zero an accumulator is
+    initialized to. Use it for the multiplicand whose row spans the reduction (a matmul's left
+    operand): a zero row there zeroes the whole output row, which reads exactly like a schedule that
+    dropped the row. The other operand may keep zero in its set — with this one positive, no output
+    row is systematically zero. *)
 let positive_level ~salt ~row_stride ~levels ~scale t =
   Float.of_int (1 + residue ~salt ~row_stride ~modulus:levels t) *. scale
 
@@ -109,8 +109,8 @@ let weight_cap = 251
     Neither sum's exactness argument changes: each is the same bounded-weight reduction it was. *)
 let weight_salts = [ 0x7E51; 0x2F3B ]
 
-(** One weight stream of {!whole_output}. Exposed for the discrimination test's negative control —
-    a bench should call {!whole_output}, which is the guard. *)
+(** One weight stream of {!whole_output}. Exposed for the discrimination test's negative control — a
+    bench should call {!whole_output}, which is the guard. *)
 let weighted ~salt ~row_stride values =
   Array.foldi values ~init:0.0 ~f:(fun t acc v ->
       acc +. (v *. Float.of_int (1 + residue ~salt ~row_stride ~modulus:weight_cap t)))

@@ -53,8 +53,7 @@ let show name ?open_placement code =
     f.CM.fr_flops f.CM.fr_bytes
     (if f.CM.fr_exact then "exact" else "inexact")
     s.CM.flops (CM.total_bytes s);
-  Verdict.p "  floor <= upper"
-    (f.CM.fr_flops <= s.CM.flops && f.CM.fr_bytes <= CM.total_bytes s);
+  Verdict.p "  floor <= upper" (f.CM.fr_flops <= s.CM.flops && f.CM.fr_bytes <= CM.total_bytes s);
   f
 
 let () =

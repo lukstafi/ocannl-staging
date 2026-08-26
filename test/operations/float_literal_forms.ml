@@ -5,25 +5,24 @@
    properties have to hold of the token it produces, and [%.16g] alone gets all three wrong:
 
    - It has to be a FLOATING literal. A value with no fractional part printed by [%.16g] has no
-     radix point, so it is a C INTEGER literal that the surrounding cast happens to convert. That is
-     value-preserving in today's cast contexts for every value but one: [-0.] printed as ["-0"] is
-     the integer zero, hence [+0.0] once cast — a live cross-backend data corruption fixed for that
-     single value by gh-ocannl-615. The rest of the class is latent, not inert (integer division,
-     integer promotion, a digit run outgrowing [long long]), which is what this test closes.
-   - It has to ROUND-TRIP. Sixteen significant digits do not recover every double: [0.1 +. 0.2]
-     prints as ["0.3"], a different double, and so does [max_float]. Arbitrary host values reach
-     this printer (hosted constant inits inline them as scalar stores), so this is a live
-     value-changing bug rather than a hypothetical one, and it is invisible to a tolerance-based
-     comparison — hence the bitwise checks below.
-   - The specials have to be SPELLED. [INFINITY] / [(-INFINITY)] / [NAN] are C99 macros MSL also
-     provides and the CUDA and HIP preludes define under [#ifndef]; a NaN's payload and sign do not
-     survive any of them, so NaN is checked as "is a NaN" rather than on the bits.
-   - A value on an f32 TIE has to be exact, not merely round-tripping. The reasoning that the cast
-     does the narrowing holds only where the dialect has a [double]; MSL does not, so Metal rounds
-     the decimal itself, at parse time. The two readings agree everywhere except on a tie, where
-     the host takes ties-to-even and a decimal near but not equal to the value breaks by whichever
-     side it landed on — so the emitted digit count silently decides the value. Ties are therefore
-     spelled as exact hexadecimal literals, which no reading has to round.
+   radix point, so it is a C INTEGER literal that the surrounding cast happens to convert. That is
+   value-preserving in today's cast contexts for every value but one: [-0.] printed as ["-0"] is the
+   integer zero, hence [+0.0] once cast — a live cross-backend data corruption fixed for that single
+   value by gh-ocannl-615. The rest of the class is latent, not inert (integer division, integer
+   promotion, a digit run outgrowing [long long]), which is what this test closes. - It has to
+   ROUND-TRIP. Sixteen significant digits do not recover every double: [0.1 +. 0.2] prints as
+   ["0.3"], a different double, and so does [max_float]. Arbitrary host values reach this printer
+   (hosted constant inits inline them as scalar stores), so this is a live value-changing bug rather
+   than a hypothetical one, and it is invisible to a tolerance-based comparison — hence the bitwise
+   checks below. - The specials have to be SPELLED. [INFINITY] / [(-INFINITY)] / [NAN] are C99
+   macros MSL also provides and the CUDA and HIP preludes define under [#ifndef]; a NaN's payload
+   and sign do not survive any of them, so NaN is checked as "is a NaN" rather than on the bits. - A
+   value on an f32 TIE has to be exact, not merely round-tripping. The reasoning that the cast does
+   the narrowing holds only where the dialect has a [double]; MSL does not, so Metal rounds the
+   decimal itself, at parse time. The two readings agree everywhere except on a tie, where the host
+   takes ties-to-even and a decimal near but not equal to the value breaks by whichever side it
+   landed on — so the emitted digit count silently decides the value. Ties are therefore spelled as
+   exact hexadecimal literals, which no reading has to round.
 
    Deliberately absent: a precision suffix. The literal is always double-typed and the narrowing is
    [convert_precision]'s cast — one rounding of the exact host double, the same conversion the host
@@ -32,9 +31,9 @@
    there and really does the narrowing: their oracles are the host's own conversions.
 
    The twin of this test is [ll_printer_constants], which asks the same two portable questions of
-   the IR DUMPS — the [.ll] and [.cd] text a constant bug is actually chased on. Both renderings
-   now come out of one helper, [Utils.decimal_float_literal] (gh-ocannl-713); what stays here is
-   what only C needs, the specials and the tie's hexadecimal spelling.
+   the IR DUMPS — the [.ll] and [.cd] text a constant bug is actually chased on. Both renderings now
+   come out of one helper, [Utils.decimal_float_literal] (gh-ocannl-713); what stays here is what
+   only C needs, the specials and the tie's hexadecimal spelling.
 
    The IR is hand-built so that each constant is stored, untouched, into its own cell of a
    materialized node: through the [Assignments] pipeline a bare constant fill is the backend's
@@ -51,13 +50,12 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
-
 let p = Verdict.p
 let p_empty = Verdict.p_empty
 let skipped = Verdict.skipped ~backend:backend_name
 
-(* On the bits, because the whole point is values a tolerance — or [Float.equal], which reports
-   [-0. = +0.] — cannot tell apart. NaN is the one exception: no dialect spells a payload. *)
+(* On the bits, because the whole point is values a tolerance — or [Float.equal], which reports [-0.
+   = +0.] — cannot tell apart. NaN is the one exception: no dialect spells a payload. *)
 let bitwise a b =
   if Float.is_nan a || Float.is_nan b then Float.is_nan a && Float.is_nan b
   else Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)

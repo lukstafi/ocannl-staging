@@ -81,8 +81,7 @@ let run_packed () =
       (* Both outputs are non-constant working nodes: same pool, distinct increasing offsets. *)
       Verdict.p "two outputs share a pool" (lp.pool_id = lq.pool_id);
       Verdict.p "two outputs have distinct offsets" (lp.offset <> lq.offset);
-      Verdict.p "offsets are 8-byte aligned (2x float32)"
-        (lp.offset % 4 = 0 && lq.offset % 4 = 0);
+      Verdict.p "offsets are 8-byte aligned (2x float32)" (lp.offset % 4 = 0 && lq.offset % 4 = 0);
       (* The two read-only constants pack into one (per-device) constant pool at distinct offsets,
          separate from the working pool. *)
       Verdict.p "two constants share a pool" (la.pool_id = lb.pool_id);

@@ -55,9 +55,7 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
-
-let on_gpu =
-  Sched.backend_is_gpu backend_name
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 

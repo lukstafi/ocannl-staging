@@ -33,7 +33,6 @@ module Numerics = Ir.Numerics
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
-
 let p_all = Verdict.p_all
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
@@ -51,7 +50,6 @@ let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
-
 let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
@@ -849,7 +847,8 @@ let () =
        and f32 holds 24 — but checked rather than asserted: were the products exactly representable
        this leg would silently duplicate the first one, which cannot see a rounding difference. *)
     let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
-    p_all "full-mantissa products are inexact in f32" (List.range 0 (fi * fk))
+    p_all "full-mantissa products are inexact in f32"
+      (List.range 0 (fi * fk))
       ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj))));
     p "full-mantissa tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_fused want_fused ~f:Float.equal);

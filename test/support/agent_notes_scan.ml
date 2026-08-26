@@ -7,8 +7,9 @@
     on the split that created these files (lukstafi/ocannl-staging#406) were exactly that, and each
     was decidable from the text alone:
 
-    - a merge resolution inserted an incoming bullet after the FIRST line of its hunk context instead
-      of the last, cutting a bullet's closing sentence in half and stranding the tail 39 lines later;
+    - a merge resolution inserted an incoming bullet after the FIRST line of its hunk context
+      instead of the last, cutting a bullet's closing sentence in half and stranding the tail 39
+      lines later;
     - the index's [fast math] hook sat on a row whose file contains no fast-math guidance, so
       following the index led away from the trap it names — and two further hooks had drifted out of
       their file's wording entirely ([identifier blacklist] against [ident_blacklist]);
@@ -26,26 +27,28 @@
     Each is stated as the thing that must be TRUE, and each finding names the rule that failed.
 
     - {b bullet-integrity}: the list structure parses under one unambiguous reading, and no bullet's
-      text is cut. Markers are ["- "] at an even indentation; a continuation line sits at exactly the
-      innermost open bullet's indentation plus two; a bullet's text — its start line and its
-      continuation lines joined by single spaces — ends in sentence-terminating punctuation. The last
-      clause is the one that catches a splice: a bullet a merge cut in half ends mid-word, and the
-      tail it stranded lands inside some other bullet. See {!bullet_text_is_terminated} for the exact
-      predicate and its escape.
-    - {b index-agreement}: every index row is [| \[<basename>\](agent-notes/<basename>) | prose with
-      `hooks` |], the target is a file this scan was handed, the link text is that file's basename,
-      an anchor (if the link carries one) names a heading the file has, and every backticked hook in
-      the second cell occurs verbatim in the target. The index is what a lookup greps before opening
-      anything, so a hook absent from its target is a dead end even when the file is right.
+      text is cut. Markers are ["- "] at an even indentation; a continuation line sits at exactly
+      the innermost open bullet's indentation plus two; a bullet's text — its start line and its
+      continuation lines joined by single spaces — ends in sentence-terminating punctuation. The
+      last clause is the one that catches a splice: a bullet a merge cut in half ends mid-word, and
+      the tail it stranded lands inside some other bullet. See {!bullet_text_is_terminated} for the
+      exact predicate and its escape.
+    - {b index-agreement}: every index row is
+      [| [<basename>](agent-notes/<basename>) | prose with `hooks` |], the target is a file this
+      scan was handed, the link text is that file's basename, an anchor (if the link carries one)
+      names a heading the file has, and every backticked hook in the second cell occurs verbatim in
+      the target. The index is what a lookup greps before opening anything, so a hook absent from
+      its target is a dead end even when the file is right.
     - {b table-shape}: every table block — a maximal run of lines whose trimmed form starts with a
       pipe — is a table: at least a header, a delimiter row and one data row; every line closes with
       an unescaped pipe; all lines carry the same number of cells; and the line after the block, if
-      non-blank, has no pipe outside inline code, which is what a wrapped row's tail looks like. This
-      is checked BEFORE index-agreement consumes the rows, because a wrapped row otherwise drops
-      silently out of the set being checked — which is how the wrap survived the round that made it.
+      non-blank, has no pipe outside inline code, which is what a wrapped row's tail looks like.
+      This is checked BEFORE index-agreement consumes the rows, because a wrapped row otherwise
+      drops silently out of the set being checked — which is how the wrap survived the round that
+      made it.
     - {b reachability}: every file handed to this scan is the target of exactly one index row, and
-      every file carries the backlink to the index. An orphan is precisely the "the hook names a file
-      carrying none of it" failure seen from the other end.
+      every file carries the backlink to the index. An orphan is precisely the "the hook names a
+      file carrying none of it" failure seen from the other end.
     - {b no-repetition}: no two bullets in the notes share their whitespace-normalized text, and no
       two share their first {!near_duplicate_prefix} characters case-insensitively. A fact promoted
       twice is a fact that will be updated once.
@@ -55,8 +58,9 @@
     Prose. Whether a bullet is TRUE of the code is not decidable here and is not attempted; the
     claim is only that what someone wrote is intact and reachable. Nor is Markdown implemented: this
     reads the dialect the notes are written in — flat ["- "] lists, one nesting level, one table in
-    the index — and reports anything outside it rather than guessing. A note that wants a fenced code
-    block or a setext heading has to teach this module about it first, which is the intended cost.
+    the index — and reports anything outside it rather than guessing. A note that wants a fenced
+    code block or a setext heading has to teach this module about it first, which is the intended
+    cost.
 
     {1 Inline code spans}
 
@@ -68,8 +72,6 @@
 
 open Base
 
-(** A structural defect: which rule it broke, where, and what is wrong. [where] is
-    ["<file>:<line>"], or ["<file>"] for a whole-file finding. *)
 type finding = {
   rule : string;
   file : string;  (** The notes file, apart from the line, so a consumer never re-parses [where]. *)
@@ -78,15 +80,17 @@ type finding = {
   message : string;
   subject : string option;
       (** The thing the finding is ABOUT, kept apart from the prose that describes it: for a bullet,
-          its opening. An exemption names a bullet, and a message is free to be reworded, so matching
-          an exemption against the message would break the moment the wording improved -- and did:
-          the key format documented one thing while the message carried the bullet's TAIL (Codex P2,
-          round 1). Consumers compare against [where]'s file and this. *)
+          its opening. An exemption names a bullet, and a message is free to be reworded, so
+          matching an exemption against the message would break the moment the wording improved --
+          and did: the key format documented one thing while the message carried the bullet's TAIL
+          (Codex P2, round 1). Consumers compare against [where]'s file and this. *)
 }
+(** A structural defect: which rule it broke, where, and what is wrong. [where] is
+    ["<file>:<line>"], or ["<file>"] for a whole-file finding. *)
 
+type bullet = { file : string; line : int; indent : int; text : string }
 (** One bullet, joined: [text] is the start line's content and every continuation line, separated by
     single spaces, with the ["- "] marker removed. [line] is the start line, 1-based. *)
-type bullet = { file : string; line : int; indent : int; text : string }
 
 let rule_bullet_integrity = "bullet-integrity"
 let rule_index_agreement = "index-agreement"
@@ -125,8 +129,7 @@ let subject_key ~file ~subject = Printf.sprintf "%s: %s" file subject
 (** The exemption key a finding would be silenced by, for the findings that can be exempted at all.
     Built from the finding's own structured fields, so the key a message tells you to paste is
     exactly the key that matches — the two cannot drift apart. *)
-let exemption_key f =
-  Option.map f.subject ~f:(fun subject -> subject_key ~file:f.file ~subject)
+let exemption_key f = Option.map f.subject ~f:(fun subject -> subject_key ~file:f.file ~subject)
 
 (* ------------------------------------------------------------------ *)
 (* Lines, indentation, inline code *)
@@ -137,8 +140,7 @@ let exemption_key f =
     would fail on the same text that passes elsewhere. *)
 let lines contents =
   String.split ~on:'\n' contents
-  |> List.map ~f:(fun l ->
-         match String.chop_suffix l ~suffix:"\r" with Some l -> l | None -> l)
+  |> List.map ~f:(fun l -> match String.chop_suffix l ~suffix:"\r" with Some l -> l | None -> l)
   |> List.mapi ~f:(fun i l -> (i + 1, l))
 
 let indent_of line =
@@ -156,6 +158,7 @@ let is_blank line = String.is_empty (String.strip line)
 (** Half-open [(start, stop)] character ranges of the inline code spans of a line, CommonMark's
     rule: a run of N backticks opens a span that the next run of exactly N closes, and a run with no
     partner opens nothing. The ranges include the delimiters. *)
+
 (** {2 Inert regions: one lexer, both states}
 
     Two things in these notes hold text that is NOT content — inline code spans and HTML comments —
@@ -171,8 +174,8 @@ let is_blank line = String.is_empty (String.strip line)
     So there is one left-to-right pass over the file, holding one state, and every caller reads its
     answer. A blank line ends an unterminated code span, because CommonMark does not let one cross a
     paragraph break; an HTML comment survives blank lines, because it is a block that ends only at
-    [-->]. Either construct left open at the end of the file is reported rather than assumed
-    closed. *)
+    [-->]. Either construct left open at the end of the file is reported rather than assumed closed.
+*)
 
 (** Markdown allows a block's line at most THREE leading spaces; at four it is an indented code
     block instead. Stripping all of it read a table indented into code as a table, so an index whose
@@ -186,13 +189,13 @@ let max_block_indent = 3
     pipe after them live — so ["| a \\\\| b | c |"] is three cells to a renderer and was two to this
     scan, quietly dropping a cell out of the width check (Codex P2, round 3). *)
 let escaped_at line i =
-  let rec count j acc = if j >= 0 && Char.equal line.[j] '\\' then count (j - 1) (acc + 1) else acc in
+  let rec count j acc =
+    if j >= 0 && Char.equal line.[j] '\\' then count (j - 1) (acc + 1) else acc
+  in
   count (i - 1) 0 % 2 = 1
 
 type inert_state = In_text | In_code of int | In_comment | In_fence of char * int
 
-(** What one pass over a file learned: where the inert text is, what was left open at the end, and
-    where each construct that HIDES text from the reader began. *)
 type inert_scan = {
   ranges : (int * (int * int) list) list;
   comment_ranges : (int * (int * int) list) list;
@@ -209,6 +212,8 @@ type inert_scan = {
   fences : (int * string) list;  (** line, and the marker that opened it *)
   comments : int list;  (** line on which each HTML comment opened *)
 }
+(** What one pass over a file learned: where the inert text is, what was left open at the end, and
+    where each construct that HIDES text from the reader began. *)
 
 let at line i pattern =
   let n = String.length line and m = String.length pattern in
@@ -353,7 +358,9 @@ let inert_by_line contents =
       | In_fence _ -> ());
       ranges_of := lineno :: !ranges_of);
   (* An unmatched run at the end of the file is literal text too. *)
-  (match !state with In_code _ -> discard () | _ -> ());
+  (match !state with
+  | In_code _ -> discard ()
+  | _ -> ());
   {
     ranges =
       List.rev_map !ranges_of ~f:(fun lineno ->
@@ -374,8 +381,8 @@ let inert_by_line contents =
 let inert_of_line line =
   match (inert_by_line line).ranges with (_, ranges) :: _ -> ranges | [] -> []
 
-(** Kept under its old name: what this answers for one line is still "where is the inline code",
-    and every caller that has a whole file passes the file's answer instead. *)
+(** Kept under its old name: what this answers for one line is still "where is the inline code", and
+    every caller that has a whole file passes the file's answer instead. *)
 let code_spans = inert_of_line
 
 let in_any_span spans i = List.exists spans ~f:(fun (start, stop) -> start <= i && i < stop)
@@ -395,7 +402,7 @@ let spans_at map lineno = Option.value (List.Assoc.find map lineno ~equal:Int.eq
 let line_is_inert ~spans line =
   (not (List.is_empty spans))
   && String.foldi line ~init:true ~f:(fun i acc c ->
-         acc && (Char.equal c ' ' || Char.equal c '\t' || in_any_span spans i))
+      acc && (Char.equal c ' ' || Char.equal c '\t' || in_any_span spans i))
 
 (** Whether a line's FIRST VISIBLE COLUMN is real text — the one question every marker test has to
     ask before it classifies a line. A ['>'], ['#'], ['|'], ['<'] or ['-'] sitting inside a code
@@ -433,9 +440,7 @@ let pipes_outside_code ?spans line =
     line that does not both start and end with a separating pipe — the shape a wrapped row takes. *)
 let row_cells ?spans line =
   let dropped = String.length line - String.length (String.lstrip line) in
-  let spans =
-    Option.map spans ~f:(List.map ~f:(fun (a, b) -> (a - dropped, b - dropped)))
-  in
+  let spans = Option.map spans ~f:(List.map ~f:(fun (a, b) -> (a - dropped, b - dropped))) in
   let line = String.strip line in
   match pipes_outside_code ?spans line with
   | [] -> None
@@ -444,7 +449,8 @@ let row_cells ?spans line =
       if first <> 0 || last <> String.length line - 1 || List.length pipes < 2 then None
       else
         let rec cut = function
-          | a :: (b :: _ as rest) -> String.strip (String.sub line ~pos:(a + 1) ~len:(b - a - 1)) :: cut rest
+          | a :: (b :: _ as rest) ->
+              String.strip (String.sub line ~pos:(a + 1) ~len:(b - a - 1)) :: cut rest
           | _ -> []
         in
         Some (cut pipes)
@@ -461,17 +467,17 @@ let delimiter_min_hyphens = 3
 let is_delimiter_row cells =
   (not (List.is_empty cells))
   && List.for_all cells ~f:(fun c ->
-         let c = String.strip c in
-         let c = Option.value (String.chop_prefix c ~prefix:":") ~default:c in
-         let c = Option.value (String.chop_suffix c ~suffix:":") ~default:c in
-         String.length c >= delimiter_min_hyphens && String.for_all c ~f:(Char.equal '-'))
+      let c = String.strip c in
+      let c = Option.value (String.chop_prefix c ~prefix:":") ~default:c in
+      let c = Option.value (String.chop_suffix c ~suffix:":") ~default:c in
+      String.length c >= delimiter_min_hyphens && String.for_all c ~f:(Char.equal '-'))
 
 (* ------------------------------------------------------------------ *)
 (* Rule 1: bullet integrity *)
 (* ------------------------------------------------------------------ *)
 
-(** Trailing characters stripped before looking for the terminator, so that ["…done.**"], ["…see
-    `x`."] and ["…(gh-ocannl-665)."] all read as terminated. *)
+(** Trailing characters stripped before looking for the terminator, so that ["…done.**"],
+    ["…see `x`."] and ["…(gh-ocannl-665)."] all read as terminated. *)
 let closing_markup = [ '`'; ')'; ']'; '}'; '"'; '\''; '*'; '_' ]
 
 let terminators = [ '.'; '!'; '?'; ':'; ';' ]
@@ -502,8 +508,8 @@ let bullet_text_is_terminated text =
   (not (String.is_empty s)) && List.mem terminators s.[String.length s - 1] ~equal:Char.equal
 
 (** Whitespace collapsed to single spaces: the one normal form the repetition rule compares in and
-    the one a bullet is named by, so a bullet re-wrapped across different lines is the same bullet to
-    both. *)
+    the one a bullet is named by, so a bullet re-wrapped across different lines is the same bullet
+    to both. *)
 let normalize text =
   String.split_on_chars text ~on:[ ' '; '\t' ]
   |> List.filter ~f:(fun s -> not (String.is_empty s))
@@ -530,21 +536,21 @@ let bullet_subject (b : bullet) = normalize b.text
 let atx_heading line =
   if indent_of line > max_block_indent then None
   else
-  (* Four spaces make it an indented code block, not a heading -- so an anchor naming it is dead,
-     the same failure the missing-space case had (Codex P2, round 6). *)
-  let s = String.strip line in
-  let hashes =
-    match String.lfindi s ~f:(fun _ c -> not (Char.equal c '#')) with
-    | Some i -> i
-    | None -> String.length s
-  in
-  if hashes = 0 || hashes > 6 then None
-  else
-    let rest = String.drop_prefix s hashes in
-    if String.is_empty rest || Char.equal rest.[0] ' ' then
-      (* A closing run of hashes is decoration, not content. *)
-      Some (String.strip (String.rstrip (String.strip rest) ~drop:(Char.equal '#')))
-    else None
+    (* Four spaces make it an indented code block, not a heading -- so an anchor naming it is dead,
+       the same failure the missing-space case had (Codex P2, round 6). *)
+    let s = String.strip line in
+    let hashes =
+      match String.lfindi s ~f:(fun _ c -> not (Char.equal c '#')) with
+      | Some i -> i
+      | None -> String.length s
+    in
+    if hashes = 0 || hashes > 6 then None
+    else
+      let rest = String.drop_prefix s hashes in
+      if String.is_empty rest || Char.equal rest.[0] ' ' then
+        (* A closing run of hashes is decoration, not content. *)
+        Some (String.strip (String.rstrip (String.strip rest) ~drop:(Char.equal '#')))
+      else None
 
 (** Whether a line opens with something that WANTS to be a heading, so that a malformed one is
     reported rather than read as prose. *)
@@ -572,8 +578,8 @@ let headings contents =
     inside one. *)
 
 (** A list marker at any indentation that is not this scan's ["- "]. An ordered item is the one that
-    bit: at column zero it read as prose (so its text got no termination or repetition check at all),
-    and indented it folded into its parent's continuation (Codex P2, round 1). *)
+    bit: at column zero it read as prose (so its text got no termination or repetition check at
+    all), and indented it folded into its parent's continuation (Codex P2, round 1). *)
 let foreign_list_marker stripped =
   let n = String.length stripped in
   let ordered =
@@ -592,22 +598,23 @@ let foreign_list_marker stripped =
   | Some m -> Some m
   | None ->
       (* A marker of any other flavour, or this repository's own dash written with a tab: the
-         accepted form is "- " exactly, and everything else is reported rather than read as prose. *)
+         accepted form is "- " exactly, and everything else is reported rather than read as
+         prose. *)
       List.find_map [ '*'; '+'; '-' ] ~f:(fun c ->
           if n >= 2 && Char.equal stripped.[0] c && md_space stripped.[1] then
             if Char.equal c '-' && Char.equal stripped.[1] ' ' then None
             else Some (String.of_char c ^ if Char.equal stripped.[1] '\t' then "\\t" else " ")
           else None)
 
-(** A fence opens a region whose contents are not the notes' dialect at all: a ["- "] line inside one
-    is example text, and reading it as a bullet invents integrity and repetition failures out of
+(** A fence opens a region whose contents are not the notes' dialect at all: a ["- "] line inside
+    one is example text, and reading it as a bullet invents integrity and repetition failures out of
     someone's code sample. Reported, and its contents skipped, so one unsupported construct is one
     finding. *)
 let fence_marker stripped =
   List.find [ "```"; "~~~" ] ~f:(fun m -> String.is_prefix stripped ~prefix:m)
 
-(** A block quote marker, which Markdown honours at EVERY depth: nested under a bullet, [`  > …`]
-    is a quote inside the list item, not part of the bullet's prose. Wiring this to column zero only
+(** A block quote marker, which Markdown honours at EVERY depth: nested under a bullet, [`  > …`] is
+    a quote inside the list item, not part of the bullet's prose. Wiring this to column zero only
     let a nested quote fold into its parent's text unchecked (Codex P2, round 2).
 
     The space after [>] is OPTIONAL, and nothing further along the line changes that: block
@@ -625,13 +632,14 @@ let block_quote_marker stripped =
   if not (String.is_prefix stripped ~prefix:">") then None
   else if String.is_prefix stripped ~prefix:">=" then
     Some
-      "a block quote: Markdown's quote marker does not need a space after it, so a line whose first \
-       visible column is \">=\" renders as a quote and not as the comparison it reads like -- rewrap \
-       so the operator is not first on the line, or write the comparison inside a code span"
+      "a block quote: Markdown's quote marker does not need a space after it, so a line whose \
+       first visible column is \">=\" renders as a quote and not as the comparison it reads like \
+       -- rewrap so the operator is not first on the line, or write the comparison inside a code \
+       span"
   else Some "a block quote, whose text belongs to no bullet and which this scan does not read"
 
-(** A thematic break or a setext heading underline: a line of nothing but one repeated marker. It
-    is a block at every depth, which is why it is factored out here rather than living inside the
+(** A thematic break or a setext heading underline: a line of nothing but one repeated marker. It is
+    a block at every depth, which is why it is factored out here rather than living inside the
     column-zero test. *)
 let thematic_break stripped =
   let all_of c =
@@ -644,14 +652,13 @@ let thematic_break stripped =
 
 (** Whether a line opens a raw HTML block, as opposed to merely starting with ['<']. Every
     column-zero ['<'] used to count, which failed two kinds of perfectly ordinary prose: an autolink
-    ([<https://example.com>]) and a comparison ([<= 8], which these notes write) (Codex P2, round 6).
-    An HTML block needs a tag-ish opener — a letter, ['/'], ['!'] or ['?'] — and an autolink is
+    ([<https://example.com>]) and a comparison ([<= 8], which these notes write) (Codex P2, round
+    6). An HTML block needs a tag-ish opener — a letter, ['/'], ['!'] or ['?'] — and an autolink is
     excluded by what it is: a bracketed run with no whitespace, carrying a scheme or an address. *)
 let html_block_opener stripped =
   String.length stripped >= 2
   && Char.equal stripped.[0] '<'
-  && (Char.is_alpha stripped.[1]
-     || List.mem [ '/'; '!'; '?' ] stripped.[1] ~equal:Char.equal)
+  && (Char.is_alpha stripped.[1] || List.mem [ '/'; '!'; '?' ] stripped.[1] ~equal:Char.equal)
   && not
        (match String.index stripped '>' with
        | Some close ->
@@ -662,21 +669,21 @@ let html_block_opener stripped =
 
 (** A setext heading underline: a line of nothing but one repeated ['-'] or ['='], directly under a
     paragraph, which makes the line ABOVE it a heading. One marker is enough. The three-marker floor
-    belongs to the THEMATIC BREAK and applying it here missed [--] and [==] entirely (gh-ocannl-714),
-    so a heading written that way carried an anchor {!headings} does not know: an index row naming it
-    would be reported dead while the link navigates.
+    belongs to the THEMATIC BREAK and applying it here missed [--] and [==] entirely
+    (gh-ocannl-714), so a heading written that way carried an anchor {!headings} does not know: an
+    index row naming it would be reported dead while the link navigates.
 
-    [under_paragraph] is the whole of what separates a heading from ordinary text here, and it is not
-    a formality: the same [--] under a blank line, a heading, a table or a fence is a paragraph of
-    two hyphens, and only a paragraph above it turns it into an underline. A run of three or more is
-    reported either way, by {!thematic_break} when nothing above it is a paragraph. *)
+    [under_paragraph] is the whole of what separates a heading from ordinary text here, and it is
+    not a formality: the same [--] under a blank line, a heading, a table or a fence is a paragraph
+    of two hyphens, and only a paragraph above it turns it into an underline. A run of three or more
+    is reported either way, by {!thematic_break} when nothing above it is a paragraph. *)
 let setext_underline ~under_paragraph stripped =
   let all_of c = (not (String.is_empty stripped)) && String.for_all stripped ~f:(Char.equal c) in
   if under_paragraph && (all_of '-' || all_of '=') then
     Some
       "a setext heading underline, which makes the line above it a heading: headings here are ATX \
-       (\"## Title\"), and one written this way carries an anchor that this scan cannot read, so an \
-       index row naming it reads as dead while the link navigates"
+       (\"## Title\"), and one written this way carries an anchor that this scan cannot read, so \
+       an index row naming it reads as dead while the link navigates"
   else None
 
 (** The lines that can be the last line of a paragraph — the one thing {!setext_underline} needs
@@ -687,8 +694,8 @@ let setext_underline ~under_paragraph stripped =
     NOT paragraph content: an underline under any of them underlines nothing. A line inside a code
     span is, because it renders as part of the paragraph carrying it.
 
-    What decides "opens a block" is the same gate {!parse_file} puts on every other marker test:
-    a marker whose first visible column is inert is not a marker. Classifying the raw column instead
+    What decides "opens a block" is the same gate {!parse_file} puts on every other marker test: a
+    marker whose first visible column is inert is not a marker. Classifying the raw column instead
     dropped a bullet's closing code-span line — one beginning [`> example.`], [`| a | b |`] or
     [`## Section`] inside the span — out of the paragraph set, and the underline below it went
     unreported while a renderer made the line a heading (Codex P2, round 2). *)
@@ -715,12 +722,12 @@ let paragraph_lines ~inert ~fences_at ~comments_at contents =
 let unsupported_block ~under_paragraph stripped =
   match block_quote_marker stripped with
   | Some what -> Some what
-  | None ->
+  | None -> (
       if html_block_opener stripped then Some "an HTML block, whose text no rule here can see"
       else
         match thematic_break stripped with
         | Some what -> Some what
-        | None -> setext_underline ~under_paragraph stripped
+        | None -> setext_underline ~under_paragraph stripped)
 
 (** One nesting level is what the notes are written in, and what {!parse_file} documents. A third
     level was being accepted anyway — [expected] simply advanced by two more spaces — so the
@@ -761,7 +768,8 @@ let parse_file ~file contents =
     stack := []
   in
   (* Set while inside a fenced region, holding the fence that opened it: its contents are somebody's
-     example, not the notes' dialect, and reading a `- ` line in one as a bullet invents failures. *)
+     example, not the notes' dialect, and reading a `- ` line in one as a bullet invents
+     failures. *)
   let scan = inert_by_line contents in
   let inert = scan.ranges in
   let comments_at = scan.comment_ranges in
@@ -789,157 +797,152 @@ let parse_file ~file contents =
       if not (is_blank line) then blank_seen := false;
       if line_is_inert ~spans line then
         (* Wholly inert, so it carries no structure -- but it may still carry TEXT. A line inside a
-           code span renders, and is part of what its bullet says; a line inside an HTML comment does
-           not, and is not. Collapsing the two made bullets differing only on a code line identical,
-           and the repetition rule called them duplicates (Codex P2, round 8). *)
-        (if not (List.is_empty (spans_at fences_at lineno)) then
-           (* A fenced block is a leaf block: it ends the list above it and its lines are nobody's
-              prose. The fence itself is reported by [hiding_constructs]. *)
-           close_all ()
-         else if line_is_inert ~spans:(spans_at comments_at lineno) line then ()
-         else
-           match !stack with
-           | [] -> ()
-           | (_, texts) :: _ -> texts := stripped :: !texts)
+           code span renders, and is part of what its bullet says; a line inside an HTML comment
+           does not, and is not. Collapsing the two made bullets differing only on a code line
+           identical, and the repetition rule called them duplicates (Codex P2, round 8). *)
+        if not (List.is_empty (spans_at fences_at lineno)) then
+          (* A fenced block is a leaf block: it ends the list above it and its lines are nobody's
+             prose. The fence itself is reported by [hiding_constructs]. *)
+          close_all ()
+        else if line_is_inert ~spans:(spans_at comments_at lineno) line then ()
+        else match !stack with [] -> () | (_, texts) :: _ -> texts := stripped :: !texts
       else if is_blank line then blank_seen := true
-      else if not marker_is_text then
-        (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
-           and closes the list. At column zero under an open bullet it is a LAZY CONTINUATION, the
-           same construct the marker path reports -- and this path was closing the stack silently,
-           so the rule went inert exactly where an inert prefix hid the marker (Codex P2, round 9).
-           The first line of such a bullet reads as terminated once the unmatched delimiter is
-           stripped, so nothing else would have caught it. *)
-        if indent_of line = 0 then (
+      else if not marker_is_text then (
+        if
+          (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
+             and closes the list. At column zero under an open bullet it is a LAZY CONTINUATION, the
+             same construct the marker path reports -- and this path was closing the stack silently,
+             so the rule went inert exactly where an inert prefix hid the marker (Codex P2, round
+             9). The first line of such a bullet reads as terminated once the unmatched delimiter is
+             stripped, so nothing else would have caught it. *)
+          indent_of line = 0
+        then (
           if (not after_blank) && not (List.is_empty !stack) then
             bad lineno
               "prose at column zero directly under a bullet, which Markdown reads as a lazy \
                continuation of it: separate it with a blank line, or indent it two spaces to make \
                it the bullet's own";
           close_all ())
-        else (
+        else
           match !stack with
           | [] -> ()
-          | (b, texts) :: _ ->
-              if indent_of line = b.indent + 2 then texts := stripped :: !texts)
+          | (b, texts) :: _ -> if indent_of line = b.indent + 2 then texts := stripped :: !texts)
       else if has_leading_tab line then (
+        bad lineno "a tab in the indentation: indentation here is spaces, two per nesting level";
+        close_all ())
+      else
+        let indent = indent_of line in
+        if looks_like_heading line then (
+          if Option.is_none (atx_heading line) then
             bad lineno
-              "a tab in the indentation: indentation here is spaces, two per nesting level";
-            close_all ())
-          else
-            let indent = indent_of line in
-            if looks_like_heading line then (
-
-                  if Option.is_none (atx_heading line) then
-                    bad lineno
-                      "a line opening with # that is not a heading: an ATX marker is one to six \
-                       hashes, followed by a space, indented at most three -- without all three of \
-                       those it renders as prose or as code, so an anchor naming it points at \
-                       nothing";
-                  close_all ())
-                else if is_table_line line then close_all ()
-                else
-                  match foreign_list_marker stripped with
-                  | Some m ->
+              "a line opening with # that is not a heading: an ATX marker is one to six hashes, \
+               followed by a space, indented at most three -- without all three of those it \
+               renders as prose or as code, so an anchor naming it points at nothing";
+          close_all ())
+        else if is_table_line line then close_all ()
+        else
+          match foreign_list_marker stripped with
+          | Some m ->
+              bad lineno
+                (Printf.sprintf
+                   "the list marker %S: bullets here are written \"- \", and an item this scan \
+                    does not recognise is an item no rule checks"
+                   m);
+              close_all ()
+          | None -> (
+              if String.equal stripped "-" then (
+                (* A lone "-" under a paragraph is that paragraph's setext underline rather than an
+                   empty list item -- CommonMark resolves the ambiguity in the heading's favour, and
+                   the message follows it. Either way it is a finding; which one it is decides what
+                   the author is told to fix. *)
+                bad lineno
+                  (match setext_underline ~under_paragraph stripped with
+                  | Some what -> what
+                  | None -> "an empty bullet");
+                close_all ())
+              else if String.is_prefix stripped ~prefix:"- " then (
+                (* A bullet start closes every open bullet at or inside its own depth. *)
+                let rec pop acc =
+                  match !stack with
+                  | (b, texts) :: rest when b.indent >= indent ->
+                      stack := rest;
+                      pop ((b, texts) :: acc)
+                  | _ -> acc
+                in
+                (* [pop] prepends as it unwinds inwards-out, so [popped] is outermost first. *)
+                List.iter (pop []) ~f:(fun (b, texts) ->
+                    let text = String.concat ~sep:" " (List.rev !texts) in
+                    bullets := { b with text } :: !bullets);
+                let expected = match !stack with [] -> 0 | (b, _) :: _ -> b.indent + 2 in
+                if indent > max_nesting_indent then
+                  bad lineno
+                    (Printf.sprintf
+                       "a bullet nested %d deep: the notes go one level down and this scan reads \
+                        no further, so anything below %d is unchecked"
+                       ((indent / 2) + 1)
+                       max_nesting_indent)
+                else if indent <> expected then
+                  bad lineno
+                    (Printf.sprintf
+                       "a bullet indented %d, where the open list puts the next one at %d" indent
+                       expected);
+                let b = { file; line = lineno; indent; text = "" } in
+                stack := (b, ref [ String.drop_prefix stripped 2 ]) :: !stack)
+              else if indent = 0 then (
+                (match unsupported_block ~under_paragraph stripped with
+                | Some what -> bad lineno what
+                | None ->
+                    (* Markdown reads column-zero prose directly under an open bullet as a LAZY
+                       CONTINUATION of that item, so this text belongs to the bullet to a renderer
+                       while this scan was closing the list and dropping it from every rule. A
+                       bullet whose first line already ends in punctuation hid the whole transition
+                       (Codex P2, round 3). Nothing legitimate needs it: the notes separate a
+                       paragraph from the list above with a blank line, which is what closes the
+                       list here. *)
+                    if (not after_blank) && not (List.is_empty !stack) then
                       bad lineno
-                        (Printf.sprintf
-                           "the list marker %S: bullets here are written \"- \", and an item this \
-                            scan does not recognise is an item no rule checks"
-                           m);
-                      close_all ()
+                        "prose at column zero directly under a bullet, which Markdown reads as a \
+                         lazy continuation of it: separate it with a blank line, or indent it two \
+                         spaces to make it the bullet's own");
+                close_all ())
+              else
+                match
+                  match block_quote_marker stripped with
+                  | Some what -> Some what
                   | None -> (
-                      if String.equal stripped "-" then (
-                        (* A lone "-" under a paragraph is that paragraph's setext underline rather
-                           than an empty list item -- CommonMark resolves the ambiguity in the
-                           heading's favour, and the message follows it. Either way it is a finding;
-                           which one it is decides what the author is told to fix. *)
+                      (* A hyphen line under a bullet is a separate block to Markdown, not part of
+                         the bullet's prose -- and folding it in left every rule green, since the
+                         joined text still ended in a period (Codex P2, round 6). A SHORT run of
+                         them is a block too, when a paragraph sits above it: it underlines that
+                         paragraph. *)
+                      match thematic_break stripped with
+                      | Some what -> Some what
+                      | None -> setext_underline ~under_paragraph stripped)
+                with
+                | Some what ->
+                    (* Honoured at depth too: nested under a bullet this is a quote inside the list
+                       item, and folding it into the parent's prose would leave its text checked by
+                       nothing. *)
+                    bad lineno what;
+                    close_all ()
+                | None -> (
+                    match !stack with
+                    | [] ->
                         bad lineno
-                          (match setext_underline ~under_paragraph stripped with
-                          | Some what -> what
-                          | None -> "an empty bullet");
-                        close_all ())
-                      else if String.is_prefix stripped ~prefix:"- " then (
-                        (* A bullet start closes every open bullet at or inside its own depth. *)
-                        let rec pop acc =
-                          match !stack with
-                          | (b, texts) :: rest when b.indent >= indent ->
-                              stack := rest;
-                              pop ((b, texts) :: acc)
-                          | _ -> acc
-                        in
-                        (* [pop] prepends as it unwinds inwards-out, so [popped] is outermost first. *)
-                        List.iter (pop []) ~f:(fun (b, texts) ->
-                            let text = String.concat ~sep:" " (List.rev !texts) in
-                            bullets := { b with text } :: !bullets);
-                        let expected = match !stack with [] -> 0 | (b, _) :: _ -> b.indent + 2 in
-                        if indent > max_nesting_indent then
+                          (if String.is_prefix stripped ~prefix:"|" then
+                             "a table row indented four spaces or more, which Markdown renders as \
+                              an indented code block rather than a table"
+                           else
+                             "an indented line continuing no bullet: nothing above it is an open \
+                              list item")
+                    | (b, texts) :: _ ->
+                        if indent <> b.indent + 2 then
                           bad lineno
                             (Printf.sprintf
-                               "a bullet nested %d deep: the notes go one level down and this scan \
-                                reads no further, so anything below %d is unchecked"
-                               ((indent / 2) + 1) max_nesting_indent
-                            )
-                        else if indent <> expected then
-                          bad lineno
-                            (Printf.sprintf
-                               "a bullet indented %d, where the open list puts the next one at %d"
-                               indent expected);
-                        let b = { file; line = lineno; indent; text = "" } in
-                        stack := (b, ref [ String.drop_prefix stripped 2 ]) :: !stack)
-                      else if indent = 0 then (
-                        (match unsupported_block ~under_paragraph stripped with
-                        | Some what -> bad lineno what
-                        | None ->
-                            (* Markdown reads column-zero prose directly under an open bullet as a
-                               LAZY CONTINUATION of that item, so this text belongs to the bullet to
-                               a renderer while this scan was closing the list and dropping it from
-                               every rule. A bullet whose first line already ends in punctuation hid
-                               the whole transition (Codex P2, round 3). Nothing legitimate needs
-                               it: the notes separate a paragraph from the list above with a blank
-                               line, which is what closes the list here. *)
-                            if (not after_blank) && not (List.is_empty !stack) then
-                              bad lineno
-                                "prose at column zero directly under a bullet, which Markdown reads \
-                                 as a lazy continuation of it: separate it with a blank line, or \
-                                 indent it two spaces to make it the bullet's own");
-                        close_all ())
-                      else
-                        match
-                          match block_quote_marker stripped with
-                          | Some what -> Some what
-                          | None ->
-                              (* A hyphen line under a bullet is a separate block to Markdown, not
-                                 part of the bullet's prose -- and folding it in left every rule
-                                 green, since the joined text still ended in a period (Codex P2,
-                                 round 6). A SHORT run of them is a block too, when a paragraph sits
-                                 above it: it underlines that paragraph. *)
-                              (match thematic_break stripped with
-                              | Some what -> Some what
-                              | None -> setext_underline ~under_paragraph stripped)
-                        with
-                        | Some what ->
-                            (* Honoured at depth too: nested under a bullet this is a quote inside
-                               the list item, and folding it into the parent's prose would leave its
-                               text checked by nothing. *)
-                            bad lineno what;
-                            close_all ()
-                        | None -> (
-                            match !stack with
-                            | [] ->
-                                bad lineno
-                                  (if String.is_prefix stripped ~prefix:"|" then
-                                     "a table row indented four spaces or more, which Markdown \
-                                      renders as an indented code block rather than a table"
-                                   else
-                                     "an indented line continuing no bullet: nothing above it is an \
-                                      open list item")
-                            | (b, texts) :: _ ->
-                                if indent <> b.indent + 2 then
-                                  bad lineno
-                                    (Printf.sprintf
-                                       "an indented line at %d continuing the bullet at line %d, \
-                                        whose continuations sit at %d"
-                                       indent b.line (b.indent + 2))
-                                else texts := stripped :: !texts)));
+                               "an indented line at %d continuing the bullet at line %d, whose \
+                                continuations sit at %d"
+                               indent b.line (b.indent + 2))
+                        else texts := stripped :: !texts)));
   close_all ();
   let bullets = List.rev !bullets in
   let terminator_findings =
@@ -953,8 +956,7 @@ let parse_file ~file contents =
                   "a bullet that does not end a sentence, so its tail may be elsewhere: %S ends \
                    \"…%s\" -- exempt it as %S if that ending is deliberate"
                   (String.prefix subject subject_display_length)
-                  (String.suffix b.text 40)
-                  (subject_key ~file ~subject))))
+                  (String.suffix b.text 40) (subject_key ~file ~subject))))
   in
   { bullets; structure = List.rev !findings @ terminator_findings }
 
@@ -972,13 +974,17 @@ let unclosed_inert ~file contents =
   | In_code _ -> []
   | In_comment ->
       [
-        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+        finding ~file
+          ~line:(List.length (lines contents))
+          ~rule:rule_bullet_integrity
           "an HTML comment opened and never closed, so everything below it is commented out and no \
            rule can see it";
       ]
   | In_fence (c, n) ->
       [
-        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+        finding ~file
+          ~line:(List.length (lines contents))
+          ~rule:rule_bullet_integrity
           (Printf.sprintf
              "a %s fence that is never closed, so the rest of the file is inside it and unread"
              (String.make n c));
@@ -998,9 +1004,9 @@ let hiding_constructs ~file contents =
             bullets, table rows or prose -- teach this scan what they are before writing one"
            marker))
   @ List.map scan.comments ~f:(fun line ->
-        finding ~file ~line ~rule:rule_bullet_integrity
-          "an HTML comment: its text is invisible to a reader, so anything promoted inside one is \
-           promoted nowhere")
+      finding ~file ~line ~rule:rule_bullet_integrity
+        "an HTML comment: its text is invisible to a reader, so anything promoted inside one is \
+         promoted nowhere")
 
 (** Rule 1 over one file. *)
 let check_structure ~file contents =
@@ -1025,10 +1031,10 @@ let tables contents =
   let rec go acc current = function
     | [] -> List.rev (match current with None -> acc | Some t -> t :: acc)
     | (lineno, line) :: rest ->
-        (* A pipe-led line inside a code span or a comment is an example of a table, not one. Reading
-           it as a block started one whose cells then parsed as inert, so a correct note carrying a
-           table example FAILED table-shape (Codex P2, round 5) -- a false failure, the direction
-           that gets a check switched off. *)
+        (* A pipe-led line inside a code span or a comment is an example of a table, not one.
+           Reading it as a block started one whose cells then parsed as inert, so a correct note
+           carrying a table example FAILED table-shape (Codex P2, round 5) -- a false failure, the
+           direction that gets a check switched off. *)
         if not (marker_is_text ~spans:(spans_at map lineno) line) then
           let acc = match current with None -> acc | Some t -> t :: acc in
           go acc None rest
@@ -1066,7 +1072,8 @@ let check_tables ~file contents =
       if not (List.is_empty closed) then closed
       else
         let cells =
-          List.map t.rows ~f:(fun (lineno, line) -> (lineno, Option.value_exn (cells_of line lineno)))
+          List.map t.rows ~f:(fun (lineno, line) ->
+              (lineno, Option.value_exn (cells_of line lineno)))
         in
         let shape =
           match cells with
@@ -1108,8 +1115,8 @@ let check_tables ~file contents =
                  && not (List.is_empty (pipes_outside_code ~spans:(spans_at map next) l)) ->
               [
                 report next
-                  "a cell separator on the line below a table: this reads as the tail of a row that \
-                   was wrapped, which ends the table above it";
+                  "a cell separator on the line below a table: this reads as the tail of a row \
+                   that was wrapped, which ends the table above it";
               ]
           | _ -> []
         in
@@ -1119,8 +1126,6 @@ let check_tables ~file contents =
 (* Rules 2 and 4: the index against the files *)
 (* ------------------------------------------------------------------ *)
 
-(** One parsed index row. [target] is as written, relative to the index's own directory; [anchor] is
-    the fragment after ['#'], if any. *)
 type index_row = {
   row_line : int;
   link_text : string;
@@ -1128,6 +1133,8 @@ type index_row = {
   anchor : string option;
   hooks : string list;
 }
+(** One parsed index row. [target] is as written, relative to the index's own directory; [anchor] is
+    the fragment after ['#'], if any. *)
 
 (** A code span's RENDERED content: the delimiter runs removed, and then one padding space from each
     side. The padding is how a span carries a literal backtick — [``` `` `foo` `` ```] renders as
@@ -1153,17 +1160,15 @@ let backticked cell =
 (** GitHub's heading slug: lowercased, spaces to hyphens, other punctuation dropped — and
     UNDERSCORES KEPT, which is the half that matters here. The headings a note would anchor are
     identifiers (`ident_blacklist`, `promote_prec`), and GitHub anchors those as `#ident_blacklist`;
-    rewriting the underscore rejected the correct anchor and accepted the wrong one (Codex P2,
-    round 1). Hyphens are likewise kept as themselves rather than re-derived. *)
+    rewriting the underscore rejected the correct anchor and accepted the wrong one (Codex P2, round
+    1). Hyphens are likewise kept as themselves rather than re-derived. *)
 let slug heading =
-  String.lowercase heading
-  |> String.to_list
+  String.lowercase heading |> String.to_list
   |> List.filter_map ~f:(fun c ->
-         if Char.is_alphanum c || Char.equal c '_' || Char.equal c '-' then Some c
-         else if Char.equal c ' ' then Some '-'
-         else None)
+      if Char.is_alphanum c || Char.equal c '_' || Char.equal c '-' then Some c
+      else if Char.equal c ' ' then Some '-'
+      else None)
   |> String.of_list
-
 
 (** A link's DESTINATION, separated from its optional title. [(../agent-notes.md "Agent notes")] is
     a perfectly ordinary link, and comparing the whole parenthesised text against the index filename
@@ -1235,9 +1240,9 @@ let links_of contents =
   List.concat_map (lines contents) ~f:(fun (lineno, l) ->
       markdown_links ~spans:(spans_at map lineno) l)
 
-(** Where a relative link written IN [from_file] actually points, as a path in the same space as
-    the scan's file keys. [from_file] is a file, so the link resolves against its DIRECTORY;
-    [".."] pops a segment and ["."] is dropped, exactly as a browser or GitHub would.
+(** Where a relative link written IN [from_file] actually points, as a path in the same space as the
+    scan's file keys. [from_file] is a file, so the link resolves against its DIRECTORY; [".."] pops
+    a segment and ["."] is dropped, exactly as a browser or GitHub would.
 
     This exists because a target's correct spelling depends on how deep the file is, and hard-coding
     the one-level spelling made the backlink rule demand [`../agent-notes.md`] of a note in a
@@ -1245,9 +1250,7 @@ let links_of contents =
     not exist. So nested notes could only pass by carrying an unusable link (Codex P2, round 2). *)
 let resolve_link ~from_file target : string option =
   let dir =
-    match List.rev (String.split from_file ~on:'/') with
-    | _ :: rest -> List.rev rest
-    | [] -> []
+    match List.rev (String.split from_file ~on:'/') with _ :: rest -> List.rev rest | [] -> []
   in
   let target = List.hd_exn (String.split target ~on:'#') in
   let step acc segment =
@@ -1256,16 +1259,18 @@ let resolve_link ~from_file target : string option =
     | Some acc ->
         if String.equal segment "." || String.is_empty segment then Some acc
         else if String.equal segment ".." then
-          (* Above the root is a DISTINCT answer, not the root. Clamping made
-             agent-notes/a.md's "../../agent-notes.md" resolve to the index, so a link pointing at
-             the repository root passed as a backlink (Codex P2, round 3). *)
-          match acc with _ :: rest -> Some rest | [] -> None
+          (* Above the root is a DISTINCT answer, not the root. Clamping made agent-notes/a.md's
+             "../../agent-notes.md" resolve to the index, so a link pointing at the repository root
+             passed as a backlink (Codex P2, round 3). *)
+          match acc with
+          | _ :: rest -> Some rest
+          | [] -> None
         else Some (segment :: acc)
   in
   List.fold (String.split target ~on:'/') ~init:(Some (List.rev dir)) ~f:step
   |> Option.map ~f:(fun acc -> List.rev acc |> String.concat ~sep:"/")
 
-(** [\[text\](target)] filling the whole cell, and nothing else. *)
+(** [[text](target)] filling the whole cell, and nothing else. *)
 let parse_link cell =
   let cell = String.strip cell in
   match (String.chop_prefix cell ~prefix:"[", String.chop_suffix cell ~suffix:")") with
@@ -1292,18 +1297,19 @@ let table_parses ~contents t =
   | Some header :: Some delim :: (_ :: _ as rest) ->
       is_delimiter_row delim
       && List.for_all (Some header :: Some delim :: rest) ~f:(function
-           | Some c -> List.length c = List.length header
-           | None -> false)
+        | Some c -> List.length c = List.length header
+        | None -> false)
   | _ -> false
 
 (** The index's rows, or the one finding that says its table did not parse at all.
 
     The distinction is the point. A wrapped row ends the table, which leaves the index looking like
-    TWO tables with most of its rows outside both -- and asking the hook and reachability rules about
-    that produces one spurious "unreachable" line per notes file, burying the single finding that
-    says what actually happened. So a refusal comes back as [Error] and stops those rules, which then
-    report that they could not be evaluated rather than reporting twelve falsehoods. It cannot hide a
-    real defect: the refusal is itself a failure, and the table rule has already named the line. *)
+    TWO tables with most of its rows outside both -- and asking the hook and reachability rules
+    about that produces one spurious "unreachable" line per notes file, burying the single finding
+    that says what actually happened. So a refusal comes back as [Error] and stops those rules,
+    which then report that they could not be evaluated rather than reporting twelve falsehoods. It
+    cannot hide a real defect: the refusal is itself a failure, and the table rule has already named
+    the line. *)
 let index_rows ~file contents =
   match tables contents with
   | [] -> Error (file_finding ~file ~rule:rule_index_agreement "no table: the index is a table")
@@ -1316,8 +1322,8 @@ let index_rows ~file contents =
       (* One block, but not a table: a row that does not close, a ragged width, a missing delimiter.
          Extracting rows anyway dropped the bad one and then reported EVERY notes file as an orphan,
          burying the one actionable finding under a dozen spurious ones -- the same cascade the
-         two-table refusal above exists to prevent, through the door it left open (Codex P2,
-         round 6). *)
+         two-table refusal above exists to prevent, through the door it left open (Codex P2, round
+         6). *)
       Error
         (file_finding ~file ~rule:rule_index_agreement
            "a table that does not parse, so its rows cannot be read: fix what table-shape reports \
@@ -1336,20 +1342,22 @@ let index_rows ~file contents =
                 | None ->
                     Either.Second
                       (finding ~file ~line:lineno ~rule:rule_index_agreement
-                         (Printf.sprintf
-                            "a row whose first cell is not a link to a notes file: %S" link))
+                         (Printf.sprintf "a row whose first cell is not a link to a notes file: %S"
+                            link))
                 | Some (link_text, target) ->
                     let target, anchor =
                       match String.lsplit2 target ~on:'#' with
                       | Some (t, a) -> (t, Some a)
                       | None -> (target, None)
                     in
-                    Either.First { row_line = lineno; link_text; target; anchor; hooks = backticked hooks })
+                    Either.First
+                      { row_line = lineno; link_text; target; anchor; hooks = backticked hooks })
             | Some cells ->
                 Either.Second
                   (finding ~file ~line:lineno ~rule:rule_index_agreement
                      (Printf.sprintf
-                        "a row of %d cells: the index's schema is \"| file link | coverage prose |\""
+                        "a row of %d cells: the index's schema is \"| file link | coverage prose \
+                         |\""
                         (List.length cells)))
             | None ->
                 Either.Second
@@ -1370,91 +1378,100 @@ let check_index ~index_file ~index_contents ~(files : (string * string) list) =
            -- fix the table first";
       ]
   | Ok (rows, row_findings) ->
-  let per_row =
-    List.concat_map rows ~f:(fun row ->
-        let report msg = finding ~file:index_file ~line:row.row_line ~rule:rule_index_agreement msg in
-        let basename = List.last_exn (String.split row.target ~on:'/') in
-        let text_finding =
-          if String.equal row.link_text basename then []
-          else
-            [
-              report
-                (Printf.sprintf "link text %S naming the file %S: the index reads as a file list"
-                   row.link_text basename);
-            ]
-        in
-        match List.Assoc.find files row.target ~equal:String.equal with
-        | None ->
-            text_finding
-            @ [ report (Printf.sprintf "a link to %S, which is not a notes file" row.target) ]
-        | Some contents ->
-            let anchor_finding =
-              match row.anchor with
-              | None -> []
-              | Some a ->
-                  if List.exists (headings contents) ~f:(fun h -> String.equal (slug h) a) then []
-                  else
-                    [
-                      report
-                        (Printf.sprintf "an anchor #%s that %s has no heading for" a row.target);
-                    ]
+      let per_row =
+        List.concat_map rows ~f:(fun row ->
+            let report msg =
+              finding ~file:index_file ~line:row.row_line ~rule:rule_index_agreement msg
             in
-            let hook_findings =
-              List.filter_map row.hooks ~f:(fun hook ->
-                  if String.is_substring contents ~substring:hook then None
-                  else
-                    Some
-                      (report
-                         (Printf.sprintf
-                            "the hook `%s`, which does not occur in %s: the index is what a lookup \
-                             greps first, so a hook absent from its target is a dead end"
-                            hook row.target)))
+            let basename = List.last_exn (String.split row.target ~on:'/') in
+            let text_finding =
+              if String.equal row.link_text basename then []
+              else
+                [
+                  report
+                    (Printf.sprintf
+                       "link text %S naming the file %S: the index reads as a file list"
+                       row.link_text basename);
+                ]
             in
-            text_finding @ anchor_finding @ hook_findings)
-  in
-  let targets = List.map rows ~f:(fun r -> r.target) in
-  let duplicates =
-    List.filter_map rows ~f:(fun r ->
-        let earlier = List.filter rows ~f:(fun o -> String.equal o.target r.target && o.row_line < r.row_line) in
-        if List.is_empty earlier then None
-        else
-          Some
-            (finding ~file:index_file ~line:r.row_line ~rule:rule_reachability
-               (Printf.sprintf "a second row for %s: one row per file, or a lookup has two answers"
-                  r.target)))
-  in
-  let orphans =
-    List.filter_map files ~f:(fun (name, _) ->
-        if List.mem targets name ~equal:String.equal then None
-        else
-          Some
-            (file_finding ~file:name ~rule:rule_reachability
-               "a notes file no index row links to: unreachable from the one place a lookup starts"))
-  in
-  let backlinks =
-    List.filter_map files ~f:(fun (name, contents) ->
-        (* A link, not a byte sequence -- and one that RESOLVES to the index from where this file
-           sits, so a note one directory deeper is asked for the spelling that works from there
-           rather than for the spelling that works one level up. *)
-        if
-          List.exists (links_of contents) ~f:(fun (_, t) ->
-              Option.value_map (resolve_link ~from_file:name t) ~default:false
-                ~f:(String.equal index_file))
-        then None
-        else
-          Some
-            (file_finding ~file:name ~rule:rule_reachability
-               (Printf.sprintf
-                  "no navigable link back to the index: a link resolving to %S from here (outside \
-                   code spans, HTML comments and images), which from %S is written %S"
-                  index_file name
-                  (String.concat
-                     (List.init
-                        (List.length (String.split name ~on:'/') - 1)
-                        ~f:(fun _ -> "../"))
-                  ^ index_file))))
-  in
-  row_findings @ per_row @ duplicates @ orphans @ backlinks
+            match List.Assoc.find files row.target ~equal:String.equal with
+            | None ->
+                text_finding
+                @ [ report (Printf.sprintf "a link to %S, which is not a notes file" row.target) ]
+            | Some contents ->
+                let anchor_finding =
+                  match row.anchor with
+                  | None -> []
+                  | Some a ->
+                      if List.exists (headings contents) ~f:(fun h -> String.equal (slug h) a) then
+                        []
+                      else
+                        [
+                          report
+                            (Printf.sprintf "an anchor #%s that %s has no heading for" a row.target);
+                        ]
+                in
+                let hook_findings =
+                  List.filter_map row.hooks ~f:(fun hook ->
+                      if String.is_substring contents ~substring:hook then None
+                      else
+                        Some
+                          (report
+                             (Printf.sprintf
+                                "the hook `%s`, which does not occur in %s: the index is what a \
+                                 lookup greps first, so a hook absent from its target is a dead \
+                                 end"
+                                hook row.target)))
+                in
+                text_finding @ anchor_finding @ hook_findings)
+      in
+      let targets = List.map rows ~f:(fun r -> r.target) in
+      let duplicates =
+        List.filter_map rows ~f:(fun r ->
+            let earlier =
+              List.filter rows ~f:(fun o ->
+                  String.equal o.target r.target && o.row_line < r.row_line)
+            in
+            if List.is_empty earlier then None
+            else
+              Some
+                (finding ~file:index_file ~line:r.row_line ~rule:rule_reachability
+                   (Printf.sprintf
+                      "a second row for %s: one row per file, or a lookup has two answers" r.target)))
+      in
+      let orphans =
+        List.filter_map files ~f:(fun (name, _) ->
+            if List.mem targets name ~equal:String.equal then None
+            else
+              Some
+                (file_finding ~file:name ~rule:rule_reachability
+                   "a notes file no index row links to: unreachable from the one place a lookup \
+                    starts"))
+      in
+      let backlinks =
+        List.filter_map files ~f:(fun (name, contents) ->
+            (* A link, not a byte sequence -- and one that RESOLVES to the index from where this
+               file sits, so a note one directory deeper is asked for the spelling that works from
+               there rather than for the spelling that works one level up. *)
+            if
+              List.exists (links_of contents) ~f:(fun (_, t) ->
+                  Option.value_map (resolve_link ~from_file:name t) ~default:false
+                    ~f:(String.equal index_file))
+            then None
+            else
+              Some
+                (file_finding ~file:name ~rule:rule_reachability
+                   (Printf.sprintf
+                      "no navigable link back to the index: a link resolving to %S from here \
+                       (outside code spans, HTML comments and images), which from %S is written %S"
+                      index_file name
+                      (String.concat
+                         (List.init
+                            (List.length (String.split name ~on:'/') - 1)
+                            ~f:(fun _ -> "../"))
+                      ^ index_file))))
+      in
+      row_findings @ per_row @ duplicates @ orphans @ backlinks
 
 (* ------------------------------------------------------------------ *)
 (* Rule 5: no bullet repeated *)
@@ -1482,19 +1499,20 @@ let check_repetition (bullets : bullet list) =
               (Printf.sprintf "a bullet repeating %s verbatim: \"%s…\"" (where o)
                  (String.prefix key 60));
           ]
-      | None ->
+      | None -> (
           Hashtbl.set exact ~key ~data:b;
           let pkey = String.lowercase (String.prefix key near_duplicate_prefix) in
           if String.length pkey < near_duplicate_prefix then []
-          else (
+          else
             match Hashtbl.find prefix pkey with
             | Some (o : bullet) ->
                 [
                   report rule_no_repetition
                     (Printf.sprintf
-                       "a bullet opening exactly as %s does: \"%s…\" — one fact promoted twice is a \
-                        fact that will be updated once"
-                       (where o) (String.prefix key near_duplicate_prefix));
+                       "a bullet opening exactly as %s does: \"%s…\" — one fact promoted twice is \
+                        a fact that will be updated once"
+                       (where o)
+                       (String.prefix key near_duplicate_prefix));
                 ]
             | None ->
                 Hashtbl.set prefix ~key:pkey ~data:b;
@@ -1516,7 +1534,8 @@ let unnamed_rule_findings found = List.filter found ~f:(fun f -> not (names_a_ru
     findings carrying a rule {!rules} does not name keep their order, at the end. *)
 let in_rule_order found =
   let named, unnamed = List.partition_tf found ~f:(fun f -> names_a_rule f.rule) in
-  List.concat_map rules ~f:(fun r -> List.filter named ~f:(fun f -> String.equal f.rule r)) @ unnamed
+  List.concat_map rules ~f:(fun r -> List.filter named ~f:(fun f -> String.equal f.rule r))
+  @ unnamed
 
 (** Every rule, over an index and the files it indexes. Findings come back in {!in_rule_order} --
     grouped by rule in {!rules} order, and within a rule in file and line order, with any finding

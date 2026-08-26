@@ -144,8 +144,7 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
       print_tree ~indent:"" tree;
       let paths = Sspace.enumerate tree in
       (match List.last paths with
-      | Some (path, _) ->
-          Stdio.printf "last leaf's decision path: %s\n" (FD.render_path path)
+      | Some (path, _) -> Stdio.printf "last leaf's decision path: %s\n" (FD.render_path path)
       | None -> Stdio.printf "no leaves\n");
       Verdict.p "tree leaves = flat enumeration"
         (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds)
@@ -153,12 +152,12 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
 (* gh-ocannl-591: what the certain-traffic increment of a leaf's path MUST be, derived from the
    leaf's own sketch parameters and NOTHING on the path — no decision, no label. Cross-checking it
    against [sketch_path_traffic_floor] over paths walked out of the real tree is what pins the
-   decision protocol end to end: a commitment the floor stops reading shows up as a mismatch,
-   where the string protocol's silent fall-through showed up as a uniform (sound, useless) zero.
-   The two families count differently, exactly as [Cost_model.analyze] charges them: the GPU
-   pipelines stage both operand tiles in kernel (written and read), while the CPU packed
-   composition adds traffic only where it packs in kernel — every other shape packs at link time or
-   per Grid chunk, replacing the original operand's reads rather than adding to them. *)
+   decision protocol end to end: a commitment the floor stops reading shows up as a mismatch, where
+   the string protocol's silent fall-through showed up as a uniform (sound, useless) zero. The two
+   families count differently, exactly as [Cost_model.analyze] charges them: the GPU pipelines stage
+   both operand tiles in kernel (written and read), while the CPU packed composition adds traffic
+   only where it packs in kernel — every other shape packs at link time or per Grid chunk, replacing
+   the original operand's reads rather than adding to them. *)
 let expected_inc ~elt_bytes ~n_extent (p : Autotune.sketch_params) =
   let bm = p.Autotune.sk_bm and bk = p.Autotune.sk_bk in
   let bn = if p.Autotune.sk_bn = 0 then n_extent else p.Autotune.sk_bn in
@@ -187,26 +186,24 @@ let traffic_pins name ~limits ~elt_bytes ~n_extent tree opt =
     List.dedup_and_sort ~compare:String.compare
       (List.concat_map paths ~f:(fun (path, _) -> List.map path ~f:fst))
   in
-  Stdio.printf "== %s: certain-traffic increments over %d leaf paths ==\n" name
-    (List.length paths);
+  Stdio.printf "== %s: certain-traffic increments over %d leaf paths ==\n" name (List.length paths);
   Stdio.printf "  levels on the leaf paths: %s\n" (String.concat ~sep:", " levels);
   Stdio.printf "  priced above the schedule-invariant floor: %d; max increment %d bytes\n" priced
     (List.fold paths ~init:0 ~f:(fun acc (path, _) -> max acc (inc path)));
   Verdict.p_all (name ^ ": every leaf's increment is the traffic its own parameters imply") paths
-    ~f:(fun (path, p) ->
-         inc path = expected_inc ~elt_bytes ~n_extent p);
+    ~f:(fun (path, p) -> inc path = expected_inc ~elt_bytes ~n_extent p);
   Verdict.p_all (name ^ ": the increment is monotone along every path's prefixes") paths
     ~f:(fun (path, _) ->
-         let incs = 0 :: List.map (prefixes path) ~f:inc in
-         List.is_sorted incs ~compare:Int.compare);
+      let incs = 0 :: List.map (prefixes path) ~f:inc in
+      List.is_sorted incs ~compare:Int.compare);
   Verdict.p
     (name ^ ": the staging commitments price above the floor")
     (priced > 0
     && priced = List.count paths ~f:(fun (_, p) -> expected_inc ~elt_bytes ~n_extent p > 0));
   Verdict.p_all (name ^ ": every leaf path commits its pipeline's shape level") paths
     ~f:(fun (path, _) ->
-         List.exists path ~f:(fun (_, d) ->
-             match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false));
+      List.exists path ~f:(fun (_, d) ->
+          match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false));
   (* One representative path per pricing regime, walked out of the tree and rendered here (the
      rendering is all that a label reword can move). *)
   let sample what f =
@@ -218,13 +215,13 @@ let traffic_pins name ~limits ~elt_bytes ~n_extent tree opt =
   sample "staged geometry" (fun path ->
       inc path > 0
       && List.exists path ~f:(fun (_, d) ->
-             match d with FD.Geometry (FD.Gpu_mma _ | FD.Cpu_packed _) -> true | _ -> false));
+          match d with FD.Geometry (FD.Gpu_mma _ | FD.Cpu_packed _) -> true | _ -> false));
   sample "unpriced geometry" (fun path -> inc path = 0);
   sample "lattice leaf" (fun path ->
       List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)));
   (* The refinement chain of one lattice leaf: each interval commitment tightens the corner the box
-     is priced at, so the increments grow monotonically down to the singleton. Pinning the chain
-     off the tree replaces the hand-written box labels this test used to feed the parser. *)
+     is priced at, so the increments grow monotonically down to the singleton. Pinning the chain off
+     the tree replaces the hand-written box labels this test used to feed the parser. *)
   match
     (* The LAST lattice leaf: the largest corner, so the chain's tightening is visible — every box
        prices at its own minimum, which the refinement raises step by step. *)
@@ -376,21 +373,20 @@ let () =
       Stdio.printf
         "lifted-lattice search over the refuted family: %d expanded, %d scored, %d refuted\n"
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_refuted);
-  (* A multi-axis contraction (gh-ocannl-683): attention's out projection
-     [d[b,s,j] += w[j,h,e] * x[b,s,h,e]], whose weight carries two input axes, so lowering splits
-     the contraction into an outer head loop ([m_ko]) above the innermost per-head loop, and only
-     the latter's extent ([m_nk]) is what the tile gates judge. Every site above contracts over a
-     single axis, where a tile's k-extent and the site's whole K coincide; here they do not, and a
-     refutation says which one it means ([Sketch_families.k_extent_label]) — head_dim 12 divides
-     neither blocktile menu's k-extents (GPU 8 and 16, CPU 16 and 8), and where the gate still
-     applies its witness names "innermost contraction extent k=12 (of K=48 over 2 loops)" rather
-     than a bare "k=12" that reads as the site's contraction. Where it applies is now the CPU
-     blocktile pipeline alone: since gh-ocannl-730 the GPU blocktile family stages both operands
-     like the tensorized one and PADS past the same 12, so both GPU pipelines enumerate here in
-     full — the ten k-gate refutations this golden used to record are ten leaves. The unstaged
-     tensorized form reads its operands in place and keeps the intrinsic-tile gate. The batch axes
-     give the GPU pipelines the batch-grid level ([sk_batch_grid], gh-ocannl-528) that the rank-2
-     sites above never show. *)
+  (* A multi-axis contraction (gh-ocannl-683): attention's out projection [d[b,s,j] += w[j,h,e] *
+     x[b,s,h,e]], whose weight carries two input axes, so lowering splits the contraction into an
+     outer head loop ([m_ko]) above the innermost per-head loop, and only the latter's extent
+     ([m_nk]) is what the tile gates judge. Every site above contracts over a single axis, where a
+     tile's k-extent and the site's whole K coincide; here they do not, and a refutation says which
+     one it means ([Sketch_families.k_extent_label]) — head_dim 12 divides neither blocktile menu's
+     k-extents (GPU 8 and 16, CPU 16 and 8), and where the gate still applies its witness names
+     "innermost contraction extent k=12 (of K=48 over 2 loops)" rather than a bare "k=12" that reads
+     as the site's contraction. Where it applies is now the CPU blocktile pipeline alone: since
+     gh-ocannl-730 the GPU blocktile family stages both operands like the tensorized one and PADS
+     past the same 12, so both GPU pipelines enumerate here in full — the ten k-gate refutations
+     this golden used to record are ten leaves. The unstaged tensorized form reads its operands in
+     place and keeps the intrinsic-tile gate. The batch axes give the GPU pipelines the batch-grid
+     level ([sk_batch_grid], gh-ocannl-528) that the rank-2 sites above never show. *)
   let bb = 2 and ss = 64 and jj = 64 and hh = 4 and ee = 12 in
   let ov =
     NTDSL.init ~l:"ov" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee ]
@@ -415,11 +411,11 @@ let () =
       opt_o
   in
   tree_section "out-projection cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_o o_cpu_seeds;
-  tree_section "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false
-    ~limits:gpu_full_limits opt_o o_gpu_seeds;
+  tree_section "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits
+    opt_o o_gpu_seeds;
   tree_verdicts "out-projection cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_o;
-  tree_verdicts "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false
-    ~limits:gpu_full_limits opt_o;
+  tree_verdicts "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits
+    opt_o;
   (* The epilogue-fusion level (gh-ocannl-613): the family's root decision. Every site above feeds
      its matmul output to nothing fusable, so their fused flavor is refuted AT THE ROOT with the
      fusion recognizer's own reason — the first line of each "-- refuted --" report above, where
@@ -444,8 +440,8 @@ let () =
         let seeds = Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt in
         let unfused, fused = List.partition_tf seeds ~f:(fun p -> not p.Autotune.sk_epilogue) in
         Stdio.printf "== %s: %d seeds (%d unfused + %d fused), %d choice nodes, depth %d ==\n" name
-          (List.length seeds) (List.length unfused) (List.length fused)
-          (Sspace.count_choices tree) (Sspace.depth tree);
+          (List.length seeds) (List.length unfused) (List.length fused) (Sspace.count_choices tree)
+          (Sspace.depth tree);
         (match tree with
         | Sspace.Choice { children; _ }
           when List.for_all children ~f:(fun (d, _) ->
@@ -468,8 +464,8 @@ let () =
           && List.equal
                (fun u f -> String.equal (show { u with Autotune.sk_epilogue = true }) (show f))
                unfused fused);
-        (* The fused flavor's own verdicts carry its path — the same refutations and exclusions
-           the unfused flavor has, plus nothing, on this fully-dividing site. *)
+        (* The fused flavor's own verdicts carry its path — the same refutations and exclusions the
+           unfused flavor has, plus nothing, on this fully-dividing site. *)
         let flavor_of (path, _) =
           List.find_map path ~f:(fun (_, d) ->
               match d with FD.Fusion f -> Some (FD.Fusion f) | _ -> None)
@@ -639,14 +635,13 @@ let () =
       Verdict.p "the lattice exclusion carries the lift instructions"
         (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
              String.equal w Autotune.geometry_lattice_witness));
-      (* The certain-traffic increments that make the bound non-uniform: a committed staged
-         geometry prices its operand tiles, an unstaged one prices nothing, and a lattice box prices
-         its most favorable corner — monotone in refinement. Judged over the LIFTED tree's own
-         paths (gh-ocannl-591), so the pin moves with the tree rather than with a list of literals
-         this test wrote for itself. *)
+      (* The certain-traffic increments that make the bound non-uniform: a committed staged geometry
+         prices its operand tiles, an unstaged one prices nothing, and a lattice box prices its most
+         favorable corner — monotone in refinement. Judged over the LIFTED tree's own paths
+         (gh-ocannl-591), so the pin moves with the tree rather than with a list of literals this
+         test wrote for itself. *)
       let inc = Autotune.sketch_path_traffic_floor ~limits:gpu_full_limits mm2 in
-      traffic_pins "gpu staged lattice" ~limits:gpu_full_limits ~elt_bytes:4 ~n_extent:64 lifted
-        mm2;
+      traffic_pins "gpu staged lattice" ~limits:gpu_full_limits ~elt_bytes:4 ~n_extent:64 lifted mm2;
       (* Search over the lifted tree with the increment itself as the bound and an incumbent between
          the small and large boxes' floors: large-tile boxes fathom without expansion, so the walk
          scores a fraction of the lattice — the logarithmic-effective regime. The score never
@@ -660,8 +655,8 @@ let () =
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_fathomed
         stats.Sspace.st_refuted stats.Sspace.st_excluded);
   (* The CPU side of the same protocol, which no test priced before (gh-ocannl-591): the packed
-     composition's traffic depends on the packing shape ABOVE its geometry — only in-kernel
-     [serial] packing adds panel bytes, the hoisted and Grid shapes replace or split reads — and the
+     composition's traffic depends on the packing shape ABOVE its geometry — only in-kernel [serial]
+     packing adds panel bytes, the hoisted and Grid shapes replace or split reads — and the
      blocktile pipeline stages nothing at all. Same tree-walked judgment, so the CPU arms of the
      floor are pinned by the tree rather than by a literal path. *)
   (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
@@ -720,9 +715,7 @@ let () =
             List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
                 List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))
           in
-          let inc =
-            Autotune.sketch_path_traffic_floor ~limits:gpu_coarse_canonical mm2
-          in
+          let inc = Autotune.sketch_path_traffic_floor ~limits:gpu_coarse_canonical mm2 in
           Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
           Verdict.pf "lattice leaves %d, all 8-step multiples of both axes"
             (List.length lattice_leaves)

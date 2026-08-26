@@ -1,5 +1,6 @@
 ; The runners' JSON scalars and result line, a library rather than a module of the executables so
 ; that test/operations/bench_result_line can link it without the whole framework (gh-ocannl-676).
+
 (library
  (name bench_json)
  ; Attached to a package (though never installed) because its dependants are: a private library
@@ -14,6 +15,7 @@
 ; `Bench_harness.run_self_test` — the fixture-free smoke run of `measure_and_emit` — and a module
 ; of an `(executables)` stanza cannot be linked from a test. Same package, for the same reason as
 ; bench_json above.
+
 (library
  (name bench_harness)
  (package neural_nets_lib)
@@ -37,7 +39,15 @@
   bench_gpt_diag
   bench_conv_diag
   bench_min_repro)
- (libraries base bench_harness bench_json ocannl stdio unix mtime mtime.clock.os)
+ (libraries
+  base
+  bench_harness
+  bench_json
+  ocannl
+  stdio
+  unix
+  mtime
+  mtime.clock.os)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

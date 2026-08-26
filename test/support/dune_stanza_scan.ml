@@ -121,7 +121,10 @@ let read_raw content =
             Int.incr stop
           done;
           comments :=
-            { comment_start = start; comment_text = String.sub content ~pos:(start + 1) ~len:(!stop - start - 1) }
+            {
+              comment_start = start;
+              comment_text = String.sub content ~pos:(start + 1) ~len:(!stop - start - 1);
+            }
             :: !comments;
           pos := !stop;
           skip_trivia ()
@@ -155,10 +158,7 @@ let read_raw content =
           Int.incr pos;
           let closed = ref false in
           while (not !closed) && !pos < length do
-            (match content.[!pos] with
-            | '\\' -> Int.incr pos
-            | '"' -> closed := true
-            | _ -> ());
+            (match content.[!pos] with '\\' -> Int.incr pos | '"' -> closed := true | _ -> ());
             Int.incr pos
           done;
           Some
@@ -211,9 +211,7 @@ let rec shapes_agree raw sexp =
 let stanzas content =
   let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   let raw, _comments = read_raw content in
-  if
-    List.length raw <> List.length parsed
-    || not (List.for_all2_exn raw parsed ~f:shapes_agree)
+  if List.length raw <> List.length parsed || not (List.for_all2_exn raw parsed ~f:shapes_agree)
   then
     failwith
       (Printf.sprintf
@@ -397,18 +395,18 @@ type command =
           from the other unnameable programs so a check can tell them apart. Grouping them all as
           {!Unknown_directory} let a surviving [(bash …)] site answer for a dropped one (Codex P2,
           round 10). *)
-      (** a shell command line: not only is the program unreadable, the directory it runs in is too,
-          because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
+(** a shell command line: not only is the program unreadable, the directory it runs in is too,
+    because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
 
 (** Pforms naming a program that is part of the toolchain rather than of this repository.
 
     DATA both readers consult, not machinery either of them owns. The raw-text floor has to know
-    which pforms name something this workspace provides in order to see [(run python3
-    %{dep:orchestrate.py})] at all: an external command handed a file we build, whose only evidence
-    is in its ARGUMENT. What it must NOT do is re-derive {!classify_command} to find out — a second
-    reader that runs the first reader's classifier is a copy, and the floor exists to be a second
-    opinion. A list is inert: it says which spellings mean what, and leaves each reader to decide
-    what to do about it (gh-ocannl-708). *)
+    which pforms name something this workspace provides in order to see
+    [(run python3 %{dep:orchestrate.py})] at all: an external command handed a file we build, whose
+    only evidence is in its ARGUMENT. What it must NOT do is re-derive {!classify_command} to find
+    out — a second reader that runs the first reader's classifier is a copy, and the floor exists to
+    be a second opinion. A list is inert: it says which spellings mean what, and leaves each reader
+    to decide what to do about it (gh-ocannl-708). *)
 let toolchain_pforms = [ "ocaml"; "ocamlc"; "ocamlopt"; "cc"; "cxx"; "make" ]
 
 (** Pform prefixes that expand to the PATH of something dune builds or knows about in this
@@ -793,7 +791,6 @@ let inert_heads =
     "deprecated_library_name";
   ]
 
-(** One stanza as a SECOND reader sees it. *)
 type raw_stanza = {
   raw_head : string;  (** the atom the stanza opens with *)
   raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
@@ -821,18 +818,19 @@ type raw_stanza = {
           [(chdir %{…} …)] whose destination it cannot resolve; and a command it cannot name handed
           something this workspace provides, which the walk reads as a program that may run
           somewhere it cannot establish (gh-ocannl-708). Recorded rather than dropped — THAT
-          something runs is the whole of what gh-ocannl-659's per-stanza floor asks, and none of
-          the three can be placed any further without parsing shell, resolving a pform, or deciding
+          something runs is the whole of what gh-ocannl-659's per-stanza floor asks, and none of the
+          three can be placed any further without parsing shell, resolving a pform, or deciding
           which of `env probe.exe` and `diff old.exe new.exe` is a launcher (gh-ocannl-690).
 
           Carried without a directory, deliberately. {!sites} places each of these as an
-          [Unreadable_directory] site precisely BECAUSE the directory is unknown, so a
-          per-directory floor built on them would be holding the walk's refusal to guess against
-          this reader's guess. Only the per-stanza floor consumes them. *)
+          [Unreadable_directory] site precisely BECAUSE the directory is unknown, so a per-directory
+          floor built on them would be holding the walk's refusal to guess against this reader's
+          guess. Only the per-stanza floor consumes them. *)
 }
+(** One stanza as a SECOND reader sees it. *)
 
-(* One thing a stanza's actions run, as this reader sees it before deciding what to record of it.
-   A variant rather than the tuple this used to be, because the two shapes gh-ocannl-690 added carry
+(* One thing a stanza's actions run, as this reader sees it before deciding what to record of it. A
+   variant rather than the tuple this used to be, because the two shapes gh-ocannl-690 added carry
    weaker evidence than a placed command does: a [(run …)] answers "what, and where", while a shell
    line answers only "something". *)
 type raw_ran =
@@ -840,16 +838,25 @@ type raw_ran =
       cwd : string;  (** where the process ends up, when that is knowable *)
       token : string;  (** the command position, as written *)
       args : string list;
-          (** the atoms the command was handed, as written. A command this reader cannot name is
-              not the end of the story while one of them names something this workspace provides:
-              [(run python3 %{dep:orchestrate.py})] runs a file we build, and the walk places a
-              site for exactly that reading (gh-ocannl-708). *)
+          (** the atoms the command was handed, as written. A command this reader cannot name is not
+              the end of the story while one of them names something this workspace provides:
+              [(run python3 %{dep:orchestrate.py})] runs a file we build, and the walk places a site
+              for exactly that reading (gh-ocannl-708). *)
       under_path : bool;  (** whether a [(setenv PATH …)] encloses it *)
       unresolved : string option;
           (** [Some dir] when a [(chdir dir …)] whose destination holds a pform encloses it, which
               makes [cwd] a fiction — the command is still evidence that something runs *)
     }
   | Raw_opaque of string  (** something runs here and this reader will not say what *)
+
+(* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
+   ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
+   document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
+   classifiers reachable from one place (Codex P2, round 2).
+
+   Sharing the traversal costs nothing this module was protecting: the independence it documents
+   lives in the CLASSIFICATION -- how a stanza is decided to run something -- and that is still two
+   separate pieces of machinery, answering the same question from different sides. *)
 
 (** [raw_stanzas content] reads [content] as a second opinion on {!sites}: the stanzas it declares,
     with what each of them runs and where.
@@ -888,12 +895,11 @@ type raw_ran =
       [in_subdir site.subdir site.cwd].
     - WHAT CANNOT BE RESOLVED. Under a [chdir] whose destination holds a pform neither reader can
       say where the process runs: the walk emits an {!Unreadable_directory} site carrying no
-      executables, and this one records the command in {!raw_stanza.raw_opaque} — tagged rather
-      than dropped, since THAT something runs there is what the per-stanza floor rests on. A
-      command that is external wherever it runs is passed over by both, the walk placing no site
-      for it either.
-    - IDENTITY. Commands are recognised as {!classify_command} recognises them, [(:name …)]
-      bindings included, and normalised to the same string.
+      executables, and this one records the command in {!raw_stanza.raw_opaque} — tagged rather than
+      dropped, since THAT something runs there is what the per-stanza floor rests on. A command that
+      is external wherever it runs is passed over by both, the walk placing no site for it either.
+    - IDENTITY. Commands are recognised as {!classify_command} recognises them, [(:name …)] bindings
+      included, and normalised to the same string.
 
     What it still declines to NAME is a [(bash …)] or [(system …)] command line, and an external
     command handed something this workspace provides: the text does not say what those run. Both are
@@ -901,14 +907,6 @@ type raw_ran =
     them. Where it under-reports it does so knowingly: a floor may under-claim, and then holds a
     weaker statement about that one stanza, but may never over-claim, which would report a hole in a
     correct scan. *)
-(* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
-   ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
-   document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
-   classifiers reachable from one place (Codex P2, round 2).
-
-   Sharing the traversal costs nothing this module was protecting: the independence it documents
-   lives in the CLASSIFICATION -- how a stanza is decided to run something -- and that is still two
-   separate pieces of machinery, answering the same question from different sides. *)
 let raw_stanza_of =
   let counted_heads = "test" :: "tests" :: action_heads in
   let test_heads = [ "test"; "tests" ] in
@@ -964,16 +962,16 @@ let raw_stanza_of =
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
   (* A command name PATH decides the meaning of: no pform to resolve, no extension and no explicit
-     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so it
-     places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the opaque
-     one both rest on, so they read one predicate rather than restating it. *)
+     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so
+     it places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the
+     opaque one both rest on, so they read one predicate rather than restating it. *)
   let is_bare_name cmd =
     (not (String.is_substring cmd ~substring:"%{"))
     && (not (is_executable cmd))
     && not (is_explicit_path cmd)
   in
-  (* Whether a command-line word names something this workspace provides, as far as the RAW TEXT
-     can tell: a `.exe`, an explicit relative path, or a pform that is not one of the toolchain's.
+  (* Whether a command-line word names something this workspace provides, as far as the RAW TEXT can
+     tell: a `.exe`, an explicit relative path, or a pform that is not one of the toolchain's.
 
      This is what lets the floor see a command it cannot NAME running something of ours -- `(run
      python3 %{dep:orchestrate.py})`, and `env -C ../sibling ./probe.exe` in the same shape. The
@@ -982,18 +980,18 @@ let raw_stanza_of =
      ({!toolchain_pforms} first among them, which is what keeps `(run tool %{ocaml})` invisible to
      both). Coarser is the safe direction: a floor may under-claim -- it then holds a weaker
      statement about that one stanza -- and may not over-claim, which would report a hole in a
-     correct scan. The `%{…}` boundaries are dune's own delimiters and are read with {!pieces},
-     the way {!is_explicit_path} and {!is_executable} are already read from one place: what stays
-     apart between the two readers is the judgement, not the lexing. *)
+     correct scan. The `%{…}` boundaries are dune's own delimiters and are read with {!pieces}, the
+     way {!is_explicit_path} and {!is_executable} are already read from one place: what stays apart
+     between the two readers is the judgement, not the lexing. *)
   let names_workspace_file arg =
     is_executable arg || is_explicit_path arg
     || List.exists (pieces arg) ~f:(function
-         | Literal _ -> false
-         | Pform pform ->
-             let head =
-               match String.lsplit2 pform ~on:':' with Some (head, _) -> head | None -> pform
-             in
-             not (List.mem toolchain_pforms head ~equal:String.equal))
+      | Literal _ -> false
+      | Pform pform ->
+          let head =
+            match String.lsplit2 pform ~on:':' with Some (head, _) -> head | None -> pform
+          in
+          not (List.mem toolchain_pforms head ~equal:String.equal))
   in
   (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
      this is the question [executables_run] answers, and answering it twice is the point. *)
@@ -1072,11 +1070,9 @@ let raw_stanza_of =
               List.filter_map placed ~f:(fun (cwd, cmd, _) ->
                   if String.equal (program_path cmd) test_pform then None
                   else
-                    match program ~bindings cmd with
-                    | Some path -> Some (cwd, path)
-                    | None -> None)
+                    match program ~bindings cmd with Some path -> Some (cwd, path) | None -> None)
               |> List.dedup_and_sort ~compare:(fun (c1, e1) (c2, e2) ->
-                     match String.compare c1 c2 with 0 -> String.compare e1 e2 | n -> n);
+                  match String.compare c1 c2 with 0 -> String.compare e1 e2 | n -> n);
             raw_test_cwds = test_cwds;
             (* A bare name under `(setenv PATH …)`: the only shape whose site the walk is certain to
                make {!Unreadable_directory}, since a command it CAN name stays a [Runs] even there.
@@ -1112,7 +1108,7 @@ let raw_stanza_of =
                         floored -- with the directory it runs in, which is more than this list can
                         carry. *)
                      | None when String.equal (program_path token) test_pform -> None
-                     | None ->
+                     | None -> (
                          if under_path && is_bare_name token then
                            (* Likewise [raw_unnameable], which carries the directory when there is
                               one. *)
@@ -1140,7 +1136,7 @@ let raw_stanza_of =
                                  Some
                                    (where unresolved
                                       (Printf.sprintf "%s, itself named out of this workspace" token))
-                               else None)))
+                               else None))))
               |> List.dedup_and_sort ~compare:String.compare;
           };
         ]
@@ -1156,13 +1152,13 @@ let raw_stanza_of =
     {!raw_stanza.raw_opaque}, and that is enough, because the question here is whether the stanza is
     subject to the rule and not which program answers for it (gh-ocannl-690).
 
-    What still passes it by is an action head nobody has classified and which encloses no [(run
-    …)]: {!sites_of_stanza} places an {!Unclassified_action} site where this reader, which knows
-    [run] and the shell actions by name, sees nothing at all. Under-claiming is harmless exactly as
-    long as the comparison is made STANZA BY STANZA: it weakens the floor for that stanza alone.
-    Compared in aggregate it is not harmless at all — a stanza the walk counts and this reader does
-    not contributes slack that hides a DIFFERENT stanza dropping out of enforcement (Codex P2,
-    round 2). *)
+    What still passes it by is an action head nobody has classified and which encloses no [(run …)]:
+    {!sites_of_stanza} places an {!Unclassified_action} site where this reader, which knows [run]
+    and the shell actions by name, sees nothing at all. Under-claiming is harmless exactly as long
+    as the comparison is made STANZA BY STANZA: it weakens the floor for that stanza alone. Compared
+    in aggregate it is not harmless at all — a stanza the walk counts and this reader does not
+    contributes slack that hides a DIFFERENT stanza dropping out of enforcement (Codex P2, round 2).
+*)
 let raw_runs_something r =
   (not (List.is_empty r.raw_runs))
   || (not (List.is_empty r.raw_test_cwds))
@@ -1189,80 +1185,80 @@ let raw_stanzas content =
     the same time — gh-ocannl-659 asks what comments sit inside it — walks the file itself and calls
     this per stanza, rather than re-deriving what counts as a site. *)
 let sites_of_stanza subdir stanza =
-  (let deps () = field stanza "deps" in
-      let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = [])
-          ?(path_rewritten = false) kind name =
-        [
-          {
-            kind;
-            name;
-            declares_config = not (List.is_empty (declared_config_paths deps_field));
-            declared_config_paths = declared_config_paths deps_field;
-            declares_backend = declares_env_var deps_field backend_env_var;
-            path_rewritten;
-            executables;
-            subdir;
-            cwd;
-          };
-        ]
-      in
-      let stanza_name () = String.concat ~sep:", " (names_of stanza) in
-      (* Everything a stanza's actions run, each with the directory it runs in. A `(test)` may carry
-         a custom action, so this serves both branches; the difference is only WHICH of the commands
-         is the test itself. *)
-      let run = executables_run stanza in
-      let sites_for ~is_test =
-        List.map run ~f:fst
+  let deps () = field stanza "deps" in
+  let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = []) ?(path_rewritten = false)
+      kind name =
+    [
+      {
+        kind;
+        name;
+        declares_config = not (List.is_empty (declared_config_paths deps_field));
+        declared_config_paths = declared_config_paths deps_field;
+        declares_backend = declares_env_var deps_field backend_env_var;
+        path_rewritten;
+        executables;
+        subdir;
+        cwd;
+      };
+    ]
+  in
+  let stanza_name () = String.concat ~sep:", " (names_of stanza) in
+  (* Everything a stanza's actions run, each with the directory it runs in. A `(test)` may carry a
+     custom action, so this serves both branches; the difference is only WHICH of the commands is
+     the test itself. *)
+  let run = executables_run stanza in
+  let sites_for ~is_test =
+    List.map run ~f:fst
+    |> List.dedup_and_sort ~compare:String.compare
+    |> List.concat_map ~f:(fun cwd ->
+        let for_cwd f =
+          List.filter_map run ~f:(fun (c, command) ->
+              if String.equal c cwd then f command else None)
+        in
+        let exes =
+          for_cwd (function
+            (* In a test stanza, `%{test}` is the test binary itself, reported as the Test site
+               rather than as something the action also runs. *)
+            | Runs name when is_test && String.equal name test_pform -> None
+            | Runs name -> Some name
+            | _ -> None)
+        in
+        let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
+        let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
+        let rewritten = for_cwd (function Path_rewritten cmd -> Some cmd | _ -> None) in
+        (if List.is_empty exes then []
+         else site ~cwd ~executables:exes Runs_executable (String.concat ~sep:", " exes))
+        @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
+        @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd)
+        @ List.concat_map rewritten ~f:(fun cmd ->
+            site ~cwd ~path_rewritten:true Unreadable_directory cmd))
+  in
+  match head stanza with
+  | Some ("test" | "tests") ->
+      (* Where the TEST runs, which is where its own command runs -- not where a helper in the same
+         action happens to be sent (Codex P2, round 10). With no custom action, dune runs it in the
+         stanza's directory. *)
+      let test_cwds =
+        List.filter_map run ~f:(function
+          | cwd, Runs name when String.equal name test_pform -> Some cwd
+          | _ -> None)
         |> List.dedup_and_sort ~compare:String.compare
-        |> List.concat_map ~f:(fun cwd ->
-            let for_cwd f =
-              List.filter_map run ~f:(fun (c, command) ->
-                  if String.equal c cwd then f command else None)
-            in
-            let exes =
-              for_cwd (function
-                (* In a test stanza, `%{test}` is the test binary itself, reported as the Test site
-                   rather than as something the action also runs. *)
-                | Runs name when is_test && String.equal name test_pform -> None
-                | Runs name -> Some name
-                | _ -> None)
-            in
-            let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
-            let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
-            let rewritten = for_cwd (function Path_rewritten cmd -> Some cmd | _ -> None) in
-            (if List.is_empty exes then []
-             else site ~cwd ~executables:exes Runs_executable (String.concat ~sep:", " exes))
-            @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
-            @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd)
-            @ List.concat_map rewritten ~f:(fun cmd ->
-                  site ~cwd ~path_rewritten:true Unreadable_directory cmd))
       in
-      match head stanza with
-      | Some ("test" | "tests") ->
-          (* Where the TEST runs, which is where its own command runs -- not where a helper in the
-             same action happens to be sent (Codex P2, round 10). With no custom action, dune runs
-             it in the stanza's directory. *)
-          let test_cwds =
-            List.filter_map run ~f:(function
-              | cwd, Runs name when String.equal name test_pform -> Some cwd
-              | _ -> None)
-            |> List.dedup_and_sort ~compare:String.compare
-          in
-          let test_cwds = if List.is_empty test_cwds then [ "" ] else test_cwds in
-          List.concat_map test_cwds ~f:(fun cwd -> site ~cwd Test (stanza_name ()))
-          @ sites_for ~is_test:true
-      | Some "library" -> (
-          match field stanza "inline_tests" with
-          | None -> []
-          | Some inline -> site ~deps:(field_in inline "deps") Inline_tests (stanza_name ()))
-      | Some h when List.mem action_heads h ~equal:String.equal ->
-          (* One site per directory the rule runs something in: what each needs is that directory's
-             config, declared by the path that reaches it from here. *)
-          sites_for ~is_test:false
-          @ List.concat_map (unclassified_action_heads stanza) ~f:(function
-            | Some cwd, head -> site ~cwd Unclassified_action head
-            | None, what -> site Unreadable_directory what)
-      | _ -> [])
+      let test_cwds = if List.is_empty test_cwds then [ "" ] else test_cwds in
+      List.concat_map test_cwds ~f:(fun cwd -> site ~cwd Test (stanza_name ()))
+      @ sites_for ~is_test:true
+  | Some "library" -> (
+      match field stanza "inline_tests" with
+      | None -> []
+      | Some inline -> site ~deps:(field_in inline "deps") Inline_tests (stanza_name ()))
+  | Some h when List.mem action_heads h ~equal:String.equal ->
+      (* One site per directory the rule runs something in: what each needs is that directory's
+         config, declared by the path that reaches it from here. *)
+      sites_for ~is_test:false
+      @ List.concat_map (unclassified_action_heads stanza) ~f:(function
+        | Some cwd, head -> site ~cwd Unclassified_action head
+        | None, what -> site Unreadable_directory what)
+  | _ -> []
 
 (** Every place in [content] that runs a test executable.
 
@@ -1380,8 +1376,8 @@ let marker_sentinel = "ocannl-backend:"
     whose remedy is to reach for [none] — a lie this grammar accepts. So the relationship is
     asserted where the link cost is already paid rather than here:
     [test/operations/marker_backend_vocabulary] holds this list equal to the names of
-    [Backends.all_of_backend] plus
-    ["none"], and fails whichever side moves alone (gh-ocannl-689). *)
+    [Backends.all_of_backend] plus ["none"], and fails whichever side moves alone (gh-ocannl-689).
+*)
 let marker_backends = [ "none"; "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ]
 
 (** The separators the marker admits between the backend and the reason. The em dash is what this
@@ -1399,10 +1395,10 @@ type marker =
 
 (** [parse_marker text] reads the text of one [;] comment (everything after the semicolon).
 
-    [None] means it is not a marker at all — ordinary prose, which a dune file is full of. [Some
-    (Malformed …)] means it announced itself as one and does not parse, which is a failure rather
-    than a shrug: a marker the grammar rejects would otherwise leave its stanza declaring nothing,
-    reported as if the author had written no marker.
+    [None] means it is not a marker at all — ordinary prose, which a dune file is full of.
+    [Some (Malformed …)] means it announced itself as one and does not parse, which is a failure
+    rather than a shrug: a marker the grammar rejects would otherwise leave its stanza declaring
+    nothing, reported as if the author had written no marker.
 
     The grammar, all of it:
     {v ; ocannl-backend: <backend>[,<backend>…] -- <reason> v}
@@ -1416,8 +1412,8 @@ type marker =
     Everything the grammar refuses it refuses OUT LOUD, and nothing it can repair does it repair.
     That distinction is the whole value of the construct: this is the one comment in the tree whose
     job is to be checkable, so an empty entry between commas, a backend named twice, or a second
-    declaration sharing the line are all {!Malformed} rather than normalised away — silently
-    reading [cc,] as [cc] would hand back a clean answer for a marker its author got wrong. *)
+    declaration sharing the line are all {!Malformed} rather than normalised away — silently reading
+    [cc,] as [cc] would hand back a clean answer for a marker its author got wrong. *)
 let parse_marker text =
   let trimmed = String.strip text in
   match String.substr_index trimmed ~pattern:marker_sentinel with
@@ -1435,14 +1431,14 @@ let parse_marker text =
                 (index, separator)))
         |> List.min_elt ~compare:(fun (a, _) (b, _) -> Int.compare a b)
         |> Option.map ~f:(fun (index, separator) ->
-               ( String.strip (String.sub rest ~pos:0 ~len:index),
-                 String.strip (String.subo rest ~pos:(index + String.length separator)) ))
+            ( String.strip (String.sub rest ~pos:0 ~len:index),
+              String.strip (String.subo rest ~pos:(index + String.length separator)) ))
       in
       Some
         (* A SECOND sentinel in the same comment is refused before anything is read out of the
            first. Reading from the earliest one and letting the rest fall into the reason would
-           absorb a whole second declaration into prose -- and the accounting check below cannot
-           see it, since both occurrences ARE in a comment this scan places. One comment, one
+           absorb a whole second declaration into prose -- and the accounting check below cannot see
+           it, since both occurrences ARE in a comment this scan places. One comment, one
            declaration; a second one goes on its own line, inside the stanza it is about. *)
         (if Option.is_some (String.substr_index rest ~pattern:marker_sentinel) then
            Malformed
@@ -1455,8 +1451,8 @@ let parse_marker text =
            | None ->
                Malformed
                  (Printf.sprintf
-                    "no `--` separating the backend from the reason -- the grammar is `; %s <%s> -- \
-                     <reason>`"
+                    "no `--` separating the backend from the reason -- the grammar is `; %s <%s> \
+                     -- <reason>`"
                     marker_sentinel
                     (String.concat ~sep:"|" marker_backends))
            | Some (backend, reason) ->
@@ -1486,8 +1482,7 @@ let parse_marker text =
                    (Printf.sprintf "`%s` is not one of %s" backend
                       (String.concat ~sep:", " marker_backends))
                else if List.contains_dup named ~compare:String.compare then
-                 Malformed
-                   (Printf.sprintf "`%s` names the same backend twice" backend)
+                 Malformed (Printf.sprintf "`%s` names the same backend twice" backend)
                else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
                  Malformed
                    (Printf.sprintf
@@ -1498,7 +1493,9 @@ let parse_marker text =
                    (String.split_on_chars reason ~on:[ ' '; '\t' ]
                    |> List.filter ~f:(Fn.non String.is_empty))
                  < 2
-               then Malformed (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
+               then
+                 Malformed
+                   (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
                else Marker { backend = String.concat ~sep:"," named; reason })
 
 type marked_stanza = {
@@ -1507,8 +1504,8 @@ type marked_stanza = {
   marked_line : int;  (** the line its opening parenthesis sits on *)
   marked_sites : site list;  (** what it runs; empty means it is not subject to the rule *)
   marked_raw_subject : bool;
-      (** what {!raw_runs_something} — the SECOND reader — makes of the same stanza. Carried here
-          so the floor can be checked per stanza against [marked_sites] instead of as a total: two
+      (** what {!raw_runs_something} — the SECOND reader — makes of the same stanza. Carried here so
+          the floor can be checked per stanza against [marked_sites] instead of as a total: two
           answers about one stanza cannot be traded off against a third stanza the way two counts
           over a file can. *)
   marked_declares_backend : bool;  (** whether it declares [(env_var OCANNL_BACKEND)] *)
@@ -1554,8 +1551,7 @@ let marked_stanzas content =
             marked_sites = sites;
             (* The same stanza, put to the other reader. `raw_stanza_of` returns nothing for a form
                that is not a stanza at all, which is itself an honest "runs nothing". *)
-            marked_raw_subject =
-              List.exists (raw_stanza_of ~subdir:dir sexp) ~f:raw_runs_something;
+            marked_raw_subject = List.exists (raw_stanza_of ~subdir:dir sexp) ~f:raw_runs_something;
             (* Read from the SITES' own dependency fields, not from the stanza as a whole. Which
                field carries a site's deps is already worked out per site -- an inline-test library
                declares under `(inline_tests (deps …))`, not in the library stanza at large -- and
@@ -1690,14 +1686,14 @@ type module_set =
   | Default_less of string list
       (** the default set, less the modules subtracted from it. [(modules :standard \ helper)] is
           this with [helper] subtracted, and an absent field is this with nothing subtracted.
-          Resolving the subtraction matters as much as resolving the default: a stanza that
-          EXCLUDES a module does not link it, so demanding a declaration of it would be a demand
-          about a module the test never builds (Codex P2, round 3). *)
+          Resolving the subtraction matters as much as resolving the default: a stanza that EXCLUDES
+          a module does not link it, so demanding a declaration of it would be a demand about a
+          module the test never builds (Codex P2, round 3). *)
 
 let explicit_modules stanza =
   match field stanza "modules" with
   | None -> Default_less []
-  | Some args ->
+  | Some args -> (
       let flat = List.concat_map args ~f:atoms in
       if not (List.mem flat ":standard" ~equal:String.equal) then
         Named (List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None))
@@ -1709,7 +1705,7 @@ let explicit_modules stanza =
            module the stanza does not build. *)
         match List.split_while flat ~f:(fun a -> not (String.equal a "\\")) with
         | _, [] -> Default_less []
-        | _, _ :: excluded -> Default_less excluded
+        | _, _ :: excluded -> Default_less excluded)
 
 (** The modules a stanza owns, given every module the directory holds. Dune's default set is the
     directory less what other stanzas claim, which is what makes an explicit list elsewhere in the
@@ -1731,8 +1727,8 @@ type artifact_verdict =
   | Artifact_declared  (** the deps this stanza's run happens under name the variable *)
   | Artifact_undeclared  (** they do not, which is the hole *)
   | Artifact_stale_declaration
-      (** they do, and no module of this stanza reads [build_files_prefix] at all: a declaration with
-          nothing behind it, which is the restatement this check exists to replace *)
+      (** they do, and no module of this stanza reads [build_files_prefix] at all: a declaration
+          with nothing behind it, which is the restatement this check exists to replace *)
   | Artifact_other_reader
       (** they do, no module calls the initializer, and one reads the key directly — a declaration
           this check has no business removing. Calling the initializer is the usual reason to need
@@ -1754,16 +1750,16 @@ type artifact_subject = {
   artifact_readers : string list;
       (** its modules that read [build_files_prefix] by name and do NOT call the initializer. They
           need the variable tracked for the same reason and are subject to the same rule: the
-          initializer is the usual way to read the key, not the only one (Codex P2, rounds 2 and
-          3). *)
+          initializer is the usual way to read the key, not the only one (Codex P2, rounds 2 and 3).
+      *)
   artifact_deps_site : string;
       (** where the declaration was looked for, in words a diagnostic can use: the stanza's own
           dependency field, or the rules that run its executable *)
   artifact_verdict : artifact_verdict;
 }
 
-(** Every stanza in [stanzas] the rule has an opinion about, given [calls], which answers whether one
-    module name's source calls the initializer. A stanza with no caller among its modules and no
+(** Every stanza in [stanzas] the rule has an opinion about, given [calls], which answers whether
+    one module name's source calls the initializer. A stanza with no caller among its modules and no
     declaration of its own is not a subject and is not reported. *)
 let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas stanzas ~calls
     ~reads_prefix =
@@ -1790,9 +1786,7 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
     List.concat_map (names_of stanza) ~f:(fun name ->
         let local = name ^ ".exe" in
         if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
-    @ (match field stanza "public_name" with
-      | Some [ Sexp.Atom public ] -> [ public ]
-      | _ -> [])
+    @ (match field stanza "public_name" with Some [ Sexp.Atom public ] -> [ public ] | _ -> [])
     @
     match field stanza "public_names" with
     | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
@@ -1823,79 +1817,78 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
     | Sexp.List [] | Sexp.Atom _ -> false
   in
   let module_subjects =
-    List.filter_map stanzas ~f:(fun stanza -> 
-      match head stanza with
-      | Some h when List.mem module_bearing_heads h ~equal:String.equal ->
-          let modules = modules_of ~directory_modules stanzas stanza in
-          let callers = List.filter modules ~f:calls in
-          let readers =
-            List.filter modules ~f:(fun m -> (not (calls m)) && reads_prefix m)
-          in
-          let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
-          let subject artifact_verdict artifact_deps_site =
-            Some
-              {
-                artifact_head = h;
-                artifact_name = name;
-                artifact_callers = callers;
-                artifact_readers = readers;
-                artifact_deps_site;
-                artifact_verdict;
-              }
-          in
-          (* [all] is what makes the stanza declared -- every run of it has to be invalidated, so a
+    List.filter_map stanzas ~f:(fun stanza ->
+        match head stanza with
+        | Some h when List.mem module_bearing_heads h ~equal:String.equal -> (
+            let modules = modules_of ~directory_modules stanzas stanza in
+            let callers = List.filter modules ~f:calls in
+            let readers = List.filter modules ~f:(fun m -> (not (calls m)) && reads_prefix m) in
+            let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
+            let subject artifact_verdict artifact_deps_site =
+              Some
+                {
+                  artifact_head = h;
+                  artifact_name = name;
+                  artifact_callers = callers;
+                  artifact_readers = readers;
+                  artifact_deps_site;
+                  artifact_verdict;
+                }
+            in
+            (* [all] is what makes the stanza declared -- every run of it has to be invalidated, so a
              second rule running the same executable without the declaration leaves that run stale.
              [any] is what makes a declaration present at all, and so what a stale one is judged
              by. The two coincide for everything dune runs itself. *)
-          (* What makes the stanza subject to the rule is that some module of it READS the key --
+            (* What makes the stanza subject to the rule is that some module of it READS the key --
              through the initializer or by name. Asking only about the initializer permitted a
              declaration for a direct reader without ever requiring one, which leaves exactly the
              stale run this check is about (Codex P2, round 3). Which of the two it is decides only
              the wording of the verdict. *)
-          let decide ~all ~any site =
-            match (callers, readers, all, any) with
-            | [], [], _, false -> None
-            | [], [], _, true -> subject Artifact_stale_declaration site
-            | [], _ :: _, true, _ -> subject Artifact_other_reader site
-            | _ :: _, _, true, _ -> subject Artifact_declared site
-            | _, _, false, _ -> subject Artifact_undeclared site
-          in
-          let declares args = declares_env_var args artifact_env_var in
-          (match h with
-          | "library" ->
-              (* A library module CALLING the initializer is prohibited whether or not the library
-                 also has inline tests: `init` empties the artifact directory of whatever process
-                 links the module, and an `(inline_tests (deps …))` declaration invalidates the
-                 inline-test runner alone -- not the other executables that link the same library
-                 and initialize through it (Codex P2, round 4). Reading the key by NAME is an
-                 ordinary thing for a library module to do, so a reader is judged where the library's
-                 own tests run, and not judged at all where it has none. *)
-              if not (List.is_empty callers) then subject Artifact_in_library "-"
-              else (
-                match field stanza "inline_tests" with
-                | None -> None
-                | Some inline ->
-                    let declared = declares (field_in inline "deps") in
-                    decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
-          | "executable" | "executables" -> (
-              let names = names_of stanza in
-              match runners_of stanza with
-              | [] ->
-                  if List.is_empty callers && List.is_empty readers then None
-                  else subject Artifact_unrun "-"
-              | runners ->
-                  let declared = List.map runners ~f:(fun r -> declares (field r "deps")) in
-                  decide
-                    ~all:(List.for_all declared ~f:Fn.id)
-                    ~any:(List.exists declared ~f:Fn.id)
-                    (Printf.sprintf "the `(deps …)` of the %d rule%s running %s"
-                       (List.length runners)
-                       (if List.length runners = 1 then "" else "s")
-                       (String.concat ~sep:", " (List.map names ~f:(fun n -> n ^ ".exe")))))
-          | _ ->
-              let declared = declares (field stanza "deps") in
-              decide ~all:declared ~any:declared "its `(deps …)`")
-      | _ -> None)
+            let decide ~all ~any site =
+              match (callers, readers, all, any) with
+              | [], [], _, false -> None
+              | [], [], _, true -> subject Artifact_stale_declaration site
+              | [], _ :: _, true, _ -> subject Artifact_other_reader site
+              | _ :: _, _, true, _ -> subject Artifact_declared site
+              | _, _, false, _ -> subject Artifact_undeclared site
+            in
+            let declares args = declares_env_var args artifact_env_var in
+            match h with
+            | "library" -> (
+                if
+                  (* A library module CALLING the initializer is prohibited whether or not the
+                     library also has inline tests: `init` empties the artifact directory of
+                     whatever process links the module, and an `(inline_tests (deps …))` declaration
+                     invalidates the inline-test runner alone -- not the other executables that link
+                     the same library and initialize through it (Codex P2, round 4). Reading the key
+                     by NAME is an ordinary thing for a library module to do, so a reader is judged
+                     where the library's own tests run, and not judged at all where it has none. *)
+                  not (List.is_empty callers)
+                then subject Artifact_in_library "-"
+                else
+                  match field stanza "inline_tests" with
+                  | None -> None
+                  | Some inline ->
+                      let declared = declares (field_in inline "deps") in
+                      decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
+            | "executable" | "executables" -> (
+                let names = names_of stanza in
+                match runners_of stanza with
+                | [] ->
+                    if List.is_empty callers && List.is_empty readers then None
+                    else subject Artifact_unrun "-"
+                | runners ->
+                    let declared = List.map runners ~f:(fun r -> declares (field r "deps")) in
+                    decide ~all:(List.for_all declared ~f:Fn.id)
+                      ~any:(List.exists declared ~f:Fn.id)
+                      (Printf.sprintf "the `(deps …)` of the %d rule%s running %s"
+                         (List.length runners)
+                         (if List.length runners = 1 then "" else "s")
+                         (String.concat ~sep:", " (List.map names ~f:(fun n -> n ^ ".exe")))))
+            | _ ->
+                let declared = declares (field stanza "deps") in
+                decide ~all:declared ~any:declared "its `(deps …)`")
+        | _ -> None)
   in
   (* The converse over the stanzas the question above does not reach. A `(rule …)` names no modules,
      so it is a subject only through the executable it runs -- and a rule that declares the variable

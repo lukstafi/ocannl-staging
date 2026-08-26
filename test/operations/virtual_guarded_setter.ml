@@ -5,9 +5,9 @@
    The rejection the [Low_level.t] doc promises ("a conditional write is never a definite write;
    virtualization treats guarded computations as non-inlineable in v1") was enforced only for a
    guard INTERIOR to the captured subtree: [virtual_llc]'s [If] arm recursed plainly, and the
-   setter/loop arms handed [check_and_store_virtual] the subtree rooted BELOW the guard, so the
-   walk that raises [Non_virtual 142] never saw it. The fix threads the enclosing-guard flag down
-   the walk and rejects at store time.
+   setter/loop arms handed [check_and_store_virtual] the subtree rooted BELOW the guard, so the walk
+   that raises [Non_virtual 142] never saw it. The fix threads the enclosing-guard flag down the
+   walk and rejects at store time.
 
    These are hand-built [Ir.Low_level.t] cases through the [Ll_test] harness (gh-ocannl-600): the
    [Assignments] pipeline does emit pre-virtualization guards (interval guards for clamped-window
@@ -76,7 +76,9 @@ let case_guarded_rmw () =
   p "guarded RMW: flag off leaves the zero init" (close off (Array.create ~len:n 0.));
   p "guarded RMW: flag on applies the update" (close on avals);
   let moff, mon =
-    run_both (optimize ~materialized:[ x ] ~name:"vgs_rmw_mat" llc) ~name:"vgs_rmw_mat" ~flag ~seed ~out
+    run_both
+      (optimize ~materialized:[ x ] ~name:"vgs_rmw_mat" llc)
+      ~name:"vgs_rmw_mat" ~flag ~seed ~out
   in
   p "guarded RMW: agrees with the materialized arm at both flag values"
     (close off moff && close on mon)
@@ -108,7 +110,9 @@ let case_guarded_reset () =
   p "guarded reset: flag off keeps the unguarded write" (close off ticks);
   p "guarded reset: flag on applies the reset" (close on (Array.create ~len:n 0.));
   let moff, mon =
-    run_both (optimize ~materialized:[ x ] ~name:"vgs_reset_mat" llc) ~name:"vgs_reset_mat" ~flag ~seed ~out
+    run_both
+      (optimize ~materialized:[ x ] ~name:"vgs_reset_mat" llc)
+      ~name:"vgs_reset_mat" ~flag ~seed ~out
   in
   p "guarded reset: agrees with the materialized arm at both flag values"
     (close off moff && close on mon)
@@ -137,7 +141,11 @@ let case_interior_guard () =
   let expected = Array.init n ~f:(fun i -> if i % 2 = 1 then 1. +. Float.of_int i else 0.) in
   let seed = [ (mask, maskv); (out, blank n) ] in
   let got = execute ~name:"vgs_interior" o ~seed ~read:[ out ] in
-  let mat = execute ~name:"vgs_interior_mat" (optimize ~materialized:[ x ] ~name:"vgs_interior_mat" llc) ~seed ~read:[ out ] in
+  let mat =
+    execute ~name:"vgs_interior_mat"
+      (optimize ~materialized:[ x ] ~name:"vgs_interior_mat" llc)
+      ~seed ~read:[ out ]
+  in
   p "interior guard: only the masked-in cells carry the write" (same got [ expected ]);
   p "interior guard: agrees with the materialized arm" (same got mat)
 

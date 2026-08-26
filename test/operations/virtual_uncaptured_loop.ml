@@ -4,21 +4,21 @@
 
    [virtual_llc] captures a candidate's computation at the outermost [For_loop] whose index appears
    in the candidate's assignment indices ([track_symbol] / [reverse_node_map]). A reduction loop
-   BELOW that point rides along inside the stored subtree, which is what makes the ordinary
-   [x[t] += a[s]] shape inlineable at all (and what [virtualize_max_inline_reduction] prices). A
-   repetition loop ABOVE it does not ride along, and when the index map mentions no symbol at all —
-   a fixed-index accumulator — no loop is ever a capture site, so the entire reduction is outside
-   the stored statement. The fix threads the enclosing loops down the walk and rejects such a
-   candidate as [Non_virtual 147] at store time; this is the [For_loop] half of the defect
-   gh-ocannl-651 fixed for [If].
+   BELOW that point rides along inside the stored subtree, which is what makes the ordinary [x[t] +=
+   a[s]] shape inlineable at all (and what [virtualize_max_inline_reduction] prices). A repetition
+   loop ABOVE it does not ride along, and when the index map mentions no symbol at all — a
+   fixed-index accumulator — no loop is ever a capture site, so the entire reduction is outside the
+   stored statement. The fix threads the enclosing loops down the walk and rejects such a candidate
+   as [Non_virtual 147] at store time; this is the [For_loop] half of the defect gh-ocannl-651 fixed
+   for [If].
 
    Two positive controls guard the other direction, because a rejection is always SOUND and the only
    way this fix can be wrong is by rejecting too much: the ordinary inner-reduction shape must still
    inline, and a width-1 enclosing loop must stay exempt (replaying a single-iteration loop once is
    exact, so the width test has to be [> 1] rather than "any enclosing loop").
 
-   Hand-built [Ir.Low_level.t] through the [Ll_test] harness (gh-ocannl-600). Each case executes both
-   readings of the same program — the optimized one and the differential arm with the candidate
+   Hand-built [Ir.Low_level.t] through the [Ll_test] harness (gh-ocannl-600). Each case executes
+   both readings of the same program — the optimized one and the differential arm with the candidate
    pre-decided [On_device] — since a dropped repetition is invisible structurally: an inlined body
    missing an outer loop looks exactly like an inlined body that never had one. *)
 
@@ -57,8 +57,8 @@ let case_repetition_above () =
          (loop_n k 2 (loop_n t n (set x [| iter t |] (add (get x [| iter t |]) (c 1.)))))
          (loop_n u n (set out [| iter u |] (get x [| iter u |]))))
   in
-  let o = both ~label:"repetition_above" ~llc ~cand:x ~out ~seed:[]
-      ~expected:(Array.create ~len:n 2.)
+  let o =
+    both ~label:"repetition_above" ~llc ~cand:x ~out ~seed:[] ~expected:(Array.create ~len:n 2.)
   in
   p "repetition above the capture: candidate rejected (stays non-virtual)" (known_non_virtual o x);
   p "repetition above the capture: rejected as Non_virtual 147"
@@ -106,7 +106,8 @@ let case_inner_reduction () =
          (loop_n u n (set out [| iter u |] (get x [| iter u |]))))
   in
   let o =
-    both ~label:"inner_reduction" ~llc ~cand:x ~out ~seed:[ (a, avals) ]
+    both ~label:"inner_reduction" ~llc ~cand:x ~out
+      ~seed:[ (a, avals) ]
       ~expected:(Array.create ~len:n 10.)
   in
   p "inner reduction: candidate still virtual" (known_virtual o x);
@@ -121,7 +122,8 @@ let case_width_one_enclosing () =
   materialize out;
   let k = sym () and t = sym () and u = sym () in
   let llc =
-    seq (loop_n k 1 (loop_n t n (set x [| iter t |] (tick t))))
+    seq
+      (loop_n k 1 (loop_n t n (set x [| iter t |] (tick t))))
       (loop_n u n (set out [| iter u |] (get x [| iter u |])))
   in
   let o =

@@ -270,9 +270,8 @@ type optop =
           rejected, since it could restrict which threads accumulate while the transfers write back
           an accumulator that never received the update. A [Zero_out] of [target] elsewhere is left
           in place — the init-load observes it, so semantics are preserved without a surjectivity
-          analysis. Compose as: [Split]s →
-          [Stage]s → [Privatize] → materializing [Unroll]s (the unrolls then turn the tile accesses
-          into constant-indexed, register-allocatable form). *)
+          analysis. Compose as: [Split]s → [Stage]s → [Privatize] → materializing [Unroll]s (the
+          unrolls then turn the tile accesses into constant-indexed, register-allocatable form). *)
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
       (** Expand the unique [Zero_out tn] statement into an ordinary loop nest over the supplied
           symbols (one per axis of [tn]'s padded dims; see {!expand_zero}). Whole-node [Zero_out] of
@@ -467,8 +466,8 @@ val fuse_epilogue_witness : target:Tn.t -> Low_level.optimized -> string option
     elementwise tail immediately follows the reduction over [target] and the fusion applies. The
     autotune family tree judges its fused-flavor branch with it (the check runs on the pre-schedule
     code, where the plain accumulation-nest site applies), so a site without a fusable tail carries
-    the recognizer's reason as a construction-time refutation rather than silently minting no
-    twins. *)
+    the recognizer's reason as a construction-time refutation rather than silently minting no twins.
+*)
 
 val can_fuse_epilogue : target:Tn.t -> Low_level.optimized -> bool
 (** [Option.is_none (fuse_epilogue_witness ~target opt)]: whether the fusion applies. *)
@@ -788,21 +787,20 @@ type launch_excess = {
   lx_phrase : string;
 }
 (** The first dimension of a geometry the device refuses. [lx_phrase] is the verb phrase both
-    callers render — e.g. ["requests a .z workgroup extent of 128, exceeding the device limit of
-    64"] — so a gate [detail] and a seeding refutation witness say the same thing about the same
-    candidate. *)
+    callers render — e.g.
+    ["requests a .z workgroup extent of 128, exceeding the device limit of 64"] — so a gate [detail]
+    and a seeding refutation witness say the same thing about the same candidate. *)
 
 val launch_geometry_excess :
   limits:Backend_intf.hardware_limits -> launch_geometry -> launch_excess option
 (** The one static reading of a device's per-dimension launch caps (gh-ocannl-709), consulted both
     by {!check_hardware_limits_classified} (on the lowered code's geometry) and by autotune's
     seeding pre-filter (on a candidate's predicted geometry), so the two cannot disagree about what
-    a device permits and a cap is never encoded twice. [None] = every predicted dimension fits.
-    Rows are tested in the order [.x]/[.y]/[.z] workgroup, [.y] grid, [.z] grid fold; a [None] cap
-    ({!field:Backend_intf.max_workgroup_dims} on the C backends,
-    {!field:Backend_intf.max_grid_yz} on Metal) exempts its dimensions. The workgroup thread
-    PRODUCT is deliberately not a row: it is not a per-dimension geometry question, and only the
-    gate checks it. *)
+    a device permits and a cap is never encoded twice. [None] = every predicted dimension fits. Rows
+    are tested in the order [.x]/[.y]/[.z] workgroup, [.y] grid, [.z] grid fold; a [None] cap
+    ({!field:Backend_intf.max_workgroup_dims} on the C backends, {!field:Backend_intf.max_grid_yz}
+    on Metal) exempts its dimensions. The workgroup thread PRODUCT is deliberately not a row: it is
+    not a per-dimension geometry question, and only the gate checks it. *)
 
 val check_hardware_limits :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
@@ -811,15 +809,14 @@ val check_hardware_limits :
     dimensions) against {!field:Backend_intf.max_threads_per_workgroup}, the total bytes of
     [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and then the
     launch geometry dimension by dimension through the shared {!launch_geometry_excess} — the
-    workgroup's [.x]/[.y]/[.z] extents
-    against {!field:Backend_intf.max_workgroup_dims} (a separate hardware fact from the thread
-    product: CUDA caps [maxThreadsDim.z] at 64 while the product cap is 1024 — gh-ocannl-679), and
-    both 16-bit-capped grid dimensions, the [.y] extent ([grid.(1)], a blocktiled matmul's row-block
-    count) and the folded [.z] extent ([grid.(2)], the product of the Grid slots [>= 2] —
-    gh-ocannl-643), against {!field:Backend_intf.max_grid_yz}. [grid.(0)] is deliberately ungated:
-    it is 2^31-scale wherever hardware axes bind. Backend [compile] calls this after any
-    [?lowered_transform] (or the default annotator, which already respects the limits), turning
-    driver-level launch failures into early, named errors. A no-op for all-[None] limits. *)
+    workgroup's [.x]/[.y]/[.z] extents against {!field:Backend_intf.max_workgroup_dims} (a separate
+    hardware fact from the thread product: CUDA caps [maxThreadsDim.z] at 64 while the product cap
+    is 1024 — gh-ocannl-679), and both 16-bit-capped grid dimensions, the [.y] extent ([grid.(1)], a
+    blocktiled matmul's row-block count) and the folded [.z] extent ([grid.(2)], the product of the
+    Grid slots [>= 2] — gh-ocannl-643), against {!field:Backend_intf.max_grid_yz}. [grid.(0)] is
+    deliberately ungated: it is 2^31-scale wherever hardware axes bind. Backend [compile] calls this
+    after any [?lowered_transform] (or the default annotator, which already respects the limits),
+    turning driver-level launch failures into early, named errors. A no-op for all-[None] limits. *)
 
 val check_hardware_limits_classified :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit

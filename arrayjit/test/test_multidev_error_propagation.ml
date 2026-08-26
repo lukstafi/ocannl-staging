@@ -52,6 +52,5 @@ let () =
   Sched.schedule_task dev
     (Ir.Task.Task
        { context_lifetime = (); description = "boom"; work = (fun () -> failwith "boom") });
-  Verdict.p "sync surfaces worker failure"
-    (raised_boom (fun () -> Sched.sync (Sched.all_work dev)));
+  Verdict.p "sync surfaces worker failure" (raised_boom (fun () -> Sched.sync (Sched.all_work dev)));
   Verdict.p "await re-raises worker failure" (raised_boom (fun () -> Sched.await dev))

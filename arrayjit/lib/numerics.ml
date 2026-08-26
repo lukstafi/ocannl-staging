@@ -40,19 +40,18 @@ type t = {
           it off to recover the pre-gh-517 semantics, where every operator rounds to the target
           node's storage precision.
 
-          The GPU backends' {e compute} precision is unaffected either way — they have native
-          16-bit types and arithmetic, so pointwise narrow arithmetic computes where it stores.
-          Their reduction-{e accumulator} residency follows the tensor-unit formats
-          (gh-ocannl-663): CUDA's bf16 mma legs hold f32 per-lane registers, so its serial bf16
-          legs widen to match, and fp8 — which has an accumulator format on no backend — takes f32
-          residency everywhere; f16, and bf16 on HIP/Metal (whose tiles accumulate in
-          storage-width fragments), keep storage residency so serial and tensorized legs stay
-          width-uniform per backend. This knob reaches the GPU accumulators only where per-step
-          narrowing can be restored SCHEDULE-UNIFORMLY: fp8 on CUDA and HIP (nothing tensorizes
-          fp8 destinations). CUDA's bf16 residency is structural — the mma accumulate is
-          hardware-f32, so narrowing only the serial legs would resurrect the schedule-dependent
-          width — and so is Metal's fp8 one: MSL has no fp8 type, every fp8 computation there runs
-          in f32 ([Metal_backend]'s [compute_prec]). *)
+          The GPU backends' {e compute} precision is unaffected either way — they have native 16-bit
+          types and arithmetic, so pointwise narrow arithmetic computes where it stores. Their
+          reduction-{e accumulator} residency follows the tensor-unit formats (gh-ocannl-663):
+          CUDA's bf16 mma legs hold f32 per-lane registers, so its serial bf16 legs widen to match,
+          and fp8 — which has an accumulator format on no backend — takes f32 residency everywhere;
+          f16, and bf16 on HIP/Metal (whose tiles accumulate in storage-width fragments), keep
+          storage residency so serial and tensorized legs stay width-uniform per backend. This knob
+          reaches the GPU accumulators only where per-step narrowing can be restored
+          SCHEDULE-UNIFORMLY: fp8 on CUDA and HIP (nothing tensorizes fp8 destinations). CUDA's bf16
+          residency is structural — the mma accumulate is hardware-f32, so narrowing only the serial
+          legs would resurrect the schedule-dependent width — and so is Metal's fp8 one: MSL has no
+          fp8 type, every fp8 computation there runs in f32 ([Metal_backend]'s [compute_prec]). *)
   fp16_arithmetic : bool;
       (** Compute fp16 in fp16 on CPU targets that have native 16-bit arithmetic (ARMv8.2-FP16,
           AVX512-FP16), instead of widening to f32 (gh-ocannl-516). This is the one narrow format a

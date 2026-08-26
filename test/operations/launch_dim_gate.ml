@@ -18,8 +18,8 @@
    components equal to the product cap, so a real-limits run on this machine could not tell a
    working gate from a missing one.
 
-   Every claim comes in a pair: the cap that refuses and the cap that accepts. Without the
-   accepting arm a gate that refuses everything reads as a pass. *)
+   Every claim comes in a pair: the cap that refuses and the cap that accepts. Without the accepting
+   arm a gate that refuses everything reads as a pass. *)
 
 open Base
 open Ll_test
@@ -55,8 +55,11 @@ let block_nest () =
   optimize ~materialized:[ o ] ~name:"ldg_block" llc
 
 let cuda_like ~z =
-  { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-    max_workgroup_dims = Some (1024, 1024, z) }
+  {
+    BI.no_hardware_limits with
+    max_threads_per_workgroup = Some 1024;
+    max_workgroup_dims = Some (1024, 1024, z);
+  }
 
 let accepts ~limits opt =
   match Sched.check_hardware_limits_classified ~name:"ldg" ~limits opt with
@@ -85,9 +88,9 @@ let () =
     (Array.equal Int.equal block [| 2; 2; 128 |]);
   p "geometry: its thread product is 512, well under a 1024-thread device" (product = 512);
 
-  (* The gap itself: on the product alone -- the whole of the pre-679 gate -- this launch is
-     legal. This claim is what makes the refusal below attributable to the per-dimension cap and
-     not to some other check tightening. *)
+  (* The gap itself: on the product alone -- the whole of the pre-679 gate -- this launch is legal.
+     This claim is what makes the refusal below attributable to the per-dimension cap and not to
+     some other check tightening. *)
   p "product-only limits accept the 2 x 2 x 128 workgroup (the pre-679 gate)"
     (accepts opt ~limits:{ BI.no_hardware_limits with max_threads_per_workgroup = Some 1024 });
 
@@ -106,8 +109,11 @@ let () =
      would erase which knob has to shrink. Caps of 1 on [.x] / [.y] leave [.z] slack, so the row
      that fires is the row under test. *)
   let dim_only caps =
-    { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-      max_workgroup_dims = Some caps }
+    {
+      BI.no_hardware_limits with
+      max_threads_per_workgroup = Some 1024;
+      max_workgroup_dims = Some caps;
+    }
   in
   p "an .x cap below the .x extent refuses as Workgroup_x_extent"
     (match refusal opt ~limits:(dim_only (1, 1024, 1024)) with
@@ -120,8 +126,11 @@ let () =
   p "caps at every extent accept the whole geometry"
     (accepts opt
        ~limits:
-         { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-           max_workgroup_dims = Some (2, 2, 128) });
+         {
+           BI.no_hardware_limits with
+           max_threads_per_workgroup = Some 1024;
+           max_workgroup_dims = Some (2, 2, 128);
+         });
 
   (* [max_workgroup_dims = None] is what the C backends report, and it must exempt the dimensions
      rather than reject on a missing cap. *)
@@ -159,8 +168,8 @@ let () =
     | Some (SO.Grid_y_extent, 300, Some 299) -> true
     | _ -> false);
   (* The fold: three Grid loops, so the outermost sits at slot 2 and its extent becomes [grid.(2)].
-     [.y] is 2 here, below the same cap, so only the [.z] row can fire and the typed resource is
-     not an artifact of check ordering. *)
+     [.y] is 2 here, below the same cap, so only the [.z] row can fire and the typed resource is not
+     an artifact of check ordering. *)
   let fold_opt =
     let o = mk "ldg_fold" ~dims:[| 4; 2; 8 |] in
     materialize o;
@@ -199,6 +208,9 @@ let () =
   p "annotator: an .x cap of 8 clamps the block to 8, before the gate ever sees it"
     (annotated
        ~limits:
-         { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-           max_workgroup_dims = Some (8, 1024, 1024) }
-     = 8)
+         {
+           BI.no_hardware_limits with
+           max_threads_per_workgroup = Some 1024;
+           max_workgroup_dims = Some (8, 1024, 1024);
+         }
+    = 8)

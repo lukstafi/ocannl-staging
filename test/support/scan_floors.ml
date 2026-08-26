@@ -42,8 +42,7 @@ let root_of ~floors path =
     String.equal directory root || String.is_prefix directory ~prefix:(root ^ "/")
   in
   List.filter floors ~f:under
-  |> List.max_elt ~compare:(fun (a, _) (b, _) ->
-         Int.compare (String.length a) (String.length b))
+  |> List.max_elt ~compare:(fun (a, _) (b, _) -> Int.compare (String.length a) (String.length b))
   |> Option.value_map ~default:directory ~f:fst
 
 (** [paths] counted per root, sorted by root. *)
@@ -63,8 +62,8 @@ let counts_by_root ~floors paths =
     ({!report}). *)
 let roots ~floors paths = List.map (counts_by_root ~floors paths) ~f:fst
 
-(** The floors [paths] fails, itemised: a root below its bound, or absent from the census
-    altogether -- which is what a glob matching nothing looks like from here.
+(** The floors [paths] fails, itemised: a root below its bound, or absent from the census altogether
+    -- which is what a glob matching nothing looks like from here.
 
     Itemised rather than summed, for the reason gh-ocannl-665 recorded about a floor's diagnostic:
     "one short" does not say which root is standing on nothing. [noun] names what was counted

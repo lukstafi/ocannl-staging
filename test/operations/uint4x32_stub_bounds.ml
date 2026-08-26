@@ -1,13 +1,13 @@
 (* The uint4x32 FFI stubs take an [int array], a type that carries no length, and each one reads
-   four lanes out of it. Before gh-ocannl-688 the C helper [ocaml_array_to_uint4x32] read
-   Field(v, 0..3) unconditionally, so a shorter array was an out-of-bounds read. It usually landed
-   on adjacent heap words and passed unnoticed; it faulted when the array happened to be the
-   topmost block in the minor heap, because then lanes 1..3 sit on the PROT_NONE guard page beyond
-   young_end and the read is a SIGBUS rather than a wrong number.
+   four lanes out of it. Before gh-ocannl-688 the C helper [ocaml_array_to_uint4x32] read Field(v,
+   0..3) unconditionally, so a shorter array was an out-of-bounds read. It usually landed on
+   adjacent heap words and passed unnoticed; it faulted when the array happened to be the topmost
+   block in the minor heap, because then lanes 1..3 sit on the PROT_NONE guard page beyond young_end
+   and the read is a SIGBUS rather than a wrong number.
 
-   [Gc.minor ()] resets young_ptr to young_end, so the [Array.make 1 0] right after it is the
-   first allocation of a fresh minor heap and therefore lands at the very top -- which makes the
-   fault deterministic instead of depending on where the allocator happened to be. *)
+   [Gc.minor ()] resets young_ptr to young_end, so the [Array.make 1 0] right after it is the first
+   allocation of a fresh minor heap and therefore lands at the very top -- which makes the fault
+   deterministic instead of depending on where the allocator happened to be. *)
 
 open Ir
 

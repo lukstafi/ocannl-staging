@@ -185,9 +185,9 @@ let entry_points stanzas =
   |> List.dedup_and_sort ~compare:String.compare
 
 (* The aliases `dune build @<alias>` runs a gate for: those a gate attaches to, closed under what
-   building an alias builds -- the `deps` of every rule attached to it and of the `(alias …)`
-   stanza defining it. A slow rule whose `deps` name the gate's alias is gated as much as one the
-   gate sits beside, and runs it first. *)
+   building an alias builds -- the `deps` of every rule attached to it and of the `(alias …)` stanza
+   defining it. A slow rule whose `deps` name the gate's alias is gated as much as one the gate sits
+   beside, and runs it first. *)
 let gated_aliases stanzas =
   let rec close gated =
     let next =
@@ -202,7 +202,8 @@ let gated_aliases stanzas =
   in
   close (Set.empty (module String))
 
-(* The aliases building `@<alias>` reaches, through the same two routes -- what a suite aggregates. *)
+(* The aliases building `@<alias>` reaches, through the same two routes -- what a suite
+   aggregates. *)
 let aliases_reached_from stanzas alias =
   let rec close reached =
     let next =
@@ -249,8 +250,8 @@ let is_repo_wide_scan stanza =
 
 (* ... and the glob has to LEAVE the directory to be reading the repository (Codex P2, round 6). A
    test that recursively reads a fixture tree of its own uses the same form and is nobody's
-   repo-wide scan; classifying it as one would demand a `scans` family beside it and fail the
-   check until an unrelated suite appeared. *)
+   repo-wide scan; classifying it as one would demand a `scans` family beside it and fail the check
+   until an unrelated suite appeared. *)
 let rec escapes_directory = function
   | Sexp.List (Sexp.Atom "glob_files_rec" :: args) ->
       List.exists args ~f:(function
@@ -262,7 +263,7 @@ let rec escapes_directory = function
 let is_repo_wide_scan stanza =
   is_repo_wide_scan stanza
   && Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
-         List.exists args ~f:escapes_directory)
+      List.exists args ~f:escapes_directory)
 
 (* Dune's named dependencies: `(deps (:golden foo.expected))` binds `%{golden}` to that path. A
    pform naming one carries no colon, so without the binding `golden_stem` would take the BINDING's
@@ -346,9 +347,9 @@ let rec goldens_in = function
    `n3_fwd_with_prec-unoptimized`, `top_down_prec.%{read:…}.expected` is `top_down_prec`,
    `micrograd_demo_logging-%{read:…}-0-0.log.expected` is `micrograd_demo_logging`, and the ppx
    convention's `test_ppx_op_expected.ml` is `test_ppx_op`. The alias may go on to say WHICH golden
-   of a subject it checks -- `-extension`, `-unoptimized`, `-ppx` -- which is why the relation
-   asked for is a prefix rather than equality: one run can write several goldens, and each needs an
-   alias of its own. *)
+   of a subject it checks -- `-extension`, `-unoptimized`, `-ppx` -- which is why the relation asked
+   for is a prefix rather than equality: one run can write several goldens, and each needs an alias
+   of its own. *)
 let golden_stem ?(named = []) golden =
   let cut_at s ~on =
     match String.substr_index s ~pattern:on with None -> s | Some i -> String.prefix s i
@@ -375,9 +376,7 @@ let is_golden_diff stanza =
    names `runtest`, dune calls the pair a dependency cycle. The `runtest-env_spelling_gate` rule is
    the deliberate exception, and is recognized structurally rather than by name: it is the ambient
    gate, whose whole purpose is to run the same binary the `(test)` stanza does. *)
-let is_test_stanza = function
-  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> true
-  | _ -> false
+let is_test_stanza = function Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> true | _ -> false
 
 (* The generated names that belong to an ambient gate: a `(test)` stanza depending on `(universe)`
    is the gate, so a rule sharing ITS alias runs the same gate binary, which is the one deliberate
@@ -441,7 +440,9 @@ let main () =
     let kept = Set.of_list (module String) (Sources.sources_among (List.map all ~f:fst)) in
     List.filter all ~f:(fun (path, _) -> Set.mem kept path)
   in
-  let sources = List.map source_files ~f:(fun (path, on_disk) -> (String.lowercase path, on_disk)) in
+  let sources =
+    List.map source_files ~f:(fun (path, on_disk) -> (String.lowercase path, on_disk))
+  in
   if List.is_empty dune_files || List.is_empty sources then (
     Verdict.fail "no dune files or no sources among the arguments -- the rule's globs match nothing";
     Stdlib.exit 1);
@@ -487,9 +488,7 @@ let main () =
      floor is a statement about the repository, so it is asked only of a run that has it. Which mode
      a run was in goes into the golden, so a glob that breaks flips that line rather than quietly
      retiring the floor. *)
-  let repository_census =
-    List.is_empty (Sources.floor_violations (List.map source_files ~f:fst))
-  in
+  let repository_census = List.is_empty (Sources.floor_violations (List.map source_files ~f:fst)) in
   let artifact_claimed = ref (Set.empty (module String)) in
   let artifact_violations = ref 0 in
   (* One line per subject for stderr, and per dune file for the golden: what the golden holds is
@@ -513,9 +512,9 @@ let main () =
      relationship checked below is "the same stanzas" and not "as many stanzas". Two totals compared
      as numbers say nothing about WHICH stanza either reader is alone on, and a gap of one absorbs a
      different stanza dropping out of enforcement (Codex P2, round 2), which is why gh-ocannl-690
-     itemised the gap on stderr rather than leaving it as arithmetic. Identities rather than
-     counts is also what keeps this off the churn treadmill gh-ocannl-701 took the scans off: a test
-     added anywhere moves both lists together. *)
+     itemised the gap on stderr rather than leaving it as arithmetic. Identities rather than counts
+     is also what keeps this off the churn treadmill gh-ocannl-701 took the scans off: a test added
+     anywhere moves both lists together. *)
   let walk_places = ref [] in
   let floor_names = ref [] in
   (* Kept apart on purpose: a stanza declaring neither is the hole gh-ocannl-659 is about, while a
@@ -708,9 +707,10 @@ let main () =
       by_file :=
         ( dune_file,
           (if !any_declared then [ "declares " ^ Scan.backend_env_var ] else [])
-          @ (match Set.to_list !words with
-            | [] -> []
-            | words -> [ "markers: " ^ String.concat ~sep:", " words ]) )
+          @
+          match Set.to_list !words with
+          | [] -> []
+          | words -> [ "markers: " ^ String.concat ~sep:", " words ] )
         :: !by_file;
       (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
          needing it. Both directions, since a declaration nothing reads for is the restatement this
@@ -729,25 +729,25 @@ let main () =
             (subdir, Scan.in_subdir dir subdir, List.map group ~f:snd))
       in
       (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
-         what qualifies them -- not the repository-relative directory the modules are looked up in. *)
+         what qualifies them -- not the repository-relative directory the modules are looked up
+         in. *)
       let all_group_stanzas = List.concat_map artifact_groups ~f:(fun (_, _, group) -> group) in
       let subjects =
         List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
             let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
             let calls module_name = Set.mem artifact_caller_keys (key module_name) in
-            (* A module that reads `build_files_prefix` some other way needs the variable tracked for
-               the same reason a caller does, and is subject to the same rule (Codex P2, rounds 2 and
-               3). Narrowed textually first, the way the caller census is: the key has to be SPELLED
-               for either spelling of a read to name it, so only the sources that mention it are
-               parsed. *)
+            (* A module that reads `build_files_prefix` some other way needs the variable tracked
+               for the same reason a caller does, and is subject to the same rule (Codex P2, rounds
+               2 and 3). Narrowed textually first, the way the caller census is: the key has to be
+               SPELLED for either spelling of a read to name it, so only the sources that mention it
+               are parsed. *)
             let reads_prefix module_name =
               match List.Assoc.find sources ~equal:String.equal (key module_name) with
               | None -> false
               | Some on_disk -> (
                   let content = In_channel.read_all on_disk in
                   String.is_substring content ~substring:artifact_config_key
-                  &&
-                  try Sources.source_reads_key content ~key:artifact_config_key with _ -> false)
+                  && try Sources.source_reads_key content ~key:artifact_config_key with _ -> false)
             in
             (* Dune's default module set is the directory less what other stanzas claim, so the scan
                needs to know what the directory holds -- a `(test (name t))` with no `(modules …)`
@@ -762,9 +762,8 @@ let main () =
                   else None)
             in
             List.map
-              (Scan.artifact_subjects ~directory_modules ~subdir
-                 ~runner_stanzas:all_group_stanzas group ~calls ~reads_prefix)
-              ~f:(fun subject -> (here, subject)))
+              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_stanzas
+                 group ~calls ~reads_prefix) ~f:(fun subject -> (here, subject)))
       in
       List.iter subjects ~f:(fun (here, subject) ->
           let where =
@@ -776,12 +775,10 @@ let main () =
             match (subject.Scan.artifact_callers, subject.Scan.artifact_readers) with
             | [], readers ->
                 String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
-            | callers, [] ->
-                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
+            | callers, [] -> String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
             | callers, readers ->
                 String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init` and "
-                ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key
-                ^ "` by name"
+                ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
           in
           List.iter needs ~f:(fun m ->
               artifact_claimed :=
@@ -799,8 +796,8 @@ let main () =
               fail
                 (Printf.sprintf
                    "%s: %s -- `%s` decides which directory the run's generated artifacts are read \
-                    from, and %s does not declare `(env_var %s)`, so dune serves the previous run's \
-                    result across a change of it. Add the declaration there"
+                    from, and %s does not declare `(env_var %s)`, so dune serves the previous \
+                    run's result across a change of it. Add the declaration there"
                    where what artifact_config_key subject.Scan.artifact_deps_site
                    Scan.artifact_env_var)
           | Scan.Artifact_stale_declaration ->
@@ -817,19 +814,19 @@ let main () =
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s: %s, and no stanza in this file runs the executable -- an `(executable)` has \
-                    no `deps` field, so the `(env_var %s)` declaration goes on the rule that RUNS \
-                    it, the same placement as the `%s` dep and the backend marker. This scan can \
-                    find neither"
+                   "%s: %s, and no stanza in this file runs the executable -- an `(executable)` \
+                    has no `deps` field, so the `(env_var %s)` declaration goes on the rule that \
+                    RUNS it, the same placement as the `%s` dep and the backend marker. This scan \
+                    can find neither"
                    where what Scan.artifact_env_var Scan.config_file)
           | Scan.Artifact_in_library ->
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s: %s, from a library module -- the initializer empties the artifact directory \
-                    of the process that owns it, so it belongs to an executable's own modules. \
-                    Called through a library it puts the `(env_var %s)` requirement on every stanza \
-                    that links the library, where nothing follows it"
+                   "%s: %s, from a library module -- the initializer empties the artifact \
+                    directory of the process that owns it, so it belongs to an executable's own \
+                    modules. Called through a library it puts the `(env_var %s)` requirement on \
+                    every stanza that links the library, where nothing follows it"
                    where what Scan.artifact_env_var));
       artifact_by_file := (dune_file, List.map subjects ~f:snd) :: !artifact_by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
@@ -849,8 +846,7 @@ let main () =
                    training_lock));
       List.iter entry_points ~f:(fun alias ->
           if Set.mem gated_here alias then gated := (dune_file, alias) :: !gated
-          else if Map.mem gateless dune_file then
-            gateless_used := Set.add !gateless_used dune_file
+          else if Map.mem gateless dune_file then gateless_used := Set.add !gateless_used dune_file
           else
             fail
               (Printf.sprintf
@@ -872,8 +868,8 @@ let main () =
                 fail
                   (Printf.sprintf
                      "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- `dune \
-                      build @%s` would skip it silently; list `(alias %s)` in the `(alias (name %s) \
-                      (deps …))` stanza"
+                      build @%s` would skip it silently; list `(alias %s)` in the `(alias (name \
+                      %s) (deps …))` stanza"
                      dune_file alias suite suite alias suite)));
       (* The scans family, the same question asked of the repo-wide scans (gh-ocannl-703): the rule
          that diffs a scan's output against its golden is the one that fails, so it is the one
@@ -909,25 +905,25 @@ let main () =
               else ()
             else
               List.iter (targets_of producer) ~f:(fun target ->
-                let checkers =
-                  List.filter stanzas ~f:(fun s ->
-                      is_golden_diff s
-                      && Option.value_map (Scan.field s "action") ~default:false ~f:(fun args ->
-                             List.exists args ~f:(diffs_file ~named:(named_deps s) target)))
-                in
-                let aliases = List.concat_map checkers ~f:aliases_of in
-                if not (List.exists aliases ~f:(Set.mem scans_reaches)) then
-                  fail
-                    (Printf.sprintf
-                       "%s globs the repository to produce `%s` -- a repo-wide scan -- and no rule \
-                        the `%s` alias aggregates diffs it against its golden: `dune build \
-                        @%s/%s` would skip it silently. Give the diff rule `(alias \
-                        runtest-<name>)` -- that alias and no other -- and list `(alias \
-                        runtest-<name>)` in BOTH the `(alias (name runtest) (deps …))` and the \
-                        `(alias (name %s) (deps …))` stanzas"
-                       dune_file target scans_suite
-                       (Stdlib.Filename.dirname dune_file)
-                       scans_suite scans_suite)));
+                  let checkers =
+                    List.filter stanzas ~f:(fun s ->
+                        is_golden_diff s
+                        && Option.value_map (Scan.field s "action") ~default:false ~f:(fun args ->
+                            List.exists args ~f:(diffs_file ~named:(named_deps s) target)))
+                  in
+                  let aliases = List.concat_map checkers ~f:aliases_of in
+                  if not (List.exists aliases ~f:(Set.mem scans_reaches)) then
+                    fail
+                      (Printf.sprintf
+                         "%s globs the repository to produce `%s` -- a repo-wide scan -- and no \
+                          rule the `%s` alias aggregates diffs it against its golden: `dune build \
+                          @%s/%s` would skip it silently. Give the diff rule `(alias \
+                          runtest-<name>)` -- that alias and no other -- and list `(alias \
+                          runtest-<name>)` in BOTH the `(alias (name runtest) (deps …))` and the \
+                          `(alias (name %s) (deps …))` stanzas"
+                         dune_file target scans_suite
+                         (Stdlib.Filename.dirname dune_file)
+                         scans_suite scans_suite)));
       (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
          merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
          in the file rather than of the golden diffs alone, since any rule can be given such an
@@ -940,37 +936,35 @@ let main () =
               (* The one deliberate collision: a rule sharing the alias dune generates for a
                  `(test)` stanza BECAUSE IT RUNS THE SAME BINARY -- the ambient gate, whose rule
                  exists so that every per-test alias can depend on it. Three things have to hold,
-                 and the third is what the earlier rounds were missing: the rule is a gate, the
-                 name belongs to a gate `(test)` stanza, and the rule's action runs that stanza's
+                 and the third is what the earlier rounds were missing: the rule is a gate, the name
+                 belongs to a gate `(test)` stanza, and the rule's action runs that stanza's
                  executable, so the merged alias runs one program either way (Codex P2, rounds 6 to
                  8). *)
               | Some name
                 when is_gate stanza && Set.mem gate_names name
                      && List.exists (Scan.executables_run stanza) ~f:(fun (_cwd, command) ->
-                            match command with
-                            | Scan.Runs path ->
-                                String.equal
-                                  (Stdlib.Filename.basename path)
-                                  (name ^ ".exe")
-                            | _ -> false) ->
+                         match command with
+                         | Scan.Runs path ->
+                             String.equal (Stdlib.Filename.basename path) (name ^ ".exe")
+                         | _ -> false) ->
                   ()
               | Some name when Set.mem generated name ->
-                    fail
-                      (Printf.sprintf
-                         "%s attaches a rule to `%s`, the alias dune generates for the `%s` \
-                          stanza in this directory -- the two merge, so `dune build @%s/%s` would \
-                          run that test as well as this rule, and naming `runtest` beside it is a \
-                          dependency cycle. Name the alias after the GOLDEN this rule checks, \
-                          qualified where a run writes several"
-                         dune_file alias name
-                         (Stdlib.Filename.dirname dune_file)
-                         alias)
+                  fail
+                    (Printf.sprintf
+                       "%s attaches a rule to `%s`, the alias dune generates for the `%s` stanza \
+                        in this directory -- the two merge, so `dune build @%s/%s` would run that \
+                        test as well as this rule, and naming `runtest` beside it is a dependency \
+                        cycle. Name the alias after the GOLDEN this rule checks, qualified where a \
+                        run writes several"
+                       dune_file alias name
+                       (Stdlib.Filename.dirname dune_file)
+                       alias)
               | _ -> ()));
       (* And one alias checks one golden: two golden diffs sharing an alias make the targeted run
          two tests, which is the isolation this arrangement is for -- and the prefix relation above
          admits the pair, since `foo.expected` and `foo-extension.expected` both accept
-         `runtest-foo-extension` (Codex P2, round 7). A producer rule sharing its checker's alias
-         is a different thing and stays allowed: it is what MAKES the output the checker reads. *)
+         `runtest-foo-extension` (Codex P2, round 7). A producer rule sharing its checker's alias is
+         a different thing and stays allowed: it is what MAKES the output the checker reads. *)
       List.iter
         (List.concat_map stanzas ~f:(fun s ->
              (* One entry per GOLDEN, not per rule: a single rule whose `progn` diffs two goldens
@@ -985,11 +979,10 @@ let main () =
         ~f:(fun group ->
           fail
             (Printf.sprintf
-               "%s checks %d goldens on the alias `%s` -- `dune build @%s/%s` would run them \
-                all, so the alias no longer names one test. Give each its own, named after the \
-                golden it checks"
-               dune_file (List.length group)
-               (List.hd_exn group)
+               "%s checks %d goldens on the alias `%s` -- `dune build @%s/%s` would run them all, \
+                so the alias no longer names one test. Give each its own, named after the golden \
+                it checks"
+               dune_file (List.length group) (List.hd_exn group)
                (Stdlib.Filename.dirname dune_file)
                (List.hd_exn group)));
       (* Every golden diff sits on a per-test alias, and on that alias ALONE (gh-ocannl-726). Dune
@@ -1011,19 +1004,19 @@ let main () =
             | [ alias ]
               when List.exists suites ~f:(fun suite -> member_of suite alias)
                    && List.for_all (goldens_in stanza) ~f:(fun golden ->
-                          let suffix =
-                            List.find_map suites ~f:(fun suite ->
-                                String.chop_prefix alias ~prefix:(suite ^ "-"))
-                            |> Option.value ~default:alias
-                          in
-                          let stem = golden_stem ~named:(named_deps stanza) golden in
-                          (* The stem itself, or the stem and then a qualifier saying WHICH golden
-                             of the run this is. A bare prefix would accept `runtest-foobar` for
-                             `foo.expected`, leaving the alias a reader constructs empty (Codex P2,
-                             round 8). *)
-                          (not (String.is_empty stem))
-                          && (String.equal suffix stem
-                             || String.is_prefix suffix ~prefix:(stem ^ "-"))) ->
+                       let suffix =
+                         List.find_map suites ~f:(fun suite ->
+                             String.chop_prefix alias ~prefix:(suite ^ "-"))
+                         |> Option.value ~default:alias
+                       in
+                       let stem = golden_stem ~named:(named_deps stanza) golden in
+                       (* The stem itself, or the stem and then a qualifier saying WHICH golden of
+                          the run this is. A bare prefix would accept `runtest-foobar` for
+                          `foo.expected`, leaving the alias a reader constructs empty (Codex P2,
+                          round 8). *)
+                       (not (String.is_empty stem))
+                       && (String.equal suffix stem || String.is_prefix suffix ~prefix:(stem ^ "-")))
+              ->
                 ()
             | aliases ->
                 let what =
@@ -1058,8 +1051,7 @@ let main () =
                       Printf.sprintf
                         "attaches a golden diff to %d aliases (%s) -- and a rule on two aliases \
                          makes building either one build both"
-                        (List.length aliases)
-                        (String.concat ~sep:", " aliases)
+                        (List.length aliases) (String.concat ~sep:", " aliases)
                 in
                 fail
                   (Printf.sprintf
@@ -1068,8 +1060,7 @@ let main () =
                       …))` stanza, which is what runs it as part of the suite. <name> is the \
                       golden the rule checks, and for `runtest` must not be the name of a `(test)` \
                       stanza in this directory, since dune generates `runtest-<name>` for those"
-                     dune_file what
-                     (String.concat ~sep:", " suites)));
+                     dune_file what (String.concat ~sep:", " suites)));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared =
         List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in)
@@ -1247,8 +1238,7 @@ let main () =
     Scan.artifact_env_var;
   printf "  %s\n"
     (if repository_census then
-       Printf.sprintf
-         "the census covers every scan root, so the floor of %d callers applies to it"
+       Printf.sprintf "the census covers every scan root, so the floor of %d callers applies to it"
          artifact_caller_floor
      else
        "the census does not cover the repository's scan roots, so only the relationship is asked \
@@ -1302,10 +1292,12 @@ let main () =
   in
   (* As MULTISETS, not sets. Two stanzas opening on the same line of the same file share an
      identity, and comparing deduplicated lists would let the floored one answer for the other --
-     the collapse `config_dep_completeness` compares (directory, executable) pairs with
-     multiplicity to avoid (Codex P2, rounds 2 and 3 of PR #343). *)
+     the collapse `config_dep_completeness` compares (directory, executable) pairs with multiplicity
+     to avoid (Codex P2, rounds 2 and 3 of PR #343). *)
   let counts identities =
-    List.fold identities ~init:(Map.empty (module String)) ~f:(fun tally identity ->
+    List.fold identities
+      ~init:(Map.empty (module String))
+      ~f:(fun tally identity ->
         Map.update tally identity ~f:(fun n -> 1 + Option.value n ~default:0))
   in
   let excess these those =
@@ -1357,8 +1349,8 @@ let main () =
      executable has a site placed for it"
     (!marker_holes = 0);
   Verdict.p_all
-    "every stanza either reader names as running an executable is named by the other too"
-    population ~f:named_by_both;
+    "every stanza either reader names as running an executable is named by the other too" population
+    ~f:named_by_both;
   eprintf
     "Artifact-directory verdict of every stanza whose modules call Test_utils.Generated.init, or \
      which declares %s without one (not diffed -- see gh-ocannl-665):\n\
@@ -1366,7 +1358,8 @@ let main () =
     Scan.artifact_env_var
     (String.concat ~sep:"\n" (List.rev !artifact_table));
   let unclaimed =
-    List.filter artifact_callers ~f:(fun path -> not (Set.mem !artifact_claimed (String.lowercase path)))
+    List.filter artifact_callers ~f:(fun path ->
+        not (Set.mem !artifact_claimed (String.lowercase path)))
   in
   List.iter unclaimed ~f:(fun path ->
       fail
@@ -1375,7 +1368,9 @@ let main () =
             rule that would require `(env_var %s)` of it never reaches it. Name the module in the \
             stanza that builds it, or hand this scan that directory's dune file"
            path Scan.artifact_env_var));
-  let floor_met = (not repository_census) || List.length artifact_callers >= artifact_caller_floor in
+  let floor_met =
+    (not repository_census) || List.length artifact_callers >= artifact_caller_floor
+  in
   if not floor_met then
     fail
       (Printf.sprintf
@@ -1408,8 +1403,8 @@ let main () =
    in this repository that calls `Test_utils.Generated.init` declares the variable, so a check that
    reported nothing and a check that decided nothing would both pass over it, and the second is what
    an unexercised rule quietly becomes. So the rule is put to a stanza/source pair the repository
-   does not contain: a synthetic tree of four dune files and one source, handed to THIS executable in
-   a child process, once with the declaration and once without.
+   does not contain: a synthetic tree of four dune files and one source, handed to THIS executable
+   in a child process, once with the declaration and once without.
 
    Everything but the one declaration is held fixed between the two runs, so the difference in
    verdict is the rule's and nothing else's. The tree is built to satisfy the file's other rules --
@@ -1547,8 +1542,7 @@ let control () =
      with, and a relative one would name nothing from inside the temporary tree. *)
   let exe =
     let name = Stdlib.Sys.executable_name in
-    if Stdlib.Filename.is_relative name then
-      Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
+    if Stdlib.Filename.is_relative name then Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
     else name
   in
   let root = Stdlib.Filename.temp_dir "evd_control" "" in
@@ -1566,7 +1560,8 @@ let control () =
      merely the child's misfortune -- the argument gh-ocannl-692 made for `generated_provenance`. *)
   let diagnostic = "calls `Test_utils.Generated.init`" in
   let report label (status, text) =
-    eprintf "the control's %s run %s. Its captured output:\n%s\n" label (describe_status status) text
+    eprintf "the control's %s run %s. Its captured output:\n%s\n" label (describe_status status)
+      text
   in
   let violating = run ~declares:false in
   let legitimate = run ~declares:true in
@@ -1591,10 +1586,9 @@ let control () =
     violating_reported;
   Verdict.p "the same tree with the declaration added passes and says nothing about it"
     legitimate_passed;
-  (try remove_tree root with Unix.Unix_error _ -> ())
+  try remove_tree root with Unix.Unix_error _ -> ()
 
-(* gh-ocannl-708's control, and why it is a second tree rather than a stanza added to the one
-   above.
+(* gh-ocannl-708's control, and why it is a second tree rather than a stanza added to the one above.
 
    The rule under control here is the RELATIONSHIP between the two readers: a stanza the walk places
    a site for is a stanza the raw-text floor names. This repository contains exactly one stanza of
@@ -1630,8 +1624,8 @@ let floor_control () =
   let context = control_context () in
   List.iter context ~f:(fun (file, content) ->
       write_file (Stdlib.Filename.concat root file) content);
-  (* One source, so that the run is handed both a dune file and a source: the checker refuses a
-     tree with neither, since its globs matching nothing is the failure it reports first. It calls
+  (* One source, so that the run is handed both a dune file and a source: the checker refuses a tree
+     with neither, since its globs matching nothing is the failure it reports first. It calls
      nothing and reads no configuration key, which keeps the tree's only subject the rule above. *)
   write_file (Stdlib.Filename.concat root "t/noop.ml") "let () = ()\n";
   let paths = "t/dune" :: "t/noop.ml" :: List.map context ~f:fst in
@@ -1669,7 +1663,8 @@ let floor_control () =
   in
   let invisible_ok =
     exited 0 invisible
-    && (not (String.is_substring (snd invisible) ~substring:"runs an executable and declares neither"))
+    && (not
+          (String.is_substring (snd invisible) ~substring:"runs an executable and declares neither"))
     && not (String.is_substring (snd invisible) ~substring:unfloored_sentence)
   in
   if not reported_ok then report "reported" reported;
@@ -1683,12 +1678,11 @@ let floor_control () =
     "an external command handed a file this workspace builds is a stanza the rule reaches, \
      reported by name when it declares neither"
     reported_ok;
-  Verdict.p
-    "the same stanza, declaring its backend, passes with the raw-text floor naming it too"
+  Verdict.p "the same stanza, declaring its backend, passes with the raw-text floor naming it too"
     floored_ok;
   Verdict.p "the same command handed nothing of this workspace is a stanza neither reader sees"
     invisible_ok;
-  (try remove_tree root with Unix.Unix_error _ -> ())
+  try remove_tree root with Unix.Unix_error _ -> ()
 
 let () =
   match Array.to_list Stdlib.Sys.argv with

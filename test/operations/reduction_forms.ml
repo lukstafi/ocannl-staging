@@ -1,56 +1,54 @@
 (* The serial-rendered forms of ONE reduction, enumerated mechanically (gh-ocannl-664).
 
-   The set of forms a single reduction loop can reach at codegen is defined implicitly, by the
-   union of the schedule ops that can rewrite it and the codegen arms that can render the result.
-   Three optimizer arcs enumerated its members one review round at a time — gh-ocannl-639 took six
-   rounds over [Unroll] (both representations), sequential double materialization, [Pad]-guarded
-   copies, [Partition] segments, Retype-[Vectorized] and Retype-[Workgroup_reduce]; gh-ocannl-663
-   added schedule-minted vs codegen-minted scopes, [Tile_mma] fallbacks, the rng-exclusion
-   granularity, virtualization's [Where]-guarded update spelling and init-vs-update rendering;
-   gh-ocannl-693 added the localized-at-identity-precision form and the peeled-guard shapes. Every
-   one of those was a point in the same product, found by a reviewer rather than by a test.
+   The set of forms a single reduction loop can reach at codegen is defined implicitly, by the union
+   of the schedule ops that can rewrite it and the codegen arms that can render the result. Three
+   optimizer arcs enumerated its members one review round at a time — gh-ocannl-639 took six rounds
+   over [Unroll] (both representations), sequential double materialization, [Pad]-guarded copies,
+   [Partition] segments, Retype-[Vectorized] and Retype-[Workgroup_reduce]; gh-ocannl-663 added
+   schedule-minted vs codegen-minted scopes, [Tile_mma] fallbacks, the rng-exclusion granularity,
+   virtualization's [Where]-guarded update spelling and init-vs-update rendering; gh-ocannl-693
+   added the localized-at-identity-precision form and the peeled-guard shapes. Every one of those
+   was a point in the same product, found by a reviewer rather than by a test.
 
    This test defines the set EXTENSIONALLY: a table of (composition x storage precision), each
-   member naming the form it claims to reach, executed and read back. Two claims per member, and
-   the second is what makes the first trustworthy:
+   member naming the form it claims to reach, executed and read back. Two claims per member, and the
+   second is what makes the first trustworthy:
 
    - VALUE. A localizing member must agree BITWISE with the serial baseline's execution; a
-     read-modify-write member must agree bitwise with the host's per-step-narrowed reference. Both
-     references are exact: the operands are storage-exact multiples of 1/8 whose PARTIAL SUMS leave
-     the storage format's exactness range (see {!cells}), so the two references differ at bf16 and
-     f16 — proven here rather than assumed, by the "the whole-nest and per-step references differ"
-     claims. At f32 they coincide, which is
-     the identity-precision leg gh-ocannl-693 added: there the value claim pins substitution and
-     iteration coverage rather than accumulator width.
-   - FORM. The emitted kernel is classified — localized scope, per-step read-modify-write, SIMD
-     accumulator grid, warp-shuffle tree, [Tile_mma] scalar fallback — and must be the form the
-     member claims. Without this a composition that silently stopped reaching its form would keep
-     passing its value claim by falling back to another one, which is exactly the false green the
-     issue is about: agreement between two renderings is worthless if they are the same rendering.
+   read-modify-write member must agree bitwise with the host's per-step-narrowed reference. Both
+   references are exact: the operands are storage-exact multiples of 1/8 whose PARTIAL SUMS leave
+   the storage format's exactness range (see {!cells}), so the two references differ at bf16 and f16
+   — proven here rather than assumed, by the "the whole-nest and per-step references differ" claims.
+   At f32 they coincide, which is the identity-precision leg gh-ocannl-693 added: there the value
+   claim pins substitution and iteration coverage rather than accumulator width. - FORM. The emitted
+   kernel is classified — localized scope, per-step read-modify-write, SIMD accumulator grid,
+   warp-shuffle tree, [Tile_mma] scalar fallback — and must be the form the member claims. Without
+   this a composition that silently stopped reaching its form would keep passing its value claim by
+   falling back to another one, which is exactly the false green the issue is about: agreement
+   between two renderings is worthless if they are the same rendering.
 
-   The member list itself is printed, so a form added to codegen without a table entry shows up as
-   a golden diff rather than as silence. Members a backend cannot evaluate (SIMD grids off the C
+   The member list itself is printed, so a form added to codegen without a table entry shows up as a
+   golden diff rather than as silence. Members a backend cannot evaluate (SIMD grids off the C
    backends, warp shuffles off the GPUs) stay in the table and report {!Verdict.skipped}.
 
-   The reduction is hand-built {!Ir.Low_level} (via [ll_test]) so that the nest shape is the
-   test's, not shape inference's, and so that the loop symbols are in hand: every composition names
-   its axes directly instead of re-deriving them from the lowered nest.
+   The reduction is hand-built {!Ir.Low_level} (via [ll_test]) so that the nest shape is the test's,
+   not shape inference's, and so that the loop symbols are in hand: every composition names its axes
+   directly instead of re-deriving them from the lowered nest.
 
    Three points of the space are deliberately absent, and saying so is part of defining the set:
 
    - The [Grid] arm, whose fallback is the plain serial loop and NOT the localizing one — the one
-     arm that can serialize without localizing. No schedule op in the tree produces an unbindable,
-     non-parallel-eligible [Grid] level over a reduction axis, and one that existed would be a
-     cross-thread race rather than a width question, so a member here could only be built by hand
-     out of a shape the pipeline cannot reach.
-   - The rng-mentioning update, one of the two configuration-independent declines. Its source is a
-     uint4x32 key whose host representation is not a float array, so building it costs more than it
-     would pin here; [test/operations/narrow_rng_nesting.ml]'s reduced-uniform leg is where that
-     decline lives.
-   - The HONOURED register-tile and tensor-core renderings. Those hold their accumulator in a
-     C-tile rather than in a serial nest, so they are not serial forms of this reduction;
-     [tile_mma_narrow] pins their width. What is a member is the [Tile_mma] SCALAR FALLBACK, whose
-     reduction is a serial nest like any other. *)
+   arm that can serialize without localizing. No schedule op in the tree produces an unbindable,
+   non-parallel-eligible [Grid] level over a reduction axis, and one that existed would be a
+   cross-thread race rather than a width question, so a member here could only be built by hand out
+   of a shape the pipeline cannot reach. - The rng-mentioning update, one of the two
+   configuration-independent declines. Its source is a uint4x32 key whose host representation is not
+   a float array, so building it costs more than it would pin here;
+   [test/operations/narrow_rng_nesting.ml]'s reduced-uniform leg is where that decline lives. - The
+   HONOURED register-tile and tensor-core renderings. Those hold their accumulator in a C-tile
+   rather than in a serial nest, so they are not serial forms of this reduction; [tile_mma_narrow]
+   pins their width. What is a member is the [Tile_mma] SCALAR FALLBACK, whose reduction is a serial
+   nest like any other. *)
 
 open Base
 open Ocannl
@@ -117,8 +115,8 @@ let cells = Ll_test.cycle ~dims:[| rows; cols |] ~modulus:67 ~offset:180. ~strid
 let cell r k = cells [| r; k |]
 let x_values = Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols))
 
-(* The accumulator's INCOMING contents: distinct per row and nonzero (Codex P2, round 1). With
-   every [out] cell and both references starting at zero, a regression that initialized a localized
+(* The accumulator's INCOMING contents: distinct per row and nonzero (Codex P2, round 1). With every
+   [out] cell and both references starting at zero, a regression that initialized a localized
    accumulator to zero instead of loading [out[r]] would satisfy every form and every value claim —
    while the same [out[r] += x[r,k]] IR computes the wrong thing for any caller whose destination
    already holds data, which is what an accumulation into a pre-zeroed or previously-written node
@@ -127,8 +125,8 @@ let x_values = Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols))
 let seed_value r = (100. +. (7. *. Float.of_int r)) /. 8.
 let out_seed = Array.init rows ~f:seed_value
 
-(* Host references, per storage precision. [round] is the library's own conversion, so these are
-   the kernel's roundings and not an approximation of them. *)
+(* Host references, per storage precision. [round] is the library's own conversion, so these are the
+   kernel's roundings and not an approximation of them. *)
 let round (prec : Ops.prec) v =
   match prec with
   | Ops.Bfloat16_prec _ -> Ops.bfloat16_to_single (Ops.single_to_bfloat16 v)
@@ -136,9 +134,9 @@ let round (prec : Ops.prec) v =
   | Ops.Fp8_prec _ -> Ops.fp8_to_single (Ops.single_to_fp8 v)
   | _ -> v
 
-(* How many of the [cols] terms a guarded shape's guard admits. INTERIOR, not the whole axis
-   (Codex P2, round 2): a guard bound to the full extent is true on every iteration, so a schedule
-   mint that DROPPED or broadened the predicate while rewriting the nest would still produce the
+(* How many of the [cols] terms a guarded shape's guard admits. INTERIOR, not the whole axis (Codex
+   P2, round 2): a guard bound to the full extent is true on every iteration, so a schedule mint
+   that DROPPED or broadened the predicate while rewriting the nest would still produce the
    localized form and still compute the baseline's value — both claims green over a guard that had
    ceased to exist. With an interior extent the reference is a partial sum, and a lost predicate or
    a lost iteration is a different number. *)
@@ -178,8 +176,8 @@ let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
    duplicated parameter. Exhaustive, so a new constructor has to answer the question. *)
 let is_loop_rewrite (op : Sched.optop) =
   match op with
-  | Sched.Split _ | Sched.Swap _ | Sched.Retype _ | Sched.Unroll _ | Sched.Partition _
-  | Sched.Pad _ ->
+  | Sched.Split _ | Sched.Swap _ | Sched.Retype _ | Sched.Unroll _ | Sched.Partition _ | Sched.Pad _
+    ->
       true
   | Sched.Split_reduce _ | Sched.Tensorize _ | Sched.Stage _ | Sched.Privatize _
   | Sched.Expand_zero _ | Sched.Fuse_epilogue _ ->
@@ -215,13 +213,12 @@ let native_fp16 =
 
    The GPU arms restate their backends' [accum_prec], and the restatement is the point rather than
    duplication to be refactored away: a table derived FROM the backend would agree with it by
-   construction and could not detect a regression in it.
-   - metal_backend.ml: [half] and [bfloat] are native MSL scalars that compute where they store, so
-     16-bit accumulators keep storage residency; fp8 is not a type there and goes through f32.
-   - cuda_backend.ml: bf16 -> f32, the hardware having no bf16 accumulate; fp8 -> f32 under
-     [narrow_compute_f32]; everything else itself.
-   - hip_backend.ml: RDNA WMMA has genuine bf16 and f16 accumulator variants, so 16-bit keeps its
-     storage residency and only fp8 widens. *)
+   construction and could not detect a regression in it. - metal_backend.ml: [half] and [bfloat] are
+   native MSL scalars that compute where they store, so 16-bit accumulators keep storage residency;
+   fp8 is not a type there and goes through f32. - cuda_backend.ml: bf16 -> f32, the hardware having
+   no bf16 accumulate; fp8 -> f32 under [narrow_compute_f32]; everything else itself. -
+   hip_backend.ml: RDNA WMMA has genuine bf16 and f16 accumulator variants, so 16-bit keeps its
+   storage residency and only fp8 widens. *)
 
 type residency =
   | Wider  (** The accumulator resides above storage: the whole-nest reference. *)
@@ -235,8 +232,7 @@ let expected_residency prec =
   let of_resolved resolved = if same_prec resolved prec then At_storage else Wider in
   let has name = String.is_substring backend_name ~substring:name in
   if on_cpu then
-    of_resolved
-      (Numerics.cpu_compute_prec ~native_fp16_arithmetic:(Lazy.force native_fp16) prec)
+    of_resolved (Numerics.cpu_compute_prec ~native_fp16_arithmetic:(Lazy.force native_fp16) prec)
   else if has "metal" then match prec with Ops.Fp8_prec _ -> Wider | _ -> At_storage
   else if has "cuda" then
     match prec with
@@ -251,11 +247,11 @@ let residency_name = function
   | At_storage -> "storage width (per-step)"
   | Undecided why -> "undecided: " ^ why
 
-(* Which storage precisions the warp-shuffle rendering of a [Workgroup_reduce] loop accepts on a
-   GPU backend (gh-ocannl-682): it stages the value at the accumulator RESIDENCY, so it takes f32
-   itself and every narrow precision the backend's policy resolves to f32 — bf16 on CUDA. A
-   residency that stays narrow is refused by raising rather than by falling back to a serial loop,
-   so those legs stay unevaluable off the C backends, where [warp_size = 0] serializes them all. *)
+(* Which storage precisions the warp-shuffle rendering of a [Workgroup_reduce] loop accepts on a GPU
+   backend (gh-ocannl-682): it stages the value at the accumulator RESIDENCY, so it takes f32 itself
+   and every narrow precision the backend's policy resolves to f32 — bf16 on CUDA. A residency that
+   stays narrow is refused by raising rather than by falling back to a serial loop, so those legs
+   stay unevaluable off the C backends, where [warp_size = 0] serializes them all. *)
 let shuffle_takes prec_name =
   String.equal prec_name "f32"
   ||
@@ -265,8 +261,8 @@ let shuffle_takes prec_name =
 
 (* {1 Program shapes}
 
-   Six spellings of one reduction. The guarded ones admit an INTERIOR prefix of the reduction axis
-   — the runtime extent is bound to {!guard_terms} of [cols] at launch, and the mask admits the same
+   Six spellings of one reduction. The guarded ones admit an INTERIOR prefix of the reduction axis —
+   the runtime extent is bound to {!guard_terms} of [cols] at launch, and the mask admits the same
    prefix — so they compute a smaller sum than the unguarded ones and are judged against a reference
    of their own. A guard true on every iteration would have made their claims unfailable, which is
    the whole of {!guard_terms}'s comment. Beyond the value, what the guards change is which peel
@@ -305,8 +301,8 @@ type shape =
           through {!Ll_test.optimize_scoped} rather than through [LL.optimize]. Same interior
           runtime extent, so the else-arm is taken on real iterations rather than on none. *)
 
-(* How many terms a shape's reduction admits, PER ROW — which reference its value is judged
-   against. Only {!Mixed_guard} varies with the row; the others admit the same prefix in each. *)
+(* How many terms a shape's reduction admits, PER ROW — which reference its value is judged against.
+   Only {!Mixed_guard} varies with the row; the others admit the same prefix in each. *)
 let terms_of_shape shape r =
   match shape with
   | Runtime_guard | Data_guard | Where_scope -> guard_terms
@@ -435,17 +431,12 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
   | Data_guard ->
       let mask = node ~dims:[| cols |] "rfmask" in
       Ll_test.materialize mask;
-      let cond =
-        LL.Binop (Ops.Cmplt, (LL.Get (mask, [| ki |]), prec), (LL.Constant 1.0, prec))
-      in
+      let cond = LL.Binop (Ops.Cmplt, (LL.Get (mask, [| ki |]), prec), (LL.Constant 1.0, prec)) in
       {
         base with
         llc = nest ~body:(LL.If { cond = (cond, prec); body = plain_body }) ();
         materialized = [ out; x; mask ];
-        seed =
-          ( mask,
-            Array.init cols ~f:(fun k -> if k < guard_terms then 0.0 else 1.0) )
-          :: seed;
+        seed = (mask, Array.init cols ~f:(fun k -> if k < guard_terms then 0.0 else 1.0)) :: seed;
       }
   | Side_write ->
       (* Indexed by BOTH symbols, so the sibling is not loop-invariant: a hoistable one would leave
@@ -568,8 +559,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
                        this is post-optimize IR handed to the backend the way the schedule mints
                        hand theirs. The mint records which side built the scope; the borrowed
                        spelling is what the member is about. *)
-                    LL.Local_scope
-                      { id; body; orig_indices = acc_cell; mint = LL.Schedule_minted };
+                    LL.Local_scope { id; body; orig_indices = acc_cell; mint = LL.Schedule_minted };
                   debug = "";
                 };
           }
@@ -581,9 +571,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
                {
                  tn = out;
                  idcs = acc_cell;
-                 llsc =
-                   LL.Ternop
-                     (Ops.Where, (cond, iprec), (update, prec), (get_acc, prec));
+                 llsc = LL.Ternop (Ops.Where, (cond, iprec), (update, prec), (get_acc, prec));
                  debug = "";
                })
           ()
@@ -631,15 +619,15 @@ let ident_for src ~label =
   let n = String.length src in
   String.substr_index_all src ~may_overlap:false ~pattern:label
   |> List.filter_map ~f:(fun at ->
-         let b = ref at and e = ref (at + String.length label) in
-         while !b > 0 && is_ident_char src.[!b - 1] do
-           Int.decr b
-         done;
-         while !e < n && is_ident_char src.[!e] do
-           Int.incr e
-         done;
-         if !e < n && Char.equal src.[!e] '[' then Some (String.sub src ~pos:!b ~len:(!e - !b))
-         else None)
+      let b = ref at and e = ref (at + String.length label) in
+      while !b > 0 && is_ident_char src.[!b - 1] do
+        Int.decr b
+      done;
+      while !e < n && is_ident_char src.[!e] do
+        Int.incr e
+      done;
+      if !e < n && Char.equal src.[!e] '[' then Some (String.sub src ~pos:!b ~len:(!e - !b))
+      else None)
   |> List.min_elt ~compare:(fun a b -> Int.compare (String.length a) (String.length b))
 
 let statements src =
@@ -647,8 +635,8 @@ let statements src =
       String.concat ~sep:" " (String.split_on_chars st ~on:[ '\n'; '\t' ]))
 
 (* Whether [tok] is a scope-local name: [v<digits>_<node ident>], {!C_syntax.pp_scope_id}'s
-   spelling. Which node it belongs to is not constrained — the accumulator of a [Virtual_acc]
-   member is a different node from the one stored. *)
+   spelling. Which node it belongs to is not constrained — the accumulator of a [Virtual_acc] member
+   is a different node from the one stored. *)
 let is_scope_local tok =
   String.length tok > 2
   && Char.equal tok.[0] 'v'
@@ -696,9 +684,9 @@ let mentions_scope_local st =
   in
   go 0
 
-(* Occurrences of [ident] as a WHOLE identifier followed by a subscript. Substring counting is
-   wrong here: [partials_rfout[..]] contains [rfout[], so a reduction whose partials node is named
-   after its target would read as touching the target twice. *)
+(* Occurrences of [ident] as a WHOLE identifier followed by a subscript. Substring counting is wrong
+   here: [partials_rfout[..]] contains [rfout[], so a reduction whose partials node is named after
+   its target would read as touching the target twice. *)
 let subscripts st ~ident =
   List.count
     (String.substr_index_all st ~may_overlap:false ~pattern:(ident ^ "["))
@@ -748,7 +736,9 @@ let read_form src ~label =
         | Some at -> mentions_scope_local (String.drop_prefix st (at + 4))
       in
       let assigns_node st =
-        match (String.substr_index st ~pattern:"] = ", String.substr_index st ~pattern:(ident ^ "[")) with
+        match
+          (String.substr_index st ~pattern:"] = ", String.substr_index st ~pattern:(ident ^ "["))
+        with
         | Some at, Some lhs -> lhs < at && (lhs = 0 || not (is_ident_char st.[lhs - 1]))
         | _ -> false
       in
@@ -762,8 +752,7 @@ let read_form src ~label =
           rmw_statements = List.count sts ~f:(fun st -> accesses st >= 2);
           stores_from_local =
             List.count sts ~f:(fun st -> accesses st = 1 && assigns_node st && stores_a_local st);
-          foreign_local_stores =
-            List.count sts ~f:(fun st -> accesses st = 0 && stores_a_local st);
+          foreign_local_stores = List.count sts ~f:(fun st -> accesses st = 0 && stores_a_local st);
           node_accesses = List.sum (module Int) sts ~f:accesses;
           foreign_accesses =
             List.sum
@@ -774,18 +763,17 @@ let read_form src ~label =
           has_warp = String.is_substring src ~substring:"ocannl_shfl_xor";
         }
 
-(* What the reading says the kernel rendered. The order matters, and not merely for tidiness: a
-   SIMD grid's epilogue is TEXTUALLY a read-modify-write ([out[i] = out[i] + vred_total]) — one per
-   nest rather than one per step, which is the entire difference — so testing the RMW fingerprint
-   first would classify the vector rendering as the form it exists to avoid. The more specific form
-   wins, and the per-nest count is checked separately against the member's declared sites. *)
+(* What the reading says the kernel rendered. The order matters, and not merely for tidiness: a SIMD
+   grid's epilogue is TEXTUALLY a read-modify-write ([out[i] = out[i] + vred_total]) — one per nest
+   rather than one per step, which is the entire difference — so testing the RMW fingerprint first
+   would classify the vector rendering as the form it exists to avoid. The more specific form wins,
+   and the per-nest count is checked separately against the member's declared sites. *)
 let form_of reading =
   if reading.has_warp then Warp
   else if reading.has_simd then Simd
   else if reading.rmw_statements = 0 && reading.stores_from_local > 0 then Localized
   else if
-    reading.rmw_statements > 0 && reading.stores_from_local = 0
-    && reading.foreign_local_stores > 0
+    reading.rmw_statements > 0 && reading.stores_from_local = 0 && reading.foreign_local_stores > 0
   then Partials_combine
   else if reading.rmw_statements > 0 && reading.stores_from_local = 0 then Rmw
   else
@@ -797,12 +785,11 @@ let form_of reading =
        member's claim. *)
     Unrecognized
 
-
 (* {1 Executing a member} *)
 
 let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
-  (* The launch parameters have to reach BOTH halves: [LL.optimize]'s walk asserts that every
-     symbol it meets is in scope (a runtime-extent guard mentions one that no loop binds), and
+  (* The launch parameters have to reach BOTH halves: [LL.optimize]'s walk asserts that every symbol
+     it meets is in scope (a runtime-extent guard mentions one that no loop binds), and
      [Sched.apply] folds guards against their declared ranges. *)
   let static_indices = Idx.bound_symbols prog.bindings in
   let o =
@@ -812,11 +799,11 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
         Ll_test.optimize_scoped ~materialized:prog.materialized ~static_indices ~name ~raw prog.llc
   in
   (* The transform's INPUT and OUTPUT are both kept. A coverage entry that only checks its member
-     exists says nothing about whether that member still exercises the op it is credited with
-     (Codex P2, round 10): were [Unroll]'s annotated rewrite to regress to leaving the loop
-     [Serial], the kernel would keep the same localized classification, the same closing store and
-     the same value, and both the member and its coverage entry would stay green. Comparing the two
-     is what binds a cited op to an observable effect. *)
+     exists says nothing about whether that member still exercises the op it is credited with (Codex
+     P2, round 10): were [Unroll]'s annotated rewrite to regress to leaving the loop [Serial], the
+     kernel would keep the same localized classification, the same closing store and the same value,
+     and both the member and its coverage entry would stay green. Comparing the two is what binds a
+     cited op to an observable effect. *)
   let before = ref None and after = ref None and per_op = ref [] in
   let ctx, routine =
     Context.compile ~name ~prelowered:o
@@ -832,9 +819,9 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
            is compiled. *)
         (* Only for a COMPOSITION of loop rewrites: with one op the whole-schedule comparison
            already is the per-op one, and a node-minting op cannot be applied twice. *)
-        if List.length sched > 1 && List.for_all sched ~f:is_loop_rewrite then
-          per_op :=
-            (let rec step acc state = function
+        (if List.length sched > 1 && List.for_all sched ~f:is_loop_rewrite then
+           per_op :=
+             let rec step acc state = function
                | [] -> List.rev acc
                | op :: rest ->
                    let next = Sched.apply ~static_indices [ op ] state in
@@ -850,16 +837,16 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
       (Lazy.force base_ctx) Ir.Assignments.empty_comp prog.bindings
   in
   prog.bind routine.Context.bindings;
-  let ctx =
-    List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs)
-  in
+  let ctx = List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   let ctx = Context.run ctx routine in
   let read tn = Context.get_values ctx tn in
-  (read prog.out, List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
-   (!before, !after, !per_op))
+  ( read prog.out,
+    List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
+    (!before, !after, !per_op) )
 
 (* The axis kinds a statement's loops carry. What binds a member to the constructor its coverage
-   entry credits it with: an op that names an axis kind must leave that kind in the IR it produced. *)
+   entry credits it with: an op that names an axis kind must leave that kind in the IR it
+   produced. *)
 let rec axis_kinds (llc : LL.t) : LL.axis_type list =
   match llc with
   | LL.For_loop { axis; body; _ } -> axis :: axis_kinds body
@@ -888,8 +875,9 @@ and scalar_axis_kinds (llsc : LL.scalar_t) : LL.axis_type list =
    normally earn a tolerance — but each of them is declared over f32 only (or, for the shuffle,
    available at f32 only), and there these operands' partial sums are exact, so every association
    gives the same float. That is not an assumption: the "at f32 the whole-nest and per-step
-   references coincide" claim asserts exactly the exactness the argument rests on. A tolerance would have hidden a real narrowing at a seam behind
-   an allowance for a reassociation that cannot cost anything here. *)
+   references coincide" claim asserts exactly the exactness the argument rests on. A tolerance would
+   have hidden a real narrowing at a seam behind an allowance for a reassociation that cannot cost
+   anything here. *)
 
 type reference =
   | Baseline  (** The serial rendering of the plain nest, executed at this precision: 32 terms. *)
@@ -907,9 +895,9 @@ type reference =
           other baselines, and that is the claim gh-ocannl-721 moves — before the localization the
           run narrowed at every step where the policy asks for a wider accumulator. *)
   | Owned_cell
-      (** The host reference the POLICY selects, over the full axis, starting from ZERO: the
-          virtual accumulator owns its cell and initializes it from a [Zero_out] rather than
-          loading [out], so the incoming contents are not part of what it computes. *)
+      (** The host reference the POLICY selects, over the full axis, starting from ZERO: the virtual
+          accumulator owns its cell and initializes it from a [Zero_out] rather than loading [out],
+          so the incoming contents are not part of what it computes. *)
 
 type member = {
   slug : string;  (** Short name; also the routine name's stem, so artifacts are per member. *)
@@ -927,8 +915,8 @@ type member = {
           textual copy of the surviving output loop's body, which is one unless the composition
           duplicated that loop ([Unroll ~materialize] or [Partition] of the OUTPUT axis). Pinned
           exactly, not as "at least one" (Codex P2, round 1): a regression that gave each
-          [Partition] segment or each unrolled copy its OWN scope and closing store would still
-          read as localized under a positive-count test, and on a backend whose accumulator already
+          [Partition] segment or each unrolled copy its OWN scope and closing store would still read
+          as localized under a positive-count test, and on a backend whose accumulator already
           resides at storage width the extra store/reload seams need not change the executed value
           either — a false green in both claims at once. The node's total subscript count is bounded
           by [2 * store_sites] for the same reason: each site may open the cell and close it, and
@@ -940,18 +928,18 @@ type member = {
           P2, round 7): the form alone says only that SOME partial localized and SOME statement
           read-modify-writes the target, so partials closing through several scopes, or a combine
           expanded into several textual sites, would still read as this form — and this leg's f32
-          arithmetic is exactly representable, so the extra seams or the reassociation need not
-          move the value either. *)
+          arithmetic is exactly representable, so the extra seams or the reassociation need not move
+          the value either. *)
   foreign_accesses : int;
       (** For {!Partials_combine}: how many subscripts the foreign node carries in total — the
-          partials' own zero-init, scope-open read and closing store, plus one read per block in
-          the combine. *)
+          partials' own zero-init, scope-open read and closing store, plus one read per block in the
+          combine. *)
   rmw_sites : int;
-      (** For a member claiming {!Rmw}: how many read-modify-write statements the composition
-          emits, textually — one per repetition where the level is [Unrolled], one where it is a
-          serial loop. Pinned exactly, because the COUNT is what distinguishes the two declining
-          forms (Codex P2, round 5): if the [Unrolled] renderer regressed to [serial_loop], or the
-          axis annotation were dropped, the source would still hold one read-modify-write, [form_of]
+      (** For a member claiming {!Rmw}: how many read-modify-write statements the composition emits,
+          textually — one per repetition where the level is [Unrolled], one where it is a serial
+          loop. Pinned exactly, because the COUNT is what distinguishes the two declining forms
+          (Codex P2, round 5): if the [Unrolled] renderer regressed to [serial_loop], or the axis
+          annotation were dropped, the source would still hold one read-modify-write, [form_of]
           would still answer [Rmw], and execution would still equal the per-step reference — serial
           and unrolled loops visit the same terms — so a member advertised as "one per copy" would
           be green without the Unrolled fallback ever running. *)
@@ -966,10 +954,9 @@ type member = {
           updates — ANDed into the form claim. For the one distinguishing feature the node-access
           classifier cannot see: which spelling the update took inside the scope.
 
-          Scoped to those statements rather than searched for in the whole artifact (Codex P2,
-          round 2): at f16 the kernel pulls in [half_to_float_emulated], whose body is full of
-          unrelated ternaries, so [" ? "] anywhere in the source is true whatever the update
-          renders as. *)
+          Scoped to those statements rather than searched for in the whole artifact (Codex P2, round
+          2): at f16 the kernel pulls in [half_to_float_emulated], whose body is full of unrelated
+          ternaries, so [" ? "] anywhere in the source is true whatever the update renders as. *)
   precisions : string list;
   available : string -> bool;
       (** Whether this backend can evaluate the member at the given storage precision. Per
@@ -988,14 +975,11 @@ let no_ops _ = []
    through the pragma'd loop. That fallback is as much a member of this set as the SIMD grid, so the
    expectation is backend-dependent instead of the leg being marked unavailable. *)
 let simd_or_localized = if on_cpu then Simd else Localized
-
 let simd_claimed = "SIMD accumulator grid, or the localized scope where no vector rendering exists"
 
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
     ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?(foreign_accesses = 0) ?expect_axis
-    ?(extra = [])
-    ?(precisions = [ "f32"; "bf16"; "f16" ])
-    ?(available = fun _ -> true) slug what =
+    ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ]) ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
   {
     slug;
@@ -1021,8 +1005,7 @@ let members =
        left every f32 reduction doing one global read-modify-write per step. --- *)
     member "serial" "no schedule ops (the reference rendering)";
     (* --- the two [Unroll] representations autotune proposes over small reduction loops --- *)
-    member "unroll-annot" "Unroll (annotated: codegen repeats the body)"
-      ~expect_axis:LL.Unrolled
+    member "unroll-annot" "Unroll (annotated: codegen repeats the body)" ~expect_axis:LL.Unrolled
       ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
     member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = true } ]);
@@ -1041,8 +1024,7 @@ let members =
         [ pt; Sched.Unroll { axis = List.hd_exn segs; materialize = false } ]);
     (* Two segment loops over the output axis, each carrying a whole reduction: two sites. *)
     member "partition-outer" "Partition of the OUTPUT axis (the reduction is inside a segment)"
-      ~store_sites:2
-      ~sched:(fun g ->
+      ~store_sites:2 ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.r ~breakpoints:[ 1 ] in
         [ pt ]);
     (* --- [Split], with and without a reordering --- *)
@@ -1050,11 +1032,12 @@ let members =
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Unroll { axis = inner; materialize = true } ]);
-    member "split-then-swap" "Split the reduction axis, then Swap the halves"
-      ~precisions:[ "f32" ] ~sched:(fun g ->
+    member "split-then-swap" "Split the reduction axis, then Swap the halves" ~precisions:[ "f32" ]
+      ~sched:(fun g ->
         let sp, outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Swap { outer; inner } ]);
-    (* --- [Pad]: guarded copies, whose constant-bounded guard the mint must peel into the scope --- *)
+    (* --- [Pad]: guarded copies, whose constant-bounded guard the mint must peel into the scope
+       --- *)
     member "pad-then-unroll-mat" "Pad the reduction axis, then Unroll ~materialize (guarded copies)"
       ~sched:(fun g ->
         [
@@ -1064,24 +1047,24 @@ let members =
     (* --- [Split_reduce]: block partials plus a combine nest. The reduction scopes do NOT coincide
        (each partial narrows at its own store), so this member claims f32 only, where the sums are
        exact. --- *)
-    member "split-reduce" "Split_reduce into four block partials plus a combine nest"
+    member "split-reduce"
+      "Split_reduce into four block partials plus a combine nest"
       (* Seven subscripts of the partials node, and each one is accounted for: the whole-node
-         zero-init, the scope-opening read and the closing store of the per-block accumulation
-         (the partials are themselves localized), then one read per block in the combine. Counted
-         off the emitted kernel rather than predicted — my arithmetic said five and the init and
-         the open are the two it forgot. *)
+         zero-init, the scope-opening read and the closing store of the per-block accumulation (the
+         partials are themselves localized), then one read per block in the combine. Counted off the
+         emitted kernel rather than predicted — my arithmetic said five and the init and the open
+         are the two it forgot. *)
       ~expect:Partials_combine ~foreign_sites:1 ~foreign_accesses:7 ~precisions:[ "f32" ]
       ~sched:(fun g ->
         let op, _b, _i, _c = Sched.split_reduce ~axis:g.k ~target:g.out ~num_blocks:4 in
         [ op ]);
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
        rendering NESTED inside a surviving serial reduction level. --- *)
-    member "retype-vectorized" "Retype the reduction axis to Vectorized"
-      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized
-      ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Vectorized } ]);
+    member "retype-vectorized" "Retype the reduction axis to Vectorized" ~expect:simd_or_localized
+      ~claimed:simd_claimed ~expect_axis:LL.Vectorized ~sched:(fun g ->
+        [ Sched.Retype { axis = g.k; ty = LL.Vectorized } ]);
     member "split-then-vectorize-inner" "Split, then Retype the INNER half to Vectorized"
-      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized
-      ~sched:(fun g ->
+      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized ~sched:(fun g ->
         (* 32 wide, which every lane ladder a real target has can cover; see {!cols}. *)
         let sp, _outer, inner =
           Sched.split ~axis:g.k ~factor:32 ~outer:LL.Serial ~inner:LL.Serial
@@ -1091,8 +1074,8 @@ let members =
        accepted falls back to the localizing peel, never to the pragma'd loop — the pragmas assert
        iteration independence, which an accumulation does not satisfy. A two-wide inner half is
        below the profitability gate, so the SIMD grid declines and the peel takes it. *)
-    member "split-then-vectorize-narrow" "Split into a two-wide inner half, then Retype it Vectorized"
-      ~expect_axis:LL.Vectorized
+    member "split-then-vectorize-narrow"
+      "Split into a two-wide inner half, then Retype it Vectorized" ~expect_axis:LL.Vectorized
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:2 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Retype { axis = inner; ty = LL.Vectorized } ]);
@@ -1103,10 +1086,10 @@ let members =
       ~claimed:"warp-shuffle tree, or the localized scope where no lane index is bound"
         (* The shuffle tree takes accumulators whose RESIDENCY is single or double precision
            (gh-ocannl-682), and refuses anything else by raising rather than by falling back — so
-           off the C backends this member is evaluable at f32 and at whichever narrow precisions
-           the backend's [accum_prec] widens, which is bf16 on CUDA and nothing elsewhere. Its
-           value claim stays bitwise there: the tree reassociates, but these operands' f32 partial
-           sums are exact whatever the association, and both the shuffle and the localized serial
+           off the C backends this member is evaluable at f32 and at whichever narrow precisions the
+           backend's [accum_prec] widens, which is bf16 on CUDA and nothing elsewhere. Its value
+           claim stays bitwise there: the tree reassociates, but these operands' f32 partial sums
+           are exact whatever the association, and both the shuffle and the localized serial
            baseline narrow to bf16 exactly once. *)
       ~available:(fun prec_name -> on_cpu || shuffle_takes prec_name)
       ~expect_axis:LL.Workgroup_reduce
@@ -1116,7 +1099,8 @@ let members =
        REDUCTION axis to a workgroup dimension is a cross-lane race wherever the binding exists, so
        the leg runs on the backends that serialize it and is skipped where it would not be. *)
     member "retype-workgroup" "Retype the reduction axis to Workgroup (no index bound: serialized)"
-      ~available:(fun _ -> on_cpu) ~expect_axis:LL.Workgroup
+      ~available:(fun _ -> on_cpu)
+      ~expect_axis:LL.Workgroup
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Workgroup } ]);
     (* --- the gh-490 runtime-extent guard, whose bound is a kernel parameter rather than a
        constant. The peel must see through it (gh-ocannl-693) and the mints must agree with the
@@ -1125,8 +1109,8 @@ let members =
     member "runtime-guard" "a runtime-extent guard, unscheduled" ~shape:Runtime_guard
       ~reference:Guarded_baseline;
     member "runtime-guard-unroll-mat" "a runtime-extent guard under Unroll ~materialize"
-      ~shape:Runtime_guard ~reference:Guarded_baseline
-      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = true } ]);
+      ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
+        [ Sched.Unroll { axis = g.k; materialize = true } ]);
     member "runtime-guard-partition" "a runtime-extent guard under Partition of the reduction axis"
       ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
@@ -1146,11 +1130,11 @@ let members =
        reduction axis is not, which is why this member runs everywhere and [retype-workgroup] does
        not. *)
     member "mixed-guard-workgroup" "the same guard with the output axis bound to a workgroup"
-      ~shape:Mixed_guard ~reference:Mixed_baseline ~expect_axis:LL.Workgroup
-      ~sched:(fun g -> [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
+      ~shape:Mixed_guard ~reference:Mixed_baseline ~expect_axis:LL.Workgroup ~sched:(fun g ->
+        [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
-    member "virtual-accumulator" "a virtual accumulator inlined at its read site"
-      ~shape:Virtual_acc ~reference:Owned_cell;
+    member "virtual-accumulator" "a virtual accumulator inlined at its read site" ~shape:Virtual_acc
+      ~reference:Owned_cell;
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
       ~shape:Where_scope ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
@@ -1158,11 +1142,10 @@ let members =
        member, and the whole table would be measuring nothing. --- *)
     member "decline-data-guard" "a data-dependent guard (not a pure index guard)" ~shape:Data_guard
       ~expect:Rmw ~reference:Per_step;
-    member "decline-sibling-statement" "a second statement in the reduction level"
-      ~shape:Side_write ~expect:Rmw ~reference:Per_step;
+    member "decline-sibling-statement" "a second statement in the reduction level" ~shape:Side_write
+      ~expect:Rmw ~reference:Per_step;
     member "decline-sibling-unrolled" "the same level Unrolled: one read-modify-write per copy"
-      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols
-      ~expect_axis:LL.Unrolled
+      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols ~expect_axis:LL.Unrolled
       ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
@@ -1194,15 +1177,21 @@ let optop_coverage (op : Sched.optop) : coverage =
   | Sched.Split _ ->
       Covered
         [
-          "split-then-unroll"; "split-then-swap"; "split-then-vectorize-inner";
+          "split-then-unroll";
+          "split-then-swap";
+          "split-then-vectorize-inner";
           "split-then-vectorize-narrow";
         ]
   | Sched.Swap _ -> Covered [ "split-then-swap" ]
   | Sched.Retype _ ->
       Covered
         [
-          "retype-vectorized"; "split-then-vectorize-inner"; "split-then-vectorize-narrow";
-          "retype-workgroup-reduce"; "retype-workgroup"; "mixed-guard-workgroup";
+          "retype-vectorized";
+          "split-then-vectorize-inner";
+          "split-then-vectorize-narrow";
+          "retype-workgroup-reduce";
+          "retype-workgroup";
+          "mixed-guard-workgroup";
         ]
   | Sched.Unroll _ -> Covered [ "unroll-annot"; "unroll-mat"; "unroll-outer-mat" ]
   | Sched.Partition _ -> Covered [ "partition"; "partition-then-unroll"; "partition-outer" ]
@@ -1254,7 +1243,14 @@ let optop_samples : Sched.optop list =
   let s = coverage_sym in
   [
     Sched.Split
-      { axis = s; factor = 1; outer = LL.Serial; inner = LL.Serial; outer_index = s; inner_index = s };
+      {
+        axis = s;
+        factor = 1;
+        outer = LL.Serial;
+        inner = LL.Serial;
+        outer_index = s;
+        inner_index = s;
+      };
     Sched.Swap { outer = s; inner = s };
     Sched.Retype { axis = s; ty = LL.Serial };
     Sched.Unroll { axis = s; materialize = false };
@@ -1290,8 +1286,8 @@ let optop_samples : Sched.optop list =
 let axis_samples : LL.axis_type list =
   [ LL.Serial; LL.Unrolled; LL.Vectorized; LL.Workgroup; LL.Workgroup_reduce; LL.Grid ]
 
-(* The constructor's own name, off its sexp — so the printed table cannot disagree with the value
-   it describes. *)
+(* The constructor's own name, off its sexp — so the printed table cannot disagree with the value it
+   describes. *)
 let constructor_name sexp =
   match sexp with Sexp.List (Sexp.Atom name :: _) -> name | Sexp.Atom name -> name | _ -> "?"
 
@@ -1305,9 +1301,9 @@ let agrees got want =
 let show vs = String.concat ~sep:" " (Array.to_list (Array.map vs ~f:(Printf.sprintf "%h")))
 let routine_stem slug = String.tr slug ~target:'-' ~replacement:'_'
 
-(* The coverage tables, printed and asserted: every constructor is reached by a member that
-   EXISTS, or exempted with a reason. A slug naming no member fails the claim, so renaming a member
-   without updating its coverage entry is a failure rather than a quiet gap. *)
+(* The coverage tables, printed and asserted: every constructor is reached by a member that EXISTS,
+   or exempted with a reason. A slug naming no member fails the claim, so renaming a member without
+   updating its coverage entry is a failure rather than a quiet gap. *)
 let () =
   let slugs =
     "tile-mma-fallback" :: List.map members ~f:(fun m -> m.slug) |> Set.of_list (module String)
@@ -1321,9 +1317,7 @@ let () =
             ok := false;
             Stdio.printf "  %-18s covered by nothing\n" name
         | Covered members_of ->
-            let missing =
-              List.filter members_of ~f:(fun slug -> not (Set.mem slugs slug))
-            in
+            let missing = List.filter members_of ~f:(fun slug -> not (Set.mem slugs slug)) in
             if not (List.is_empty missing) then begin
               ok := false;
               Stdio.eprintf "  %s cites members that do not exist: %s\n" name
@@ -1346,9 +1340,7 @@ let () =
     ~classify:axis_coverage axis_samples;
   (* A duplicated sample would print one constructor twice and leave another unprinted, while the
      exhaustive matches above stayed satisfied. *)
-  let distinct l =
-    List.length (List.dedup_and_sort l ~compare:String.compare) = List.length l
-  in
+  let distinct l = List.length (List.dedup_and_sort l ~compare:String.compare) = List.length l in
   p "the coverage samples name distinct constructors"
     (distinct (List.map optop_samples ~f:(fun op -> constructor_name (Sched.sexp_of_optop op)))
     && distinct (List.map axis_samples ~f:(fun ty -> constructor_name (LL.sexp_of_axis_type ty))))
@@ -1375,8 +1367,7 @@ let () =
   Stdio.printf "  %02d %-27s [%-12s] over %-21s %-70s -> %s\n"
     (List.length members + 1)
     "tile-mma-fallback" "f32 bf16 f16" "small contraction"
-    "Tensorize whose emission preconditions fail (transposed-B operands)"
-    (form_name Mma_fallback)
+    "Tensorize whose emission preconditions fail (transposed-B operands)" (form_name Mma_fallback)
 
 (* The baselines: the plain nest with no schedule ops, and the runtime-extent-guarded nest with no
    schedule ops, one of each per precision. Every localizing member is compared against one of them,
@@ -1401,10 +1392,7 @@ let mixed_baselines =
       (prec_name, values))
 
 let baseline prec_name = List.Assoc.find_exn baselines ~equal:String.equal prec_name
-
-let guarded_baseline prec_name =
-  List.Assoc.find_exn guarded_baselines ~equal:String.equal prec_name
-
+let guarded_baseline prec_name = List.Assoc.find_exn guarded_baselines ~equal:String.equal prec_name
 let mixed_baseline prec_name = List.Assoc.find_exn mixed_baselines ~equal:String.equal prec_name
 
 let () =
@@ -1438,8 +1426,8 @@ let () =
               guarded prefix (the operands discriminate accumulator width)"
              prec_name)
           (differ && differ_guarded);
-      (* Which reference the policy selects, and the assertion that the run took THAT one. Not
-         "one of the two": see {!expected_residency}. *)
+      (* Which reference the policy selects, and the assertion that the run took THAT one. Not "one
+         of the two": see {!expected_residency}. *)
       let selected ~terms ~terms_desc values ~what =
         let wide, stepped = refs terms in
         let claim =
@@ -1475,10 +1463,10 @@ let () =
       ignore
         (selected ~terms:mixed_terms ~terms_desc:"20, 19 and 18 terms by row" mixed
            ~what:"mixed-guard baseline");
-      (* And the guards SELECT: without this the guarded members could not fail at all, since a
-         mint or a renderer that discarded the predicate would land on the unguarded sum and still
-         match. Both references the guarded members use are covered — the executed guarded baseline
-         (the localizing members) and the host per-step reference at the guarded term count (the
+      (* And the guards SELECT: without this the guarded members could not fail at all, since a mint
+         or a renderer that discarded the predicate would land on the unguarded sum and still match.
+         Both references the guarded members use are covered — the executed guarded baseline (the
+         localizing members) and the host per-step reference at the guarded term count (the
          data-guarded decline). *)
       let _, stepped_guarded = refs guarded_terms in
       p
@@ -1498,9 +1486,9 @@ let () =
            prec_name)
         ((not (Array.for_all2_exn mixed got ~f:Float.equal))
         && not (Array.for_all2_exn mixed guarded ~f:Float.equal));
-      (* Which regime this backend is in, on stderr so the golden stays backend-uniform: whether
-         the accumulator resolves wider than storage decides whether the localized and
-         read-modify-write forms are also distinguishable BY VALUE here, or only structurally. *)
+      (* Which regime this backend is in, on stderr so the golden stays backend-uniform: whether the
+         accumulator resolves wider than storage decides whether the localized and read-modify-write
+         forms are also distinguishable BY VALUE here, or only structurally. *)
       Stdio.eprintf "accumulator residency at %s: %s\n%!" prec_name
         (match residency with
         | Some r -> residency_name r
@@ -1545,17 +1533,14 @@ let () =
               (match (before, after) with
               | Some b, Some a ->
                   let changed =
-                    (List.is_empty sched
-                    || not (Sexp.equal (LL.sexp_of_t b) (LL.sexp_of_t a)))
+                    (List.is_empty sched || not (Sexp.equal (LL.sexp_of_t b) (LL.sexp_of_t a)))
                     && (List.is_empty per_op
-                       || (List.length per_op = List.length sched
-                          && List.for_all per_op ~f:Fn.id))
+                       || (List.length per_op = List.length sched && List.for_all per_op ~f:Fn.id))
                   in
                   let axis_ok =
                     match m.expect_axis with
                     | None -> true
-                    | Some ty ->
-                        List.exists (axis_kinds a) ~f:(fun k -> LL.equal_axis_type k ty)
+                    | Some ty -> List.exists (axis_kinds a) ~f:(fun k -> LL.equal_axis_type k ty)
                   in
                   if not (changed && axis_ok) then
                     (* Phrased with [%s] rather than a trailing [%b] on purpose: this is a
@@ -1564,8 +1549,8 @@ let () =
                        [verdict_ratchet] hunts. Better to say it in words than to earn an
                        exemption. *)
                     Stdio.eprintf
-                      "  %s: the schedule left no mark -- IR changed: %s, named axis kind \
-                       present: %s\n"
+                      "  %s: the schedule left no mark -- IR changed: %s, named axis kind present: \
+                       %s\n"
                       name (Bool.to_string changed) (Bool.to_string axis_ok);
                   p evidence_claim (changed && axis_ok)
               | _ ->
@@ -1579,8 +1564,7 @@ let () =
               in
               if not extra_ok then
                 Stdio.eprintf "  %s: no scope-local assignment among %d contains all of [%s]\n" name
-                  (List.length updates)
-                  (String.concat ~sep:"; " m.extra);
+                  (List.length updates) (String.concat ~sep:"; " m.extra);
               (match read_form src ~label:"rfout" with
               | None ->
                   Stdio.eprintf "  %s: no accumulator identifier in the emitted kernel\n" name;
@@ -1606,20 +1590,20 @@ let () =
                            the explicit partials form, which declares how many it has. *)
                         && reading.foreign_local_stores = m.foreign_sites
                     | Simd | Warp ->
-                        (* A vector or shuffle epilogue closes the cell ONCE per nest, and may
-                           spell that as [out[i] = out[i] + vred_total] rather than as a store
-                           from a scope local — textually a read-modify-write, but one per nest
-                           instead of one per step, which is the whole distinction. Either
-                           spelling counts, and the access bound is what refuses a regression
-                           that closed once per chain. *)
+                        (* A vector or shuffle epilogue closes the cell ONCE per nest, and may spell
+                           that as [out[i] = out[i] + vred_total] rather than as a store from a
+                           scope local — textually a read-modify-write, but one per nest instead of
+                           one per step, which is the whole distinction. Either spelling counts, and
+                           the access bound is what refuses a regression that closed once per
+                           chain. *)
                         reading.stores_from_local + reading.rmw_statements = m.store_sites
                         && reading.node_accesses <= 2 * m.store_sites
                         (* And no partial closed elsewhere on the way, exactly as for an ordinary
-                           localized member (Codex P2, round 12 — the round-11 fix belonged here
-                           too and I applied it to one arm only). A SIMD or shuffle renderer that
-                           began closing intermediate partials into another node would keep its
-                           marker, its single target epilogue and these target-only counts, and the
-                           f32 legs' exactly-representable arithmetic would absorb the added
+                           localized member (Codex P2, round 12 — the round-11 fix belonged here too
+                           and I applied it to one arm only). A SIMD or shuffle renderer that began
+                           closing intermediate partials into another node would keep its marker,
+                           its single target epilogue and these target-only counts, and the f32
+                           legs' exactly-representable arithmetic would absorb the added
                            store/reload seams. *)
                         && reading.foreign_local_stores = m.foreign_sites
                     | Rmw ->
@@ -1659,8 +1643,7 @@ let () =
                 | Baseline -> baseline prec_name
                 | Guarded_baseline -> guarded_baseline prec_name
                 | Mixed_baseline -> mixed_baseline prec_name
-                | Per_step ->
-                    per_step_ref ~terms:(terms_of_shape m.shape) ~from:seed_value prec
+                | Per_step -> per_step_ref ~terms:(terms_of_shape m.shape) ~from:seed_value prec
                 | Owned_cell -> (
                     let from _ = 0.0 in
                     let full (_ : int) = cols in
@@ -1669,8 +1652,7 @@ let () =
                     | At_storage | Undecided _ -> per_step_ref ~terms:full ~from prec)
               in
               let ok = agrees got want in
-              if not ok then
-                Stdio.eprintf "  %s: got [%s] want [%s]\n" name (show got) (show want);
+              if not ok then Stdio.eprintf "  %s: got [%s] want [%s]\n" name (show got) (show want);
               p value_claim ok
             end
           end))
@@ -1759,16 +1741,12 @@ let () =
       else begin
         let plain = mma_matmul ~tag:("rfmma_p_" ^ prec_name) ~prec in
         let want, _ =
-          mma_run
-            ~name:("rf_mma_plain_" ^ prec_name)
-            ~out:plain.Tensor.value ~tensorize:false
+          mma_run ~name:("rf_mma_plain_" ^ prec_name) ~out:plain.Tensor.value ~tensorize:false
             (Train.forward plain)
         in
         let tiled = mma_matmul ~tag:("rfmma_t_" ^ prec_name) ~prec in
         let got, census =
-          mma_run
-            ~name:("rf_mma_fallback_" ^ prec_name)
-            ~out:tiled.Tensor.value ~tensorize:true
+          mma_run ~name:("rf_mma_fallback_" ^ prec_name) ~out:tiled.Tensor.value ~tensorize:true
             (Train.forward tiled)
         in
         (* The census says every [Tile_mma] statement declined; it says NOTHING about how the
@@ -1801,8 +1779,7 @@ let () =
           | Some reading ->
               let ok =
                 same_form (form_of reading) Localized
-                && reading.stores_from_local = 1
-                && reading.node_accesses <= 3
+                && reading.stores_from_local = 1 && reading.node_accesses <= 3
                 (* And nothing closed elsewhere on the way, as every other localized form in the
                    table now requires (Codex P2, round 13). A fallback that began closing
                    intermediate partials into another node would keep its single [mc] store, its

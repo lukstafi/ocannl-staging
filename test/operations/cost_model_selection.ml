@@ -47,6 +47,7 @@ let capture comp =
 
 (* 16x16 x 16x16 matmul values, for correctness checks below. *)
 let n = 16
+
 let mav =
   Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
 

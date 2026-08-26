@@ -1,10 +1,10 @@
 (* [Low_level.peel_accum_nest] must refuse a DEAD level (gh-ocannl-693, Codex P2 on PR #421).
 
-   Every form the peel licenses — codegen's accumulator localization and [Schedule]'s
-   [Unroll ~materialize:true] / [Partition] mints — reads and writes the accumulated cell OUTSIDE
-   the peeled levels, unconditionally:
+   Every form the peel licenses — codegen's accumulator localization and [Schedule]'s [Unroll
+   ~materialize:true] / [Partition] mints — reads and writes the accumulated cell OUTSIDE the peeled
+   levels, unconditionally:
 
-     { float v; v = acc[0]; for (k = 0; k <= -1; ++k) { v = v + src[k]; } acc[0] = v; }
+   { float v; v = acc[0]; for (k = 0; k <= -1; ++k) { v = v + src[k]; } acc[0] = v; }
 
    whereas the loop it replaces performs no accesses at all. That is not merely wasteful. The
    routine-interface walk propagates liveness as [live && to_ >= from_], so a node reached only
@@ -15,11 +15,11 @@
    phantom parameters for identifiers only dead code renders".
 
    Pinned at [peel_accum_nest] rather than end to end, and deliberately: [LL.optimize] drops dead
-   loops, so ordinary lowering cannot deliver one to codegen — which is why this never bit. What
-   CAN deliver one is a post-optimize transform, i.e. exactly the schedule mints that share this
-   peel, so the refusal belongs to the shared definition and is asserted there. The live twin is
-   the control: same nest, one bound changed, and it must still peel — a refusal that also refused
-   live nests would pass a one-sided test while disabling the feature. *)
+   loops, so ordinary lowering cannot deliver one to codegen — which is why this never bit. What CAN
+   deliver one is a post-optimize transform, i.e. exactly the schedule mints that share this peel,
+   so the refusal belongs to the shared definition and is asserted there. The live twin is the
+   control: same nest, one bound changed, and it must still peel — a refusal that also refused live
+   nests would pass a one-sided test while disabling the feature. *)
 
 open Base
 module LL = Ir.Low_level
@@ -62,8 +62,7 @@ let nest ~upto =
           };
     }
 
-let peels ~upto =
-  Option.is_some (LL.peel_accum_nest ~loop_bounds:[] ~free_of:[] (nest ~upto))
+let peels ~upto = Option.is_some (LL.peel_accum_nest ~loop_bounds:[] ~free_of:[] (nest ~upto))
 
 let () =
   (* The control: the identical nest over a live range is still recognized. Without this, a peel
@@ -95,8 +94,8 @@ let () =
    index: it must still peel, or the refusal has disabled the feature for every padded window rather
    than closing the race. *)
 
-(* A second accumulator, indexed by the enclosing symbol: the lane-private cell. Four cells for
-   four lanes, so [lanes[w]] is in bounds over the whole of [w]'s range without the guard's help. *)
+(* A second accumulator, indexed by the enclosing symbol: the lane-private cell. Four cells for four
+   lanes, so [lanes[w]] is in bounds over the whole of [w]'s range without the guard's help. *)
 let lanes = node ~id:940_100_003 ~label:"pdl_lanes" ~dims:[| 4 |]
 
 (* The same cell over a node too SMALL for the enclosing range: there the guard is what keeps the
@@ -133,9 +132,7 @@ let guarded_nest ~guard_sym ~cell =
         LL.If
           {
             cond =
-              ( LL.Binop
-                  (Ops.Cmplt, (LL.Embed_index g, single), (LL.Constant 1.0, single)),
-                single );
+              (LL.Binop (Ops.Cmplt, (LL.Embed_index g, single), (LL.Constant 1.0, single)), single);
             body =
               LL.Set
                 {
@@ -158,8 +155,7 @@ let () =
      width-1 axis (a single-instance level has nothing to tell apart). *)
   let loop_bounds = [ (enclosing, (0, 3)); (other, (0, 3)) ] in
   let peels ~guard_sym ~cell =
-    Option.is_some
-      (LL.peel_accum_nest ~loop_bounds ~free_of:[] (guarded_nest ~guard_sym ~cell))
+    Option.is_some (LL.peel_accum_nest ~loop_bounds ~free_of:[] (guarded_nest ~guard_sym ~cell))
   in
   Verdict.p "a guard varying with the peeled index still peels"
     (peels ~guard_sym:`Peeled ~cell:`Shared);
@@ -175,8 +171,8 @@ let () =
      and the accumulator stops round-tripping through storage on every iteration. *)
   Verdict.p "a mixed guard over a lane-private cell peels"
     (peels ~guard_sym:(`Mixed enclosing) ~cell:(`Per_lane enclosing));
-  (* Separation is about the cell, not about the guard mentioning the symbol: a cell mentioning
-     BOTH enclosing symbols additively still maps [(0,1)] and [(1,0)] to one cell. *)
+  (* Separation is about the cell, not about the guard mentioning the symbol: a cell mentioning BOTH
+     enclosing symbols additively still maps [(0,1)] and [(1,0)] to one cell. *)
   Verdict.p "a mixed guard over a cell two enclosing lanes collapse onto is refused"
     (not (peels ~guard_sym:(`Mixed enclosing) ~cell:(`Lane_sum (enclosing, other))));
   (* Separation is DISTINCTNESS, not access validity, and the escape needs both (Codex P1 on PR
@@ -195,10 +191,12 @@ let () =
      symbol no loop binds, there is nothing to separate and the guard was already confined. *)
   Verdict.p "the lane-private shape still peels when its guard bound is bound outside every loop"
     (Option.is_some
-       (LL.peel_accum_nest ~loop_bounds:[ (other, (0, 3)) ] ~free_of:[]
+       (LL.peel_accum_nest
+          ~loop_bounds:[ (other, (0, 3)) ]
+          ~free_of:[]
           (guarded_nest ~guard_sym:(`Mixed enclosing) ~cell:`Shared)));
-  (* gh-490's runtime-extent guard is NOT constant-bounded: [Assignments.extent_guard] emits
-     [i < s] with [s] a STATIC symbol -- a kernel parameter bound at launch, never a loop index. It
+  (* gh-490's runtime-extent guard is NOT constant-bounded: [Assignments.extent_guard] emits [i < s]
+     with [s] a STATIC symbol -- a kernel parameter bound at launch, never a loop index. It
      therefore cannot select among enclosing iterations, and the peel must still take it, or every
      runtime-bounded reduction loses accumulator localization (and, on narrow storage, its
      gh-ocannl-639 accumulator width along with it). The classification is the program's own: the
@@ -289,7 +287,6 @@ let () =
         |> fun vals -> Ok (List.hd_exn vals).(0)
     | exception e -> Error (Exn.to_string e)
   in
-  Verdict.p "a dead Unrolled level compiles instead of aborting codegen"
-    (Result.is_ok outcome);
+  Verdict.p "a dead Unrolled level compiles instead of aborting codegen" (Result.is_ok outcome);
   Verdict.p "a dead Unrolled level performs no accumulation"
     (match outcome with Ok v -> Float.equal v seeded | Error _ -> false)

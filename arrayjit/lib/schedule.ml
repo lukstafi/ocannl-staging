@@ -705,14 +705,14 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
   in
   (llc, !out_masks)
 
-(* The accumulation mints below forward [Low_level.loop_bounds llc] to
-   [Low_level.peel_accum_nest], so a runtime-extent guard ([i < s], gh-490) does not stop them:
-   [s] is bound outside every loop and cannot select among enclosing iterations. Derived here rather
-   than certified by [apply]'s caller, because declining is NOT neutral for these mints the way it
-   is in codegen -- a refused mint makes [Unroll ~materialize:true] round-trip the accumulator
-   through storage per copy and [Partition] turn its segment seams into narrowing points, so on
-   narrow storage the candidate stops agreeing with the serial baseline, which is the very
-   invariant they exist to keep (gh-ocannl-693 review rounds 6-7). *)
+(* The accumulation mints below forward [Low_level.loop_bounds llc] to [Low_level.peel_accum_nest],
+   so a runtime-extent guard ([i < s], gh-490) does not stop them: [s] is bound outside every loop
+   and cannot select among enclosing iterations. Derived here rather than certified by [apply]'s
+   caller, because declining is NOT neutral for these mints the way it is in codegen -- a refused
+   mint makes [Unroll ~materialize:true] round-trip the accumulator through storage per copy and
+   [Partition] turn its segment seams into narrowing points, so on narrow storage the candidate
+   stops agreeing with the serial baseline, which is the very invariant they exist to keep
+   (gh-ocannl-693 review rounds 6-7). *)
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let loop_ranges = lazy (Low_level.loop_bounds llc) in
   let open Low_level in
@@ -804,12 +804,12 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
             (* Under routine logging the per-iteration [Set] copies ARE the trace: a [Local_scope]
                body renders with [log_set_locals:false], so minting the scope would silence every
                update. The serial baseline's widening declines under logging for the same reason
-               (C_syntax.try_localize_serial_reduce), so within a logged regime the unrolled and serial
-               candidates still agree — both per-step. *)
+               (C_syntax.try_localize_serial_reduce), so within a logged regime the unrolled and
+               serial candidates still agree — both per-step. *)
             if Utils.debug_log_from_routines () then None
             else
-              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges)
-                ~free_of:[ axis ] fc.body
+              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges) ~free_of:[ axis ]
+                fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->
@@ -935,8 +935,8 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
           let mint =
             if Utils.debug_log_from_routines () then None
             else
-              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges)
-                ~free_of:[ axis ] fc.body
+              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges) ~free_of:[ axis ]
+                fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->
@@ -2168,22 +2168,21 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
          do to the accumulator's lifecycle (PR #91 review; gh-ocannl-730). Three admissible kinds:
 
          - {e Invariant}: free of memory reads and of symbols bound by [over] or any loop inside its
-           subtree. A thread-identifying guard (a [lane == 0] restriction) is of this kind, and it
-           means only some threads update their private accumulator — so the init-load and the
-           store-back must run under the {e same} predicate, or stale lanes clobber the result.
-         - {e Iteration mask}: hardware-free (every symbol it mentions is bound by a [Serial] or
-           [Unrolled] loop, or by no loop at all — a launch-uniform binding), mentioning at least one
-           symbol bound inside. It selects which iterations of one thread's own accumulation fire; it
-           cannot select threads. It stays on the update alone: a tile slot it never updates is
-           init-loaded from [target] and stored back unchanged, and every slot belongs to the one
-           thread that transfers it. A reduction-axis pad mask (gh-ocannl-485) is of this kind.
-         - {e Output mask}: literally [target]'s own index on some axis, compared against a bound no
-           larger than that axis's dimension — the shape a row/column pad mask takes once the block
-           and register [Split]s have substituted their hardware symbols into it. The transfers
-           already carry the per-axis edge guard [src_idcs.(a) < tgt_dims.(a)] over that same
-           expression, so they transfer every slot the mask updates and no update is lost; a slot
-           the mask skips round-trips through the accumulator unchanged. It too stays on the update
-           alone.
+         subtree. A thread-identifying guard (a [lane == 0] restriction) is of this kind, and it
+         means only some threads update their private accumulator — so the init-load and the
+         store-back must run under the {e same} predicate, or stale lanes clobber the result. - {e
+         Iteration mask}: hardware-free (every symbol it mentions is bound by a [Serial] or
+         [Unrolled] loop, or by no loop at all — a launch-uniform binding), mentioning at least one
+         symbol bound inside. It selects which iterations of one thread's own accumulation fire; it
+         cannot select threads. It stays on the update alone: a tile slot it never updates is
+         init-loaded from [target] and stored back unchanged, and every slot belongs to the one
+         thread that transfers it. A reduction-axis pad mask (gh-ocannl-485) is of this kind. - {e
+         Output mask}: literally [target]'s own index on some axis, compared against a bound no
+         larger than that axis's dimension — the shape a row/column pad mask takes once the block
+         and register [Split]s have substituted their hardware symbols into it. The transfers
+         already carry the per-axis edge guard [src_idcs.(a) < tgt_dims.(a)] over that same
+         expression, so they transfer every slot the mask updates and no update is lost; a slot the
+         mask skips round-trips through the accumulator unchanged. It too stays on the update alone.
 
          Anything else — a data-dependent guard, or one mixing a hardware symbol into a comparison
          that is not [target]'s own index — is rejected: it can restrict which threads accumulate
@@ -2379,9 +2378,9 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
           Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
               For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; axis = Serial })
         in
-        (* Carry the invariant part of the accesses' guard chain onto the transfers: only the
-           lanes that update their private accumulator may load and store it back (PR #91 review).
-           The iteration and output masks are deliberately absent — see the classification above. *)
+        (* Carry the invariant part of the accesses' guard chain onto the transfers: only the lanes
+           that update their private accumulator may load and store it back (PR #91 review). The
+           iteration and output masks are deliberately absent — see the classification above. *)
         List.fold transfer_conds ~init:nest ~f:(fun body cond -> If { cond; body })
       in
       let remapped =
@@ -5057,12 +5056,11 @@ let aligned_chains ?max_chain ?(expanded_zeros = []) (opt : Low_level.optimized)
                  | _ -> None) )))
 
 (* The configured block size is a target; the device's capacity is a hard cap. Two hardware facts,
-   not one (gh-ocannl-679): the workgroup's thread PRODUCT
-   ([max_threads_per_workgroup]) and its per-dimension bound ([max_workgroup_dims]) — on CUDA the
-   latter's [.z] entry is 16x below the former. Both annotators below emit exactly one [Workgroup]
-   loop per nest, so the extent they choose lands on [.x] and only that entry can bind; clamping
-   here is what keeps [check_hardware_limits_classified] a backstop rather than the first line of
-   defence. *)
+   not one (gh-ocannl-679): the workgroup's thread PRODUCT ([max_threads_per_workgroup]) and its
+   per-dimension bound ([max_workgroup_dims]) — on CUDA the latter's [.z] entry is 16x below the
+   former. Both annotators below emit exactly one [Workgroup] loop per nest, so the extent they
+   choose lands on [.x] and only that entry can bind; clamping here is what keeps
+   [check_hardware_limits_classified] a backstop rather than the first line of defence. *)
 let clamp_block_size ~(limits : Backend_intf.hardware_limits) block_size =
   let clamp cap n = Option.value_map cap ~default:n ~f:(min n) in
   clamp limits.max_threads_per_workgroup block_size

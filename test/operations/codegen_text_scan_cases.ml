@@ -25,8 +25,8 @@ module Scan = Test_utils.Codegen_text_scan
 
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
-(** How a classified golden reads, for comparison: the families, then where the evidence came
-    from. [none] is a file the scan does not call a member. *)
+(** How a classified golden reads, for comparison: the families, then where the evidence came from.
+    [none] is a file the scan does not call a member. *)
 let render_golden = function
   | None -> "none"
   | Some (g : Scan.golden) ->
@@ -67,7 +67,10 @@ let golden_cases =
       "[metal] markers metal-kernel" );
     ( "the compact IR serialization is an assignment without the spaces",
       "canonical_render.expected",
-      "rendering:\n       c;zero <cr_out>;for b0=0..2@Grid{set <cr_out>[(2*b0+1*b1+5),]:=scope(<cr_acc>.1)[b0,]{nop;};}\n       an alpha-variant lowering renders identically: true\n",
+      "rendering:\n\
+      \       c;zero <cr_out>;for b0=0..2@Grid{set \
+       <cr_out>[(2*b0+1*b1+5),]:=scope(<cr_acc>.1)[b0,]{nop;};}\n\
+      \       an alpha-variant lowering renders identically: true\n",
       "[ll] markers ll-assign" );
     ( "a low-level IR dump is a member by its loop headers and assignments",
       "dump_test.expected",
@@ -242,9 +245,9 @@ let () =
     ( "the qualified Utils.build_file is a read of the artifact directory",
       {ocaml|let () = p "wrote" (Stdlib.Sys.file_exists (Utils.build_file "k.c"))|ocaml},
       "+direct" );
-    (* Module aliases. A conventional short alias is ordinary OCaml, and a scan matching the
-       literal component would not merely mis-attribute such a file -- it would drop it from the
-       inventory entirely, which is the silent direction (Codex P2, round 1). *)
+    (* Module aliases. A conventional short alias is ordinary OCaml, and a scan matching the literal
+       component would not merely mis-attribute such a file -- it would drop it from the inventory
+       entirely, which is the silent direction (Codex P2, round 1). *)
     ( "a module alias of the reader is the reader",
       {ocaml|module G = Test_utils.Generated
 let () = G.assert_emits ~routine:"r" ~contains:"__syncthreads()" "synced"|ocaml},
@@ -298,9 +301,9 @@ let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (LL.to_doc () llc)|ocaml},
       {ocaml|let to_doc row = PPrint.string (render_row row)
 let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
       "none" );
-    (* Round 3's genre: the membership rules learned the third route and the PIN rules had not, so
-       a fragment could be dropped while the file stayed listed -- nothing looked wrong, and a grep
-       of the inventory missed the assertion. *)
+    (* Round 3's genre: the membership rules learned the third route and the PIN rules had not, so a
+       fragment could be dropped while the file stayed listed -- nothing looked wrong, and a grep of
+       the inventory missed the assertion. *)
     ( "an inline emitter render in the haystack still pins its fragment",
       {ocaml|module LL = Ir.Low_level
 let () = p "radix" (String.is_substring (render (LL.to_doc () llc)) ~substring:"-0.0")|ocaml},
@@ -353,23 +356,25 @@ let () = p "values" (Array.for_all2_exn got want ~f:Float.equal)|ocaml},
 let association_cases =
   [
     ( "a table of dumped constants is text derived from generated code",
-      "exact value                %cd dump                   C-style dump\n       0x1.999999999999ap-4       0.1                        0.1\n       every dumped constant parses back to the double it names: true\n",
+      "exact value                %cd dump                   C-style dump\n\
+      \       0x1.999999999999ap-4       0.1                        0.1\n\
+      \       every dumped constant parses back to the double it names: true\n",
       "[derived] beside t.ml" );
     ( "a census of the decisions a kernel was built from moves with them",
-      "seeds: standard, both hoistable: total=18 whole=2 packed=12\n       seeded packed pad-composition matches the serial twin bitwise: true\n",
+      "seeds: standard, both hoistable: total=18 whole=2 packed=12\n\
+      \       seeded packed pad-composition matches the serial twin bitwise: true\n",
       "[derived] beside t.ml" );
-    (* The negative control that decides the rule: a schedule test's golden is a column of
-       booleans, and a boolean does not move when codegen does -- the claim goes on reading true.
-       Pulling those in would add a line per schedule test and train the reader to skim. *)
+    (* The negative control that decides the rule: a schedule test's golden is a column of booleans,
+       and a boolean does not move when codegen does -- the claim goes on reading true. Pulling
+       those in would add a line per schedule test and train the reader to skim. *)
     ( "a golden of nothing but claims is the test's verdict, not its output",
-      "padded packed matmul matches the serial twin bitwise: true\n       pad guard over an unstaged operand is rejected: true\n",
+      "padded packed matmul matches the serial twin bitwise: true\n\
+      \       pad guard over an unstaged operand is rejected: true\n",
       "none" );
     ( "blank lines do not make a verdict golden into output",
       "first claim holds: true\n\n   \nsecond claim holds: PASS\n",
       "none" );
-    ( "an empty golden is not output either",
-      "",
-      "none" );
+    ("an empty golden is not output either", "", "none");
   ]
 
 let render_association = function
@@ -387,8 +392,11 @@ let () =
       if String.equal found expected then printf "ok: association -- %s\n" name
       else fail "association -- %s: expected [%s], found [%s]" name expected found);
   List.iter
-    [ ("a plain source", "d/x.ml", "d/x"); ("a select real", "d/x.real.ml", "d/x");
-      ("a select stub", "d/x.missing.ml", "d/x") ]
+    [
+      ("a plain source", "d/x.ml", "d/x");
+      ("a select real", "d/x.real.ml", "d/x");
+      ("a select stub", "d/x.missing.ml", "d/x");
+    ]
     ~f:(fun (name, path, expected) ->
       let found = Scan.source_stem path in
       if String.equal found expected then printf "ok: stem -- %s\n" name

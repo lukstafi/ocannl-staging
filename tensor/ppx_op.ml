@@ -92,8 +92,8 @@ let rec is_ndarray_constant_expr expr =
       match expr.pexp_desc with
       | Pexp_constant (Pconst_float _) | Pexp_constant (Pconst_integer _) -> true
       (* Descend through axis-basis annotations, e.g. [((1., 2., 3.) : features)], so numeric
-         literals carrying a dimension-basis tag stay on the ndarray path rather than being read
-         as a stack. *)
+         literals carrying a dimension-basis tag stay on the ndarray path rather than being read as
+         a stack. *)
       | Pexp_constraint (e, _) -> is_ndarray_constant_expr e
       | Pexp_tuple (e :: _) | Pexp_array (e :: _) -> is_ndarray_constant_expr e
       | _ -> false)
@@ -362,8 +362,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
   | {
    pexp_desc =
      Pexp_record
-       ( ( first_label,
-           (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]) as init_nd) )
+       ( (first_label, (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]) as init_nd))
          :: extra_args,
          None );
    _;
@@ -422,8 +421,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
   (* A tensor literal whose outermost axis container carries an axis-label annotation, e.g. [([ 1.;
      2.; 3. ] : rgb)] or [([| … |] : batch)]. *)
   | {
-   pexp_desc =
-     Pexp_constraint (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]), _);
+   pexp_desc = Pexp_constraint (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]), _);
    _;
   } ->
       (no_vbs, ndarray_op ?label ~ndarray_fn:(dsl_fn "ndarray") expr)

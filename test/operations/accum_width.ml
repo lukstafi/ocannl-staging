@@ -19,13 +19,13 @@
 
    The value claims are policy claims and run wherever the backend's accumulator resolution widens
    bf16 (gh-ocannl-663): the CPU backends ([Numerics.cpu_compute_prec]) and CUDA, whose mma legs
-   hold f32 per-lane registers across the whole k extent — the hardware has no bf16 accumulate —
-   so its serial legs must match. On HIP and Metal the tensor units accumulate in bf16 fragments
-   and the serial legs deliberately keep bf16 storage residency (width-uniform with their mma
-   legs), so the bf16 widened claims are false there BY DESIGN and skipped — while the fp8 claim,
-   which holds universally, executes on every backend. The structural
-   claims grep cc's generated C and the SIMD/Workgroup_reduce-serialization legs exercise CPU-only
-   renderings; they stay cc-only and print their passing golden line as skipped elsewhere. *)
+   hold f32 per-lane registers across the whole k extent — the hardware has no bf16 accumulate — so
+   its serial legs must match. On HIP and Metal the tensor units accumulate in bf16 fragments and
+   the serial legs deliberately keep bf16 storage residency (width-uniform with their mma legs), so
+   the bf16 widened claims are false there BY DESIGN and skipped — while the fp8 claim, which holds
+   universally, executes on every backend. The structural claims grep cc's generated C and the
+   SIMD/Workgroup_reduce-serialization legs exercise CPU-only renderings; they stay cc-only and
+   print their passing golden line as skipped elsewhere. *)
 
 open Base
 open Ocannl
@@ -181,11 +181,10 @@ let claim_where_guarded =
    accumulator (256 +1x5 narrows once to 260)"
 
 let claim_init_round =
-  "a widened scope's opening init keeps its own assignment's rounding (128 + 0.5 rounds before \
-   the x3 reduction)"
+  "a widened scope's opening init keeps its own assignment's rounding (128 + 0.5 rounds before the \
+   x3 reduction)"
 
-let claim_off_fp8 =
-  "narrow_compute_f32=false recovers per-step fp8 narrowing (16 + 8x0.5 stays 16)"
+let claim_off_fp8 = "narrow_compute_f32=false recovers per-step fp8 narrowing (16 + 8x0.5 stays 16)"
 
 let claim_wgreduce =
   "a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial \
@@ -262,8 +261,8 @@ let all_claims =
 
 let () =
   if not widens_bf16 then
-    (* The fp8 claim holds on HIP and Metal too, so it executes rather than printing a
-       green-by-skip line; every bf16-widening leg is skipped. *)
+    (* The fp8 claim holds on HIP and Metal too, so it executes rather than printing a green-by-skip
+       line; every bf16-widening leg is skipped. *)
     List.iter all_claims ~f:(fun c -> if String.equal c claim_fp8 then fp8_leg () else skipped c)
   else begin
     let ma = NTDSL.init ~l:"ma" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
@@ -546,8 +545,7 @@ let () =
     let wid = LL.get_scope wacc in
     let w_guard = LL.Binop (Ir.Ops.Cmplt, (Ll_test.embed wi, iprec), (LL.Constant 5.0, iprec)) in
     let w_upd =
-      LL.Binop
-        (Ir.Ops.Add, (LL.Get_local wid, bf16), (Ll_test.get wxs [| Ll_test.iter wi |], bf16))
+      LL.Binop (Ir.Ops.Add, (LL.Get_local wid, bf16), (Ll_test.get wxs [| Ll_test.iter wi |], bf16))
     in
     let w_body =
       LL.Seq
@@ -565,7 +563,12 @@ let () =
           idcs = [| Ll_test.fixed 0 |];
           llsc =
             LL.Local_scope
-              { id = wid; body = w_body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Schedule_minted };
+              {
+                id = wid;
+                body = w_body;
+                orig_indices = [| Ll_test.fixed 0 |];
+                mint = LL.Schedule_minted;
+              };
           debug = "";
         }
     in
@@ -584,7 +587,9 @@ let () =
                   bf16 ),
                 (Ll_test.get wacc [| Ll_test.fixed 0 |], bf16) )))
     in
-    let wo = Ll_test.optimize_scoped ~materialized:[ wacc; wxs ] ~name:"aw_whereg" ~raw:w_raw w_llc in
+    let wo =
+      Ll_test.optimize_scoped ~materialized:[ wacc; wxs ] ~name:"aw_whereg" ~raw:w_raw w_llc
+    in
     let wvals =
       Ll_test.execute ~name:"aw_whereg" wo
         ~seed:[ (wacc, [| 256.0 |]); (wxs, Array.create ~len:8 1.0) ]
@@ -628,11 +633,11 @@ let () =
         (Ll_test.set gacc2
            [| Ll_test.fixed 0 |]
            (LL.Binop
-              ( Ir.Ops.Sub,
-                (Ll_test.get gacc2 [| Ll_test.fixed 0 |], bf16),
-                (LL.Constant 0.5, bf16) )))
+              (Ir.Ops.Sub, (Ll_test.get gacc2 [| Ll_test.fixed 0 |], bf16), (LL.Constant 0.5, bf16))))
     in
-    let ro = Ll_test.optimize_scoped ~materialized:[ gacc2 ] ~name:"aw_recurrence" ~raw:rec_raw rec_llc in
+    let ro =
+      Ll_test.optimize_scoped ~materialized:[ gacc2 ] ~name:"aw_recurrence" ~raw:rec_raw rec_llc
+    in
     let rvals =
       Ll_test.execute ~name:"aw_recurrence" ro ~seed:[ (gacc2, [| 256.0 |]) ] ~read:[ gacc2 ]
     in
@@ -728,7 +733,12 @@ let () =
           idcs = [| Ll_test.fixed 0 |];
           llsc =
             LL.Local_scope
-              { id = iid; body = i_body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Schedule_minted };
+              {
+                id = iid;
+                body = i_body;
+                orig_indices = [| Ll_test.fixed 0 |];
+                mint = LL.Schedule_minted;
+              };
           debug = "";
         }
     in
@@ -749,15 +759,15 @@ let () =
                  (Ll_test.get im [| Ll_test.fixed 0 |], bf16) )) )
     in
     let io =
-      Ll_test.optimize_scoped ~materialized:[ iacc; ia; ib; im ] ~name:"aw_init_round" ~raw:i_raw i_llc
+      Ll_test.optimize_scoped ~materialized:[ iacc; ia; ib; im ] ~name:"aw_init_round" ~raw:i_raw
+        i_llc
     in
     let ivals =
       Ll_test.execute ~name:"aw_init_round" io
         ~seed:[ (ia, [| 128.0 |]); (ib, [| 0.5 |]); (im, [| 3.0 |]) ]
         ~read:[ iacc ]
     in
-    p claim_init_round
-      (Float.equal (List.hd_exn ivals).(0) (if on_cpu then 386.0 else 384.0));
+    p claim_init_round (Float.equal (List.hd_exn ivals).(0) (if on_cpu then 386.0 else 384.0));
     (* === Workgroup_reduce serialized on cc: retyping the reduction axis to a hardware kind the
        backend cannot bind must not change the accumulator width relative to the Serial spelling.
        16 terms push the running sums past 4, where bf16 can no longer represent the 1/64

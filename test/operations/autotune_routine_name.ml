@@ -8,13 +8,13 @@
    compiled. Without a name the search died at its first candidate's lowering with the
    [Invalid_argument] of [Assignments.get_name_exn], deep inside the search and saying nothing about
    names. [Autotune.model_default] and [Autotune.placement_surface], the other two drop-ins for
-   [Context.compile] here, are pinned on the same nameless comp.
-   - The [routine] column of the calibration rows (gh-ocannl-635) READS the name the compiles were
-   given instead of deriving it a second time from the block comment. Pinned with a comp that has
-   BOTH — a block comment saying one thing, a [~name] saying another — so a reading and a
-   re-derivation disagree. That divergence was unreachable while nothing could pass a name, and
-   would have been silent the day something could: every row naming the block comment while the
-   kernels it measured, and their generated sources, carried the other name.
+   [Context.compile] here, are pinned on the same nameless comp. - The [routine] column of the
+   calibration rows (gh-ocannl-635) READS the name the compiles were given instead of deriving it a
+   second time from the block comment. Pinned with a comp that has BOTH — a block comment saying one
+   thing, a [~name] saying another — so a reading and a re-derivation disagree. That divergence was
+   unreachable while nothing could pass a name, and would have been silent the day something could:
+   every row naming the block comment while the kernels it measured, and their generated sources,
+   carried the other name.
 
    The calibration file is pinned by the companion dune rule
    (--ocannl_autotune_calibration_file=autotune_routine_name.tsv) and truncated here at start, so
@@ -84,7 +84,8 @@ let () =
      [Train.tune_placements] that is not a compile. *)
   let sctx = Context.auto () in
   p "placement_surface ~name reads a nameless comp's decision surface"
-    (match Autotune.placement_surface ~name:"gh669_nameless_surface" sctx nameless Ir.Indexing.Empty
+    (match
+       Autotune.placement_surface ~name:"gh669_nameless_surface" sctx nameless Ir.Indexing.Empty
      with
     | _ -> true
     | exception Invalid_argument _ -> false);
@@ -131,4 +132,4 @@ let () =
     (not (List.exists rows ~f:(fun row -> String.equal row.Cal.routine block_name)));
   p_all "every calibration row names one of the searches by the name it was given" rows
     ~f:(fun row ->
-         String.equal row.Cal.routine tuned_name || String.equal row.Cal.routine passed_name)
+      String.equal row.Cal.routine tuned_name || String.equal row.Cal.routine passed_name)

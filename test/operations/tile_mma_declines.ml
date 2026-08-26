@@ -10,9 +10,9 @@
    rendered (intrinsics / register-tiled / scalar fallback), and since gh-ocannl-626 the summary --
    including the three-way [tensorization] label -- is a field of the compiled routine
    ([Context.routine.mma]) rather than a global a call site brackets. Autotune reads it to annotate
-   candidate timings; here we assert directly that a whole-triple [Tensorize] over a standard
-   layout renders register-tiled on the C backends while a transposed-B layout (the gradient-GEMM
-   shape) falls back to scalar, and that each routine's label reports which happened.
+   candidate timings; here we assert directly that a whole-triple [Tensorize] over a standard layout
+   renders register-tiled on the C backends while a transposed-B layout (the gradient-GEMM shape)
+   falls back to scalar, and that each routine's label reports which happened.
 
    - The per-chunk privatization byte cap (config [cc_grid_private_bytes_cap], default 256KB): a
    grid-outermost packed GEMM that re-packs the B~ panel per chunk (gh-ocannl-475's alternative
@@ -87,8 +87,8 @@ let accum_syms (opt : LL.optimized) =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
-(* Compile [comp] under [transform] and return the compiled routine's Tile_mma rendering summary.
-   No bracket around the census global: since gh-ocannl-626 [Context.compile] collects it and the
+(* Compile [comp] under [transform] and return the compiled routine's Tile_mma rendering summary. No
+   bracket around the census global: since gh-ocannl-626 [Context.compile] collects it and the
    summary is a field of the routine, so a caller cannot forget to ask. *)
 let compile_with_census ~transform comp =
   let ctx = Context.auto () in
@@ -96,7 +96,6 @@ let compile_with_census ~transform comp =
   routine.Context.mma
 
 let renderings summary = List.map summary.Ir.C_syntax.renderings ~f:snd
-
 let n = 64
 
 (* === Census: whole-triple Tensorize, standard vs. transposed-B layout (C backends). === *)

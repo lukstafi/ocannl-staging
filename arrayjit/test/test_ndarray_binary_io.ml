@@ -96,15 +96,15 @@ let test_mapped_at_offset () =
   Stdlib.Sys.remove path;
   Verdict.pass_fail "mapped at unaligned offset" (Nd.payloads_equal nd1 nd2)
 
-(* The mappable-or-decode act itself (gh-ocannl-667). Both readers -- checkpoints and safetensors
-   -- ingest through [Nd.ingest_payload], and each can only A/B whole files: a checkpoint load
-   takes [~mmap:false] for all of its payloads or none, and safetensors offers no way to decline a
-   mapping at all. What is checked here is per payload, of one file whose layout takes BOTH paths:
-   the reported path, the counter it bumped, and -- for a payload that is mappable -- that
-   declining the mapping decodes the same bytes into an equal array.
+(* The mappable-or-decode act itself (gh-ocannl-667). Both readers -- checkpoints and safetensors --
+   ingest through [Nd.ingest_payload], and each can only A/B whole files: a checkpoint load takes
+   [~mmap:false] for all of its payloads or none, and safetensors offers no way to decline a mapping
+   at all. What is checked here is per payload, of one file whose layout takes BOTH paths: the
+   reported path, the counter it bumped, and -- for a payload that is mappable -- that declining the
+   mapping decodes the same bytes into an equal array.
 
-   The layout is packed on purpose, which is where the mixture comes from: a one-byte payload
-   ahead of a double leaves that double at an offset no multiple of 8, and it decodes. *)
+   The layout is packed on purpose, which is where the mixture comes from: a one-byte payload ahead
+   of a double leaves that double at an offset no multiple of 8, and it decodes. *)
 let test_ingestion () =
   let path = Stdlib.Filename.temp_file "ndarray_ingest" ".bin" in
   let flat prec ~debug n ~f =
@@ -143,9 +143,7 @@ let test_ingestion () =
   let ic = Stdlib.open_in_bin path in
   let ingest ?padding ?mmap ~debug prec ~dims (byte_offset, nbytes) =
     let m0, d0 = Nd.ingestion_counts () in
-    let nd, taken =
-      Nd.ingest_payload ?padding ?mmap ~debug prec ~dims ~byte_offset ~nbytes ic
-    in
+    let nd, taken = Nd.ingest_payload ?padding ?mmap ~debug prec ~dims ~byte_offset ~nbytes ic in
     let m1, d1 = Nd.ingestion_counts () in
     let counted =
       match taken with

@@ -225,16 +225,16 @@ let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option
 
 (** {2 The separation query}
 
-    Does an index vector tell apart the iterations of a set of loop symbols? Where
-    {!pair_conflict} asks whether two accesses of DIFFERENT program positions can collide, this asks
-    the same engine about ONE access taken twice — the instance-vs-instance form of the question:
-    two instances of the same statement, iterating [concurrent] symbols independently, can address
-    a common cell of [idcs] only if they agree on every symbol of [syms].
+    Does an index vector tell apart the iterations of a set of loop symbols? Where {!pair_conflict}
+    asks whether two accesses of DIFFERENT program positions can collide, this asks the same engine
+    about ONE access taken twice — the instance-vs-instance form of the question: two instances of
+    the same statement, iterating [concurrent] symbols independently, can address a common cell of
+    [idcs] only if they agree on every symbol of [syms].
 
     [concurrent] must cover every symbol whose value may differ between the two instances, not only
-    those of [syms]: with [idcs = acc[w1 + w2]] and [syms = \[w1\]], holding [w2] equal would
-    "prove" that a common cell forces [w1] equal, while instances [(0, 1)] and [(1, 0)] share
-    [acc\[1\]]. [syms] is then the subset the caller needs told apart. *)
+    those of [syms]: with [idcs = acc[w1 + w2]] and [syms = [w1]], holding [w2] equal would "prove"
+    that a common cell forces [w1] equal, while instances [(0, 1)] and [(1, 0)] share [acc[1]].
+    [syms] is then the subset the caller needs told apart. *)
 let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list)
     ~(idcs : Idx.axis_index array) : bool =
   List.is_empty syms
@@ -258,19 +258,19 @@ let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list
 let within_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
   Array.length idcs = Array.length dims
   && Array.for_alli idcs ~f:(fun ax idx ->
-         match linear_terms idx with
-         | None -> false
-         | Some (terms, offset) -> (
-             let bounds =
-               List.fold terms
-                 ~init:(Some (offset, offset))
-                 ~f:(fun acc (c, s) ->
-                   match (acc, range s) with
-                   | Some (lo, hi), Some (slo, shi) ->
-                       Some (lo + min (c * slo) (c * shi), hi + max (c * slo) (c * shi))
-                   | _ -> None)
-             in
-             match bounds with Some (lo, hi) -> lo >= 0 && hi < dims.(ax) | None -> false))
+      match linear_terms idx with
+      | None -> false
+      | Some (terms, offset) -> (
+          let bounds =
+            List.fold terms
+              ~init:(Some (offset, offset))
+              ~f:(fun acc (c, s) ->
+                match (acc, range s) with
+                | Some (lo, hi), Some (slo, shi) ->
+                    Some (lo + min (c * slo) (c * shi), hi + max (c * slo) (c * shi))
+                | _ -> None)
+          in
+          match bounds with Some (lo, hi) -> lo >= 0 && hi < dims.(ax) | None -> false))
 
 (** {2 The peel-guard legality query}
 
@@ -320,8 +320,7 @@ let within_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
     Requiring more would decline the ordinary shape of an outer serial level the cell is free of. *)
 
 type peel_guard =
-  | Confined_to_peel
-      (** Every symbol the guard mentions is peeled or bound outside every loop. *)
+  | Confined_to_peel  (** Every symbol the guard mentions is peeled or bound outside every loop. *)
   | Lane_private_if_separated of Idx.symbol list
       (** Legal exactly if the accumulated cell {!separates} these enclosing loop symbols. *)
   | Not_peelable of string  (** With the reason, for a decline log. *)

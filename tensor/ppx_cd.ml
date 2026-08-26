@@ -1002,9 +1002,7 @@ let translate ?ident_label (expr : expression) : result =
         | Lident tensor_name, Pexp_ident { txt = Lident name_expr; _ }
           when String.equal name_expr tensor_name ->
             (* Simple case: just tensor initialization, similar to original string syntax *)
-            let name_expr =
-              Ast_builder.Default.estring ~loc:first_label.loc tensor_name
-            in
+            let name_expr = Ast_builder.Default.estring ~loc:first_label.loc tensor_name in
             let extra_args =
               List.map extra_args ~f:(function
                 | { txt = Lident "o"; _ }, value -> ("output_dims", value)
@@ -1073,18 +1071,13 @@ let translate ?ident_label (expr : expression) : result =
         _;
       } ->
         { default_result with expr = ndarray_op ~ndarray_fn:[%expr NTDSL.ndarray] expr }
-    | [%expr lhs] ->
-        { default_result with typ = Array; slot = LHS }
-    | [%expr v] ->
-        { default_result with typ = Array; slot = LHS; expr = [%expr t.Tensor.value] }
-    | [%expr g] ->
-        { default_result with typ = Array; slot = LHS }
-    | [%expr rhs1] ->
-        { default_result with typ = Array; slot = RHS1 }
+    | [%expr lhs] -> { default_result with typ = Array; slot = LHS }
+    | [%expr v] -> { default_result with typ = Array; slot = LHS; expr = [%expr t.Tensor.value] }
+    | [%expr g] -> { default_result with typ = Array; slot = LHS }
+    | [%expr rhs1] -> { default_result with typ = Array; slot = RHS1 }
     | [%expr t] -> { default_result with slot = LHS }
     | [%expr t1] -> { default_result with slot = RHS1 }
-    | [%expr v1] ->
-        { default_result with typ = Array; slot = RHS1; expr = [%expr t1.Tensor.value] }
+    | [%expr v1] -> { default_result with typ = Array; slot = RHS1; expr = [%expr t1.Tensor.value] }
     | [%expr g1] ->
         {
           default_result with
@@ -1092,12 +1085,9 @@ let translate ?ident_label (expr : expression) : result =
           slot = RHS1;
           expr = [%expr Option.map t1.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | [%expr rhs2] ->
-        { default_result with typ = Array; slot = RHS2 }
-    | [%expr t2] ->
-        { default_result with typ = Tensor; slot = RHS2 }
-    | [%expr v2] ->
-        { default_result with typ = Array; slot = RHS2; expr = [%expr t2.Tensor.value] }
+    | [%expr rhs2] -> { default_result with typ = Array; slot = RHS2 }
+    | [%expr t2] -> { default_result with typ = Tensor; slot = RHS2 }
+    | [%expr v2] -> { default_result with typ = Array; slot = RHS2; expr = [%expr t2.Tensor.value] }
     | [%expr g2] ->
         {
           default_result with
@@ -1105,12 +1095,9 @@ let translate ?ident_label (expr : expression) : result =
           slot = RHS2;
           expr = [%expr Option.map t2.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | [%expr rhs3] ->
-        { default_result with typ = Array; slot = RHS3 }
-    | [%expr t3] ->
-        { default_result with typ = Tensor; slot = RHS3 }
-    | [%expr v3] ->
-        { default_result with typ = Array; slot = RHS3; expr = [%expr t3.Tensor.value] }
+    | [%expr rhs3] -> { default_result with typ = Array; slot = RHS3 }
+    | [%expr t3] -> { default_result with typ = Tensor; slot = RHS3 }
+    | [%expr v3] -> { default_result with typ = Array; slot = RHS3; expr = [%expr t3.Tensor.value] }
     | [%expr g3] ->
         {
           default_result with

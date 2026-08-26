@@ -13,16 +13,15 @@
    parameters it is about to commit to — so this file pins three things:
 
    - the predicate's own rows: each of the five dimensions refuses one over its cap as its own typed
-     resource, and accepts a candidate exactly AT the cap (without that arm a predicate that refuses
-     everything reads as a pass), and an unpredicted dimension is exempt rather than refused;
-   - the seeder's prediction is FAITHFUL: for every GPU seed of a real batched matmul, the predicted
-     geometry is the one the applied schedule actually launches with. A prediction that drifted from
-     what the builders emit would silently withhold legal candidates, which is worse than the wasted
-     compile it saves;
-   - parity, per dimension, on one real seed: a cap at the seed's own extent leaves it seeded AND
-     accepted by the gate; a cap one below removes it from the seed list AND makes the gate refuse
-     it — with the SAME sentence, so a refutation log and a decline log say the same thing about the
-     same candidate.
+   resource, and accepts a candidate exactly AT the cap (without that arm a predicate that refuses
+   everything reads as a pass), and an unpredicted dimension is exempt rather than refused; - the
+   seeder's prediction is FAITHFUL: for every GPU seed of a real batched matmul, the predicted
+   geometry is the one the applied schedule actually launches with. A prediction that drifted from
+   what the builders emit would silently withhold legal candidates, which is worse than the wasted
+   compile it saves; - parity, per dimension, on one real seed: a cap at the seed's own extent
+   leaves it seeded AND accepted by the gate; a cap one below removes it from the seed list AND
+   makes the gate refuse it — with the SAME sentence, so a refutation log and a decline log say the
+   same thing about the same candidate.
 
    Limits are MOCKED throughout: the point is a cap below a candidate's geometry, and the fleet's
    real devices are nowhere near these extents (CUDA's [maxThreadsDim.z] of 64 against a 1024
@@ -40,8 +39,8 @@ module BI = Ir.Backend_intf
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
-
 let p_empty = Verdict.p_empty
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -75,9 +74,11 @@ let key (q : Autotune.sketch_params) =
 let () =
   (* === The predicate's five rows, each over its own cap and each at it === *)
   let row ~what ~resource ~at ~over g =
-    p (what ^ ": a geometry exactly at the cap passes the predicate")
+    p
+      (what ^ ": a geometry exactly at the cap passes the predicate")
       (Option.is_none (Sched.launch_geometry_excess ~limits:at g));
-    p (what ^ ": one over the cap is refused as its own typed resource")
+    p
+      (what ^ ": one over the cap is refused as its own typed resource")
       (match Sched.launch_geometry_excess ~limits:over g with
       | Some x ->
           SO.equal_resource x.Sched.lx_resource resource
@@ -85,19 +86,22 @@ let () =
       | None -> false)
   in
   row ~what:".x workgroup extent" ~resource:SO.Workgroup_x_extent
-    ~at:(wg_caps (128, 1, 1)) ~over:(wg_caps (127, 1024, 1024))
+    ~at:(wg_caps (128, 1, 1))
+    ~over:(wg_caps (127, 1024, 1024))
     (geometry ~block_x:128 ());
   row ~what:".y workgroup extent" ~resource:SO.Workgroup_y_extent
-    ~at:(wg_caps (1, 128, 1)) ~over:(wg_caps (1024, 127, 1024))
+    ~at:(wg_caps (1, 128, 1))
+    ~over:(wg_caps (1024, 127, 1024))
     (geometry ~block_y:128 ());
-  (* CUDA's cliff: [maxThreadsDim] is (1024, 1024, 64) — re-verified through bin/device_props on
-     the fleet's sm_120 part, which also reports [maxGridSize] (2^31-1, 65535, 65535) — so a
-     2 x 2 x 128 workgroup has a perfectly legal 512-thread product and is still an invalid launch
-     configuration. No in-tree annotator emits three [Workgroup] loops, so
-     this row is exercised through the predicate directly; [launch_dim_gate.ml] carries the same
-     geometry through the gate on a hand-built nest. *)
+  (* CUDA's cliff: [maxThreadsDim] is (1024, 1024, 64) — re-verified through bin/device_props on the
+     fleet's sm_120 part, which also reports [maxGridSize] (2^31-1, 65535, 65535) — so a 2 x 2 x 128
+     workgroup has a perfectly legal 512-thread product and is still an invalid launch
+     configuration. No in-tree annotator emits three [Workgroup] loops, so this row is exercised
+     through the predicate directly; [launch_dim_gate.ml] carries the same geometry through the gate
+     on a hand-built nest. *)
   row ~what:".z workgroup extent" ~resource:SO.Workgroup_z_extent
-    ~at:(wg_caps (1, 1, 128)) ~over:(wg_caps (1024, 1024, 127))
+    ~at:(wg_caps (1, 1, 128))
+    ~over:(wg_caps (1024, 1024, 127))
     (geometry ~block_z:128 ());
   row ~what:".y grid extent" ~resource:SO.Grid_y_extent ~at:(grid_cap 128) ~over:(grid_cap 127)
     (geometry ~grid_y:128 ());
@@ -105,7 +109,8 @@ let () =
     (geometry ~grid_z:128 ());
   p "the CUDA cliff: a 2 x 2 x 128 workgroup is refused on a (1024, 1024, 64) device"
     (match
-       Sched.launch_geometry_excess ~limits:(wg_caps (1024, 1024, 64))
+       Sched.launch_geometry_excess
+         ~limits:(wg_caps (1024, 1024, 64))
          (geometry ~block_x:2 ~block_y:2 ~block_z:128 ())
      with
     | Some x -> SO.equal_resource x.Sched.lx_resource SO.Workgroup_z_extent
@@ -198,15 +203,13 @@ let () =
 
      The reference seeds are scalar-blocktile leaves (no mma capability in [limits], so the
      tensorized pipeline is refuted and the enumeration is the blocktile family alone): a 32x32x8
-     tiling of this site launches a 1 x 2 grid of 8 x 8 workgroups, and its batch-grid twin folds
-     b x h = 8 onto [.z]. The [.y] leg uses the serial-batch seed and the [.z] leg the twin, because
+     tiling of this site launches a 1 x 2 grid of 8 x 8 workgroups, and its batch-grid twin folds b
+     x h = 8 onto [.z]. The [.y] leg uses the serial-batch seed and the [.z] leg the twin, because
      one [max_grid_yz] field caps both grid dimensions — on the twin, a cap below the row-block
      count would also refuse the fold, and the claim could not say which row fired. *)
   let blocktile ~batch_grid =
     List.find_exn (seeds BI.no_hardware_limits) ~f:(fun q ->
-        q.Autotune.sk_gpu
-        && (not q.Autotune.sk_mma)
-        && (not q.Autotune.sk_epilogue)
+        q.Autotune.sk_gpu && (not q.Autotune.sk_mma) && (not q.Autotune.sk_epilogue)
         && q.Autotune.sk_bm = 32 && q.Autotune.sk_tm = 4 && q.Autotune.sk_bk = 8
         && Bool.equal q.Autotune.sk_batch_grid batch_grid)
   in
@@ -214,11 +217,14 @@ let () =
   let applied q = Sched.apply (Autotune.sketch_schedule ~p:q opt) opt in
   let sdims = LL.launch_dims (applied serial_seed).LL.llc in
   let tdims = LL.launch_dims (applied twin_seed).LL.llc in
-  p "parity premise: the reference seed launches 8 x 8 workgroups over a .y grid of 2, its twin \
+  p
+    "parity premise: the reference seed launches 8 x 8 workgroups over a .y grid of 2, its twin \
      folding 8 onto .z"
-    (sdims.LL.block.(0) = 8 && sdims.LL.block.(1) = 8 && sdims.LL.grid.(1) = 2
-   && sdims.LL.grid.(2) = 1
-   && tdims.LL.grid.(2) = bb * hh);
+    (sdims.LL.block.(0) = 8
+    && sdims.LL.block.(1) = 8
+    && sdims.LL.grid.(1) = 2
+    && sdims.LL.grid.(2) = 1
+    && tdims.LL.grid.(2) = bb * hh);
 
   (* The gate's verdict on this seed's schedule: the typed resource and the sentence it reports. *)
   let gate q ~limits =
@@ -258,9 +264,11 @@ let () =
       | None -> false)
   in
   parity ~what:"seed .x workgroup extent" ~resource:SO.Workgroup_x_extent ~seed:serial_seed
-    ~at:(wg_caps (8, 1024, 1024)) ~over:(wg_caps (7, 1024, 1024));
+    ~at:(wg_caps (8, 1024, 1024))
+    ~over:(wg_caps (7, 1024, 1024));
   parity ~what:"seed .y workgroup extent" ~resource:SO.Workgroup_y_extent ~seed:serial_seed
-    ~at:(wg_caps (1024, 8, 1024)) ~over:(wg_caps (1024, 7, 1024));
+    ~at:(wg_caps (1024, 8, 1024))
+    ~over:(wg_caps (1024, 7, 1024));
   parity ~what:"seed .y grid extent" ~resource:SO.Grid_y_extent ~seed:serial_seed ~at:(grid_cap 2)
     ~over:(grid_cap 1);
   parity ~what:"seed .z grid fold" ~resource:SO.Grid_z_extent ~seed:twin_seed

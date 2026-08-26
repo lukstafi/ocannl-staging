@@ -63,12 +63,12 @@ let axis_type_label = function
     consumer that walks the IR looking for schedulable structure means only one of them:
 
     - [Inlined_computation] -- virtualization's inline of a virtual node's computation at a read
-      site ([virtual_llc], and the CSE / simplification rewrites that carry those scopes along).
-      The loops inside such a body are the inlined node's own iteration space, re-instantiated per
-      use site; no [Schedule] op has ever targeted them.
-    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
-      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a
-      running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
+      site ([virtual_llc], and the CSE / simplification rewrites that carry those scopes along). The
+      loops inside such a body are the inlined node's own iteration space, re-instantiated per use
+      site; no [Schedule] op has ever targeted them.
+    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing [Unroll]
+      and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a running
+      value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
       [Schedule.rewrite_loop] retargets.
 
     This is the fact [Autotune.collect_loops] needs: it enumerates loops inside [Schedule_minted]
@@ -79,8 +79,8 @@ let axis_type_label = function
     Deliberately NOT the mechanism behind {!scope_target_rejection}: that one asks whether a scope
     was in the program a given [optimize] call was HANDED, which is a per-call fact -- a
     virtualizer-minted scope handed back into a second [optimize] still carries
-    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no
-    honest way to spell "not mine". See {!input_scope_ids}. *)
+    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no honest
+    way to spell "not mine". See {!input_scope_ids}. *)
 type scope_mint = Inlined_computation | Schedule_minted [@@deriving sexp, compare, equal]
 
 type t =
@@ -1368,8 +1368,7 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) ~guarded ~enc
     List.iter enclosing ~f:(fun (s, width) ->
         if
           width > 1
-          && not
-               (Option.exists !at_idcs ~f:(Array.exists ~f:(axis_index_mentions_symbol s)))
+          && not (Option.exists !at_idcs ~f:(Array.exists ~f:(axis_index_mentions_symbol s)))
         then raise @@ Non_virtual 147);
     let current_computations =
       Hashtbl.find optim_ctx.computations traced.tn |> Option.value ~default:[]
@@ -2160,8 +2159,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                               ~guarded ~enclosing:enclosing' body;
                         }
                   in
-                  (* The stored subtree is rooted AT this loop, so [enclosing] (not [enclosing'])
-                     is what it fails to contain. *)
+                  (* The stored subtree is rooted AT this loop, so [enclosing] (not [enclosing']) is
+                     what it fails to contain. *)
                   check_and_store_virtual optim_ctx ~guarded ~enclosing node static_indices stored);
               (* Phase 2 -- emit. Candidates are NOT in [process_for], so surviving readers
                  (materialized siblings, and later virtual siblings, all now stored) inline the
@@ -2247,15 +2246,14 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
        unguarded at every read site. The flag rides down into [check_and_store_virtual], which
        rejects such a candidate as [Non_virtual 142] — the same verdict the walk's own [If] arm
        gives an interior guard. The CONDITION is evaluated whenever this statement is reached, so it
-       inherits the enclosing flag rather than the one this [If] establishes.
-       Lifting this (prepending the guard to the stored computation) is adjacent to the Block
-       virtualizer's range-guard machinery. *)
+       inherits the enclosing flag rather than the one this [If] establishes. Lifting this
+       (prepending the guard to the stored computation) is adjacent to the Block virtualizer's
+       range-guard machinery. *)
     | If { cond = c, prec; body } ->
         If
           {
             cond = (loop_scalar ~process_for ~owned ~in_storage_pass ~guarded ~enclosing c, prec);
-            body =
-              loop_proc ~process_for ~owned ~in_storage_pass ~guarded:true ~enclosing body;
+            body = loop_proc ~process_for ~owned ~in_storage_pass ~guarded:true ~enclosing body;
           }
   and loop_scalar ~process_for ~owned ~in_storage_pass ~guarded ~enclosing (llsc : scalar_t) :
       scalar_t =
@@ -3442,8 +3440,7 @@ let cse_equal_scalar s1 s2 =
         Local_scope { id = id2; body = b2; orig_indices = oi2; mint = m2 } ) ->
         (* Record the binder mapping through the checked path (Bug 3) before comparing the body, so
            the binder and its nested [Set_local] / [Get_local] uses all agree via [ids_equal]. *)
-        equal_scope_mint m1 m2
-        && ids_bind id1 id2
+        equal_scope_mint m1 m2 && ids_bind id1 id2
         && Array.equal orig_idx_equal oi1 oi2
         && equal_t b1 b2
     | Get_local id1, Get_local id2 -> ids_equal id1 id2
@@ -4137,9 +4134,9 @@ let launch_dims (llc : t) : launch_dims =
 
 (** The binding arithmetic of a [Grid] loop at [slot >= 2] under the [.z] fold (see the section
     comment): [(stride, cap)] such that the loop's index is [(z / stride) % cap] — [stride] the
-    product of the per-slot maxima of grid slots in [\[2, slot)], [cap = Some m] with [m] the
-    loop's own slot maximum when a higher grid slot exists in the kernel, [None] (no modulo needed)
-    when this is the topmost folded slot, since then [z / stride < m] already. For the common
+    product of the per-slot maxima of grid slots in [\[2, slot)], [cap = Some m] with [m] the loop's
+    own slot maximum when a higher grid slot exists in the kernel, [None] (no modulo needed) when
+    this is the topmost folded slot, since then [z / stride < m] already. For the common
     single-slot-2 case this is [(1, None)]: the binding is the bare [.z] register. *)
 let grid_fold (axes : hardware_axis_info list) ~(slot : int) : int * int option =
   assert (slot >= 2);
@@ -4183,12 +4180,12 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2). A no-op
     for all-[Serial] code. Raises [Invalid_argument] on: annotated loops with [from_ <> 0]; more
     than 3 [Workgroup] slots ([Grid] slots [>= 2] fold onto [.z], see the hardware-axis section
-    comment); annotated loops inside [Local_scope] bodies; a kernel containing
-    barriers whose same-slot workgroup extents differ (a barrier under divergent control flow is UB)
-    or with a barrier lexically under an [If] guard; and writes to materialized tensor nodes
-    lexically outside all annotated loops (every hardware thread would execute them, racing with the
-    annotated writes — there is no grid-wide synchronization). Cannot prove iteration independence;
-    that is the annotating pass's obligation. *)
+    comment); annotated loops inside [Local_scope] bodies; a kernel containing barriers whose
+    same-slot workgroup extents differ (a barrier under divergent control flow is UB) or with a
+    barrier lexically under an [If] guard; and writes to materialized tensor nodes lexically outside
+    all annotated loops (every hardware thread would execute them, racing with the annotated writes
+    — there is no grid-wide synchronization). Cannot prove iteration independence; that is the
+    annotating pass's obligation. *)
 let validate_parallel plc (llc : t) : unit =
   let axes = hardware_axes llc in
   if not (List.is_empty axes) then (
@@ -5178,8 +5175,8 @@ let pure_index_guard (llsc : scalar_t) =
   | Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) -> operand a && operand b
   | _ -> false
 
-(* Whether a scalar reads the scope local [id], descending into nested scope bodies — certifies
-   that an update's contribution is free of the local it updates (the scope-local counterpart of
+(* Whether a scalar reads the scope local [id], descending into nested scope bodies — certifies that
+   an update's contribution is free of the local it updates (the scope-local counterpart of
    {!scalar_touches_tn}). *)
 let rec scalar_reads_scope ~id (s : scalar_t) =
   match s with
@@ -5237,19 +5234,18 @@ let rec index_only_scalar (llsc : scalar_t) =
   | Unop (_, (a, _)) -> index_only_scalar a
 
 (* The reduction operator of a scope-local update in EITHER spelling: the plain
-   [accum_local_update_parts] form, or virtualization's guarded-read form — [Set_local (id,
-   Where (index-only cond, update, Get_local id))], possibly nested per condition
-   ([inline_computation] folds one [Where] per range/unit-solve guard). The guarded form is a
-   reduction for RESIDENCY purposes (gh-ocannl-663): the condition observes no precision, the
-   off-condition arm carries the accumulator through unchanged, and the on-condition arm is the
-   reduce-shaped update — so the accumulator-scope census accepts it where treating the guarded
-   self-read as a recurrence would leave a virtualized reduction narrow while its materialized
-   serial twin widens (placement-dependent width). Deliberately NOT merged into
-   {!accum_local_update_parts}: its [(op, contrib)] decomposition licenses consumers (the SIMD
-   folding, [subst_accum_read]-style rewrites) to rebuild an unguarded [op(local, contrib)], which
-   the guarded form is not; and not into {!scope_updates_reduce_op}: that is the HOIST license,
-   and hoisting a guarded update across further levels is a separate question from what width its
-   accumulator resides at. *)
+   [accum_local_update_parts] form, or virtualization's guarded-read form — [Set_local (id, Where
+   (index-only cond, update, Get_local id))], possibly nested per condition ([inline_computation]
+   folds one [Where] per range/unit-solve guard). The guarded form is a reduction for RESIDENCY
+   purposes (gh-ocannl-663): the condition observes no precision, the off-condition arm carries the
+   accumulator through unchanged, and the on-condition arm is the reduce-shaped update — so the
+   accumulator-scope census accepts it where treating the guarded self-read as a recurrence would
+   leave a virtualized reduction narrow while its materialized serial twin widens
+   (placement-dependent width). Deliberately NOT merged into {!accum_local_update_parts}: its [(op,
+   contrib)] decomposition licenses consumers (the SIMD folding, [subst_accum_read]-style rewrites)
+   to rebuild an unguarded [op(local, contrib)], which the guarded form is not; and not into
+   {!scope_updates_reduce_op}: that is the HOIST license, and hoisting a guarded update across
+   further levels is a separate question from what width its accumulator resides at. *)
 let accum_local_update_op ~id (llsc : scalar_t) : Ops.binop option =
   let rec go llsc =
     match llsc with
@@ -5295,11 +5291,11 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    rebuild)] where [rebuild] re-wraps a replacement base statement in the peeled levels. The ONE
    definition shared by [C_syntax]'s widened serial fallback and the scope-form mints of
    [Schedule.Unroll ~materialize:true] and [Schedule.Partition], so the transforms and the emission
-   cannot drift in what nests they recognize. Guard legality — whether the peeled levels may
-   include a given [If] at all — is asked of {!Affine.peel_guard} and {!Affine.separates} rather
-   than decided here (gh-ocannl-722); [loop_bounds] is {!loop_bounds} of the enclosing
-   program, which is what classifies a guard symbol as an enclosing level, a peeled one, or an
-   index bound outside every loop.
+   cannot drift in what nests they recognize. Guard legality — whether the peeled levels may include
+   a given [If] at all — is asked of {!Affine.peel_guard} and {!Affine.separates} rather than
+   decided here (gh-ocannl-722); [loop_bounds] is {!loop_bounds} of the enclosing program, which is
+   what classifies a guard symbol as an enclosing level, a peeled one, or an index bound outside
+   every loop.
 
    Deliberately single-statement: a fused body updating several distinct accumulators is out of
    scope — no lowering or schedule op produces one (each [Assignments] accumulation lowers to its
@@ -5411,14 +5407,15 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body
     | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc -> (
         let rebuild b = rebuild (If { cond = (gc, gp); body = b }) in
         match
-          Affine.peel_guard ~loop_bound ~peeled:(peeled ~free_of)
-            ~guard_syms:(guard_symbols gc)
+          Affine.peel_guard ~loop_bound ~peeled:(peeled ~free_of) ~guard_syms:(guard_symbols gc)
         with
         | Affine.Not_peelable _ -> None
         | Affine.Confined_to_peel -> peel ~free_of ~pending ~rebuild gbody
         | Affine.Lane_private_if_separated enclosing ->
             peel ~free_of ~pending:(enclosing @ pending) ~rebuild gbody)
-    | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug } ]
+    | [
+     Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug };
+    ]
       when cell_invariant ~free_of idcs && cell_admits ~free_of ~pending tn idcs -> (
         match strip (flat_lines [ sbody ]) with
         | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)

@@ -47,19 +47,19 @@ let schedules () =
   let lr sched step = Train.Lr_schedule.learning_rate sched ~step in
   Verdict.p_all "warmup applies to every kind, constant included" [ con_s; cos_s; lin_s; wsd_s ]
     ~f:(fun s -> Float.(abs (lr s 0 -. 0.2) < 1e-12));
-  Verdict.p_all "constant holds base_lr after warmup" [ 5; 15; 30 ]
-    ~f:(fun s -> Float.(abs (lr con_s s -. 1.0) < 1e-12));
+  Verdict.p_all "constant holds base_lr after warmup" [ 5; 15; 30 ] ~f:(fun s ->
+      Float.(abs (lr con_s s -. 1.0) < 1e-12));
   Verdict.p "warmup starts at base_lr/warmup_steps" Float.(abs (lr cos_s 0 -. 0.2) < 1e-12);
   Verdict.p "warmup reaches base_lr on its last step" Float.(abs (lr cos_s 4 -. 1.0) < 1e-12);
   Verdict.p "cosine reaches final_frac * base_lr past total_steps"
     Float.(abs (lr cos_s 30 -. 0.1) < 1e-12);
   Verdict.p "linear reaches final_frac * base_lr past total_steps"
     Float.(abs (lr lin_s 30 -. 0.1) < 1e-12);
-  Verdict.p_all "wsd holds base_lr between warmup and the decay point" [ 5; 12; 19 ]
-    ~f:(fun s -> Float.(abs (lr wsd_s s -. 1.0) < 1e-12));
+  Verdict.p_all "wsd holds base_lr between warmup and the decay point" [ 5; 12; 19 ] ~f:(fun s ->
+      Float.(abs (lr wsd_s s -. 1.0) < 1e-12));
   Verdict.p "wsd decays below base_lr after the decay point" Float.(lr wsd_s 21 < 1.0);
   Verdict.p_all "cosine decay is nonincreasing" (List.range 5 30) ~f:(fun s ->
-         Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12));
+      Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12));
   (* Degenerate config: a warmup longer than the horizon must not keep ramping past it. *)
   let over =
     {

@@ -4,13 +4,13 @@
     memory, and nothing read them until this. They are prose, so they were assumed to be beyond
     mechanical checking — but three of the six review findings on the split that created them
     (lukstafi/ocannl-staging#406) were structural and every one was decidable from the text alone: a
-    bullet a merge resolution cut in half, an index hook naming a file that carries none of it, and a
-    row wrapped across two physical lines, which ends a Markdown table and drops the five rows below
-    it out of the index. Each was caught by a human reading carefully. A note that corrupts silently
-    is worse than one that is missing, because every later session inherits it as fact.
+    bullet a merge resolution cut in half, an index hook naming a file that carries none of it, and
+    a row wrapped across two physical lines, which ends a Markdown table and drops the five rows
+    below it out of the index. Each was caught by a human reading carefully. A note that corrupts
+    silently is worse than one that is missing, because every later session inherits it as fact.
 
-    The five rules, and what each is for, are stated in {!Test_utils.Agent_notes_scan}, which is where
-    they are decided — pure functions over strings, so the negative controls in
+    The five rules, and what each is for, are stated in {!Test_utils.Agent_notes_scan}, which is
+    where they are decided — pure functions over strings, so the negative controls in
     [agent_notes_scan_cases.ml] exercise the same code this runs over the repository. This file is
     the live-tree half: it opens what dune hands it and reports one verdict per rule.
 
@@ -31,10 +31,10 @@ module Notes = Test_utils.Agent_notes_scan
 (** Bullets that legitimately end without sentence-terminating punctuation, keyed by
     [Agent_notes_scan.subject_key] form — ["<file>: <the bullet's opening, whitespace-normalized>"],
     which the finding's own message prints ready to paste — and each carrying its reason. The cheap
-    fix for a flagged
-    bullet is punctuation; this list is for one whose ending is load-bearing. Every entry has to earn
-    its place on every run — an exemption that no longer matches a flagged bullet is reported, so a
-    stale one cannot sit here granting cover to whatever text replaced it. *)
+    fix for a flagged bullet is punctuation; this list is for one whose ending is load-bearing.
+    Every entry has to earn its place on every run — an exemption that no longer matches a flagged
+    bullet is reported, so a stale one cannot sit here granting cover to whatever text replaced it.
+*)
 let unterminated_bullets : (string * string) list = []
 
 let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
@@ -58,8 +58,7 @@ let () =
     match index_path with
     | [ p ] -> p
     | ps ->
-        eprintf "FAILED: expected exactly one index among the arguments, got %d\n"
-          (List.length ps);
+        eprintf "FAILED: expected exactly one index among the arguments, got %d\n" (List.length ps);
         Stdlib.exit 1
   in
   let index_file = docs_relative index_path in
@@ -69,8 +68,8 @@ let () =
     |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
   let bullets, findings = Notes.check_all ~index_file ~index_contents ~files in
-  eprintf "Scanned %d notes files plus the index, %d bullets, %d findings.\n"
-    (List.length files) (List.length bullets) (List.length findings);
+  eprintf "Scanned %d notes files plus the index, %d bullets, %d findings.\n" (List.length files)
+    (List.length bullets) (List.length findings);
   (* The floors. Neither moves when a note is edited, a bullet added or a file split; both fail the
      moment the scan is handed nothing, which is the one way its silence would be a lie. *)
   Verdict.claim "the scan was handed the notes files" (List.length files >= 10);
@@ -105,8 +104,7 @@ let () =
         eprintf "  %s: %s: %s\n" f.Notes.rule f.Notes.where f.Notes.message);
     Verdict.p claim (List.is_empty found)
   in
-  report Notes.rule_bullet_integrity
-    "every bullet is whole and every list parses as one reading";
+  report Notes.rule_bullet_integrity "every bullet is whole and every list parses as one reading";
   report Notes.rule_index_agreement "every index row names a file that carries what it claims";
   report Notes.rule_table_shape "every table is a table, row by row";
   report Notes.rule_reachability "every notes file is reachable from the index, and links back";
@@ -140,7 +138,8 @@ let () =
      hatch must not do. *)
   let bullet_findings =
     List.filter_map findings ~f:(fun f ->
-        if String.equal f.Notes.rule Notes.rule_bullet_integrity then Notes.exemption_key f else None)
+        if String.equal f.Notes.rule Notes.rule_bullet_integrity then Notes.exemption_key f
+        else None)
   in
   let colliding =
     List.find_a_dup (List.sort bullet_findings ~compare:String.compare) ~compare:String.compare
@@ -154,8 +153,7 @@ let () =
         not
           (List.exists findings ~f:(fun f ->
                String.equal f.Notes.rule Notes.rule_bullet_integrity
-               && Option.value_map (Notes.exemption_key f) ~default:false
-                    ~f:(String.equal key))))
+               && Option.value_map (Notes.exemption_key f) ~default:false ~f:(String.equal key))))
   in
   List.iter stale ~f:(fun (key, reason) ->
       eprintf "  stale exemption for %s (%s): no bullet is flagged for it any more\n" key reason);

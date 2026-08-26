@@ -108,11 +108,11 @@ module Slab = struct
 end
 
 (* The HIP SDK include dir (no-spaces junction on Windows / HIP_PATH / /opt/rocm), forward-slashed
-   for the clang command line. [None] when no SDK is found (the Linux built-in-headers path).
-   Lifted out of [Impl] for the same reason [Cuda_backend.cuda_include_options] was: it is a policy
-   every hiprtc caller has to agree with, and tools/fp8_soak.ml is one -- a soak that guessed its
-   own include path would report the HIP arm ready and then fail to compile its kernel wherever the
-   SDK does not sit where the guess looked (Codex P2 on PR #463, for the CUDA side of the same
+   for the clang command line. [None] when no SDK is found (the Linux built-in-headers path). Lifted
+   out of [Impl] for the same reason [Cuda_backend.cuda_include_options] was: it is a policy every
+   hiprtc caller has to agree with, and tools/fp8_soak.ml is one -- a soak that guessed its own
+   include path would report the HIP arm ready and then fail to compile its kernel wherever the SDK
+   does not sit where the guess looked (Codex P2 on PR #463, for the CUDA side of the same
    program). *)
 let hip_sdk_include_dir =
   lazy
@@ -138,9 +138,7 @@ let fp8_guard_helper_names = [ "ocannl_single_to_fp8_uniform"; "ocannl_double_to
 
 let fp8_guard_source () =
   List.map fp8_guard_helper_names ~f:(fun wanted ->
-      match
-        List.find Builtins_hip.builtins ~f:(fun (name, _, _) -> String.equal name wanted)
-      with
+      match List.find Builtins_hip.builtins ~f:(fun (name, _, _) -> String.equal name wanted) with
       | Some (_, code, _) -> code
       | None ->
           raise
@@ -552,13 +550,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let vector_bytes = 16
     let vector_style = `Packed_struct
 
-    (* gh-ocannl-663: serial-rendered reduction accumulators mirror the mma legs' residency.
-       Unlike CUDA, RDNA WMMA has genuine bf16 (and f16) accumulator variants and the uniform
-       16-bit triples are seeded, so narrow 16-bit accumulators keep their storage residency —
-       widening the serial legs here would re-introduce the serial-vs-mma width dependence
-       gh-ocannl-639 removes. fp8 has an accumulator format on no backend (its serial arithmetic
-       already bridges through float per operator), so it follows the CPU policy: f32 residency,
-       one narrowing per nest, governed by the same [narrow_compute_f32] knob. *)
+    (* gh-ocannl-663: serial-rendered reduction accumulators mirror the mma legs' residency. Unlike
+       CUDA, RDNA WMMA has genuine bf16 (and f16) accumulator variants and the uniform 16-bit
+       triples are seeded, so narrow 16-bit accumulators keep their storage residency — widening the
+       serial legs here would re-introduce the serial-vs-mma width dependence gh-ocannl-639 removes.
+       fp8 has an accumulator format on no backend (its serial arithmetic already bridges through
+       float per operator), so it follows the CPU policy: f32 residency, one narrowing per nest,
+       governed by the same [narrow_compute_f32] knob. *)
     let accum_prec prec =
       match prec with
       | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
@@ -965,8 +963,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        2^-14 where the answer is a signed zero (gh-ocannl-647, filed upstream as
        https://github.com/ROCm/rocm-systems/issues/10591 — that fix landing is what retires this
        helper). The guard pre-rounds only that range, which rounds to zero anyway, so it is exact
-       everywhere, and this backend's fp8 output matches CUDA, cc, Metal and the host codec on
-       every input.
+       everywhere, and this backend's fp8 output matches CUDA, cc, Metal and the host codec on every
+       input.
 
        One funnel rather than four call sites, because the first version of this guarded
        [convert_precision] alone and left fp8 ARITHMETIC results narrowing through bare casts — an
@@ -1933,8 +1931,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ("compute_capability_major", [%sexp_of: int] attributes.compute_capability_major);
               ("compute_capability_minor", [%sexp_of: int] attributes.compute_capability_minor);
               ("max_threads_per_block", [%sexp_of: int] attributes.max_threads_per_block);
-              (* The launch-dimension limits the schedule layer gates against: [max_grid_size]
-                 feeds [hardware_limits.max_grid_yz], and [max_threads_dim] bounds a workgroup
+              (* The launch-dimension limits the schedule layer gates against: [max_grid_size] feeds
+                 [hardware_limits.max_grid_yz], and [max_threads_dim] bounds a workgroup
                  per-dimension (beyond the [max_threads_per_block] product). Surfaced so a run on
                  hardware can read back what the gates compare against -- otherwise the only
                  evidence a query is not degenerate is that nothing got rejected. *)
@@ -1966,9 +1964,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
            (* Per-dimension workgroup caps (gh-ocannl-679), from the same queried [max_threads_dim]
               the dump above surfaces. On the AMD parts seen so far it reads (1024, 1024, 1024) --
-              equal to [max_threads_per_block], so on those devices every per-dimension violation
-              is also a product violation and this row never fires alone. It is CUDA, whose [.z] is
-              64, that the row exists for; filling it here keeps the two backends' gates identical
+              equal to [max_threads_per_block], so on those devices every per-dimension violation is
+              also a product violation and this row never fires alone. It is CUDA, whose [.z] is 64,
+              that the row exists for; filling it here keeps the two backends' gates identical
               rather than making the caller ask which backend it is on. *)
            max_workgroup_dims =
              (match
@@ -1982,11 +1980,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       let _, _, z = a.max_threads_dim in
                       z) )
               with
-              | Some x, Some y, Some z -> Some (x, y, z)
-              | _ -> None);
-           (* One cap for both gated dimensions (see [Backend_intf.max_grid_yz]): the smaller of
-              the queried .y and .z components, so the gate is never looser than the device on
-              either. On the AMD devices seen so far they coincide. *)
+             | Some x, Some y, Some z -> Some (x, y, z)
+             | _ -> None);
+           (* One cap for both gated dimensions (see [Backend_intf.max_grid_yz]): the smaller of the
+              queried .y and .z components, so the gate is never looser than the device on either.
+              On the AMD devices seen so far they coincide. *)
            max_grid_yz =
              min_over (fun (a : H.Device.attributes) ->
                  let _, y, z = a.max_grid_size in

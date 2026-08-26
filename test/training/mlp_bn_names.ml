@@ -409,8 +409,8 @@ let () =
      differ (gh-ocannl-725). What is robust here is the RANKING and its margins — the gaps between
      the top three characters are ~0.08, some 200x the drift — so the digits go to stderr and stdout
      keeps the ordered letters plus the separation that makes the order meaningful. Both claims
-     discriminate: a model that failed to learn the letter-frequency head would rank differently, and
-     a collapsed (near-uniform) distribution would fail the margin. *)
+     discriminate: a model that failed to learn the letter-frequency head would rank differently,
+     and a collapsed (near-uniform) distribution would fail the margin. *)
   set_ctx_one_hot (Array.create ~len:block_size dot_idx);
   let start_probs, _dice = next_probs () in
   let ranked =
@@ -424,9 +424,12 @@ let () =
     |> Array.map ~f:(fun (p, i) -> Printf.sprintf "%c=%.2f" (letter_of i) p)
     |> String.concat_array ~sep:" ");
   let letters =
-    top3 |> Array.map ~f:(fun (_, i) -> String.of_char (letter_of i)) |> String.concat_array ~sep:" "
+    top3
+    |> Array.map ~f:(fun (_, i) -> String.of_char (letter_of i))
+    |> String.concat_array ~sep:" "
   in
-  Verdict.p "Start-context top-3 next chars are a, e, i in that order" (String.equal letters "a e i");
+  Verdict.p "Start-context top-3 next chars are a, e, i in that order"
+    (String.equal letters "a e i");
   let min_gap = 0.05 in
   let gaps_wide =
     Array.for_alli top3 ~f:(fun k (p, _) ->

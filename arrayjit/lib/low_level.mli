@@ -53,9 +53,9 @@ val axis_type_label : axis_type -> string
       site, and the rewrites that carry those scopes along. The loops inside such a body are the
       inlined node's own iteration space, re-instantiated per use site; no [Schedule] op has ever
       targeted them.
-    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
-      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a
-      running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
+    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing [Unroll]
+      and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a running
+      value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
       [Schedule.rewrite_loop] retargets.
 
     This is the fact [Autotune.collect_loops] needs: it enumerates loops inside [Schedule_minted]
@@ -66,8 +66,8 @@ val axis_type_label : axis_type -> string
     Deliberately NOT the mechanism behind the scope-target contract {!input_scope_ids} serves: that
     one asks whether a scope was in the program a given {!optimize} call was HANDED, which is a
     per-call fact -- a virtualizer-minted scope handed back into a second [optimize] still carries
-    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no
-    honest way to spell "not mine". *)
+    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no honest
+    way to spell "not mine". *)
 type scope_mint = Inlined_computation | Schedule_minted [@@deriving sexp, compare, equal]
 
 (** Cases: [t] -- code, [scalar_t] -- single number at some precision. *)
@@ -185,11 +185,11 @@ and scalar_t =
           node with no setter is decided non-virtual, so a hand-built scope over a freshly created
           node is rejected too unless the node is declared virtual. AFTER [optimize] the shape is
           legal and means the opposite: [Schedule]'s materializing [Unroll] and [Partition] mints
-          and [C_syntax.try_localize_serial_reduce] localize a materialized accumulator this way, and
-          codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR already
-          in that form reaches a backend through [Context.compile ?prelowered], never through
-          [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only by
-          itself, when a later refusal materializes the node it had inlined — which happens
+          and [C_syntax.try_localize_serial_reduce] localize a materialized accumulator this way,
+          and codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR
+          already in that form reaches a backend through [Context.compile ?prelowered], never
+          through [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only
+          by itself, when a later refusal materializes the node it had inlined — which happens
           (gh-ocannl-704): the virtualization walk is in source order, so a statement reached after
           a read that already minted can materialize the node under the scope. *)
   | Get_local of scope_id
@@ -366,14 +366,14 @@ val peel_accum_nest :
     load/store pair private and idempotent (gh-ocannl-721) — which is why the cell reaches the
     decision and the peel defers it to the base.
 
-    [loop_bounds] is {!loop_bounds} of the enclosing program, and supplies both the
-    classification and the ranges: a guard symbol in it that is not peeled is an enclosing level's
-    index, while one outside it is a static index parameter or a runtime extent and is harmless —
-    which is what keeps gh-490's runtime-extent guard ([Assignments.extent_guard]'s [i < s], whose
-    bound is a static symbol rather than a constant) peelable. Required rather than defaulted, and
-    derived from the program rather than certified by the caller, so that no call site can forget
-    it: the mints of [Schedule] need it as much as codegen does, since a refused mint there turns
-    segment seams into narrowing points instead of merely declining an optimization. *)
+    [loop_bounds] is {!loop_bounds} of the enclosing program, and supplies both the classification
+    and the ranges: a guard symbol in it that is not peeled is an enclosing level's index, while one
+    outside it is a static index parameter or a runtime extent and is harmless — which is what keeps
+    gh-490's runtime-extent guard ([Assignments.extent_guard]'s [i < s], whose bound is a static
+    symbol rather than a constant) peelable. Required rather than defaulted, and derived from the
+    program rather than certified by the caller, so that no call site can forget it: the mints of
+    [Schedule] need it as much as codegen does, since a refused mint there turns segment seams into
+    narrowing points instead of merely declining an optimization. *)
 
 (** {2 Hardware axis analyses}
 
@@ -382,8 +382,8 @@ val peel_accum_nest :
     0), the next [.y], then [.z]; [Workgroup] and [Workgroup_reduce] share the block/threadgroup
     slot space. [Grid] slots [>= 2] all share the hardware [.z] dimension by folding
     (gh-ocannl-643): the launch's [.z] extent is their per-slot maxima multiplied out
-    ({!launch_dims}) and each such loop binds [(z / stride) % cap] ({!grid_fold}); [Workgroup]
-    slots stay capped at 3. *)
+    ({!launch_dims}) and each such loop binds [(z / stride) % cap] ({!grid_fold}); [Workgroup] slots
+    stay capped at 3. *)
 
 type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, equal]
 (** Arrays of length 3 ([.x], [.y], [.z]); all-1s for all-[Serial] code. *)
@@ -404,10 +404,10 @@ val launch_dims : t -> launch_dims
     per-slot maxima of grid slots [>= 2] (the [.z] fold, see the section comment). *)
 
 val grid_fold : hardware_axis_info list -> slot:int -> int * int option
-(** The binding arithmetic of a [Grid] loop at [slot >= 2] under the [.z] fold: [(stride, cap)]
-    such that the loop binds [(z / stride) % cap] — [stride] the product of the per-slot maxima of
-    grid slots in [\[2, slot)], [cap = None] (no modulo) when no higher grid slot exists in the
-    kernel. [(1, None)] — the bare [.z] register — for the common single-slot-2 case. *)
+(** The binding arithmetic of a [Grid] loop at [slot >= 2] under the [.z] fold: [(stride, cap)] such
+    that the loop binds [(z / stride) % cap] — [stride] the product of the per-slot maxima of grid
+    slots in [\[2, slot)], [cap = None] (no modulo) when no higher grid slot exists in the kernel.
+    [(1, None)] — the bare [.z] register — for the common single-slot-2 case. *)
 
 val scope_purity_violation : t -> string option
 (** gh-ocannl-584: the predicate form of {!validate_scope_bodies} — [None] when every [Local_scope]
@@ -845,8 +845,8 @@ val sink_zero_outs : t -> t
 
     Both dumps render a [Constant] through {!Utils.decimal_float_literal}: a floating literal that
     parses back to exactly the double it names, so the dump distinguishes [-0.0] from [+0.0] and a
-    constant whose 17th significant digit matters from one whose does not (gh-ocannl-713). The
-    dumps are the surface a constant bug is chased on, so normalizing the values away there costs a
+    constant whose 17th significant digit matters from one whose does not (gh-ocannl-713). The dumps
+    are the surface a constant bug is chased on, so normalizing the values away there costs a
     session before anyone suspects the view. The C-dialect spellings — [INFINITY], the hexadecimal
     literal for an f32 tie — belong to {!C_syntax.c_float_literal} and are deliberately not carried
     here: a dump is not C. *)

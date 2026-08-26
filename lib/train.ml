@@ -729,17 +729,16 @@ let placement_arm_name = function
     before cost, per the gh-558 lesson; config [tune_flip_ordering=cost] restores the legacy
     recompute-cost order as the evaluation baseline — weighed, under the default
     [tune_flip_ordering=profitable] (gh-ocannl-579), against what the two arms just MEASURED about
-    the family that prior points at ({!Autotune.family_profit_of_reports} over both arm reports:
-    arm B is the all-materialized specialization the enablement set is derived from, so its best
+    the family that prior points at ({!Autotune.family_profit_of_reports} over both arm reports: arm
+    B is the all-materialized specialization the enablement set is derived from, so its best
     tensorized time against its best time prices the promotion for free). A family measured to lose
     here by more than [tune_flip_profit_margin] voids the prior and the surface ranks by cost — the
     prior models expressibility, and on gh-514's metal/f16 cell promoting a hopeless family took
     budget slots 1-2 and pushed the winning cheap flip out of a budget-5 chain. And, under config
-    [autotune_bound_pruning],
-    fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial placement
-    vector extended by it already meets the best measured time (admissible: the floor lower-bounds
-    every completion, so the flip cannot win). Fathomed flips do not consume the budget, which
-    counts measured flips.
+    [autotune_bound_pruning], fathoms a [Materialize] flip pre-search when the roofline floor of the
+    chain's partial placement vector extended by it already meets the best measured time
+    (admissible: the floor lower-bounds every completion, so the flip cannot win). Fathomed flips do
+    not consume the budget, which counts measured flips.
 
     gh-ocannl-638, [ship_arm] (config [tune_ship_arm], default [Measured_winner]): ship a chosen
     {!placement_arm} instead of the measured winner. It exists for measurement — a profile of arm
@@ -1163,7 +1162,8 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
       LL =
       Ir.Low_level
     in
-    let (* gh-514 follow-up gh-ocannl-579: the enablement prior prices which sketch families a flip
+    let
+        (* gh-514 follow-up gh-ocannl-579: the enablement prior prices which sketch families a flip
            makes EXPRESSIBLE, and nothing about whether they pay. The arms just searched settle
            that, for free: arm B is the all-materialized specialization the prior derives its
            enablement set from, so its report's best tensorized time against its best time says what
@@ -1188,7 +1188,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
          silently skip the refinement and ship the A/B winner as though the setting had been
          honored. The two process-level classes are not this containment's either, for the same
          reasons they are not the arms'. *)
-      | exception exn when (match exn with Utils.User_error _ -> true | _ -> must_propagate exn) ->
+      | exception exn when match exn with Utils.User_error _ -> true | _ -> must_propagate exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
           Stdlib.Printexc.raise_with_backtrace exn backtrace
       | exception exn ->

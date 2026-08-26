@@ -5,16 +5,16 @@
    Two spellings, because on ROCm they are not the same conversion:
 
    - [`Raw] is [(__hip_fp8_e5m2)x], the platform's own cast. It is BROKEN for tiny magnitudes
-     (gh-ocannl-647): an out-of-range shift in [hip/amd_detail/amd_hip_fp8.h]'s [cast_to_f8] returns
-     values as large as 2^-14 where every other implementation returns a signed zero. Sweeping it is
-     what localizes the defect to an exponent window, and a count of 0 here is the trigger to remove
-     the guard (https://github.com/ROCm/rocm-systems/issues/10591).
-   - [`Guarded] is [ocannl_single_to_fp8_uniform] / [ocannl_double_to_fp8_uniform] from
-     {!Builtins_hip} — the source text, fetched from the backend rather than transcribed, exactly as
-     the host side of this soak is the shipped [builtins.c] object code reached by [extern]. This is
-     what an OCANNL HIP kernel narrows with, unconditionally since gh-ocannl-647, so it is what
-     "does our codec still agree with what our kernels produce" really asks here. It is the default,
-     and the pass/fail gate: 0 disagreements expected on every ROCm.
+   (gh-ocannl-647): an out-of-range shift in [hip/amd_detail/amd_hip_fp8.h]'s [cast_to_f8] returns
+   values as large as 2^-14 where every other implementation returns a signed zero. Sweeping it is
+   what localizes the defect to an exponent window, and a count of 0 here is the trigger to remove
+   the guard (https://github.com/ROCm/rocm-systems/issues/10591). - [`Guarded] is
+   [ocannl_single_to_fp8_uniform] / [ocannl_double_to_fp8_uniform] from {!Builtins_hip} — the source
+   text, fetched from the backend rather than transcribed, exactly as the host side of this soak is
+   the shipped [builtins.c] object code reached by [extern]. This is what an OCANNL HIP kernel
+   narrows with, unconditionally since gh-ocannl-647, so it is what "does our codec still agree with
+   what our kernels produce" really asks here. It is the default, and the pass/fail gate: 0
+   disagreements expected on every ROCm.
 
    Compiled WITHOUT [-ffast-math], which the backend does pass: fast math is about arithmetic and
    this program does none — the conversion is the whole kernel. The guard's own [fabsf]/[copysignf]
@@ -38,8 +38,7 @@ let source () =
   {|
 #include <hip/hip_fp8.h>
 
-|}
-  ^ Hip_backend.fp8_guard_source ()
+|} ^ Hip_backend.fp8_guard_source ()
   ^ {|
 
 /* Which side of amd_hip_fp8.h's compile-time split the conversions above were built on, asked of
@@ -149,8 +148,8 @@ type state = {
 (* Present so the arms share one signature, and it genuinely has nothing to select between here.
    ROCm's split IS compile-time -- [HIP_FP8_CVT_FAST_PATH] -- but it is keyed off the TARGET
    ARCHITECTURE MACRO (__gfx942__ and four others), not off a numeric threshold an option could be
-   dialled below the device's own capability the way [--gpu-architecture=compute_XX] can be on
-   CUDA. hiprtc compiles for the current default device, so [`Device] and [`Backend] are the same
+   dialled below the device's own capability the way [--gpu-architecture=compute_XX] can be on CUDA.
+   hiprtc compiles for the current default device, so [`Device] and [`Backend] are the same
    compilation, and which side of the split it landed on is REPORTED by {!conversion_path} rather
    than chosen here. *)
 type arch_policy = [ `Device | `Backend ]
@@ -200,8 +199,7 @@ let init () =
       let path_out = H.Deviceptr.mem_alloc ~size_in_bytes:8 in
       H.Stream.launch_kernel
         (H.Module.get_function kernel_module ~name:"ocannl_report_fp8_path")
-        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream
-        [ H.Stream.Tensor path_out ];
+        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream [ H.Stream.Tensor path_out ];
       let path_host =
         Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int32 Stdlib.Bigarray.c_layout 2
       in
@@ -264,8 +262,7 @@ let conversion_path () =
   | 0 ->
       Printf.sprintf "header software cast_to_f8 (HIP_FP8_CVT_FAST_PATH = 0 on %s)"
         st.attrs.gcn_arch_name
-  | _ ->
-      Printf.sprintf "unknown (HIP_FP8_CVT_FAST_PATH undefined, on %s)" st.attrs.gcn_arch_name
+  | _ -> Printf.sprintf "unknown (HIP_FP8_CVT_FAST_PATH undefined, on %s)" st.attrs.gcn_arch_name
 
 let block_dim = 256
 let grid_dim = 4096

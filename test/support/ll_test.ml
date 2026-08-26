@@ -110,10 +110,10 @@ let mul a b = binop Ops.Mul a b
 (** {2 Index-precision scalars}
 
     The builders above are single-precision, which is what a value computation is. A GUARD is not: a
-    comparison and its conjunctions are read at index precision, the same as an
-    {!Ir.Low_level.If}'s condition and a [Where]'s selector, and building one at [single] misstates
-    what the pass under test sees. Index precision is read at build time rather than captured once,
-    because it is a configured setting. *)
+    comparison and its conjunctions are read at index precision, the same as an {!Ir.Low_level.If}'s
+    condition and a [Where]'s selector, and building one at [single] misstates what the pass under
+    test sees. Index precision is read at build time rather than captured once, because it is a
+    configured setting. *)
 
 let iprec () = Ops.index_prec ()
 
@@ -174,9 +174,9 @@ let ramp base s = add (c base) (embed s)
     the leg passes for the wrong reason. A zero-mean operand random-walks small enough that every
     bf16 partial sum stays bf16-exact, so per-step narrowing is invisible and a schedule-dependent
     accumulator width reads as parity — the zero-mean trap that
-    docs/agent-notes/backend-precision-and-simd.md's gh-ocannl-639 entry records (trap 2), found
-    the hard way by this test's first draft. Hence a cycle whose cells
-    are exact and whose running sums DRIFT out of the storage format's exactness range.
+    docs/agent-notes/backend-precision-and-simd.md's gh-ocannl-639 entry records (trap 2), found the
+    hard way by this test's first draft. Hence a cycle whose cells are exact and whose running sums
+    DRIFT out of the storage format's exactness range.
 
     Both halves of that are arithmetic, not rules of thumb, and {!cycle} states each as a condition
     a caller has to check rather than assume. *)
@@ -271,11 +271,11 @@ let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
 
 (** {1 Optimization} *)
 
-(** [optimize_in ctx ~name llc] runs the backends' own pipeline ([analyze_proc] -> [specialize_proc]:
-    structural facts -> placements -> [virtual_llc] -> cleanup -> simplify -> CSE -> hoist) over
-    hand-built code, retaining its decisions and stored computations in [ctx] for a follow-on
-    routine. This is the cross-routine counterpart of {!optimize}: use it when the case under test
-    is a lineage transition rather than one isolated routine.
+(** [optimize_in ctx ~name llc] runs the backends' own pipeline ([analyze_proc] ->
+    [specialize_proc]: structural facts -> placements -> [virtual_llc] -> cleanup -> simplify -> CSE
+    -> hoist) over hand-built code, retaining its decisions and stored computations in [ctx] for a
+    follow-on routine. This is the cross-routine counterpart of {!optimize}: use it when the case
+    under test is a lineage transition rather than one isolated routine.
 
     [~materialized] pre-decides those nodes' placement in the lineage state the optimization reads,
     which is what {!Context.decide_materialized} does for the [Assignments] pipeline — and the only
@@ -287,9 +287,9 @@ let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
 
     [~static_indices] are the launch parameters the code may mention outside every loop: the bound
     symbols of the [Indexing.bindings] the routine will be compiled with. Hand-built IR carrying a
-    gh-490 runtime-extent guard ([If (i < s)], as [Assignments.extent_guard] emits) needs them —
-    the virtualization walk asserts that every [Embed_index (Iterator s)] it meets is in scope, and
-    a launch parameter is in scope only because the caller declared it. Empty by default, which is
+    gh-490 runtime-extent guard ([If (i < s)], as [Assignments.extent_guard] emits) needs them — the
+    virtualization walk asserts that every [Embed_index (Iterator s)] it meets is in scope, and a
+    launch parameter is in scope only because the caller declared it. Empty by default, which is
     right for every nest whose indices are all loop indices. *)
 let optimize_in ?(materialized = []) ?(static_indices = []) (ctx : LL.optimize_ctx) ~name llc :
     LL.optimized =
@@ -375,7 +375,8 @@ let link ?ctx ~name (o : LL.optimized) =
     also needs an executed leg.
 
     This deliberately does not seed the placements table by hand: overwriting a committed entry
-    would bypass the provenance/conflict checks whose behavior the lineage test is meant to cover. *)
+    would bypass the provenance/conflict checks whose behavior the lineage test is meant to cover.
+*)
 let link_finalized ?ctx ~placements ~name (o : LL.optimized) =
   let linked = link ?ctx ~name o in
   List.iter placements ~f:(fun tn ->
@@ -441,9 +442,9 @@ let same ?tol got expected = List.for_all2_exn got expected ~f:(close ?tol)
     a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
 let p = Verdict.p
 
-(** The quantified claims, re-exported for the same reason {!p} is: a hand-built-IR test says
-    "every statement …" of a collection it derived from the walk, and over an empty one that reads
-    as a pass while checking nothing (gh-ocannl-729). {!Verdict.p_all} fails there instead. *)
+(** The quantified claims, re-exported for the same reason {!p} is: a hand-built-IR test says "every
+    statement …" of a collection it derived from the walk, and over an empty one that reads as a
+    pass while checking nothing (gh-ocannl-729). {!Verdict.p_all} fails there instead. *)
 let p_all = Verdict.p_all
 
 let p_none = Verdict.p_none
@@ -642,8 +643,7 @@ let count_scalar ?in_scopes ~f (llc : LL.t) =
 let census (llc : LL.t) =
   let ifs = ref 0 and wheres = ref 0 and loops = ref 0 in
   walk llc
-    ~on_stmt:(function
-      | LL.If _ -> Int.incr ifs | LL.For_loop _ -> Int.incr loops | _ -> ())
+    ~on_stmt:(function LL.If _ -> Int.incr ifs | LL.For_loop _ -> Int.incr loops | _ -> ())
     ~on_ternop:(function Ops.Where -> Int.incr wheres | _ -> ());
   (!ifs, !wheres, !loops)
 
@@ -680,8 +680,7 @@ let loop_sites ?in_scopes (llc : LL.t) : loop_site list =
           found := site :: !found;
           stack := site :: !stack
       | _ -> ())
-    ~on_exit:(fun s ->
-      match s with LL.For_loop _ -> stack := List.tl_exn !stack | _ -> ());
+    ~on_exit:(fun s -> match s with LL.For_loop _ -> stack := List.tl_exn !stack | _ -> ());
   List.rev !found
 
 (** The first loop (in preorder) satisfying [f]. *)

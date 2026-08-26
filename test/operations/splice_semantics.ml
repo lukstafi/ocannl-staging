@@ -269,14 +269,10 @@ let phase1 () =
             [| iter t |]
             (add (get tmp [| aff [ (1, t) ] 1 |]) (get tmp [| aff [ (1, t) ] 1 |]))))
   in
-  let o_a4 =
-    optimize_in ctx4 ~name:"ssem_scratch_a" llc_a4
-  in
+  let o_a4 = optimize_in ctx4 ~name:"ssem_scratch_a" llc_a4 in
   let a4_vals = Array.init dim ~f:(fun i -> 81. +. Float.of_int i) in
   let cctx4 = Context.auto () in
-  let linked_a4 =
-    link_finalized ~ctx:cctx4 ~placements:[ tmp ] ~name:"ssem_scratch_a" o_a4
-  in
+  let linked_a4 = link_finalized ~ctx:cctx4 ~placements:[ tmp ] ~name:"ssem_scratch_a" o_a4 in
   let _cctx4 = run_linked linked_a4 ~seed:[ (a4, a4_vals) ] in
   p "scratch producer: tmp resolved to routine-local scratch" (known_local o_a4 tmp);
   let b4 = mk "b4" in
@@ -287,8 +283,7 @@ let phase1 () =
   in
   let rejected_scratch =
     try
-      ignore
-        (optimize_in ctx4 ~name:"ssem_scratch_b" llc_b4 : LL.optimized);
+      ignore (optimize_in ctx4 ~name:"ssem_scratch_b" llc_b4 : LL.optimized);
       false
     with Utils.User_error msg ->
       String.is_substring msg ~substring:"routine-local scratch"

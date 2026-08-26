@@ -105,8 +105,8 @@ let () =
   Verdict.p_empty "probabilities and other [batch, vocab] intermediates stay virtual"
     ~over:big_nodes unexpected;
   List.iter unexpected ~f:(fun tn -> printf "  unexpectedly materialized: %s\n" (Tn.debug_name tn));
-  Verdict.p_all "logits value and gradient are materialized" allowed
-    ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn));
+  Verdict.p_all "logits value and gradient are materialized" allowed ~f:(fun tn ->
+      not (Tn.Placements.known_virtual plc tn));
 
   (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured lowered
      code; runs identically under every configured backend). *)

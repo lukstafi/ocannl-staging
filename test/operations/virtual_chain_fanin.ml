@@ -148,7 +148,10 @@ let phase1b () =
     LL.Set_local (id, Array.fold ws ~init:(c 0.) ~f:(fun acc w -> add acc (get w [| iter i |])))
   in
   let producer =
-    loop_n i dim (set y [| iter i |] (LL.Local_scope { id; body; orig_indices = [| iter i |]; mint = LL.Inlined_computation }))
+    loop_n i dim
+      (set y
+         [| iter i |]
+         (LL.Local_scope { id; body; orig_indices = [| iter i |]; mint = LL.Inlined_computation }))
   in
   let consumer = loop_n j dim (set out [| iter j |] (get y [| iter j |])) in
   let o = optimize ~name:"vcf_scope" (seq producer consumer) in
@@ -181,7 +184,13 @@ let phase1b () =
       (loop_n i2 dim
          (set y2
             [| iter i2 |]
-            (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |]; mint = LL.Inlined_computation })))
+            (LL.Local_scope
+               {
+                 id = id2;
+                 body = body2;
+                 orig_indices = [| iter i2 |];
+                 mint = LL.Inlined_computation;
+               })))
   in
   let consumer2 = loop_n j2 dim (set out2 [| iter j2 |] (get y2 [| iter j2 |])) in
   let o2 = optimize ~name:"vcf_scope_rmw" (seq producer2 consumer2) in
@@ -321,8 +330,8 @@ let phase2 () =
   p "pipeline: x9 and x10 virtual again past the reset"
     (Tn.Placements.known_virtual plc_default (value 9 xs_default)
     && Tn.Placements.known_virtual plc_default (value 10 xs_default));
-  p_all "pipeline, cap disabled: whole chain virtual" xs_off
-    ~f:(fun x -> Tn.Placements.known_virtual plc_off x.Tensor.value);
+  p_all "pipeline, cap disabled: whole chain virtual" xs_off ~f:(fun x ->
+      Tn.Placements.known_virtual plc_off x.Tensor.value);
   let expected =
     Array.init dim ~f:(fun i ->
         List.fold

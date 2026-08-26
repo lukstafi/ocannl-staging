@@ -28,9 +28,7 @@ let fail fmt = Printf.ksprintf Verdict.fail fmt
    claim shape while no single line of this file contains it, so a reader that matched text would
    find the first and miss this one. *)
 let planted_plain = "planted canary: %b\n"
-
-let planted_continued = "planted canary over a \
-                         continuation: %b\n"
+let planted_continued = "planted canary over a continuation: %b\n"
 
 (* Formats that ARE the claim shape, with the label and kind each yields. *)
 let claim_cases =
@@ -52,7 +50,9 @@ let claim_cases =
     (* The two literals the ratchet looks for, which are fixture inputs first. The continuation is
        what says the reader works on decoded values: its source line ends mid-label. *)
     ("the planted canary", planted_plain, "planted canary");
-    ("the planted canary over a continuation", planted_continued, "planted canary over a continuation");
+    ( "the planted canary over a continuation",
+      planted_continued,
+      "planted canary over a continuation" );
   ]
 
 (* Formats whose label is COMPUTED: the claim shape too, since gh-ocannl-624 gave them an entry
@@ -61,7 +61,9 @@ let claim_cases =
 let computed_cases =
   [
     ("a leading string argument", "%s fused: %b\n", "fused");
-    ("an interpolated measurement", "Epoch %d, loss below threshold=%b\n", "Epoch , loss below threshold");
+    ( "an interpolated measurement",
+      "Epoch %d, loss below threshold=%b\n",
+      "Epoch , loss below threshold" );
     ("arguments on both sides of the label", "%s %s parallelizable: %b\n", "parallelizable");
     (* The wrapper the pre-`Verdict` tests defined for themselves, and the exact shape this ratchet
        exists to keep from regrowing: the whole label is the argument, so the rendered residual is
@@ -113,10 +115,9 @@ let source_cases =
       {ocaml|open Stdio
 let () = eprintf "fused: %b\n" true|ocaml},
       [ ("fused", Some "eprintf") ] );
-    (* The wrapper is why the check is about the literal and not about the call: a
-       `let p name b = printf "%s: %b\n" name b` helper is what these sites looked like before
-       Verdict existed, and pointing the scan at printing functions alone would miss every claim
-       routed through one. *)
+    (* The wrapper is why the check is about the literal and not about the call: a `let p name b =
+       printf "%s: %b\n" name b` helper is what these sites looked like before Verdict existed, and
+       pointing the scan at printing functions alone would miss every claim routed through one. *)
     ( "a claim handed to a wrapper is still a claim",
       {ocaml|let () = report "fused: %b\n" true|ocaml},
       [ ("fused", Some "report") ] );
@@ -163,7 +164,8 @@ let () =
     | None -> fail "%s -- %s: expected label %S, found no claim" what name label
   in
   List.iter claim_cases ~f:(check_kind ~what:"claim shape" ~expected:Scan.Literal_label);
-  List.iter computed_cases ~f:(check_kind ~what:"computed claim shape" ~expected:Scan.Computed_label);
+  List.iter computed_cases
+    ~f:(check_kind ~what:"computed claim shape" ~expected:Scan.Computed_label);
   (* The head is what an exemption is keyed by, so it has to be the format VERBATIM up to the
      boolean -- conversions unrendered, and stopping before the `%b` so that writing one out is not
      itself a claim. *)

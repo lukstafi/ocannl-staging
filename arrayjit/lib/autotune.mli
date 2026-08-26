@@ -164,10 +164,10 @@ type matmul_site = {
   m_nj : int;
   m_nk : int;
   m_ko : (Ir.Indexing.symbol * int) list;
-      (** Contraction loops enclosing [m_k], in nest order (gh-ocannl-683): a multi-axis
-          contraction — attention's out projection, whose weight carries two input axes — is a
-          k-loop lowering has already split, and every pipeline treats these as k-block loops above
-          the one its own k-split mints. Empty on single-axis contractions. *)
+      (** Contraction loops enclosing [m_k], in nest order (gh-ocannl-683): a multi-axis contraction
+          — attention's out projection, whose weight carries two input axes — is a k-loop lowering
+          has already split, and every pipeline treats these as k-block loops above the one its own
+          k-split mints. Empty on single-axis contractions. *)
   m_bo : (Ir.Indexing.symbol * int) list;
   m_bi : (Ir.Indexing.symbol * int) list;
   m_row_axis : int;
@@ -183,8 +183,8 @@ type matmul_site = {
 
 val detect_matmul : Ir.Low_level.t -> matmul_site option
 (** Recognize a matmul accumulation nest: a perfectly nested all-serial accumulation whose
-    contraction loops are the innermost suffix absent from the accumulator's index map, every
-    other loop owning a distinct accumulator axis, with the 2-D tile roles assigned per
+    contraction loops are the innermost suffix absent from the accumulator's index map, every other
+    loop owning a distinct accumulator axis, with the 2-D tile roles assigned per
     [classify_matmul]'s operand rules and everything else batch. Reads off the extracted access
     relations like {!detect_conv}, with the same [legality_crosscheck] soak. Exposed for tests. *)
 
@@ -276,9 +276,9 @@ module Family_decision : sig
       quietly stopped differentiating the tree. *)
 
   type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
-  (** A committed tile geometry. Which fields are meaningful is the {!geometry_choice}
-      constructor's business: [g_bm]/[g_bk] always; [g_bn] is [0] for {!Cpu_packed}'s unsplit full
-      column extent and the mma lane width for {!Gpu_mma}; [g_tm]/[g_tn] are the per-thread tile of
+  (** A committed tile geometry. Which fields are meaningful is the {!geometry_choice} constructor's
+      business: [g_bm]/[g_bk] always; [g_bn] is [0] for {!Cpu_packed}'s unsplit full column extent
+      and the mma lane width for {!Gpu_mma}; [g_tm]/[g_tn] are the per-thread tile of
       {!Gpu_blocktile} and [0] elsewhere. [g_bk = 0] in {!Gpu_mma} is the unstaged full-K block. *)
 
   type geometry_choice =
@@ -371,31 +371,27 @@ val lift_geometry_lattice :
   (Family_decision.t, sketch_params) Ir.Schedule_space.tree
 (** Lift every geometry-lattice exclusion — the branches whose decision is
     [Family_decision.Geometry Lattice], identified by that datum rather than by the exclusion's
-    prose witness — preserving the laziness of everything else;
-    lifted branches remain subject to legality (the box refutations), and other exclusions stay
-    excluded. {!model_default}'s family search applies this under config
-    [model_default_geometry_lattice]. Exposed for tests. *)
+    prose witness — preserving the laziness of everything else; lifted branches remain subject to
+    legality (the box refutations), and other exclusions stay excluded. {!model_default}'s family
+    search applies this under config [model_default_geometry_lattice]. Exposed for tests. *)
 
 val sketch_path_traffic_floor :
-  limits:Ir.Backend_intf.hardware_limits ->
-  Ir.Low_level.optimized ->
-  Family_decision.path ->
-  int
+  limits:Ir.Backend_intf.hardware_limits -> Ir.Low_level.optimized -> Family_decision.path -> int
 (** The certain-traffic increment (bytes) of a family-tree decision path (gh-ocannl-514 phase 5):
     traffic every completion below the path moves beyond the schedule-invariant
     {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions as {e data}
     ({!Family_decision}, gh-ocannl-591; the decision also says which pipeline minted it, so the
-    caller's backend kind is not needed alongside the path) — a committed
-    staged geometry contributes its operand tiles' distinct-cell footprints exactly as
-    {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
-    packed panels only under in-kernel [serial] packing — a hoisted panel replaces the original
-    operand's reads rather than adding traffic), and a lattice box contributes its most favorable
-    (smallest-tiles) corner priced at the same per-format intrinsic tile the lattice is built from,
-    so the increment is monotone in refinement. [0] when no matmul site is detected or nothing is
-    certain. Composed with the floor's legs, this is what makes the family bound non-uniform across
-    the tree — the schedule-invariant floor differentiates only placements (phase 3), the increments
-    differentiate the sketch-geometry subtrees. Detection runs once at partial application; the
-    returned closure is cheap per path. Exposed for tests. *)
+    caller's backend kind is not needed alongside the path) — a committed staged geometry
+    contributes its operand tiles' distinct-cell footprints exactly as {!Ir.Cost_model.analyze}
+    charges them on every leaf (in-kernel GPU stages read and write; CPU packed panels only under
+    in-kernel [serial] packing — a hoisted panel replaces the original operand's reads rather than
+    adding traffic), and a lattice box contributes its most favorable (smallest-tiles) corner priced
+    at the same per-format intrinsic tile the lattice is built from, so the increment is monotone in
+    refinement. [0] when no matmul site is detected or nothing is certain. Composed with the floor's
+    legs, this is what makes the family bound non-uniform across the tree — the schedule-invariant
+    floor differentiates only placements (phase 3), the increments differentiate the sketch-geometry
+    subtrees. Detection runs once at partial application; the returned closure is cheap per path.
+    Exposed for tests. *)
 
 val sketch_schedule : p:sketch_params -> Ir.Low_level.optimized -> Ir.Schedule.schedule
 (** The composed pipeline a seed parameterizes, built against the given lowering (the site is
@@ -494,8 +490,8 @@ val menu :
     category order (gh-ocannl-685). [admits] filters proposals BEFORE that cap, so the budget is
     shared over moves the caller can use rather than over moves it is about to discard -- the beam
     passes its GPU dispatchability rule here, since an incumbent binding no hardware dimension can
-    only be expanded through a move that binds one. It may record its refusals. Exposed for
-    tests. *)
+    only be expanded through a move that binds one. It may record its refusals. Exposed for tests.
+*)
 
 type decline_summary = {
   key : Ir.Schedule_outcome.rejection_key;
@@ -511,6 +507,17 @@ type terminal_failure = {
   detail : string;
 }
 
+(** What the call did about searching (gh-ocannl-677). The states are mutually exclusive and each
+    carries exactly its own data, so a consumer matches instead of re-deriving: "it searched" is
+    [Searched | Search_died _] and nothing else — in particular it is {e not} [not cache_hit], the
+    reading that costs a benchmark harness every tuned cell under the reproducible profile, where a
+    call reports having neither searched nor replayed. Spelled as four independent booleans until
+    gh-ocannl-677, where two consumers mis-derived the state in one PR.
+
+    Note the arithmetic: five constructors for what reads as four outcomes, because "nothing
+    searched" is two — a deliberate no-search that ships the untuned default and returns, and a
+    failure before the search that reports and then raises. The old encoding could not tell them
+    apart either, it just did not say so. *)
 type outcome =
   | Searched
       (** A search ran and completed: candidates were proposed and compiled or timed, leaving the
@@ -537,17 +544,6 @@ type outcome =
           still reports (gh-ocannl-550), carrying whatever census the call had reached, so a caller
           attributing arms by arrival order (the positional [?report] of {!Train.tune_placements})
           gets a slot for it. *)
-(** What the call did about searching (gh-ocannl-677). The states are mutually exclusive and each
-    carries exactly its own data, so a consumer matches instead of re-deriving: "it searched" is
-    [Searched | Search_died _] and nothing else — in particular it is {e not} [not cache_hit], the
-    reading that costs a benchmark harness every tuned cell under the reproducible profile, where a
-    call reports having neither searched nor replayed. Spelled as four independent booleans until
-    gh-ocannl-677, where two consumers mis-derived the state in one PR.
-
-    Note the arithmetic: five constructors for what reads as four outcomes, because "nothing
-    searched" is two — a deliberate no-search that ships the untuned default and returns, and a
-    failure before the search that reports and then raises. The old encoding could not tell them
-    apart either, it just did not say so. *)
 
 type report = {
   outcome : outcome;
@@ -744,9 +740,9 @@ type report = {
 val no_search_report : report
 (** The report of a {!tune} call that never searched (config [autotune_search=false], gh-ocannl-559,
     and no cache entry to replay): [outcome = Search_disabled], every counter zero, every time
-    [infinity], [best_label] empty and [best_tensorization = None]. The caller gets the untuned default compile. Also the base
-    the pre-search failure reports are built on, with [outcome] replaced and whatever census the
-    call had reached filled in. *)
+    [infinity], [best_label] empty and [best_tensorization = None]. The caller gets the untuned
+    default compile. Also the base the pre-search failure reports are built on, with [outcome]
+    replaced and whatever census the call had reached filled in. *)
 
 val outcome_name : outcome -> string
 (** The stable one-word name of an outcome state — ["searched"], ["search-died"], ["cache-replay"],
@@ -838,22 +834,21 @@ val flip_profit_margin_of_string : string -> float
     tests. *)
 
 val family_profit_of_report : ?margin:float -> report -> family_profit
+
 val family_profit_of_reports : ?margin:float -> report list -> family_profit
 (** What completed searches measured about the tensorized family's profitability on this device
-    (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config
-    [tune_flip_profit_margin]. Over several reports the most favourable evidence wins — the
-    expressibility prior is deleted only by evidence that contradicts it, never by the absence of a
-    confirmation. A failing arm's report counts: its timings are measurements of the family even
-    though its [best_ms] is not shippable. Exposed for tests and for [Train.tune_placements], which
-    derives it from the placement A/B's two arm reports. *)
+    (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config [tune_flip_profit_margin].
+    Over several reports the most favourable evidence wins — the expressibility prior is deleted
+    only by evidence that contradicts it, never by the absence of a confirmation. A failing arm's
+    report counts: its timings are measurements of the family even though its [best_ms] is not
+    shippable. Exposed for tests and for [Train.tune_placements], which derives it from the
+    placement A/B's two arm reports. *)
 
 val family_profit_summary : family_profit -> string
 (** A log-line phrase naming the evidence and its ratio. *)
 
 val effective_flip_ordering :
-  ordering:[ `Cost | `Enablement | `Profitable ] ->
-  profit:family_profit ->
-  [ `Cost | `Enablement ]
+  ordering:[ `Cost | `Enablement | `Profitable ] -> profit:family_profit -> [ `Cost | `Enablement ]
 (** The ordering [`Profitable] resolves to under the given evidence: [`Enablement] when the family
     is unmeasured or competitive, [`Cost] when it is measured to lose here. Both of the prior's
     classes go at once, because the promotion of family-unlocking flips and the demotion of
@@ -988,9 +983,9 @@ val model_default :
     envelope constants.
 
     Being a drop-in for {!Context.compile} includes its [name] (gh-ocannl-669): it names the routine
-    and every artifact of this compile — the model pick's, the fallback's, and the hermetic lowerings
-    of the placement search alike — and, as there, a comp carrying no {!Ir.Assignments.Block_comment}
-    requires it. *)
+    and every artifact of this compile — the model pick's, the fallback's, and the hermetic
+    lowerings of the placement search alike — and, as there, a comp carrying no
+    {!Ir.Assignments.Block_comment} requires it. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
@@ -1027,10 +1022,10 @@ val on_candidate_preflight : (string -> unit) ref
 val tune :
   ?name:string ->
   (* Names the computation, exactly as {!Context.compile}'s [name] names its single routine
-     (gh-ocannl-669): every compile of this search -- each candidate, the baseline, the cache replay,
-     the winner, the untuned fallbacks, the [autotune_log] control -- is named alike, and so is the
-     [routine] column of the calibration rows this search emits. Required, as there, for a comp
-     carrying no {!Ir.Assignments.Block_comment}; omitted, the name is derived per compile via
+     (gh-ocannl-669): every compile of this search -- each candidate, the baseline, the cache
+     replay, the winner, the untuned fallbacks, the [autotune_log] control -- is named alike, and so
+     is the [routine] column of the calibration rows this search emits. Required, as there, for a
+     comp carrying no {!Ir.Assignments.Block_comment}; omitted, the name is derived per compile via
      {!Ir.Assignments.get_name_exn}. *)
   ?search:bool ->
   (* Whether to search at all; default from config [autotune_search] (true). With [false]
@@ -1086,14 +1081,14 @@ val tune :
     execution-dependency tracking behaves as if the winning compile were the only one. Raises like
     {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run in.
 
-    "Like {!Context.compile}" includes its [name] (gh-ocannl-669) — without which a comp that carries
-    no {!Ir.Assignments.Block_comment} but that {!Context.compile} can name (as [Parallel]'s
+    "Like {!Context.compile}" includes its [name] (gh-ocannl-669) — without which a comp that
+    carries no {!Ir.Assignments.Block_comment} but that {!Context.compile} can name (as [Parallel]'s
     collective routines are named) could be compiled but not tuned. The schedule cache deliberately
     does not see it: a cache key is [Ir.Schedule_cache.cache_key] over the canonical lowering, the
-    backend, the numerics and codegen tags, and the worker pool — and the name reaches only codegen's
-    artifact and kernel naming, never the lowering. Two identical computations under different names
-    therefore share one tuned entry, which is what the cache is for; naming a routine neither
-    invalidates a crown nor mints a private one.
+    backend, the numerics and codegen tags, and the worker pool — and the name reaches only
+    codegen's artifact and kernel naming, never the lowering. Two identical computations under
+    different names therefore share one tuned entry, which is what the cache is for; naming a
+    routine neither invalidates a crown nor mints a private one.
 
     Memory (gh-ocannl-550): every candidate this searches is {!Context.release}d as soon as it stops
     being a beam survivor, so the search's live {e working} pools and contexts are bounded by

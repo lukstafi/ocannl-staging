@@ -35,9 +35,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let on_gpu = Ir.Schedule.backend_is_gpu backend_name
-
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let single = Ir.Ops.single
 let bf16 = Ir.Ops.bfloat16
@@ -285,19 +283,19 @@ let () =
     p "guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU)"
       (approx (run ~name:"guarded_extent_wshfl" ~transform:sibling_transform z1) expected_partial)
 
-(* --- gh-ocannl-682: narrow accumulators. The shuffle stages the value at the backend's
-   accumulator RESIDENCY rather than at the node's storage precision, so a bf16 reduction on a
-   widening backend computes the same number its serial rendering does, and a residency that stays
-   narrow is refused rather than shuffled at a width no builtin overload covers.
+(* --- gh-ocannl-682: narrow accumulators. The shuffle stages the value at the backend's accumulator
+   RESIDENCY rather than at the node's storage precision, so a bf16 reduction on a widening backend
+   computes the same number its serial rendering does, and a residency that stays narrow is refused
+   rather than shuffled at a width no builtin overload covers.
 
    The terms [1 + (k mod 7)/128] are each exact in bf16 and discriminate all three renderings: over
    32 lanes the exact f32 total 32.703125 narrows once to 32.75, while a tree staged at bf16 gives
-   32.5 and a per-step read-modify-write of the bf16 cell gives 32.25. Every f32 partial sum here
-   is a multiple of 1/128 below 2^15, so the tree's reassociation costs nothing and the claim is
+   32.5 and a per-step read-modify-write of the bf16 cell gives 32.25. Every f32 partial sum here is
+   a multiple of 1/128 below 2^15, so the tree's reassociation costs nothing and the claim is
    bitwise rather than approximate. The 128-lane version repeats the pattern — exact total
    130.9609375, narrowed once 131.0, against 130.0 for a bf16 tree and 128.0 for per-step narrowing
-   — and it is the one that also stages per-warp partials, so it pins the shared slots' element
-   type too. *)
+   — and it is the one that also stages per-warp partials, so it pins the shared slots' element type
+   too. *)
 
 let bf16_term k = 1.0 +. (Float.of_int (k % 7) /. 128.0)
 
@@ -396,10 +394,10 @@ let () =
    too, and one class of body it never widens is an RNG-bearing accumulation. An RNG conversion
    picks both its result type and which random bits it consumes from the precision it renders at
    (gh-ocannl-517), so [try_localize_serial_reduce] declines to localize such an update and its
-   serial form accumulates in the narrow cell, narrowing on every iteration. Shuffling the same
-   body at the residency would accumulate the whole tree wide and narrow once — a change in the
-   accumulation WIDTH, not merely its association, which is the one property gh-ocannl-682 exists
-   to preserve. So the rendering refuses it wherever the residency is wider than storage.
+   serial form accumulates in the narrow cell, narrowing on every iteration. Shuffling the same body
+   at the residency would accumulate the whole tree wide and narrow once — a change in the
+   accumulation WIDTH, not merely its association, which is the one property gh-ocannl-682 exists to
+   preserve. So the rendering refuses it wherever the residency is wider than storage.
 
    At f32/f64 storage the two coincide and nothing is refused, which is why this leg is bf16 and
    runs only where bf16 actually widens. *)
@@ -411,9 +409,7 @@ let () =
   let n = 32 in
   (* [Constant_bits] rather than a uint4x32 tensor node: the refusal fires from the contribution's
      SHAPE at codegen, so the leg needs a well-typed RNG conversion, not a live bit source. *)
-  let rx =
-    NTDSL.init ~l:"wshfl_rng_x" ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) ()
-  in
+  let rx = NTDSL.init ~l:"wshfl_rng_x" ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) () in
   let%op rs = rx ++ "i=>0" in
   Tn.update_prec rs.Tensor.value bf16;
   let transform =
@@ -444,8 +440,7 @@ let () =
         None
       with Invalid_argument msg -> Some msg
     with
-    | Some msg ->
-        p claim_rng_refused (String.is_substring msg ~substring:"free of RNG conversions")
+    | Some msg -> p claim_rng_refused (String.is_substring msg ~substring:"free of RNG conversions")
     | None -> p claim_rng_refused false
   else if on_cpu then
     (* [warp_size = 0] on the C backends: the loop is serial, which is its correct meaning, and the

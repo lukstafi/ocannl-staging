@@ -252,16 +252,16 @@ let tune_arms () =
     shipped_mma = None;
   }
 
-(** Counts one reported search by its provenance (gh-ocannl-644). Kept separate from
-    {!collect_arm} because a search this process ran is a search whether or not it was one of the
-    placement arms: {!Train.tune_placements}' flip refinements report through its [flip_report] and
-    must {e not} enter [arm_reports] (their arrival order would misname the arms in {!tune_json}),
-    yet a flip search loads this process with accumulated modules and buffers exactly like an arm
-    search does — which is the whole reason the two-pass protocol exists. A caller that runs any
-    search whose outcome it does not otherwise collect should still route it here.
+(** Counts one reported search by its provenance (gh-ocannl-644). Kept separate from {!collect_arm}
+    because a search this process ran is a search whether or not it was one of the placement arms:
+    {!Train.tune_placements}' flip refinements report through its [flip_report] and must {e not}
+    enter [arm_reports] (their arrival order would misname the arms in {!tune_json}), yet a flip
+    search loads this process with accumulated modules and buffers exactly like an arm search does —
+    which is the whole reason the two-pass protocol exists. A caller that runs any search whose
+    outcome it does not otherwise collect should still route it here.
 
-    A report is counted by matching its [Autotune.outcome] (gh-ocannl-677), which is what makes
-    the third bucket visible: under [autotune_search=false] — the reproducible profile — and on a
+    A report is counted by matching its [Autotune.outcome] (gh-ocannl-677), which is what makes the
+    third bucket visible: under [autotune_search=false] — the reproducible profile — and on a
     pre-search failure, a call neither searches nor replays, having shipped the untuned default.
     Such an arm must not be counted as a search: it would fail the sweep's provenance gate on both
     passes of a tuned cell, and there is nothing wrong with either. Nor as a replay: it carries no
@@ -271,8 +271,7 @@ let collect_search t (r : Autotune.report) =
   match r.Autotune.outcome with
   | Autotune.Searched | Autotune.Search_died _ -> t.searches <- t.searches + 1
   | Autotune.Cache_replay -> t.replays <- t.replays + 1
-  | Autotune.Search_disabled | Autotune.Pre_search_failure _ ->
-      t.no_searches <- t.no_searches + 1
+  | Autotune.Search_disabled | Autotune.Pre_search_failure _ -> t.no_searches <- t.no_searches + 1
 
 let collect_arm t (r : Autotune.report) =
   collect_search t r;
@@ -291,19 +290,19 @@ let step_census = function
     it with the routines it goes on to step, right after compiling them.
 
     This is deliberately not derived from the arm reports, and overrides them downstream, because a
-    crowned arm candidate is not always the shipped artifact. Two ways they come apart, both live:
-    a gh-555 flip refinement that beats the A/B winner ships under [on_ship "flip"] and is not an
-    arm at all (flip reports stay out of [arm_reports] — their arrival order would misname the
-    arms), so an arm lookup finds nothing and the cell would report no census; and on the
-    [timing_ctx] path {!Autotune.tune} recompiles the winner in the production context and falls
-    back to the untuned default when that replay is rejected or lands unparallelized, so the arm
-    describes a schedule that was discarded. In both cases the arm's label can claim tensorized over
-    a routine that emitted no mma, which is the exact failure this whole field exists to prevent —
-    so the fact is taken from the compiled routine, which cannot be wrong about itself. *)
+    crowned arm candidate is not always the shipped artifact. Two ways they come apart, both live: a
+    gh-555 flip refinement that beats the A/B winner ships under [on_ship "flip"] and is not an arm
+    at all (flip reports stay out of [arm_reports] — their arrival order would misname the arms), so
+    an arm lookup finds nothing and the cell would report no census; and on the [timing_ctx] path
+    {!Autotune.tune} recompiles the winner in the production context and falls back to the untuned
+    default when that replay is rejected or lands unparallelized, so the arm describes a schedule
+    that was discarded. In both cases the arm's label can claim tensorized over a routine that
+    emitted no mma, which is the exact failure this whole field exists to prevent — so the fact is
+    taken from the compiled routine, which cannot be wrong about itself. *)
 let collect_shipped t routines = t.shipped_mma <- Some (step_census routines)
 
-(** Whether this process ran a schedule search rather than replaying cached winners throughout —
-    the [searched] field of the result line. See {!measure_and_emit}. *)
+(** Whether this process ran a schedule search rather than replaying cached winners throughout — the
+    [searched] field of the result line. See {!measure_and_emit}. *)
 let searched t = t.searches > 0
 
 (** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are
@@ -697,34 +696,35 @@ let protocol_of_st st =
     timed_steps = meta_int st "timed_steps";
   }
 
-(** Runs the measurement protocol and emits the JSON result line, which it also returns.
-    [run_step] advances the batch binding and enqueues one step; [read_loss] returns the current
-    loss value (awaits the device); [sync] awaits all queued work. [out] is where the line is
-    written — [stdout], where [orchestrate.py] reads a cell's result, except for {!run_self_test},
-    which redirects it so that a golden carries no timings.
+(** Runs the measurement protocol and emits the JSON result line, which it also returns. [run_step]
+    advances the batch binding and enqueues one step; [read_loss] returns the current loss value
+    (awaits the device); [sync] awaits all queued work. [out] is where the line is written —
+    [stdout], where [orchestrate.py] reads a cell's result, except for {!run_self_test}, which
+    redirects it so that a golden carries no timings.
 
     Keep the protocol here rather than in a caller (gh-ocannl-702): {!run_self_test} is what stands
     behind this function in a fresh checkout, and it stands behind exactly what this function does.
 
     Every number in the line goes through {!Bench_json}, so a non-finite one is [null] rather than
-    OCaml's [nan] / [inf]: a training run that diverges is exactly the run whose loss trajectory
-    the report needs, and a line that does not parse is a cell [orchestrate.py] drops as a broken
-    runner after the whole measurement has been paid for (gh-ocannl-676).
+    OCaml's [nan] / [inf]: a training run that diverges is exactly the run whose loss trajectory the
+    report needs, and a line that does not parse is a cell [orchestrate.py] drops as a broken runner
+    after the whole measurement has been paid for (gh-ocannl-676).
 
     The line's [searched] field states whether {e this process} ran a schedule search
     (gh-ocannl-644). A tuned cell is measured by a two-pass protocol — pass 1 searches and populates
     [autotune_cache/], a fresh pass 2 replays the cached winner and provides the step times, because
     a searching process is measurably slower per launch (accumulated modules and buffers; measured
     at +10.3% on small CUDA kernels behind a 16 s search, and ~0 behind a cheap one or where a step
-    is milliseconds rather than microseconds -- gh-ocannl-675). Both passes emit the same [framework]/[backend]/[variant]/[precision],
-    so without this field a report can quote pass-1 timings as protocol-compliant ones indefinitely,
-    and nothing in the artifact contradicts it — which is what [report-gh612-hip.md] did for fifteen
-    revisions. [searched] is [false] for an untuned cell too: it says no search ran in this process,
-    which for a cell that tunes nothing is both true and the condition the protocol wants — as it is
-    for a tuned cell under [autotune_search=false], which ships the untuned default having neither
-    searched nor replayed (the [tune] object's [no_searches] is what tells that apart from a
-    replay — a count of arms whose {!Autotune.outcome} was one of the two states that search
-    nothing, rather than an inference from two counters that are both zero). *)
+    is milliseconds rather than microseconds -- gh-ocannl-675). Both passes emit the same
+    [framework]/[backend]/[variant]/[precision], so without this field a report can quote pass-1
+    timings as protocol-compliant ones indefinitely, and nothing in the artifact contradicts it —
+    which is what [report-gh612-hip.md] did for fifteen revisions. [searched] is [false] for an
+    untuned cell too: it says no search ran in this process, which for a cell that tunes nothing is
+    both true and the condition the protocol wants — as it is for a tuned cell under
+    [autotune_search=false], which ships the untuned default having neither searched nor replayed
+    (the [tune] object's [no_searches] is what tells that apart from a replay — a count of arms
+    whose {!Autotune.outcome} was one of the two states that search nothing, rather than an
+    inference from two counters that are both zero). *)
 let measure_and_emit ~protocol ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step
     ?tune ?(out = Stdio.stdout) ~run_step ~read_loss ~sync () =
   let { workload; parity_steps; warmup_steps; timed_steps } = protocol in
@@ -761,10 +761,8 @@ let measure_and_emit ~protocol ~backend ~variant ?(precision = "f32") ~compile_s
   let line =
     Bench_json.result_line ~backend ~variant ~precision ~workload ~compile_s
       ~searched:(Option.value_map tune ~default:false ~f:searched)
-      ?tokens_per_step
-      ?tune:(Option.bind tune ~f:tune_json)
-      ~p10:(percentile synced 10.) ~p50:(percentile synced 50.) ~p90:(percentile synced 90.)
-      ~queued_ms ~timed_steps ~losses ()
+      ?tokens_per_step ?tune:(Option.bind tune ~f:tune_json) ~p10:(percentile synced 10.)
+      ~p50:(percentile synced 50.) ~p90:(percentile synced 90.) ~queued_ms ~timed_steps ~losses ()
   in
   Stdio.Out_channel.output_string out (line ^ "\n");
   Stdio.Out_channel.flush out;
@@ -874,8 +872,8 @@ let run_self_test ?(out = Stdio.stdout) () =
     Int.incr step_count
   in
   let open Operation.At in
-  (* No [~tune]: an untuned cell, so the line's [searched] is false and it carries no [tune]
-     object. What the self-test guards is the protocol and the emitter, not the search. *)
+  (* No [~tune]: an untuned cell, so the line's [searched] is false and it carries no [tune] object.
+     What the self-test guards is the protocol and the emitter, not the search. *)
   measure_and_emit ~protocol:self_test_protocol ~backend ~variant:"self-test" ~compile_s ~out
     ~run_step
     ~read_loss:(fun () -> (!ctx_ref, loss).@[0])

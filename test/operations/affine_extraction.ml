@@ -190,8 +190,7 @@ let () =
        cross-thread dependence would flip `false` to `true` here, exit zero, and be promotable.
        Stated in the direction that holds, on the same bound boolean the row prints. *)
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe;
-    if parallelizable then
-      Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name safe
+    if parallelizable then Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name safe
     else Verdict.claimf "%s %s does not parallelize" (Idx.symbol_ident sym) name (not safe)
   in
   check_par "(map axis)" ~parallelizable:true i2;

@@ -14,20 +14,11 @@ let () =
   let cases =
     [
       (false, false, [ "-Ihip"; "-ffast-math"; "-fno-associative-math" ]);
-      ( false,
-        true,
-        [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-g" ] );
-      ( true,
-        false,
-        [
-          "-Ihip"; "-Irocwmma"; "-std=c++17"; "-ffast-math"; "-fno-associative-math";
-        ] );
+      (false, true, [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-g" ]);
+      (true, false, [ "-Ihip"; "-Irocwmma"; "-std=c++17"; "-ffast-math"; "-fno-associative-math" ]);
       ( true,
         true,
-        [
-          "-Ihip"; "-Irocwmma"; "-std=c++17"; "-ffast-math"; "-fno-associative-math";
-          "-g";
-        ] );
+        [ "-Ihip"; "-Irocwmma"; "-std=c++17"; "-ffast-math"; "-fno-associative-math"; "-g" ] );
     ]
   in
   Verdict.p_all "every HIPRTC variant keeps the no-reassociation override after fast math" cases

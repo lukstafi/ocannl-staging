@@ -481,13 +481,13 @@ let () =
      and travels into a report.
 
      The reference is the UNSCHEDULED computation, not "whichever variant completed first". Those
-     coincide while the naive leg runs, and diverge exactly where it matters: under
-     [naive_repeats = 0] the naive leg is skipped, and taking the first scheduled variant instead
-     would label an unvalidated output "reference" — with a single schedulable variant, comparing it
-     against nothing at all, and with several, hiding any defect they share. So skipping the
-     expensive naive TIMING costs the timing only: the oracle is materialized by one untimed run of
-     the same unscheduled kernel, on demand and once. When the naive leg does run, its own output is
-     that oracle and no extra run happens. *)
+     coincide while the naive leg runs, and diverge exactly where it matters: under [naive_repeats =
+     0] the naive leg is skipped, and taking the first scheduled variant instead would label an
+     unvalidated output "reference" — with a single schedulable variant, comparing it against
+     nothing at all, and with several, hiding any defect they share. So skipping the expensive naive
+     TIMING costs the timing only: the oracle is materialized by one untimed run of the same
+     unscheduled kernel, on demand and once. When the naive leg does run, its own output is that
+     oracle and no extra run happens. *)
   let reference = ref None in
   let disagreements = ref 0 in
   let unscheduled_output () =
@@ -515,15 +515,14 @@ let () =
     let ctx = Context.auto () in
     (* What codegen actually did with each [Tile_mma] (gh-ocannl-479). A [Tile_mma] whose
        preconditions fail renders the scalar fallback and still reports under its schedule's name —
-       "timed is not tensorized", docs/agent-notes/scheduling-and-autotune.md — so a variant name
-       is not evidence of tensorization and every variant carrying one has to be read from the
-       census instead. The
-       decline rules include a column extent below the compute vector width (which arbitrary extents
-       now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in FMA
-       form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
-       perturbs neither what is compiled nor what is timed. Since gh-ocannl-626 it travels on the
-       compiled routine, so this bench cannot forget to ask and cannot disagree with
-       [narrow_gebp_bench] about what "tensorized" means. *)
+       "timed is not tensorized", docs/agent-notes/scheduling-and-autotune.md — so a variant name is
+       not evidence of tensorization and every variant carrying one has to be read from the census
+       instead. The decline rules include a column extent below the compute vector width (which
+       arbitrary extents now reach), a narrow [vector_bytes], mixed operand precisions, an
+       accumulation not in FMA form, and [debug_log_from_routines]. Collecting the census only
+       appends to a list, so it perturbs neither what is compiled nor what is timed. Since
+       gh-ocannl-626 it travels on the compiled routine, so this bench cannot forget to ask and
+       cannot disagree with [narrow_gebp_bench] about what "tensorized" means. *)
     let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
     let mma = routine.Context.mma in
     (* Warmup (includes any lazy initialization and host transfers). *)
@@ -550,13 +549,13 @@ let () =
        total factors as sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the
        checksum is for. And a plain sum reads only the multiset, so it cannot see a PERMUTATION,
        which is what a misplaced row-edge peel produces. The weight is keyed on the (row, column)
-       pair rather than on the flat offset t = i*n + j, because [1 + (t mod 251)] collapses to
-       [1 + j] whenever 251 divides n — every row then carries the identical weight vector, a row
+       pair rather than on the flat offset t = i*n + j, because [1 + (t mod 251)] collapses to [1 +
+       j] whenever 251 divides n — every row then carries the identical weight vector, a row
        permutation is invisible, and the spot cell at [1][1] is blind to other rows at the same
        time, so both halves of the check fail together at n = 251, 502, 753, … (gh-ocannl-711).
        Weights stay capped at 251 so that products of these exact-in-binary operands stay exact in
-       the double accumulator, and the printed [chk a/b] is one sum per weight stream: at a narrow
-       n a single capped stream runs out of distinct row weight vectors and two rows collide, whose
+       the double accumulator, and the printed [chk a/b] is one sum per weight stream: at a narrow n
+       a single capped stream runs out of distinct row weight vectors and two rows collide, whose
        swap no weighting of that stream can see. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
     (* The unscheduled leg, when it runs, IS the oracle — same kernel, so re-running it would only
@@ -572,13 +571,12 @@ let () =
       end
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
-    (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
-       that appears only when there is something to say is a suffix a table reader does not miss
-       when it is absent (gh-ocannl-626). *)
+    (* The label is printed on EVERY timing line, including the untensorized variants: a suffix that
+       appears only when there is something to say is a suffix a table reader does not miss when it
+       is absent (gh-ocannl-626). *)
     p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %s, %s)  [%s]\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot)
-      (Bench_checksum.render checksum) agreement
+      spot values.(spot) (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in

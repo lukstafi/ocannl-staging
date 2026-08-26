@@ -58,8 +58,8 @@ let () =
    accumulator out of device memory. Metal can miscompile the resulting scope local when its loop
    reads a buffer through the pooled slot table; shader validation happens to hide the bug. Keep a
    device-produced, fully materialized input between the producer and reduction so this leg
-   exercises the same kernel shape as a virtual residual plus attention output (gh-ocannl-731),
-   and make every input cell distinct so a dropped or replayed iteration cannot hide. *)
+   exercises the same kernel shape as a virtual residual plus attention output (gh-ocannl-731), and
+   make every input cell distinct so a dropped or replayed iteration cannot hide. *)
 let () =
   Tensor.unsafe_reinitialize ();
   let seq_len = 4 and width = 16 in
@@ -74,7 +74,7 @@ let () =
     TDSL.range_of_shape ~label:[ "localized_indices" ] ~batch_dims:[ 1; seq_len ] ~input_dims:[]
       ~output_dims:[ width ] ()
   in
-  let%op total = (indices + produced) ++ "...|... => |->0" in
+  let%op total = indices + produced ++ "...|... => |->0" in
   let ctx = Context.auto () in
   let ctx, routine = Context.compile ctx (Train.forward total) Ir.Indexing.Empty in
   let ctx = Context.run ctx routine in

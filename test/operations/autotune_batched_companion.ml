@@ -22,14 +22,13 @@ module LL = Ir.Low_level
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
-
 let p_empty = Verdict.p_empty
 let p_all = Verdict.p_all
 let p_none = Verdict.p_none
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
-   variant naming one of five mutually exclusive states, so a claim names the state it means
-   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+   variant naming one of five mutually exclusive states, so a claim names the state it means instead
+   of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
 let replayed (r : Autotune.report) =
   match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
 
@@ -42,8 +41,8 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let is_gpu = Sched.backend_is_gpu backend_name
 
-(* The family tree's unfused flavor is refuted on companion coverage and on nothing else (the
-   fused flavor, the root's other child, is refuted separately — these sites feed their output to a
+(* The family tree's unfused flavor is refuted on companion coverage and on nothing else (the fused
+   flavor, the root's other child, is refuted separately — these sites feed their output to a
    reduction, not a fusable tail — and carries the fusion recognizer's reason, gh-ocannl-613). *)
 let coverage_refutes_unfused tree =
   let refs =
@@ -53,7 +52,7 @@ let coverage_refutes_unfused tree =
   in
   (not (List.is_empty refs))
   && List.for_all refs ~f:(fun (_, w) ->
-         String.is_substring w ~substring:"companion coverage (gh-521)")
+      String.is_substring w ~substring:"companion coverage (gh-521)")
 
 let clean_cache dir =
   if Stdlib.Sys.file_exists dir && Stdlib.Sys.is_directory dir then
@@ -180,13 +179,10 @@ let () =
      j-serial form. *)
   let cpu_scheds =
     List.filter_map
-      (List.filter
-         (Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt)
+      (List.filter (Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt)
          ~f:(fun sp -> not sp.Autotune.sk_epilogue))
       ~f:(fun sp ->
-        match Autotune.sketch_schedule ~p:sp opt with
-        | sched -> Some sched
-        | exception _ -> None)
+        match Autotune.sketch_schedule ~p:sp opt with sched -> Some sched | exception _ -> None)
   in
   p_none "bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead"
     cpu_scheds ~f:(fun s -> blocks_j bounds s);
@@ -395,9 +391,9 @@ let () =
   let fine_gemm_seg tuples =
     List.find (normals tuples) ~f:(fun seg -> not (List.is_empty (gpu_seeds seg)))
   in
-  (* Split the same way as the [bc] leg above, and for the same reason (gh-ocannl-730): every
-     freed seed must Grid-block j, and every seed whose column block is narrower than j must spread
-     it across more than one block. *)
+  (* Split the same way as the [bc] leg above, and for the same reason (gh-ocannl-730): every freed
+     seed must Grid-block j, and every seed whose column block is narrower than j must spread it
+     across more than one block. *)
   let fine_built =
     match fine_gemm_seg (segments ~arity_cuts:true opt) with
     | None -> None
@@ -522,6 +518,4 @@ let () =
   p "lm: cache-replayed head matches the reference"
     (approx got_z2 z_expected && approx got_r2 r_expected);
   p "lm: second tune was a cache hit or full replay"
-    (match reports2 with
-    | [ rep ] -> replayed rep || completed rep
-    | _ -> false)
+    (match reports2 with [ rep ] -> replayed rep || completed rep | _ -> false)

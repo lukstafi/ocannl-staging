@@ -40,9 +40,7 @@ let p_none = Verdict.p_none
 let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-
-let on_gpu =
-  Sched.backend_is_gpu backend_name
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 
@@ -326,18 +324,19 @@ let () =
         q.Autotune.sk_mma && q.Autotune.sk_batch_grid && not q.Autotune.sk_epilogue)
   in
   p "qkv_mma: tensorized batch-grid twins are seeded" (not (List.is_empty mma_grid_seeds));
-  p_all "qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z"
+  p_all
+    "qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z"
     mma_grid_seeds ~f:(fun q ->
-         match Sched.apply (Autotune.sketch_schedule ~p:q opt) opt with
-         | o -> (
-             match LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc with
-             | () -> (LL.launch_dims o.LL.llc).LL.grid.(2) = bb * hh
-             | exception exn ->
-                 Stdio.eprintf "qkv_mma: validate FAILED: %s\n" (Exn.to_string exn);
-                 false)
-         | exception exn ->
-             Stdio.eprintf "qkv_mma: construct FAILED: %s\n" (Exn.to_string exn);
-             false);
+      match Sched.apply (Autotune.sketch_schedule ~p:q opt) opt with
+      | o -> (
+          match LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc with
+          | () -> (LL.launch_dims o.LL.llc).LL.grid.(2) = bb * hh
+          | exception exn ->
+              Stdio.eprintf "qkv_mma: validate FAILED: %s\n" (Exn.to_string exn);
+              false)
+      | exception exn ->
+          Stdio.eprintf "qkv_mma: construct FAILED: %s\n" (Exn.to_string exn);
+          false);
 
   (* --- The pre-driver gate for the launch dimensions: [validate_parallel] deliberately accepts any
      grid geometry (it is backend-independent), so [Schedule.check_hardware_limits_classified] is
@@ -412,8 +411,8 @@ let () =
      blocktile seed launches two Workgroup dimensions of [bm/tm] x [bn/tn] threads, so its [.y]
      entry is load-bearing on a schedule the seeding path actually produces — [launch_dim_gate.ml]
      covers the three-dimensional case (CUDA's [.z] cliff) on a hand-built nest, since no in-tree
-     annotator emits three nested Workgroup loops. The product cap here is set to exactly the
-     seed's own product, so the product row can never be what fires. *)
+     annotator emits three nested Workgroup loops. The product cap here is set to exactly the seed's
+     own product, so the product row can never be what fires. *)
   let sblock = sdims.LL.block in
   let wg_limits dims =
     {

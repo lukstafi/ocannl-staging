@@ -102,21 +102,24 @@
 (rule
  (alias runtest-test_ppx_op-ppx)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff test_ppx_op_expected.ml test_ppx_op_actual.ml)))
 
 (rule
  (alias runtest-test_ppx_name_conflict-ppx)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff test_ppx_name_conflict_expected.ml test_ppx_name_conflict_actual.ml)))
 
 (rule
  (alias runtest-test_compose_logic_err-ppx)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff test_compose_logic_err_expected.ml test_compose_logic_err_actual.ml)))
 

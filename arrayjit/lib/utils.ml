@@ -1649,10 +1649,10 @@ let normalize_exponent s =
 
     - {b It is a floating literal, not an integer one.} [%.16g] of a value with no fractional part
       has no radix point, so [2.] comes out as ["2"] and [-0.] as ["-0"] -- the integer zero, hence
-      [+0.0] once read as C, and indistinguishable from [+0.] to a reader of a dump. That is the
-      one distinction the gh-ocannl-615 chase was about: asking whether a [-0.0] in host data
-      survives to the kernel, and being answered [:= 0] either way. Forcing the radix point closes
-      the whole class at once.
+      [+0.0] once read as C, and indistinguishable from [+0.] to a reader of a dump. That is the one
+      distinction the gh-ocannl-615 chase was about: asking whether a [-0.0] in host data survives
+      to the kernel, and being answered [:= 0] either way. Forcing the radix point closes the whole
+      class at once.
     - {b It round-trips.} 16 significant digits do not recover every double: [0.1 +. 0.2] prints as
       ["0.3"], which is a {e different} double, and so a constant whose 17th digit matters displays
       identically to one whose does not. The rendering therefore retries at [%.17g] -- the width
@@ -1662,8 +1662,8 @@ let normalize_exponent s =
 
     Non-finite values get [%.16g]'s words ([inf], [-inf], [nan]): they have no decimal spelling at
     all, and appending a radix point to one would produce a token that is neither. A caller whose
-    dialect needs its own spelling handles them before calling -- {!C_syntax.c_float_literal}
-    spells C's [INFINITY] and [NAN], while an IR dump, which is not C, keeps the words. *)
+    dialect needs its own spelling handles them before calling -- {!C_syntax.c_float_literal} spells
+    C's [INFINITY] and [NAN], while an IR dump, which is not C, keeps the words. *)
 let decimal_float_literal c =
   if not (Float.is_finite c) then Printf.sprintf "%.16g" c
   else

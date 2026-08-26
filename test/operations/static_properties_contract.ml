@@ -11,8 +11,8 @@
    function; this test checks it against each backend's REAL dump, plus the parts of it a parser
    cannot enforce (uniform keys, the ordinal sequence).
 
-   Two legs run in every configuration: the selected backend (so pinning [OCANNL_BACKEND] covers
-   cc, metal, cuda and hip in turn -- the goldens stay backend-uniform because every claim is
+   Two legs run in every configuration: the selected backend (so pinning [OCANNL_BACKEND] covers cc,
+   metal, cuda and hip in turn -- the goldens stay backend-uniform because every claim is
    shape-only) and multidev_cc, which is always available and is the backend the issue was about.
    Device names, counts and attribute values are machine-specific, so they go to stderr; stdout
    carries claims only.
@@ -71,9 +71,9 @@ let check_dump ~leg ~backend_name (props : Sexp.t) =
   let parsed = BI.parse_static_properties props in
   Verdict.pf "%s: dump is a device dump (message-shaped device entries under the group atom)" leg
     (Option.is_some parsed);
-  (* Every claim below is conjoined with "there is a device to check", so a dump that does not
-     parse -- or enumerates nothing -- reports them as false rather than vacuously true: an
-     unevaluated claim printing the same line as a verified one is what a golden cannot show. *)
+  (* Every claim below is conjoined with "there is a device to check", so a dump that does not parse
+     -- or enumerates nothing -- reports them as false rather than vacuously true: an unevaluated
+     claim printing the same line as a verified one is what a golden cannot show. *)
   let devices = match parsed with Some { BI.devices; _ } -> devices | None -> [] in
   let some_device = not (List.is_empty devices) in
   Verdict.pf "%s: at least one device is enumerated" leg some_device;
@@ -81,7 +81,7 @@ let check_dump ~leg ~backend_name (props : Sexp.t) =
   Verdict.pf "%s: keys within a device entry are distinct" leg
     (some_device
     && List.for_all keys ~f:(fun ks ->
-           List.length (List.dedup_and_sort ks ~compare:String.compare) = List.length ks));
+        List.length (List.dedup_and_sort ks ~compare:String.compare) = List.length ks));
   Verdict.pf "%s: all device entries carry the same keys in the same order" leg
     (some_device
     &&
@@ -91,20 +91,19 @@ let check_dump ~leg ~backend_name (props : Sexp.t) =
   Verdict.pf "%s: every device entry carries device_name and device_ordinal" leg
     (some_device
     && List.for_all devices ~f:(fun fields ->
-           List.exists fields ~f:(fun (k, _) -> String.equal k "device_name")
-           && List.exists fields ~f:(fun (k, _) -> String.equal k "device_ordinal")));
+        List.exists fields ~f:(fun (k, _) -> String.equal k "device_name")
+        && List.exists fields ~f:(fun (k, _) -> String.equal k "device_ordinal")));
   Verdict.pf "%s: device ordinals are 0..n-1 in entry order" leg
     (some_device
     && List.for_alli devices ~f:(fun i fields ->
-           match List.Assoc.find fields ~equal:String.equal "device_ordinal" with
-           | Some (Sexp.Atom ordinal) -> String.equal ordinal (Int.to_string i)
-           | _ -> false))
+        match List.Assoc.find fields ~equal:String.equal "device_ordinal" with
+        | Some (Sexp.Atom ordinal) -> String.equal ordinal (Int.to_string i)
+        | _ -> false))
 
 let () =
   check_negative_controls ();
   let selected = Context.auto () in
-  check_dump ~leg:"selected backend"
-    ~backend_name:(Context.backend_name selected)
+  check_dump ~leg:"selected backend" ~backend_name:(Context.backend_name selected)
     (Context.static_properties selected);
   (* [threads] > 1 selects multidev_cc; it needs no hardware, so this leg runs everywhere. *)
   let multidev = Context.cpu ~threads:2 () in

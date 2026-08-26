@@ -41,7 +41,7 @@ let () =
   let has sub = List.exists srcs ~f:(String.is_substring ~substring:sub) in
   Verdict.p "large_models=true: generated slot table is ulong* __pool_slots"
     (has "ulong* __pool_slots");
-  (* Phrased as the fact that holds, so that [true] is the passing reading on both lines: a
-     designed negative and a blessed regression are the same line in a golden (gh-ocannl-624). *)
+  (* Phrased as the fact that holds, so that [true] is the passing reading on both lines: a designed
+     negative and a blessed regression are the same line in a golden (gh-ocannl-624). *)
   Verdict.p "large_models=true: generated slot table is not uint* __pool_slots"
     (not (has "uint* __pool_slots"))

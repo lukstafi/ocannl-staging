@@ -33,8 +33,8 @@ module Asgns = Ir.Assignments
 let p = Verdict.p
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
-   variant naming one of five mutually exclusive states, so a claim names the state it means
-   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+   variant naming one of five mutually exclusive states, so a claim names the state it means instead
+   of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
 let replayed (r : Autotune.report) =
   match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
 
@@ -323,8 +323,7 @@ let () =
     (mr1.Autotune.sketch_candidates
     >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
   p "tuned matmul matches the serial twin" (Array.for_all2_exn got_mm1 got_serial ~f:approx);
-  p "matmul tune searches then hits the cache"
-    (completed mr1 && replayed mr2);
+  p "matmul tune searches then hits the cache" (completed mr1 && replayed mr2);
   p "matmul cache-hit values match the serial twin"
     (Array.for_all2_exn got_mm2 got_serial ~f:approx);
 
@@ -334,8 +333,7 @@ let () =
      the sketch pipelines apply without the zero-expansion geometry. === *)
   let q = 32 in
   let qav =
-    Array.init (q * q)
-      ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:11 ~offset:0. ~stride:0.125)
+    Array.init (q * q) ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:11 ~offset:0. ~stride:0.125)
   in
   let qbv =
     Array.init (q * q) ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:7 ~offset:(-3.) ~stride:1.)

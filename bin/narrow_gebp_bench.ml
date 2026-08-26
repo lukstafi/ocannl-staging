@@ -275,13 +275,12 @@ let () =
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
-    (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a
-       table reader does not notice (gh-ocannl-626). *)
+    (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a table
+       reader does not notice (gh-ocannl-626). *)
     p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %s, %s)  [%s]\n" variant
       (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot)
-      (Bench_checksum.render checksum) agreement
+      spot values.(spot) (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma, values)
   in

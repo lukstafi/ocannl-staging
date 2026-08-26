@@ -3,10 +3,10 @@
 
    A tensor's fp8 cells get written from two places: the host, through [Ndarray]'s
    [Ops.single_to_fp8] (the C stub compiled from builtins.c), and a kernel, through whatever the
-   backend emits — the same software codec on cc and Metal, the native [__nv_fp8_e5m2] cast on
-   CUDA, and on HIP [__hip_fp8_e5m2] behind a guard that pre-rounds the underflow window ROCm gets
-   wrong (gh-ocannl-647). Nothing makes those agree by construction, so this compares them
-   directly: the same values narrowed each way, read back and compared.
+   backend emits — the same software codec on cc and Metal, the native [__nv_fp8_e5m2] cast on CUDA,
+   and on HIP [__hip_fp8_e5m2] behind a guard that pre-rounds the underflow window ROCm gets wrong
+   (gh-ocannl-647). Nothing makes those agree by construction, so this compares them directly: the
+   same values narrowed each way, read back and compared.
 
    The values are the ones where a codec has a decision to make, because everywhere else agreement
    is uninformative — ties in both directions (round-to-nearest-EVEN, not away from zero), the
@@ -28,7 +28,6 @@ let p = Verdict.p
 let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
-
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* Narrow on the DEVICE. [*. 1.] is the exact identity on every value below — signed zeros,

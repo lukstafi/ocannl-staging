@@ -117,13 +117,13 @@ type hardware_limits = {
           [threadgroup]); [None] when the backend imposes no limit. *)
   max_workgroup_dims : (int * int * int) option;
       (** Per-dimension upper bounds on the launch's workgroup shape — the caps on [.x], [.y] and
-          [.z] of {!Low_level.launch_dims}' [block], in that order. Beside, not
-          instead of, {!field-max_threads_per_workgroup}: that one caps the {e product}, and the
-          two are not the same fact. CUDA's [maxThreadsDim] is [(1024, 1024, 64)] — the [.z]
-          component is 16x smaller than the product cap — so a workgroup of [2 x 2 x 128] has a
-          perfectly legal 512-thread product and is still an invalid launch configuration
-          (gh-ocannl-679). [Workgroup] slots are capped at 3 and the innermost binds [.x], so the
-          outermost annotated loop's extent lands on [.z] directly; no fold is involved.
+          [.z] of {!Low_level.launch_dims}' [block], in that order. Beside, not instead of,
+          {!field-max_threads_per_workgroup}: that one caps the {e product}, and the two are not the
+          same fact. CUDA's [maxThreadsDim] is [(1024, 1024, 64)] — the [.z] component is 16x
+          smaller than the product cap — so a workgroup of [2 x 2 x 128] has a perfectly legal
+          512-thread product and is still an invalid launch configuration (gh-ocannl-679).
+          [Workgroup] slots are capped at 3 and the innermost binds [.x], so the outermost annotated
+          loop's extent lands on [.z] directly; no fold is involved.
 
           Unlike {!field-max_grid_yz} this carries all three bounds rather than one shared one,
           because here the dimensions genuinely differ: on CUDA [.z] is the odd one out, while HIP
@@ -146,17 +146,17 @@ type hardware_limits = {
           [Schedule.zero_expansion] clamp their block size against the [.x] entry too, so the gate
           is a backstop rather than the first line of defence. *)
   max_grid_yz : int option;
-      (** Upper bound on {e each} of the launch's [.y] and [.z] grid dimensions: the row-block
-          count ([grid.(1)]) and the folded batch-extent product ([grid.(2)], the dimension [Grid]
-          slots [>= 2] fold onto — gh-ocannl-643, [Low_level]'s hardware-axis section comment).
-          One field rather than two because it is one hardware fact: CUDA and HIP cap
-          [gridDim.y] and [gridDim.z] at the same 65535 while [gridDim.x] is 2^31-scale (on CUDA
-          an architectural constant, unlike the queried per-device limits above; HIP queries it,
-          conservatively as the smaller of the two components). What a caller does about an excess
-          differs per dimension, and that distinction lives in the typed cause instead
-          ([Schedule_outcome.Grid_y_extent] vs. [Grid_z_extent]). [None] when the backend imposes
-          no such limit (Metal's threadgroups-per-grid dimensions are not 16-bit, and the C
-          backends render annotated loops serially). Both dimensions are checked pre-driver by
+      (** Upper bound on {e each} of the launch's [.y] and [.z] grid dimensions: the row-block count
+          ([grid.(1)]) and the folded batch-extent product ([grid.(2)], the dimension [Grid] slots
+          [>= 2] fold onto — gh-ocannl-643, [Low_level]'s hardware-axis section comment). One field
+          rather than two because it is one hardware fact: CUDA and HIP cap [gridDim.y] and
+          [gridDim.z] at the same 65535 while [gridDim.x] is 2^31-scale (on CUDA an architectural
+          constant, unlike the queried per-device limits above; HIP queries it, conservatively as
+          the smaller of the two components). What a caller does about an excess differs per
+          dimension, and that distinction lives in the typed cause instead
+          ([Schedule_outcome.Grid_y_extent] vs. [Grid_z_extent]). [None] when the backend imposes no
+          such limit (Metal's threadgroups-per-grid dimensions are not 16-bit, and the C backends
+          render annotated loops serially). Both dimensions are checked pre-driver by
           [Schedule.check_hardware_limits_classified]; the autotune batch-grid twins also consult
           the [.z] reading at seeding so an over-cap candidate is never proposed. *)
   mma : mma_capability option;
@@ -247,9 +247,9 @@ type device_dump = {
     The contract, which every backend that enumerates devices honors and this function is the single
     reader of:
 
-    - The dump is [(<group> <entry> ...)]: an atom naming the group, then the entries. [<group>] ends
-      in ["_devices"] -- and is [<backend name>_devices] -- exactly when the dump enumerates devices,
-      so a dump that describes something else (an unlinked backend's
+    - The dump is [(<group> <entry> ...)]: an atom naming the group, then the entries. [<group>]
+      ends in ["_devices"] -- and is [<backend name>_devices] -- exactly when the dump enumerates
+      devices, so a dump that describes something else (an unlinked backend's
       [(<backend>_missing (error ...))], see [Lowered_backend_missing]) is distinguishable without
       guessing.
     - Every entry of a [_devices] dump is a device, and is [Sexp.message]-shaped: the atom [device]

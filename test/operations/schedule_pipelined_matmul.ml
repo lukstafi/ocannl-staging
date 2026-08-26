@@ -50,7 +50,6 @@ module Numerics = Ir.Numerics
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
-
 let p_all = Verdict.p_all
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
@@ -67,7 +66,6 @@ let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
-
 let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated

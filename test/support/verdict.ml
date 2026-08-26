@@ -53,8 +53,8 @@ let p name b =
 
 (** [pf fmt … b] is {!p} with a COMPUTED label: the format and its arguments render the label, and
     the boolean follows, so the call reads in the same order as [p name b] —
-    [Verdict.pf "%s gradients match the oracle" label ok] prints ["… gradients match the oracle:
-    true"] and fails the run on [false].
+    [Verdict.pf "%s gradients match the oracle" label ok] prints
+    ["… gradients match the oracle: true"] and fails the run on [false].
 
     This is the entry point for the claims gh-ocannl-601 could not convert (gh-ocannl-624): a claim
     whose label names which leg, which epoch or which measured quantity it is about has to build
@@ -113,7 +113,7 @@ let short_fail name detail =
    collection that can be a whole tensor readback; the length is computed only to report a
    failure. *)
 let quantified ?(min = 1) name xs holds =
-  if (if min <= 1 then not (List.is_empty xs) else List.length xs >= min) then p name (holds ())
+  if if min <= 1 then not (List.is_empty xs) else List.length xs >= min then p name (holds ())
   else
     let length = List.length xs in
     short_fail name (if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min)
@@ -125,9 +125,9 @@ let p_all ?min name xs ~f = quantified ?min name xs (fun () -> List.for_all xs ~
 
 (** [p_none name xs ~f] claims that no element of [xs] satisfies [f], and that there is an element —
     the guarded form of [p name (not (List.exists xs ~f))] and of
-    [p name (List.is_empty (List.filter xs ~f))]. The mirror of {!p_all}, and the one the ["no X
-    is …"] claims want: filtering an empty collection also yields nothing, so the unguarded spelling
-    passes on an empty input just as [List.for_all] does. *)
+    [p name (List.is_empty (List.filter xs ~f))]. The mirror of {!p_all}, and the one the
+    ["no X is …"] claims want: filtering an empty collection also yields nothing, so the unguarded
+    spelling passes on an empty input just as [List.for_all] does. *)
 let p_none ?min name xs ~f = quantified ?min name xs (fun () -> not (List.exists xs ~f))
 
 (** [p_empty name ~over xs] claims that the derived collection [xs] is empty, and that the

@@ -12,22 +12,22 @@
    The claims are therefore both structural and executed:
 
    - the emitted f32 kernel opens the accumulator into a local, updates the local inside the
-     reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop;
-   - on Metal the localized accumulator itself is [volatile] (gh-ocannl-731), because the same
-     shader-compiler pass can corrupt this replacement form when its contribution reads through a
-     pooled pointer. The kernel carries no volatile POINTER shadow: localization lifted the
-     device-memory RMW that shadow pins. (Nothing to evaluate on a backend whose
-     [volatile_scalar_rmw] is [false] — reported as skipped rather than as a vacuous pass.)
-   - the values match a host reference computed in the same summation order. The producers
-     discriminate: every element is [1 + 10*i + j], so it varies with BOTH loop symbols and is
-     clear of the zero the accumulator is initialized to — a constant producer would survive a
-     dropped or replayed iteration, and a value omitting a symbol would survive a wrong
-     substitution.
+   reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop; - on
+   Metal the localized accumulator itself is [volatile] (gh-ocannl-731), because the same
+   shader-compiler pass can corrupt this replacement form when its contribution reads through a
+   pooled pointer. The kernel carries no volatile POINTER shadow: localization lifted the
+   device-memory RMW that shadow pins. (Nothing to evaluate on a backend whose [volatile_scalar_rmw]
+   is [false] — reported as skipped rather than as a vacuous pass.) - the values match a host
+   reference computed in the same summation order. The producers discriminate: every element is [1 +
+   10*i + j], so it varies with BOTH loop symbols and is clear of the zero the accumulator is
+   initialized to — a constant producer would survive a dropped or replayed iteration, and a value
+   omitting a symbol would survive a wrong substitution.
 
    Two nest shapes, because they exercise different placements of the localized store: a scalar
    reduction over both axes (the loss shape — the store lands above every loop, at function scope)
-   and a row reduction (the batch-gradient / contraction shape — the store lands inside the surviving
-   output loop, whose symbol the cell DOES mention, so the volatile predicate is false there too). *)
+   and a row reduction (the batch-gradient / contraction shape — the store lands inside the
+   surviving output loop, whose symbol the cell DOES mention, so the volatile predicate is false
+   there too). *)
 
 open Base
 open Ocannl
@@ -35,16 +35,13 @@ open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-
-let backend_name =
-  String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* [volatile_scalar_rmw] is a backend source constant, not a config key; Metal is the only backend
    that sets it. On every other backend "the kernel carries no volatile alias" is vacuously true and
    is reported as skipped instead. *)
 let has_volatile_shadow = String.is_substring backend_name ~substring:"metal"
 let () = Test_utils.Generated.init ~backend_name
-
 let rows = 6
 let cols = 7
 
@@ -120,8 +117,8 @@ let () =
     match String.substr_index st ~pattern:" = " with
     | None -> None
     | Some at ->
-        (* Splitting on [;] carries a [for] header's tail into the next statement, so the
-           assigned name is the LAST token before the [=], not the whole prefix. *)
+        (* Splitting on [;] carries a [for] header's tail into the next statement, so the assigned
+           name is the LAST token before the [=], not the whole prefix. *)
         let lhs =
           match List.rev (String.split_on_chars (String.prefix st at) ~on:[ ' '; '\n'; '\t' ]) with
           | last :: _ -> last
@@ -140,9 +137,7 @@ let () =
   in
   let check_localized routine label =
     let source = Test_utils.Generated.read routine in
-    let statements =
-      List.map (String.split source ~on:';') ~f:normalize
-    in
+    let statements = List.map (String.split source ~on:';') ~f:normalize in
     let fail_all () =
       List.iter
         [
@@ -151,8 +146,7 @@ let () =
           "no statement both reads and writes the node";
           "the node is stored exactly once, from the local";
           "Metal accumulator local is volatile, without a pointer shadow";
-        ]
-        ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
+        ] ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
     in
     match List.find_map statements ~f:scope_init with
     | None -> fail_all ()
@@ -166,18 +160,18 @@ let () =
         Verdict.p
           (label ^ ": the reduction updates the local, not the node")
           (List.exists statements ~f:(fun st ->
-               node_accesses st = 0 && count st local >= 2
+               node_accesses st = 0
+               && count st local >= 2
                && String.is_substring st ~substring:(local ^ " = ")));
-        (* The read-modify-write shape is one statement reading and writing the node. Its absence
-           is what localization buys; the [Zero_out] statement reaches the node once and is not
-           it. *)
+        (* The read-modify-write shape is one statement reading and writing the node. Its absence is
+           what localization buys; the [Zero_out] statement reaches the node once and is not it. *)
         Verdict.p_all (label ^ ": no statement both reads and writes the node") statements
           ~f:(fun st -> node_accesses st <= 1);
         Verdict.p
           (label ^ ": the node is stored exactly once, from the local")
           (1
           = List.count statements ~f:(fun st ->
-                node_accesses st = 1 && String.is_substring st ~substring:("] = " ^ local)));
+              node_accesses st = 1 && String.is_substring st ~substring:("] = " ^ local)));
         if has_volatile_shadow then
           Verdict.p
             (label ^ ": Metal accumulator local is volatile, without a pointer shadow")

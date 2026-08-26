@@ -21,7 +21,8 @@ type outcome =
   | Search_died of terminal_failure
       (** A search ran and terminated on a fatal failure. The counters hold what it had reached. *)
   | Cache_replay  (** A cached winner replayed; nothing was searched in this process. *)
-  | Search_disabled  (** [autotune_search=false] with nothing to replay: the untuned default ships. *)
+  | Search_disabled
+      (** [autotune_search=false] with nothing to replay: the untuned default ships. *)
   | Pre_search_failure of terminal_failure
       (** A failure before (or instead of) the search proper: the base compile, the baseline link or
           timing, a fatal cache replay, an untuned fallback compile. *)
@@ -1275,9 +1276,9 @@ type loop_desc = {
   ld_from_ : int;
       (** The loop's lower bound. [Partition] segments after the first start at their breakpoint
           (segment ranges stay absolute), and only [Split] among the proposed ops requires a
-          zero-origin loop — [Swap], [Unroll] (either representation) and non-hardware [Retype]s
-          are origin-agnostic, so nonzero-origin loops stay enumerated for them (Codex P2 on PR
-          #403). *)
+          zero-origin loop — [Swap], [Unroll] (either representation) and non-hardware [Retype]s are
+          origin-agnostic, so nonzero-origin loops stay enumerated for them (Codex P2 on PR #403).
+      *)
   ld_extent : int;
   ld_axis : LL.axis_type;
   ld_innermost : bool;
@@ -1292,8 +1293,7 @@ type loop_desc = {
    the accumulation mints of [Unroll ~materialize:true] and [Partition] (gh-ocannl-639) and
    virtualization's inlined computations put loops. This is the scalar-position reach of
    [Schedule.rewrite_loop] and [Schedule.find_loops_env]; like them it enters neither [If]
-   conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
-   invalid).
+   conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often invalid).
 
    Each body comes with its scope's provenance (gh-ocannl-687), which every caller here descends
    into but which decides what the menu then proposes for the loops found there. *)
@@ -1319,12 +1319,12 @@ let stmt_scope_bodies (stmt : LL.t) : (LL.t * LL.scope_mint) list =
    (gh-ocannl-666), so a loop whose only inner loops sit inside a scope does not read as innermost.
    Provenance-blind on purpose (PR #424 review round 2): innermost-ness decides which loop a
    [Vectorized] retype is proposed for, and the renderer answers that question structurally. An
-   outer loop whose body holds a [Local_scope] cannot be explicitly vectorized at all —
-   [C_syntax]'s elementwise vectorizer bails on [Local_scope] / [Get_local], and an accumulating
-   bailout falls back to a plain serial loop — so calling it innermost would propose a retype that
-   renders exactly like the baseline. The inlined reduction one level down is the loop that has a
-   renderer ([try_vectorize_reduce] recognizes its [Set_local] accumulation), which is why
-   [collect_loops] keeps enumerating it. *)
+   outer loop whose body holds a [Local_scope] cannot be explicitly vectorized at all — [C_syntax]'s
+   elementwise vectorizer bails on [Local_scope] / [Get_local], and an accumulating bailout falls
+   back to a plain serial loop — so calling it innermost would propose a retype that renders exactly
+   like the baseline. The inlined reduction one level down is the loop that has a renderer
+   ([try_vectorize_reduce] recognizes its [Set_local] accumulation), which is why [collect_loops]
+   keeps enumerating it. *)
 let rec contains_loop = function
   | LL.Seq (a, b) -> contains_loop a || contains_loop b
   | LL.If { body; _ } -> contains_loop body
@@ -1348,18 +1348,18 @@ let rec contains_loop = function
    Both provenances are entered, and each descriptor records which (gh-ocannl-687's [ld_inlined]).
    The distinction is NOT about reachability — [Schedule.rewrite_loop] descends every [Local_scope],
    so a proposal naming an inlined loop applies — and it is not about which loops exist. It is about
-   which CATEGORY is worth a candidate compile on a loop virtualization re-instantiates per use
-   site (PR #424 review round 2, correcting a first attempt that dropped such loops wholesale):
+   which CATEGORY is worth a candidate compile on a loop virtualization re-instantiates per use site
+   (PR #424 review round 2, correcting a first attempt that dropped such loops wholesale):
 
    - [Vectorized] retypes stay proposable there, and must. That is one descriptor, and it is the
-     only one with a renderer built for the shape: an inlined reduction's [Set_local] accumulation is
-     exactly what [C_syntax.try_vectorize_reduce] recognizes, while the enclosing loop cannot be
-     explicitly vectorized at all (its body holds a [Local_scope]). Excluding the inner loop does
-     not move the candidate outward, it destroys it.
-   - [Split]s, [Swap]s and [Unroll]s do not. Up to eight descriptors per loop, no evidence any of
-     them pays on a per-use-site inline, and each one costs a candidate compile and — under the
-     per-unit cap — displaces a proposal for the main nest. Nothing proposed them before gh-666,
-     whose widening was aimed at the accumulation mints and swept these in for want of provenance. *)
+   only one with a renderer built for the shape: an inlined reduction's [Set_local] accumulation is
+   exactly what [C_syntax.try_vectorize_reduce] recognizes, while the enclosing loop cannot be
+   explicitly vectorized at all (its body holds a [Local_scope]). Excluding the inner loop does not
+   move the candidate outward, it destroys it. - [Split]s, [Swap]s and [Unroll]s do not. Up to eight
+   descriptors per loop, no evidence any of them pays on a per-use-site inline, and each one costs a
+   candidate compile and — under the per-unit cap — displaces a proposal for the main nest. Nothing
+   proposed them before gh-666, whose widening was aimed at the accumulation mints and swept these
+   in for want of provenance. *)
 let collect_loops registry llc =
   let acc = ref [] in
   let seen = Hash_set.create (module Idx.Symbol) in
@@ -1395,10 +1395,7 @@ let collect_loops registry llc =
         walk ~inlined body
     | stmt ->
         List.iter (stmt_scope_bodies stmt) ~f:(fun (body, mint) ->
-            walk
-              ~inlined:
-                (inlined || LL.equal_scope_mint mint LL.Inlined_computation)
-              body)
+            walk ~inlined:(inlined || LL.equal_scope_mint mint LL.Inlined_computation) body)
   in
   walk ~inlined:false llc;
   List.rev !acc
@@ -1475,9 +1472,7 @@ let share_cap ~cap (categories : (string * 'a list) list) : 'a list * (string * 
           Int.decr budget;
           progressed := true))
   done;
-  let kept =
-    List.concat_mapi categories ~f:(fun idx (_, l) -> List.take l keep.(idx))
-  in
+  let kept = List.concat_mapi categories ~f:(fun idx (_, l) -> List.take l keep.(idx)) in
   let dropped =
     List.filter_mapi categories ~f:(fun idx (name, l) ->
         let d = List.length l - keep.(idx) in
@@ -1486,8 +1481,8 @@ let share_cap ~cap (categories : (string * 'a list) list) : 'a list * (string * 
   (kept, dropped)
 
 let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
-    ~(limits : Ir.Backend_intf.hardware_limits) ~registry (opt : LL.optimized) :
-    SC.saved_optop list =
+    ~(limits : Ir.Backend_intf.hardware_limits) ~registry (opt : LL.optimized) : SC.saved_optop list
+    =
   let loops = collect_loops registry opt.LL.llc in
   (* gh-ocannl-687: how many enumerated loops are offered the [Vectorized] retype alone because
      virtualization inlined them, so the narrowing is visible rather than silent. *)
@@ -1507,7 +1502,7 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
         (* [Sched.Split]'s index arithmetic requires a zero-origin loop (its apply raises
            otherwise); nonzero-origin loops — [Partition] segments after the first — are still in
            [loops] for the origin-agnostic families below. *)
-        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 || ld.ld_inlined then
+        if (not (LL.equal_axis_type ld.ld_axis LL.Serial)) || ld.ld_from_ <> 0 || ld.ld_inlined then
           []
         else
           List.filter_map split_factors ~f:(fun factor ->
@@ -1702,19 +1697,20 @@ let placement_enablement ~limits ~static_indices ~(base : LL.optimized) ~(allmat
   (site_tns enabling_sites, site_tns base_sites)
 
 (* gh-ocannl-579: the profitability term. The enablement prior above prices EXPRESSIBILITY — which
-   sketch families a placement makes reachable — and nothing else, so it promotes a flip whose family
-   this device has already been measured to lose with. The evidence that settles it is in hand at the
-   only place the prior is consumed: [Train.tune_placements] searches arm B (materialize-all) — the
-   very specialization [placement_enablement] derives [enablement] from — before the flip chain
-   walks, and its report says what the tensorized family was worth here ([mma_best_ms] against
-   [best_ms], same device, same computation, same session, already paid for). *)
+   sketch families a placement makes reachable — and nothing else, so it promotes a flip whose
+   family this device has already been measured to lose with. The evidence that settles it is in
+   hand at the only place the prior is consumed: [Train.tune_placements] searches arm B
+   (materialize-all) — the very specialization [placement_enablement] derives [enablement] from —
+   before the flip chain walks, and its report says what the tensorized family was worth here
+   ([mma_best_ms] against [best_ms], same device, same computation, same session, already paid
+   for). *)
 
 type family_profit = Unmeasured | Pays of float | Loses of float
 
-(* Most favourable evidence wins: the prior is deleted only by evidence that contradicts it, never by
-   the mere absence of a confirmation, and a single arm that measured a competitive family outranks
-   another that measured a losing one (the arms search different placements; the promotion is a bet
-   on the best placement reachable, not on the average). *)
+(* Most favourable evidence wins: the prior is deleted only by evidence that contradicts it, never
+   by the mere absence of a confirmation, and a single arm that measured a competitive family
+   outranks another that measured a losing one (the arms search different placements; the promotion
+   is a bet on the best placement reachable, not on the average). *)
 let combine_family_profit a b =
   match (a, b) with
   | Unmeasured, x | x, Unmeasured -> x
@@ -1855,13 +1851,9 @@ let placement_surface ?name ?ordering ?(evidence = []) ctx comp bindings =
     List.filter_map candidates ~f:(fun fc ->
         match fc.LL.fc_flip with `Materialize -> Some fc.LL.fc_tn | `Inline -> None)
   in
-  let allmat =
-    Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
-  in
+  let allmat = Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
-  let ps_candidates =
-    rank_flip_candidates ~ordering ?profit ~enablement ~disablement candidates
-  in
+  let ps_candidates = rank_flip_candidates ~ordering ?profit ~enablement ~disablement candidates in
   let candidate_set =
     Set.of_list (module Ir.Tnode) (List.map ps_candidates ~f:(fun fc -> fc.LL.fc_tn))
   in
@@ -2260,10 +2252,10 @@ let model_default ?name ?report ctx comp bindings =
               Printf.sprintf "placement#%d %s" fc.LL.fc_tn.Ir.Tnode.uid
                 (Ir.Tnode.debug_name fc.LL.fc_tn)
             in
-            (* The placement levels commit to DATA like the family levels do (gh-ocannl-591):
-               each child carries the candidate it decides and which way, so the bound below reads
-               the path instead of finding the candidate back through the level name and the
-               commitment back through the label. [level_name] is the display name only. *)
+            (* The placement levels commit to DATA like the family levels do (gh-ocannl-591): each
+               child carries the candidate it decides and which way, so the bound below reads the
+               path instead of finding the candidate back through the level name and the commitment
+               back through the label. [level_name] is the display name only. *)
             let rec build vector = function
               | [] -> Sspace.Leaf (List.rev vector)
               | fc :: rest ->
@@ -2459,7 +2451,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
      generated sources and debug artifacts are named — by construction now, rather than by the
      coincidence that no compile here passed a name. Lazy and total on purpose: this is a diagnostic
      label, while the "a comp must be named" contract belongs to the compiles, and deriving it
-     eagerly would move that failure ahead of them (and impose it on a search that emits nothing). *)
+     eagerly would move that failure ahead of them (and impose it on a search that emits
+     nothing). *)
   let routine_name =
     lazy
       (Option.value_or_thunk name ~default:(fun () ->
@@ -2808,15 +2801,14 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                     best_tensorization = Some (mma_summary c).Ir.C_syntax.tensorization;
                     best_mma_statements = mma_statements c;
                     best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
-                    (* Nothing was timed in this process — [mma_timed = 0] like every other
-                       COUNTER here, which describes this call. The TIMES describe the program, and
-                       are replayed from the entry exactly as [best_ms] and [baseline_ms] above are:
+                    (* Nothing was timed in this process — [mma_timed = 0] like every other COUNTER
+                       here, which describes this call. The TIMES describe the program, and are
+                       replayed from the entry exactly as [best_ms] and [baseline_ms] above are:
                        without that, the flip chain's profitability term (gh-ocannl-579) would rank
                        the decision surface one way on the cold run that measured the family and the
                        other way on every warm-cache run after it. [None] for a search that timed
                        none, and for entries written before the field existed. *)
-                    mma_best_ms =
-                      Option.value entry.SC.mma_best_ms ~default:Float.infinity;
+                    mma_best_ms = Option.value entry.SC.mma_best_ms ~default:Float.infinity;
                     best_schedule = flat_schedule c.form;
                   };
                 Some (c.cctx, c.routine)
@@ -3109,8 +3101,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
         let emit_partial_and_raise (fatal : Outcome.fatal) =
           let summaries = decline_summaries declines in
           let best_c, best_ms = !best_so_far in
-          (* Shadowing the projection of the same name would be gratuitous here: this is the
-             failure being constructed, not one being read off a report. *)
+          (* Shadowing the projection of the same name would be gratuitous here: this is the failure
+             being constructed, not one being read off a report. *)
           let failure =
             { phase = fatal.phase; candidate = fatal.candidate; detail = Exn.to_string fatal.exn }
           in
@@ -3312,8 +3304,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                             (Ir.C_syntax.tensorization_name summary.Ir.C_syntax.tensorization)
                             scalar total
                         else if total = 0 && spec_expects_mma spec then
-                          logf "%s: NOTE not-requested, tensorized candidate emitted no Tile_mma \
-                                statement"
+                          logf
+                            "%s: NOTE not-requested, tensorized candidate emitted no Tile_mma \
+                             statement"
                             (spec_label spec);
                         if Float.(ms < snd !best_so_far) then best_so_far := (Some c, ms);
                         Some (c, ms)
@@ -3762,8 +3755,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                    (* gh-ocannl-579: a measurement of the program, stored like the two above so the
                       flip chain's profitability term reads the same evidence on a warm cache as on
                       the cold run that measured it. Absent when nothing tensorized was timed. *)
-                   mma_best_ms =
-                     (if Float.is_finite !mma_best_ms then Some !mma_best_ms else None);
+                   mma_best_ms = (if Float.is_finite !mma_best_ms then Some !mma_best_ms else None);
                    default_ms = default_ms ();
                    default_fingerprint =
                      Option.map (default_ms ()) ~f:(fun _ ->

@@ -6,7 +6,8 @@
     search was incomplete twice over on gh-ocannl-623: [arrayjit/test/] carries codegen goldens that
     no [test/*.expected] glob sees, and a substring assertion inside a [.ml] is invisible to any
     [.expected] scan however thorough. The second miss is the expensive one -- those assertions are
-    {!Verdict} claims, so they exit nonzero and fail a plain [dune build], not merely [dune runtest].
+    {!Verdict} claims, so they exit nonzero and fail a plain [dune build], not merely
+    [dune runtest].
 
     So the population is enumerated here, and the enumeration is a golden. Adding a pin promotes a
     line; a codegen change reads the list and knows what it must re-run, before pushing rather than
@@ -18,10 +19,11 @@
     {1 What the golden holds}
 
     The inventory itself: every member, and under each source site the fragments it pins. That is a
-    list that moves when someone adds a pin -- which is the point, and is not the tally gh-ocannl-665
-    warns about, because the line that appears names the pin that appeared. The COUNTS go to stderr,
-    and what the counts were there for -- the assurance that a scan reporting nothing scanned
-    something -- is kept as floors, which fail the run rather than printing (gh-ocannl-701). *)
+    list that moves when someone adds a pin -- which is the point, and is not the tally
+    gh-ocannl-665 warns about, because the line that appears names the pin that appeared. The COUNTS
+    go to stderr, and what the counts were there for -- the assurance that a scan reporting nothing
+    scanned something -- is kept as floors, which fail the run rather than printing (gh-ocannl-701).
+*)
 
 open Base
 open Stdio
@@ -52,11 +54,12 @@ let excluded =
        codegen change does not re-run it" );
     ( "test/operations/codegen_text_inventory.expected",
       "this scan's own output, which quotes the fragments the sources pin: including it would make \
-       the scan's result depend on its own golden, so a promote would take two rounds to converge" );
+       the scan's result depend on its own golden, so a promote would take two rounds to converge"
+    );
     ( "test/operations/generated_provenance.ml",
-      "the test OF the freshness-checked reader: it writes its artifact contents by hand and checks \
-       that a stale or overwritten one is refused, so the strings under it are fixtures no backend \
-       emits and a codegen change does not re-run it" );
+      "the test OF the freshness-checked reader: it writes its artifact contents by hand and \
+       checks that a stale or overwritten one is refused, so the strings under it are fixtures no \
+       backend emits and a codegen change does not re-run it" );
   ]
 
 let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
@@ -77,7 +80,9 @@ let () =
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
   let is_excluded path = List.Assoc.mem excluded path ~equal:String.equal in
-  let of_suffix suffix = List.filter arguments ~f:(fun (name, _) -> String.is_suffix name ~suffix) in
+  let of_suffix suffix =
+    List.filter arguments ~f:(fun (name, _) -> String.is_suffix name ~suffix)
+  in
   let golden_files = of_suffix ".expected" in
   let all_ml = of_suffix ".ml" in
   let present name = List.exists all_ml ~f:(fun (n, _) -> String.equal n name) in
@@ -102,19 +107,17 @@ let () =
   in
   let handed_over = List.map (golden_files @ source_files) ~f:fst in
   let stale =
-    List.filter excluded ~f:(fun (path, _) ->
-        not (List.mem handed_over path ~equal:String.equal))
+    List.filter excluded ~f:(fun (path, _) -> not (List.mem handed_over path ~equal:String.equal))
   in
   List.iter stale ~f:(fun (path, reason) ->
       Verdict.fail
         (Printf.sprintf
-           "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or fix \
-            the path it was meant to name"
+           "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or \
+            fix the path it was meant to name"
            path reason));
   let by_itself =
     List.filter_map golden_files ~f:(fun (name, on_disk) ->
-        if is_excluded name then None
-        else Scan.classify_golden ~path:name ~contents:(read on_disk))
+        if is_excluded name then None else Scan.classify_golden ~path:name ~contents:(read on_disk))
   in
   let unparsed = ref [] in
   let sites =
@@ -151,7 +154,8 @@ let () =
            "%s does not parse as OCaml, so the scan cannot say whether it pins emitted text" path));
   let golden_paths = List.map goldens ~f:(fun g -> g.Scan.path) in
   let site_paths = List.map sites ~f:(fun s -> s.Scan.site_path) in
-  Floors.report ~floors:golden_floors ~noun:"golden" ~what:"Goldens holding emitted text" golden_paths;
+  Floors.report ~floors:golden_floors ~noun:"golden" ~what:"Goldens holding emitted text"
+    golden_paths;
   Floors.report ~floors:source_floors ~noun:"site" ~what:"Sources pinning emitted text" site_paths;
   eprintf "Files handed over: %d goldens, %d sources.\n" (List.length golden_files)
     (List.length source_files);
@@ -168,9 +172,7 @@ let () =
     ~f:(fun g ->
       let origin =
         (match g.Scan.by_extension with Some ext -> [ "extension " ^ ext ] | None -> [])
-        @ (match g.Scan.tags with
-          | [] -> []
-          | tags -> [ "markers " ^ String.concat ~sep:" " tags ])
+        @ (match g.Scan.tags with [] -> [] | tags -> [ "markers " ^ String.concat ~sep:" " tags ])
         @ match g.Scan.beside with Some source -> [ "beside " ^ source ] | None -> []
       in
       printf "%s [%s] %s\n" g.Scan.path

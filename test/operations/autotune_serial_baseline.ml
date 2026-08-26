@@ -30,10 +30,11 @@ module Asgns = Ir.Assignments
 let p = Verdict.p
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
-   variant naming one of five mutually exclusive states, so a claim names the state it means
-   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+   variant naming one of five mutually exclusive states, so a claim names the state it means instead
+   of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
 let replayed (r : Autotune.report) =
   match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -44,6 +45,7 @@ let named name (comp : Asgns.comp) : Asgns.comp =
    Compiled, never run: this half of the test is structural. *)
 let side = 256
 let n = 16
+
 let mav =
   Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
 

@@ -79,5 +79,4 @@ let () =
   let%op loss4 = y4 ++ "...|i=>0" in
   ignore (Train.forward_once (Context.auto ()) loss4 : Context.t);
   let d = dims_of one in
-  Verdict.pf "dim close-down: 0.5+0.5 %s | scalar" (show_dims d)
-    (Array.fold d ~init:1 ~f:( * ) = 1)
+  Verdict.pf "dim close-down: 0.5+0.5 %s | scalar" (show_dims d) (Array.fold d ~init:1 ~f:( * ) = 1)

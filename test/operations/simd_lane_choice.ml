@@ -65,9 +65,9 @@ let () =
   (* Vectorizing at all is never given up by widening: whatever a 32-byte machine renders as
      vectors, a 64-byte one does too. *)
   p_all "widening never turns a vectorized extent into a serial one" extents ~f:(fun extent ->
-         List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
-             Option.is_none (lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
-             || Option.is_some (lanes_for ~vector_bytes:64 ~elt_bytes ~extent)));
+      List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
+          Option.is_none (lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
+          || Option.is_some (lanes_for ~vector_bytes:64 ~elt_bytes ~extent)));
 
   (* An accumulating loop ends in a horizontal fold as long as the lane count, so the width that
      minimizes updates is not always the width that minimizes the whole rendering. *)
@@ -76,8 +76,9 @@ let () =
     && Option.equal Int.equal (reduce_lanes_for ~vector_bytes:64 ~elt_bytes:4 ~extent:64) (Some 8));
   p "a long reduction still takes the full width (4096 -> 16 lanes)"
     (Option.equal Int.equal (reduce_lanes_for ~vector_bytes:64 ~elt_bytes:4 ~extent:4096) (Some 16));
-  p_all "the reduction width offers the same rungs, so it too never declines where 32 bytes would not"
+  p_all
+    "the reduction width offers the same rungs, so it too never declines where 32 bytes would not"
     extents ~f:(fun extent ->
-         List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
-             Option.is_none (reduce_lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
-             || Option.is_some (reduce_lanes_for ~vector_bytes:64 ~elt_bytes ~extent)))
+      List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
+          Option.is_none (reduce_lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
+          || Option.is_some (reduce_lanes_for ~vector_bytes:64 ~elt_bytes ~extent)))

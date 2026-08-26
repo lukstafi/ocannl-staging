@@ -101,7 +101,9 @@ let () =
   let frees_before_failed_grow = List.length !Mock_raw.freed in
   let stale_writer =
     Tn.create (Tn.Default Ir.Ops.single) ~id:571 ~label:[ "stale merge writer" ]
-      ~unpadded_dims:(lazy [| 1 |]) ~padding:(lazy None) ()
+      ~unpadded_dims:(lazy [| 1 |])
+      ~padding:(lazy None)
+      ()
   in
   device.merge_buffer := Some (loc 0);
   device.merge_buffer_capacity <- 32;
@@ -114,9 +116,7 @@ let () =
   in
   Verdict.p "injected grow failure fired" grow_failed;
   let old_pool_absent =
-    match Mock_slab.resolve_pool device (loc 0) with
-    | _ -> false
-    | exception _ -> true
+    match Mock_slab.resolve_pool device (loc 0) with _ -> false | exception _ -> true
   in
   Verdict.p "failed grow invalidated the released pool, capacity, and writer"
     (old_pool_absent
@@ -128,7 +128,7 @@ let () =
   Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1;
   let p3 = Mock_slab.resolve_pool device (loc 0) in
   Verdict.p "grow retry installs a fresh pool without another free"
-    (not (p2 = p3) && List.length !Mock_raw.freed = frees_before_failed_grow + 1);
+    ((not (p2 = p3)) && List.length !Mock_raw.freed = frees_before_failed_grow + 1);
   (* A unique tnode pool id never pre-exists, so allocating it frees nothing. *)
   Mock_slab.alloc_pool device ~pool_id:1 ~size_in_bytes:16 ~alignment:1;
   Stdio.printf "freed count after unique-id alloc = %d\n" (List.length !Mock_raw.freed);

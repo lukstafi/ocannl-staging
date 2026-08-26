@@ -88,7 +88,8 @@
 (rule
  (alias runtest-stdout_clean)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff stdout_clean.expected stdout_clean.actual)))
 
@@ -147,6 +148,7 @@
 (rule
  (alias runtest-default_stderr)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff default_stderr.expected default_stderr.actual)))

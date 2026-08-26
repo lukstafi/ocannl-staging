@@ -3,14 +3,14 @@
    [orchestrate.py] reads a cell's measurement by taking the last '{'-prefixed line of its output
    and [json.loads]ing it; a line that does not parse is reported as `!!! <label> failed` and the
    cell is dropped, after its whole measurement has been paid for. The line is one ~300-character
-   format with two optional pre-formatted fragments and a nested object, and until this test
-   nothing anywhere parsed it.
+   format with two optional pre-formatted fragments and a nested object, and until this test nothing
+   anywhere parsed it.
 
    The values here are the ones a happy-path run never produces and a report needs most: a diverged
    loss trajectory (OCaml's [%g] spells a non-finite float [nan] / [inf] / [-inf], none of which is
    JSON), a time that was never measured ([infinity]), and a backend diagnostic carrying quotes and
-   control characters. The parse oracle is Yojson, which rejects exactly those OCaml spellings —
-   the negative control at the end shows it does — while accepting [null]. *)
+   control characters. The parse oracle is Yojson, which rejects exactly those OCaml spellings — the
+   negative control at the end shows it does — while accepting [null]. *)
 
 open Base
 module V = Verdict
@@ -70,10 +70,10 @@ let tune =
           ~mma_statements:0 ~mma_scalar_fallbacks:0 ~mma_seeded:0 ~mma_timed:0
           ~mma_best_ms:Float.infinity ~terminal_failure:None;
         (* An honestly tensorized winner, and an ordinary one that never asked. *)
-        Bench_json.tune_arm ~name:"D" ~state:"searched" ~searched:true ~cache_hit:false
-          ~best_ms:0.5 ~best_label:"mma-gpu 16x16x16" ~tensorized:true
-          ~tensorization:(Some "tensorized") ~mma_statements:4 ~mma_scalar_fallbacks:0
-          ~mma_seeded:6 ~mma_timed:5 ~mma_best_ms:0.5 ~terminal_failure:None;
+        Bench_json.tune_arm ~name:"D" ~state:"searched" ~searched:true ~cache_hit:false ~best_ms:0.5
+          ~best_label:"mma-gpu 16x16x16" ~tensorized:true ~tensorization:(Some "tensorized")
+          ~mma_statements:4 ~mma_scalar_fallbacks:0 ~mma_seeded:6 ~mma_timed:5 ~mma_best_ms:0.5
+          ~terminal_failure:None;
         Bench_json.tune_arm ~name:"E" ~state:"searched" ~searched:true ~cache_hit:false
           ~best_ms:1.25 ~best_label:"grid 64" ~tensorized:false
           ~tensorization:(Some "not-requested") ~mma_statements:0 ~mma_scalar_fallbacks:0
@@ -88,9 +88,10 @@ let ordinary =
 (* Everything a diverged, half-measured, tuned cell reports at once. *)
 let diverged =
   Bench_json.result_line ~backend:"metal" ~variant:"tuned" ~precision:"f16" ~workload:"gpt2_mini"
-    ~compile_s:Float.nan ~searched:true ~tokens_per_step:4096 ~tune
-    ~p10:Float.infinity ~p50:Float.nan ~p90:Float.neg_infinity ~queued_ms:Float.nan ~timed_steps:0
-    ~losses:[| 1.5; Float.nan; Float.infinity; Float.neg_infinity |] ()
+    ~compile_s:Float.nan ~searched:true ~tokens_per_step:4096 ~tune ~p10:Float.infinity
+    ~p50:Float.nan ~p90:Float.neg_infinity ~queued_ms:Float.nan ~timed_steps:0
+    ~losses:[| 1.5; Float.nan; Float.infinity; Float.neg_infinity |]
+    ()
 
 let () =
   Stdio.printf "\n=== ordinary cell ===\n%s\n" ordinary;
@@ -138,8 +139,7 @@ let () =
   V.p "the three tensorization labels reach the wire"
     (List.for_all
        [ ("B", "scalar-fallback"); ("D", "tensorized"); ("E", "not-requested") ]
-       ~f:(fun (n, label) ->
-         Yojson.Safe.equal (member "tensorization" (arm n)) (`String label)));
+       ~f:(fun (n, label) -> Yojson.Safe.equal (member "tensorization" (arm n)) (`String label)));
   V.p "a tensorized label over a scalar-fallback emission is visible as the pair"
     (Yojson.Safe.equal (member "tensorized" (arm "B")) (`Bool true)
     && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback")
@@ -161,9 +161,9 @@ let () =
                 ~shipped_mma:None ~arms:[])))
        `Null)
 
-(* The negative control: without the mapping the line carries OCaml's own spellings, and this
-   oracle rejects each of them — which is what makes the verdicts above evidence rather than
-   ceremony. (A JSON parser that admits `NaN` as an extension still rejects `nan`.) *)
+(* The negative control: without the mapping the line carries OCaml's own spellings, and this oracle
+   rejects each of them — which is what makes the verdicts above evidence rather than ceremony. (A
+   JSON parser that admits `NaN` as an extension still rejects `nan`.) *)
 let () =
   V.p "the pre-fix spellings do not parse"
     (List.for_all [ "nan"; "inf"; "-inf" ] ~f:(fun spelling ->

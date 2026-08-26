@@ -36,8 +36,8 @@ let () =
      stream kernel demonstrated it, and per-kernel rates have to be reconstructed outside the
      rows. *)
   let kernels = List.map reports ~f:fst in
-  Verdict.p_all "every row names its routine" rows
-    ~f:(fun r -> List.mem kernels r.Cal.routine ~equal:String.equal);
+  Verdict.p_all "every row names its routine" rows ~f:(fun r ->
+      List.mem kernels r.Cal.routine ~equal:String.equal);
   Stdio.printf "routines named, in order: %s\n"
     (String.concat ~sep:" "
        (List.filter kernels ~f:(fun k ->

@@ -23,11 +23,10 @@
    the window the guard covers -- which is true today, stays true (vacuously) once the platform is
    fixed, and whose disagreement count reaching 0 is the trigger to delete the guard.
 
-   Usage:
-     dune exec tools/fp8_soak.exe                  -- every arm the box has, both sweeps
-     dune exec tools/fp8_soak.exe -- --arm=cuda --sweep=f32
-     dune exec tools/fp8_soak.exe -- --arm=hip --spelling=both
-   Runs in a couple of minutes on an RTX 5070 Ti; see docs/agent-notes/backend-precision-and-simd.md.
+   Usage: dune exec tools/fp8_soak.exe -- every arm the box has, both sweeps dune exec
+   tools/fp8_soak.exe -- --arm=cuda --sweep=f32 dune exec tools/fp8_soak.exe -- --arm=hip
+   --spelling=both Runs in a couple of minutes on an RTX 5070 Ti; see
+   docs/agent-notes/backend-precision-and-simd.md.
 
    Exit status is a verdict: nonzero if any claim failed, so it can gate a release check. *)
 
@@ -141,7 +140,6 @@ let guard_threshold_exp = -17
 let window_top = -78
 let window_period = 64
 let window_width = 4
-
 let in_documented_window m = m <= window_top && (window_top - m) % window_period < window_width
 
 (* The four low halves the f64 sweep crosses every top half with: zero, one ulp up, the mantissa's
@@ -191,16 +189,18 @@ let f64_chunk = 1 lsl 24 (* top halves; four bytes of output each *)
 let report_records (c : counts_buf) ~arm ~vendor =
   for k = 0 to get c s_reported - 1 do
     let base = s_records + (3 * k) in
-    Stdio.eprintf "%s: input 0x%Lx -> codec 0x%02x, %s 0x%02x\n" arm c.{base} (get c (base + 1)) vendor
+    Stdio.eprintf "%s: input 0x%Lx -> codec 0x%02x, %s 0x%02x\n" arm c.{base}
+      (get c (base + 1))
+      vendor
       (get c (base + 2))
   done
 
 let elapsed since = Unix.gettimeofday () -. since
 
 (* Two landmark narrowings, printed once: a tie that must go to even (1.125 -> 1.0, code 0x3C) and
-   the tie between zero and the smallest subnormal (2^-17 -> +0). They are also what puts
-   builtins.o on the link line -- the sweep reaches [single_to_fp8] and [double_to_fp8] through an
-   `extern` declaration in C, and a member of the [ir] library's stub archive is only pulled in once
+   the tie between zero and the smallest subnormal (2^-17 -> +0). They are also what puts builtins.o
+   on the link line -- the sweep reaches [single_to_fp8] and [double_to_fp8] through an `extern`
+   declaration in C, and a member of the [ir] library's stub archive is only pulled in once
    something has referenced it, which the OCaml externals here do. *)
 let codec_landmarks () =
   Printf.sprintf "single_to_fp8 1.125 -> 0x%02x, double_to_fp8 2^-17 -> 0x%02x"
@@ -244,8 +244,7 @@ let run_f64 (module A : ARM) ~spelling =
 
 (* Every finite e5m2 code, both signs: 0x00-0x7B and 0x80-0xFB. A sweep of all 2^32 float patterns
    must reach all of them, and a kernel that silently wrote nothing would not. *)
-let all_finite_codes =
-  List.filter (List.range 0 256) ~f:(fun c -> c land 0x7F <= 0x7B)
+let all_finite_codes = List.filter (List.range 0 256) ~f:(fun c -> c land 0x7F <= 0x7B)
 
 (* An input's base-2 magnitude exponent from its biased exponent FIELD. A zero field is subnormal
    and its magnitude is only bounded above, by 2^(1-bias) -- which is what is returned, so a
@@ -254,7 +253,8 @@ let all_finite_codes =
 let magnitude_exp ~bias e = if e = 0 then 1 - bias else e - bias
 
 let show_window () =
-  Printf.sprintf "2^%d..2^%d and every 2^-%d below that, %d binary exponents wide" (window_top - window_width + 1)
+  Printf.sprintf "2^%d..2^%d and every 2^-%d below that, %d binary exponents wide"
+    (window_top - window_width + 1)
     (window_top + 1) window_period window_width
 
 (* The disagreeing exponent fields as CONSECUTIVE RUNS with their magnitudes, because the runs are
@@ -263,9 +263,7 @@ let show_window () =
 let show_exps exps ~bias =
   let runs =
     List.fold_right exps ~init:[] ~f:(fun e acc ->
-        match acc with
-        | (lo, hi) :: rest when lo = e + 1 -> (e, hi) :: rest
-        | _ -> (e, e) :: acc)
+        match acc with (lo, hi) :: rest when lo = e + 1 -> (e, hi) :: rest | _ -> (e, e) :: acc)
   in
   String.concat ~sep:", "
     (List.map runs ~f:(fun (lo, hi) ->
@@ -279,7 +277,9 @@ let report (module A : ARM) ~sweep ~inputs ~spelling ~bias ~exp_size (counts, se
   (* Both halves of "what was measured" ride in every claim: which side of the vendor header's
      compile-time split the kernel compiled on, and which of the vendor's narrowing spellings it
      called. Neither is inferable from the options this program passed. *)
-  let via = Printf.sprintf "%s, narrowing with %s" (A.conversion_path ()) (A.spelling_label spelling) in
+  let via =
+    Printf.sprintf "%s, narrowing with %s" (A.conversion_path ()) (A.spelling_label spelling)
+  in
   let finite = get counts s_finite in
   let exps = bit_set counts s_dis_exps ~size:exp_size in
   Stdio.printf "\n%s %s sweep, %s: %d inputs, %.1fs\n" A.name sweep (A.spelling_label spelling)
@@ -304,8 +304,8 @@ let report (module A : ARM) ~sweep ~inputs ~spelling ~bias ~exp_size (counts, se
   (* The raw cast is known-defective on ROCm, so on an arm that HAS a guarded spelling the raw probe
      asserts LOCALIZATION rather than agreement: asserting agreement there would be a claim that
      fails by design on affected hardware, which makes the tool unusable as a gate exactly where it
-     is most needed. Everywhere else -- CUDA, and HIP's guarded spelling, which is what OCANNL
-     emits -- the claim is the full one. *)
+     is most needed. Everywhere else -- CUDA, and HIP's guarded spelling, which is what OCANNL emits
+     -- the claim is the full one. *)
   let defective_by_design =
     (match spelling with `Raw -> true | `Guarded -> false)
     && List.exists (A.spellings ()) ~f:(function `Guarded -> true | `Raw -> false)
@@ -327,14 +327,13 @@ let report (module A : ARM) ~sweep ~inputs ~spelling ~bias ~exp_size (counts, se
       vendor sweep (show_window ()) via
       (List.for_all exps ~f:(fun e -> in_documented_window (magnitude_exp ~bias e))))
   else
-    Verdict.pf "the software codec and %s agree on every finite %s input the sweep covers, via the %s"
-      vendor sweep via (finite = 0);
+    Verdict.pf
+      "the software codec and %s agree on every finite %s input the sweep covers, via the %s" vendor
+      sweep via (finite = 0);
   let produced = code_set counts s_all_codes in
   Verdict.p_all
-    (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code, via the %s" vendor sweep
-       via)
-    all_finite_codes ~min:248
-    ~f:(fun c -> List.mem produced c ~equal:Int.equal)
+    (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code, via the %s" vendor
+       sweep via) all_finite_codes ~min:248 ~f:(fun c -> List.mem produced c ~equal:Int.equal)
 
 let usage () =
   Stdio.printf
@@ -358,7 +357,7 @@ let () =
   let sweep = ref "both" in
   let spelling = ref "default" in
   let arch = ref `Device in
-  Array.iteri (Stdlib.Sys.argv) ~f:(fun i s ->
+  Array.iteri Stdlib.Sys.argv ~f:(fun i s ->
       if i > 0 then
         match String.lsplit2 s ~on:'=' with
         | Some ("--arm", v) -> arm_filter := Some (String.lowercase v)

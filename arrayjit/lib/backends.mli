@@ -116,8 +116,8 @@ module Metal_b : Ir.Backend_intf.Backend
 (** The implemented backends. Constructors statically imply the corresponding singleton module ([Cc]
     -> {!Cc_b}, ...). *)
 type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal, enumerate]
-(** [enumerate] derives [all_of_backend], every backend OCANNL has, so that a check wanting "the
-    set of backends" reads it off the type instead of restating it. The vocabulary of the
+(** [enumerate] derives [all_of_backend], every backend OCANNL has, so that a check wanting "the set
+    of backends" reads it off the type instead of restating it. The vocabulary of the
     [; ocannl-backend:] dune marker is such a check: [test/operations/marker_backend_vocabulary]
     holds it equal to [List.map all_of_backend ~f:backend_name] plus ["none"], which is what stops
     it agreeing with a list that has stopped being this one (gh-ocannl-689). *)

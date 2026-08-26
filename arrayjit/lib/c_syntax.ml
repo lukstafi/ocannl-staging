@@ -82,10 +82,10 @@ let is_tensorized_rendering = function
 (** Whether a compiled routine's tensorization request was honoured (gh-ocannl-626). Three states,
     not a boolean, because "this routine has no tensor-core work in it" and "this routine asked for
     tensor-core work and got the scalar fallback" are opposite readings of a timing and the boolean
-    that collapses them is the defect: an [Tile_mma]-free routine is not a failure, a wholly declined
-    one is. Mixed renderings — some statements honoured, some declined — read as {!Tensorized}, and
-    the counts on {!mma_summary} say by how much; the label answers "did any tensor-core / SIMD-tile
-    emission happen", the counts answer "how much of what was asked for". *)
+    that collapses them is the defect: an [Tile_mma]-free routine is not a failure, a wholly
+    declined one is. Mixed renderings — some statements honoured, some declined — read as
+    {!Tensorized}, and the counts on {!mma_summary} say by how much; the label answers "did any
+    tensor-core / SIMD-tile emission happen", the counts answer "how much of what was asked for". *)
 type tensorization =
   | Not_requested
       (** Codegen emitted no [Tile_mma] statement at all: nothing about this routine claims tensor
@@ -149,7 +149,8 @@ let mma_summary_string summary =
         List.map
           (List.dedup_and_sort (List.map rs ~f:snd) ~compare:compare_mma_rendering)
           ~f:(fun r ->
-            Printf.sprintf "%s x%d" (Sexp.to_string (sexp_of_mma_rendering r))
+            Printf.sprintf "%s x%d"
+              (Sexp.to_string (sexp_of_mma_rendering r))
               (List.count rs ~f:(fun (_, r') -> equal_mma_rendering r r')))
       in
       Printf.sprintf "%s: %s"
@@ -176,7 +177,7 @@ let with_census f =
   let restore () =
     let inner = !mma_census in
     mma_census_enabled := saved_enabled;
-    mma_census := (if saved_enabled then inner @ saved_census else saved_census)
+    mma_census := if saved_enabled then inner @ saved_census else saved_census
   in
   let result =
     match f () with
@@ -304,8 +305,8 @@ module type C_syntax_config = sig
 
   val accum_prec : Ops.prec -> Ops.prec
   (** The precision a reduction {e accumulator} resides at across its whole nest, given the
-      precision the accumulated node is stored at (gh-ocannl-663). Where it differs from the
-      storage precision, every serial-rendered form of a recognized accumulation — the plain serial
+      precision the accumulated node is stored at (gh-ocannl-663). Where it differs from the storage
+      precision, every serial-rendered form of a recognized accumulation — the plain serial
       fallback, unrolled and partitioned nests, and reduction-shaped scope locals — holds the
       accumulator here and narrows once at the store, so a reduction's effective accumulation width
       is a per-backend policy, never a property of which schedule or rendering ran (gh-ocannl-639's
@@ -314,24 +315,24 @@ module type C_syntax_config = sig
       On the CPU backends this {e is} [compute_prec]: the accumulator is an assignment intermediate
       like any other. The GPU backends compute where they store ([compute_prec] is the identity on
       their native narrow arithmetic) but accumulate per their tensor-unit format triples, and this
-      hook is where a backend mirrors those: CUDA's bf16 mma legs hold f32 per-lane registers
-      across the whole [k] extent (the hardware has no bf16 accumulate), so its serial legs must
-      widen bf16 the same way, while HIP's and Metal's uniform-bf16 tiles accumulate in bf16
-      fragments, so their serial legs keep bf16 residency. fp8 has an accumulator format on no
-      backend and follows the CPU policy (f32) everywhere; f16 accumulates natively at f16 in every
-      seeded GPU triple and stays put.
+      hook is where a backend mirrors those: CUDA's bf16 mma legs hold f32 per-lane registers across
+      the whole [k] extent (the hardware has no bf16 accumulate), so its serial legs must widen bf16
+      the same way, while HIP's and Metal's uniform-bf16 tiles accumulate in bf16 fragments, so
+      their serial legs keep bf16 residency. fp8 has an accumulator format on no backend and follows
+      the CPU policy (f32) everywhere; f16 accumulates natively at f16 in every seeded GPU triple
+      and stays put.
 
-      The recognized accumulation update renders {e wholly} at this precision, contribution
-      included — gh-ocannl-639's rendering shape, kept on GPU deliberately: operand widenings are
-      exact, a narrow-by-narrow product is exact at the wider precision (the same
-      full-precision-product semantics the tensor units apply per element), and the FMA form stays
-      a single fused operation. Statements outside recognized accumulations keep {!compute_prec}.
+      The recognized accumulation update renders {e wholly} at this precision, contribution included
+      — gh-ocannl-639's rendering shape, kept on GPU deliberately: operand widenings are exact, a
+      narrow-by-narrow product is exact at the wider precision (the same full-precision-product
+      semantics the tensor units apply per element), and the FMA form stays a single fused
+      operation. Statements outside recognized accumulations keep {!compute_prec}.
 
       Must resolve at least as wide as {!compute_prec} (asserted at codegen setup: narrowing an
       intermediate below its own arithmetic precision would round-trip every update), and like it
       must be a function of the storage precision alone. When overriding {!compute_prec}, override
-      this together with it — the two are bound at [include] time, so a stale pairing does not
-      track the override. *)
+      this together with it — the two are bound at [include] time, so a stale pairing does not track
+      the override. *)
 
   val vector_prec_ok : Ops.prec -> bool
   (** Whether the explicit vector renderings ([Vectorized] loops) can operate at this {e compute}
@@ -453,14 +454,14 @@ module type C_syntax_config = sig
       nonzero power of two must define [ocannl_shfl_xor(value, lane_mask)] overloads in their
       builtins for the supported accumulator precisions (single, and double where it exists), bind
       workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
-      (needed by the two-phase multi-warp form). Those two overloads are all the rendering asks
-      for at any storage width: the shuffled value resides at [accum_prec] of the storage precision
+      (needed by the two-phase multi-warp form). Those two overloads are all the rendering asks for
+      at any storage width: the shuffled value resides at [accum_prec] of the storage precision
       (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused —
       as is an RNG-bearing contribution wherever that residency is wider than storage, since the
-      serial rendering of one keeps a narrow accumulator (see [accum_pinned_to_storage_prec]).
-      [0] disables the rendering: [Workgroup_reduce] loops render like [Workgroup] — hardware
-      binding, or the serial fallback (which is the correct meaning of a recognized accumulation
-      body on CPU backends). *)
+      serial rendering of one keeps a narrow accumulator (see [accum_pinned_to_storage_prec]). [0]
+      disables the rendering: [Workgroup_reduce] loops render like [Workgroup] — hardware binding,
+      or the serial fallback (which is the correct meaning of a recognized accumulation body on CPU
+      backends). *)
 
   val mma_syntax :
     (d_prec:Ops.prec ->
@@ -549,8 +550,8 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
-(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
-    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
+(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32 is
+    a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
     break by whichever side it fell on.
 
     Computed against the two neighbours rather than by masking mantissa bits, so that the f32
@@ -568,7 +569,8 @@ let is_f32_tie c =
         magnitude, so naming it is complete rather than a first case of many. *)
      ||
      let f = Int32.float_of_bits (Int32.bits_of_float c) in
-     Float.is_finite f && Float.(f <> c)
+     Float.is_finite f
+     && Float.(f <> c)
      &&
      let bits = Int32.bits_of_float f in
      (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
@@ -585,49 +587,48 @@ let is_f32_tie c =
     that parses back to exactly [c] on every C-family backend.
 
     Three properties, each of which [%.16g] alone gets wrong (gh-ocannl-623). Two of them are not
-    C's alone — a debug dump wants a floating literal that round-trips for the same reasons a
-    kernel does — so they live in {!Utils.decimal_float_literal}, which the IR printers share
+    C's alone — a debug dump wants a floating literal that round-trips for the same reasons a kernel
+    does — so they live in {!Utils.decimal_float_literal}, which the IR printers share
     (gh-ocannl-713):
 
     - {b It is a floating literal, not an integer one.} In C the consequence is direct: [2.] came
       out as the integer literal [2], value-preserving in the cast contexts the constants happen to
-      sit in today — but [-0.] came out as ["-0"], the integer zero, hence [+0.0] once cast, so
-      a [-0.0] in host data silently reached kernels as [+0.0] wherever the constant fill inlines
-      as scalar stores (gh-ocannl-615 fixed that one value). The rest of the class is latent rather
+      sit in today — but [-0.] came out as ["-0"], the integer zero, hence [+0.0] once cast, so a
+      [-0.0] in host data silently reached kernels as [+0.0] wherever the constant fill inlines as
+      scalar stores (gh-ocannl-615 fixed that one value). The rest of the class is latent rather
       than inert: an integer literal divides as an integer against another one, promotes as an
       integer, and would overflow its type once the digits outgrow [long long].
     - {b It round-trips.} That reaches emitted code for real: hosted constant inits (gh-ocannl-633)
-      inline arbitrary host values as scalar stores, and [0.1 +. 0.2] at 16 digits is a {e
-      different} double. Values that already round-trip at 16 digits keep their exact previous
+      inline arbitrary host values as scalar stores, and [0.1 +. 0.2] at 16 digits is a
+      {e different} double. Values that already round-trip at 16 digits keep their exact previous
       spelling, which is why no codegen golden moves except by the appended [.0].
     - {b The specials are spelled, not printed.} This one is C's own, and is why the shared
-      rendering is called only after they are ruled out: it leaves them as [%.16g]'s words
-      ([inf], [nan]), which no C dialect parses. [INFINITY] and
-      [NAN] are C99 [math.h] macros that MSL also provides; the CUDA and HIP preludes define them
-      under [#ifndef] since nvrtc/hiprtc supply no standard headers. [(-INFINITY)] is parenthesized
-      so it cannot glue into [--INFINITY] beside a subtraction. A NaN's payload and sign do not
-      survive this (no dialect spells a payload portably); nothing in OCANNL depends on them, and
-      a bit-exact constant has {!Low_level.Constant_bits} available.
+      rendering is called only after they are ruled out: it leaves them as [%.16g]'s words ([inf],
+      [nan]), which no C dialect parses. [INFINITY] and [NAN] are C99 [math.h] macros that MSL also
+      provides; the CUDA and HIP preludes define them under [#ifndef] since nvrtc/hiprtc supply no
+      standard headers. [(-INFINITY)] is parenthesized so it cannot glue into [--INFINITY] beside a
+      subtraction. A NaN's payload and sign do not survive this (no dialect spells a payload
+      portably); nothing in OCANNL depends on them, and a bit-exact constant has
+      {!Low_level.Constant_bits} available.
 
     Deliberately {e not} carried here: a precision suffix. The literal is always double-typed and
     the narrowing is [B.convert_precision]'s cast, which is a single rounding of the exact host
-    double — the same conversion the host performs when it stores the value. An [f]-suffixed
-    decimal would instead round the decimal straight to float. The cast is present for every
-    non-double target: [Ops.c_convert_precision] and each backend's override return [("", "")] only
-    when [from] and [to_] are the same precision.
+    double — the same conversion the host performs when it stores the value. An [f]-suffixed decimal
+    would instead round the decimal straight to float. The cast is present for every non-double
+    target: [Ops.c_convert_precision] and each backend's override return [("", "")] only when [from]
+    and [to_] are the same precision.
 
     That last argument has a hole, and {!is_f32_tie} is what fills it: the cast only {e is} a
-    narrowing where the dialect has a [double]. MSL does not, so Metal rounds the decimal itself,
-    at parse time, to f32. A decimal that round-trips as a double is not thereby exact, so the two
+    narrowing where the dialect has a [double]. MSL does not, so Metal rounds the decimal itself, at
+    parse time, to f32. A decimal that round-trips as a double is not thereby exact, so the two
     readings — round [c] to f32, versus round a decimal near [c] to f32 — can differ, and they
     differ exactly when [c] sits on an f32 tie: the host takes ties-to-even while the dialect
-    follows whichever side the decimal happens to land on. Which digit count is emitted then
-    decides the value, so this is not a hazard the retry above introduced but one it {e moves}.
-    A hexadecimal literal takes it away instead of moving it: it is exact by construction, so there
-    is no parse-time rounding for either reading to disagree about, and both round [c] itself. It
-    is spelled only for ties — a handful of values that were otherwise a coin toss — so the
-    ordinary constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the
-    form. *)
+    follows whichever side the decimal happens to land on. Which digit count is emitted then decides
+    the value, so this is not a hazard the retry above introduced but one it {e moves}. A
+    hexadecimal literal takes it away instead of moving it: it is exact by construction, so there is
+    no parse-time rounding for either reading to disagree about, and both round [c] itself. It is
+    spelled only for ties — a handful of values that were otherwise a coin toss — so the ordinary
+    constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the form. *)
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
@@ -1040,8 +1041,8 @@ let c_stdlib_macros =
     - a routine DEFINITION takes file scope, so [void printf(...)] after [<stdio.h>] is a
       conflicting declaration and [void exp(...)] after [<math.h>] likewise -- an error regardless
       of whether the kernel ever calls either;
-    - a parameter or a local legally SHADOWS them, so a tensor node named [exp] is well-formed C
-      and always has been.
+    - a parameter or a local legally SHADOWS them, so a tensor node named [exp] is well-formed C and
+      always has been.
 
     So this table constrains routine names only ({!C_syntax.kernel_ident}) and is deliberately kept
     out of [ident_blacklist]: adding it there would rename tensor nodes -- [Tensor.unop]'s
@@ -1501,6 +1502,12 @@ module C_syntax (B : C_syntax_config) = struct
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
 
+  (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
+     standard-library functions and types the preludes' unconditional includes declare. The extra
+     table applies here and not to node names because a routine definition takes FILE scope, where
+     [void exp(...)] after [<math.h>] is a conflicting declaration, while a parameter or local named
+     [exp] merely shadows it and is well-formed C (gh-ocannl-686 review round 1). *)
+
   (** [kernel_ident name] is [name] made safe to emit as a kernel function's C identifier
       (gh-ocannl-686).
 
@@ -1546,11 +1553,6 @@ module C_syntax (B : C_syntax_config) = struct
       reaches the vendor compiler. That failure is an ordinary compile error naming the conflict,
       which is the state this function put the reserved words in -- not the misattributed "bug in
       OCANNL" the issue was about. *)
-  (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
-     standard-library functions and types the preludes' unconditional includes declare. The extra
-     table applies here and not to node names because a routine definition takes FILE scope, where
-     [void exp(...)] after [<math.h>] is a conflicting declaration, while a parameter or local named
-     [exp] merely shadows it and is well-formed C (gh-ocannl-686 review round 1). *)
   let routine_ident_blacklist = ident_blacklist @ c_stdlib_idents
 
   let kernel_ident name =
@@ -1578,10 +1580,10 @@ module C_syntax (B : C_syntax_config) = struct
      A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [acc_prec] across its whole
      reduction nest and narrows once at the store, in every rendering — virtual scopes
      ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
-     plain serial fallback ([try_localize_serial_reduce]) — so the effective accumulation width is the
-     numerics policy's, never an artifact of which rendering or schedule ran. On the CPU backends
-     [acc_prec] IS [comp_prec]; the GPU backends resolve accumulators wider than their (native,
-     identity) compute precision where their tensor-unit triples do (gh-ocannl-663). *)
+     plain serial fallback ([try_localize_serial_reduce]) — so the effective accumulation width is
+     the numerics policy's, never an artifact of which rendering or schedule ran. On the CPU
+     backends [acc_prec] IS [comp_prec]; the GPU backends resolve accumulators wider than their
+     (native, identity) compute precision where their tensor-unit triples do (gh-ocannl-663). *)
 
   let comp_prec = B.compute_prec
   let acc_prec = B.accum_prec
@@ -1591,9 +1593,7 @@ module C_syntax (B : C_syntax_config) = struct
      overriding [compute_prec] without restating [accum_prec] keeps the default bound to the
      PRE-override compute precision, which would silently narrow every reduction accumulator. *)
   let () =
-    List.iter
-      [ Ops.half; Ops.bfloat16; Ops.fp8; Ops.single; Ops.double ]
-      ~f:(fun p ->
+    List.iter [ Ops.half; Ops.bfloat16; Ops.fp8; Ops.single; Ops.double ] ~f:(fun p ->
         if Ops.prec_in_bytes (acc_prec p) < Ops.prec_in_bytes (comp_prec p) then
           invalid_arg
             (Printf.sprintf
@@ -1643,8 +1643,8 @@ module C_syntax (B : C_syntax_config) = struct
      precision it renders at (gh-ocannl-517), so [try_localize_serial_reduce] declines to localize
      an RNG-bearing update: its serial rendering accumulates directly in the narrow cell, narrowing
      on EVERY iteration. A rendering that instead accumulated the whole reduction at [accum_prec]
-     and narrowed once would therefore change the accumulator's WIDTH, not merely the association
-     -- the exact property gh-ocannl-682 exists to preserve -- so the warp-shuffle rendering refuses
+     and narrowed once would therefore change the accumulator's WIDTH, not merely the association --
+     the exact property gh-ocannl-682 exists to preserve -- so the warp-shuffle rendering refuses
      such a body wherever the residency is wider than storage. Where the two coincide (f32/f64
      storage, and every backend that does not widen) there is no divergence to guard against and
      RNG-bearing reductions render exactly as they did before gh-ocannl-682. *)
@@ -1676,13 +1676,13 @@ module C_syntax (B : C_syntax_config) = struct
   (* Scope-local scalars an RNG conversion writes. Their declaration, their assignments and their
      reads all have to agree on a precision, and only a whole-proc scan sees all three (a
      [Declare_local] carries no value), so the exclusion is resolved once here rather than per
-     statement. A superset would only forgo an optimization, never mis-render. Keyed per
-     [scope_id], not per tnode (Codex P2 round 2 on PR #396): virtualization copies of an
-     rng-consuming node each carry their own rng-mentioning [Set_local], so every copy is marked
-     on its own, while an UNRELATED scope over the same tnode — a schedule-minted accumulation
-     into a node that elsewhere consumes rng — keeps its accumulator residency instead of being
-     pinned to storage by the shared uid. A [Tile_mma]'s scalar fallback renders through the same
-     [scope_prec_of], so the scan descends into it. *)
+     statement. A superset would only forgo an optimization, never mis-render. Keyed per [scope_id],
+     not per tnode (Codex P2 round 2 on PR #396): virtualization copies of an rng-consuming node
+     each carry their own rng-mentioning [Set_local], so every copy is marked on its own, while an
+     UNRELATED scope over the same tnode — a schedule-minted accumulation into a node that elsewhere
+     consumes rng — keeps its accumulator residency instead of being pinned to storage by the shared
+     uid. A [Tile_mma]'s scalar fallback renders through the same [scope_prec_of], so the scan
+     descends into it. *)
   let rng_scope_ids =
     let acc = Hash_set.create (module Int) in
     let rec scan_sc (llsc : Low_level.scalar_t) =
@@ -1724,8 +1724,8 @@ module C_syntax (B : C_syntax_config) = struct
     Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
     acc
 
-  (* Scope locals that are reduction ACCUMULATORS (gh-ocannl-663): every [Set_local] to the scope
-     is either an opening init (its value free of the local) or a reduce-shaped update
+  (* Scope locals that are reduction ACCUMULATORS (gh-ocannl-663): every [Set_local] to the scope is
+     either an opening init (its value free of the local) or a reduce-shaped update
      ([Low_level.accum_local_update_parts]'s grammar, the FMA form counting as Add), all updates
      under ONE reduction operator — a general recurrence or a mixed-operator sequence keeps its
      per-iteration narrowing by the source's own semantics and disqualifies the scope. Such locals
@@ -1737,24 +1737,24 @@ module C_syntax (B : C_syntax_config) = struct
      the [Declare_local]-lifted form of [hoist_cross_statement_cse], and scopes inside a
      [Tile_mma]'s scalar fallback (rendered on decline through the same [scope_prec_of]).
 
-     The residency must be observation-neutral, and it is only while no control flow reads the
-     local mid-reduction: a guard observing the accumulator (e.g. [If (local < c)] around
-     [local += x]) would execute a DIFFERENT set of iterations under a widened local, since the
-     wide value reaches sums the per-step-narrowed one rounds away. So any local read by an [If]
-     condition is disqualified (Codex P1 round 2 on PR #396) — a stronger condition than the
-     hoisting license ([scope_updates_reduce_op] demands guard PURITY, because hoisting moves the
-     init and store across the guard; residency moves nothing, so a data-dependent guard that
-     does not read the local stays eligible). A nested [Local_scope] inside a condition is not a
-     read of ITS local at this level: the condition observes only that scope's once-narrowed
-     result, which is residency-neutral, and the main walk classifies its interior. *)
+     The residency must be observation-neutral, and it is only while no control flow reads the local
+     mid-reduction: a guard observing the accumulator (e.g. [If (local < c)] around [local += x])
+     would execute a DIFFERENT set of iterations under a widened local, since the wide value reaches
+     sums the per-step-narrowed one rounds away. So any local read by an [If] condition is
+     disqualified (Codex P1 round 2 on PR #396) — a stronger condition than the hoisting license
+     ([scope_updates_reduce_op] demands guard PURITY, because hoisting moves the init and store
+     across the guard; residency moves nothing, so a data-dependent guard that does not read the
+     local stays eligible). A nested [Local_scope] inside a condition is not a read of ITS local at
+     this level: the condition observes only that scope's once-narrowed result, which is
+     residency-neutral, and the main walk classifies its interior. *)
   let accum_scope_ids =
     let verdicts = Hashtbl.create (module Int) in
     let classify (id : Low_level.scope_id) v =
       (* [accum_local_update_op] rather than [accum_local_update_parts]: virtualization's
-         guarded-read updates — [Where (index-only cond, update, Get_local id)] — are reductions
-         for residency purposes (Codex P1 round 3 on PR #396); treating their self-read as a
-         recurrence left a virtualized reduction narrow while its materialized serial twin
-         widened, a placement-dependent width. *)
+         guarded-read updates — [Where (index-only cond, update, Get_local id)] — are reductions for
+         residency purposes (Codex P1 round 3 on PR #396); treating their self-read as a recurrence
+         left a virtualized reduction narrow while its materialized serial twin widened, a
+         placement-dependent width. *)
       match Low_level.accum_local_update_op ~id v with
       | Some op ->
           Hashtbl.update verdicts id.scope_id ~f:(function
@@ -1762,13 +1762,13 @@ module C_syntax (B : C_syntax_config) = struct
             | Some (`Accum op0) when Ops.equal_binop op0 op -> `Accum op
             | Some _ -> `Bad)
       | None ->
-          if Low_level.scalar_reads_scope ~id v then Hashtbl.set verdicts ~key:id.scope_id ~data:`Bad
+          if Low_level.scalar_reads_scope ~id v then
+            Hashtbl.set verdicts ~key:id.scope_id ~data:`Bad
     in
     let rec guarding_reads_sc (llsc : Low_level.scalar_t) =
       match llsc with
       | Low_level.Get_local id -> Hashtbl.set verdicts ~key:id.Low_level.scope_id ~data:`Bad
-      | Local_scope _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _
-        ->
+      | Local_scope _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
           ()
       | Get_dynamic { dyn_value = v, _; _ } -> guarding_reads_sc v
       | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -1835,8 +1835,8 @@ module C_syntax (B : C_syntax_config) = struct
   (* Metal's pooled-pointer compiler bug also reaches the localized spelling of a scalar
      accumulation (gh-ocannl-731): instead of a device-memory RMW, the loop updates a scope local
      and reads its contribution through a pointer derived from [__pool_slots]. Shader validation
-     hides both manifestations. Keep every reduction-shaped scope local volatile on the backend
-     that requests the workaround; ordinary locals and every other backend stay byte-identical. *)
+     hides both manifestations. Keep every reduction-shaped scope local volatile on the backend that
+     requests the workaround; ordinary locals and every other backend stay byte-identical. *)
   let scope_decl_type (id : Low_level.scope_id) =
     let qualifier =
       if B.volatile_scalar_rmw && Hash_set.mem accum_scope_ids id.scope_id then "volatile " else ""
@@ -1862,13 +1862,13 @@ module C_syntax (B : C_syntax_config) = struct
   (* [routine_names]: the kernel function names in [proc_doc] — their declarations (and the
      name-echoing comments) are token occurrences the usage scan below must not count as builtin
      uses. Since gh-ocannl-686 the names arriving here are {!kernel_ident}-mangled, so a routine
-     name can no longer BE a builtin key: a colliding one was renamed before it reached codegen,
-     and the kernel's own token no longer matches the key. The exclusion is kept as the backstop
-     for that guarantee — a routine named exactly like a builtin cannot genuinely use it (the
-     definition would be a duplicate C symbol), so dropping the name from the scan degrades a
-     pathological collision from silent helper injection — which on CUDA could raise the
-     architecture floor past the device (Codex P2 on PR #317, round 4) — into an ordinary compile
-     error naming the conflict. *)
+     name can no longer BE a builtin key: a colliding one was renamed before it reached codegen, and
+     the kernel's own token no longer matches the key. The exclusion is kept as the backstop for
+     that guarantee — a routine named exactly like a builtin cannot genuinely use it (the definition
+     would be a duplicate C symbol), so dropping the name from the scan degrades a pathological
+     collision from silent helper injection — which on CUDA could raise the architecture floor past
+     the device (Codex P2 on PR #317, round 4) — into an ordinary compile error naming the
+     conflict. *)
   let filter_and_prepend_builtins ~routine_names ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
     PPrint.ToBuffer.pretty 1.0 110 doc_buffer proc_doc;
@@ -2284,7 +2284,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Ops.Add | Ops.Sub | Ops.Mul | Ops.Div ->
         let inf = match op with Ops.Add -> " + " | Sub -> " - " | Mul -> " * " | _ -> " / " in
         PPrint.string (Printf.sprintf "%s = %s%s%s;" dst dst inf src)
-    | Ops.Max | Ops.Min ->
+    | Ops.Max | Ops.Min -> (
         let open PPrint in
         let cmp = match op with Ops.Max -> ">=" | _ -> "<=" in
         let blend =
@@ -2295,7 +2295,7 @@ module C_syntax (B : C_syntax_config) = struct
                 (__typeof__(ocannl_m__))%s)); }"
                dst cmp src dst cmp src src src dst dst dst src)
         in
-        (match vec_minmax_builtin ~prec ~lanes ~op with
+        match vec_minmax_builtin ~prec ~lanes ~op with
         | [] -> blend
         | arms ->
             let first = ref true in
@@ -2490,10 +2490,10 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Every symbol bound by a loop in the routine, with its iteration range. The accumulator peel
      needs the COMPLEMENT: a guard symbol outside this set is bound outside every loop -- a static
-     index parameter, a runtime extent -- so it cannot select among an enclosing level's
-     iterations, which is what keeps gh-490's runtime-extent guard ([i < s]) peelable. The ranges
-     are what lets it ask whether the accumulated cell tells two enclosing instances apart
-     ([Affine.separates], gh-ocannl-721). *)
+     index parameter, a runtime extent -- so it cannot select among an enclosing level's iterations,
+     which is what keeps gh-490's runtime-extent guard ([i < s]) peelable. The ranges are what lets
+     it ask whether the accumulated cell tells two enclosing instances apart ([Affine.separates],
+     gh-ocannl-721). *)
   let current_loop_bounds : (Indexing.symbol * (int * int)) list ref = ref []
 
   (* Set by [compile_proc]: nodes placed in workgroup-shared memory. Their declarations carry
@@ -3478,15 +3478,14 @@ module C_syntax (B : C_syntax_config) = struct
                   ("C_syntax.pp_ll: hardware-annotated loop " ^ symbol_ident i
                  ^ " missing from the slot table (pp_ll called outside compile_proc?)")
           in
-          (* Grid slots [>= 2] fold onto the hardware [.z] register (gh-ocannl-643, the
-             [Low_level] hardware-axis section comment): the loop binds [(z / stride) % cap], with
-             the divisor/modulo omitted where trivial — a lone slot-2 loop renders the bare
-             register exactly as before the fold existed. The backend is only ever asked for slots
-             it names ([0..2]). *)
+          (* Grid slots [>= 2] fold onto the hardware [.z] register (gh-ocannl-643, the [Low_level]
+             hardware-axis section comment): the loop binds [(z / stride) % cap], with the
+             divisor/modulo omitted where trivial — a lone slot-2 loop renders the bare register
+             exactly as before the fold existed. The backend is only ever asked for slots it names
+             ([0..2]). *)
           let hw_slot, fold =
             match kind with
-            | `Grid when slot >= 2 ->
-                (2, Some (Low_level.grid_fold !current_hardware_axes ~slot))
+            | `Grid when slot >= 2 -> (2, Some (Low_level.grid_fold !current_hardware_axes ~slot))
             | _ -> (slot, None)
           in
           match B.hardware_index ~kind ~slot:hw_slot with
@@ -3502,9 +3501,7 @@ module C_syntax (B : C_syntax_config) = struct
                     Option.value_map cap ~default:e ~f:(fun c -> e ^ " % " ^ Int.to_string c)
               in
               let binding =
-                string ("const " ^ B.loop_index_type)
-                ^^ pp_symbol i
-                ^^ string (" = " ^ expr ^ ";")
+                string ("const " ^ B.loop_index_type) ^^ pp_symbol i ^^ string (" = " ^ expr ^ ";")
               in
               group
                 (lbrace
@@ -4206,9 +4203,9 @@ module C_syntax (B : C_syntax_config) = struct
                    reduction accumulates at. [vname], the per-warp staging slots and the shuffle
                    stages all live at [prec]; the narrow cell is read widened and written narrowed
                    once, in [fold_total]. The gate is on the RESIDENCY, not on storage: where a
-                   backend's accumulators stay narrow (bf16/f16 on HIP and Metal, f16 on CUDA)
-                   there is no wider value to shuffle and no [ocannl_shfl_xor] overload to shuffle
-                   it with, so those keep the loud refusal rather than gaining an untested
+                   backend's accumulators stay narrow (bf16/f16 on HIP and Metal, f16 on CUDA) there
+                   is no wider value to shuffle and no [ocannl_shfl_xor] overload to shuffle it
+                   with, so those keep the loud refusal rather than gaining an untested
                    narrow-shuffle path. *)
                 let store_prec = Lazy.force tn.Tn.storage_prec in
                 let prec = acc_prec store_prec in
@@ -4375,18 +4372,18 @@ module C_syntax (B : C_syntax_config) = struct
            are independent:
 
            - {b Width} (gh-ocannl-639): the local resides at the backend's accumulator precision
-             ([acc_prec], gh-ocannl-663 — on CPU that is the compute precision) and narrows once at
-             the store, so a reduction's effective accumulation width is set by the numerics policy,
-             never by which schedule happened to place the accumulator in a register.
-           - {b Residency} (gh-ocannl-693): the accumulator leaves the node's storage, so the nest
-             performs one load and one store instead of a global read-modify-write per step. This
-             holds at EVERY precision, the identity ones included — f32/f64/integers,
-             [narrow_compute_f32 = false], native fp16, and the GPU backends' 16-bit precisions
-             whose tensor units accumulate at storage width. At those the widening half is vacuous
-             (the local's precision IS the storage precision) and the rewrite is exactly
-             value-neutral, which is why it is unconditional: leaving it precision-gated made
-             residency "whichever schedule happened to place it" at f32, and on Metal
-             [volatile_scalar_rmw] pinned the resulting RMW to device memory by construction.
+           ([acc_prec], gh-ocannl-663 — on CPU that is the compute precision) and narrows once at
+           the store, so a reduction's effective accumulation width is set by the numerics policy,
+           never by which schedule happened to place the accumulator in a register. - {b Residency}
+           (gh-ocannl-693): the accumulator leaves the node's storage, so the nest performs one load
+           and one store instead of a global read-modify-write per step. This holds at EVERY
+           precision, the identity ones included — f32/f64/integers, [narrow_compute_f32 = false],
+           native fp16, and the GPU backends' 16-bit precisions whose tensor units accumulate at
+           storage width. At those the widening half is vacuous (the local's precision IS the
+           storage precision) and the rewrite is exactly value-neutral, which is why it is
+           unconditional: leaving it precision-gated made residency "whichever schedule happened to
+           place it" at f32, and on Metal [volatile_scalar_rmw] pinned the resulting RMW to device
+           memory by construction.
 
            Implemented as a local rewrite into exactly the [Local_scope] form virtualization gives
            virtual accumulators, rendered recursively: [scope_prec_of] (the minted scope is
@@ -4410,8 +4407,8 @@ module C_syntax (B : C_syntax_config) = struct
            carve-out, [renders_at_store_prec]), so rendering it inside a scope's precision would
            change the draw, not just move it.
 
-           Interaction with [volatile_scalar_rmw] (Metal) has two forms. Localization lifts the
-           node [Set] out of exactly the invariant-address loops, so the volatile POINTER shadow's
+           Interaction with [volatile_scalar_rmw] (Metal) has two forms. Localization lifts the node
+           [Set] out of exactly the invariant-address loops, so the volatile POINTER shadow's
            predicate is false at a fully localized site. But gh-ocannl-731 showed the same shader
            compiler pass corrupting the replacement scope-local accumulation when its contribution
            reads through a pooled pointer; [scope_decl_type] therefore makes that accumulator local
@@ -4420,7 +4417,8 @@ module C_syntax (B : C_syntax_config) = struct
         let try_localize_serial_reduce () : PPrint.document option =
           (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
              which covers the levels BELOW this one. This is the same refusal for the level being
-             rendered, whose bounds the peel never sees (the caller re-wraps it via [rebuild_hook]). *)
+             rendered, whose bounds the peel never sees (the caller re-wraps it via
+             [rebuild_hook]). *)
           if Utils.debug_log_from_routines () || to_ < from_ then None
           else
             let localize (tn, idcs, base, debug, rebuild) =
@@ -4434,15 +4432,13 @@ module C_syntax (B : C_syntax_config) = struct
                     match base with
                     | `Update llsc ->
                         let id = Low_level.get_scope tn in
-                        (* Codegen-minted, so the census over [B.procs] never saw it: register
-                           the scope as an accumulator or [scope_prec_of] would resolve it at
-                           [comp_prec] and defeat the widening on the backends where the two
-                           differ (gh-ocannl-663). Fresh ids per mint, so no collision with a
-                           censused verdict. *)
+                        (* Codegen-minted, so the census over [B.procs] never saw it: register the
+                           scope as an accumulator or [scope_prec_of] would resolve it at
+                           [comp_prec] and defeat the widening on the backends where the two differ
+                           (gh-ocannl-663). Fresh ids per mint, so no collision with a censused
+                           verdict. *)
                         Hash_set.add accum_scope_ids id.Low_level.scope_id;
-                        ( id,
-                          Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc)
-                        )
+                        (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
                     | `Scope (id, rest) ->
                         (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
                            previous level of this very rewrite): hoist it through the enclosing
@@ -4548,7 +4544,8 @@ module C_syntax (B : C_syntax_config) = struct
                    defensive — [Base.List.init] RAISES on a negative length, so without it a dead
                    [Unrolled] level aborts codegen. gh-ocannl-693 widened the reach of that: the
                    localizer used to peel such a level and never fall through here, and now declines
-                   it (a dead level must not be peeled), so this arm receives what the peel refused. *)
+                   it (a dead level must not be peeled), so this arm receives what the peel
+                   refused. *)
                 @@ List.init
                      (max 0 (to_ - from_ + 1))
                      ~f:(fun k ->
@@ -4938,16 +4935,15 @@ module C_syntax (B : C_syntax_config) = struct
            being rounded at every assignment to it.
 
            A [Set_local] that does NOT read its own local is an INIT — the inlined image of a
-           separate source assignment — and renders as that assignment's store would: at
-           [comp_prec] (the rng carve-out rides [scope_prec_of]'s storage pin), converted once
-           into the scope's residency. Where scope and compute precision coincide (the CPU
-           backends, non-accumulator scopes) this is the identity; where an accumulator resides
-           wider than the arithmetic (gh-ocannl-663), it preserves the initializer's own
-           per-assignment rounding — e.g. a virtual bf16 node initialized by [a + b] and then
-           reduced narrows the init to bf16 exactly as its materialized twin's store does, instead
-           of leaking f32 residency into a different source assignment's semantics (Codex P2
-           round 3 on PR #396; the provenance boundary of gh-ocannl-639's adjacent-accumulations
-           rule). *)
+           separate source assignment — and renders as that assignment's store would: at [comp_prec]
+           (the rng carve-out rides [scope_prec_of]'s storage pin), converted once into the scope's
+           residency. Where scope and compute precision coincide (the CPU backends, non-accumulator
+           scopes) this is the identity; where an accumulator resides wider than the arithmetic
+           (gh-ocannl-663), it preserves the initializer's own per-assignment rounding — e.g. a
+           virtual bf16 node initialized by [a + b] and then reduced narrows the init to bf16
+           exactly as its materialized twin's store does, instead of leaking f32 residency into a
+           different source assignment's semantics (Codex P2 round 3 on PR #396; the provenance
+           boundary of gh-ocannl-639's adjacent-accumulations rule). *)
         let prec = scope_prec_of id in
         let value_prec =
           if Low_level.scalar_reads_scope ~id value then prec
@@ -4955,7 +4951,9 @@ module C_syntax (B : C_syntax_config) = struct
           else comp_prec (Lazy.force id.Low_level.tn.Tn.storage_prec)
         in
         let local_defs, value_doc = pp_scalar value_prec value in
-        let value_doc = wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc in
+        let value_doc =
+          wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc
+        in
         let local_defs = pp_local_defs local_defs in
         let assignment = pp_scope_id id ^^ string " = " ^^ value_doc ^^ semi in
         if Utils.debug_log_from_routines () && log_set_locals then
@@ -5880,11 +5878,11 @@ module C_syntax (B : C_syntax_config) = struct
            invalid_arg
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
     (* gh-ocannl-686: the routine name reaches the emitted [void <name>(] verbatim, so it must
-       already be a legal, non-reserved identifier. Mangling it HERE would leave the caller's
-       symbol lookup and artifact names pointing at the pre-mangling spelling, so the caller owns
-       the normalization ({!kernel_ident}, applied once at each backend's [compile] entry) and this
-       is the check that it happened -- a backend that skips it fails here, naming the routine,
-       instead of handing its compiler a source it rejects as an OCANNL bug. *)
+       already be a legal, non-reserved identifier. Mangling it HERE would leave the caller's symbol
+       lookup and artifact names pointing at the pre-mangling spelling, so the caller owns the
+       normalization ({!kernel_ident}, applied once at each backend's [compile] entry) and this is
+       the check that it happened -- a backend that skips it fails here, naming the routine, instead
+       of handing its compiler a source it rejects as an OCANNL bug. *)
     if not (String.equal name (kernel_ident name)) then
       invalid_arg
         (Printf.sprintf

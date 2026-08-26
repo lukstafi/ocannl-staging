@@ -25,7 +25,6 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
@@ -194,11 +193,11 @@ let () =
   p "default annotator matmul values match the serial twin"
     (Array.for_all2_exn mm_sched mm_serial ~f:approx);
 
-  (* --- Privatize under If guards (PR #91 review; gh-ocannl-730): a lane-guarded accumulation
-     [if (w == 0) c += va[k]] must carry the guard onto the synthesized init-load and store-back
-     (stale lanes would otherwise clobber the result). A guard that VARIES across the accumulation
-     is classified instead of rejected: one free of hardware-typed loop symbols masks iterations of
-     one thread's own accumulator, so it stays on the update and off the transfers (this is what a
+  (* --- Privatize under If guards (PR #91 review; gh-ocannl-730): a lane-guarded accumulation [if
+     (w == 0) c += va[k]] must carry the guard onto the synthesized init-load and store-back (stale
+     lanes would otherwise clobber the result). A guard that VARIES across the accumulation is
+     classified instead of rejected: one free of hardware-typed loop symbols masks iterations of one
+     thread's own accumulator, so it stays on the update and off the transfers (this is what a
      reduction-axis [Pad] leaves behind, and what lets the GPU blocktile family pad); one that mixes
      a thread-selecting symbol into a comparison that is not the target's own index is still
      rejected. Structural checks on hand-built IR, backend-independent. --- *)

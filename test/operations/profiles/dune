@@ -95,7 +95,8 @@
 (rule
  (alias runtest-from_config_file)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff from_config_file.expected from_config_file.actual)))
 
@@ -115,7 +116,8 @@
 (rule
  (alias runtest-from_cmdline)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff from_cmdline.expected from_cmdline.actual)))
 
@@ -135,7 +137,8 @@
 (rule
  (alias runtest-from_env)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff from_env.expected from_env.actual)))
 
@@ -160,7 +163,8 @@
 (rule
  (alias runtest-host_profile_flag)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff host_profile_flag.expected host_profile_flag.actual)))
 
@@ -186,7 +190,8 @@
 (rule
  (alias runtest-explicit_beats_profile)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff explicit_beats_profile.expected explicit_beats_profile.actual)))
 
@@ -211,7 +216,8 @@
 (rule
  (alias runtest-empty_cmdline_falls_through)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    empty_cmdline_falls_through.expected

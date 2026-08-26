@@ -88,9 +88,7 @@ let () =
     && pools_freed before after = 1
     && live_working_delta before after = 0);
   let before = AC.snapshot () in
-  let control_ctx, control_routine =
-    Context.compile (Context.cpu ()) comp Ir.Indexing.Empty
-  in
+  let control_ctx, control_routine = Context.compile (Context.cpu ()) comp Ir.Indexing.Empty in
   let after_compile = AC.snapshot () in
   Context.release control_ctx;
   let after_release = AC.snapshot () in
@@ -105,8 +103,7 @@ let () =
      exists yet. [with_delta] must give the unreachable working pool back. *)
   let before = AC.snapshot () in
   let raised, hits =
-    injected FI.Link_after_delta (fun () ->
-        Context.compile (Context.cpu ()) comp Ir.Indexing.Empty)
+    injected FI.Link_after_delta (fun () -> Context.compile (Context.cpu ()) comp Ir.Indexing.Empty)
   in
   let after = AC.snapshot () in
   p "post-allocation link injection fired" (raised && hits = 1);
@@ -169,9 +166,9 @@ let () =
     (working_allocated before after = 1
     && pools_freed before after = 1
     && live_working_delta before after = 0);
-  (* Shared/GPU uploads may report their error only when the stream is synchronized. The fresh
-     pool must remain guarded through that await because no updated context reaches the caller when
-     it raises. The callback models the first await reporting that queued failure; cleanup's retry
+  (* Shared/GPU uploads may report their error only when the stream is synchronized. The fresh pool
+     must remain guarded through that await because no updated context reaches the caller when it
+     raises. The callback models the first await reporting that queued failure; cleanup's retry
      await then succeeds and permits the exact free. *)
   let before = AC.snapshot () in
   let upload_await_hits = ref 0 in
@@ -228,9 +225,7 @@ let () =
      nor any free, and the uninjected retry performs the one cleanup. *)
   let await_ctx = Context.from_host (Context.cpu ()) x.Tensor.value nd in
   let before_await_release = AC.snapshot () in
-  let raised, hits =
-    injected FI.Finalize_before_await (fun () -> Context.release await_ctx)
-  in
+  let raised, hits = injected FI.Finalize_before_await (fun () -> Context.release await_ctx) in
   let after_failed_await = AC.snapshot () in
   p "finalize-await injection fired" (raised && hits = 1);
   p "failed finalize await commits no cleanup state"
@@ -253,7 +248,9 @@ let () =
   let release_ctx = Context.from_host (Context.cpu ()) x.Tensor.value nd in
   let release_ctx = Context.from_host release_ctx z.Tensor.value nd_z in
   let before_release = AC.snapshot () in
-  let raised, hits = injected ~at:2 FI.Finalize_before_free (fun () -> Context.release release_ctx) in
+  let raised, hits =
+    injected ~at:2 FI.Finalize_before_free (fun () -> Context.release release_ctx)
+  in
   let after_failed_release = AC.snapshot () in
   p "finalize injection fired after one successful free" (raised && hits = 2);
   p "failed finalize reports no release and records its one completed free"
@@ -277,8 +274,8 @@ let () =
     (!second_hits = 0 && AC.equal after_retry after_second);
 
   (* Schedule-cache ownership is filesystem ownership: a failed writer must preserve the previous
-     committed entry and clean only its own unique staging file; a failed/corrupt replay is a miss.
-  *)
+     committed entry and clean only its own unique staging file; a failed/corrupt replay is a
+     miss. *)
   let cache_key = "gh571-cache" in
   clean_dir resource_cache_dir;
   SC.store ~dir:resource_cache_dir ~key:cache_key (cache_entry "old" 2.);
@@ -294,8 +291,7 @@ let () =
   in
   p "cache-store injection fired" (raised && hits = 1);
   p "failed cache commit preserves the old entry and removes its staging file"
-    (Option.equal String.equal (cache_backend cache_key) (Some "old")
-    && List.is_empty leftovers);
+    (Option.equal String.equal (cache_backend cache_key) (Some "old") && List.is_empty leftovers);
   SC.store ~dir:resource_cache_dir ~key:cache_key (cache_entry "new" 1.);
   p "cache-store retry commits the replacement"
     (Option.equal String.equal (cache_backend cache_key) (Some "new"));
@@ -311,8 +307,7 @@ let () =
     in
     (result, !hits)
   in
-  p "cache-replay injection becomes an honest miss"
-    (replay_hits = 1 && Option.is_none replay);
+  p "cache-replay injection becomes an honest miss" (replay_hits = 1 && Option.is_none replay);
   p "cache-replay control reads the committed replacement"
     (Option.equal String.equal (cache_backend cache_key) (Some "new"));
   Stdio.Out_channel.write_all

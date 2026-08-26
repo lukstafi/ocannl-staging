@@ -7,45 +7,44 @@
    believed to see M = 1024; (H2) the projection kernels are simply small (134 MFLOP each against
    the FFN's 537) and launch/occupancy-bound at any tiling.
 
-   This bench builds the shapes by hand at the SAME total FLOPs, on the SAME device, under the
-   SAME sketch geometries, and times them warm. Each site is
-   [d[b.., m, n..] += w[n.., k..] * x[b.., m, k..]]; the groups are:
+   This bench builds the shapes by hand at the SAME total FLOPs, on the SAME device, under the SAME
+   sketch geometries, and times them warm. Each site is [d[b.., m, n..] += w[n.., k..] * x[b.., m,
+   k..]]; the groups are:
 
    - A: 134.2 MFLOP, N = K = 256, 1024 rows split as B x M for B in {1,2,4,8} -- equal work, equal
-     block count at every geometry, only the row split differs. This is the leg that isolates
-     M-per-block from everything else.
-   - B: the FFN up-projection's own shape (N = 1024, 537 MFLOP), merged and batched.
-   - C: 134 / 268 / 537 / 1074 MFLOP at a fixed shape, batched and merged -- the size leg.
-   - D: the out projection, whose weight carries two input axes (a multi-axis contraction,
-     gh-ocannl-683), merged and batched.
-   - E: the 2x2 factorial over the two pre-splits at constant FLOPs -- rows merged (1024) or split
-     (8 x 128) against the column axis merged (256) or split into 8 heads of 32, which is the
-     column structure the gpt2_mini lowering actually gives q/k/v.
-   - P: a 1024^3 square GEMM -- the family's own ceiling, where no shape question arises.
+   block count at every geometry, only the row split differs. This is the leg that isolates
+   M-per-block from everything else. - B: the FFN up-projection's own shape (N = 1024, 537 MFLOP),
+   merged and batched. - C: 134 / 268 / 537 / 1074 MFLOP at a fixed shape, batched and merged -- the
+   size leg. - D: the out projection, whose weight carries two input axes (a multi-axis contraction,
+   gh-ocannl-683), merged and batched. - E: the 2x2 factorial over the two pre-splits at constant
+   FLOPs -- rows merged (1024) or split (8 x 128) against the column axis merged (256) or split into
+   8 heads of 32, which is the column structure the gpt2_mini lowering actually gives q/k/v. - P: a
+   1024^3 square GEMM -- the family's own ceiling, where no shape question arises.
 
-   Two sites appear twice: A_rows1024 = E_qkv_rows1_heads1 and A_b8x128 = E_qkv_rows8_heads1.
-   That is deliberate -- each is measured twice within one run, so a run reports its own session
-   drift and a shape effect can be judged against it.
+   Two sites appear twice: A_rows1024 = E_qkv_rows1_heads1 and A_b8x128 = E_qkv_rows8_heads1. That
+   is deliberate -- each is measured twice within one run, so a run reports its own session drift
+   and a shape effect can be judged against it.
 
-   Candidates per site: the untuned shipped default, then every geometry of the GPU blocktile
-   sketch family applied as the pure IR transform it is; mode [tune] instead runs a full
-   [Autotune.tune] search per site with [~search:true] and the disk cache DISABLED, so neither
-   shape can replay the other's cached winner and a configuration that disabled searching cannot
-   return the untuned default under a tuned label.
+   Candidates per site: the untuned shipped default, then every geometry of the GPU blocktile sketch
+   family applied as the pure IR transform it is; mode [tune] instead runs a full [Autotune.tune]
+   search per site with [~search:true] and the disk cache DISABLED, so neither shape can replay the
+   other's cached winner and a configuration that disabled searching cannot return the untuned
+   default under a tuned label.
 
    Timing is ROUND-INTERLEAVED, not site-by-site: one round per base tile geometry ([bgrid] twins
    included, since a merged site's plain arm and a batched site's [bgrid] arm are the pair being
    compared; the crowned routines of [tune] mode are one further round), inside which every arm is
-   timed batch by batch. The visiting order uses ONE rotation per adjacent PAIR of batches,
-   mirrored on the odd member, so each such pair exchanges the positions of every pair of arms
-   exactly -- the run-by-run A/B alternation, for all pairs at once and with no RNG. (A rotation
-   that advances every batch does not do this: rotate-then-reverse leaves each arm at the same
-   position in both halves.) An even batch count balances the pairs exactly, which is why the
-   default is even. Timing one site to completion before the next puts the drift straight into the
-   difference under test, and reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches queued back-to-back with one
-   sync -- the sync only, never a device-to-host readback, which would put a transfer and a host
-   allocation inside the timed region (what a kernel sustains inside a step, and the summary's statistic, taken at the MEDIAN
-   batch), and the tuner's own one-dispatch-one-sync minimum, which reads up to 2.6x higher.
+   timed batch by batch. The visiting order uses ONE rotation per adjacent PAIR of batches, mirrored
+   on the odd member, so each such pair exchanges the positions of every pair of arms exactly -- the
+   run-by-run A/B alternation, for all pairs at once and with no RNG. (A rotation that advances
+   every batch does not do this: rotate-then-reverse leaves each arm at the same position in both
+   halves.) An even batch count balances the pairs exactly, which is why the default is even. Timing
+   one site to completion before the next puts the drift straight into the difference under test,
+   and reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches
+   queued back-to-back with one sync -- the sync only, never a device-to-host readback, which would
+   put a transfer and a host allocation inside the timed region (what a kernel sustains inside a
+   step, and the summary's statistic, taken at the MEDIAN batch), and the tuner's own
+   one-dispatch-one-sync minimum, which reads up to 2.6x higher.
 
    Which of the three numbers on a line to believe depends on what the noise is. The median is the
    right summary when the noise is symmetric, which is why it is the summary. On a CONTENDED box it
@@ -57,32 +56,31 @@
 
    Every candidate's whole output is compared cell by cell against a host-computed oracle -- built
    straight from the input formulas, so it is independent of the compiler under test -- and the
-   inputs are chosen so that f32 and f64 accumulation agree exactly whatever order either uses.
-   Each line carries the launch dimensions the schedule actually produced, so "same geometry" is
-   read off the kernel. Any cell that fails parity, fails to compile or run, or (in [tune] mode)
-   did not actually search, is counted and the process exits nonzero: a blank in the column the
-   caller asked for is a failed experiment, not a missing number.
+   inputs are chosen so that f32 and f64 accumulation agree exactly whatever order either uses. Each
+   line carries the launch dimensions the schedule actually produced, so "same geometry" is read off
+   the kernel. Any cell that fails parity, fails to compile or run, or (in [tune] mode) did not
+   actually search, is counted and the process exits nonzero: a blank in the column the caller asked
+   for is a failed experiment, not a missing number.
 
    Usage (bin/ cwd trap: pin the backend, and run from a directory holding an ocannl_config):
-     OCANNL_BACKEND=hip <path to>/projection_shape_bench.exe \
-       [repeats] [batches] [group] [order] [mode]
-   Defaults 50 repeats, 6 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd (or
-   rev, which reverses the rotation each round starts from), mode seeds (or tune, or both). The
+   OCANNL_BACKEND=hip <path to>/projection_shape_bench.exe \ [repeats] [batches] [group] [order]
+   [mode] Defaults 50 repeats, 6 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd
+   (or rev, which reverses the rotation each round starts from), mode seeds (or tune, or both). The
    batch count must be EVEN -- the visiting order mirrors in adjacent pairs -- so the measurement
    this bench was written for reads, in full:
 
-     cd benchmarks   # the nearest ocannl_config, and bin/ has the cwd trap
-     OCANNL_BACKEND=hip ../_build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
+   cd benchmarks # the nearest ocannl_config, and bin/ has the cwd trap OCANNL_BACKEND=hip
+   ../_build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
 
-   Three things the output does NOT claim. The launch dimensions are printed only for the arms
-   whose lowering this bench transforms itself; the untuned default and a crowned search compile
-   their own, so those rows say so rather than reporting a geometry nobody verified. The
-   [bestseed] column ranks arms measured in DIFFERENT rounds, so unlike every per-geometry
-   comparison it is exposed to drift between rounds -- read it as indicative and the round lines
-   as the measurement. And on the C backends the hoisted seeds mint packed-constant nodes per
-   candidate, which land in the device-wide constant cache that [Context.release] cannot reclaim,
-   so a long CPU run grows by one packed pool per hoisted candidate; the bench says so when it
-   times them rather than pretending its cleanup covers that class. *)
+   Three things the output does NOT claim. The launch dimensions are printed only for the arms whose
+   lowering this bench transforms itself; the untuned default and a crowned search compile their
+   own, so those rows say so rather than reporting a geometry nobody verified. The [bestseed] column
+   ranks arms measured in DIFFERENT rounds, so unlike every per-geometry comparison it is exposed to
+   drift between rounds -- read it as indicative and the round lines as the measurement. And on the
+   C backends the hoisted seeds mint packed-constant nodes per candidate, which land in the
+   device-wide constant cache that [Context.release] cannot reclaim, so a long CPU run grows by one
+   packed pool per hoisted candidate; the bench says so when it times them rather than pretending
+   its cleanup covers that class. *)
 
 open Base
 open Ocannl
@@ -100,9 +98,9 @@ let p fmt =
       Stdio.Out_channel.flush Stdio.stdout)
     fmt
 
-(* Process-level conditions are not candidate failures: containing them turns an OOM or an
-   interrupt into one "failed cell" and keeps the run going, which prolongs thrashing and can make
-   a minutes-long benchmark unstoppable. Same set the autotuner's own containment re-raises. *)
+(* Process-level conditions are not candidate failures: containing them turns an OOM or an interrupt
+   into one "failed cell" and keeps the run going, which prolongs thrashing and can make a
+   minutes-long benchmark unstoppable. Same set the autotuner's own containment re-raises. *)
 let is_fatal = function
   | Out_of_memory | Stack_overflow | Stdlib.Sys.Break | Assert_failure _ -> true
   | _ -> false
@@ -110,11 +108,10 @@ let is_fatal = function
 (* Cleanup on a path that is already failing must not itself abort the run -- a backend still
    reporting the original asynchronous error can raise from the release's device await -- but a
    fatal condition still propagates. *)
-let release_quietly ctx =
-  try Context.release ctx with e when not (is_fatal e) -> ()
+let release_quietly ctx = try Context.release ctx with e when not (is_fatal e) -> ()
 
-(* A classified rejection is containable only when the backend says the device was not written:
-   an illegal address, a device assertion or a launch timeout reports [Writes_may_have_occurred],
+(* A classified rejection is containable only when the backend says the device was not written: an
+   illegal address, a device assertion or a launch timeout reports [Writes_may_have_occurred],
    leaves partial writes and a sticky context behind, and every later arm on that device is then
    suspect. The autotuner escalates that class for the same reason. *)
 let escalate_if_wrote ?fatal ~candidate (c : Outcome.classified_cause) =
@@ -130,9 +127,9 @@ let escalate_if_wrote ?fatal ~candidate (c : Outcome.classified_cause) =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-(* [offset + stride * (flat index mod modulus)] over row-major [dims]: varies along every axis
-   whose extent is not a multiple of [modulus]. Products are multiples of 1/8 and partial sums
-   stay far below 2^24, so f32 addition is exact in any order and parity is bitwise. *)
+(* [offset + stride * (flat index mod modulus)] over row-major [dims]: varies along every axis whose
+   extent is not a multiple of [modulus]. Products are multiples of 1/8 and partial sums stay far
+   below 2^24, so f32 addition is exact in any order and parity is bitwise. *)
 let cycle ~dims ~modulus ~offset ~stride idcs =
   let flat = Array.foldi dims ~init:0 ~f:(fun i acc d -> (acc * d) + (idcs.(i) % d)) in
   offset +. (stride *. Float.of_int (flat % modulus))
@@ -159,15 +156,18 @@ let geom_label (q : Autotune.sketch_params) =
    and the winner directly. Same clock [Autotune.time_routine] measures with. *)
 let elapsed c = Mtime.Span.to_float_ns (Mtime_clock.count c) /. 1e9
 
-(* One site: a batched matmul [d[bs.., m, j] += a[bs.., m, kk..] * w[j, kk..]]. [ks] is the
-   weight's input-axis list -- a singleton for the q/k/v shape, a pair for the out projection's
-   multi-axis contraction. *)
+(* One site: a batched matmul [d[bs.., m, j] += a[bs.., m, kk..] * w[j, kk..]]. [ks] is the weight's
+   input-axis list -- a singleton for the q/k/v shape, a pair for the out projection's multi-axis
+   contraction. *)
 type site = { tag : string; bs : int list; m : int; ns : int list; ks : int list }
 
 let prod = List.fold ~init:1 ~f:( * )
 
 let flops s =
-  2.0 *. Float.of_int (prod s.bs) *. Float.of_int s.m *. Float.of_int (prod s.ns)
+  2.0
+  *. Float.of_int (prod s.bs)
+  *. Float.of_int s.m
+  *. Float.of_int (prod s.ns)
   *. Float.of_int (prod s.ks)
 
 let build s =
@@ -186,18 +186,16 @@ let build s =
   let%op d = w * a in
   d
 
-
 (* The independent oracle: the site's whole output computed on the host straight from the [cycle]
-   formulas, in the same row-major layout the device writes. Every candidate is compared against
-   it cell by cell, not through a scalar digest -- a checksum with a repeating coefficient cannot
-   see a permutation of cells one period apart, and a reference taken from the default pipeline
-   cannot see a defect the default pipeline shares. Products are multiples of 1/8 and every
-   partial sum stays below 2^24, so the f64 accumulation here and the device's f32 accumulation
-   agree exactly whatever order either uses, and the comparison is [Float.equal]. *)
+   formulas, in the same row-major layout the device writes. Every candidate is compared against it
+   cell by cell, not through a scalar digest -- a checksum with a repeating coefficient cannot see a
+   permutation of cells one period apart, and a reference taken from the default pipeline cannot see
+   a defect the default pipeline shares. Products are multiples of 1/8 and every partial sum stays
+   below 2^24, so the f64 accumulation here and the device's f32 accumulation agree exactly whatever
+   order either uses, and the comparison is [Float.equal]. *)
 let oracle s =
   let nn = prod s.ns and kk = prod s.ks and rows = prod s.bs * s.m in
-  let wv =
-    Array.init (nn * kk) ~f:(fun i -> -5.5 +. (0.5 *. Float.of_int (i % 11)))
+  let wv = Array.init (nn * kk) ~f:(fun i -> -5.5 +. (0.5 *. Float.of_int (i % 11)))
   and av = Array.init (rows * kk) ~f:(fun i -> 0.25 +. (0.25 *. Float.of_int (i % 13))) in
   let d = Array.create ~len:(rows * nn) 0.0 in
   for r = 0 to rows - 1 do
@@ -224,15 +222,15 @@ type live = {
   lv_single : float ref;
   lv_failed : bool ref;
       (** Set when a timed dispatch raises: the arm stops being visited, is not reported, and its
-          cell is counted -- a recoverable per-candidate failure must not abort a run that still
-          has matched arms to measure and release. *)
+          cell is counted -- a recoverable per-candidate failure must not abort a run that still has
+          matched arms to measure and release. *)
 }
 
 let () =
   let args = Bench_args.create "projection_shape_bench" in
   let repeats = Bench_args.int args 0 ~name:"repeats" ~default:50 in
-  (* Even by default: the per-batch reversal below alternates every pair's order, so an even
-     number of batches balances every pair exactly. *)
+  (* Even by default: the per-batch reversal below alternates every pair's order, so an even number
+     of batches balances every pair exactly. *)
   let nbatches = Bench_args.int args 1 ~name:"batches" ~default:6 in
   (* Odd counts are refused rather than rounded: the visiting order mirrors in adjacent PAIRS of
      batches, so an unpaired final batch gives every arm one extra measurement in one visit order
@@ -247,16 +245,16 @@ let () =
   if repeats % 2 = 1 then
     invalid_arg
       (Printf.sprintf
-         "repeats must be even (got %d): it is also the mirrored sample count of the \
-          one-dispatch statistic"
+         "repeats must be even (got %d): it is also the mirrored sample count of the one-dispatch \
+          statistic"
          repeats);
   let group = String.lowercase (Bench_args.string args 2 ~default:"all") in
   (* [fwd]/[rev] reverses the rotation the interleaved rounds start from, so a residual
      first-arm-is-cold bias can be shown not to carry the conclusion. *)
   let order = String.lowercase (Bench_args.string args 3 ~default:"fwd") in
-  (* [seeds] times the sketch seeds, one interleaved round per geometry; [tune] runs the full
-     search per site (which cannot be interleaved -- a search is minutes of its own dispatches)
-     with the disk cache disabled, so neither shape can replay the other's winner. *)
+  (* [seeds] times the sketch seeds, one interleaved round per geometry; [tune] runs the full search
+     per site (which cannot be interleaved -- a search is minutes of its own dispatches) with the
+     disk cache disabled, so neither shape can replay the other's winner. *)
   let mode = String.lowercase (Bench_args.string args 4 ~default:"seeds") in
   if not (List.mem [ "seeds"; "tune"; "both" ] mode ~equal:String.equal) then
     invalid_arg ("unknown mode " ^ mode ^ " (seeds | tune | both)");
@@ -291,7 +289,13 @@ let () =
     and c =
       List.concat_map [ 8; 16; 32; 64 ] ~f:(fun bb ->
           [
-            { tag = Printf.sprintf "C_b%dx128" bb; bs = [ bb ]; m = 128; ns = [ 256 ]; ks = [ 256 ] };
+            {
+              tag = Printf.sprintf "C_b%dx128" bb;
+              bs = [ bb ];
+              m = 128;
+              ns = [ 256 ];
+              ks = [ 256 ];
+            };
             {
               tag = Printf.sprintf "C_rows%d" (bb * 128);
               bs = [];
@@ -325,16 +329,23 @@ let () =
     | "all" -> a @ b @ c @ d @ e @ pk
     | g -> invalid_arg ("unknown group " ^ g)
   in
-  let sites = match order with
+  let sites =
+    match order with
     | "fwd" -> sites
     | "rev" -> List.rev sites
     | o -> invalid_arg ("unknown order " ^ o)
   in
-  (* Any cell of the experiment that could not be measured is a failure of the run, not a blank in
-     a table: a harness that exits 0 with "n/a" in the column the caller asked for lets automation
+  (* Any cell of the experiment that could not be measured is a failure of the run, not a blank in a
+     table: a harness that exits 0 with "n/a" in the column the caller asked for lets automation
      accept an invalid experiment. *)
   let failures = ref 0 in
-  let fail fmt = Printf.ksprintf (fun m -> Int.incr failures; p "   !! %s\n" m) fmt in
+  let fail fmt =
+    Printf.ksprintf
+      (fun m ->
+        Int.incr failures;
+        p "   !! %s\n" m)
+      fmt
+  in
   (* Phase 1: per site, the lowering, the detected shape, the seed list and the host oracle. *)
   let prepared =
     List.map sites ~f:(fun s ->
@@ -344,8 +355,8 @@ let () =
           (String.concat ~sep:"x" (List.map s.ns ~f:Int.to_string))
           (String.concat ~sep:"x" (List.map s.ks ~f:Int.to_string))
           (fl /. 1e6);
-        (* One [build] per SITE, and the lowering probe uses THAT graph: a second [build] would
-           mint a second pair of host-initialized operands, and those enter the per-device constant
+        (* One [build] per SITE, and the lowering probe uses THAT graph: a second [build] would mint
+           a second pair of host-initialized operands, and those enter the per-device constant
            buffer cache which [Context.release] cannot reach, so a discarded probe graph would
            retain its operands for the rest of the run. *)
         let d = build s in
@@ -365,29 +376,30 @@ let () =
         let seeds =
           Autotune.sketch_seed_params ~is_gpu:on_gpu ~is_cpu:(not on_gpu) ~limits opt
           |> List.filter ~f:(fun (q : Autotune.sketch_params) ->
-                 (not q.sk_epilogue) && not q.sk_mma)
+              (not q.sk_epilogue) && not q.sk_mma)
         in
         (* The same comp is compiled for every candidate, which is what the sketch suites do too. *)
         (s, fl, seeds, lazy (oracle s), d, fwd))
   in
-  (* Compile one candidate and check its parity. The routine name carries a run-wide counter so
-     that under [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source
-     survives its neighbours instead of being overwritten by them.
+  (* Compile one candidate and check its parity. The routine name carries a run-wide counter so that
+     under [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source survives
+     its neighbours instead of being overwritten by them.
 
-     A candidate that fails parity, or that raises anywhere between the compile and the readback,
-     is RELEASED here and never returned: its context must not outlive the attempt (the pool tables
+     A candidate that fails parity, or that raises anywhere between the compile and the readback, is
+     RELEASED here and never returned: its context must not outlive the attempt (the pool tables
      strongly retain device slabs, docs/agent-notes/backend-memory.md), and an incorrect schedule
      must not be timed, ranked, or able to win a summary column that carries no parity marker. The
-     context is held in a ref the cleanup can reach, so the release covers the exception path too. *)
+     context is held in a ref the cleanup can reach, so the release covers the exception path
+     too. *)
   let counter = ref 0 in
-  (* The two direct compiles go through [Context.compile_outcome] so that a FATAL compile,
-     link or driver failure is not contained as one cell by the generic handler below: only a
-     classified candidate rejection is recoverable. [Autotune.tune] is a raising API and does its
-     own classification internally, so the tuned arm keeps the raising form. *)
+  (* The two direct compiles go through [Context.compile_outcome] so that a FATAL compile, link or
+     driver failure is not contained as one cell by the generic handler below: only a classified
+     candidate rejection is recoverable. [Autotune.tune] is a raising API and does its own
+     classification internally, so the tuned arm keeps the raising form. *)
   let compiled ~fatal_seen ?lowered_transform ~name ctx fwd =
     match
-      Context.compile_outcome ?lowered_transform ~name ~provenance:Outcome.Candidate
-        ~candidate:name ctx fwd Ir.Indexing.Empty
+      Context.compile_outcome ?lowered_transform ~name ~provenance:Outcome.Candidate ~candidate:name
+        ctx fwd Ir.Indexing.Empty
     with
     | Ok v -> v
     | Error (Outcome.Classified c) ->
@@ -403,8 +415,8 @@ let () =
     let held = ref None in
     let drop () = Option.iter !held ~f:(fun c -> release_quietly !c) in
     (* Set when the classifier called a validation failure fatal: [raise_failure] re-raises the
-       original exception with its backtrace, which the containment below would otherwise catch
-       like any other. A classified decline is left to that containment on purpose. *)
+       original exception with its backtrace, which the containment below would otherwise catch like
+       any other. A classified decline is left to that containment on purpose. *)
     let fatal_seen = ref false in
     match
       let dims = ref None in
@@ -417,12 +429,11 @@ let () =
       held := Some ctx;
       (* The warm-up launches and the synchronizing readback go through the same classifier the
          timed batches use: an unclassified driver failure here is fatal, not a candidate's own
-         decline, and continuing to compile and time arms on an affected device is what the
-         contract exists to stop. *)
+         decline, and continuing to compile and time arms on an affected device is what the contract
+         exists to stop. *)
       let protect phase f =
         match
-          Outcome.protect
-            ~classify_backend:(Context.failure_classifier !ctx)
+          Outcome.protect ~classify_backend:(Context.failure_classifier !ctx)
             ~provenance:Outcome.Candidate ~phase ~candidate:label f
         with
         | Ok v -> v
@@ -619,10 +630,10 @@ let () =
           List.map seeds ~f:(fun q -> base_geom (geom_label q)))
       |> List.dedup_and_sort ~compare:String.compare
     in
-    (* The hoisted CPU seeds mint packed-constant nodes per candidate; those land in the
-       device-wide constant cache that [Context.release] cannot reclaim, so this branch grows by
-       one packed pool per such candidate. Said out loud rather than papered over -- the alternative
-       is to drop the family, and a measurement is worth more than a tidy footprint here. *)
+    (* The hoisted CPU seeds mint packed-constant nodes per candidate; those land in the device-wide
+       constant cache that [Context.release] cannot reclaim, so this branch grows by one packed pool
+       per such candidate. Said out loud rather than papered over -- the alternative is to drop the
+       family, and a measurement is worth more than a tidy footprint here. *)
     if (not on_gpu) && List.exists geometries ~f:(fun g -> String.is_substring g ~substring:"hoist")
     then
       p
@@ -633,11 +644,11 @@ let () =
           List.concat_map prepared ~f:(fun ((_, _, seeds, _, _, _) as pr) ->
               List.filter seeds ~f:(fun q -> String.equal (base_geom (geom_label q)) g)
               |> List.filter_map ~f:(fun q ->
-                     arm pr ~label:(geom_label q) ~compile:(fun ~record ~name ~fatal_seen fwd ->
-                         compiled ~fatal_seen
-                           ~lowered_transform:(fun o ->
-                             record (Sched.apply (Autotune.sketch_schedule ~p:q o) o))
-                           ~name (Context.auto ()) fwd)))
+                  arm pr ~label:(geom_label q) ~compile:(fun ~record ~name ~fatal_seen fwd ->
+                      compiled ~fatal_seen
+                        ~lowered_transform:(fun o ->
+                          record (Sched.apply (Autotune.sketch_schedule ~p:q o) o))
+                        ~name (Context.auto ()) fwd)))
         in
         run_round ~label:g lives)
   end;
@@ -665,7 +676,8 @@ let () =
        reproducible only against the line below. *)
     let shown = function "" -> "(unset)" | v -> v in
     p
-      "\n-- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, \
+      "\n\
+       -- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, \
        split_reduce_max_sites %d, cache disabled\n\
        -- ambient search gates: autotune_bound_pruning=%s model_peak_flops=%s \
        model_peak_memory_bandwidth=%s\n"
@@ -678,9 +690,8 @@ let () =
           let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
           let lv =
             arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name ~fatal_seen fwd ->
-                Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam
-                  ~rounds:tn_rounds ~repeats:tn_repeats ~keep_fraction:tn_keep
-                  ~max_split_reduce_sites:tn_split
+                Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam ~rounds:tn_rounds
+                  ~repeats:tn_repeats ~keep_fraction:tn_keep ~max_split_reduce_sites:tn_split
                   ~report:(fun (r : Autotune.report) ->
                     lbl := r.Autotune.best_label;
                     ms := r.Autotune.best_ms;
@@ -698,8 +709,7 @@ let () =
             | None ->
                 if Option.is_some lv then fail "%s: the tune cell reported nothing" s.tag;
                 false
-            | Some Autotune.Searched
-              when Float.is_finite !ms && not (String.is_empty !lbl) ->
+            | Some Autotune.Searched when Float.is_finite !ms && not (String.is_empty !lbl) ->
                 p "   %-22s crowned: %s  (search best_ms %.4f)\n" s.tag !lbl !ms;
                 Hashtbl.set tuned ~key:s.tag ~data:!lbl;
                 true
@@ -710,8 +720,8 @@ let () =
                   s.tag !ms !lbl;
                 false
             | Some o ->
-                fail "%s: the tune cell did not search (%s) -- its number is not a tuned \
-                      measurement"
+                fail
+                  "%s: the tune cell did not search (%s) -- its number is not a tuned measurement"
                   s.tag (Autotune.outcome_name o);
                 false
           in
@@ -729,14 +739,13 @@ let () =
     Option.bind (Hashtbl.find results tag) ~f:(fun l ->
         List.find l ~f:(fun (l', _) -> String.equal l' lbl) |> Option.map ~f:snd)
   in
-  (* The two named columns are the two geometries gh-ocannl-728 quotes as crowned on gfx1151 --
-     but only on a GPU backend: [geom_label] prefixes the CPU family's seeds with "cpu" and its
+  (* The two named columns are the two geometries gh-ocannl-728 quotes as crowned on gfx1151 -- but
+     only on a GPU backend: [geom_label] prefixes the CPU family's seeds with "cpu" and its
      blocktile menu is 16 and 8, so asking for the GPU spellings there would print n/a over
-     measurements that were taken. A site's best arm at a geometry may be a twin (the [bgrid] one
-     on a batched GPU site, the [hoist] one on CPU), so the twins are tried first. *)
+     measurements that were taken. A site's best arm at a geometry may be a twin (the [bgrid] one on
+     a batched GPU site, the [hoist] one on CPU), so the twins are tried first. *)
   let col_a, col_b =
-    if on_gpu then ("gpu 32x32x8/4x4", "gpu 16x16x8/2x2")
-    else ("cpu 16x16x16/0x0", "cpu 8x8x8/0x0")
+    if on_gpu then ("gpu 32x32x8/4x4", "gpu 16x16x8/2x2") else ("cpu 16x16x16/0x0", "cpu 8x8x8/0x0")
   in
   let crowned tag want =
     List.find_map [ want ^ " bgrid"; want ^ " hoist"; want ] ~f:(of_site tag)
@@ -751,21 +760,21 @@ let () =
   p
     "   the named-geometry columns compare arms measured in ONE interleaved round; bestseed ranks \
      across rounds and is indicative\n";
-  p "%-22s %9s  %8s  %8s  %8s  %8s  %8s  %s\n" "site" "MFLOP" "untuned"
-    (short_col col_a) (short_col col_b) "bestseed" "tuned" "winner";
+  p "%-22s %9s  %8s  %8s  %8s  %8s  %8s  %s\n" "site" "MFLOP" "untuned" (short_col col_a)
+    (short_col col_b) "bestseed" "tuned" "winner";
   List.iter sites ~f:(fun s ->
       let all = Option.value (Hashtbl.find results s.tag) ~default:[] in
       let seeds_only =
         List.filter all ~f:(fun (l, _) ->
-            (not (String.is_prefix l ~prefix:"default"))
-            && not (String.is_prefix l ~prefix:"TUNED"))
+            (not (String.is_prefix l ~prefix:"default")) && not (String.is_prefix l ~prefix:"TUNED"))
       in
       let best_of =
         List.fold seeds_only ~init:None ~f:(fun acc (l, g) ->
             match acc with Some (_, bg) when Float.(bg >= g) -> acc | _ -> Some (l, g))
       in
       let tn = of_site s.tag "TUNED (full search)" in
-      p "%-22s %9.1f  %s  %s  %s  %s  %s  %s\n" s.tag (flops s /. 1e6)
+      p "%-22s %9.1f  %s  %s  %s  %s  %s  %s\n" s.tag
+        (flops s /. 1e6)
         (f_opt (of_site s.tag "default (untuned)"))
         (f_opt (crowned s.tag col_a))
         (f_opt (crowned s.tag col_b))
@@ -775,6 +784,8 @@ let () =
         | Some l when Option.is_some tn -> l
         | _ -> Option.value_map best_of ~default:"-" ~f:fst));
   if !failures > 0 then (
-    p "\n%d cell(s) of this experiment could not be measured or failed parity -- see the !! lines.\n"
+    p
+      "\n\
+       %d cell(s) of this experiment could not be measured or failed parity -- see the !! lines.\n"
       !failures;
     Stdlib.exit 1)

@@ -3,20 +3,20 @@
     [build_files/<routine>.ll] and the [.cd] dumps are the surface a constant bug is chased on, so
     what they print about a constant has to BE the constant. Rendered with [%.16g] it was not, in
     two ways. A value with no fractional part lost its radix point, so a dumped [-0.] came out as
-    the token [-0]: the integer zero, which is what any C-family dialect reading the dump back
-    would make of it, and the exact shape of the bug gh-ocannl-615 chased. And 16 significant
-    digits do not recover every double, so a constant whose 17th digit mattered was displayed as
-    its 16-digit neighbour — [0.1 +. 0.2] and [0.3] printed the same text, which is the harder
-    failure to suspect, because the view and the value disagree while both look ordinary. Both
-    printers now share the renderer that already settled this for kernel text
-    ([Utils.decimal_float_literal], gh-ocannl-623), minus its C-dialect spellings: an IR dump is
-    not C, so the specials stay the words [%.16g] gives them.
+    the token [-0]: the integer zero, which is what any C-family dialect reading the dump back would
+    make of it, and the exact shape of the bug gh-ocannl-615 chased. And 16 significant digits do
+    not recover every double, so a constant whose 17th digit mattered was displayed as its 16-digit
+    neighbour — [0.1 +. 0.2] and [0.3] printed the same text, which is the harder failure to
+    suspect, because the view and the value disagree while both look ordinary. Both printers now
+    share the renderer that already settled this for kernel text ([Utils.decimal_float_literal],
+    gh-ocannl-623), minus its C-dialect spellings: an IR dump is not C, so the specials stay the
+    words [%.16g] gives them.
 
     The table below is the dump surface itself: each row is what the two printers write for one
     constant, keyed by its exact hexadecimal spelling — decimal-rounding-free, so the row label
-    cannot itself lose the distinction it is about. The claims under it are the properties that
-    make the table trustworthy: every token parses back to the very double it names, no finite
-    token is an integer literal, and the tokens tell apart values the printers used to conflate. *)
+    cannot itself lose the distinction it is about. The claims under it are the properties that make
+    the table trustworthy: every token parses back to the very double it names, no finite token is
+    an integer literal, and the tokens tell apart values the printers used to conflate. *)
 
 open Base
 module LL = Ir.Low_level
@@ -77,8 +77,8 @@ let () =
   let tokens = List.concat_map values ~f:(fun v -> [ (v, cd_token v); (v, ll_token v) ]) in
   Ll.p "every dumped constant parses back to the double it names"
     (List.for_all tokens ~f:(fun (v, token) -> round_trips v token));
-  (* A finite token that is neither is an integer literal, which is how the radix point went
-     missing in the first place. *)
+  (* A finite token that is neither is an integer literal, which is how the radix point went missing
+     in the first place. *)
   Ll.p "every finite constant is dumped as a floating literal, with a radix point or an exponent"
     (List.for_all tokens ~f:(fun (v, token) ->
          (not (Float.is_finite v))

@@ -77,6 +77,7 @@
 ; Readback of the backend's queried device properties and derived hardware limits (gh-ocannl-684).
 ; No positional geometry, so no bench_args; the backend comes from the library's own --ocannl_*
 ; scan, and must be pinned explicitly (the bin/ cwd trap).
+
 (executable
  (package neural_nets_lib)
  (public_name ocannl_device_props)
@@ -89,6 +90,7 @@
 
 ; gh-ocannl-728: the batched-vs-merged row-axis measurement. Positional geometry, so bench_args;
 ; the backend comes from the library's own --ocannl_* scan and must be pinned explicitly.
+
 (executable
  (package neural_nets_lib)
  (public_name projection_shape_bench)

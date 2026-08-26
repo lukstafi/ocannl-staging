@@ -87,10 +87,10 @@ let () =
   (match site with
   | None -> p "fresh: conv site detected" false
   | Some s ->
-      p_all "fresh: lowered conv is offset-free in buffer space" s.Autotune.c_axes
-        ~f:(fun cx -> cx.Autotune.cx_offset = 0);
+      p_all "fresh: lowered conv is offset-free in buffer space" s.Autotune.c_axes ~f:(fun cx ->
+          cx.Autotune.cx_offset = 0);
       p_all "fresh: window and stride detected" s.Autotune.c_axes ~f:(fun cx ->
-             cx.Autotune.cx_stride = 1 && cx.Autotune.cx_nk = 3));
+          cx.Autotune.cx_stride = 1 && cx.Autotune.cx_nk = 3));
   (* === Compatible late demand on the now-committed operand is accepted === *)
   (match compile_conv ~ctx "fresh_again" x2 with
   | exception Row.Shape_error (msg, _) ->
@@ -129,10 +129,10 @@ let () =
   match compile_conv "wrapped_zero" xw0 with
   | exception Row.Shape_error (msg, _) ->
       pr "wrapped_zero: unexpected rejection: %s\n" (String.prefix msg 60)
-  | _, site ->
+  | _, site -> (
       p "wrapped_zero: conv on matching committed neutral accepted" true;
-      (match site with
+      match site with
       | Some s ->
-          p_all "wrapped_zero: offset-free in buffer space" s.Autotune.c_axes
-            ~f:(fun cx -> cx.Autotune.cx_offset = 0)
+          p_all "wrapped_zero: offset-free in buffer space" s.Autotune.c_axes ~f:(fun cx ->
+              cx.Autotune.cx_offset = 0)
       | None -> p "wrapped_zero: offset-free in buffer space" false)

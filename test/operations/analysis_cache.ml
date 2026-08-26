@@ -16,11 +16,10 @@
 open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
-
 module Idx = Ir.Indexing
 
-(* Nodes and builders come from [Ll_test] (gh-ocannl-600, gh-ocannl-608), which carries the same
-   set this file used to spell for itself — in one of the three mutually incompatible argument
+(* Nodes and builders come from [Ll_test] (gh-ocannl-600, gh-ocannl-608), which carries the same set
+   this file used to spell for itself — in one of the three mutually incompatible argument
    conventions the hand-built-IR tests had drifted into. *)
 let mk = Ll_test.node_factory ~first_id:3000 ~dims:[| 3 |] ()
 let materialize = Ll_test.materialize
@@ -32,7 +31,6 @@ let mul = Ll_test.mul
 let c = Ll_test.c
 let loop s body = Ll_test.loop ~upto:2 s body
 let seq = Ll_test.seq
-
 let p = Verdict.p
 
 (* One "lowering" of the two-consumer routine: fresh loop symbols each call, tensor nodes fixed by

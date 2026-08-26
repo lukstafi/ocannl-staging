@@ -13,37 +13,36 @@ open Ppxlib
    [dune-project] is a known quantity rather than a discovery. Measured against Ast_503..Ast_506,
    which are the candidates a selection move can land on:
 
-   - {b Literal values} ([Pconst_string], [Pconst_float], [Pconst_integer], [Pconst_char]) --
-     about fifty occurrences, mostly in [ppx_cd] and [ppx_op]. {b Moves at Ast_503}, where
-     [constant] stops being a flat variant and becomes [{ pconst_desc; pconst_loc }]; the payloads
-     themselves are unchanged. Not expressible: a quotation pins one literal, and there is no way
-     to write "any string literal, and give me its text", which is what these arms need;
-     [Ast_pattern.estring] says it but raises on an attributed node rather than declining to match
-     (see [string_literal] below). Reads that stand alone are funnelled through [string_literal]
-     and [string_of_constant]; the rest sit inside quotation-shaped arms in [ppx_cd]/[ppx_op].
-     Per-site fix: [Pconst_X (..)] becomes [{ pconst_desc = Pconst_X (..); _ }]. Mechanical.
+   - {b Literal values} ([Pconst_string], [Pconst_float], [Pconst_integer], [Pconst_char]) -- about
+   fifty occurrences, mostly in [ppx_cd] and [ppx_op]. {b Moves at Ast_503}, where [constant] stops
+   being a flat variant and becomes [{ pconst_desc; pconst_loc }]; the payloads themselves are
+   unchanged. Not expressible: a quotation pins one literal, and there is no way to write "any
+   string literal, and give me its text", which is what these arms need; [Ast_pattern.estring] says
+   it but raises on an attributed node rather than declining to match (see [string_literal] below).
+   Reads that stand alone are funnelled through [string_literal] and [string_of_constant]; the rest
+   sit inside quotation-shaped arms in [ppx_cd]/[ppx_op]. Per-site fix: [Pconst_X (..)] becomes [{
+   pconst_desc = Pconst_X (..); _ }]. Mechanical.
 
    - {b Tuple payloads} ([Pexp_tuple], [Ppat_tuple]) -- about fifteen occurrences. {b Moves at
-     Ast_504}, which adds labelled tuples: [Pexp_tuple of (string option * expression) list] and
-     [Ppat_tuple of (string option * pattern) list * closed_flag]. Not expressible: all but one
-     bind a variable-length element list, and no quotation states one. Construction already goes
-     through [Ast_builder.Default.pexp_tuple] where it can ([pat2expr]). Per-site fix: pair each
-     element with [None] -- and decide, per site, whether a labelled tuple should be accepted as
-     an axis container or refused. That is a design question, not a rename.
+   Ast_504}, which adds labelled tuples: [Pexp_tuple of (string option * expression) list] and
+   [Ppat_tuple of (string option * pattern) list * closed_flag]. Not expressible: all but one bind a
+   variable-length element list, and no quotation states one. Construction already goes through
+   [Ast_builder.Default.pexp_tuple] where it can ([pat2expr]). Per-site fix: pair each element with
+   [None] -- and decide, per site, whether a labelled tuple should be accepted as an axis container
+   or refused. That is a design question, not a rename.
 
    - {b [Pexp_open] and [Pexp_letmodule]} -- ten occurrences. {b Moves at Ast_505}, which deletes
-     both: [let open M in e] and [let module M = .. in e] become
-     [Pexp_struct_item (Pstr_open ../Pstr_module .., e)]. Not expressible: the arms match a binder
-     and rebuild it around a translated body, and neither a quotation nor a builder states "the
-     body of whatever binder this is". This is the one residue class whose fix is a restructure
-     rather than a rename; lukstafi/ocannl-staging#408 met the same deletion from the compiler
-     side, in [Cache_dir_scan].
+   both: [let open M in e] and [let module M = .. in e] become [Pexp_struct_item (Pstr_open
+   ../Pstr_module .., e)]. Not expressible: the arms match a binder and rebuild it around a
+   translated body, and neither a quotation nor a builder states "the body of whatever binder this
+   is". This is the one residue class whose fix is a restructure rather than a rename;
+   lukstafi/ocannl-staging#408 met the same deletion from the compiler side, in [Cache_dir_scan].
 
    - {b "Any node of this kind" tests} -- [Pexp_ident _], [Pexp_array _], [Pexp_apply (fn, args)],
-     [Pexp_record (..)], [Pexp_function (..)], [Pstr_value], [Ppat_var] and friends. A quotation
-     pins a shape; it cannot say "any identifier" or "an array of any length". These are coupling
-     to a grep and not to a version: every one of them is byte-identical from Ast_502 through
-     Ast_506, [Pexp_function]'s [params * constraint * body] triple included. *)
+   [Pexp_record (..)], [Pexp_function (..)], [Pstr_value], [Ppat_var] and friends. A quotation pins
+   a shape; it cannot say "any identifier" or "an array of any length". These are coupling to a grep
+   and not to a version: every one of them is byte-identical from Ast_502 through Ast_506,
+   [Pexp_function]'s [params * constraint * body] triple included. *)
 
 type li = longident
 
@@ -75,8 +74,8 @@ let axis_basis_of_type (typ : core_type) : string option =
    -- costs these two definitions rather than every call site.
 
    [Ast_pattern.estring] would say "a string literal" without naming a constructor at all, but its
-   generated combinators assert the node carries no attributes and RAISE when it does, where a
-   plain match simply does not select the arm. That would turn several friendly "expected a string
+   generated combinators assert the node carries no attributes and RAISE when it does, where a plain
+   match simply does not select the arm. That would turn several friendly "expected a string
    literal" error extensions into hard failures, so it is declined here. *)
 let string_literal expr =
   match expr.pexp_desc with Pexp_constant (Pconst_string (s, _, _)) -> Some s | _ -> None

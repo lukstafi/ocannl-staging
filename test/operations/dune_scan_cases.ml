@@ -462,8 +462,7 @@ let render_raw (r : Scan.raw_stanza) =
         if String.is_empty cwd then "%{test}" else cwd ^ ":%{test}")
   in
   let unnameable =
-    List.map r.Scan.raw_unnameable ~f:(fun cwd ->
-        if String.is_empty cwd then "!" else "!" ^ cwd)
+    List.map r.Scan.raw_unnameable ~f:(fun cwd -> if String.is_empty cwd then "!" else "!" ^ cwd)
   in
   (* `?` for what the reader records without naming: it says THAT something runs and nothing more,
      which is a weaker entry than the `!` of a bare command under `(setenv PATH …)` -- that one
@@ -480,15 +479,17 @@ let raw_stanza_cases =
        stanzas. A `test` nested anywhere else is not a stanza -- `(env (test …))` names a build
        PROFILE, and `sites` rightly makes no test site of it. *)
     ("a test stanza", {dune|(test (name t))|dune}, [ "test{%{test}}" ]);
-    ("two of them", {dune|(test (name a))
-(test (name b))|dune}, [ "test{%{test}}"; "test{%{test}}" ]);
+    ( "two of them",
+      {dune|(test (name a))
+(test (name b))|dune},
+      [ "test{%{test}}"; "test{%{test}}" ] );
     ("a plural stanza is one stanza", {dune|(tests (names a b c))|dune}, [ "tests{%{test}}" ]);
     ( "a build profile named test is not a test stanza",
       {dune|(env (test (flags (:standard))))|dune},
       [ "env{}" ] );
     (* A `(subdir …)` moves where its stanzas run, and that directory is where the config is
-       resolved -- so it composes into the recorded one, ready to compare against
-       `in_subdir site.subdir site.cwd`. *)
+       resolved -- so it composes into the recorded one, ready to compare against `in_subdir
+       site.subdir site.cwd`. *)
     ( "a stanza inside a subdir runs there",
       {dune|(subdir gen (test (name t)))|dune},
       [ "subdir{}"; "test@gen{gen:%{test}}" ] );
@@ -502,7 +503,9 @@ let raw_stanza_cases =
       {dune|(subdir gen (rule (action (chdir sub (run %{dep:a.exe})))))|dune},
       [ "subdir{}"; "rule@gen{gen/sub:a.exe}" ] );
     (* An inline_tests field belongs to the stanza it sits directly inside. *)
-    ("a library with inline tests", {dune|(library (name l) (inline_tests))|dune}, [ "library+inline{}" ]);
+    ( "a library with inline tests",
+      {dune|(library (name l) (inline_tests))|dune},
+      [ "library+inline{}" ] );
     ("a library without", {dune|(library (name l) (libraries base))|dune}, [ "library{}" ]);
     ( "an inline_tests nested deeper is not the library's field",
       {dune|(library (name l) (env (inline_tests)))|dune},
@@ -512,7 +515,9 @@ let raw_stanza_cases =
       {dune|(subdir child (library (name l) (inline_tests)))|dune},
       [ "subdir{}"; "library@child+inline{}" ] );
     (* What runs things, and where. *)
-    ("a rule running a dep pform", {dune|(rule (action (run %{dep:probe.exe})))|dune}, [ "rule{probe.exe}" ]);
+    ( "a rule running a dep pform",
+      {dune|(rule (action (run %{dep:probe.exe})))|dune},
+      [ "rule{probe.exe}" ] );
     ("a bare path", {dune|(rule (action (run ./probe.exe)))|dune}, [ "rule{probe.exe}" ]);
     (* An explicit relative path names something this repository built whatever its extension --
        `classify_command` treats `./probe` as a site, so the floor must too. *)
@@ -521,7 +526,9 @@ let raw_stanza_cases =
        the end of the story for BOTH readers -- `sites` places no site for it either. This is the
        negative control the rule below is written against: what makes the difference is the
        ARGUMENT, not the command. *)
-    ("but a bare word is a tool on PATH", {dune|(rule (action (run python3 x.py)))|dune}, [ "rule{}" ]);
+    ( "but a bare word is a tool on PATH",
+      {dune|(rule (action (run python3 x.py)))|dune},
+      [ "rule{}" ] );
     (* Handed a file this workspace builds, the same tool is a stanza both readers see. The walk
        reads it as a program that may run in a directory it cannot establish -- dune's grammar does
        not say whether `python3 %{dep:orchestrate.py}` runs our file or merely reads it -- and until
@@ -532,8 +539,8 @@ let raw_stanza_cases =
       [ "rule{?python3, handed %{dep:orchestrate.py}}" ] );
     (* The counter-example that rules out narrowing the walk instead: `env -C ../sibling probe.exe`
        is the same shape -- an external command handed workspace paths -- and it does launch
-       something of ours, somewhere else. Both paths are named, since either could be the program.
-       *)
+       something of ours, somewhere else. Both paths are named, since either could be the
+       program. *)
     ( "and a launcher pointed elsewhere counts for the same reason",
       {dune|(rule (action (run env -C ../sibling ./probe.exe)))|dune},
       [ "rule{?env, handed ../sibling, ./probe.exe}" ] );
@@ -601,9 +608,7 @@ let raw_stanza_cases =
     ( "a quoted chdir destination",
       {dune|(rule (action (chdir "scratch dir" (run %{dep:probe.exe}))))|dune},
       [ "rule{scratch dir:probe.exe}" ] );
-    ( "a quoted command",
-      {dune|(rule (action (run "./probe.exe")))|dune},
-      [ "rule{probe.exe}" ] );
+    ("a quoted command", {dune|(rule (action (run "./probe.exe")))|dune}, [ "rule{probe.exe}" ]);
     ( "an escape inside a quoted atom",
       {dune|(rule (action (chdir "with\"quote" (run %{dep:probe.exe}))))|dune},
       [ "rule{with\"quote:probe.exe}" ] );
@@ -611,7 +616,9 @@ let raw_stanza_cases =
       {dune|(rule (action (chdir a (chdir b (run %{dep:x.exe})))))|dune},
       [ "rule{a/b:x.exe}" ] );
     ("an alias runs things too", {dune|(alias (action (run %{dep:a.exe})))|dune}, [ "alias{a.exe}" ]);
-    ("a test's custom action", {dune|(test (name t) (action (run %{dep:helper.exe})))|dune}, [ "test{%{test} helper.exe}" ]);
+    ( "a test's custom action",
+      {dune|(test (name t) (action (run %{dep:helper.exe})))|dune},
+      [ "test{%{test} helper.exe}" ] );
     (* A test's own binary runs where its action puts it, and `sites` emits one Test site per
        directory because each resolves a different config -- so two chdir branches are two. *)
     ( "a test's own binary under a chdir",
@@ -662,12 +669,8 @@ let raw_stanza_cases =
       [ "rule{?probe.exe, under `(chdir %{root} ...)`}" ] );
     (* Dune allows whitespace and comments after an opening paren; a head read as empty would make
        the stanza invisible to a floor whose whole job is seeing it. *)
-    ( "whitespace before the head",
-      "(\n test (name probe)\n)",
-      [ "test{%{test}}" ] );
-    ( "a comment before the head",
-      "(; which test\n test (name probe))",
-      [ "test{%{test}}" ] );
+    ("whitespace before the head", "(\n test (name probe)\n)", [ "test{%{test}}" ]);
+    ("a comment before the head", "(; which test\n test (name probe))", [ "test{%{test}}" ]);
     ( "and before a chdir destination",
       "(rule (action (chdir ; here\n ../sibling (run %{dep:a.exe}))))",
       [ "rule{../sibling:a.exe}" ] );
@@ -680,14 +683,18 @@ let raw_stanza_cases =
       [ "executable{}" ] );
     (* Declined because the text alone does not say what they resolve to: all under-report, which is
        the safe direction for a floor. *)
-    ("the test pform runs where the action puts it", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{%{test}}" ]);
+    ( "the test pform runs where the action puts it",
+      {dune|(test (name t) (action (run %{test} --flag)))|dune},
+      [ "test{%{test}}" ] );
     (* A shell line is not parsed -- splitting it on whitespace would be reading it, and reading it
        wrong -- but it is RECORDED, because a rule that runs its test through a shell is subject to
        the same rules as one that runs it directly. *)
     ( "a shell line runs something unnamed",
       {dune|(rule (action (bash "./probe.exe")))|dune},
       [ "rule{?(bash ./probe.exe)}" ] );
-    ("and so does a system one", {dune|(rule (action (system "probe")))|dune}, [ "rule{?(system probe)}" ]);
+    ( "and so does a system one",
+      {dune|(rule (action (system "probe")))|dune},
+      [ "rule{?(system probe)}" ] );
     ( "one whose shell the text could not read either way",
       {dune|(rule (action (bash "if ready; then ./probe.exe; fi")))|dune},
       [ "rule{?(bash if ready; then ./probe.exe; fi)}" ] );
@@ -706,7 +713,9 @@ let raw_stanza_cases =
       [ "library{}" ] );
     (* A `(:name …)` dependency binds an executable, and the binding sits in the same stanza -- so
        the text CAN resolve it, and the three rules of test/ppx/dune are all of this shape. *)
-    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{pp.exe}" ]);
+    ( "a name bound by a dep",
+      {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune},
+      [ "rule{pp.exe}" ] );
     ( "and one behind a ./, which says only \"here\"",
       {dune|(rule (deps (:pp pp.exe)) (action (run ./%{pp} --impl x)))|dune},
       [ "rule{pp.exe}" ] );
@@ -729,8 +738,8 @@ let raw_stanza_cases =
 (rule (action (run %{pp})))|dune},
       [ "rule{pp.exe}"; "rule{?%{pp}, itself named out of this workspace}" ] );
     (* A binding's paths are the atoms and the forms that CARRY paths -- an `(alias …)` names
-       something dune does not run, so an `.exe`-looking atom inside one is not the binding's value.
-       *)
+       something dune does not run, so an `.exe`-looking atom inside one is not the binding's
+       value. *)
     ( "a non-path form in a binding is not its value",
       {dune|(rule (deps (:runner (alias fake.exe) (file real.exe))) (action (run %{runner})))|dune},
       [ "rule{real.exe}" ] );
@@ -741,8 +750,8 @@ let raw_stanza_cases =
       {dune|(rule (action (progn (:pp pp.exe) (run %{pp}))))|dune},
       [ "rule{?%{pp}, itself named out of this workspace}" ] );
     (* `(setenv PATH …)` changes what a bare name resolves to, so the walk stops vouching for the
-       program -- and the floor records that it must have said so. A command the text CAN name
-       stays an ordinary run even there, because the walk still names it. *)
+       program -- and the floor records that it must have said so. A command the text CAN name stays
+       an ordinary run even there, because the walk still names it. *)
     ( "a bare command under setenv PATH is unnameable",
       {dune|(rule (action (setenv PATH . (run probe))))|dune},
       [ "rule{!}" ] );
@@ -772,8 +781,10 @@ let raw_stanza_cases =
       {dune|(rule (action (run %{ocamlc} -c x.ml)))|dune},
       [ "rule{}" ] );
     ("an executable only depended on", {dune|(rule (deps %{dep:probe.exe}))|dune}, [ "rule{}" ]);
-    ("one named in a comment", {dune|(rule (action (progn)))
-; (run %{dep:probe.exe})|dune}, [ "rule{}" ]);
+    ( "one named in a comment",
+      {dune|(rule (action (progn)))
+; (run %{dep:probe.exe})|dune},
+      [ "rule{}" ] );
     ( "one inside a string",
       {dune|(rule (action (echo "(run %{dep:probe.exe})")))|dune},
       [ "rule{}" ] );
@@ -799,8 +810,12 @@ let marker_grammar_cases =
     ("the plain shape", " ocannl-backend: none -- links no backend", "none|links no backend");
     (* The em dash is what this repository's prose uses and `--` is what a keyboard produces;
        refusing either would be a grammar that fails for a reason nobody can see in a diff. *)
-    ("an em dash separates too", " ocannl-backend: cc \xe2\x80\x94 names its backend", "cc|names its backend");
-    ("spacing around the colon is free", ";ocannl-backend:metal -- pins MSL emission", "metal|pins MSL emission");
+    ( "an em dash separates too",
+      " ocannl-backend: cc \xe2\x80\x94 names its backend",
+      "cc|names its backend" );
+    ( "spacing around the colon is free",
+      ";ocannl-backend:metal -- pins MSL emission",
+      "metal|pins MSL emission" );
     (* A stanza may honestly name two backends; `none` makes no such pair. *)
     ( "two backends, for a stanza that names both",
       " ocannl-backend: cc,multidev_cc -- names both by argument",
@@ -822,13 +837,16 @@ let marker_grammar_cases =
       "!the reason `pure` is one word -- say why, not what" );
     ("an empty reason", " ocannl-backend: cc --", "!the reason `` is one word -- say why, not what");
     (* The separator is the EARLIEST one, not the first spelling that occurs anywhere: taking the
-       `--` here would put "cc \xe2\x80\x94 pinned" in the backend position and swallow half the sentence. *)
+       `--` here would put "cc \xe2\x80\x94 pinned" in the backend position and swallow half the
+       sentence. *)
     ( "an em dash before a double dash in the reason",
       " ocannl-backend: cc \xe2\x80\x94 pinned -- really pinned",
       "cc|pinned -- really pinned" );
     (* Announced anywhere in the comment: a marker someone annotated is still a marker, and reading
        it from the sentinel rather than from the start of the line is what keeps it one. *)
-    ("annotated prose before it", " NOTE ocannl-backend: hip -- names its backend", "hip|names its backend");
+    ( "annotated prose before it",
+      " NOTE ocannl-backend: hip -- names its backend",
+      "hip|names its backend" );
     (* Refused rather than normalised. Each of these is a TYPO in the one comment whose whole job is
        to be checkable, and a grammar that quietly repaired it would hand back a clean answer for a
        marker its author got wrong -- which is the failure mode the malformed/absent distinction
@@ -915,11 +933,11 @@ let marker_placement_cases =
   ]
 
 (* gh-ocannl-659's rule itself, put to stanzas this repository does not contain.
-   [Scan.backend_rule_of] is the decision `env_var_deps` acts on, and until gh-ocannl-690 the
-   shapes below were where the two readers disagreed: a rule that runs its test through a shell,
-   and one under a `chdir` no reader can resolve. The rule always applied to them -- the walk places
-   their sites -- but nothing independent vouched for that, so a walk that stopped seeing them would
-   have looked exactly like a file with nothing to check.
+   [Scan.backend_rule_of] is the decision `env_var_deps` acts on, and until gh-ocannl-690 the shapes
+   below were where the two readers disagreed: a rule that runs its test through a shell, and one
+   under a `chdir` no reader can resolve. The rule always applied to them -- the walk places their
+   sites -- but nothing independent vouched for that, so a walk that stopped seeing them would have
+   looked exactly like a file with nothing to check.
 
    Rendered as "<head> <verdict>", with "+floor" appended when the SECOND reader also sees the
    stanza running something. The pairing is the point: "reported, +floor" is a hole named by both
@@ -946,8 +964,8 @@ let backend_rule_cases =
     ( "a plain run declaring neither is reported",
       {dune|(rule (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
       [ "rule REPORTED: declares neither +floor" ] );
-    (* And the same thing said through a shell. Before gh-ocannl-690 this line read
-       "REPORTED: declares neither" with no floor under it. *)
+    (* And the same thing said through a shell. Before gh-ocannl-690 this line read "REPORTED:
+       declares neither" with no floor under it. *)
     ( "a shell action declaring neither is reported, and the floor says so too",
       {dune|(rule (deps ocannl_config) (action (bash "./probe.exe")))|dune},
       [ "rule REPORTED: declares neither +floor" ] );
@@ -1016,9 +1034,9 @@ let backend_rule_cases =
  (deps ocannl_config)
  (action (run python3 %{dep:orchestrate.py})))|dune},
       [ "rule names none +floor" ] );
-    (* The negative control for it: the same tool handed nothing this workspace provides is a
-       stanza NEITHER reader sees, so the rule does not apply and no floor claims it does.
-       Over-claiming here would fail a correct scan. *)
+    (* The negative control for it: the same tool handed nothing this workspace provides is a stanza
+       NEITHER reader sees, so the rule does not apply and no floor claims it does. Over-claiming
+       here would fail a correct scan. *)
     ( "the same tool handed nothing of ours is counted by neither reader",
       {dune|(rule (action (run python3 x.py)))|dune},
       [ "rule runs nothing" ] );
@@ -1034,9 +1052,11 @@ let backend_rule_cases =
    shape of "the author declared something the check did not read". *)
 let sentinel_counting_cases =
   [
-    ("in a comment", {dune|(test (name t)
+    ( "in a comment",
+      {dune|(test (name t)
  ; ocannl-backend: none -- links no backend
- (deps ocannl_config))|dune}, (1, 1));
+ (deps ocannl_config))|dune},
+      (1, 1) );
     ( "inside a quoted argument, where it declares nothing",
       {dune|(rule (deps ocannl_config) (action (echo "ocannl-backend: none -- links no backend")))|dune},
       (1, 0) );
@@ -1195,7 +1215,6 @@ let artifact_cases =
  (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
       [ "l" ],
       [ "library l: in a library (l)" ] );
-
     ( "and a library that does not call it is not a subject",
       {dune|(library (name l) (modules l) (libraries base))|dune},
       [],
@@ -1268,8 +1287,8 @@ let artifact_default_modules_cases =
 
 (* Calling the initializer is the usual reason a stanza needs the variable tracked, not the only
    one: a test reading `build_files_prefix` by name needs it just as much, and a converse check that
-   knew only the initializer would make the documented way of pinning the key unusable for it
-   (Codex P2, round 2). The third element is which modules read it directly. *)
+   knew only the initializer would make the documented way of pinning the key unusable for it (Codex
+   P2, round 2). The third element is which modules read it directly. *)
 let artifact_reader_cases =
   [
     ( "a declaration behind a direct read of the key is not stale",
@@ -1404,7 +1423,8 @@ let () =
       check ("backend rule -- " ^ name) expected found);
   List.iter sentinel_counting_cases ~f:(fun (name, source, (in_text, in_comments)) ->
       let found =
-        Printf.sprintf "%d in the text, %d in comments" (Scan.sentinel_occurrences source)
+        Printf.sprintf "%d in the text, %d in comments"
+          (Scan.sentinel_occurrences source)
           (List.length (Scan.marker_comments source))
       in
       check

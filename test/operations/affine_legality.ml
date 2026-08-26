@@ -646,7 +646,6 @@ let () =
   p "program order: an inlined scope body's read before the enclosing write"
     (List.compare Aff.compare_path_comp scope_body_read enclosing_write < 0)
 
-
 (* gh-ocannl-722 / gh-ocannl-721: the peel-guard legality queries.
 
    [separates] is the instance-vs-instance form of [pair_conflict] — one access taken twice — so it
@@ -682,7 +681,8 @@ let () =
     in
     let ok = (not query) || oracle in
     if not ok then unsound name;
-    Stdio.printf "%-46s query %-6b oracle %-6b%s\n" name query oracle (if ok then "" else "  UNSOUND")
+    Stdio.printf "%-46s query %-6b oracle %-6b%s\n" name query oracle
+      (if ok then "" else "  UNSOUND")
   in
   (* The shape gh-ocannl-721 is about: [acc[w]] under [Workgroup w], every lane its own cell. *)
   check_separates ~name:"acc[w] separates w" ~concurrent:[ w ] ~syms:[ w ] [| Idx.Iterator w |];
@@ -692,7 +692,8 @@ let () =
   (* Mentioning the symbol is not separating it: [(0,1)] and [(1,0)] address the same cell. *)
   check_separates ~name:"acc[w + w2] separates neither" ~concurrent:[ w; w2 ] ~syms:[ w ]
     [| aff [ (1, w); (1, w2) ] 0 |];
-  (* A mixed-radix cell does separate both, and that is exactly the criterion [forced_pairs] uses. *)
+  (* A mixed-radix cell does separate both, and that is exactly the criterion [forced_pairs]
+     uses. *)
   check_separates ~name:"acc[4w + w2] separates w and w2" ~concurrent:[ w; w2 ] ~syms:[ w; w2 ]
     [| aff [ (4, w); (1, w2) ] 0 |];
   (* Two axes, one per lane symbol. *)
@@ -704,8 +705,8 @@ let () =
   (* Nothing to tell apart is separated vacuously — the peel's "no enclosing symbol" case. *)
   check_separates ~name:"an empty symbol set is separated" ~concurrent:[ w ] ~syms:[]
     [| Idx.Fixed_idx 0 |];
-  (* An index component the engine cannot interpret contributes no information, so the answer is
-     the conservative one rather than an unsound "separated". *)
+  (* An index component the engine cannot interpret contributes no information, so the answer is the
+     conservative one rather than an unsound "separated". *)
   check_separates ~name:"an opaque component does not separate" ~concurrent:[ w ] ~syms:[ w ]
     [| Idx.Sub_axis |];
 
@@ -721,14 +722,13 @@ let () =
   wb "acc[w] fits a 4-cell node" ~dims:[| 4 |] [| Idx.Iterator w |] true;
   wb "acc[w] does not fit a 1-cell node" ~dims:[| 1 |] [| Idx.Iterator w |] false;
   wb "acc[w] does not fit a 3-cell node either" ~dims:[| 3 |] [| Idx.Iterator w |] false;
-  wb "acc[w + 1] leaves a 4-cell node at the top" ~dims:[| 4 |]
-    [| aff [ (1, w) ] 1 |] false;
-  wb "acc[w - 1] leaves a 4-cell node at the bottom" ~dims:[| 4 |]
-    [| aff [ (1, w) ] (-1) |] false;
+  wb "acc[w + 1] leaves a 4-cell node at the top" ~dims:[| 4 |] [| aff [ (1, w) ] 1 |] false;
+  wb "acc[w - 1] leaves a 4-cell node at the bottom" ~dims:[| 4 |] [| aff [ (1, w) ] (-1) |] false;
   wb "acc[4w + w2] fits a 16-cell node" ~dims:[| 16 |] [| aff [ (4, w); (1, w2) ] 0 |] true;
   wb "acc[w, w2] fits a 4x4 node" ~dims:[| 4; 4 |] [| Idx.Iterator w; Idx.Iterator w2 |] true;
   wb "acc[w, w2] does not fit a 4x2 node" ~dims:[| 4; 2 |]
-    [| Idx.Iterator w; Idx.Iterator w2 |] false;
+    [| Idx.Iterator w; Idx.Iterator w2 |]
+    false;
   wb "a fixed index inside the box fits" ~dims:[| 4 |] [| Idx.Fixed_idx 2 |] true;
   wb "a fixed index outside it does not" ~dims:[| 2 |] [| Idx.Fixed_idx 2 |] false;
   (* A static parameter's value is not known here, so it cannot be placed inside any box -- the

@@ -393,8 +393,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     | exception exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
         (* Synchronize best-effort, but do not let a sticky worker/stream error suppress the only
-           owner capable of releasing this unreachable fresh pool. Multidev keeps [dev_error]
-           after reporting it, so retrying await can deterministically re-raise. *)
+           owner capable of releasing this unreachable fresh pool. Multidev keeps [dev_error] after
+           reporting it, so retrying await can deterministically re-raise. *)
         (try
            Resource_fault_injection.hit Transfer_cleanup_before_await;
            Backend.await device
@@ -418,8 +418,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
             update_writer_event ctx @@ Node tn;
             (* The upload may be asynchronous. Keep the fresh allocation inside the unwind guard
                until the stream has reported its result: otherwise an error first observed here
-               escapes [Context.from_host] before the updated context is returned, and no caller
-               can ever release [dst]. The outer Context-level await remains necessary for the
+               escapes [Context.from_host] before the updated context is returned, and no caller can
+               ever release [dst]. The outer Context-level await remains necessary for the
                existing-buffer branch. *)
             Resource_fault_injection.hit From_host_before_await;
             Backend.await ctx.device;
@@ -1234,10 +1234,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
             if
               (not (Map.mem context.ctx_buffers key))
-              && not
-                   (Option.exists
-                      (Hashtbl.find context.device.constant_buffer_cache key)
-                      ~f:(equal_buffer_loc loc))
+              && (not
+                    (Option.exists
+                       (Hashtbl.find context.device.constant_buffer_cache key)
+                       ~f:(equal_buffer_loc loc)))
               && not (Set.mem freed loc.pool_id)
             then (
               free_pool context.device ~pool_id:loc.pool_id;
@@ -1416,8 +1416,8 @@ let finalize (type dev runner event)
      reporting an asynchronous error, or a dead worker domain. Left set, every later release of this
      context would be a silent no-op and its pools would stay rooted for the process — restoring
      exactly the unbounded growth this exists to end, and on the failure paths where it matters
-     most, since the tuner catches a failed release and carries on with the next candidate or arm.
-     A retry skips the pool ids whose frees already returned successfully; backend frees are
+     most, since the tuner catches a failed release and carries on with the next candidate or arm. A
+     retry skips the pool ids whose frees already returned successfully; backend frees are
      idempotent too, but relying on that would still call a raw deallocator twice. *)
   let cleanup () =
     Option.iter Backend.free_pool ~f:(fun free_pool ->
@@ -1433,14 +1433,14 @@ let finalize (type dev runner event)
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
               (* A host upload may give a tnode a context-owned working location even when an
-                 earlier compile cached a CONSTANT location for the same key. Compare locations,
-                 not key presence: otherwise finalize mistakes the working pool for that constant
-                 and leaks it (gh-ocannl-571's transfer negative control). *)
-              && not
-                   (Option.exists
-                      (Hashtbl.find ctx.device.constant_buffer_cache key)
-                      ~f:(equal_buffer_loc loc))
-              && not (Set.mem ctx.released_pool_ids loc.pool_id)
+                 earlier compile cached a CONSTANT location for the same key. Compare locations, not
+                 key presence: otherwise finalize mistakes the working pool for that constant and
+                 leaks it (gh-ocannl-571's transfer negative control). *)
+              && (not
+                    (Option.exists
+                       (Hashtbl.find ctx.device.constant_buffer_cache key)
+                       ~f:(equal_buffer_loc loc)))
+              && (not (Set.mem ctx.released_pool_ids loc.pool_id))
               && not (Set.mem freed loc.pool_id)
             then (
               Resource_fault_injection.hit Finalize_before_free;

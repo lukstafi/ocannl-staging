@@ -2,14 +2,14 @@
    [Low_level.optimize], and is REJECTED rather than silently normalized to a plain [Get].
 
    The shape is legal on the OTHER side of the pipeline: [Schedule]'s materializing [Unroll] and
-   [Partition] mints, and [C_syntax.try_localize_serial_reduce], build exactly it over a materialized
-   accumulator AFTER optimization, and codegen renders it. So one IR meant two different things
-   depending on which side of [optimize] it was handed to, and nothing told a test author or a
-   future transform writer which side they were on. The optimizer used to answer by discarding the
-   body and reading the buffer instead, which is how two [accum_width.ml] legs ran kernels literally
-   spelling [acc[0] = acc[0]] while claiming to pin an accumulation width: the identity copy
-   happened to reproduce the expected value (256 stays 256), so they passed without executing what
-   they claimed.
+   [Partition] mints, and [C_syntax.try_localize_serial_reduce], build exactly it over a
+   materialized accumulator AFTER optimization, and codegen renders it. So one IR meant two
+   different things depending on which side of [optimize] it was handed to, and nothing told a test
+   author or a future transform writer which side they were on. The optimizer used to answer by
+   discarding the body and reading the buffer instead, which is how two [accum_width.ml] legs ran
+   kernels literally spelling [acc[0] = acc[0]] while claiming to pin an accumulation width: the
+   identity copy happened to reproduce the expected value (256 stays 256), so they passed without
+   executing what they claimed.
 
    The legs below are the contract. Materialized-accumulator localization belongs to codegen's
    accumulator peel (gh-ocannl-693), which this rejection makes the ONE route: until it lands, the
@@ -40,7 +40,8 @@ let () =
     LL.Seq
       ( LL.Set_local (id, Ll_test.get acc [| Ll_test.fixed 0 |]),
         Ll_test.loop_n i 8
-          (LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.get xs [| Ll_test.iter i |]))) )
+          (LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.get xs [| Ll_test.iter i |])))
+      )
   in
   let scoped mint =
     Ll_test.set acc
@@ -57,12 +58,12 @@ let () =
   p "the refusal names the node"
     (Option.value_map rejection ~default:false ~f:(fun msg ->
          String.is_substring msg ~substring:(Tn.debug_name acc)));
-  (* gh-ocannl-687 added a mint field to [Local_scope], and it is deliberately NOT what decides
-     this rejection. The mint records which pass BUILT a scope; this contract is about which side
-     of [optimize] a program was handed to, a per-call fact that {!Low_level.input_scope_ids}
-     answers. Claiming the schedule's provenance must not buy a program past the optimizer -- were
-     the two conflated, hand-built IR (which has no honest way to spell "not mine") could label its
-     way back into the silent collapse this rejection closed. *)
+  (* gh-ocannl-687 added a mint field to [Local_scope], and it is deliberately NOT what decides this
+     rejection. The mint records which pass BUILT a scope; this contract is about which side of
+     [optimize] a program was handed to, a per-call fact that {!Low_level.input_scope_ids} answers.
+     Claiming the schedule's provenance must not buy a program past the optimizer -- were the two
+     conflated, hand-built IR (which has no honest way to spell "not mine") could label its way back
+     into the silent collapse this rejection closed. *)
   p "claiming the schedule mint does not exempt a program handed to optimize"
     (Option.is_some (rejection_of LL.Schedule_minted));
   (* The refusal is about the SCOPE, not about the computation: the same accumulation spelled
@@ -71,15 +72,11 @@ let () =
     Ll_test.loop_n i 8
       (Ll_test.set acc
          [| Ll_test.fixed 0 |]
-         (Ll_test.add
-            (Ll_test.get acc [| Ll_test.fixed 0 |])
-            (Ll_test.get xs [| Ll_test.iter i |])))
+         (Ll_test.add (Ll_test.get acc [| Ll_test.fixed 0 |]) (Ll_test.get xs [| Ll_test.iter i |])))
   in
   let raw_vals =
     let o = Ll_test.optimize ~materialized:[ acc; xs ] ~name:"som_raw" raw in
-    Ll_test.execute ~name:"som_raw" o
-      ~seed:[ (acc, [| seeded |]); (xs, xs_values) ]
-      ~read:[ acc ]
+    Ll_test.execute ~name:"som_raw" o ~seed:[ (acc, [| seeded |]); (xs, xs_values) ] ~read:[ acc ]
   in
   p "the same accumulation without the scope optimizes and executes"
     (Float.equal (List.hd_exn raw_vals).(0) accumulated);
@@ -104,14 +101,20 @@ let () =
         Ll_test.loop_n c 3
           (LL.Set_local
              ( vid,
-               Ll_test.add (LL.Get_local vid)
-                 (Ll_test.get src [| Ll_test.iter r; Ll_test.iter c |]) )) )
+               Ll_test.add (LL.Get_local vid) (Ll_test.get src [| Ll_test.iter r; Ll_test.iter c |])
+             )) )
   in
   let vllc =
     Ll_test.loop_n r 4
       (Ll_test.set out
          [| Ll_test.iter r |]
-         (LL.Local_scope { id = vid; body = vbody; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }))
+         (LL.Local_scope
+            {
+              id = vid;
+              body = vbody;
+              orig_indices = [| Ll_test.fixed 0 |];
+              mint = LL.Inlined_computation;
+            }))
   in
   let vo = Ll_test.optimize ~materialized:[ out; src ] ~name:"som_virtual" vllc in
   p "a Local_scope over a virtual node survives optimization" (Ll_test.count_scopes vo.LL.llc = 1);
@@ -141,8 +144,8 @@ let () =
 
 (* === the one exemption: a scope the pass MINTED, retracted by the pass itself === *)
 
-(* gh-ocannl-704. The scope-target rejection carries exactly one exemption, and the exemption is
-   the only reason [cleanup_virtual_llc] takes [~input_scopes] and [specialize_proc] computes
+(* gh-ocannl-704. The scope-target rejection carries exactly one exemption, and the exemption is the
+   only reason [cleanup_virtual_llc] takes [~input_scopes] and [specialize_proc] computes
    [input_scope_ids]. [virtual_llc] mints a scope at a [Get] of a node still virtual at that point;
    a later refusal can commit that node [Never_virtual]; cleanup then rewrites the scope back to a
    plain [Get], which is sound because the setter that now survives writes the very value the body
@@ -159,20 +162,20 @@ let () =
 
    Both are hand-built, which is the honest standing of the exemption: it is not conservatism about
    a hypothetical, it is what keeps [LL.optimize] from refusing IR it produced itself -- but no
-   ordinary [Assignments] lowering in the suite has been observed to reach it (an instrumented
-   build of the gh-ocannl-681 PR found hits only on out-of-contract INPUT scopes, and one repeated
-   here over the targeted virtualization tests found none at all). *)
+   ordinary [Assignments] lowering in the suite has been observed to reach it (an instrumented build
+   of the gh-ocannl-681 PR found hits only on out-of-contract INPUT scopes, and one repeated here
+   over the targeted virtualization tests found none at all). *)
 
-(* Both witnesses are about LEGALITY, and every heuristic cap in [decide_placements] runs BEFORE
-   any legality question is asked -- so an ambient policy setting can materialize either node ahead
-   of the refusal under test (provenance 1, 39 or 41 instead of 142 or 13) and leave the legs
-   asserting about a program the virtualizer never entered. The read-modify-write exemption matters
-   the same way: with [inline_complex_computations] off, witness 1's accumulating producer counts
-   its own self-read as a visit and trips the visit cap. So EVERY field of [virtualize_settings] is
-   pinned for the duration and restored, rather than the one field a particular default happens to
-   make load-bearing. Pinning at runtime is also what keeps this test independent of the
-   configuration it runs under: no [OCANNL_VIRTUALIZE_*] override can change its reading, so the
-   stanza has no virtualization env keys to declare. *)
+(* Both witnesses are about LEGALITY, and every heuristic cap in [decide_placements] runs BEFORE any
+   legality question is asked -- so an ambient policy setting can materialize either node ahead of
+   the refusal under test (provenance 1, 39 or 41 instead of 142 or 13) and leave the legs asserting
+   about a program the virtualizer never entered. The read-modify-write exemption matters the same
+   way: with [inline_complex_computations] off, witness 1's accumulating producer counts its own
+   self-read as a visit and trips the visit cap. So EVERY field of [virtualize_settings] is pinned
+   for the duration and restored, rather than the one field a particular default happens to make
+   load-bearing. Pinning at runtime is also what keeps this test independent of the configuration it
+   runs under: no [OCANNL_VIRTUALIZE_*] override can change its reading, so the stanza has no
+   virtualization env keys to declare. *)
 let with_virtualize_settings ~max_visits f =
   let s = LL.virtualize_settings in
   let saved =
@@ -257,15 +260,13 @@ let () =
     (Option.equal Int.equal (Ll_test.rejection_code retracted v) (Some 142));
   p "the pass retracts the scope it minted rather than refusing its own program"
     (Ll_test.count_scopes retracted.LL.llc = 0 && Ll_test.count_get retracted v > 0);
-  (* Executed parity against the materialized reading of the same program: [v] declared
-     materialized up front, so no scope is ever minted and the consumer reads the buffer all along.
-     Every execution gets a routine name of its own -- a second compile under one name overwrites
-     the first's debug artifacts, so a failing leg would otherwise be debugged against another
-     leg's IR. *)
+  (* Executed parity against the materialized reading of the same program: [v] declared materialized
+     up front, so no scope is ever minted and the consumer reads the buffer all along. Every
+     execution gets a routine name of its own -- a second compile under one name overwrites the
+     first's debug artifacts, so a failing leg would otherwise be debugged against another leg's
+     IR. *)
   let reference =
-    Ll_test.optimize
-      ~materialized:[ out; flag; v ]
-      ~name:"smr_reference"
+    Ll_test.optimize ~materialized:[ out; flag; v ] ~name:"smr_reference"
       (Ll_test.seq producer (Ll_test.seq consumer overwrite))
   in
   let run_at o name f reads =
@@ -286,9 +287,9 @@ let () =
   p "the guarded setter does run when the flag is on"
     (Ll_test.close (List.nth_exn reference_on 1) [| 9.; 9.; 9.; 9. |]);
   (* The exemption keys on which SIDE of this [optimize] call a scope came from, not on its shape:
-     spell the consumer's read as an equivalent [Local_scope] with the honest
-     [Inlined_computation] mint, and the same program is rejected, because [input_scope_ids]
-     recorded that scope at entry. *)
+     spell the consumer's read as an equivalent [Local_scope] with the honest [Inlined_computation]
+     mint, and the same program is rejected, because [input_scope_ids] recorded that scope at
+     entry. *)
   let handed =
     let k = Ll_test.sym () in
     let hid = LL.get_scope v in
@@ -350,17 +351,13 @@ let () =
     Ll_test.loop_n j 1 (Ll_test.set ob [| Ll_test.fixed 0 |] (Ll_test.get w [| Ll_test.iter j |]))
   in
   let control =
-    Ll_test.optimize
-      ~materialized:[ src; oa; ob ]
-      ~name:"smr2_control"
+    Ll_test.optimize ~materialized:[ src; oa; ob ] ~name:"smr2_control"
       (Ll_test.seq producer matching_read)
   in
   p "the matching read alone inlines the fixed-cell producer"
     (Ll_test.known_virtual control w && Ll_test.count_get control w = 0);
   let retracted =
-    Ll_test.optimize
-      ~materialized:[ src; oa; ob ]
-      ~name:"smr2_retract"
+    Ll_test.optimize ~materialized:[ src; oa; ob ] ~name:"smr2_retract"
       (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
   in
   p "a later unservable read commits the already-inlined node Never_virtual"
@@ -368,9 +365,7 @@ let () =
   p "consumption-time refusal retracts the minted scope too, rather than refusing the program"
     (Ll_test.count_scopes retracted.LL.llc = 0 && Ll_test.count_get retracted w > 0);
   let reference =
-    Ll_test.optimize
-      ~materialized:[ src; oa; ob; w ]
-      ~name:"smr2_reference"
+    Ll_test.optimize ~materialized:[ src; oa; ob; w ] ~name:"smr2_reference"
       (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
   in
   let read_both o name =

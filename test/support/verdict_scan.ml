@@ -23,13 +23,13 @@
     - {!Computed_label}: the label is built from arguments. ["%s fused: %b\n"],
       ["Epoch %d, loss below threshold=%b\n"].
 
-    Both are recognised now. The literal form was gh-ocannl-668's; the computed one is gh-ocannl-624,
-    which the sweep of that issue converted onto {!Verdict.pf} and {!Verdict.claimf} — entry points
-    that did not exist when this reader was written, which is why the shape was out of scope then
-    and is not now. The separator vocabulary is the other thing that widened: a reader that accepted
-    only a colon was blind to the whole ["… = %b"] population, and that is how the claims in
-    [data_parallel], [shard_transfer] and [test_buffer_loc] sat outside a check written to catch
-    exactly them.
+    Both are recognised now. The literal form was gh-ocannl-668's; the computed one is
+    gh-ocannl-624, which the sweep of that issue converted onto {!Verdict.pf} and {!Verdict.claimf}
+    — entry points that did not exist when this reader was written, which is why the shape was out
+    of scope then and is not now. The separator vocabulary is the other thing that widened: a reader
+    that accepted only a colon was blind to the whole ["… = %b"] population, and that is how the
+    claims in [data_parallel], [shard_transfer] and [test_buffer_loc] sat outside a check written to
+    catch exactly them.
 
     The escape hatch is narrower as a result, and deliberately so. A descriptive print used to
     escape by carrying a second conversion; a computed label carries one by construction, so that no
@@ -62,7 +62,6 @@
 
 open Base
 open Ppxlib.Parsetree
-
 module Ast_traverse = Ppxlib.Ast_traverse
 
 (* The parse helpers are Config_key_scan's: one place in this repository decides how an OCaml source
@@ -154,16 +153,16 @@ let claim_site format =
             if not (String.is_empty label) then Some (label, kind, verbatim)
             else
               match kind with
-              (* Nothing before the separator and nothing to build it from: [": %b"] names no fact.
-              *)
+              (* Nothing before the separator and nothing to build it from: [": %b"] names no
+                 fact. *)
               | Literal_label -> None
-              (* The label is built ENTIRELY from arguments — [Stdio.printf "%s: %b\n" name b], which
-                 is not an edge case but THE shape: it is the wrapper several tests defined before
-                 [Verdict] existed, the one gh-ocannl-668 was written to keep from regrowing, and the
-                 one this reader would have let straight back in by treating its empty residual as
-                 "no label". A residual is empty here because every character of the label was a
-                 conversion, which makes the claim more computed, not less. Reported under the
-                 verbatim head, which is also what names it in an exemption. *)
+              (* The label is built ENTIRELY from arguments — [Stdio.printf "%s: %b\n" name b],
+                 which is not an edge case but THE shape: it is the wrapper several tests defined
+                 before [Verdict] existed, the one gh-ocannl-668 was written to keep from regrowing,
+                 and the one this reader would have let straight back in by treating its empty
+                 residual as "no label". A residual is empty here because every character of the
+                 label was a conversion, which makes the claim more computed, not less. Reported
+                 under the verbatim head, which is also what names it in an exemption. *)
               | Computed_label ->
                   let shown = String.rstrip verbatim in
                   let shown =
@@ -273,8 +272,4 @@ let scan content =
     end
   in
   iterator#structure ast;
-  {
-    sites = List.rev !sites;
-    literals = !literals;
-    applied_literals = Hashtbl.length printers;
-  }
+  { sites = List.rev !sites; literals = !literals; applied_literals = Hashtbl.length printers }

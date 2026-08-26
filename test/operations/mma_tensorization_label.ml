@@ -9,11 +9,10 @@
    This test pins the label's definition, which is the whole point of the field:
 
    - [Not_requested]: codegen emitted no [Tile_mma] statement. Nothing about the routine claims
-     tensor cores. This is also the NEGATIVE CONTROL — a routine whose census was never going to
-     say anything must not read as tensorized.
-   - [Tensorized]: at least one [Tile_mma] rendered to a tensor-core or SIMD-register-tile
-     emission.
-   - [Scalar_fallback]: [Tile_mma] statements were emitted and EVERY one of them declined.
+   tensor cores. This is also the NEGATIVE CONTROL — a routine whose census was never going to say
+   anything must not read as tensorized. - [Tensorized]: at least one [Tile_mma] rendered to a
+   tensor-core or SIMD-register-tile emission. - [Scalar_fallback]: [Tile_mma] statements were
+   emitted and EVERY one of them declined.
 
    and the two properties that make it trustworthy: the field on the routine is exactly what a
    bracket around that same compile would have collected (it is not fabricated), and the label is a
@@ -110,7 +109,8 @@ let () =
      must NOT come out of a routine nobody asked to tensorize is "tensorized". *)
   let plain = matmul ~tag:"mtl_plain" in
   let mma, bracketed =
-    compile_twice ~name:"mtl_plain" ~transform:(fun opt -> opt)
+    compile_twice ~name:"mtl_plain"
+      ~transform:(fun opt -> opt)
       (named "mtl_plain" (Train.forward plain))
   in
   p "a routine with no Tensorize is labeled not-requested"
@@ -132,19 +132,16 @@ let () =
     let honoured = matmul ~tag:"mtl_ok" in
     let mma_ok, _ =
       compile_twice ~name:"mtl_ok"
-        ~transform:(fun opt ->
-          Sched.apply (tensorize_schedule ~out:honoured.Tensor.value opt) opt)
+        ~transform:(fun opt -> Sched.apply (tensorize_schedule ~out:honoured.Tensor.value opt) opt)
         (named "mtl_ok" (Train.forward honoured))
     in
     p "an honoured Tensorize is labeled tensorized"
       (Cs.equal_tensorization mma_ok.Cs.tensorization Cs.Tensorized
-      && mma_ok.Cs.statements > 0
-      && mma_ok.Cs.scalar_fallbacks = 0);
+      && mma_ok.Cs.statements > 0 && mma_ok.Cs.scalar_fallbacks = 0);
     let declined = matmul_tb ~tag:"mtl_tb" in
     let mma_tb, _ =
       compile_twice ~name:"mtl_tb"
-        ~transform:(fun opt ->
-          Sched.apply (tensorize_schedule ~out:declined.Tensor.value opt) opt)
+        ~transform:(fun opt -> Sched.apply (tensorize_schedule ~out:declined.Tensor.value opt) opt)
         (named "mtl_tb" (Train.forward declined))
     in
     p "a declined Tensorize is labeled scalar-fallback"
@@ -174,7 +171,7 @@ let () =
   p "all statements declined is scalar-fallback"
     (match derived [ fb; fb ] with Cs.Scalar_fallback, 2, 2 -> true | _ -> false);
   p_all "every non-fallback rendering counts as tensorized" [ rt; ix; ld ] ~f:(fun r ->
-         match derived [ r ] with Cs.Tensorized, 1, 0 -> true | _ -> false);
+      match derived [ r ] with Cs.Tensorized, 1, 0 -> true | _ -> false);
   (* Mixed: some honoured, some declined. The label answers "did any tensor-core emission happen",
      the counts answer "how much of what was asked for" — a mixed routine is tensorized AND carries
      a nonzero fallback count, and a reader gets both. *)
@@ -184,11 +181,11 @@ let () =
 (* === Nesting: an enclosing collection still sees the inner compiles === *)
 
 let () =
-  (* [Context.compile] brackets the census itself now. A harness that ALSO brackets — around a
-     whole sweep of compiles, which is what the benches do — must not be emptied by that, so
-     nesting is additive: the inner bracket summarizes its own entries, and the outer one still
-     sees them. Entries are pushed directly here rather than compiled, so the contract is pinned on
-     every backend and independent of what any schedule happens to render. *)
+  (* [Context.compile] brackets the census itself now. A harness that ALSO brackets — around a whole
+     sweep of compiles, which is what the benches do — must not be emptied by that, so nesting is
+     additive: the inner bracket summarizes its own entries, and the outer one still sees them.
+     Entries are pushed directly here rather than compiled, so the contract is pinned on every
+     backend and independent of what any schedule happens to render. *)
   let inner_seen = ref 0 in
   let (), outer =
     Cs.with_census (fun () ->
@@ -215,8 +212,7 @@ let () =
   p "a report with no crowned candidate does not render as tensorized"
     (not
        (String.equal
-          (Option.value_map r.Autotune.best_tensorization ~default:"none"
-             ~f:Cs.tensorization_name)
+          (Option.value_map r.Autotune.best_tensorization ~default:"none" ~f:Cs.tensorization_name)
           "tensorized"))
 
 (* stderr, not stdout: the golden has to stay backend-uniform (the skipped legs print the passing

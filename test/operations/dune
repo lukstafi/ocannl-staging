@@ -231,7 +231,8 @@
 (rule
  (alias runtest-micrograd_demo_logging)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    "micrograd_demo_logging-%{read:config/ocannl_backend.txt}-0-0.log.expected"
@@ -624,7 +625,8 @@
 (rule
  (alias runtest-n3_fwd_with_prec-unoptimized)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    "n3_fwd_with_prec-unoptimized.ll.expected"
@@ -633,7 +635,8 @@
 (rule
  (alias runtest-top_down_prec-unoptimized)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    "top_down_prec-unoptimized.ll.expected"
@@ -654,7 +657,8 @@
 (rule
  (alias runtest-zero_out_local_decl-unoptimized)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    "zero_out_local_decl-unoptimized.ll.expected"
@@ -675,7 +679,8 @@
 (rule
  (alias runtest-test_where_precision-unoptimized)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff
    "test_where_precision-unoptimized.ll.expected"
@@ -1289,7 +1294,8 @@
 (rule
  (alias runtest-test_log_stmt_format)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff "test_log_stmt_format.c.expected" "test_log_stmt_format.c.actual")))
 
@@ -1432,7 +1438,8 @@
 (rule
  (alias runtest-config_var_spellings)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff config_var_spellings.expected config_var_spellings.actual)))
 
@@ -1517,7 +1524,8 @@
 (rule
  (alias runtest-config_var_warnings)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff config_var_warnings.expected config_var_warnings.actual)))
 
@@ -1560,7 +1568,8 @@
 (rule
  (alias runtest-config_var_fatal_spelling)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff config_var_fatal_spelling.expected config_var_fatal_spelling.actual)))
 
@@ -1597,7 +1606,8 @@
 (rule
  (alias runtest-test_config_consistency)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
 
@@ -1635,7 +1645,13 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules marker_backend_vocabulary)
- (libraries base stdio arrayjit.ir arrayjit.context test_utils arrayjit.verdict))
+ (libraries
+  base
+  stdio
+  arrayjit.ir
+  arrayjit.context
+  test_utils
+  arrayjit.verdict))
 
 (executable
  (name digest_completeness)
@@ -1671,7 +1687,8 @@
 (rule
  (alias runtest-digest_completeness)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff digest_completeness.expected digest_completeness.actual)))
 
@@ -1716,7 +1733,8 @@
 (rule
  (alias runtest-env_var_deps)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff env_var_deps.expected env_var_deps.actual)))
 
@@ -1742,7 +1760,8 @@
 (rule
  (alias runtest-env_var_deps_control)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff env_var_deps_control.expected env_var_deps_control.actual)))
 
@@ -1775,7 +1794,8 @@
 (rule
  (alias runtest-cache_dir_ignores)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
 
@@ -1800,7 +1820,8 @@
 (rule
  (alias runtest-config_dep_completeness)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff config_dep_completeness.expected config_dep_completeness.actual)))
 
@@ -1832,7 +1853,8 @@
 (rule
  (alias runtest-verdict_ratchet)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff verdict_ratchet.expected verdict_ratchet.actual)))
 
@@ -1868,7 +1890,8 @@
 (rule
  (alias runtest-codegen_text_inventory)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff codegen_text_inventory.expected codegen_text_inventory.actual)))
 
@@ -1896,6 +1919,7 @@
 ; diverged loss trajectory, times that were never measured, a diagnostic full of control
 ; characters. Yojson is the parse oracle -- it rejects OCaml's `nan`/`inf` spellings, which is the
 ; regression (gh-ocannl-676), and the test's last verdicts show that it does.
+
 (test
  ; ocannl-backend: none -- links no backend: it formats and re-parses JSON strings.
  (name bench_result_line)
@@ -1935,7 +1959,8 @@
    test_metal_pool_bindings.ml
    from
    (metal -> test_metal_pool_bindings.real.ml)
-   (-> test_metal_pool_bindings.missing.ml)) arrayjit.verdict)
+   (-> test_metal_pool_bindings.missing.ml))
+  arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1955,7 +1980,8 @@
    test_metal_guarded_gather_codegen.ml
    from
    (metal -> test_metal_guarded_gather_codegen.real.ml)
-   (-> test_metal_guarded_gather_codegen.missing.ml)) arrayjit.verdict)
+   (-> test_metal_guarded_gather_codegen.missing.ml))
+  arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1975,7 +2001,8 @@
    test_metal_pool_slot_width.ml
    from
    (metal -> test_metal_pool_slot_width.real.ml)
-   (-> test_metal_pool_slot_width.missing.ml)) arrayjit.verdict)
+   (-> test_metal_pool_slot_width.missing.ml))
+  arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1994,7 +2021,8 @@
    test_cuda_pool_offset.ml
    from
    (cudajit.cuda -> test_cuda_pool_offset.real.ml)
-   (-> test_cuda_pool_offset.missing.ml)) arrayjit.verdict)
+   (-> test_cuda_pool_offset.missing.ml))
+  arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2429,7 +2457,9 @@
 (test
  (name launch_predicate_parity)
  (package neural_nets_lib)
- (deps ocannl_config (env_var OCANNL_BACKEND))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules launch_predicate_parity)
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
@@ -2856,7 +2886,8 @@
 (rule
  (alias runtest-autotune_bound_pruning)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff autotune_bound_pruning.expected autotune_bound_pruning.actual)))
 
@@ -2887,7 +2918,8 @@
 (rule
  (alias runtest-bandwidth_calibration)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff bandwidth_calibration.expected bandwidth_calibration.actual)))
 
@@ -2918,7 +2950,8 @@
 (rule
  (alias runtest-autotune_routine_name)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff autotune_routine_name.expected autotune_routine_name.actual)))
 
@@ -2993,7 +3026,8 @@
 (rule
  (alias runtest-cost_model_selection)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff cost_model_selection.expected cost_model_selection.actual)))
 
@@ -3026,7 +3060,8 @@
 (rule
  (alias runtest-model_default_fallback)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff model_default_fallback.expected model_default_fallback.actual)))
 
@@ -3338,6 +3373,7 @@
 ; the three gh-514 phase-6 cells' measured numbers as synthetic reports -- pure record functions,
 ; no device, so the policy is pinned deterministically where the measurement that motivated it is
 ; a shared-box timing.
+
 (test
  ; ocannl-backend: none -- links no backend: pure functions over search-report records, no context
  ; and no compile.
@@ -3375,7 +3411,8 @@
 (rule
  (alias runtest-placement_surface)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff placement_surface.expected placement_surface.actual)))
 
@@ -3409,7 +3446,8 @@
 (rule
  (alias runtest-flip_bound_pruning)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff flip_bound_pruning.expected flip_bound_pruning.actual)))
 
@@ -3443,7 +3481,8 @@
 (rule
  (alias runtest-model_default_placements)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff model_default_placements.expected model_default_placements.actual)))
 
@@ -3621,7 +3660,8 @@
 (rule
  (alias runtest-agent_notes_structure)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
 
@@ -3700,7 +3740,9 @@
  (name bench_self_test)
  (package neural_nets_lib)
  (locks ocannl_training_test)
- (deps ocannl_config (env_var OCANNL_BACKEND))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules bench_self_test)
  (libraries base stdio yojson bench_harness arrayjit.verdict))
 
@@ -3787,9 +3829,11 @@
 (rule
  (alias runtest-shell_scripts_parse)
  (package neural_nets_lib)
- (deps (alias runtest-env_spelling_gate))
+ (deps
+  (alias runtest-env_spelling_gate))
  (action
   (diff shell_scripts_parse.expected shell_scripts_parse.actual)))
+
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached.
 
@@ -3802,10 +3846,7 @@
  ; ocannl-backend: none -- the driver invokes a shell harness through fake opam and links no backend.
  (alias runtest)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  ../../tools/sweep.sh
-  sweep_harness.sh)
+ (deps ocannl_config ../../tools/sweep.sh sweep_harness.sh)
  (action
   (run
    %{dep:sweep_harness_driver.exe}

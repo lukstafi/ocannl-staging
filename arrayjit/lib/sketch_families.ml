@@ -113,11 +113,11 @@ type sketch_params = {
           store-back and the whole routine is one kernel — the fused competitor to the fissioned
           two-kernel form. The matmul family tree's root level (gh-ocannl-613): the fused flavor is
           refuted with the recognizer's own reason ([Sched.fuse_epilogue_witness]) when the base
-          code has no fusable tail, and otherwise enumerates after every unfused leaf; a
-          candidate whose scheduled form no longer admits the fusion (e.g. materializing unrolls
-          duplicating the store-back) fails its compile and is skipped like any other invalid
-          candidate. On GPU the accumulator moves to workgroup-shared memory (the [shared] flag) so
-          the Metal fragment intrinsics keep firing after placement makes it routine-local. *)
+          code has no fusable tail, and otherwise enumerates after every unfused leaf; a candidate
+          whose scheduled form no longer admits the fusion (e.g. materializing unrolls duplicating
+          the store-back) fails its compile and is skipped like any other invalid candidate. On GPU
+          the accumulator moves to workgroup-shared memory (the [shared] flag) so the Metal fragment
+          intrinsics keep firing after placement makes it routine-local. *)
   sk_batch_grid : bool;
       (** GPU matmul pipelines on batched (rank-3+) sites only (gh-ocannl-643): [Retype] the site's
           batch loops — [m_bo] and the hoisted [m_bi] — to [Grid], so a batched/multi-head GEMM's
@@ -127,10 +127,10 @@ type sketch_params = {
           annotation, with interior batch loops hoisted identically, so the cross-nest positional
           thread identity is preserved. Seeded as a {e twin} of each geometry — the serial-batch
           flavor stays measured, because block-count curves are non-monotone (gh-ocannl-569's probe
-          peaked near 128 blocks and regressed by 1024): the tuner, not a heuristic, decides
-          whether the extra parallelism beats the occupancy it costs. Refuted at the leaf,
-          like every other launch dimension, when the batch extents' product exceeds the backend's
-          [.z] limit ([Schedule.launch_geometry_excess] over [hardware_limits.max_grid_yz], with
+          peaked near 128 blocks and regressed by 1024): the tuner, not a heuristic, decides whether
+          the extra parallelism beats the occupancy it costs. Refuted at the leaf, like every other
+          launch dimension, when the batch extents' product exceeds the backend's [.z] limit
+          ([Schedule.launch_geometry_excess] over [hardware_limits.max_grid_yz], with
           [max_grid_fold_extent] standing in where the backend advertises none) — the same reading
           [Schedule.check_hardware_limits_classified] enforces pre-driver for schedules that do not
           come from these seeds. *)
@@ -225,8 +225,8 @@ type matmul_site = {
   m_i : Idx.symbol;
   m_j : Idx.symbol;
   m_k : Idx.symbol;
-      (** The innermost contraction loop — the one a pipeline's k-split divides, whose extent
-          [m_nk] the tile's k-extent is judged against. *)
+      (** The innermost contraction loop — the one a pipeline's k-split divides, whose extent [m_nk]
+          the tile's k-extent is judged against. *)
   m_ni : int;
   m_nj : int;
   m_nk : int;
@@ -326,20 +326,19 @@ let unit_axis (idcs : Idx.axis_index array) s : int option =
    Inputs: the perfectly nested serial accumulation statement's loops in nest order (with extents),
    the accumulator's index map [di], and the two operand reads. Roles:
 
-   - The contraction nest is the maximal innermost suffix of loops absent from [di] (lowering
-   orders the reduction loops after the output loops, so a multi-axis contraction is exactly such a
+   - The contraction nest is the maximal innermost suffix of loops absent from [di] (lowering orders
+   the reduction loops after the output loops, so a multi-axis contraction is exactly such a
    suffix): [k] is its innermost loop, the rest are [m_ko] (gh-ocannl-683). - Every other loop must
-   own a distinct axis of [di] (unit coefficient, sole occurrence). - [j] owns [di]'s minor axis
-   and must be the innermost of the write loops (how lowering orders them — the sketch pipelines'
+   own a distinct axis of [di] (unit coefficient, sole occurrence). - [j] owns [di]'s minor axis and
+   must be the innermost of the write loops (how lowering orders them — the sketch pipelines'
    hoisting normalization only handles batch loops above [j]). - Per operand order, [a] must own
    [k], must not read [j]; [b] must own [j] and [k]; [i] is the {e deepest} write loop owned by [a]
    and absent from [b] — the 2-D tile row; a role symbol owns its component alone (a convolution
-   window [ox + kx] is not a tile axis). The exclusions are what keep variance-style
-   self-products [d[b,s] += x[b,s,k] * x[b,s,k]] — whose reads mention every loop — from
-   masquerading as matmuls: they seeded (and always failed candidate compile) before. -
-   Everything else is batch: [m_bo] outside [i], [m_bi] between [i] and [j]; batch symbols and
-   outer contraction symbols may appear in the operands freely (their occurrences form the tile
-   block base).
+   window [ox + kx] is not a tile axis). The exclusions are what keep variance-style self-products
+   [d[b,s] += x[b,s,k] * x[b,s,k]] — whose reads mention every loop — from masquerading as matmuls:
+   they seeded (and always failed candidate compile) before. - Everything else is batch: [m_bo]
+   outside [i], [m_bi] between [i] and [j]; batch symbols and outer contraction symbols may appear
+   in the operands freely (their occurrences form the tile block base).
 
    Detection remains permissive about everything else — a mis-detected site fails its candidate
    compile (op preconditions, [validate_parallel], hardware limits) and is skipped. *)
@@ -347,7 +346,9 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
     ~(di : Idx.axis_index array) ~(o1 : Ir.Tnode.t * Idx.axis_index array)
     ~(o2 : Ir.Tnode.t * Idx.axis_index array) ~(zeroed : bool) ~(fma : bool) : matmul_site option =
   let rank = Array.length di in
-  let rev_ks, rev_ws = List.split_while (List.rev loops) ~f:(fun (s, _) -> not (idcs_mention di s)) in
+  let rev_ks, rev_ws =
+    List.split_while (List.rev loops) ~f:(fun (s, _) -> not (idcs_mention di s))
+  in
   match (rev_ks, rev_ws) with
   | (k, nk) :: rev_ko, (_ :: _ :: _ as rev_ws : (Idx.symbol * int) list) when rank >= 2 -> (
       let ko = List.rev rev_ko in
@@ -371,19 +372,21 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
               (* A tile axis is a plain iterator: a role symbol must be the SOLE symbol of the
                  component it owns. A convolution window [x[..., oy + ky, ox + kx, ic]] mixes an
                  output symbol with a kernel one in a single component; once contraction nests are
-                 admitted (gh-ocannl-683) a conv's [(ky, kx, ic)] suffix would otherwise classify
-                 as a matmul here — [ic] as [k], the window axes as [i] and a batch loop — and since
+                 admitted (gh-ocannl-683) a conv's [(ky, kx, ic)] suffix would otherwise classify as
+                 a matmul here — [ic] as [k], the window axes as [i] and a batch loop — and since
                  the matmul family is tried first, the conv family would silently never be seeded
                  for it (schedule_conv_gemm pins the conv seeds). *)
               let plain idx =
-                match idx with Idx.Iterator _ | Idx.Affine { symbols = [ _ ]; _ } -> true | _ -> false
+                match idx with
+                | Idx.Iterator _ | Idx.Affine { symbols = [ _ ]; _ } -> true
+                | _ -> false
               in
               let sole_axis idcs s =
                 match unit_axis idcs s with Some p when plain idcs.(p) -> Some p | _ -> None
               in
               (* The same for the outer contraction loops, wherever an operand mentions one: a
-                 conv's kernel-window symbols are exactly the suffix loops that appear mixed into
-                 an output axis ([oy + ky]), and with the channel loop innermost the row rule alone
+                 conv's kernel-window symbols are exactly the suffix loops that appear mixed into an
+                 output axis ([oy + ky]), and with the channel loop innermost the row rule alone
                  would still pick the batch loop as [i]. Strides and offsets stay admissible — these
                  loops are only ever iterated, never tiled. *)
               let ko_plain idcs =
@@ -563,8 +566,8 @@ let matmul_site_equal (x : matmul_site) (y : matmul_site) =
   Idx.equal_symbol x.m_i y.m_i && Idx.equal_symbol x.m_j y.m_j && Idx.equal_symbol x.m_k y.m_k
   && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && batch_equal x.m_ko y.m_ko
   && batch_equal x.m_bo y.m_bo && batch_equal x.m_bi y.m_bi && x.m_row_axis = y.m_row_axis
-  && phys_equal x.m_d y.m_d
-  && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b && Bool.equal x.m_zeroed y.m_zeroed
+  && phys_equal x.m_d y.m_d && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b
+  && Bool.equal x.m_zeroed y.m_zeroed
   && Option.equal Bool.equal x.m_tb y.m_tb
   && Bool.equal x.m_fma y.m_fma
 
@@ -1027,10 +1030,10 @@ let zero_geometry ?(batch_grid = false) (site : matmul_site)
        except under the [sk_batch_grid] twins (gh-ocannl-643), where they mirror the accumulation
        nest's batch geometry: interior-batch zero loops (node axes between the row axis and the
        minor axis) hoist above the row loop with the same sequential adjacent [Swap]s as
-       [batch_hoist_swaps], and every batch zero loop retypes to [Grid] — the zero nest's loop
-       order and per-position geometry then match the accumulation nest's by construction, which is
-       what keeps a hardware thread zeroing exactly the cells it accumulates. The row loop precedes
-       the column loop in the zero nest ([m_row_axis < rank - 1]), matching the accumulation's
+       [batch_hoist_swaps], and every batch zero loop retypes to [Grid] — the zero nest's loop order
+       and per-position geometry then match the accumulation nest's by construction, which is what
+       keeps a hardware thread zeroing exactly the cells it accumulates. The row loop precedes the
+       column loop in the zero nest ([m_row_axis < rank - 1]), matching the accumulation's
        positional hardware-slot order. *)
     let zi = List.nth_exn zsyms site.m_row_axis and zj = List.last_exn zsyms in
     let batch_ops =
@@ -1108,10 +1111,10 @@ let rec nest_loop_syms acc (llc : LL.t) =
    the positional loop-reorder [Swap]s that mirror the site pipeline's interior-batch hoisting —
    gh-ocannl-643; positional identity across nests is preserved because the permutation and the
    per-position geometry are functions of the shared chain-position roles alone), [skip] the loop
-   symbols of a nest to leave alone (the fused twins' epilogue tail,
-   which the fusion relocates under the accumulation nest's geometry — annotating it would make
-   [Fuse_epilogue] reject the candidate for the wrong reason), and [expanded_zeros] the nodes whose
-   whole-node [Zero_out] the caller expands with the same geometry.
+   symbols of a nest to leave alone (the fused twins' epilogue tail, which the fusion relocates
+   under the accumulation nest's geometry — annotating it would make [Fuse_epilogue] reject the
+   candidate for the wrong reason), and [expanded_zeros] the nodes whose whole-node [Zero_out] the
+   caller expands with the same geometry.
 
    [None] when the analysis bails, when the site's own chain was trimmed below [site_syms] (the
    nests could not be aligned at this arity — a companion annotated anyway would read cells another
@@ -1132,9 +1135,8 @@ let rec nest_loop_syms acc (llc : LL.t) =
    simd width here (a single [Workgroup] slot of extent [sk_simd]), which is what makes that safe in
    practice; a cross-nest simdgroup barrier would be the formal fix. *)
 let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbol list)
-    ~(expanded_zeros : Ir.Tnode.t list)
-    ~(annotate : (Idx.symbol * int) list -> Sched.schedule) (opt : LL.optimized) :
-    (Sched.schedule, string) Result.t =
+    ~(expanded_zeros : Ir.Tnode.t list) ~(annotate : (Idx.symbol * int) list -> Sched.schedule)
+    (opt : LL.optimized) : (Sched.schedule, string) Result.t =
   let plc = opt.LL.optimize_ctx.LL.placements in
   let rec writes_materialized (llc : LL.t) =
     match llc with
@@ -1307,11 +1309,11 @@ let matmul_chain_roles (site : matmul_site) : [ `Batch | `Row | `Col ] list =
 
 (* One companion nest's schedule under the shared chain-position roles: the interior batch loops
    (the [`Batch] positions after the [`Row] one) are hoisted above the nest's own row loop with the
-   same sequential adjacent [Swap]s as [batch_hoist_swaps] applies to the site nest, then each
-   chain position gets its role's annotation. Emitted per companion because the swaps name the
-   companion's own symbols; positional thread identity across nests is preserved because the
-   permutation and the per-position geometry are functions of the role list alone (gh-ocannl-643).
-   With batch positions unannotated the hoists are omitted: they would be dead reordering. *)
+   same sequential adjacent [Swap]s as [batch_hoist_swaps] applies to the site nest, then each chain
+   position gets its role's annotation. Emitted per companion because the swaps name the companion's
+   own symbols; positional thread identity across nests is preserved because the permutation and the
+   per-position geometry are functions of the role list alone (gh-ocannl-643). With batch positions
+   unannotated the hoists are omitted: they would be dead reordering. *)
 let companion_role_ops ~(roles : [ `Batch | `Row | `Col ] array)
     ~(annotate_role : [ `Batch | `Row | `Col ] -> Idx.symbol -> Sched.schedule) ~(batch_grid : bool)
     (cs : (Idx.symbol * int) list) : Sched.schedule =
@@ -1369,7 +1371,9 @@ let seeding_limits (limits : Ir.Backend_intf.hardware_limits) : Ir.Backend_intf.
    [.z]. One encoding of the slot rule for every family that predicts a geometry. *)
 let predicted_launch_geometry ~(grid : int list) ~(block : int list) : Sched.launch_geometry =
   let slot loops i = match List.nth (List.rev loops) i with Some n -> Some n | None -> Some 1 in
-  let fold = match List.rev grid with _ :: _ :: rest -> List.fold rest ~init:1 ~f:( * ) | _ -> 1 in
+  let fold =
+    match List.rev grid with _ :: _ :: rest -> List.fold rest ~init:1 ~f:( * ) | _ -> 1
+  in
   {
     Sched.lg_grid_y = slot grid 1;
     lg_grid_z = Some fold;
@@ -1383,7 +1387,8 @@ let predicted_launch_geometry ~(grid : int list) ~(block : int list) : Sched.lau
    log and a decline log read alike. *)
 let launch_geometry_refutation ~(limits : Ir.Backend_intf.hardware_limits)
     (geom : Sched.launch_geometry) : string option =
-  Option.map (Sched.launch_geometry_excess ~limits:(seeding_limits limits) geom)
+  Option.map
+    (Sched.launch_geometry_excess ~limits:(seeding_limits limits) geom)
     ~f:(fun x -> "the candidate " ^ x.Sched.lx_phrase)
 
 (* Whether the [sk_batch_grid] twins are worth a decision level for this site: there are batch loops
@@ -1429,12 +1434,12 @@ let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
   List.map site.m_bi ~f:(fun (g, _) -> Sched.Swap { outer = site.m_i; inner = g })
 
 (* The k-block loops of a pipeline, in nest order (gh-ocannl-683): the site's outer contraction
-   loops followed by the loop the pipeline's own k-split minted ([k_o], or nothing for the
-   unsplit whole-[m_k] forms). A multi-axis contraction is a k-loop lowering has already split, so
-   wherever a pipeline names "the k-block loop" — the loops the output roles sink below, the
-   anchor the staged tiles reload at, the loop the accumulator is privatized over (the OUTERMOST
-   block loop, so the private tile stays resident across the whole reduction) — it names this list.
-   Empty [m_ko] makes it exactly [k_o], so single-axis sites keep byte-identical schedules. *)
+   loops followed by the loop the pipeline's own k-split minted ([k_o], or nothing for the unsplit
+   whole-[m_k] forms). A multi-axis contraction is a k-loop lowering has already split, so wherever
+   a pipeline names "the k-block loop" — the loops the output roles sink below, the anchor the
+   staged tiles reload at, the loop the accumulator is privatized over (the OUTERMOST block loop, so
+   the private tile stays resident across the whole reduction) — it names this list. Empty [m_ko]
+   makes it exactly [k_o], so single-axis sites keep byte-identical schedules. *)
 let k_blocks (site : matmul_site) (k_o : Idx.symbol list) : Idx.symbol list =
   List.map site.m_ko ~f:fst @ k_o
 
@@ -1468,8 +1473,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
      [sk_batch_grid] twins (gh-ocannl-643). *)
   let annotate_role role sym =
     match role with
-    | `Batch ->
-        if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
+    | `Batch -> if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
     | (`Row | `Col) as rc ->
         let blk, reg = match rc with `Row -> (bm, tm) | `Col -> (bn, tn) in
         let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
@@ -1628,8 +1632,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
      [sk_batch_grid] twins (gh-ocannl-643). *)
   let annotate_role role sym =
     match role with
-    | `Batch ->
-        if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
+    | `Batch -> if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
     | `Row ->
         let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
         [ sp ]
@@ -2390,8 +2393,8 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
       (* The conv family does not predict its launch geometry yet, so its GPU seeds are not
          pre-filtered against the caps [Schedule.launch_geometry_excess] holds (gh-ocannl-709): a
          conv's outer [Grid] loops fold batch x spatial onto [.z], which large inputs can push over
-         a 16-bit cap, and today that costs one compile the gate then declines. What is missing is
-         a [conv_launch_geometry] beside [matmul_launch_geometry] and its cross-check against an
+         a 16-bit cap, and today that costs one compile the gate then declines. What is missing is a
+         [conv_launch_geometry] beside [matmul_launch_geometry] and its cross-check against an
          applied schedule's [Ir.Low_level.launch_dims] — the caps themselves need no second
          encoding. *)
       let seeds = cpu_seeds @ gpu_seeds in
@@ -2420,6 +2423,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     change too. *)
 
 module Family_decision = struct
+  type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
   (** A tile geometry as committed by a [geometry] level. Which fields are meaningful is the
       constructor's business ({!geometry_choice}), so the zero-encodings that the shared shape
       carries are read only where they mean something:
@@ -2431,7 +2435,6 @@ module Family_decision = struct
 
       [g_bk = 0] in {!Gpu_mma} is the unstaged full-K block — the one distinction the traffic floor
       turns on, since an unstaged geometry reads its operands in place and stages nothing. *)
-  type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
 
   (** How a [geometry] level was committed. The five forms are the five curated menus (plus the
       lattice branch), and they are distinct constructors rather than one shape because what a
@@ -2446,8 +2449,8 @@ module Family_decision = struct
             the unstaged full-K block. *)
     | Cpu_blocktile of int  (** The CPU blocktile menu's single block size (bm = bn = bk). *)
     | Cpu_packed of geometry
-        (** The CPU packed-composition menu; what it costs depends on the {!Packing_shape} above
-            it. *)
+        (** The CPU packed-composition menu; what it costs depends on the {!Packing_shape} above it.
+        *)
     | Lattice
         (** The staged tile-size lattice beyond the curated menu (gh-ocannl-514 phase 5), excluded
             by default and lifted by {!lift_geometry_lattice}. Its own axes commit as
@@ -2478,13 +2481,13 @@ module Family_decision = struct
         (** Which CPU packed composition: where the panels are packed (in kernel, at link time, per
             Grid chunk) — what makes a packed geometry's traffic additional or merely relocated. *)
 
+  type path = (string * t) list
   (** The path a consumer reads: {!Ir.Schedule_space}'s [(level, decision)] vector at this label
       type. The level string is display; the decision is the identity. *)
-  type path = (string * t) list
 
   (* The decisions are pure data — variants over ints — and the [autotune] library carries no ppx
-     deriving, so structural [Poly] equality IS the intended equality here (no floats, no
-     functions, no abstract payloads). *)
+     deriving, so structural [Poly] equality IS the intended equality here (no floats, no functions,
+     no abstract payloads). *)
 
   (** Two decisions are the same commitment. *)
   let equal (a : t) (b : t) = Poly.equal a b
@@ -2548,8 +2551,8 @@ module Family_decision = struct
   let render_path (path : path) = Sspace.render_path ~label:to_label path
 end
 
-(** The matmul family's trees and children at the decision label type. *)
 type family_tree = (Family_decision.t, sketch_params) Sspace.tree
+(** The matmul family's trees and children at the decision label type. *)
 
 type family_child = (Family_decision.t, sketch_params) Sspace.child
 
@@ -2683,8 +2686,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   (* The k-extent gate names what it actually compares against ([k_extent_label]). *)
   let ndiv_k what c =
-    ( divides c site.m_nk,
-      Printf.sprintf "%s=%d does not divide %s" what c (k_extent_label site) )
+    (divides c site.m_nk, Printf.sprintf "%s=%d does not divide %s" what c (k_extent_label site))
   in
   let base_params =
     {
@@ -2728,11 +2730,11 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  ( Family_decision.Geometry
                      (Gpu_blocktile { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = tm; g_tn = tn }),
                    refute_unless
-                     ((* Pad composition (gh-ocannl-730): [gpu_sketch_schedule] stages both
-                         operands through zero-fringe workgroup tiles at every geometry, so the
-                         block extents pad rather than gate — the tensorized family's
-                         gh-ocannl-485 argument, measured on this pipeline. The REGISTER split is
-                         not padded: [tm]/[tn] still divide their block tiles. *)
+                     ((* Pad composition (gh-ocannl-730): [gpu_sketch_schedule] stages both operands
+                         through zero-fringe workgroup tiles at every geometry, so the block extents
+                         pad rather than gate — the tensorized family's gh-ocannl-485 argument,
+                         measured on this pipeline. The REGISTER split is not padded: [tm]/[tn]
+                         still divide their block tiles. *)
                       (if pad_composition_ok ~n_staged:(if bk > 0 then 2 else 0) ~n_operands:2 then
                          []
                        else
@@ -2795,11 +2797,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           (List.map [ 16; 8 ] ~f:(fun b ->
                ( Family_decision.Geometry (Cpu_blocktile b),
                  refute_unless
-                   [
-                     ndiv "b" b ~into:"m" site.m_ni;
-                     ndiv "b" b ~into:"n" site.m_nj;
-                     ndiv_k "b" b;
-                   ]
+                   [ ndiv "b" b ~into:"m" site.m_ni; ndiv "b" b ~into:"n" site.m_nj; ndiv_k "b" b ]
                    (fun () ->
                      leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist }) )))
       in
@@ -3302,7 +3300,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  (c_syntax.ml [collect_parallel_grid]). *)
               choice
                 [
-                  (Family_decision.Packing_shape `Serial, subt (fun () -> geoms ~f:(fun p _ _ -> leaf p)));
+                  ( Family_decision.Packing_shape `Serial,
+                    subt (fun () -> geoms ~f:(fun p _ _ -> leaf p)) );
                   ( Family_decision.Packing_shape `Hoisted,
                     if any_hoistable then
                       subt (fun () -> geoms ~f:(fun p _ _ -> leaf { p with sk_hoist = true }))
@@ -3465,12 +3464,12 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
    the unfused leaves before the twins compete. The fused flavor is a construction-time verdict of
    the root: refuted with the fusion recognizer's own reason when the base code carries no fusable
    tail ([Sched.fuse_epilogue_witness] — the check runs on the base code, where the plain
-   accumulation-nest site applies), so a site that mints no twins says why. Each flavor's
-   pipelines are then judged under the flavor's own preconditions — the fused coverage verdict is
+   accumulation-nest site applies), so a site that mints no twins says why. Each flavor's pipelines
+   are then judged under the flavor's own preconditions — the fused coverage verdict is
    flavor-indexed (gh-ocannl-577) but implied by the unfused one ([matmul_coverage_witness]), so it
    is derived from it and the alignment analysis runs twice only where the unfused flavor is
-   refuted. Both flavors' subtrees stay lazy like every other level: nothing below the root is
-   built before a consumer descends into it. *)
+   refuted. Both flavors' subtrees stay lazy like every other level: nothing below the root is built
+   before a consumer descends into it. *)
 let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     ~(opt : LL.optimized) site : family_tree =
   let unfused_coverage = lazy (matmul_coverage_witness ~opt ~fused:false site) in
@@ -3481,8 +3480,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       | Some _ -> matmul_coverage_witness ~opt ~fused:true site)
   in
   let flavor ~fused ~coverage_witness =
-    Sspace.Child
-      (lazy (matmul_flavor_tree ~is_gpu ~is_cpu ~limits ~coverage_witness ~fused site))
+    Sspace.Child (lazy (matmul_flavor_tree ~is_gpu ~is_cpu ~limits ~coverage_witness ~fused site))
   in
   decided_choice
     [
@@ -3543,7 +3541,7 @@ let sketch_path_traffic_floor ~(limits : Ir.Backend_intf.hardware_limits) (opt :
     Family_decision.path -> int =
   match detect_matmul opt.LL.llc with
   | None -> fun _path -> 0
-  | Some site ->
+  | Some site -> (
       let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
       let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
       let pa = Ir.Ops.prec_in_bytes a_prec and pb = Ir.Ops.prec_in_bytes b_prec in
@@ -3568,9 +3566,7 @@ let sketch_path_traffic_floor ~(limits : Ir.Backend_intf.hardware_limits) (opt :
       fun path ->
         let decisions = List.map path ~f:snd in
         let committed =
-          List.find_map decisions ~f:(function
-            | Family_decision.Geometry g -> Some g
-            | _ -> None)
+          List.find_map decisions ~f:(function Family_decision.Geometry g -> Some g | _ -> None)
         in
         match committed with
         | Some (Family_decision.Gpu_blocktile { g_bm = bm; g_bn = bn; g_bk = bk; _ }) ->
@@ -3609,10 +3605,9 @@ let sketch_path_traffic_floor ~(limits : Ir.Backend_intf.hardware_limits) (opt :
             let tm_t, _, tk_t = tile_min in
             let corner axis default =
               List.fold decisions ~init:default ~f:(fun acc -> function
-                | Family_decision.Lattice_box { lb_axis; lb_lo; _ }
-                  when Poly.equal lb_axis axis ->
+                | Family_decision.Lattice_box { lb_axis; lb_lo; _ } when Poly.equal lb_axis axis ->
                     lb_lo
                 | _ -> acc)
             in
             2 * tile_bytes ~bm:(corner `Bm tm_t) ~bn:w ~bk:(corner `Bk tk_t)
-        | None -> 0
+        | None -> 0)

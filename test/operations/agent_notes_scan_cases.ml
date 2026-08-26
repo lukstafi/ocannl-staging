@@ -1,10 +1,10 @@
 (** What {!Test_utils.Agent_notes_scan} calls a defect, on input built to break it.
 
     The live-tree scan next door ([agent_notes_structure]) is green whenever the notes are intact,
-    which is most days — and a check that is green because it sees nothing looks exactly like a check
-    that is green because everything holds. So each of the five rules is exercised here on synthetic
-    notes: a violation the rule must flag, and beside it the nearest legitimate text it must NOT,
-    since a rule that fires on ordinary prose gets turned off rather than obeyed.
+    which is most days — and a check that is green because it sees nothing looks exactly like a
+    check that is green because everything holds. So each of the five rules is exercised here on
+    synthetic notes: a violation the rule must flag, and beside it the nearest legitimate text it
+    must NOT, since a rule that fires on ordinary prose gets turned off rather than obeyed.
 
     The fixtures are written against the shapes the real defects took (lukstafi/ocannl-staging#406):
     a bullet cut mid-sentence by a merge with its tail stranded inside a later bullet, an index hook
@@ -15,10 +15,9 @@ open Base
 open Stdio
 module Notes = Test_utils.Agent_notes_scan
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune promote`d
-   into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
-
 let render (f : Notes.finding) = Printf.sprintf "%s @ %s" f.Notes.rule f.Notes.where
 
 (* ------------------------------------------------------------------ *)
@@ -30,37 +29,45 @@ let render (f : Notes.finding) = Printf.sprintf "%s @ %s" f.Notes.rule f.Notes.w
 let structure_cases =
   [
     ( "a flat list of finished bullets",
-      "# Title\n\n- One fact, stated.\n- Another, with a continuation line that\n  wraps and then \
-       ends.\n",
+      "# Title\n\n\
+       - One fact, stated.\n\
+       - Another, with a continuation line that\n\
+      \  wraps and then ends.\n",
       [] );
     (* The shape a merge leaves behind: an incoming bullet inserted after the FIRST line of its hunk
        context instead of the last, so the bullet above it stops mid-word. The tail lands inside a
        later bullet, where nothing marks it -- the truncation above is the decidable half. *)
     ( "a bullet a merge cut in half",
-      "# Title\n\n- A fact whose closing sentence stops mid-senten\n- An unrelated incoming \
-       bullet, complete in itself.\n  ce and the rest of it, stranded here.\n",
+      "# Title\n\n\
+       - A fact whose closing sentence stops mid-senten\n\
+       - An unrelated incoming bullet, complete in itself.\n\
+      \  ce and the rest of it, stranded here.\n",
       [ "bullet-integrity @ f.md:3" ] );
     ("a bullet ending in a colon", "# Title\n\n- The three of them are:\n", []);
     ( "a bullet ending in a parenthesis after the period",
       "# Title\n\n- A fact with its issue named (gh-ocannl-406.)\n",
       [] );
     ("a bullet ending in bold", "# Title\n\n- A fact that ends **emphatically.**\n", []);
-    ( "a bullet ending in markup behind a space",
-      "# Title\n\n- A fact ends. `\n",
-      [] );
+    ("a bullet ending in markup behind a space", "# Title\n\n- A fact ends. `\n", []);
     ("a bullet ending in a code span", "# Title\n\n- A fact naming `Ops.promote_prec`.\n", []);
     ( "a bullet ending in an identifier and no punctuation",
       "# Title\n\n- A fact that trails off into `Ops.promote_prec`\n",
       [ "bullet-integrity @ f.md:3" ] );
     (* One nesting level is what the notes use; its continuations sit two deeper again. *)
     ( "a nested bullet with its own continuations",
-      "# Title\n\n- A fact with parts, as follows:\n  - the first part, which\n    wraps across a \
-       line.\n  - the second part.\n- The next fact.\n",
+      "# Title\n\n\
+       - A fact with parts, as follows:\n\
+      \  - the first part, which\n\
+      \    wraps across a line.\n\
+      \  - the second part.\n\
+       - The next fact.\n",
       [] );
     (* Findings come out in document order, parent before child, however the list nests. *)
     ( "a nested list where parent and child are both cut short",
-      "# Title\n\n- A parent that stops mid-senten\n  - a child that stops too\n- A finished \
-       fact.\n",
+      "# Title\n\n\
+       - A parent that stops mid-senten\n\
+      \  - a child that stops too\n\
+       - A finished fact.\n",
       [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4" ] );
     ( "an indented line at the parent's depth while a nested bullet is open",
       "# Title\n\n- A fact with parts:\n  - the first part.\n  more of the first fact.\n",
@@ -102,8 +109,9 @@ let structure_cases =
     ( "an ordered item written with a parenthesis",
       "# Title\n\n1) A fact written as an ordered item.\n",
       [ "bullet-integrity @ f.md:3" ] );
-    (* A line wholly inside a code span or a comment is an example. Parsing it invents findings about
-       text nobody sees -- and can report the closing delimiter as an illegal lazy continuation. *)
+    (* A line wholly inside a code span or a comment is an example. Parsing it invents findings
+       about text nobody sees -- and can report the closing delimiter as an illegal lazy
+       continuation. *)
     ( "a bullet-looking line inside a multiline code span",
       "# Title\n\n- A fact showing the shape `\n  - not a bullet\n  ` in passing.\n",
       [] );
@@ -132,8 +140,7 @@ let structure_cases =
     ( "a prose line that is a complete triple-backtick span",
       "# Title\n\n```foo``` is how it is written.\n",
       [] );
-    ("a real fence is still a fence", "# Title\n\n```\ncode\n```\n",
-      [ "bullet-integrity @ f.md:3" ] );
+    ("a real fence is still a fence", "# Title\n\n```\ncode\n```\n", [ "bullet-integrity @ f.md:3" ]);
     ( "an autolink at column zero is not an HTML block",
       "# Title\n\n<https://example.com> is the reference.\n",
       [] );
@@ -162,7 +169,13 @@ let structure_cases =
       "# Title\n\n- 296 stanzas were placed against a floor of 295.\n",
       [] );
     ( "a fenced block, whose contents are not bullets",
-      "# Title\n\n- A fact.\n\n```\n- not a bullet, an example\n| not | a table |\n```\n\n-        Another fact.\n",
+      "# Title\n\n\
+       - A fact.\n\n\
+       ```\n\
+       - not a bullet, an example\n\
+       | not | a table |\n\
+       ```\n\n\
+       -        Another fact.\n",
       [ "bullet-integrity @ f.md:5" ] );
     ( "a fence that is never closed",
       "# Title\n\n- A fact.\n\n~~~\n- not a bullet\n",
@@ -175,7 +188,8 @@ let structure_cases =
       "# Title\n\nProse <!-- and then nothing.\n\n- A fact.\n",
       [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:6" ] );
     (* Markdown honours a quote marker at every depth, so nested under a bullet this is a quote
-       inside the list item -- not part of the bullet's prose, and checked by nothing if folded in. *)
+       inside the list item -- not part of the bullet's prose, and checked by nothing if folded
+       in. *)
     ( "a block quote nested under a bullet",
       "# Title\n\n- A fact:\n  > Quoted guidance.\n",
       [ "bullet-integrity @ f.md:4" ] );
@@ -228,7 +242,8 @@ let structure_cases =
     ( "an angle bracket inside a continuation is ordinary text",
       "# Title\n\n- A fact about widths\n  <= 8, and about `dune build <that target>`.\n",
       [] );
-    ("a thematic break", "# Title\n\n- A fact.\n\n---\n\n- Another fact.\n",
+    ( "a thematic break",
+      "# Title\n\n- A fact.\n\n---\n\n- Another fact.\n",
       [ "bullet-integrity @ f.md:5" ] );
     (* A setext underline needs ONE marker, not the three a thematic break needs, so "--" and "=="
        used to fall through to prose while a renderer made the line above them a heading -- an
@@ -247,8 +262,8 @@ let structure_cases =
       "# Title\n\n- A fact:\n  --\n  More.\n",
       [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
     (* The nearest legitimate text, and the one the notes actually contain: a wrapped line opening
-       with the ASCII dash this project writes for an em-dash. It is not a line of markers, so it
-       is not an underline. *)
+       with the ASCII dash this project writes for an em-dash. It is not a line of markers, so it is
+       not an underline. *)
     ( "a dash opening a continuation line is not an underline",
       "# Title\n\n- A fact\n  -- and its aside -- carries on here.\n",
       [] );
@@ -258,9 +273,7 @@ let structure_cases =
     ( "two hyphens under a blank line are a paragraph, not an underline",
       "# Title\n\n- A fact.\n\n--\n\n- Another fact.\n",
       [] );
-    ( "two hyphens under a heading are not an underline",
-      "# Title\n\n## Section\n--\n",
-      [] );
+    ("two hyphens under a heading are not an underline", "# Title\n\n## Section\n--\n", []);
     ( "two hyphens under a table row are not an underline",
       "# Title\n\n| File | Covers |\n| --- | --- |\n| a | b |\n--\n",
       [] );
@@ -280,7 +293,10 @@ let structure_cases =
       "# Title\n\n- A fact showing `\n  ## Section` in passing:\n  --\n  More.\n",
       [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:6" ] );
     ( "a third nesting level",
-      "# Title\n\n- A fact with parts:\n  - the first part, itself with parts:\n    - a third        level.\n",
+      "# Title\n\n\
+       - A fact with parts:\n\
+      \  - the first part, itself with parts:\n\
+      \    - a third        level.\n",
       [ "bullet-integrity @ f.md:5" ] );
     ( "prose at column zero between lists",
       "# Title\n\n- A fact.\n\nA paragraph of prose.\n\n- Another fact.\n",
@@ -303,8 +319,12 @@ let table_cases =
        and every row below it renders as pipe-delimited prose. Both halves are visible: the row does
        not close, and the line below the block carries the rest of it. *)
     ( "a row wrapped across two physical lines",
-      "# Title\n\n| File | What it covers |\n| --- | --- |\n| a | a description long enough to\n  \
-       have been wrapped |\n| c | d |\n",
+      "# Title\n\n\
+       | File | What it covers |\n\
+       | --- | --- |\n\
+       | a | a description long enough to\n\
+      \  have been wrapped |\n\
+       | c | d |\n",
       [ "table-shape @ f.md:5"; "table-shape @ f.md:7" ] );
     ( "the wrapped tail below a table that itself closes",
       "# Title\n\n| File | What it covers |\n| --- | --- |\n| a | b |\nthe rest of it |\n",
@@ -318,7 +338,8 @@ let table_cases =
     ( "a header with no delimiter row",
       "# Title\n\n| File | What it covers |\n| a | b |\n| c | d |\n",
       [ "table-shape @ f.md:4" ] );
-    ("a header and a delimiter and no rows", "# Title\n\n| File | Covers |\n| --- | --- |\n",
+    ( "a header and a delimiter and no rows",
+      "# Title\n\n| File | Covers |\n| --- | --- |\n",
       [ "table-shape @ f.md:3" ] );
     (* The notes quote pipes constantly (`=:||`, `none|cc|metal`), and a quoted one is not a cell
        separator -- a rule that thought otherwise would fire on a dozen real bullets. *)
@@ -357,8 +378,9 @@ let table_cases =
     ( "a delimiter cell of two hyphens",
       "# Title\n\n| File | Covers |\n| -- | -- |\n| a | b |\n",
       [ "table-shape @ f.md:4" ] );
-    ("alignment colons are still a delimiter row",
-      "# Title\n\n| File | Covers |\n| :--- | ---: |\n| a | b |\n", [] );
+    ( "alignment colons are still a delimiter row",
+      "# Title\n\n| File | Covers |\n| :--- | ---: |\n| a | b |\n",
+      [] );
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -389,15 +411,19 @@ let index_cases =
   [
     ( "an index whose rows all resolve",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
-        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+      ],
       [] );
     (* PR #406's second finding, from both ends: the hook sits on the wrong row, so following the
        index leads away from the trap it names. *)
     ( "a hook the file it points at does not carry",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "`fast math` and the `Gadget` seam" ],
-      [ ("agent-notes/a.md", file "- A fact about `Widget`, and about fast math.\n");
-        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`, and about fast math.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+      ],
       [ "index-agreement @ agent-notes.md:8" ] );
     ( "a hook whose wording drifted from the file's",
       index [ row "a.md" "the `identifier blacklist`" ],
@@ -429,11 +455,23 @@ let index_cases =
        it. Asking the hook and reachability rules about that would produce one "unreachable" line per
        file and bury the one finding that says what happened -- so they decline, loudly. *)
     ( "a wrapped row takes the rest of the index out of the table",
-      "# Agent notes\n\nAn index.\n\n| File | What it covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the\n`Widget` seam |\n| [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
-      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
-        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
-      [ "index-agreement @ agent-notes.md"; "table-shape @ agent-notes.md:7";
-        "table-shape @ agent-notes.md:9"; "reachability @ agent-notes.md" ] );
+      "# Agent notes\n\n\
+       An index.\n\n\
+       | File | What it covers |\n\
+       | --- | --- |\n\
+       | [a.md](agent-notes/a.md) | the\n\
+       `Widget` seam |\n\
+       | [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+      ],
+      [
+        "index-agreement @ agent-notes.md";
+        "table-shape @ agent-notes.md:7";
+        "table-shape @ agent-notes.md:9";
+        "reachability @ agent-notes.md";
+      ] );
     ( "an anchor on an identifier heading, which GitHub keeps underscored",
       index [ "| [a.md](agent-notes/a.md#ident_blacklist) | the `ident_blacklist` |" ],
       [ ("agent-notes/a.md", file "## ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
@@ -446,96 +484,159 @@ let index_cases =
        them carries a link. *)
     ( "a backlink that is only a code span",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nThe index lives at `[index](../agent-notes.md)`.\n\n- A fact about            `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           The index lives at `[index](../agent-notes.md)`.\n\n\
+           - A fact about            `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink commented out",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\n<!-- [index](../agent-notes.md) -->\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n<!-- [index](../agent-notes.md) -->\n\n- A fact about `Widget`.\n" );
+      ],
       [ "bullet-integrity @ agent-notes/a.md:3"; "reachability @ agent-notes/a.md" ] );
     ( "a backlink that is an image",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\n![index](../agent-notes.md)\n\n- A fact about `Widget`.\n") ],
+      [
+        ("agent-notes/a.md", "# A file\n\n![index](../agent-notes.md)\n\n- A fact about `Widget`.\n");
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink hidden in the middle of a multiline code span",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nPart of an example: `\n[index](../agent-notes.md)\n`.\n\n- A fact about            `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Part of an example: `\n\
+           [index](../agent-notes.md)\n\
+           `.\n\n\
+           - A fact about            `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink after a code span that closed on the line above",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nPart of an example: `\nexample`\n[index](../agent-notes.md)\n\n- A fact            about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Part of an example: `\n\
+           example`\n\
+           [index](../agent-notes.md)\n\n\
+           - A fact            about `Widget`.\n" );
+      ],
       [] );
     ( "a backlink inside a multiline HTML comment",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nProse <!--\n[index](../agent-notes.md)\n-->\n\n- A fact about            `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Prose <!--\n\
+           [index](../agent-notes.md)\n\
+           -->\n\n\
+           - A fact about            `Widget`.\n" );
+      ],
       [ "bullet-integrity @ agent-notes/a.md:3"; "reachability @ agent-notes/a.md" ] );
     ( "a backlink whose bracket is escaped",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nWrite it \\[index](../agent-notes.md) to show the syntax.\n\n- A fact            about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Write it \\[index](../agent-notes.md) to show the syntax.\n\n\
+           - A fact            about `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "an anchor naming a heading that only appears inside a comment",
       index [ "| [a.md](agent-notes/a.md#draft-heading) | the `Widget` seam |" ],
-      [ ("agent-notes/a.md",
-          file "<!--\n## Draft heading\n-->\n\n- A fact about `Widget`.\n") ],
+      [ ("agent-notes/a.md", file "<!--\n## Draft heading\n-->\n\n- A fact about `Widget`.\n") ],
       [ "bullet-integrity @ agent-notes/a.md:5"; "index-agreement @ agent-notes.md:7" ] );
     ( "an index row with a third cell",
-      "# Agent notes\n\nAn index.\n\n| File | Covers | Owner |\n| --- | --- | --- |\n|        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
+      "# Agent notes\n\n\
+       An index.\n\n\
+       | File | Covers | Owner |\n\
+       | --- | --- | --- |\n\
+       |        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
       [ "index-agreement @ agent-notes.md:7"; "reachability @ agent-notes/a.md" ] );
     (* Text inside a code span RENDERS, so it is part of what a bullet says; text inside a comment
        does not. Two bullets differing only on a code line are two bullets. *)
     ( "two bullets differing only inside a multiline code span",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md", file "- A fact about `Widget`, showing `\n  foo\n  ` in passing.\n");
-        ("agent-notes/b.md", file "- A fact about `Widget`, showing `\n  bar\n  ` in passing.\n") ],
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`, showing `\n  foo\n  ` in passing.\n");
+        ("agent-notes/b.md", file "- A fact about `Widget`, showing `\n  bar\n  ` in passing.\n");
+      ],
       [] );
     ( "two bullets differing only inside an HTML comment are one bullet",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          file "- A fact about `Widget`, showing <!--\n  foo\n  --> in passing.\n");
-        ("agent-notes/b.md",
-          file "- A fact about `Widget`, showing <!--\n  bar\n  --> in passing.\n") ],
-      [ "bullet-integrity @ agent-notes/a.md:5"; "bullet-integrity @ agent-notes/b.md:5";
-        "no-repetition @ agent-notes/b.md:5" ] );
+      [
+        ( "agent-notes/a.md",
+          file "- A fact about `Widget`, showing <!--\n  foo\n  --> in passing.\n" );
+        ( "agent-notes/b.md",
+          file "- A fact about `Widget`, showing <!--\n  bar\n  --> in passing.\n" );
+      ],
+      [
+        "bullet-integrity @ agent-notes/a.md:5";
+        "bullet-integrity @ agent-notes/b.md:5";
+        "no-repetition @ agent-notes/b.md:5";
+      ] );
     ( "a backlink carrying a link title",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nSee the [index](../agent-notes.md \"Agent notes\").\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           See the [index](../agent-notes.md \"Agent notes\").\n\n\
+           - A fact about `Widget`.\n" );
+      ],
       [] );
     ( "a backlink whose destination is angle-bracketed",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nSee the [index](<../agent-notes.md>).\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\nSee the [index](<../agent-notes.md>).\n\n- A fact about `Widget`.\n" );
+      ],
       [] );
     ( "an escaped comment opener starts no comment",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nProse \\<!--[index](../agent-notes.md)-->\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\nProse \\<!--[index](../agent-notes.md)-->\n\n- A fact about `Widget`.\n" );
+      ],
       [] );
     ( "a hook padded to carry a literal backtick",
-      "# Agent notes\n\nAn index.\n\n| File | Covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the `` `Widget` `` seam |\n",
+      "# Agent notes\n\n\
+       An index.\n\n\
+       | File | Covers |\n\
+       | --- | --- |\n\
+       | [a.md](agent-notes/a.md) | the `` `Widget` `` seam |\n",
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
       [] );
     ( "a backlink whose closing parenthesis is escaped",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nWrite it [index](../agent-notes.md#draft\\) to show the syntax.\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Write it [index](../agent-notes.md#draft\\) to show the syntax.\n\n\
+           - A fact about `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink whose closing bracket is escaped",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nWrite it [index\\](../agent-notes.md) to show the syntax.\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Write it [index\\](../agent-notes.md) to show the syntax.\n\n\
+           - A fact about `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink between escaped backticks is navigable",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nWritten \\`[index](../agent-notes.md)\\` in the source.\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Written \\`[index](../agent-notes.md)\\` in the source.\n\n\
+           - A fact about `Widget`.\n" );
+      ],
       [] );
     ( "an anchor naming a heading indented into code",
       index [ "| [a.md](agent-notes/a.md#draft) | the `Widget` seam |" ],
@@ -544,28 +645,43 @@ let index_cases =
     (* One block, but not a table: the row extraction must decline rather than report every file as
        an orphan. *)
     ( "an index whose single table has a row that does not close",
-      "# Agent notes\n\nAn index.\n\n| File | Covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the `Widget` seam\n| [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
-      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
-        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
-      [ "index-agreement @ agent-notes.md"; "table-shape @ agent-notes.md:7";
-        "reachability @ agent-notes.md" ] );
+      "# Agent notes\n\n\
+       An index.\n\n\
+       | File | Covers |\n\
+       | --- | --- |\n\
+       | [a.md](agent-notes/a.md) | the `Widget` seam\n\
+       | [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+      ],
+      [
+        "index-agreement @ agent-notes.md";
+        "table-shape @ agent-notes.md:7";
+        "reachability @ agent-notes.md";
+      ] );
     ( "a backlink one directory too far up",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nSee the [index](../../agent-notes.md).\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\nSee the [index](../../agent-notes.md).\n\n- A fact about `Widget`.\n" );
+      ],
       [ "reachability @ agent-notes/a.md" ] );
     ( "an anchor on a heading written without a space",
       index [ "| [a.md](agent-notes/a.md#ident_blacklist) | the `ident_blacklist` |" ],
-      [ ("agent-notes/a.md",
-          file "##ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
+      [ ("agent-notes/a.md", file "##ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
       [ "bullet-integrity @ agent-notes/a.md:5"; "index-agreement @ agent-notes.md:7" ] );
     ( "a backlink carrying an anchor is still a backlink",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nPart of the [index](../agent-notes.md#index).\n\n- A fact about            `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\n\
+           Part of the [index](../agent-notes.md#index).\n\n\
+           - A fact about            `Widget`.\n" );
+      ],
       [] );
-    (* The directory is flat today; a note in a subdirectory of it is judged like any other, which is
-       what makes recursing over the tree safe rather than merely more thorough. *)
+    (* The directory is flat today; a note in a subdirectory of it is judged like any other, which
+       is what makes recursing over the tree safe rather than merely more thorough. *)
     ( "a note in a subdirectory, linked and backlinked from its own depth",
       index [ "| [a.md](agent-notes/sub/a.md) | the `Widget` seam |" ],
       [ ("agent-notes/sub/a.md", file_at 2 "- A fact about `Widget`.\n") ],
@@ -576,18 +692,24 @@ let index_cases =
       [ "reachability @ agent-notes/sub/a.md" ] );
     ( "a note in a subdirectory, unlinked",
       index [ row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
-        ("agent-notes/sub/a.md", file_at 2 "- A fact about `Widget`.\n") ],
+      [
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+        ("agent-notes/sub/a.md", file_at 2 "- A fact about `Widget`.\n");
+      ],
       [ "reachability @ agent-notes/sub/a.md" ] );
     ( "a backlink written with a redundant ./ still resolves",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md",
-          "# A file\n\nSee the [index](./../agent-notes.md).\n\n- A fact about `Widget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          "# A file\n\nSee the [index](./../agent-notes.md).\n\n- A fact about `Widget`.\n" );
+      ],
       [] );
     ( "a file no row links",
       index [ row "a.md" "the `Widget` seam" ],
-      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
-        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
+      [
+        ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+      ],
       [ "reachability @ agent-notes/b.md" ] );
     ( "two rows for one file",
       index [ row "a.md" "the `Widget` seam"; row "a.md" "the `Widget` seam again" ],
@@ -600,28 +722,35 @@ let index_cases =
     (* Rule 5. A fact promoted into two files is a fact that will be corrected in one of them. *)
     ( "the same bullet in two files",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/a.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n");
-        ("agent-notes/b.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n") ],
+      [
+        ("agent-notes/a.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n");
+        ("agent-notes/b.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n");
+      ],
       [ "no-repetition @ agent-notes/b.md:5" ] );
     ( "the same bullet re-wrapped",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/a.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n");
-        ("agent-notes/b.md",
-          file "- One fact, promoted twice, about `Widget`\n  and `Gadget`.\n") ],
+      [
+        ("agent-notes/a.md", file "- One fact, promoted twice, about `Widget` and `Gadget`.\n");
+        ("agent-notes/b.md", file "- One fact, promoted twice, about `Widget`\n  and `Gadget`.\n");
+      ],
       [ "no-repetition @ agent-notes/b.md:5" ] );
     ( "two bullets opening alike and diverging",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/a.md",
-          file "- The analysis pass establishes what the specializer may assume of `Widget`.\n");
-        ("agent-notes/b.md",
-          file "- The analysis pass establishes what the specializer may assume of `Gadget`.\n") ],
+      [
+        ( "agent-notes/a.md",
+          file "- The analysis pass establishes what the specializer may assume of `Widget`.\n" );
+        ( "agent-notes/b.md",
+          file "- The analysis pass establishes what the specializer may assume of `Gadget`.\n" );
+      ],
       [ "no-repetition @ agent-notes/b.md:5" ] );
     ( "two bullets that merely start with the same few words",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
-      [ ("agent-notes/a.md",
-          file "- The `Widget` seam is where storage meets compute, and it is narrow.\n");
-        ("agent-notes/b.md",
-          file "- The `Gadget` seam is where the pool meets the stream, and it is wide.\n") ],
+      [
+        ( "agent-notes/a.md",
+          file "- The `Widget` seam is where storage meets compute, and it is narrow.\n" );
+        ( "agent-notes/b.md",
+          file "- The `Gadget` seam is where the pool meets the stream, and it is wide.\n" );
+      ],
       [] );
   ]
 
@@ -629,8 +758,8 @@ let index_cases =
 
    Round 3 was six findings and three of them were here -- code-span pairing, backslash parity, ATX
    spacing -- each an approximation of a CommonMark rule, each feeding every rule in the scan, and
-   each invisible from the rule level because a rule reads "no pipe there" and "no heading there" the
-   same whether the primitive was right or lazy. A layer that everything depends on and nothing
+   each invisible from the rule level because a rule reads "no pipe there" and "no heading there"
+   the same whether the primitive was right or lazy. A layer that everything depends on and nothing
    tests directly is where this class regenerates, so it gets its own fixtures. *)
 let primitive_cases =
   [
@@ -652,23 +781,17 @@ let primitive_cases =
    a whole file and the lines whose text is inert, as "<line>:<start>-<stop>". *)
 let carry_cases =
   [
-    ( "a span closed on the next line",
-      "a `b\nc` d\n",
-      [ "1:2-4"; "2:0-2" ] );
-    (* Round 4's finding: the closing run being LAST on its line must clear the carry, and did not --
-       the whole rest of the file went on reading as code. *)
+    ("a span closed on the next line", "a `b\nc` d\n", [ "1:2-4"; "2:0-2" ]);
+    (* Round 4's finding: the closing run being LAST on its line must clear the carry, and did not
+       -- the whole rest of the file went on reading as code. *)
     ( "a span closed by the last run on its line",
       "a `b\nexample`\n[index](../agent-notes.md)\n",
       [ "1:2-4"; "2:0-8" ] );
-    ( "a paragraph break discards an unterminated span's ranges",
-      "a `b\n\nc | d\n",
-      [] );
+    ("a paragraph break discards an unterminated span's ranges", "a `b\n\nc | d\n", []);
     ( "a comment spanning three lines",
       "Prose <!--\n[index](../agent-notes.md)\n--> after\n",
       [ "1:6-10"; "2:0-26"; "3:0-3" ] );
-    ( "a comment survives a blank line",
-      "Prose <!--\n\n--> after\n",
-      [ "1:6-10"; "3:0-3" ] );
+    ("a comment survives a blank line", "Prose <!--\n\n--> after\n", [ "1:6-10"; "3:0-3" ]);
   ]
 
 (* Escaping is decided by the PARITY of the backslash run, not by the character before the pipe. *)
@@ -692,17 +815,22 @@ let heading_cases =
     ("an identifier heading", "## ident_blacklist", Some "ident_blacklist");
   ]
 
-(* A relative link resolves against its file's DIRECTORY, and above the root is a distinct answer. *)
+(* A relative link resolves against its file's DIRECTORY, and above the root is a distinct
+   answer. *)
 let resolve_cases =
   [
     ("one level up", "agent-notes/a.md", "../agent-notes.md", Some "agent-notes.md");
-    ("two levels up from a nested note", "agent-notes/sub/a.md", "../../agent-notes.md",
-      Some "agent-notes.md");
+    ( "two levels up from a nested note",
+      "agent-notes/sub/a.md",
+      "../../agent-notes.md",
+      Some "agent-notes.md" );
     ("one too many is above the root", "agent-notes/a.md", "../../agent-notes.md", None);
     ("a redundant ./ is dropped", "agent-notes/a.md", "./../agent-notes.md", Some "agent-notes.md");
     ("a sibling needs no ..", "agent-notes/a.md", "b.md", Some "agent-notes/b.md");
-    ("an anchor is not part of the path", "agent-notes/a.md", "../agent-notes.md#x",
-      Some "agent-notes.md");
+    ( "an anchor is not part of the path",
+      "agent-notes/a.md",
+      "../agent-notes.md#x",
+      Some "agent-notes.md" );
   ]
 
 (* The escape hatch is only a hatch if the key a message tells you to paste is the key that matches.
@@ -723,13 +851,19 @@ let exemption_cases =
        a prefix key would have silenced both from one exemption. *)
     ( "two bullets agreeing past the display length keep distinct keys",
       "agent-notes/a.md",
-      "# A file\n\n- The analysis pass establishes what the specializer may assume of `Widget`\n-        The analysis pass establishes what the specializer may assume of `Gadget`\n",
-      [ "agent-notes/a.md: The analysis pass establishes what the specializer may assume of \
+      "# A file\n\n\
+       - The analysis pass establishes what the specializer may assume of `Widget`\n\
+       -        The analysis pass establishes what the specializer may assume of `Gadget`\n",
+      [
+        "agent-notes/a.md: The analysis pass establishes what the specializer may assume of \
          `Widget`";
         "agent-notes/a.md: The analysis pass establishes what the specializer may assume of \
-         `Gadget`" ] );
-    ("a finished bullet has no finding to key", "agent-notes/a.md",
-      "# A file\n\n- A fact that ends properly.\n", [] );
+         `Gadget`";
+      ] );
+    ( "a finished bullet has no finding to key",
+      "agent-notes/a.md",
+      "# A file\n\n- A fact that ends properly.\n",
+      [] );
   ]
 
 let () =
@@ -747,13 +881,11 @@ let () =
       check ("tables -- " ^ name) expected
         (List.map (Notes.check_tables ~file:"f.md" body) ~f:render));
   List.iter primitive_cases ~f:(fun (name, line, expected) ->
-      let found =
-        List.map (Notes.code_spans line) ~f:(fun (a, b) -> Printf.sprintf "%d-%d" a b)
-      in
+      let found = List.map (Notes.code_spans line) ~f:(fun (a, b) -> Printf.sprintf "%d-%d" a b) in
       check ("code spans -- " ^ name) expected found);
   List.iter carry_cases ~f:(fun (name, contents, expected) ->
       let found =
-        List.concat_map ((Notes.inert_by_line contents).Notes.ranges) ~f:(fun (lineno, ranges) ->
+        List.concat_map (Notes.inert_by_line contents).Notes.ranges ~f:(fun (lineno, ranges) ->
             List.map ranges ~f:(fun (a, b) -> Printf.sprintf "%d:%d-%d" lineno a b))
       in
       check ("inert carry -- " ^ name) expected found);
@@ -767,9 +899,7 @@ let () =
       check ("link resolution -- " ^ name) (Option.to_list expected)
         (Option.to_list (Notes.resolve_link ~from_file target)));
   List.iter exemption_cases ~f:(fun (name, file, body, expected) ->
-      let keys =
-        List.filter_map (Notes.check_structure ~file body) ~f:Notes.exemption_key
-      in
+      let keys = List.filter_map (Notes.check_structure ~file body) ~f:Notes.exemption_key in
       let message_offers_key =
         List.for_all (Notes.check_structure ~file body) ~f:(fun f ->
             match Notes.exemption_key f with
@@ -781,9 +911,7 @@ let () =
         fail "exemption -- %s: the finding's message does not print the key that would silence it"
           name);
   List.iter index_cases ~f:(fun (name, index_contents, files, expected) ->
-      let _, found =
-        Notes.check_all ~index_file:"agent-notes.md" ~index_contents ~files
-      in
+      let _, found = Notes.check_all ~index_file:"agent-notes.md" ~index_contents ~files in
       check ("index -- " ^ name) expected (List.map found ~f:render));
   (* gh-ocannl-706. A finding whose rule [Notes.rules] does not name -- a sixth rule written and not
      added to the list -- used to be dropped where the report is grouped by that list: the rule

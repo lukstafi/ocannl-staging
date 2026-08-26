@@ -92,13 +92,7 @@ let family_name = function
   | Ll -> "ll"
   | Routine_log -> "routine-log"
 
-let family_rank = function
-  | C -> 0
-  | Cuda -> 1
-  | Hip -> 2
-  | Metal -> 3
-  | Ll -> 4
-  | Routine_log -> 5
+let family_rank = function C -> 0 | Cuda -> 1 | Hip -> 2 | Metal -> 3 | Ll -> 4 | Routine_log -> 5
 
 (** Extensions that DECLARE the artifact snapshotted, ordered longest-first so that [.cu.expected]
     is tried before a hypothetical [.expected]. A file matching one is a member whatever it
@@ -120,7 +114,7 @@ let is_claim_line line =
   let line = String.rstrip line in
   String.is_prefix line ~prefix:"FAIL: "
   || List.exists [ ": true"; ": false"; ": PASS"; ": FAIL" ] ~f:(fun suffix ->
-         String.is_suffix line ~suffix)
+      String.is_suffix line ~suffix)
 
 (** A low-level-IR loop header, [for i12 = 0 to 4 {]. Recognised by shape rather than by a needle
     because the induction variable carries a number: ["for i"], digits, [" = "]. *)
@@ -134,13 +128,13 @@ let is_ll_loop_line line =
         while !j < n && Char.is_digit line.[!j] do
           Int.incr j
         done;
-        (!j > start + String.length "for i" && String.is_prefix (String.drop_prefix line !j) ~prefix:" = ")
+        !j > start + String.length "for i"
+        && String.is_prefix (String.drop_prefix line !j) ~prefix:" = "
         || from (start + 1)
   in
   from 0
 
 type test = Needles of string list | Shape of (string -> bool)
-
 type marker = { tag : string; family : family; test : test }
 
 (** The content markers, by family.
@@ -207,8 +201,8 @@ type golden = {
           member. See {!classify_associated}. *)
 }
 
-(** The family of a golden that holds text DERIVED from generated code in a shape no marker names:
-    a table of dumped constants, a census of the schedule decisions a kernel was built from. *)
+(** The family of a golden that holds text DERIVED from generated code in a shape no marker names: a
+    table of dumped constants, a census of the schedule decisions a kernel was built from. *)
 let derived_family = "derived"
 
 (** [classify_golden ~path ~contents] is [Some] when the file pins emitted text. [path] is used for
@@ -226,15 +220,14 @@ let classify_golden ~path ~contents =
   | _ ->
       (* The DECLARING extension is authoritative about which substrate produced the file, and the
          markers are evidence only where there is none. CUDA and HIP spell the same launch
-         vocabulary, so a [.hip.expected] matching [cuda-kernel] is HIP text, not CUDA text -- and
-         a snapshot named for its backend needs re-recording on that backend whatever else its
-         markers say. Where nothing declares, the markers are all there is, and a file carrying
-         several dialects (a routine log holds both the IR line and the C rendering) names them all.
-      *)
+         vocabulary, so a [.hip.expected] matching [cuda-kernel] is HIP text, not CUDA text -- and a
+         snapshot named for its backend needs re-recording on that backend whatever else its markers
+         say. Where nothing declares, the markers are all there is, and a file carrying several
+         dialects (a routine log holds both the IR line and the C rendering) names them all. *)
       let families =
         (match by_extension with
-        | Some (_, family) -> [ family ]
-        | None -> List.map matched ~f:(fun m -> m.family))
+          | Some (_, family) -> [ family ]
+          | None -> List.map matched ~f:(fun m -> m.family))
         |> List.dedup_and_sort ~compare:(fun a b -> Int.compare (family_rank a) (family_rank b))
         |> List.map ~f:family_name
       in
@@ -323,7 +316,6 @@ let idents_in expr =
   iterator#expression expr;
   !found
 
-
 (** The module a qualified path calls into: the component before the last. [Generated.read] and
     [Test_utils.Generated.read] both answer ["Generated"], [G.read] answers ["G"], and an
     unqualified [read] answers nothing -- which is what keeps a test's own local [read] from being
@@ -343,9 +335,9 @@ let qualifier_of path =
 
     What this does NOT reach is an alias in another FILE: this scan decides one source at a time, so
     a wrapper module that some other file defines around the reader would leave its callers
-    unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated],
-    IS the target -- and a scan of one file cannot see it; a shared helper of that shape would have
-    to be added to the seeds here. *)
+    unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated], IS
+    the target -- and a scan of one file cannot see it; a shared helper of that shape would have to
+    be added to the seeds here. *)
 let module_aliases ~target structure =
   let aliases = Hash_set.of_list (module String) [ target ] in
   let resolves path =
@@ -518,8 +510,7 @@ let text_test ~generated expr =
 
 (** The name a simple [let] binds, or [None] for a pattern this scan does not follow. Used for the
     parameter peel, where a position has to be exact. *)
-let bound_name pattern =
-  match pattern.ppat_desc with Ppat_var { txt; _ } -> Some txt | _ -> None
+let bound_name pattern = match pattern.ppat_desc with Ppat_var { txt; _ } -> Some txt | _ -> None
 
 (** Every variable a pattern binds, tuple and record patterns included. Used for taint, where
     [let values, src = run () in] must taint [src] -- a source reached through a tuple is a source.
@@ -539,13 +530,13 @@ let pattern_names pattern =
   !found
 
 (* Positional parameters, in order, stopping at the first one this scan does not follow: a labelled
-   or optional parameter, or a pattern that is not a plain name. Stopping keeps the positions
-   honest -- a call site is matched by argument POSITION, and a parameter skipped rather than
-   stopped at would shift every position after it. *)
+   or optional parameter, or a pattern that is not a plain name. Stopping keeps the positions honest
+   -- a call site is matched by argument POSITION, and a parameter skipped rather than stopped at
+   would shift every position after it. *)
 let peel_params expr =
   let rec go acc expr =
     match expr.pexp_desc with
-    | Pexp_function (params, _, body) ->
+    | Pexp_function (params, _, body) -> (
         let rec take = function
           | [] -> []
           | param :: rest -> (
@@ -557,7 +548,7 @@ let peel_params expr =
         let taken = take params in
         let acc = acc @ taken in
         let complete = List.length taken = List.length params in
-        (match body with
+        match body with
         | Pfunction_body inner when complete -> go acc inner
         | Pfunction_body inner -> (acc, inner)
         | Pfunction_cases _ -> (acc, expr))
@@ -632,16 +623,18 @@ type predicate = {
 
 (** Which of [params] a name inside [body] derives from, to a fixed point.
 
-    The haystack a predicate tests is not always a parameter spelled at the test: [let has sub s =
-    let body = strip s in String.is_substring body ~substring:sub] reaches it through a local
-    binding. Following that is what tells this predicate -- which pins -- apart from [let has s =
-    String.is_substring backend_name ~substring:s], which tests the backend's NAME and pins nothing.
-    A name deriving from exactly one parameter identifies it; from several, the predicate falls back
-    to the closing-over-a-tainted-name route. *)
+    The haystack a predicate tests is not always a parameter spelled at the test:
+    [let has sub s = let body = strip s in String.is_substring body ~substring:sub] reaches it
+    through a local binding. Following that is what tells this predicate -- which pins -- apart from
+    [let has s = String.is_substring backend_name ~substring:s], which tests the backend's NAME and
+    pins nothing. A name deriving from exactly one parameter identifies it; from several, the
+    predicate falls back to the closing-over-a-tainted-name route. *)
 let params_derived_in ~params body =
   let table = Hashtbl.create (module String) in
   let of_expr e =
-    List.fold (idents_in e) ~init:(Set.empty (module String)) ~f:(fun acc name ->
+    List.fold (idents_in e)
+      ~init:(Set.empty (module String))
+      ~f:(fun acc name ->
         let acc = if List.exists params ~f:(String.equal name) then Set.add acc name else acc in
         match Hashtbl.find table name with Some s -> Set.union acc s | None -> acc)
   in
@@ -662,10 +655,10 @@ let params_derived_in ~params body =
   done;
   of_expr
 
-(** Predicates whose literal argument IS a pinned fragment: the [let has s = String.is_substring src
-    ~substring:s] idiom and its variants -- one that takes the source as a parameter ([let src_has
-    src s = ...]), one that reaches it through a local binding, one that counts occurrences with
-    [~pattern].
+(** Predicates whose literal argument IS a pinned fragment: the
+    [let has s = String.is_substring src ~substring:s] idiom and its variants -- one that takes the
+    source as a parameter ([let src_has src s = ...]), one that reaches it through a local binding,
+    one that counts occurrences with [~pattern].
 
     Also returns the source ranges of the text arguments inside those definitions. Those sites test
     a PARAMETER, not a fragment, and reading them as pins would mark every file using the idiom as
@@ -680,9 +673,7 @@ let predicates ~generated ~tainted bindings =
             let index_of p =
               List.findi params ~f:(fun _ q -> String.equal p q) |> Option.map ~f:fst
             in
-            let closes_over_source =
-              List.exists (idents_in body) ~f:(fun i -> Set.mem tainted i)
-            in
+            let closes_over_source = List.exists (idents_in body) ~f:(fun i -> Set.mem tainted i) in
             let derived_params = params_derived_in ~params body in
             let result = ref None in
             let consider { text; tested; inherent } =
@@ -691,7 +682,8 @@ let predicates ~generated ~tainted bindings =
               in
               (* The fragment argument inside a predicate's own definition tests a PARAMETER, not a
                  fragment; reading it as a pin would mark every file using the idiom partial. Only
-                 that shape is consumed -- a literal the body hard-codes is left for the pin walk. *)
+                 that shape is consumed -- a literal the body hard-codes is left for the pin
+                 walk. *)
               Option.iter text_param ~f:(fun _ ->
                   consumed :=
                     (text.pexp_loc.loc_start.pos_cnum, text.pexp_loc.loc_end.pos_cnum) :: !consumed);
@@ -702,8 +694,7 @@ let predicates ~generated ~tainted bindings =
               let better candidate =
                 match !result with
                 | None -> true
-                | Some existing ->
-                    Option.is_none existing.text_at && Option.is_some candidate
+                | Some existing -> Option.is_none existing.text_at && Option.is_some candidate
               in
               if better (Option.bind text_param ~f:index_of) then
                 let source_param =
@@ -766,26 +757,27 @@ let rec pin_of_expr ~literals expr =
       match longident_of expr with
       | Some [ name ] when Map.mem literals name -> Literal (Map.find_exn literals name)
       | _ -> (
-      match expr.pexp_desc with
-      | Pexp_apply (callee, args) -> (
-          match longident_of callee with
-          | Some path when path_ends path ~name:"sprintf" || path_ends path ~name:"ksprintf" -> (
-              match List.filter_map (positional args) ~f:string_literal with
-              | fmt :: _ -> Format fmt
-              | [] -> Computed)
-          | Some path when path_ends path ~name:"^" -> (
-              let parts =
-                List.map (positional args) ~f:(fun a ->
-                    match pin_of_expr ~literals a with
-                    | Literal text -> Printf.sprintf "%S" text
-                    | Interpolated text -> text
-                    | Format _ | Computed -> "...")
-              in
-              let rendered = String.concat ~sep:" ^ " parts in
-              if String.is_substring rendered ~substring:"\"" then Interpolated rendered
-              else Computed)
-          | _ -> Computed)
-      | _ -> Computed))
+          match expr.pexp_desc with
+          | Pexp_apply (callee, args) -> (
+              match longident_of callee with
+              | Some path when path_ends path ~name:"sprintf" || path_ends path ~name:"ksprintf"
+                -> (
+                  match List.filter_map (positional args) ~f:string_literal with
+                  | fmt :: _ -> Format fmt
+                  | [] -> Computed)
+              | Some path when path_ends path ~name:"^" ->
+                  let parts =
+                    List.map (positional args) ~f:(fun a ->
+                        match pin_of_expr ~literals a with
+                        | Literal text -> Printf.sprintf "%S" text
+                        | Interpolated text -> text
+                        | Format _ | Computed -> "...")
+                  in
+                  let rendered = String.concat ~sep:" ^ " parts in
+                  if String.is_substring rendered ~substring:"\"" then Interpolated rendered
+                  else Computed
+              | _ -> Computed)
+          | _ -> Computed))
 
 (** Names bound directly to a string literal, for {!pin_of_expr} to resolve a fragment through.
     Simple bindings only: a name bound twice is dropped rather than guessed at. *)
@@ -835,8 +827,7 @@ let classify_source ~path ~contents =
                    calls ~aliases:generated p ~name) ->
             reads_generated := true
         | Some p
-          when List.exists direct_artifact_names ~f:(fun name ->
-                   calls ~aliases:utils p ~name) ->
+          when List.exists direct_artifact_names ~f:(fun name -> calls ~aliases:utils p ~name) ->
             reads_direct := true
         | Some p
           when List.exists emitter_names ~f:(fun name -> path_ends p ~name)
@@ -862,26 +853,22 @@ let classify_source ~path ~contents =
     in
     let pins = ref [] in
     let is_consumed (e : expression) =
-      List.mem consumed
-        (e.pexp_loc.loc_start.pos_cnum, e.pexp_loc.loc_end.pos_cnum)
+      List.mem consumed (e.pexp_loc.loc_start.pos_cnum, e.pexp_loc.loc_end.pos_cnum)
         ~equal:(fun (a, b) (c, d) -> a = c && b = d)
     in
     let literals = literal_bindings bindings in
-    let record text =
-      if not (is_consumed text) then pins := pin_of_expr ~literals text :: !pins
-    in
+    let record text = if not (is_consumed text) then pins := pin_of_expr ~literals text :: !pins in
     (* Generated source in the haystack, by any of the three routes -- a tainted name, an inline
        [Generated.read], an inline emitter render, an inline [build_files/] read. Naming only the
-       first two here left an assertion that renders inline
-       ([String.is_substring (render (LL.to_doc () llc)) ~substring:"-0.0"]) with its fragment
-       silently dropped: the FILE stayed in the census through the membership branches, so nothing
-       looked wrong, while grepping the inventory for the moved spelling missed the assertion
-       (Codex P2, round 3). The membership rules and the pin rules have to know the same routes. *)
+       first two here left an assertion that renders inline ([String.is_substring (render (LL.to_doc
+       () llc)) ~substring:"-0.0"]) with its fragment silently dropped: the FILE stayed in the
+       census through the membership branches, so nothing looked wrong, while grepping the inventory
+       for the moved spelling missed the assertion (Codex P2, round 3). The membership rules and the
+       pin rules have to know the same routes. *)
     let mentions_tainted e =
       List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i)
       || mentions_generated_read ~generated e
-      || renders_generated_text e
-      || reads_artifacts_directly ~utils e
+      || renders_generated_text e || reads_artifacts_directly ~utils e
     in
     let iterator =
       object
@@ -909,9 +896,7 @@ let classify_source ~path ~contents =
                                 | Some a -> mentions_tainted a
                                 | None -> false)
                           in
-                          match
-                            (source_ok, Option.bind predicate.text_at ~f:(List.nth args))
-                          with
+                          match (source_ok, Option.bind predicate.text_at ~f:(List.nth args)) with
                           | true, Some text -> record text
                           | _ -> ()))
                   | _ -> ())

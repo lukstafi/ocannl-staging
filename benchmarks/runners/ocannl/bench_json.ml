@@ -4,9 +4,9 @@
    whole library — so that a test can feed the line fabricated values: a diverged loss vector, a
    time that was never measured, a backend diagnostic full of control characters. The line is one
    ~300-character format with optional pre-formatted fragments and a nested object, and
-   [orchestrate.py] reads a cell's result by [json.loads]ing it; before this module nothing
-   anywhere parsed it, and a cell whose line does not parse is reported as a broken runner after
-   the whole measurement has been paid for. *)
+   [orchestrate.py] reads a cell's result by [json.loads]ing it; before this module nothing anywhere
+   parsed it, and a cell whose line does not parse is reported as a broken runner after the whole
+   measurement has been paid for. *)
 
 open Base
 
@@ -15,8 +15,8 @@ open Base
     Every non-finite float in this file becomes [null] rather than OCaml's [nan] / [inf] / [-inf],
     none of which JSON has: a diverged training run is exactly the run whose evidence the result
     line exists to carry, so it must not be the run whose result line fails to parse. The consumer
-    side of the same rule is [orchestrate.py]'s DIVERGED verdict — [null] in a loss vector means
-    the cell ran and diverged, which is a parity failure naming its cause, not a missing cell. *)
+    side of the same rule is [orchestrate.py]'s DIVERGED verdict — [null] in a loss vector means the
+    cell ran and diverged, which is a parity failure naming its cause, not a missing cell. *)
 let num ?(prec = 6) v = if Float.is_finite v then Printf.sprintf "%.*g" prec v else "null"
 
 (** As {!num}, with a fixed number of decimals ([%f] rather than [%g]). *)
@@ -37,8 +37,8 @@ let string s =
     | c when Char.to_int c < 0x20 || Char.to_int c = 0x7f -> ' '
     | c -> c)
 
-(** One arm of the [tune] object: the crowned candidate of one placement arm, its search
-    provenance, and how its best timed tensorized candidate compared (gh-ocannl-546). [best_ms] and
+(** One arm of the [tune] object: the crowned candidate of one placement arm, its search provenance,
+    and how its best timed tensorized candidate compared (gh-ocannl-546). [best_ms] and
     [mma_best_ms] are [infinity] when the arm timed nothing at all, which {!num} renders [null].
 
     [state] names what the arm did about searching — the {!Autotune.outcome_name} of its outcome
@@ -55,15 +55,14 @@ let string s =
     was no crowned candidate to consult, so an arm that consulted no census cannot read as
     tensorized. [mma_statements] is the denominator [mma_scalar_fallbacks] is a count out of. An arm
     with [tensorized: true] and a [tensorization] other than ["tensorized"] measured scalar code
-    under a tensorized label; [orchestrate.py] marks that cell rather than letting the number
-    stand. *)
+    under a tensorized label; [orchestrate.py] marks that cell rather than letting the number stand.
+*)
 let tune_arm ~name ~state ~searched ~cache_hit ~best_ms ~best_label ~tensorized ~tensorization
     ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms ~terminal_failure =
   Printf.sprintf
     {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
     (string name) (string state) searched cache_hit (num best_ms) (string best_label) tensorized
-    (Option.value_map tensorization ~default:"null" ~f:(fun t ->
-         Printf.sprintf {|"%s"|} (string t)))
+    (Option.value_map tensorization ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
     mma_statements mma_scalar_fallbacks mma_seeded mma_timed (num mma_best_ms)
     (Option.value_map terminal_failure ~default:"null" ~f:(fun detail ->
          Printf.sprintf {|"%s"|} (string detail)))
@@ -76,9 +75,9 @@ let tune_arm ~name ~state ~searched ~cache_hit ~best_ms ~best_label ~tensorized 
     being zero.
 
     [shipped_mma] is the census of the routine this cell's step times actually ran, as
-    [{"tensorization": …, "statements": N, "scalar_fallbacks": N}] (gh-ocannl-626). It is a
-    separate field from the arms', and authoritative over them, because a crowned ARM CANDIDATE is
-    not always the shipped ARTIFACT: a gh-555 flip refinement that beats the A/B winner ships under
+    [{"tensorization": …, "statements": N, "scalar_fallbacks": N}] (gh-ocannl-626). It is a separate
+    field from the arms', and authoritative over them, because a crowned ARM CANDIDATE is not always
+    the shipped ARTIFACT: a gh-555 flip refinement that beats the A/B winner ships under
     [shipped: "flip"] and is deliberately not an arm at all, and on the [timing_ctx] path
     {!Autotune.tune} recompiles the winner in the production context and falls back to the untuned
     default when that replay is rejected or lands unparallelized. In both cases the arm describes a
@@ -99,8 +98,8 @@ let tune_object ~shipped ~searches ~replays ~no_searches ~shipped_mma ~arms =
 (** The result line [orchestrate.py] parses, as a string without its trailing newline.
 
     [tune] is the already-built [tune] object (see [Bench_harness.tune_json]) or [None] for an
-    untuned cell; [tokens_per_step] is present only for workloads that have one. The percentiles
-    and [queued_ms] are milliseconds. *)
+    untuned cell; [tokens_per_step] is present only for workloads that have one. The percentiles and
+    [queued_ms] are milliseconds. *)
 let result_line ~backend ~variant ~precision ~workload ~compile_s ~searched ?tokens_per_step ?tune
     ~p10 ~p50 ~p90 ~queued_ms ~timed_steps ~losses () =
   let tokens_field =

@@ -26,7 +26,6 @@ module SC = Ir.Schedule_cache
 module SO = Ir.Schedule_outcome
 
 let p = Verdict.p
-
 let p_all = Verdict.p_all
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a

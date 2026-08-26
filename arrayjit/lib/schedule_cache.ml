@@ -582,14 +582,13 @@ let rec ensure_dir dir =
     try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ())
 
 let cache_file ~dir ~key = Stdlib.Filename.concat dir (sanitize key ^ ".sexp")
-
 let next_tmp_id : Utils.atomic_int = Atomic.make 0
 
 let store ~dir ~key entry =
   ensure_dir dir;
   let file = cache_file ~dir ~key in
-  (* A fixed [file.tmp] lets concurrent writers overwrite or rename one another's staging file.
-     Give each attempt its own artifact, and remove it on every failure path: the committed entry is
+  (* A fixed [file.tmp] lets concurrent writers overwrite or rename one another's staging file. Give
+     each attempt its own artifact, and remove it on every failure path: the committed entry is
      either the old complete file or the new complete file, never an intention left in [.tmp]. *)
   let tmp =
     Printf.sprintf "%s.tmp.%d.%d" file (Unix.getpid ()) (Atomic.fetch_and_add next_tmp_id 1)

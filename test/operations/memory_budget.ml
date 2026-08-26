@@ -40,7 +40,6 @@ module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
-
 let p_all = Verdict.p_all
 
 (* The gate's off position must really be off. An environment setting outranks the copied test
@@ -114,8 +113,7 @@ let () =
     ]
   in
   p_all "ratio: agrees with exact division on signs, ties and magnitudes" cases
-    ~f:(fun (ra, ca, rb, cb) ->
-         Context.compare_relief_ratio ra ca rb cb = oracle ra ca rb cb);
+    ~f:(fun (ra, ca, rb, cb) -> Context.compare_relief_ratio ra ca rb cb = oracle ra ca rb cb);
   (* The reason it is not a cross-multiplication: these products overflow, the ratios do not. *)
   let big = Int.max_value / 3 in
   p "ratio: survives operands whose cross-products would overflow"
@@ -209,8 +207,8 @@ let baseline, minimum, mid =
   p "minimize: the reported reliefs sum to the footprint moved"
     (List.fold min_plan.bp_flips ~init:0 ~f:(fun a (_, relief, _) -> a + relief)
     = baseline - minimum);
-  p_all "minimize: no flip reports negative relief" min_plan.bp_flips
-    ~f:(fun (_, relief, _) -> relief >= 0);
+  p_all "minimize: no flip reports negative relief" min_plan.bp_flips ~f:(fun (_, relief, _) ->
+      relief >= 0);
   (* Strictly between the two ends, so it is reachable but not free. *)
   (baseline, minimum, (baseline + minimum) / 2)
 

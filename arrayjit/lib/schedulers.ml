@@ -252,15 +252,15 @@ module Multidev (Backend : For_add_scheduler) :
     Sexp.List
       (Sexp.Atom (name ^ "_devices")
       :: List.init (num_devices ()) ~f:(fun ordinal ->
-             Sexp.message "device"
-               [
-                 ("device_name", Sexp.Atom "CPU");
-                 ("device_ordinal", [%sexp_of: int] ordinal);
-                 (* The device's own scheduling threads: one worker domain per ordinal. Not the
-                    kernel-level width -- Grid loops render onto the process-global worker pool,
-                    which is a backend fact and not a per-device one. *)
-                 ("threads", [%sexp_of: int] 1);
-               ]))
+          Sexp.message "device"
+            [
+              ("device_name", Sexp.Atom "CPU");
+              ("device_ordinal", [%sexp_of: int] ordinal);
+              (* The device's own scheduling threads: one worker domain per ordinal. Not the
+                 kernel-level width -- Grid loops render onto the process-global worker pool, which
+                 is a backend fact and not a per-device one. *)
+              ("threads", [%sexp_of: int] 1);
+            ]))
 
   let hardware_limits () = cpu_mma_limits ()
   let get_global_debug_info () = Sexp.message "global_debug" []
@@ -306,9 +306,9 @@ module Sync (Backend : For_add_scheduler) = struct
   let is_idle _device = true
   let await _device = ()
 
-  (* The single CPU device, [Sexp.message]-shaped like every other backend's entry
-     (gh-ocannl-710): the pairs used to sit one nesting level deeper, wrapped in a list of their
-     own. See [Backend_intf.parse_static_properties] for the contract. *)
+  (* The single CPU device, [Sexp.message]-shaped like every other backend's entry (gh-ocannl-710):
+     the pairs used to sit one nesting level deeper, wrapped in a list of their own. See
+     [Backend_intf.parse_static_properties] for the contract. *)
   let static_properties () =
     Sexp.List
       [
@@ -317,8 +317,8 @@ module Sync (Backend : For_add_scheduler) = struct
           [
             ("device_name", Sexp.Atom "CPU");
             ("device_ordinal", [%sexp_of: int] 0);
-            (* Tasks run synchronously on the calling thread; see the [Multidev] note on why this
-               is not the kernel-level width. *)
+            (* Tasks run synchronously on the calling thread; see the [Multidev] note on why this is
+               not the kernel-level width. *)
             ("threads", [%sexp_of: int] 1);
           ];
       ]

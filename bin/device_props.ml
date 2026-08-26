@@ -18,10 +18,10 @@
    where compilation is what is broken.
 
    Output is one [path = value] line per fact, so it greps, diffs between machines, and pastes into
-   an issue. The lines that matter for the launch gates are
-   [limits.max_threads_per_workgroup] (the workgroup's thread PRODUCT),
-   [limits.max_workgroup_dims] (its per-dimension caps -- CUDA's third entry is 64, not 1024) and
-   [limits.max_grid_yz], each beside the raw attribute it was derived from under [static.].
+   an issue. The lines that matter for the launch gates are [limits.max_threads_per_workgroup] (the
+   workgroup's thread PRODUCT), [limits.max_workgroup_dims] (its per-dimension caps -- CUDA's third
+   entry is 64, not 1024) and [limits.max_grid_yz], each beside the raw attribute it was derived
+   from under [static.].
 
    Usage: build it and run the executable directly rather than through [dune exec] -- the
    configuration search walks up from the invocation cwd, so [dune exec] finds no [ocannl_config]
@@ -29,11 +29,8 @@
    [Context.auto] silently walks metal -> cuda -> hip -> cc and would report a different device than
    the one being asked about:
 
-   {v
-     dune build bin/device_props.exe
-     _build/default/bin/device_props.exe --ocannl_backend=metal
-     OCANNL_BACKEND=cuda _build/default/bin/device_props.exe
-   v} *)
+   {v dune build bin/device_props.exe _build/default/bin/device_props.exe --ocannl_backend=metal
+   OCANNL_BACKEND=cuda _build/default/bin/device_props.exe v} *)
 
 open Base
 
@@ -58,8 +55,7 @@ let rec emit prefix (sexp : Sexp.t) =
   | Sexp.List items when List.for_all items ~f:(fun i -> Option.is_some (atom i)) ->
       (* A tuple or array of scalars: one line, space-separated, so [(1024 1024 64)] reads as the
          one fact it is. *)
-      p "%s = %s\n" prefix
-        (String.concat ~sep:" " (List.filter_map items ~f:atom))
+      p "%s = %s\n" prefix (String.concat ~sep:" " (List.filter_map items ~f:atom))
   | Sexp.List (Sexp.Atom k :: rest)
     when (not (List.is_empty rest))
          && List.for_all rest ~f:(function Sexp.List _ -> true | _ -> false) ->
@@ -75,10 +71,11 @@ let rec emit prefix (sexp : Sexp.t) =
             else Printf.sprintf "%s.%s[%d]" prefix (key item) i
           in
           emit path (pair_value item))
-  | Sexp.List items -> List.iteri items ~f:(fun i item -> emit (Printf.sprintf "%s[%d]" prefix i) item)
+  | Sexp.List items ->
+      List.iteri items ~f:(fun i item -> emit (Printf.sprintf "%s[%d]" prefix i) item)
 
-(* The per-device entries are read through [Backend_intf.parse_static_properties], the single
-   reader of the [static_properties] contract (gh-ocannl-710), so this tool and
+(* The per-device entries are read through [Backend_intf.parse_static_properties], the single reader
+   of the [static_properties] contract (gh-ocannl-710), so this tool and
    [test/operations/static_properties_contract.ml] cannot drift apart about what a device entry is.
    Indexing the entries explicitly, rather than letting [emit] infer structure, keeps a one-device
    machine's paths identical to a four-device one's -- the whole point of a format meant to be
@@ -104,5 +101,4 @@ let () =
   let ctx = Context.auto () in
   p "backend = %s\n" (Context.backend_name ctx);
   emit_static (Context.static_properties ctx);
-  emit "limits"
-    (Ir.Backend_intf.sexp_of_hardware_limits (Context.hardware_limits ctx))
+  emit "limits" (Ir.Backend_intf.sexp_of_hardware_limits (Context.hardware_limits ctx))

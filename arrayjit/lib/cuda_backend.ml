@@ -600,9 +600,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        narrow reduction's width does not depend on whether a schedule tensorized it. bf16 has no
        accumulator format on NVIDIA hardware — the uniform-bf16 [mma.sync] arm holds f32 per-lane
        registers across the whole [k] extent and narrows once at the [d] boundary — so serial bf16
-       accumulation resides in f32 and narrows once per nest. fp8 likewise accumulates f32-only
-       (and its serial arithmetic already bridges through float per operator); f16 accumulates
-       natively at f16 in its seeded wmma triple and stays at storage width.
+       accumulation resides in f32 and narrows once per nest. fp8 likewise accumulates f32-only (and
+       its serial arithmetic already bridges through float per operator); f16 accumulates natively
+       at f16 in its seeded wmma triple and stays at storage width.
 
        The bf16 residency is STRUCTURAL — not gated on [narrow_compute_f32] — for the same reason
        Metal's fp8 one is: the seeded uniform-bf16 [mma.sync] arm accumulates f32 in hardware
@@ -610,13 +610,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        schedule-dependent width this hook exists to remove (Codex P1 round 3 on PR #396). fp8 DOES
        honor the policy: no backend seeds an fp8-destination mma triple, so per-step fp8 semantics
        under policy-off are schedule-uniform. Compute precision stays the identity either way, so
-       pointwise narrow arithmetic OUTSIDE recognized accumulations remains native.
-       Within one, the whole update — contribution included — renders at the accumulator's
-       residency, deliberately (Codex P1 on PR #396): operand widenings are exact, a bf16xbf16
-       product is exact in f32 — the same full-precision-product-into-f32 semantics the tensor
-       cores apply per element — and the FMA form stays one [fmaf]. Rounding the contribution to
-       bf16 first would mint a third numerics matching neither the mma legs nor the CPU serial
-       rendering, whose f32 chain accum_width.ml pins bitwise across cc and CUDA. *)
+       pointwise narrow arithmetic OUTSIDE recognized accumulations remains native. Within one, the
+       whole update — contribution included — renders at the accumulator's residency, deliberately
+       (Codex P1 on PR #396): operand widenings are exact, a bf16xbf16 product is exact in f32 — the
+       same full-precision-product-into-f32 semantics the tensor cores apply per element — and the
+       FMA form stays one [fmaf]. Rounding the contribution to bf16 first would mint a third
+       numerics matching neither the mma legs nor the CPU serial rendering, whose f32 chain
+       accum_width.ml pins bitwise across cc and CUDA. *)
     let accum_prec prec =
       match prec with
       | Ops.Bfloat16_prec _ -> Ops.single
@@ -2313,14 +2313,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ("max_threads_per_block", [%sexp_of: int] attributes.max_threads_per_block);
               (* The launch-dimension limits the schedule layer gates against, mirroring the HIP
                  dump: [max_block_dim] bounds a workgroup per-dimension beyond the
-                 [max_threads_per_block] product (gh-ocannl-679), and [max_grid_dim] is the
-                 device's reading of what [hardware_limits.max_grid_yz] asserts architecturally.
-                 Surfaced so a run on hardware can read back what the gates compare against --
+                 [max_threads_per_block] product (gh-ocannl-679), and [max_grid_dim] is the device's
+                 reading of what [hardware_limits.max_grid_yz] asserts architecturally. Surfaced so
+                 a run on hardware can read back what the gates compare against --
                  [bin/device_props.ml] prints exactly this (gh-ocannl-684). *)
               ( "max_block_dim",
                 [%sexp_of: int * int * int]
-                  (attributes.max_block_dim_x, attributes.max_block_dim_y, attributes.max_block_dim_z)
-              );
+                  ( attributes.max_block_dim_x,
+                    attributes.max_block_dim_y,
+                    attributes.max_block_dim_z ) );
               ( "max_grid_dim",
                 [%sexp_of: int * int * int]
                   (attributes.max_grid_dim_x, attributes.max_grid_dim_y, attributes.max_grid_dim_z)
@@ -2350,21 +2351,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
            (* Per-dimension workgroup caps (gh-ocannl-679). Queried rather than asserted from the
-              Compute Capability tables (where they are (1024, 1024, 64) from cc 2.0 up) because
-              the driver answers per device and the fold below shows the query costs nothing extra.
-              The [.z] entry is the point of the field: at 64 it sits 16x below
-              [max_threads_per_block], so a 2 x 2 x 128 workgroup has a legal 512-thread product
-              and is still an invalid launch configuration. *)
+              Compute Capability tables (where they are (1024, 1024, 64) from cc 2.0 up) because the
+              driver answers per device and the fold below shows the query costs nothing extra. The
+              [.z] entry is the point of the field: at 64 it sits 16x below [max_threads_per_block],
+              so a 2 x 2 x 128 workgroup has a legal 512-thread product and is still an invalid
+              launch configuration. *)
            max_workgroup_dims =
              (match
                 ( min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_x),
                   min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_y),
                   min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_z) )
               with
-              | Some x, Some y, Some z -> Some (x, y, z)
-              (* No devices: [min_over] is [None] on all three, and an empty machine advertises no
-                 cap rather than a spurious one. *)
-              | _ -> None);
+             | Some x, Some y, Some z -> Some (x, y, z)
+             (* No devices: [min_over] is [None] on all three, and an empty machine advertises no
+                cap rather than a spurious one. *)
+             | _ -> None);
            (* CUDA's gridDim.y and gridDim.z cap is 65535 on every architecture (the Compute
               Capability tables), unlike the per-device limits queried above — a constant, not an
               attribute. gridDim.x is 2^31-1 and needs no gate. *)

@@ -44,9 +44,7 @@ let nonzero name (a : float array) =
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-
-let on_gpu =
-  Sched.backend_is_gpu backend_name
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 
@@ -326,8 +324,8 @@ let () =
       (tag ^ " bf16: the backend's advertised tile is seeded")
       ((not has_uniform_bf16_tile) || not (List.is_empty seeds));
     (* One set of claims per flavor. A flavor the site does not seed contributes no sampled
-       candidate and its claims stand vacuously, which is what keeps the golden backend-uniform;
-       a flavor that IS sampled has to compile, run, agree with the serial twin, and reach the
+       candidate and its claims stand vacuously, which is what keeps the golden backend-uniform; a
+       flavor that IS sampled has to compile, run, agree with the serial twin, and reach the
        backend's mma hook on its own. *)
     let flavor_claims ~label ~grid =
       let n_sampled = if grid then sampled else List.length cands - sampled in

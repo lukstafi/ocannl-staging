@@ -16,12 +16,11 @@
    Two requirements, over every OCaml source in the repository:
 
    - every argument that names a cache directory -- an `Autotune.tune ~cache_dir`, and the `~dir` of
-     a direct `Schedule_cache` operation, which creates the directory just as surely -- resolves to
-     a string literal the glob covers, to the empty string, which turns the cache off, or to a
-     parameter forwarded from a call site scanned in its own right. A spelling that resolves to none
-     of those is reported rather than assumed harmless;
-   - and the root `.gitignore` still carries the glob, so that the first requirement is not being
-     enforced in support of a rule that has been edited away.
+   a direct `Schedule_cache` operation, which creates the directory just as surely -- resolves to a
+   string literal the glob covers, to the empty string, which turns the cache off, or to a parameter
+   forwarded from a call site scanned in its own right. A spelling that resolves to none of those is
+   reported rather than assumed harmless; - and the root `.gitignore` still carries the glob, so
+   that the first requirement is not being enforced in support of a rule that has been edited away.
 
    "Covered by the glob" is a single directory name carrying the prefix, not merely a string
    starting with it: `Schedule_cache.ensure_dir` walks the path it is handed, so
@@ -111,8 +110,8 @@ let () =
   if not (Scan.declares_required_glob ignore_content) then
     fail
       (Printf.sprintf
-         "the root .gitignore no longer carries `%s` -- the prefix this check enforces buys nothing \
-          without it, and covering the current names with bespoke entries instead is the \
+         "the root .gitignore no longer carries `%s` -- the prefix this check enforces buys \
+          nothing without it, and covering the current names with bespoke entries instead is the \
           name-by-name list this replaced"
          Scan.required_glob);
   (* A pattern that bears on a root-level directory and that the matcher cannot read: reported,
@@ -182,19 +181,21 @@ let () =
                  Scan.default_config_key name Scan.required_glob Scan.tune_label)));
   (* The prefix rule says the glob would cover these names; whether git ACTUALLY ignores them is a
      separate question, and the one that matters. gitignore is last-match-wins, so a negation after
-     the glob takes coverage away while the glob line sits there looking intact (Codex P2, round
-     2). Asked per name, against the file's patterns in order. *)
-  List.iter (List.dedup_and_sort (defaults @ !names) ~compare:String.compare) ~f:(fun name ->
+     the glob takes coverage away while the glob line sits there looking intact (Codex P2, round 2).
+     Asked per name, against the file's patterns in order. *)
+  List.iter
+    (List.dedup_and_sort (defaults @ !names) ~compare:String.compare)
+    ~f:(fun name ->
       if not (Scan.effectively_ignored patterns name) then
         fail
           (Printf.sprintf
              "the sources name the cache directory %s, and the root .gitignore does not ignore it \
-              -- some pattern after `%s` un-ignores it, so the directory would be left untracked in \
-              the repository root"
+              -- some pattern after `%s` un-ignores it, so the directory would be left untracked \
+              in the repository root"
              name Scan.required_glob));
   (* The sources that name one, not the names themselves: what the check establishes is a property
-     every name has, so listing them would only make the golden churn on each new tuning test --
-     the maintenance burden this check exists to remove. *)
+     every name has, so listing them would only make the golden churn on each new tuning test -- the
+     maintenance burden this check exists to remove. *)
   let naming = List.dedup_and_sort !naming ~compare:String.compare in
   printf "Sources naming a schedule cache directory, all with the `%s` prefix that `%s` covers:\n"
     Scan.required_prefix Scan.required_glob;

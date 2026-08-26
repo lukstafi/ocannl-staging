@@ -109,8 +109,8 @@ let () =
       Autotune.model_default ctx step_comp bindings
     else Context.compile ctx step_comp bindings
   in
-  (* What the timed artifact emitted, off the routine itself (gh-ocannl-626): a flip refinement or
-     a timing_ctx replay fallback ships something no arm report describes. *)
+  (* What the timed artifact emitted, off the routine itself (gh-ocannl-626): a flip refinement or a
+     timing_ctx replay fallback ships something no arm report describes. *)
   H.collect_shipped arms (H.Plain routine);
   let compile_s = Unix.gettimeofday () -. t0 in
   (* Autotune's timing context re-ran param inits on [ctx]; restore fixture weights. *)

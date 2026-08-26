@@ -1,10 +1,12 @@
 (* The stand-in for the CUDA arm on a box without cudajit: the soak still builds and still runs its
    other arms, and asking for this one says so rather than failing to link (gh-ocannl-657). *)
 
-type bytes_buf = (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
+type bytes_buf =
+  (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
 
 let name = "cuda"
 let vendor_type = "__nv_fp8_e5m2"
+
 type arch_policy = [ `Device | `Backend ]
 
 let set_arch_policy (_ : arch_policy) = ()
@@ -12,7 +14,6 @@ let set_arch_policy (_ : arch_policy) = ()
 (* The real arm's spellings, so that a run on a box without the library reports the same menu rather
    than an empty one -- every entry point below fails with the same reason anyway. *)
 let spellings () = [ `Raw ]
-
 let spelling_label (_ : [ `Raw | `Guarded ]) = "unavailable"
 let probe () = Error "not built: the cuda arm needs the cudajit library"
 let unavailable () = failwith "fp8_soak: the cuda arm needs the cudajit library"

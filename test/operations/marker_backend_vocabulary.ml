@@ -1,11 +1,11 @@
 (* The one relationship the dune-marker grammar rests on and nothing used to state (gh-ocannl-689).
 
    [Dune_stanza_scan.marker_backends] is the closed vocabulary of the [; ocannl-backend: <word> --
-   <reason>] stanza marker, and its closedness is load-bearing: it is what makes
-   [; ocannl-backend: metl -- ...] fail instead of reading as a truthful exemption. But the list is
-   written out as text, deliberately -- the scanning tests link [arrayjit.utils] and the source
-   scanners, and dragging the backend closure into a check that reads dune files would be a bad
-   trade -- so nothing in the scanner relates it to the backends OCANNL actually has.
+   <reason>] stanza marker, and its closedness is load-bearing: it is what makes [; ocannl-backend:
+   metl -- ...] fail instead of reading as a truthful exemption. But the list is written out as
+   text, deliberately -- the scanning tests link [arrayjit.utils] and the source scanners, and
+   dragging the backend closure into a check that reads dune files would be a bad trade -- so
+   nothing in the scanner relates it to the backends OCANNL actually has.
 
    Both drifts are silent, and the one that matters is not the one it looks like. Remove or rename a
    backend and markers naming the dead one keep passing. Add one, and the CORRECT marker for it is
@@ -15,7 +15,8 @@
 
    This test is where the two lists meet, and it exists as its own executable because that is the
    whole cost being managed: it links the backend closure so that no scanning test has to. It starts
-   no context, opens no device and compiles nothing -- [Backends.all_of_backend] is a derived constant.
+   no context, opens no device and compiles nothing -- [Backends.all_of_backend] is a derived
+   constant.
 
    It has since become the place for every relationship that needs the closure, for the same reason:
    the second one below relates the backends to [Ir.Schedule]'s CPU/GPU predicates. *)

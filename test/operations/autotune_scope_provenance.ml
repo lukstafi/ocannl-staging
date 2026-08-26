@@ -17,8 +17,8 @@
    is what the first attempt here did and what PR #424's review round 2 caught.
 
    [Low_level.scope_mint] is the fact that separates them. The probe is a controlled pair: ONE
-   program shape — [out[i] = scope{ acc := out[i]; for k: acc := acc + x[i,k] }] — built twice,
-   the two copies differing in nothing but the scope's [mint] field. Both copies' [k] must keep the
+   program shape — [out[i] = scope{ acc := out[i]; for k: acc := acc + x[i,k] }] — built twice, the
+   two copies differing in nothing but the scope's [mint] field. Both copies' [k] must keep the
    vectorize retype; only the schedule-minted copy's [k] may draw Splits, Swaps and Unrolls. The
    control that makes the negative half discriminating: [k] is registry-nameable in the inlined copy
    too, so what keeps those categories away from it is the provenance decision and not an
@@ -54,8 +54,7 @@ let () =
       (Ll_test.loop_n k nk
          (LL.Set_local
             ( acc,
-              Ll_test.add (LL.Get_local acc)
-                (Ll_test.get x [| Ll_test.iter i; Ll_test.iter k |]) )))
+              Ll_test.add (LL.Get_local acc) (Ll_test.get x [| Ll_test.iter i; Ll_test.iter k |]) )))
   in
   (* The one variable of this experiment. *)
   let program mint =
@@ -93,9 +92,7 @@ let () =
     | _ -> false
   in
   let count reg menu sym =
-    match SC.resolve reg sym with
-    | None -> 0
-    | Some rf -> List.count menu ~f:(targets rf)
+    match SC.resolve reg sym with None -> 0 | Some rf -> List.count menu ~f:(targets rf)
   in
   (* The control: the inlined copy's inner binder IS nameable by a persisted schedule, so its
      absence from the menu is the provenance decision and nothing else. *)
@@ -121,11 +118,11 @@ let () =
     (count reg_mint menu_mint i = count reg_inline menu_inline i && count reg_mint menu_mint i > 0);
   p "the inlined copy's menu is the schedule mint's minus exactly its scope-nested reshaping part"
     (List.length menu_inline + reshaping_of reg_mint menu_mint k = List.length menu_mint);
-  (* The retype stays on the loop a renderer can serve. [C_syntax]'s elementwise vectorizer bails
-     on a body holding a [Local_scope], and an accumulating bailout falls back to a plain serial
-     loop, so a retype of [i] would render like the baseline whoever minted the scope below it;
-     [try_vectorize_reduce] serves [k]'s [Set_local] accumulation in both copies. Hence: same
-     answer under either mint, and it is the inner loop. *)
+  (* The retype stays on the loop a renderer can serve. [C_syntax]'s elementwise vectorizer bails on
+     a body holding a [Local_scope], and an accumulating bailout falls back to a plain serial loop,
+     so a retype of [i] would render like the baseline whoever minted the scope below it;
+     [try_vectorize_reduce] serves [k]'s [Set_local] accumulation in both copies. Hence: same answer
+     under either mint, and it is the inner loop. *)
   let vectorizes reg menu sym =
     match SC.resolve reg sym with
     | None -> 0

@@ -65,11 +65,12 @@ and ('l, 'a) tree =
           re-parses a display string; [Autotune.Family_decision] is the matmul family's such type,
           and its [to_label] with {!render_path} is the rendering). [level] names the node for
           display and grouping only — the datum is the identity, so renaming a level is a rendering
-          change and cannot change what a path means. A [Choice] whose children are all [Refuted]/[Excluded] is an infeasible node
-          ({!leaves} is empty). Levels appear in {e emission order} (the order candidates reach
-          timing), not necessarily dependency order. Verdicts are decided when the parent is
-          constructed — fathoming needs them without expansion — while feasible children's subtrees
-          stay lazy: expanding one is a decision, not a side effect of construction. *)
+          change and cannot change what a path means. A [Choice] whose children are all
+          [Refuted]/[Excluded] is an infeasible node ({!leaves} is empty). Levels appear in
+          {e emission order} (the order candidates reach timing), not necessarily dependency order.
+          Verdicts are decided when the parent is constructed — fathoming needs them without
+          expansion — while feasible children's subtrees stay lazy: expanding one is a decision, not
+          a side effect of construction. *)
 
 val leaves : ('l, 'a) tree -> 'a list
 (** All completions of [Child] and [Unknown] branches, in tree traversal order — the order the flat
@@ -128,9 +129,9 @@ val search :
     is at or above the threshold is fathomed — equality fathoms because displacement needs strict
     improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s): a bound that
     can exceed a completion's true cost prunes true winners. [path] is the committed
-    [(level, decision)] vector down to and including the judged child — the partial vector the subtree
-    stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose floor
-    depends on the commitments (the placement levels, where {!Cost_model.completion_floor}'s
+    [(level, decision)] vector down to and including the judged child — the partial vector the
+    subtree stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose
+    floor depends on the commitments (the placement levels, where {!Cost_model.completion_floor}'s
     [open_placement] narrows as [Pl_materialize] commitments accumulate) can price the exact node
     being judged; a commitment-invariant bound (the schedule-invariant family floor) ignores it.
 

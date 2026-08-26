@@ -204,8 +204,7 @@ let () =
                  executables = _;
                  subdir = _;
                  cwd = _;
-               }
-               as site)
+               } as site)
             ->
             let key = directory_of site ^ ":" ^ name in
             (* Declaring the config the process will actually read: the nearest one on its search
@@ -314,8 +313,10 @@ let () =
         List.filter_map described ~f:(fun (site, kind, _, _) ->
             match kind with Scan.Test -> Some (effective site) | _ -> None)
       in
-      let tally_of = List.fold ~init:(Map.empty (module String)) ~f:(fun counts key ->
-          Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
+      let tally_of =
+        List.fold
+          ~init:(Map.empty (module String))
+          ~f:(fun counts key -> Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
       in
       let placed_test_cwds = tally_of placed_tests in
       Map.iteri (tally_of test_floor) ~f:(fun ~key:cwd ~data:in_text ->
@@ -370,9 +371,9 @@ let () =
             Int.incr floor_holes;
             fail
               (Printf.sprintf
-                 "%s: the raw text runs %d bare %s under `(setenv PATH ...)`%s, and the scan placed \
-                  only %d it refuses to name for that reason -- it is reading the file with a hole \
-                  in it"
+                 "%s: the raw text runs %d bare %s under `(setenv PATH ...)`%s, and the scan \
+                  placed only %d it refuses to name for that reason -- it is reading the file with \
+                  a hole in it"
                  dune_file in_text
                  (if in_text = 1 then "command" else "commands")
                  (if String.is_empty dir then "" else " in " ^ dir)
@@ -383,9 +384,12 @@ let () =
          for all six, and dropping the directory would do the same to one rule running an executable
          under two `chdir`s, whose two sites resolve two different configs (Codex P2, rounds 2 and
          3). Read from the site's structured [executables] rather than from its display name, which
-         joins several with ", " and so cannot be taken apart again where a path contains a comma. *)
+         joins several with ", " and so cannot be taken apart again where a path contains a
+         comma. *)
       let occurrences pairs =
-        List.fold pairs ~init:(Map.empty (module String)) ~f:(fun counts (cwd, exe) ->
+        List.fold pairs
+          ~init:(Map.empty (module String))
+          ~f:(fun counts (cwd, exe) ->
             let key = cwd ^ "\000" ^ exe in
             Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
       in
@@ -402,8 +406,8 @@ let () =
             let cwd, exe = String.lsplit2_exn key ~on:'\000' in
             fail
               (Printf.sprintf
-                 "%s: the raw text runs `%s`%s in %d %s, and the scan placed it in only %d -- it is \
-                  reading the file with a hole in it"
+                 "%s: the raw text runs `%s`%s in %d %s, and the scan placed it in only %d -- it \
+                  is reading the file with a hole in it"
                  dune_file exe
                  (if String.is_empty cwd then "" else " in " ^ cwd)
                  in_text
@@ -438,8 +442,8 @@ let () =
           "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
            (%d named in the text), %d exempt"
           dune_file (tally Scan.Test) (List.length test_floor) (tally Scan.Inline_tests)
-          (List.length inline_floor)
-          (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
+          (List.length inline_floor) (tally Scan.Runs_executable) (List.length run_floor)
+          (List.length exempted)
         :: !inventory);
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used
@@ -466,7 +470,8 @@ let () =
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
   (* Not a golden line: stderr is where a number that moves with every added test can be read
      without being diffed (gh-ocannl-665). A `(test)` stanza diffs stdout only. *)
-  eprintf "Stanzas that run a test executable, by dune file (not diffed -- see gh-ocannl-665):\n%s\n"
+  eprintf
+    "Stanzas that run a test executable, by dune file (not diffed -- see gh-ocannl-665):\n%s\n"
     (String.concat ~sep:"\n" (List.rev !inventory));
   eprintf
     "Totals: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
@@ -479,7 +484,8 @@ let () =
      cannot be `dune promote`d into passing. *)
   printf "\n";
   Verdict.p
-    "the scan places every test stanza, inline-test library and run executable the dune sources show"
+    "the scan places every test stanza, inline-test library and run executable the dune sources \
+     show"
     (!floor_holes = 0);
   Verdict.p "that floor applies to more than one dune file" (!floors_checked > 1);
   if not (Verdict.any_failed ()) then

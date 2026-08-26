@@ -32,7 +32,6 @@
 
 open Base
 open Ppxlib.Parsetree
-
 module Ast_traverse = Ppxlib.Ast_traverse
 module Asttypes = Ppxlib.Asttypes
 
@@ -111,12 +110,12 @@ let scope ast =
   let parameters = Hash_set.create (module String) in
   (* The names {!cache_module} goes by in this file. Resolved from the aliases rather than assumed,
      because the tests bind it three ways -- `module SC = Ir.Schedule_cache`, `module Cache = …`,
-     and the qualified path itself -- and matching on the function name alone would take any
-     `store ~dir:` in the repository for a cache write. *)
+     and the qualified path itself -- and matching on the function name alone would take any `store
+     ~dir:` in the repository for a cache write. *)
   let cache_modules = Hash_set.of_list (module String) [ cache_module ] in
-  (* An alias of an alias is an alias: `module Cache = SC` names the module as surely as
-     `module SC = Ir.Schedule_cache` does, and structure items are visited in order, so a name
-     already recognised is available to the binding that borrows it (Codex P2, round 4). *)
+  (* An alias of an alias is an alias: `module Cache = SC` names the module as surely as `module SC
+     = Ir.Schedule_cache` does, and structure items are visited in order, so a name already
+     recognised is available to the binding that borrows it (Codex P2, round 4). *)
   let names_cache_module path =
     match List.last (flatten_longident path) with
     | Some last -> String.equal last cache_module || Hash_set.mem cache_modules last
@@ -151,10 +150,10 @@ let scope ast =
         (* `let module Cache = Ir.Schedule_cache in …` binds the same name in expression position,
            which no structure item records.
 
-           Which node that is has moved: through 5.4 the compiler's own tree says
-           [Pexp_letmodule], and 5.5 replaced it with an ordinary [Pstr_module] wrapped in an
-           expression. Reading ppxlib's tree is what lets one arm answer for both -- ppxlib
-           migrates the 5.5 spelling back to this one. *)
+           Which node that is has moved: through 5.4 the compiler's own tree says [Pexp_letmodule],
+           and 5.5 replaced it with an ordinary [Pstr_module] wrapped in an expression. Reading
+           ppxlib's tree is what lets one arm answer for both -- ppxlib migrates the 5.5 spelling
+           back to this one. *)
         | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
           when names_cache_module txt ->
             Hash_set.add cache_modules alias
@@ -192,10 +191,10 @@ type report = {
 let read content =
   let ast = structure_of content in
   let literals, parameters, cache_modules = scope ast in
-    (* The empty string disables the cache only where [Autotune.tune] reads it that way: it checks
-       [String.is_empty] before consulting or writing the cache at all. A direct store has no such
-       reading -- [ensure_dir ""] is a no-op and [cache_file] then yields [<key>.sexp], written into
-       the working directory, where the glob does not reach it (Codex P2, round 2). *)
+  (* The empty string disables the cache only where [Autotune.tune] reads it that way: it checks
+     [String.is_empty] before consulting or writing the cache at all. A direct store has no such
+     reading -- [ensure_dir ""] is a no-op and [cache_file] then yields [<key>.sexp], written into
+     the working directory, where the glob does not reach it (Codex P2, round 2). *)
   let resolve ~disabling_allowed argument =
     match string_literal argument with
     | Some "" when disabling_allowed -> Disabled
@@ -322,8 +321,7 @@ let glob_matches pattern name =
     if i = np then j = nn
     else
       match pattern.[i] with
-      | '\\' when i + 1 < np ->
-          j < nn && Char.equal name.[j] pattern.[i + 1] && go (i + 2) (j + 1)
+      | '\\' when i + 1 < np -> j < nn && Char.equal name.[j] pattern.[i + 1] && go (i + 2) (j + 1)
       | '*' -> go (i + 1) j || (j < nn && go i (j + 1))
       | '?' -> j < nn && go (i + 1) (j + 1)
       | c -> j < nn && Char.equal name.[j] c && go (i + 1) (j + 1)
@@ -370,8 +368,7 @@ let root_directory_glob pattern =
 let unreadable_patterns content =
   List.filter_map content ~f:(fun { pattern; negated = _ } ->
       match root_directory_glob pattern with
-      | Some glob
-        when String.is_substring glob ~substring:"**" || String.contains glob '[' ->
+      | Some glob when String.is_substring glob ~substring:"**" || String.contains glob '[' ->
           Some pattern
       | _ -> None)
 

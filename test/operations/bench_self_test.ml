@@ -34,7 +34,9 @@ let number j k =
   | _ -> None
 
 let string_field j k = match field j k with Some (`String s) -> Some s | _ -> None
-let is_str j k expected = Option.value_map (string_field j k) ~default:false ~f:(String.equal expected)
+
+let is_str j k expected =
+  Option.value_map (string_field j k) ~default:false ~f:(String.equal expected)
 
 let () =
   (* Emitted to stderr rather than stdout: the line carries wall-clock digits, and the golden is
@@ -42,7 +44,7 @@ let () =
   let line = H.run_self_test ~out:Stdio.stderr () in
   let protocol = H.self_test_protocol in
   let parsed =
-    match (try Some (Yojson.Safe.from_string line) with _ -> None) with
+    match try Some (Yojson.Safe.from_string line) with _ -> None with
     | Some (`Assoc _ as j) -> Some j
     | Some _ | None -> None
   in
@@ -63,7 +65,9 @@ let () =
       Verdict.p "searched is false in an untuned cell"
         (match field j "searched" with Some (`Bool b) -> not b | _ -> false);
       let step_ms = Option.value (field j "step_ms") ~default:`Null in
-      let p10 = number step_ms "p10" and p50 = number step_ms "p50" and p90 = number step_ms "p90" in
+      let p10 = number step_ms "p10"
+      and p50 = number step_ms "p50"
+      and p90 = number step_ms "p90" in
       Verdict.p "step_ms carries all three percentiles"
         (Option.is_some p10 && Option.is_some p50 && Option.is_some p90);
       let percentiles = List.filter_map [ p10; p50; p90 ] ~f:Fn.id in
@@ -82,8 +86,10 @@ let () =
       let losses = match field j "losses" with Some (`List l) -> l | _ -> [] in
       Verdict.p "losses carries one parity checksum per parity step"
         (List.length losses = protocol.H.parity_steps);
-      Verdict.p_all "every parity checksum is a finite number" losses
-        ~f:(function `Float _ | `Int _ -> true | _ -> false)
+      Verdict.p_all "every parity checksum is a finite number" losses ~f:(function
+        | `Float _ | `Int _ -> true
+        | _ -> false)
   | None ->
-      (* The claim above has already failed the run; naming the line is what makes it diagnosable. *)
+      (* The claim above has already failed the run; naming the line is what makes it
+         diagnosable. *)
       Verdict.fail ("the emitted result line is not a JSON object: " ^ line)

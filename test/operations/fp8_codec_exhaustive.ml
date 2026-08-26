@@ -10,15 +10,15 @@
    Three things are checked, each over its whole input set:
 
    - [single_to_fp8] against a rounding ORACLE, over all 2^32 f32 bit patterns. The oracle is not a
-     second codec: it is the format's own decode table plus the rule that a code owns the interval
-     between the midpoints to its neighbours, with a midpoint going to the even code. That makes
-     "correctly rounded" a local property, cheap enough to evaluate on every input.
-   - [double_to_fp8] against [single_to_fp8] on all 2^32 f32-exact doubles -- the cross-check that
-     found the two codecs disagreeing on the sign of a NaN -- and against the same oracle over
-     17.2e9 doubles that are NOT f32-exact (every top half crossed with four low halves, the
-     midpoint pattern among them, which is the shape gh-ocannl-648 lived in).
-   - [fp8_to_single] over all 256 codes: the exact decoded value, strict monotonicity (which is what
-     licenses the oracle above), and the round trip back through both narrowing codecs.
+   second codec: it is the format's own decode table plus the rule that a code owns the interval
+   between the midpoints to its neighbours, with a midpoint going to the even code. That makes
+   "correctly rounded" a local property, cheap enough to evaluate on every input. - [double_to_fp8]
+   against [single_to_fp8] on all 2^32 f32-exact doubles -- the cross-check that found the two
+   codecs disagreeing on the sign of a NaN -- and against the same oracle over 17.2e9 doubles that
+   are NOT f32-exact (every top half crossed with four low halves, the midpoint pattern among them,
+   which is the shape gh-ocannl-648 lived in). - [fp8_to_single] over all 256 codes: the exact
+   decoded value, strict monotonicity (which is what licenses the oracle above), and the round trip
+   back through both narrowing codecs.
 
    The sweeps are in fp8_codec_exhaustive_stubs.c, calling the very functions [Ops] exposes, so what
    runs here is the shipped codec rather than a transcription of it. Under [@slow] because it takes
@@ -26,7 +26,8 @@
 
 open Base
 
-type sweep_buf = (int64, Stdlib.Bigarray.int64_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
+type sweep_buf =
+  (int64, Stdlib.Bigarray.int64_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
 
 external sweep_init : unit -> unit = "ocannl_fp8_sweep_init"
 external sweep_f32 : int64 -> int64 -> sweep_buf -> unit = "ocannl_fp8_sweep_f32"
@@ -78,7 +79,9 @@ let reached bufs =
 (* The offender records, in chunk order, so a failing run names the same inputs every time. *)
 let records bufs =
   Array.concat_map bufs ~f:(fun b ->
-      Array.init (Int64.to_int_exn b.{out_reported}) ~f:(fun k ->
+      Array.init
+        (Int64.to_int_exn b.{out_reported})
+        ~f:(fun k ->
           let base = out_records + (3 * k) in
           (b.{base}, Int64.to_int_exn b.{base + 1}, Int64.to_int_exn b.{base + 2})))
 
@@ -96,8 +99,8 @@ let reason_name = function
 let report_records label rs =
   Array.iter rs ~f:(fun (bits, code, reason) ->
       if reason = 1 then
-        Stdio.eprintf "%s: input 0x%Lx -> single_to_fp8 0x%02x, double_to_fp8 0x%02x (%s)\n" label bits
-          (code lsr 8) (code land 0xFF) (reason_name reason)
+        Stdio.eprintf "%s: input 0x%Lx -> single_to_fp8 0x%02x, double_to_fp8 0x%02x (%s)\n" label
+          bits (code lsr 8) (code land 0xFF) (reason_name reason)
       else Stdio.eprintf "%s: input 0x%Lx -> 0x%02x (%s)\n" label bits code (reason_name reason))
 
 let report_counts label bufs =
@@ -172,7 +175,8 @@ let () =
     else if m = 0x7C then Float.equal widened.(c) (signed Float.infinity)
     else Float.is_nan widened.(c)
   in
-  Verdict.p_all "fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero included"
+  Verdict.p_all
+    "fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero included"
     (List.range 0 256) ~min:256 ~f:decode_ok;
   Verdict.p_all "fp8_to_single is strictly increasing over the 124 non-negative finite codes"
     (List.range 0 0x7B) ~min:0x7B ~f:(fun c -> Float.( < ) widened.(c) widened.(c + 1));
@@ -192,7 +196,8 @@ let () =
      the type system -- nothing in [int64 -> int64 -> sweep_buf -> unit] says how long the buffer
      must be, and the decode table holds only the 0x7C finite magnitudes -- and a guard that has
      never fired is a claim about nothing. Cheap enough to check every run. *)
-  let refuses f = try
+  let refuses f =
+    try
       f ();
       false
     with Invalid_argument _ -> true

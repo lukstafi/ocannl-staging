@@ -9,9 +9,9 @@
    Every guarantee here fires only when a collection is empty, which in a green suite is never --
    the same shape as `generated_provenance`, and the same construction: the passing forms run
    directly, so a module that refused everything could not pass them, and the refusals run as CHILD
-   processes whose streams this one captures. Capturing matters for the same reason it does there:
-   a refusal prints this repository's failure marker (`FAIL:`, `FAILED:`), and a green run's log
-   must not carry those words.
+   processes whose streams this one captures. Capturing matters for the same reason it does there: a
+   refusal prints this repository's failure marker (`FAIL:`, `FAILED:`), and a green run's log must
+   not carry those words.
 
    Two properties, not one. The claim must FAIL on an empty collection -- exit status and a line
    naming emptiness -- and it must print BYTE-IDENTICALLY to `Verdict.p` when the collection is not
@@ -29,9 +29,9 @@ let ignore_unix f x = try f x with Unix.Unix_error _ -> ()
 
 (* Runs one mode in a child and answers its status with its two streams kept APART: the shape check
    compares what a child wrote on stdout, which is the stream a `(test)` stanza diffs, and a
-   refusal's stderr echo would drown that comparison. Through temporary files rather than pipes,
-   for the reason `generated_provenance.run_child` gives: reading two pipes in sequence deadlocks
-   once the unread one fills. *)
+   refusal's stderr echo would drown that comparison. Through temporary files rather than pipes, for
+   the reason `generated_provenance.run_child` gives: reading two pipes in sequence deadlocks once
+   the unread one fills. *)
 let run_child mode =
   let exe = Stdlib.Sys.executable_name in
   let capture suffix = Stdlib.Filename.temp_file "vq_child" suffix in
@@ -83,7 +83,8 @@ let () =
       Verdict.p_empty "every seed validates" ~over:seeds (List.filter seeds ~f:odd);
       (* An array reaches the combinators through [Array.to_list]; the eight array sites in the
          sweep spell it that way rather than growing a second family of entry points. *)
-      Verdict.p_all "every sampled value is finite" (Array.to_list [| 1.0; 2.0 |])
+      Verdict.p_all "every sampled value is finite"
+        (Array.to_list [| 1.0; 2.0 |])
         ~f:Float.is_finite
   (* === Shape: what a non-empty collection prints, compared against [p]'s own line. === *)
   | "shape_p" -> Verdict.p "the claim" true
@@ -95,7 +96,8 @@ let () =
   | "all_short" -> Verdict.p_all ~min:3 "every one of the three seeds is even" [ 2 ] ~f:even
   | "none_empty" -> Verdict.p_none "no seed is odd" [] ~f:odd
   | "exists_empty" -> Verdict.p_exists "some seed exceeds four" [] ~f:(fun n -> n > 4)
-  | "exists_short" -> Verdict.p_exists ~min:2 "at least two seeds exceed four" seeds ~f:(fun n -> n > 4)
+  | "exists_short" ->
+      Verdict.p_exists ~min:2 "at least two seeds exceed four" seeds ~f:(fun n -> n > 4)
   | "exists_none" -> Verdict.p "the claim" (List.exists seeds ~f:odd)
   | "exists_none_combinator" -> Verdict.p_exists "the claim" seeds ~f:odd
   | "empty_over_empty" -> Verdict.p_empty "every seed validates" ~over:[] []
@@ -108,9 +110,9 @@ let () =
         ~line:"no seed is odd (empty): false" (run_child "none_empty");
       refused "a `some X` claim over an empty collection names emptiness rather than the property"
         ~line:"some seed exceeds four (empty): false" (run_child "exists_empty");
-      (* Codex P2, round 1: `~min` on an existential counts WITNESSES. Read as a population floor
-         it would pass "at least two seeds exceed four" on a three-seed list with one such seed,
-         which is the false green this module exists to prevent. *)
+      (* Codex P2, round 1: `~min` on an existential counts WITNESSES. Read as a population floor it
+         would pass "at least two seeds exceed four" on a three-seed list with one such seed, which
+         is the false green this module exists to prevent. *)
       refused "a `~min:n` existential counts witnesses, not the population it searched"
         ~line:"at least two seeds exceed four (only 1 of 2 match): false" (run_child "exists_short");
       refused "an emptiness claim about a derived subset fails when the population is empty too"

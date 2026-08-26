@@ -46,8 +46,7 @@ let ni, nq, nr, ns, nt = (4, 2, 2, 2, 8)
 
 (* Discriminating producer: varies with every axis symbol (distinct coefficients), never 0. *)
 let fx idcs =
-  Float.of_int
-    (1 + (2 * idcs.(0)) + idcs.(1) + (3 * idcs.(2)) + (5 * idcs.(3)) + (7 * idcs.(4)))
+  Float.of_int (1 + (2 * idcs.(0)) + idcs.(1) + (3 * idcs.(2)) + (5 * idcs.(3)) + (7 * idcs.(4)))
 
 let x = NTDSL.init ~l:"smn_x" ~prec:Ir.Ops.single ~o:[ ni; nq; nr; ns; nt ] ~f:fx ()
 let%op out = x ++ "iqrst => i"
@@ -108,9 +107,7 @@ let () =
     (Array.for_all2_exn reference wide ~f:Float.equal);
   let pre = Option.value_exn !captured in
   let i, q, r, s, t =
-    match nest_path pre.LL.llc with
-    | [ i; q; r; s; t ] -> (i, q, r, s, t)
-    | _ -> assert false
+    match nest_path pre.LL.llc with [ i; q; r; s; t ] -> (i, q, r, s, t) | _ -> assert false
   in
   let pre_canon = SC.canonicalize ~static_indices:[] ~with_placements:false pre in
   let ref_of sym = Option.value_exn (SC.resolve (SC.base_registry pre_canon) sym) in
@@ -140,16 +137,15 @@ let () =
     | _ -> false
   in
   p_all "scope-nested loops are enumerated (each inner reduction loop draws a proposal)"
-    [ rr; rs; rt ] ~f:(fun rf -> List.exists menu ~f:(targets rf))
-  ;
+    [ rr; rs; rt ] ~f:(fun rf -> List.exists menu ~f:(targets rf));
   p "a dividing Split of the scope-nested innermost loop is proposed"
     (List.exists menu ~f:(fun op ->
          match split_axis op with Some axis -> SC.equal_sym_ref axis rt | None -> false));
   p "binder-sharing mint copies are one decision (one Split-by-2 of the copied loop)"
     (1
     = List.count menu ~f:(function
-        | SC.Split { axis; factor = 2; _ } -> SC.equal_sym_ref axis rt
-        | _ -> false));
+      | SC.Split { axis; factor = 2; _ } -> SC.equal_sym_ref axis rt
+      | _ -> false));
   p "a Swap of a perfect serial pair inside the scope is proposed"
     (List.exists menu ~f:(function
       | SC.Swap { outer; inner } ->
@@ -157,9 +153,7 @@ let () =
           || (SC.equal_sym_ref outer rs && SC.equal_sym_ref inner rt)
       | _ -> false));
   p "an Unroll of a scope-nested loop is proposed"
-    (List.exists menu ~f:(function
-      | SC.Unroll { axis; _ } -> SC.equal_sym_ref axis rs
-      | _ -> false));
+    (List.exists menu ~f:(function SC.Unroll { axis; _ } -> SC.equal_sym_ref axis rs | _ -> false));
   p "the Vectorized retype moves to the scope-nested innermost accumulating loop"
     (List.exists menu ~f:(function
       | SC.Retype { axis; ty = LL.Vectorized } -> SC.equal_sym_ref axis rt
@@ -195,7 +189,8 @@ let () =
         in
         p claim (all_ok && not (List.is_empty menu_ops)))
   in
-  parity_leg ~claim:"every menu proposal on the minted form compiles and matches the serial result"
+  parity_leg
+    ~claim:"every menu proposal on the minted form compiles and matches the serial result"
     ~saved_prefix:saved_unroll menu;
   (* === Partition: segments after the first start at their breakpoint (absolute ranges), and only
      [Split]'s index arithmetic needs a zero-origin loop — the other families must keep proposing
@@ -205,9 +200,7 @@ let () =
   let saved_pt, pt_registry = SC.to_saved (SC.base_registry pre_canon) [ pt ] in
   let pt_post = Sched.apply [ pt ] (hermetic pre) in
   let pt_menu = Autotune.menu ~is_cpu:true ~is_gpu:false ~limits ~registry:pt_registry pt_post in
-  let seg1, seg2 =
-    match segment_syms with [ a; b ] -> (a, b) | _ -> assert false
-  in
+  let seg1, seg2 = match segment_syms with [ a; b ] -> (a, b) | _ -> assert false in
   let rseg1 = Option.value_exn (SC.resolve pt_registry seg1) in
   let rseg2 = Option.value_exn (SC.resolve pt_registry seg2) in
   p "the nonzero-origin partition segment draws an Unroll proposal"

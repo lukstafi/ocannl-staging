@@ -4,10 +4,10 @@
    The enablement prior (gh-ocannl-514, from the gh-ocannl-558 lesson) promotes a flip because it
    makes a sketch family EXPRESSIBLE, and prices nothing about whether that family pays. On gh-514's
    metal/f16 mlp_wide cell (benchmarks/report-gh514-eval.md, cells C) that promotion took budget
-   slots 1-2 of a budget-5 chain for a family whose candidates timed 79-92 ms against the arm's
-   7.5 ms, pushing the cheap `inline n32_relu.grad` flip — rank 5 under cost ordering, and the
-   actual winner — out of the budget: cost-ordered chains shipped 6.55/6.64 ms, enablement-ordered
-   ones 7.03-7.14 ms.
+   slots 1-2 of a budget-5 chain for a family whose candidates timed 79-92 ms against the arm's 7.5
+   ms, pushing the cheap `inline n32_relu.grad` flip — rank 5 under cost ordering, and the actual
+   winner — out of the budget: cost-ordered chains shipped 6.55/6.64 ms, enablement-ordered ones
+   7.03-7.14 ms.
 
    The evidence that settles it is already paid for when the chain starts: [Train.tune_placements]
    searches arm B, the all-materialized specialization the prior derives its enablement set FROM,
@@ -48,15 +48,11 @@ let profit_name = function
   | Autotune.Pays _ -> "pays"
   | Autotune.Loses _ -> "loses"
 
-let ratio = function
-  | Autotune.Unmeasured -> Float.nan
-  | Autotune.Pays r | Autotune.Loses r -> r
+let ratio = function Autotune.Unmeasured -> Float.nan | Autotune.Pays r | Autotune.Loses r -> r
 
 (* No tie values among these ratios, so decimal rounding is portable. *)
 let show_ratio r = if Float.is_nan r then "--" else Printf.sprintf "%.3f" r
-
 let ordering_name = function `Cost -> "cost" | `Enablement -> "enablement"
-
 let resolves profit = Autotune.effective_flip_ordering ~ordering:`Profitable ~profit
 
 (* The three gh-514 phase-6 cells, as their arm reports. Arm A is the default-placement arm: on
@@ -94,7 +90,8 @@ let () =
     (match resolves (profit_of "hip bf16") with `Enablement -> true | `Cost -> false);
   (* The other control: a family that lost by a hair could be won back by one more placement flip,
      so it stays promoted. Only a loss beyond the margin voids the prior. *)
-  let hair = Autotune.family_profit_of_reports [ searched ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:7.6 ]
+  let hair =
+    Autotune.family_profit_of_reports [ searched ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:7.6 ]
   in
   V.p "a family that lost by 1% is still within profit"
     (match hair with Autotune.Pays _ -> true | _ -> false);
@@ -161,7 +158,8 @@ let () =
           (Sexp.to_string (Ir.Schedule_cache.sexp_of_entry (entry None)))
           ~substring:"mma_best_ms"));
   (* The label counter and the structural best are different populations. *)
-  let beam_only = Autotune.family_profit_of_reports [ beam_appended ~best_ms:7.5 ~mma_best_ms:92.0 ]
+  let beam_only =
+    Autotune.family_profit_of_reports [ beam_appended ~best_ms:7.5 ~mma_best_ms:92.0 ]
   in
   V.p "a beam-appended Tensorize measures the family though no label promised one"
     (match beam_only with Autotune.Loses _ -> true | _ -> false);
@@ -191,15 +189,16 @@ let () =
                searched ~best_ms:4.4 ~mma_timed:16 ~mma_best_ms:10.2;
              ]))
        (ratio (profit_of "cuda f16")));
-  (* The margin is configuration, and an unusable one fails the run rather than quietly becoming
-     the default: a run that asked for a profitability policy it also made impossible should not
-     get a different policy without saying so. A ratio below 1.0 would demote a family that WON. *)
+  (* The margin is configuration, and an unusable one fails the run rather than quietly becoming the
+     default: a run that asked for a profitability policy it also made impossible should not get a
+     different policy without saying so. A ratio below 1.0 would demote a family that WON. *)
   let rejects raw =
     match Autotune.flip_profit_margin_of_string raw with
     | _ -> false
     | exception Utils.User_error _ -> true
   in
-  V.p "a well-formed margin parses" (Float.equal (Autotune.flip_profit_margin_of_string " 1.25 ") 1.25);
+  V.p "a well-formed margin parses"
+    (Float.equal (Autotune.flip_profit_margin_of_string " 1.25 ") 1.25);
   V.p "a margin below 1.0 is rejected" (rejects "0.5");
   V.p "an unparseable margin is rejected" (rejects "generous");
   V.p "an empty margin is rejected" (rejects "");
@@ -215,7 +214,9 @@ let () =
      report's cells C were measured under, and a term that moved them would make those cells
      irreproducible. *)
   List.iter
-    [ ("unmeasured", unmeasured); ("paying", profit_of "hip bf16"); ("losing", profit_of "metal f16") ]
+    [
+      ("unmeasured", unmeasured); ("paying", profit_of "hip bf16"); ("losing", profit_of "metal f16");
+    ]
     ~f:(fun (name, profit) ->
       V.p
         (Printf.sprintf "ordering=cost stays cost under %s evidence" name)

@@ -311,5 +311,4 @@ let () =
        implicit -- by name, since how many files each holds is a tally of the repository rather than
        a fact about it (gh-ocannl-701). The counts are on stderr, and the floors under them are
        asserted above. *)
-    printf "OK: scanned %s.\n"
-      (String.concat ~sep:", " (Config_key_scan.scan_roots source_files)))
+    printf "OK: scanned %s.\n" (String.concat ~sep:", " (Config_key_scan.scan_roots source_files)))

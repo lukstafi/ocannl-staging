@@ -19,16 +19,15 @@
    answers none of them:
 
    - a checksum is a LINEAR functional of the output, so a row swap survives it whenever the value
-     difference is orthogonal to the weight difference — by the weights colliding, or by plain
-     cancellation. No bounded-weight scalar escapes that, so what a bench asserts on is
-     [Bench_checksum.first_difference], an elementwise comparison against the reference variant;
-     the checksum is what it PRINTS;
-   - the mix's own fold used to compress a 40-bit product into 24 bits and was GF(2)-linear, so two
-     rows' outputs differed by a value depending on neither column nor salt: row pairs existed that
-     were identical in EVERY stream at EVERY salt, which no number of streams can repair;
-   - an operand row of all zeros makes its output row all zeros, indistinguishable from a schedule
-     that dropped the row against a zero-initialized destination (hence
-     [Bench_checksum.positive_level]).
+   difference is orthogonal to the weight difference — by the weights colliding, or by plain
+   cancellation. No bounded-weight scalar escapes that, so what a bench asserts on is
+   [Bench_checksum.first_difference], an elementwise comparison against the reference variant; the
+   checksum is what it PRINTS; - the mix's own fold used to compress a 40-bit product into 24 bits
+   and was GF(2)-linear, so two rows' outputs differed by a value depending on neither column nor
+   salt: row pairs existed that were identical in EVERY stream at EVERY salt, which no number of
+   streams can repair; - an operand row of all zeros makes its output row all zeros,
+   indistinguishable from a schedule that dropped the row against a zero-initialized destination
+   (hence [Bench_checksum.positive_level]).
 
    Every claim below is paired with the pre-fix form as a NEGATIVE CONTROL: a check the new form
    passes is evidence only once the old form is shown to fail the same check. The controls are the
@@ -66,14 +65,11 @@ let mixed_rows ~salt ~modulus ~row_stride ~rows =
           Bc.residue ~salt ~row_stride ~modulus ((r * row_stride) + c)))
 
 let flat_rows ~modulus ~row_stride ~rows =
-  List.init rows ~f:(fun r ->
-      Array.init row_stride ~f:(fun c -> ((r * row_stride) + c) % modulus))
+  List.init rows ~f:(fun r -> Array.init row_stride ~f:(fun c -> ((r * row_stride) + c) % modulus))
 
 let pairwise_distinct rows =
   let n = List.length rows in
-  n
-  = List.length
-      (List.dedup_and_sort rows ~compare:(fun a b -> Array.compare Int.compare a b))
+  n = List.length (List.dedup_and_sort rows ~compare:(fun a b -> Array.compare Int.compare a b))
 
 let all_identical = function
   | [] | [ _ ] -> true
@@ -83,7 +79,6 @@ let all_identical = function
    past the third multiple of 251, so the degenerate extents 251, 502 and 753 are reached by a sweep
    rather than named into it. *)
 let extents = List.range 2 801
-
 let row_pairs = [ (0, 1); (1, 3); (0, 3); (2, 3) ]
 let rows = 4
 
@@ -114,9 +109,10 @@ let () =
   (* The multiples of 251 in range are where the flat form is degenerate BY CONSTRUCTION (rather
      than by an accidental weight collision), and it must miss the swap at every row pair there. *)
   let degenerate = List.filter extents ~f:(fun n -> n % Bc.weight_cap = 0) in
-  Verdict.p_all "the flat-offset weight misses a row swap at every multiple of 251 (negative control)"
+  Verdict.p_all
+    "the flat-offset weight misses a row swap at every multiple of 251 (negative control)"
     degenerate ~f:(fun n ->
-         List.length (List.filter !missed_flat ~f:(fun m -> m = n)) = List.length row_pairs);
+      List.length (List.filter !missed_flat ~f:(fun m -> m = n)) = List.length row_pairs);
   Verdict.p_all "the shared checksum sees a 4-row swap at those same multiples of 251" degenerate
     ~f:(fun n -> not (List.mem !missed_mixed n ~equal:Int.equal));
   (* Why the guard is WEIGHTED at all: a permutation preserves the multiset, and a plain sum reads
@@ -125,9 +121,9 @@ let () =
     (List.length !missed_plain = List.length extents * List.length row_pairs);
 
   (* Operands. [schedule_bench] draws ma over a row-major m x k array and mb as a residue mod 17
-     over a k x n one, so the collapse lands at 12 | k and 17 | n respectively.
-     Sweep the multiples of each modulus (ma's is 12 since gh-ocannl-711's review: see the
-     zero-sentinel claims below). *)
+     over a k x n one, so the collapse lands at 12 | k and 17 | n respectively. Sweep the multiples
+     of each modulus (ma's is 12 since gh-ocannl-711's review: see the zero-sentinel claims
+     below). *)
   let operand_multiples = List.range 1 25 in
   List.iter
     [ ("ma", 0x5A17, 12); ("mb", 0x3C6E, 17) ]
@@ -136,8 +132,8 @@ let () =
       Verdict.pf "mixed %s rows stay pairwise distinct at every row stride %d divides" name modulus
         (List.for_all strides ~f:(fun row_stride ->
              pairwise_distinct (mixed_rows ~salt ~modulus ~row_stride ~rows:16)));
-      Verdict.pf "flat-offset %s rows are all identical at every row stride %d divides (negative \
-                  control)"
+      Verdict.pf
+        "flat-offset %s rows are all identical at every row stride %d divides (negative control)"
         name modulus
         (List.for_all strides ~f:(fun row_stride ->
              all_identical (flat_rows ~modulus ~row_stride ~rows:16))));
@@ -159,7 +155,8 @@ let () =
               Array.init row_stride ~f:(fun j ->
                   1
                   + Bc.residue ~salt:(List.hd_exn Bc.weight_salts) ~row_stride
-                      ~modulus:Bc.weight_cap ((row * row_stride) + j))
+                      ~modulus:Bc.weight_cap
+                      ((row * row_stride) + j))
         in
         let key = String.concat ~sep:"," (Array.to_list (Array.map w ~f:Int.to_string)) in
         match Hashtbl.find seen key with
@@ -192,13 +189,9 @@ let () =
         let w = swap_rows ~n:row_stride v ~r1:a ~r2:b in
         let salt = List.hd_exn Bc.weight_salts in
         (not (Array.equal Float.equal v w))
-        && Float.equal
-             (Bc.weighted ~salt ~row_stride v)
-             (Bc.weighted ~salt ~row_stride w)
+        && Float.equal (Bc.weighted ~salt ~row_stride v) (Bc.weighted ~salt ~row_stride w)
         && not
-             (List.equal Float.equal
-                (Bc.whole_output ~row_stride v)
-                (Bc.whole_output ~row_stride w))
+             (List.equal Float.equal (Bc.whole_output ~row_stride v) (Bc.whole_output ~row_stride w))
     | [] -> false
   in
   Verdict.p
@@ -225,10 +218,11 @@ let () =
   let ma_strides = List.range 1 9 in
   Verdict.p_all "every ma value is strictly positive, so no ma row can be all-zero" ma_strides
     ~f:(fun row_stride ->
-         List.for_all (List.range 0 (600 * row_stride)) ~f:(fun t ->
-             Float.( > ) (ma_value ~row_stride t) 0.0));
+      List.for_all
+        (List.range 0 (600 * row_stride))
+        ~f:(fun t -> Float.( > ) (ma_value ~row_stride t) 0.0));
   Verdict.p_all "no ma row is all-zero at any row stride swept" ma_strides ~f:(fun row_stride ->
-         ma_rows_with_zero ~row_stride ~rows:600 = 0);
+      ma_rows_with_zero ~row_stride ~rows:600 = 0);
   Verdict.p
     "a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control)"
     (zeroing_rows ~row_stride:2 ~rows:600 > 0);
@@ -266,15 +260,15 @@ let () =
           acc +. ((v.(ta) -. v.(tb)) *. Float.of_int (w ~salt ta - w ~salt tb)))
     in
     let rows_differ a b =
-      List.exists (List.range 0 n) ~f:(fun j ->
-          not (Float.equal v.((a * n) + j) v.((b * n) + j)))
+      List.exists (List.range 0 n) ~f:(fun j -> not (Float.equal v.((a * n) + j) v.((b * n) + j)))
     in
     List.find_map (List.range 0 m) ~f:(fun a ->
-        List.find_map (List.range (a + 1) m) ~f:(fun b ->
+        List.find_map
+          (List.range (a + 1) m)
+          ~f:(fun b ->
             if
               rows_differ a b
-              && List.for_all Bc.weight_salts ~f:(fun salt ->
-                     Float.equal (shift ~salt a b) 0.0)
+              && List.for_all Bc.weight_salts ~f:(fun salt -> Float.equal (shift ~salt a b) 0.0)
             then Some (a, b, v)
             else None))
   in
@@ -295,14 +289,12 @@ let () =
   (* Confirm through the guard itself, not only through the difference form it was found with. *)
   Verdict.p_all "those swaps really do leave every printed checksum stream unchanged" cancel_cases
     ~f:(fun (_, n, _, a, b, v) ->
-         let w = swap_rows ~n v ~r1:a ~r2:b in
-         (not (Array.equal Float.equal v w))
-         && List.equal Float.equal
-              (Bc.whole_output ~row_stride:n v)
-              (Bc.whole_output ~row_stride:n w));
+      let w = swap_rows ~n v ~r1:a ~r2:b in
+      (not (Array.equal Float.equal v w))
+      && List.equal Float.equal (Bc.whole_output ~row_stride:n v) (Bc.whole_output ~row_stride:n w));
   Verdict.p_all "the elementwise guard sees those swaps" cancel_cases ~f:(fun (_, n, _, a, b, v) ->
-         let w = swap_rows ~n v ~r1:a ~r2:b in
-         Option.is_some (Bc.first_difference ~reference:v w));
+      let w = swap_rows ~n v ~r1:a ~r2:b in
+      Option.is_some (Bc.first_difference ~reference:v w));
   (* And it sees the whole class the weighted sums were swept for, at every extent, without a
      collision argument: it compares what was computed. *)
   let elementwise_missed =
@@ -320,10 +312,10 @@ let () =
   (* The mix's own row identity. Under the pre-fix fold two rows could be identical at EVERY column
      of EVERY stream, so no number of weight streams and no operand value set could tell them apart
      — the first such pair is 5977 and 10232. The fix is structural rather than statistical: masking
-     the pre-state to 24 bits before the fold makes the whole finalizer a bijection of it, and
-     [a * 73856093] is injective mod 2^24, so distinct rows below 2^24 differ at every column. *)
+     the pre-state to 24 bits before the fold makes the whole finalizer a bijection of it, and [a *
+     73856093] is injective mod 2^24, so distinct rows below 2^24 differ at every column. *)
   let pre_fix_mix ~salt a b =
-    let x = (a * 73856093) lxor (b * 19349663) lxor salt in
+    let x = a * 73856093 lxor (b * 19349663) lxor salt in
     let x = x lxor (x lsr 13) land 0xFFFFFF in
     let x = x * 1274126177 land 0xFFFFFF in
     x lxor (x lsr 7)
@@ -332,12 +324,12 @@ let () =
   let rows_identical mix ~salt a b ~columns =
     List.for_all (List.range 0 columns) ~f:(fun c -> mix ~salt a c = mix ~salt b c)
   in
-  Verdict.p_all "the pre-fix fold made rows 5977 and 10232 identical at every column of every salt (negative \
+  Verdict.p_all
+    "the pre-fix fold made rows 5977 and 10232 identical at every column of every salt (negative \
      control)"
-    mix_salts ~f:(fun salt ->
-         rows_identical pre_fix_mix ~salt 5977 10232 ~columns:64);
+    mix_salts ~f:(fun salt -> rows_identical pre_fix_mix ~salt 5977 10232 ~columns:64);
   Verdict.p_all "the mix keeps those two rows apart" mix_salts ~f:(fun salt ->
-         not (rows_identical Bc.mix ~salt 5977 10232 ~columns:64));
+      not (rows_identical Bc.mix ~salt 5977 10232 ~columns:64));
   let first_value_collision mix ~salt ~column ~rows =
     let seen = Hashtbl.create (module Int) in
     List.find_map (List.range 0 rows) ~f:(fun r ->
@@ -348,10 +340,11 @@ let () =
             Hashtbl.set seen ~key:v ~data:r;
             None)
   in
-  Verdict.p_all "no two rows below 100000 share a mix value in a column, at any salt or column swept"
-    mix_salts ~f:(fun salt ->
-         List.for_all [ 0; 1; 7; 63 ] ~f:(fun column ->
-             Option.is_none (first_value_collision Bc.mix ~salt ~column ~rows:100_000)));
+  Verdict.p_all
+    "no two rows below 100000 share a mix value in a column, at any salt or column swept" mix_salts
+    ~f:(fun salt ->
+      List.for_all [ 0; 1; 7; 63 ] ~f:(fun column ->
+          Option.is_none (first_value_collision Bc.mix ~salt ~column ~rows:100_000)));
   Verdict.p "the pre-fix fold did collide there, so that sweep can fail (negative control)"
     (List.exists mix_salts ~f:(fun salt ->
          List.exists [ 0; 1; 7; 63 ] ~f:(fun column ->
@@ -365,9 +358,7 @@ let () =
   let first_row_collision rowf =
     let seen = Hashtbl.create (module String) in
     List.find_map (List.range 0 20_000) ~f:(fun r ->
-        let key =
-          String.concat ~sep:"," (List.map (rowf r) ~f:Int.to_string)
-        in
+        let key = String.concat ~sep:"," (List.map (rowf r) ~f:Int.to_string) in
         match Hashtbl.find seen key with
         | Some _ -> Some r
         | None ->
@@ -388,9 +379,7 @@ let () =
     first_row_collision (fun r -> List.init stride ~f:(fun c -> ((r * stride) + c) % modulus))
   in
   let render_row = function None -> "none below 20000" | Some r -> Int.to_string r in
-  let operands =
-    [ ("ma", 0x5A17, 12, 13, "k", 2); ("mb", 0x3C6E, 17, 17, "n", 2) ]
-  in
+  let operands = [ ("ma", 0x5A17, 12, 13, "k", 2); ("mb", 0x3C6E, 17, 17, "n", 2) ] in
   List.iter operands ~f:(fun (name, salt, levels, modulus, axis, crossover) ->
       p "row at which %s rows first repeat, by %s (mixed over %d levels vs flat mod %d):\n" name
         axis levels modulus;
@@ -398,9 +387,9 @@ let () =
           p "  %s = %-3d mixed %-18s flat %s\n" axis stride
             (render_row (mixed_at ~salt ~levels stride))
             (render_row (flat_at ~modulus stride)));
-      (* The flat form's bound is not a birthday: its rows repeat with the modulus's period at
-         EVERY stride, 13 or 17 rows in. The mixed form is birthday-limited in a space of
-         levels^stride, so it is behind only where that space is itself too small to matter. *)
+      (* The flat form's bound is not a birthday: its rows repeat with the modulus's period at EVERY
+         stride, 13 or 17 rows in. The mixed form is birthday-limited in a space of levels^stride,
+         so it is behind only where that space is itself too small to matter. *)
       Verdict.pf
         "the mixed %s keeps rows distinct at least as far as the flat form, at every %s above %d"
         name axis crossover
@@ -414,8 +403,7 @@ let () =
       Verdict.pf
         "at %s <= %d both forms are exhausted within twenty rows, against a levels^%s space bound \
          of %d that leaves no room to improve"
-        axis crossover axis
-        (Int.pow levels crossover)
+        axis crossover axis (Int.pow levels crossover)
         (List.for_all
            (List.range 1 (crossover + 1))
            ~f:(fun stride ->
@@ -429,7 +417,9 @@ let () =
   let residues_in_range =
     List.for_all [ 3; 5; 13; 17; Bc.weight_cap ] ~f:(fun modulus ->
         List.for_all (List.range 1 40) ~f:(fun row_stride ->
-            List.for_all (List.range 0 (7 * row_stride)) ~f:(fun t ->
+            List.for_all
+              (List.range 0 (7 * row_stride))
+              ~f:(fun t ->
                 let r = Bc.residue ~salt:0x7E51 ~row_stride ~modulus t in
                 r >= 0 && r < modulus)))
   in

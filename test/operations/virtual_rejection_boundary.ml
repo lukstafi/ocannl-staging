@@ -5,13 +5,12 @@
    which one spoke:
 
    - [decide_placements] applies the heuristic caps BEFORE any legality question is asked
-     (provenance 1 visit cap / uncovered read, 39 reduction extent, 41 transitive fan-in). These are
-     flippable policy: a shape capped here may be perfectly inlineable.
-   - [check_and_store_virtual] rejects at STORE time, when the candidate's computation is captured.
-   - [inline_computation] rejects at CONSUMPTION time, once a read site's indices are known — so a
-     shape that stores fine still materializes if no read site can be served.
-   - [cleanup_virtual_llc] commits a surviving read as provenance 17; that is not a rejection, it is
-     the absence of one.
+   (provenance 1 visit cap / uncovered read, 39 reduction extent, 41 transitive fan-in). These are
+   flippable policy: a shape capped here may be perfectly inlineable. - [check_and_store_virtual]
+   rejects at STORE time, when the candidate's computation is captured. - [inline_computation]
+   rejects at CONSUMPTION time, once a read site's indices are known — so a shape that stores fine
+   still materializes if no read site can be served. - [cleanup_virtual_llc] commits a surviving
+   read as provenance 17; that is not a rejection, it is the absence of one.
 
    Before this test the boundary was documented only by scattered [Non_virtual] code comments and,
    in one case, wrongly: building "a node that becomes non-virtual after decide_placements" for the
@@ -32,19 +31,18 @@
    Codes with no minimal shape here, and why — each of these was tried, not assumed:
 
    - 5 (a symbol no call site can ground) is preempted: a single-symbol affine position is injective
-     unless its coefficient is zero, so a non-injective map arrives as 51 (multi-symbol) or 52.
-   - 52 (a [Concat] LHS position) is unreachable from this side. [trace_node_facts] runs first and
-     raises [invalid_arg] on a [Concat] index outright, so the virtualizer's arm never sees one.
-   - 11 (already decided materialized) fires, but records nothing of its own: the placement it finds
-     is the one it keeps, so the provenance a test would read is the earlier decision's. That is the
-     [~materialized] arm every row below already runs.
-   - 12 (no setter in the captured subtree) cannot fire: every call site is a setter arm, or a
-     candidate drawn from the assignment-index map, which is where its setters put it.
-   - 8, 19, 141, 143, 144 guard constructors no pre-virtualization pass emits (staged compilation,
-     hoisted locals, barriers, cooperative tiles, dynamic scatters). These will never become
-     inlineable, so a row would pin nothing that could move.
-   - 14, 140, 145, 146 belong to the vector-store (packed-uniform) consumption path, exercised
-     through the uniform tests rather than by hand. *)
+   unless its coefficient is zero, so a non-injective map arrives as 51 (multi-symbol) or 52. - 52
+   (a [Concat] LHS position) is unreachable from this side. [trace_node_facts] runs first and raises
+   [invalid_arg] on a [Concat] index outright, so the virtualizer's arm never sees one. - 11
+   (already decided materialized) fires, but records nothing of its own: the placement it finds is
+   the one it keeps, so the provenance a test would read is the earlier decision's. That is the
+   [~materialized] arm every row below already runs. - 12 (no setter in the captured subtree) cannot
+   fire: every call site is a setter arm, or a candidate drawn from the assignment-index map, which
+   is where its setters put it. - 8, 19, 141, 143, 144 guard constructors no pre-virtualization pass
+   emits (staged compilation, hoisted locals, barriers, cooperative tiles, dynamic scatters). These
+   will never become inlineable, so a row would pin nothing that could move. - 14, 140, 145, 146
+   belong to the vector-store (packed-uniform) consumption path, exercised through the uniform tests
+   rather than by hand. *)
 
 open Base
 open Ll_test
@@ -88,7 +86,8 @@ let phase_of_code = function
       Some Store
   | 13 (* no read site can be served by the stored index map *)
   | 14 (* every stored component filtered away *)
-  | 140 | 145 | 146 (* the vector-store lane-extract path *) -> Some Consumption
+  | 140 | 145 | 146 (* the vector-store lane-extract path *) ->
+      Some Consumption
   | _ -> None
 
 let phase_name = function
@@ -228,8 +227,7 @@ let row_two_setters_one_subtree () =
       (loop_n s n (seq (set x [| iter s |] (tick s)) (set x [| fixed 0 |] (c 9.))))
       (loop_n t n (set out [| iter t |] (get x [| iter t |])))
   in
-  row ~label:"two_setters_one_subtree" ~llc ~cand:x ~out ~seed:[]
-    ~expected:[| 9.; 2.; 3.; 4. |]
+  row ~label:"two_setters_one_subtree" ~llc ~cand:x ~out ~seed:[] ~expected:[| 9.; 2.; 3.; 4. |]
     ~verdict:(Rejected (Store, 4))
 
 (* A sibling READ at a symbol bound outside the captured subtree: inlining would move the read to a
@@ -282,8 +280,7 @@ let row_escaping_embed () =
             (loop_n s n (set x [| iter s |] (add (get x [| iter s |]) (add (c 1.) (embed k))))))
          (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
   in
-  row ~label:"escaping_embed_index" ~llc ~cand:x ~out ~seed:[]
-    ~expected:(Array.create ~len:n 3.)
+  row ~label:"escaping_embed_index" ~llc ~cand:x ~out ~seed:[] ~expected:(Array.create ~len:n 3.)
     ~verdict:(Rejected (Store, 10))
 
 (* A multi-symbol affine LHS position that is not injective: dropping the producer loops would fold

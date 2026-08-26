@@ -46,23 +46,22 @@ let () =
        ignore (Ll_test.cycle ~dims:[| 2; 4; 3 |] ~modulus:3 ~offset:1. ~stride:0.5 [| 0; 0; 0 |]);
        false
      with Invalid_argument _ -> true);
-  p_all "cycle accepts the shapes the accumulator-width legs use" shapes
-    ~f:(fun dims -> Option.is_none (Ll_test.blind_axis ~dims ~modulus:13));
+  p_all "cycle accepts the shapes the accumulator-width legs use" shapes ~f:(fun dims ->
+      Option.is_none (Ll_test.blind_axis ~dims ~modulus:13));
   p_all "drift varies with every index of every shape used" shapes ~f:(fun dims ->
-         let base = Array.map dims ~f:(fun _ -> 0) in
-         Array.for_alli dims ~f:(fun ax _ ->
-             let bumped = Array.copy base in
-             bumped.(ax) <- 1;
-             not (Float.equal (Ll_test.drift ~dims base) (Ll_test.drift ~dims bumped))));
+      let base = Array.map dims ~f:(fun _ -> 0) in
+      Array.for_alli dims ~f:(fun ax _ ->
+          let bumped = Array.copy base in
+          bumped.(ax) <- 1;
+          not (Float.equal (Ll_test.drift ~dims base) (Ll_test.drift ~dims bumped))));
   p_all "every drift cell is exact in bf16" shapes ~f:(fun dims ->
-         List.for_all (all_indices dims) ~f:(fun idcs -> bf16_exact (Ll_test.drift ~dims idcs)));
+      List.for_all (all_indices dims) ~f:(fun idcs -> bf16_exact (Ll_test.drift ~dims idcs)));
   (* The fact the accumulator-width legs rest on: the sums leave bf16 exactness within the extents
      they reduce, so an accumulator narrowing per step diverges from one narrowing at the store. *)
   p_all "a drift reduction leaves bf16 exactness within the extents these tests reduce" shapes
-    ~f:(fun dims ->
-         List.exists (partials ~dims) ~f:(fun s -> not (bf16_exact s)));
-  p_all "every drift partial sum stays exact in f32" shapes
-    ~f:(fun dims -> List.for_all (partials ~dims) ~f:f32_exact);
+    ~f:(fun dims -> List.exists (partials ~dims) ~f:(fun s -> not (bf16_exact s)));
+  p_all "every drift partial sum stays exact in f32" shapes ~f:(fun dims ->
+      List.for_all (partials ~dims) ~f:f32_exact);
   (* The crossing drift's doc names: the eleventh term of the 16-wide row reaches 275/64, odd and
      above bf16's guaranteed-exact bound of 2^8 units of 1/64. *)
   p "the 16-wide row's first bf16-inexact partial sum is the eleventh, at 275/64"

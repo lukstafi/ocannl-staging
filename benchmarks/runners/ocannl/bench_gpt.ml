@@ -245,9 +245,9 @@ let () =
   let arms = H.tune_arms () in
   let tuned ctx comp =
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-    (* [flip_report] only counts the gh-555 refinement searches toward the result line's
-       [searched] (gh-ocannl-644): they run whenever [tune_inline_flips] is configured, whether or
-       not a callback is wired, and a flip search loads this process like an arm search. *)
+    (* [flip_report] only counts the gh-555 refinement searches toward the result line's [searched]
+       (gh-ocannl-644): they run whenever [tune_inline_flips] is configured, whether or not a
+       callback is wired, and a flip search loads this process like an arm search. *)
     Train.tune_placements ~report:(H.collect_arm arms) ~flip_report:(H.collect_search arms)
       ~on_ship:(H.collect_ship arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
   in
@@ -265,8 +265,8 @@ let () =
         in
         (ctx, H.Plain routine)
   in
-  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip
-     refinement or a timing_ctx replay fallback ships something no arm report describes. *)
+  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip refinement
+     or a timing_ctx replay fallback ships something no arm report describes. *)
   H.collect_shipped arms routines;
   let compile_s = Unix.gettimeofday () -. t0 in
   let ctx = if tune then H.inject ctx st batch_loss mapping else ctx in

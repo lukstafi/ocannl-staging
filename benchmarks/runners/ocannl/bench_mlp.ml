@@ -48,8 +48,7 @@ let cross_entropy_loss = Nn_blocks.cross_entropy_loss
    workload named [selftest-tiny], which is deliberately NOT a comparable cell. The mode lives in
    Bench_harness, so #720's legs can offer it from any runner; it is wired up here alone for now,
    and test/operations/bench_self_test is what runs it in CI. *)
-let self_test_requested () =
-  Array.exists Stdlib.Sys.argv ~f:(String.equal "--self-test")
+let self_test_requested () = Array.exists Stdlib.Sys.argv ~f:(String.equal "--self-test")
 
 let () =
   if self_test_requested () then (
@@ -197,15 +196,14 @@ let () =
             ^ Option.value_map failure.candidate ~default:"" ~f:(fun candidate -> ":" ^ candidate))
       in
       Stdlib.Printf.eprintf
-        "%s: state=%s timed=%d failed=%d declines=[%s] terminal=%s rounds=%d \
-         sketch=%d mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
+        "%s: state=%s timed=%d failed=%d declines=[%s] terminal=%s rounds=%d sketch=%d \
+         mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
          baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b tensorization=%s \
          mma_statements=%d mma_scalar_fallbacks=%d mma_best_ms=%s\n\
          %!"
         tag (Autotune.outcome_name r.outcome) r.candidates_timed r.candidates_failed declines
-        terminal
-        r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned r.bound_pruned
-        r.fissioned r.baseline_ms
+        terminal r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned
+        r.bound_pruned r.fissioned r.baseline_ms
         (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
         r.best_ms
         (if String.is_empty r.best_label then "none" else r.best_label)
@@ -294,8 +292,8 @@ let () =
       ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in
-  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip
-     refinement or a timing_ctx replay fallback ships something no arm report describes. *)
+  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip refinement
+     or a timing_ctx replay fallback ships something no arm report describes. *)
   H.collect_shipped arms routines;
   let compile_s = Unix.gettimeofday () -. t0 in
   (* The scaled step threads the context (Loss_scaler.update overwrites the scale tensors). *)

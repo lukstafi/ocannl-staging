@@ -14,8 +14,8 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
-
 let p_all = Verdict.p_all
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -84,21 +84,21 @@ let () =
   if n_seeds = 0 then skipped claim
   else
     p_all claim (List.init n_seeds ~f:Fn.id) ~f:(fun k ->
-         let transform opt =
-           let p = List.nth_exn (seeds_of opt) k in
-           Sched.apply (Autotune.sketch_schedule ~p opt) opt
-         in
-         match
-           let sctx, sroutine =
-             Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
-           in
-           let sctx = Context.run sctx sroutine in
-           Context.get_values sctx y.Tensor.value
-         with
-         | got -> Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
-         | exception exn ->
-             Stdio.eprintf "mc: GPU tensorized seed %d FAILED %s\n" k (Exn.to_string exn);
-             false);
+        let transform opt =
+          let p = List.nth_exn (seeds_of opt) k in
+          Sched.apply (Autotune.sketch_schedule ~p opt) opt
+        in
+        match
+          let sctx, sroutine =
+            Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+          in
+          let sctx = Context.run sctx sroutine in
+          Context.get_values sctx y.Tensor.value
+        with
+        | got -> Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+        | exception exn ->
+            Stdio.eprintf "mc: GPU tensorized seed %d FAILED %s\n" k (Exn.to_string exn);
+            false);
 
   let reports = ref [] in
   let ctx = Context.auto () in

@@ -35,7 +35,11 @@
   (select
    fp8_soak_cuda.ml
    from
-   (cudajit.cuda cudajit.nvrtc arrayjit.cuda_backend -> fp8_soak_cuda.cudajit.ml)
+   (cudajit.cuda
+    cudajit.nvrtc
+    arrayjit.cuda_backend
+    ->
+    fp8_soak_cuda.cudajit.ml)
    (-> fp8_soak_cuda.missing.ml))
   (select
    fp8_soak_hip.ml

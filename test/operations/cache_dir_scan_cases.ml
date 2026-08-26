@@ -57,11 +57,11 @@ let () = SC.store ~dir:"autotune_cache_z" key value|ocaml},
     ( "a direct store through the qualified path",
       {ocaml|let () = Ir.Schedule_cache.store ~dir:"autotune_cache_q" key value|ocaml},
       [ "~dir names autotune_cache_q" ] );
-    (* The arm the census cannot reach: no source in the tree binds the module this way today. It
-       is also the arm whose spelling the compiler moved under it -- 5.5 represents
-       `let module M = … in …` as a structure item inside the expression rather than as
-       `Pexp_letmodule` -- which is why the reader works on ppxlib's parse tree, where the
-       construct has one spelling on every compiler the opam files admit. *)
+    (* The arm the census cannot reach: no source in the tree binds the module this way today. It is
+       also the arm whose spelling the compiler moved under it -- 5.5 represents `let module M = …
+       in …` as a structure item inside the expression rather than as `Pexp_letmodule` -- which is
+       why the reader works on ppxlib's parse tree, where the construct has one spelling on every
+       compiler the opam files admit. *)
     ( "a direct store through an alias bound in expression position",
       {ocaml|let go () =
   let module Cache = Ir.Schedule_cache in

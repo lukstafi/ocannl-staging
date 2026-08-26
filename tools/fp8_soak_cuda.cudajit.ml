@@ -15,7 +15,8 @@ module Cu = Cuda
 let name = "cuda"
 let vendor_type = "__nv_fp8_e5m2"
 
-type bytes_buf = (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
+type bytes_buf =
+  (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
 
 let source =
   {|
@@ -67,14 +68,14 @@ extern "C" __global__ void ocannl_vendor_narrow_f64(unsigned long long base,
 }
 |}
 
-(* Everything the sweep needs, held for the whole of it. The two lifetime fields are not
-   decoration: [Cu.Context.get_primary] finalizes with [cuDevicePrimaryCtxRelease], and the
-   underlying context is RESET once the last reference goes -- so a context dropped after [init]
-   returns can be collected mid-sweep and take the device allocation and the loaded code with it.
-   [Cuda_backend] keeps its [primary_context] in the device record for exactly this reason.
-   [kernel_module] is belt and braces: cudajit's [get_function] already documents that the returned
-   [func] retains its module, so this one is about saying the lifetime rather than inferring it from
-   a binding's internals -- and about the HIP arm, where the same reasoning has to hold. *)
+(* Everything the sweep needs, held for the whole of it. The two lifetime fields are not decoration:
+   [Cu.Context.get_primary] finalizes with [cuDevicePrimaryCtxRelease], and the underlying context
+   is RESET once the last reference goes -- so a context dropped after [init] returns can be
+   collected mid-sweep and take the device allocation and the loaded code with it. [Cuda_backend]
+   keeps its [primary_context] in the device record for exactly this reason. [kernel_module] is belt
+   and braces: cudajit's [get_function] already documents that the returned [func] retains its
+   module, so this one is about saying the lifetime rather than inferring it from a binding's
+   internals -- and about the HIP arm, where the same reasoning has to hold. *)
 type state = {
   context : Cu.Context.t;
   kernel_module : Cu.Module.t;
@@ -93,13 +94,12 @@ type state = {
    policies sweep two different things, and both are worth having:
 
    - [`Device] targets this GPU's own compute capability, which is what "verify the codec against
-     the HARDWARE" means -- gh-ocannl-646's lesson, and the only setting that exercises the
-     instruction a kernel actually runs.
-   - [`Backend] takes [Cuda_backend.gpu_arch_options], the repo's marker-driven policy, which for a
-     source with no arch markers (like this one) passes NO architecture at all and so gets nvrtc's
-     default target -- below 890, hence the software path. That is what an OCANNL fp8 kernel without
-     tensor-core markers is compiled with today, so it is the honest answer to "does the codec agree
-     with what the backend emits".
+   the HARDWARE" means -- gh-ocannl-646's lesson, and the only setting that exercises the
+   instruction a kernel actually runs. - [`Backend] takes [Cuda_backend.gpu_arch_options], the
+   repo's marker-driven policy, which for a source with no arch markers (like this one) passes NO
+   architecture at all and so gets nvrtc's default target -- below 890, hence the software path.
+   That is what an OCANNL fp8 kernel without tensor-core markers is compiled with today, so it is
+   the honest answer to "does the codec agree with what the backend emits".
 
    Default [`Device]: the issue this program exists for asks about the hardware. *)
 type arch_policy = [ `Device | `Backend ]
@@ -153,9 +153,7 @@ let init () =
          for the same reason -- one nvrtc caller disagreeing with the backend about which
          [--gpu-architecture] a source needs is how a soak comes to measure something the backend
          never emits. *)
-      let device_cc =
-        (attrs.compute_capability_major * 10) + attrs.compute_capability_minor
-      in
+      let device_cc = (attrs.compute_capability_major * 10) + attrs.compute_capability_minor in
       let options =
         Cuda_backend.cuda_include_options ()
         @
@@ -172,8 +170,7 @@ let init () =
       let stream = Cu.Stream.create () in
       Cu.Stream.launch_kernel
         (Cu.Module.get_function kernel_module ~name:"ocannl_report_arch")
-        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream
-        [ Cu.Stream.Tensor arch_out ];
+        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream [ Cu.Stream.Tensor arch_out ];
       let arch_host =
         Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int32 Stdlib.Bigarray.c_layout 1
       in
@@ -231,7 +228,8 @@ let conversion_path () =
   if st.cuda_arch >= fp8_hardware_arch then
     Printf.sprintf "hardware cvt (__CUDA_ARCH__ = %d)" st.cuda_arch
   else if st.cuda_arch = 0 then "unknown (__CUDA_ARCH__ undefined)"
-  else Printf.sprintf "header software path (__CUDA_ARCH__ = %d < %d)" st.cuda_arch fp8_hardware_arch
+  else
+    Printf.sprintf "header software path (__CUDA_ARCH__ = %d < %d)" st.cuda_arch fp8_hardware_arch
 
 let block_dim = 256
 
@@ -255,7 +253,11 @@ let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
   let ptr = device_buffer st count in
   Cu.Stream.launch_kernel st.narrow_f32 ~grid_dim_x:(grid_dim st) ~block_dim_x:block_dim
     ~shared_mem_bytes:0 st.stream
-    [ Cu.Stream.Size_t (Unsigned.Size_t.of_int base); Cu.Stream.Size_t (Unsigned.Size_t.of_int count); Cu.Stream.Tensor ptr ];
+    [
+      Cu.Stream.Size_t (Unsigned.Size_t.of_int base);
+      Cu.Stream.Size_t (Unsigned.Size_t.of_int count);
+      Cu.Stream.Tensor ptr;
+    ];
   fetch st ptr out count
 
 let narrow_f64 ~spelling ~base ~count ~lows (out : bytes_buf) =

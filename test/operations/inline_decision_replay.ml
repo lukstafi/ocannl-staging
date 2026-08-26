@@ -33,7 +33,6 @@ let loop s body = Ll_test.loop ~upto:2 s body
 let seq = Ll_test.seq
 let count_set = Ll_test.count_set
 let count_get = Ll_test.count_get
-
 let p = Verdict.p
 
 (* A reversed read [prod[2-j]]: position differs from the enclosing statement's write position, so

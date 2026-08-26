@@ -14,8 +14,8 @@ module Asgns = Ir.Assignments
 let p = Verdict.p
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
-   variant naming one of five mutually exclusive states, so a claim names the state it means
-   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+   variant naming one of five mutually exclusive states, so a claim names the state it means instead
+   of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
 let completed (r : Autotune.report) =
   match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
 
