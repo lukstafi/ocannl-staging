@@ -121,7 +121,7 @@ schedule, and it is the *schedule* that pins the numerics — a reduction-reasso
 schedule (split reductions, tensorized paths) makes the computed bits a function of the
 schedule, so results are bitwise-reproducible as long as the same schedule replays, and
 every relaxation beyond that is a named, opt-in policy (see the
-[manifesto](compilation_manifesto.md), §4; the `approximate` profile planned for v1.2,
+[manifesto](compilation_manifesto.md), §4; the `approximate` profile planned for v1.1,
 gh-719, will be the packaged one).
 
 ## Stage 0: tensors carry their code
@@ -536,7 +536,7 @@ kernel fission:
   `Split_reduce` two-pass transform (a fixed combine tree, bitwise-reproducible per
   schedule); the other atomics-free mechanism is a tensorized contraction, where an
   accepted `Tile_mma` intrinsic rendering executes the tile's reduction cooperatively. This rule is
-  profile-conditional by design: the `approximate` profile planned for v1.2 (gh-719) will
+  profile-conditional by design: the `approximate` profile planned for v1.1 (gh-719) will
   admit numerics-relaxing parallelizations as a named policy beside the deterministic
   default.
 - **Kernel fission** (`Schedule.fission_scheduled`): the whole-step program is cut into

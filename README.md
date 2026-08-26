@@ -60,7 +60,7 @@ NOTE: debug logging from CUDA or HIP in complex settings is a bit tricky, as it 
 
 ## Milestones
 
-See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. **v1.0 was released on August 13, 2026**; the next target is **v1.1, soft-dated August 24, 2026**. Release dates are now project-internal and aspirational — through v1.0 they were pinned to conference deadlines.
+See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. **v1.0.1 was released on August 26, 2026**; the next target is **v1.0.2** (robustness pulled forward), undated. Release dates are now project-internal and aspirational — through v1.0 they were pinned to conference deadlines.
 
 > Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments.
 >
@@ -71,6 +71,8 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
 > Update (August 13, 2026): **v1.0 shipped**, with its milestone fully closed (49 issues). Release dates are no longer pinned to paper deadlines: **v1.1's soft target is August 24, 2026** (the OCaml Workshop date, used as an anchor rather than as a submission). v1.1 and v1.2 were rebalanced along a different seam than the original split — **v1.1 is the compiler work plus the training-loop mechanics it needs**, **v1.2 the consumers and explorations**, including the training experience a user sees. The sequence is `0.9 → 1.0 → 1.1 → 1.2`.
 >
 > Update (late August 2026): v1.2 was split along the performance seam — **v1.2 is performance-chasing in the `approximate` profile, demonstrated on benchmarks**, and **v1.3 is the consumers, explorations, training experience, and review-filed hygiene**; the Winograd and zero-nest conv tiers (#505, #503) moved from v1.1 into v1.2. With its numerics-changing carry-overs gone, **v1.1 reads as consolidation after v1.0**: the search follow-ups v1.0's evaluation filed, inlining and reduction soundness, test and benchmark seams that cannot report a false pass, and the training-loop mechanics. The sequence is `1.0 → 1.1 → 1.2 → 1.3`.
+
+> Update (August 26, 2026): **the ladder was renumbered** — version-number depth tracks release *scope*, as in the 0.6.x line, rather than semver. The consolidation release shipped as **v1.0.1**; a new **v1.0.2** pulls the robustness/hygiene backlog forward out of the feature milestones; the performance milestone is now **v1.1**, the consumers/demos milestone **v1.1.1**, and a new **v1.2** holds ambitious feature-grade work. The sequence is `1.0 → 1.0.1 → 1.0.2 → 1.1 → 1.1.1 → 1.2`.
 
 * **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
@@ -103,28 +105,38 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] The `gpt2_mini` arc: attribute the step (#531), then judge companion coverage at the site's arity (#569) — tuned step 107.4 → 52.4 ms on CUDA, 45.6 → 25.4 ms on HIP; batched/rank-3 sites seeded (#528).
   - [x] CPU reduced precision: 16-bit storage with f32 compute and native fp16 arithmetic (#516, #517); `cc` worker-pool uniformity on hybrid CPUs (#530).
   - [x] Frontend, configuration and diagnostics: use-site row resolution and `stretch` (#544), config profiles (#559), the tuner's honest reference point (#552), routine-name collision policy (#513).
-* **1.1 (Aug 24, 2026, soft target): Consolidation after v1.0 — search follow-through, inlining and reduction soundness, honest test and benchmark seams, and training-loop mechanics.**
+* **1.0.1 (Aug 26, 2026, released): Consolidation after v1.0 — search follow-through, inlining and reduction soundness, honest test and benchmark seams, and training-loop mechanics.** (Planned as "v1.1" until the renumbering.)
   - [x] Search follow-through from the v1.0 evaluation: builder preconditions as tree verdicts, a fittable memory leg, profitability in enablement promotion, sketch-family extraction, and narrow-operand tensor-core tiling (#577, #578, #579, #580, #575).
-  - [x] The `gpt2_mini` residue: `lm_head` fission, the residual stream's re-summation, rank-4 projection sites (#574, #573, #643); the attention out-projection site stays open (#683).
-  - [x] Soundness: inlined computations keep their guards, loops and leaf reads (#651, #674, #610); reduction accumulator width independent of the chosen schedule (#639, #663, #693).
+  - [x] The `gpt2_mini` residue: `lm_head` fission, the residual stream's re-summation, rank-4 projection sites, the attention out projection, precision-neutral accumulator localization — −74% on the Metal forward step (#574, #573, #643, #683, #693).
+  - [x] Soundness: guarded and looped setters rejected rather than inlined without their `If` or repetition loop, cross-routine splices declaring their leaf reads (#651, #674, #610); reduction accumulator width independent of the chosen schedule, on every backend (#639, #663, #693, #735).
   - [x] Seams that cannot report a false pass: `Verdict` with its ratchet, generated-kernel provenance, one tracked environment spelling, complete config deps, digest completeness, benchmark pass provenance (#601, #668, #655, #628, #652, #586, #597, #572, #644).
   - [x] Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading, and `trainable_params` (#465, #467, #673).
-  - [ ] Still open: the fault-injection inventory (#571), post-finalization placements in `ll_test` (#631), the two-pass protocol question (#675), the out-projection site (#683).
-* **1.2 (undated): Performance-chasing in the approximate profile, demonstrated on benchmarks.**
+* **1.0.2 (undated): Robustness pulled forward — the review-filed hygiene, worked before it rots.**
+  - [ ] Soundness and benchmark trust from the performance milestone's fringe (#782, #754, #774, #755, #759, #760).
+  - [ ] Dedup and structural cleanups: tensor/train/backends/C_syntax internal duplication, the cc builtins' hand-synced copies (#771, #772, #770, #769, #764, #656, #779, #767, #768, #785).
+  - [ ] Test, scan and configuration seams; documentation floors (see [ROADMAP.md](ROADMAP.md)).
+* **1.1 (undated): Performance-chasing in the approximate profile, demonstrated on benchmarks.**
   - [ ] The `approximate` preset and the benchmark expansion legs, with Gemma 3 as the real-weights long-context target (#719, #720, #570).
-  - [ ] Algebraic rewrites: fused attention via online softmax on a loop-carried-recurrence construct, Winograd, zero-nest workgroup geometry, fp16 accumulator width and warp-shuffle reductions at narrow storage (#483, #696, #505, #503, #680, #682).
-  - [ ] Exact-numerics residue: footprint-scoped materialization, register-tile geometry, the peel cliff, non-dividing GEBP, vector `Max`/`Min` reductions, cost-model fidelity, async-copy staging, memory pressure (#616, #619, #620, #627, #649, #636, #637, #576, #565).
-* **1.3 (undated): Consumers, explorations, and the hygiene the reviews filed.**
-  - [ ] Training experience: resumable checkpoints, experiment tracking, plot polish, and zero-copy from mmap-backed checkpoints (#96, #122, #103, #585).
+  - [ ] Algebraic rewrites: fused attention via online softmax on a loop-carried-recurrence construct, Winograd, zero-nest workgroup geometry, fp16 accumulator width at narrow storage (#483, #696, #505, #503, #680).
+  - [ ] Exact-numerics residue: footprint-scoped materialization, register-tile geometry, the peel cliff, non-dividing GEBP, cost-model fidelity, async-copy staging, memory pressure (#616, #619, #620, #627, #636, #637, #576, #565).
+* **1.1.1 (undated): Consumers and explorations.**
+  - [ ] Training experience: resumable checkpoints, experiment tracking, plot polish (#96, #122, #103).
   - [ ] Models, reproductions and demos: model surgery, LSTM, Bonsai RNN, digit addition, BERT/ModernBERT, DisTrO (#33, #60, #182, #427, #297, #278).
-  - [ ] Frontend design, library and deployment: shape schemes, the Simply/NanoDO study for `lib/`, PoPE, inference binaries, the ppxlib ceiling migration (#404, #435, #444, #97, #695).
-  - [ ] Integrations — Polars, krnl/autograph (#219, #277) — and hardware-gated performance: HIP CDNA MFMA, CUDA pinned and constant host memory (#477, #170, #195).
-  - [ ] Engineering hygiene and test seams filed by the v1.0–v1.1 review cycles: configuration and caching, IR and codegen, test infrastructure, documentation (see [ROADMAP.md](ROADMAP.md)).
+  - [ ] Explorations, integrations and deployment: the Simply/NanoDO study for `lib/`, inference binaries, Polars, krnl/autograph (#435, #97, #219, #277).
+* **1.2 (undated): Ambitious feature-grade work.**
+  - [ ] Shape schemes for tensor functions (#404), PoPE (#444), checkpoint zero-copy on device (#585), HIP CDNA MFMA (#477), CUDA pinned host buffers (#170) and CUDA `__constant__` arrays (#195).
 
 ### Releases
 
 For more details, see [CHANGES](CHANGES.md).
 
+* **1.0.1: Consolidation after v1.0 — making a green result mean what it says.**
+  * Soundness of inlining: a guarded or looped setter is rejected for virtualization rather than replayed without its `If` or its repetition loop; cross-routine splices declare their leaf reads and are reconciled into the routine interface; `Local_scope` has an enforced purity contract, and a scope over a materialized node is an error rather than a silent collapse.
+  * Reduction accumulator width is policy, not schedule, on every backend — with precision-neutral localization worth −74% on the Metal `gpt2_mini` forward step, and batch-grid twins worth 1.72x on the HIP step.
+  * Test seams that cannot report a false pass: `Verdict` with its ratchet and quantified claims, generated-kernel provenance, per-test aliases with the `@scans` family, one tracked environment spelling with reserved namespaces, complete and floor-checked repository scans.
+  * Benchmark trust: result rows carry search provenance and fixture digests, diverged cells report divergence, and the measurement path has a fixture-free smoke test.
+  * Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading (Windows arm measured, not asserted), and `trainable_params`.
+  * CPU SIMD: whole-vector FMA (packed f32 GEBP 12.6 → 127.2 GFLOP/s at the default flags), the auto-resolved AVX-512 width (130.5 → 225.7 GFLOP/s on a Zen 5), `Max`/`Min` reductions off the per-lane libm calls, and fp8 codecs exhaustively verified — the host sweep and the CUDA/HIP soak arms in-tree, the Metal codec's bit-identity to `builtins.c` established off-tree.
 * **1.0: Advanced compiler tiers and schedule-quality follow-through.**
   * Schedule inference as branch-and-bound: a refinement tree over *partial* schedules, legality verdicts carrying their witnesses, and admissible cost floors, so a subtree is refuted or priced before any of its members is built.
   * Inlining joined scheduling as a searchable decision surface, once the concrete-index tracer was retired in favor of the affine access relations.
