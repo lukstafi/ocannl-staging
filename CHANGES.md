@@ -8,12 +8,12 @@
 > `1.0 → 1.0.1 → 1.0.2 → 1.1 → 1.1.1 → 1.2` (see ROADMAP.md). Its 135 closed issues were mostly
 > filed by PR review cycles, and their common shape is trust: a failing check that cannot be
 > `dune promote`d into a golden, an environment variable that cannot be mistyped silently, an
-> inlined computation that cannot lose its guard or its repetition loop, a reduction whose result
-> cannot depend on which schedule won, and benchmark rows that say which pass produced them and
-> which fixture bytes they measured. The training-loop mechanics land here too: LR schedules,
-> global-norm clipping, gradient accumulation, mmap-backed checkpoint loading with a
-> measured-not-asserted Windows arm, and `trainable_params` as distinct from "needs
-> initialization".
+> inlined computation that cannot lose its guard or its repetition loop, a reduction whose
+> accumulator width cannot depend on which schedule won, and benchmark rows that say which pass
+> produced them and which fixture bytes they measured. The training-loop mechanics land here too:
+> LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading with
+> its Windows arm measured and then pinned by a cross-platform regression test, and
+> `trainable_params` as distinct from "needs initialization".
 >
 > Consolidation still moved the performance needle, because several soundness fixes were
 > performance fixes: precision-neutral accumulator localization took the Metal `gpt2_mini` forward
@@ -24,8 +24,9 @@
 > a Zen 5 (gh-ocannl-621, gh-ocannl-648).
 >
 > Honest nulls, recorded as such: the two-pass benchmark protocol stays OCANNL-only — no other
-> framework's searching cell clears ~10% on either GPU box, and the old 2.5–3.5x rationale is
-> superseded by a measured ≤10.3% (gh-ocannl-675); the menu's descent into virtualization-inlined
+> framework's searching cell clears ~10% on both GPU boxes (the torch.compile residue even changes
+> sign between them), and the old 2.5–3.5x rationale is superseded by a measured ≤10.3%
+> (gh-ocannl-675); the menu's descent into virtualization-inlined
 > scopes measured zero loops reached across the whole suite, so the provenance restriction is
 > insurance rather than a measured save (gh-ocannl-687); and the gh-573/gh-574 HIP ratios were
 > re-verified end to end after the first session's arm A routines turned out profiled-but-never-
@@ -332,8 +333,10 @@
   buffer. The checkpoint format gained an `alignment` field (default 32, GGUF's `general.alignment`
   default) and rounds payload offsets up to it; the header is space-padded to the same boundary, so
   the offsets are absolute file alignments and the change breaks neither old readers nor old files.
-  Mapping is on by default except on Windows, where a mapped view holds the file open and would
-  make a later save over the same path fail (`checkpoint_load_mmap`, or the `?mmap` argument).
+  Mapping is on by default (`checkpoint_load_mmap`, or the `?mmap` argument) — originally
+  everywhere but Windows, where a mapped view holding the file open was expected to make a later
+  save over the same path fail; gh-ocannl-588 (entry above) measured that claim, found the rename
+  succeeds, and retired the exception, so the released default is on for every platform.
 
 - **Cache identity is complete by construction, not by vigilance** (gh-ocannl-572): every
   configuration key is classified in `Utils.config_key_classification` — code-borne (it reaches the
@@ -427,7 +430,11 @@
 ### Changed
 
 - **An OCANNL setting has two spellings in the environment, not four** (gh-ocannl-605):
-  `ocannl_<key>` and `OCANNL_<KEY>`, which is what `ocannl_config.reference` already described. The
+  `ocannl_<key>` and `OCANNL_<KEY>`, which is what `ocannl_config.reference` already described.
+  (An interim state within this release: gh-ocannl-652 — entry above — later dropped the
+  lowercase spelling too, so the released environment reads `OCANNL_<KEY>` alone and a lowercase
+  spelling of a known key is a fatal startup error; the commandline story below is the released
+  one.) The
   dash-prefixed `ocannl-<key>` / `OCANNL-<KEY>` are gone: documented nowhere, used by no caller,
   unsettable from bash or zsh without `env "ocannl-log_level=1" cmd` — and the tax was paid by
   every dune rule that has to declare the ambient variables it must be invalidated by, which had to
@@ -658,8 +665,9 @@
   gh-ocannl-675, gh-ocannl-751, gh-ocannl-702, gh-ocannl-711, gh-ocannl-640): a diverged cell
   emits `null` for non-finite numbers and `orchestrate.py` reports DIVERGED naming the step,
   rather than losing the cell as a runner failure; whether the tinygrad-BEAM and torch.compile
-  cells need OCANNL's two-pass protocol was measured on both GPU boxes — no cell clears ~10%, so
-  they stay single-pass, and the README's 2.5–3.5x rationale is superseded by a measured ≤10.3%;
+  cells need OCANNL's two-pass protocol was measured on both GPU boxes — no cell clears ~10% on
+  both boxes and the torch.compile residue changes sign between them, so they stay single-pass,
+  and the README's 2.5–3.5x rationale is superseded by a measured ≤10.3%;
   the tinygrad beam-provenance probe binds tinygrad 0.13's module path, and promptly flagged a
   contaminated replay; `bench_mlp --self-test` runs the full protocol on a fabricated in-memory
   MLP, so the measurement path has an executable smoke test in a fresh checkout with no Python

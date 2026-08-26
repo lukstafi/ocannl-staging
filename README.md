@@ -124,7 +124,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [ ] Models, reproductions and demos: model surgery, LSTM, Bonsai RNN, digit addition, BERT/ModernBERT, DisTrO (#33, #60, #182, #427, #297, #278).
   - [ ] Explorations, integrations and deployment: the Simply/NanoDO study for `lib/`, inference binaries, Polars, krnl/autograph (#435, #97, #219, #277).
 * **1.2 (undated): Ambitious feature-grade work.**
-  - [ ] Shape schemes for tensor functions (#404), PoPE (#444), checkpoint zero-copy on device (#585), HIP CDNA MFMA (#477), CUDA pinned and constant host memory (#170, #195).
+  - [ ] Shape schemes for tensor functions (#404), PoPE (#444), checkpoint zero-copy on device (#585), HIP CDNA MFMA (#477), CUDA pinned host buffers (#170) and CUDA `__constant__` arrays (#195).
 
 ### Releases
 
