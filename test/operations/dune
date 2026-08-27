@@ -2176,6 +2176,7 @@
  (deps
   (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
+  (env_var OCANNL_FP16_ARITHMETIC)
   (env_var OCANNL_BACKEND))
  (modules accum_width)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
@@ -2503,6 +2504,7 @@
  (deps
   (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
+  (env_var OCANNL_FP16_ARITHMETIC)
   (env_var OCANNL_BACKEND))
  (modules schedule_mma_matmul)
  (libraries base ocannl stdio arrayjit.verdict test_utils ll_test)
@@ -2991,6 +2993,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var OCANNL_FP16_ARITHMETIC)
   (env_var OCANNL_BACKEND))
  (modules sketch_family_tree)
  (libraries base ocannl stdio arrayjit.verdict)

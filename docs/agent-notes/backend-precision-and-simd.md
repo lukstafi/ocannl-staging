@@ -203,10 +203,12 @@ files.
   once per process and reports three states — no `_Float16`, `_Float16` with arithmetic *promoted*
   to float (correct, no lane-count win: x86 without AVX512-FP16), and genuinely native
   (ARMv8.2-FP16, AVX512-FP16) — surfacing the last as `hardware_limits.native_fp16_arithmetic`.
-  `Ir.Numerics.fp16_arithmetic` (off by default: it trades mantissa for throughput, unlike
-  `narrow_compute_f32`) then makes `compute_prec` leave `Half_prec` alone, so `vec_ext_typ` mints a
-  `HALF_T` vector and the lane count doubles. The middle state is why the probe is not a boolean:
-  seeding and the cost model must not expect a lane-count win where only the type exists.
+  `Ir.Numerics.fp16_arithmetic = Fp16_narrow` (config `true`; the policy is TERNARY since
+  gh-ocannl-680 — see the dedicated bullet below — and the narrow request is not the default,
+  because it trades mantissa for throughput, unlike `narrow_compute_f32`) then makes
+  `compute_prec` leave `Half_prec` alone, so `vec_ext_typ` mints a `HALF_T` vector and the lane
+  count doubles. The middle state is why the probe is not a boolean: seeding and the cost model
+  must not expect a lane-count win where only the type exists.
 - The fp16 FMA is where parity nearly breaks: `fmaf` on `_Float16` operands promotes to float and
   rounds **twice**, while `__builtin_elementwise_fma` on an fp16 vector rounds once. The scalar
   rendering and the vector rendering's per-lane fallback therefore both go through one builtin
