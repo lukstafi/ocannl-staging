@@ -254,6 +254,39 @@ tree leaves = flat enumeration: true
  8  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
  9  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1 packprec:single
 10  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1 packprec:single
+== half-prec gpu, f16 tiles, default policy: 10 seeds ==
+ 0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:true mma:true simd:32 bm:16  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:true mma:true simd:32 bm:32  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+== half-prec gpu, f16 tiles, wide policy, no wide-accumulate arm: 5 seeds ==
+ 0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+== half-prec gpu, f16 tiles, wide policy, wide-accumulate arm: 10 seeds ==
+ 0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:true mma:true simd:32 bm:16  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:true mma:true simd:32 bm:32  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+== half-prec cpu seeds, wide policy + narrow_compute_f32 off, native fp16: 2 seeds ==
+ 0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the wide-accumulate arm: true
+the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates (accumulator residency diverges from compute): true
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --

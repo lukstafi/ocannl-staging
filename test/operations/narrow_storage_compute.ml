@@ -152,7 +152,7 @@ let () =
      owes its serial twin the same bitwise equality. Where the target has only promoted or emulated
      fp16 the policy is ignored and this repeats the widening path, which is the point of testing
      the flag rather than the hardware. *)
-  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = true };
+  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_narrow };
   let twin = run ~name:"nsc_twin_nat" ~transform:serial ~prec:Ir.Ops.half ~label:"tnat" () in
   let vec = run ~name:"nsc_vec_nat" ~transform:vectorize ~prec:Ir.Ops.half ~label:"vnat" () in
   p "native-fp16 vectorized rendering is bitwise identical to the serial twin"
@@ -188,8 +188,10 @@ let () =
     Ir.Numerics.set_policy base;
     v
   in
-  let ovf_wide = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = false } in
-  let ovf_native = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = true } in
+  let ovf_wide = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_auto } in
+  let ovf_native =
+    overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_narrow }
+  in
   (* Same gate as the bf16 accuracy legs: both policies are C-backend knobs, so on a GPU backend
      both [overflow_leg] calls compute [exp 12.] in half and overflow — a property of the target's
      native arithmetic, not of the policy this pair exists to pin. *)
@@ -199,7 +201,7 @@ let () =
     ((not on_cpu)
     || if native_fp16 then not Float.(is_finite ovf_native) else Float.(is_finite ovf_native));
 
-  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = false };
+  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_auto };
 
   (* --- 2c. The shared fp16 FMA must survive an emulated target. --- *)
   (* `narrow_compute_f32 = false` leaves half at half on *any* target, including one without
@@ -213,7 +215,7 @@ let () =
     let b = NTDSL.init ~l:"fma_b" ~prec:Ir.Ops.half ~o:[ 4 ] ~f:(fun _ -> 2.0) () in
     let%op y = (a *. b) + a in
     Tn.update_prec y.Tensor.value Ir.Ops.half;
-    Ir.Numerics.set_policy { base with narrow_compute_f32 = false; fp16_arithmetic = false };
+    Ir.Numerics.set_policy { base with narrow_compute_f32 = false; fp16_arithmetic = Fp16_auto };
     let ctx = Context.auto () in
     let ctx, routine =
       Context.compile ~lowered_transform:serial ctx

@@ -252,7 +252,7 @@ let () =
 
   (* === pure fp16: native (forced) f16 arithmetic, f16 accumulators, doubled lanes === *)
   let saved_policy = Numerics.get () in
-  Numerics.set_policy { saved_policy with fp16_arithmetic = true };
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_narrow };
   (let%op fc0 = mah * mbh in
    Tn.update_prec fc0.Tensor.value Ir.Ops.half;
    let%op fc1 = mah * mbh in

@@ -209,17 +209,34 @@ let mma_format_triples ~a_prec ~b_prec ~d_prec =
           List.map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
               (a_format, b_format, d_format)))
 
+(* gh-ocannl-680: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only where
+   the backend's uniform-f16 arm accumulates f32 ([mma_f16_wide_acc] — CUDA's inline-PTX m16n8k16
+   arm on sm_80+); elsewhere (Metal's uniform-precision [simdgroup_matrix], HIP pending its
+   d-boundary conversion) the seeds are withheld and the serial legs carry the f32 residency via
+   [accum_prec], keeping the accumulation width schedule-uniform per backend (gh-ocannl-545/663).
+   Consulting [Numerics.fp16_accum_wide] here — the same predicate the emission hooks consult —
+   is what keeps seeding and emission from drifting apart on which f16 sites tensorize. Applied in
+   the tile AND staged-layout lookups, so no seed escapes the gate. *)
+let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~d_prec =
+  (match d_prec with Ir.Ops.Half_prec _ -> true | _ -> false)
+  && Ir.Numerics.fp16_accum_wide ()
+  && not mma.Ir.Backend_intf.mma_f16_wide_acc
+
 let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
-  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+  if fp16_wide_withholds mma ~d_prec then None
+  else
+    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+        List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
 
 (* The swizzled staged layout, if any, that the backend can read for this site's formats
    (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. *)
 let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec
     : LL.swizzle_kind option =
-  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
-  |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
+  if fp16_wide_withholds mma ~d_prec then None
+  else
+    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+        List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+    |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -2213,6 +2230,13 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               | _ -> false)
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec)) cprec
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec)) cprec
+            (* The C-tile accumulates at the compute precision, so a divergent accumulator
+               residency ([Fp16_wide] + [narrow_compute_f32 = false] on an f16 destination) is an
+               emission decline — mirror it here or the candidate is timed under a tensorized
+               label (gh-ocannl-680; Codex P1 round 1 on staging PR #477). *)
+            && Ir.Ops.equal_prec
+                 (Ir.Numerics.cpu_accum_prec ~native_fp16_arithmetic:native_fp16 prec)
+                 cprec
           in
           (* The renderer fills the widest vector the out-channel extent allows, halving where it
              must ({!Ir.Backend_intf.simd_lanes_for}); seeding asks the same question, or it would
@@ -3081,7 +3105,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
            and the [C_syntax.mma_census]. *)
         let native_fp16 = limits.Ir.Backend_intf.native_fp16_arithmetic in
         let comp_prec p = Ir.Numerics.cpu_compute_prec ~native_fp16_arithmetic:native_fp16 p in
-        let prec = comp_prec (Lazy.force site.m_d.Ir.Tnode.storage_prec) in
+        let d_store_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+        let prec = comp_prec d_store_prec in
         let uniform_vec_capable =
           (match prec with
             | Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true
@@ -3089,6 +3114,13 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             | _ -> false)
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec)) prec
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec)) prec
+          (* The C-tile accumulates at the compute precision, so a divergent accumulator residency
+             ([Fp16_wide] + [narrow_compute_f32 = false] on an f16 destination) is an emission
+             decline — mirror it here or the candidate is timed under a tensorized label
+             (gh-ocannl-680; Codex P1 round 1 on staging PR #477). *)
+          && Ir.Ops.equal_prec
+               (Ir.Numerics.cpu_accum_prec ~native_fp16_arithmetic:native_fp16 d_store_prec)
+               prec
         in
         (* [lanes] is the widest the register file offers, which is what the decline messages quote;
            whether a given extent can be tiled is [lanes_fit], which lets the renderer's per-extent

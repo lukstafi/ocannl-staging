@@ -46,6 +46,7 @@ let gpu_plain_limits =
           Ir.Backend_intf.mma_simd_width = 32;
           mma_tile = (8, 8, 8);
           mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+          mma_f16_wide_acc = false;
           mma_staged_layouts = [];
           mma_pipeline_depths = [];
         };
@@ -63,6 +64,7 @@ let gpu_full_limits =
           Ir.Backend_intf.mma_simd_width = 32;
           mma_tile = (8, 8, 8);
           mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+          mma_f16_wide_acc = false;
           mma_staged_layouts = [ ((f32, f32, f32), Ir.Backend_intf.Mma_swizzled_b128) ];
           mma_pipeline_depths = [ 2 ];
         };
@@ -329,7 +331,7 @@ let () =
   Numerics.set_policy { saved_policy with narrow_compute_f32 = false };
   awkward_section "half-prec cpu, narrow_compute_f32 off" ~is_gpu:false ~is_cpu:true
     ~limits:cpu_limits opt_h;
-  Numerics.set_policy { saved_policy with fp16_arithmetic = true };
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_narrow };
   let cpu_native_fp16_limits = { cpu_limits with native_fp16_arithmetic = true } in
   let _ =
     section "half-prec cpu seeds, native fp16" ~is_gpu:false ~is_cpu:true
@@ -343,6 +345,63 @@ let () =
       ~limits:cpu_limits opt_h
   in
   Numerics.set_policy saved_policy;
+  (* gh-ocannl-680: the wide-f16 seeding gate. A GPU capability advertising the uniform-f16 triple
+     seeds mma candidates under the default policy; under [Fp16_wide] those seeds are withheld
+     exactly where the capability lacks the f32-accumulate uniform-f16 arm ([mma_f16_wide_acc] —
+     Metal, and HIP pending its d-boundary conversion) and kept where it has one (CUDA sm_80+). The
+     mixed [(f16, f16, f32)] triple is advertised too, standing in for the f32-storage destinations
+     the gate must NOT touch — the gate keys on the DESTINATION's storage precision, which for
+     [opt_h] is f16. *)
+  let f16t = Ir.Backend_intf.Mma_f16 in
+  let gpu_f16_limits ~wide_acc =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (8, 8, 8);
+            mma_format_tiles = [ ((f16t, f16t, f16t), (8, 8, 8)); ((f16t, f16t, f32), (8, 8, 8)) ];
+            mma_f16_wide_acc = wide_acc;
+            mma_staged_layouts = [];
+            mma_pipeline_depths = [];
+          };
+    }
+  in
+  let has_mma seeds = List.exists seeds ~f:(fun p -> p.Autotune.sk_mma) in
+  let f16_default =
+    section "half-prec gpu, f16 tiles, default policy" ~is_gpu:true ~is_cpu:false
+      ~limits:(gpu_f16_limits ~wide_acc:false) opt_h
+  in
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+  let f16_wide_no_arm =
+    section "half-prec gpu, f16 tiles, wide policy, no wide-accumulate arm" ~is_gpu:true
+      ~is_cpu:false ~limits:(gpu_f16_limits ~wide_acc:false) opt_h
+  in
+  let f16_wide_arm =
+    section "half-prec gpu, f16 tiles, wide policy, wide-accumulate arm" ~is_gpu:true ~is_cpu:false
+      ~limits:(gpu_f16_limits ~wide_acc:true) opt_h
+  in
+  (* The CPU register tiling has the same wide-policy divergence case: under [Fp16_wide] with
+     [narrow_compute_f32 = false] on a native-fp16 target, compute resolves half while the
+     accumulator residency ([Numerics.cpu_accum_prec]) is f32, so the C-tile cannot honor it and
+     seeding must omit the tensorized candidates — mirroring [C_syntax.try_register_tile]'s
+     residency-divergence decline (Codex P1 round 1 on staging PR #477). *)
+  Numerics.set_policy
+    { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+  let f16_cpu_wide_nco =
+    section "half-prec cpu seeds, wide policy + narrow_compute_f32 off, native fp16" ~is_gpu:false
+      ~is_cpu:true ~limits:cpu_native_fp16_limits opt_h
+  in
+  Numerics.set_policy saved_policy;
+  Verdict.p
+    "the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the \
+     wide-accumulate arm"
+    (has_mma f16_default && (not (has_mma f16_wide_no_arm)) && has_mma f16_wide_arm);
+  Verdict.p
+    "the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates \
+     (accumulator residency diverges from compute)"
+    (not (has_mma f16_cpu_wide_nco));
   (* Transposed B (k on its minor axis): whole-triple and the hoisted-only Grid shape read B in
      place, which the register tiling statically declines; packing shapes normalize the layout. *)
   let tb =
@@ -700,6 +759,7 @@ let () =
                 Ir.Backend_intf.mma_simd_width = 32;
                 mma_tile = (16, 16, 16);
                 mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+                mma_f16_wide_acc = false;
                 mma_staged_layouts = [];
                 mma_pipeline_depths = [];
               };

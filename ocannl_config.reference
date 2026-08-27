@@ -855,8 +855,9 @@
 # GPU backends compute narrow arithmetic natively and their pointwise numerics are unaffected
 # either way; their reduction-accumulator width follows the tensor-unit formats (gh-ocannl-663):
 # serial bf16 reductions on CUDA and fp8 reductions everywhere accumulate in f32 and narrow once
-# per nest, mirroring the mma legs, while f16 (and bf16 on HIP/Metal, whose tiles accumulate in
-# storage-width fragments) keeps storage residency. This knob reaches the GPU accumulators only
+# per nest, mirroring the mma legs, while bf16 on HIP/Metal (whose tiles accumulate in
+# storage-width fragments) keeps storage residency; f16 residency is fp16_arithmetic's question,
+# not this knob's (gh-ocannl-680). This knob reaches the GPU accumulators only
 # where per-step narrowing can be restored SCHEDULE-UNIFORMLY, which is fp8 on CUDA and HIP (no
 # backend tensorizes fp8 destinations). It cannot reach bf16 on CUDA — the seeded uniform-bf16
 # mma arm accumulates f32 in hardware, so narrowing only the serial legs would make results
@@ -865,13 +866,28 @@
 # Programmatic override: `Ir.Numerics.set_policy`.
 #narrow_compute_f32=true
 
-# Numerics policy: on CPU targets with native 16-bit arithmetic (ARMv8.2-FP16, AVX512-FP16),
-# compute fp16 in fp16 instead of widening to f32 -- the lane count doubles against f32, at
-# fp16's 10-bit mantissa and 65504 range for intermediates. Off by default: unlike
-# narrow_compute_f32 this trades accuracy for throughput. Ignored on targets whose fp16
-# arithmetic is promoted to float (see cc_fp16_arithmetic), where it would cost accuracy for no
-# speed, and on the GPU backends. Programmatic override: `Ir.Numerics.set_policy`.
-#fp16_arithmetic=false
+# Numerics policy: how f16 computes and accumulates (gh-ocannl-680; ternary since then, and the
+# old boolean spellings keep working).
+# - "auto" (the default): each backend's structural residency. On the CPU backends f16 computes
+#   in f32 (under narrow_compute_f32); on the GPU backends f16 arithmetic is native and reduction
+#   accumulators keep storage residency, mirroring the f16-accumulate tensor-unit triple every
+#   backend seeds. Currently that means storage-width f16 accumulators on every GPU backend;
+#   the auto resolution is per backend and deliberately retains latitude to resolve WIDE on
+#   hardware where a wide f16 accumulate costs nothing (datacenter-class NVIDIA), so pin "true"
+#   or "false" where that must not move.
+# - "false": f16 reduction accumulators reside in f32 on every backend, narrowing once per nest
+#   -- the strict cross-backend-uniform semantics. On CUDA sm_80+ the uniform-f16 mma legs stay
+#   tensorized through an f32-accumulate inline-PTX arm; on Metal (no mixed-precision
+#   simdgroup_multiply_accumulate) and HIP (d-boundary conversion not wired) the uniform-f16 mma
+#   seeds are withheld instead -- widening only the serial legs would make results depend on the
+#   schedule again (gh-ocannl-663), so this setting trades the f16 tensor-unit legs there.
+# - "true": compute fp16 in fp16 on CPU targets with native 16-bit arithmetic (ARMv8.2-FP16,
+#   AVX512-FP16) -- the lane count doubles against f32, at fp16's 10-bit mantissa and 65504
+#   range for intermediates. Unlike narrow_compute_f32 this trades accuracy for throughput.
+#   Ignored on targets whose fp16 arithmetic is promoted to float (see cc_fp16_arithmetic),
+#   where it would cost accuracy for no speed; the GPU backends behave as under "auto".
+# Programmatic override: `Ir.Numerics.set_policy`.
+#fp16_arithmetic=auto
 
 # Whether the cc backend's target has native _Float16 arithmetic. "auto" (the default) probes the
 # configured compiler once per process: "none" if _Float16 is missing, "native" if the target
@@ -959,9 +975,11 @@
 # cc_vector_bytes=0
 #
 # # The numerics gates at their exact defaults, so that a profile switch never silently changes
-# # what math is being done (they are the orthogonal axis; see the issue).
+# # what math is being done (they are the orthogonal axis; see the issue). fp16_arithmetic=auto
+# # resolves deterministically per backend (gh-ocannl-680), so pinning the default keeps the
+# # principle: this profile changes no math, and same-machine runs stay reproducible.
 # tf32_matmuls=false
-# fp16_arithmetic=false
+# fp16_arithmetic=auto
 # narrow_compute_f32=true
 # --- END PROFILE PAYLOAD reproducible ---
 
@@ -982,6 +1000,7 @@
 # cc_backend_simd_flags=auto
 #
 # # Native 16-bit arithmetic where the target has it; ignored on targets that promote fp16 to
-# # float, and on the GPU backends.
+# # float, and on the GPU backends (whose f16 arithmetic and accumulators are native narrow
+# # under this setting, same as under auto -- gh-ocannl-680).
 # fp16_arithmetic=true
 # --- END PROFILE PAYLOAD performance ---

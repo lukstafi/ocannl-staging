@@ -385,6 +385,9 @@ module Impl = struct
                         ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (8, 8, 8) );
                       ];
+                    (* No mixed-precision [simdgroup_multiply_accumulate] exists, so the wide-f16
+                       policy unseeds the uniform-f16 tiles instead (gh-ocannl-680). *)
+                    mma_f16_wide_acc = false;
                     (* Metal banks too, but [simdgroup_load] takes a plain pointer and leading
                        dimension — no [ldmatrix] analogue (gh-ocannl-481 item 3, D3). *)
                     mma_staged_layouts = [];
@@ -678,7 +681,12 @@ module Impl = struct
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              | Ops.Half_prec _ -> Some "simdgroup_half8x8"
+              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments
+                 accumulate at f16 while every serial rendering holds f32 residency
+                 (gh-ocannl-680). Seeding already withholds such candidates ([mma_f16_wide_acc]);
+                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
+                 rendering whose accumulator follows [accum_prec]. *)
+              | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
               | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
               | _ -> None
           in
@@ -847,7 +855,12 @@ module Impl = struct
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              | Ops.Half_prec _ -> Some "simdgroup_half8x8"
+              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments
+                 accumulate at f16 while every serial rendering holds f32 residency
+                 (gh-ocannl-680). Seeding already withholds such candidates ([mma_f16_wide_acc]);
+                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
+                 rendering whose accumulator follows [accum_prec]. *)
+              | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
               | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
               | _ -> None
           in
@@ -1127,8 +1140,17 @@ module Impl = struct
        accumulate in fragments of the storage precision — the serial legs keep the same residency,
        and only fp8 (no accumulator format anywhere, and computed in f32 above regardless of policy)
        widens, which the compute resolution already covers. Restated next to the [compute_prec]
-       override because the pair binds at [include] time (signature coupling note). *)
-    let accum_prec = compute_prec
+       override because the pair binds at [include] time (signature coupling note).
+
+       Under [Numerics.Fp16_wide] (gh-ocannl-680) f16 accumulators reside in f32 here too — and
+       because no mixed-precision [simdgroup_multiply_accumulate] exists, the uniform-f16 mma legs
+       are withheld under that policy (the seeding gate via [mma_f16_wide_acc = false], and the
+       [frag_typ] declines below for hand-built IR), so serial and tensorized renderings stay
+       width-uniform rather than the mma legs keeping a narrow accumulate the serial legs lost. *)
+    let accum_prec prec =
+      match prec with
+      | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
+      | _ -> compute_prec prec
 
     (* If we wanted to reintroduce the log_id parameter: [Some ("const int&", "log_id")]. *)
     let kernel_log_param = None

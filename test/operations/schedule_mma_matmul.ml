@@ -231,6 +231,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_f32),
                   (16, 16, 8) );
               ];
+            mma_f16_wide_acc = false;
             mma_staged_layouts = [];
             mma_pipeline_depths = [];
           };
@@ -421,6 +422,126 @@ let () =
        has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
    in
    p "half tensorized structure as expected" ok);
+
+  (* --- Fp16_wide (gh-ocannl-680): the uniform-f16 combination under the wide policy. CUDA sm_80+
+     routes it to the f32-accumulate inline-PTX m16n8k16 arm (the bf16 uniform arm's body over the
+     shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not
+     render while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the
+     CPU register tiling renders as under the default policy (its accumulator is f32 either way).
+
+     The inputs are WIDTH-SENSITIVE, unlike [mah]/[mbh] above (Codex P1 round 3 on staging PR
+     #477: f16-exact inputs cannot tell a wide arm that accidentally accumulates narrow from a
+     correct one). Cells are f16-exact (multiples of 1/8, magnitudes below 4), products are
+     multiples of 1/64 with mean ~2.4, so the 32-term k-sums drift past 64 — where f16's spacing
+     (1/16 and coarser) can no longer represent them and per-step f16 narrowing visibly diverges —
+     while every product and partial sum stays exact in f32 (multiples of 1/64, magnitude below
+     2^8), so ANY accumulation association gives the identical f32 value: the comparison against
+     the host-side once-narrowed wide reference is bitwise for the serial rendering, the PTX arm's
+     whole-k f32 registers, and the recorded fallbacks alike, and a half-resident accumulator in
+     any of them fails it. --- *)
+  let fwa = Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375 in
+  let fwb = Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0.5 ~stride:0.625 in
+  let mwa = NTDSL.init ~l:"mwa" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:fwa () in
+  let mwb = NTDSL.init ~l:"mwb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:fwb () in
+  let wide_ref_hw =
+    (* The f64 chain reproduces the kernel's f32 arithmetic exactly (see the header note), and
+       minting a half tensor from it narrows once through the library's own conversion. *)
+    let sums =
+      Array.init (n * n) ~f:(fun t ->
+          let i = t / n and j = t % n in
+          let acc = ref 0.0 in
+          for k = 0 to n - 1 do
+            acc := !acc +. (fwa [| i; k |] *. fwb [| k; j |])
+          done;
+          !acc)
+    in
+    let mref =
+      NTDSL.init ~l:"mwref" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
+        ~f:(fun idcs -> sums.((idcs.(0) * n) + idcs.(1)))
+        ()
+    in
+    compile_serial ~name:"mm_h_wide_ref" mref
+  in
+  let saved_policy = Numerics.get () in
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+  let%op mchw0 = mwa * mwb in
+  Tn.update_prec mchw0.Tensor.value Ir.Ops.half;
+  let want_hw = compile_serial ~name:"mm_h_wide_serial" mchw0 in
+  let%op mchw1 = mwa * mwb in
+  Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
+  let got_hw, census_hw = compile_mma_with_census ~name:"mm_h_wide_mma" mchw1 in
+  Numerics.set_policy saved_policy;
+  p "Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise"
+    (Array.for_all2_exn want_hw wide_ref_hw ~f:Float.equal);
+  p
+    "Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not \
+     the schedule, sets the width)"
+    (Array.for_all2_exn got_hw wide_ref_hw ~f:Float.equal);
+  (let src = Generated.read "mm_h_wide_mma" in
+   let has s = String.is_substring src ~substring:s in
+   let intrinsics =
+     List.exists census_hw ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+   in
+   let fallback =
+     (not (List.is_empty census_hw))
+     && List.for_all census_hw ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+   in
+   let ok =
+     if on_metal then fallback && (not (has "simdgroup_half8x8")) && has "== 0)"
+     else if String.is_substring backend_name ~substring:"hip" then
+       fallback && (not (has "rocwmma")) && has "== 0)"
+     else if on_gpu then
+       (* CUDA: the f32-accumulate inline-PTX arm where the device advertises it (sm_80+); below
+          that floor the capability answers [mma_f16_wide_acc = false] and the deliberate rendering
+          is the recorded scalar fallback — derive the expectation from the advertised capability
+          rather than assuming the arm (Codex P1 round 1 on staging PR #477). *)
+       let wide_arm =
+         match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+         | Some m -> m.Ir.Backend_intf.mma_f16_wide_acc
+         | None -> false
+       in
+       if wide_arm then
+         intrinsics
+         && has "(mma-f16)"
+         && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+         && not (has "nvcuda::wmma")
+       else fallback && (not (has "nvcuda::wmma")) && has "== 0)"
+     else has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
+   in
+   p "Fp16_wide half tensorized structure as expected" ok);
+
+  (* --- The wide contract survives [narrow_compute_f32 = false] on the CPU backends (Codex P1
+     round 1 on staging PR #477): compute stays half there, the accumulator residency is f32, and
+     the register-tiled C-tile — which accumulates at COMPUTE precision — cannot honor that, so it
+     must decline to the serial fallback (whose localized accumulator follows [accum_prec]) rather
+     than accumulate narrowly under a tensorized label. On a native-fp16 machine the new
+     residency-divergence decline is what fires; elsewhere the vector-capability decline already
+     covered it — either way, no register tiling and a recorded fallback. CPU-only: on the GPU
+     backends [narrow_compute_f32] does not touch f16 compute and the leg above already pins the
+     wide rendering. --- *)
+  (let claim_ncf32 =
+     "Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile \
+      accumulator)"
+   in
+   if on_gpu then skipped claim_ncf32
+   else begin
+     Numerics.set_policy
+       { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+     let%op mchn1 = mwa * mwb in
+     Tn.update_prec mchn1.Tensor.value Ir.Ops.half;
+     let got_hn, census_hn = compile_mma_with_census ~name:"mm_h_wide_nco_mma" mchn1 in
+     Numerics.set_policy saved_policy;
+     let src = Generated.read "mm_h_wide_nco_mma" in
+     (* Compared against the independent wide reference, on the width-sensitive inputs: the
+        fallback's localized accumulator staying half — not merely differing from a serial twin
+        rendered the same way — is what this must catch (Codex P1 round 3 on PR #477). *)
+     p claim_ncf32
+       ((not (List.is_empty census_hn))
+       && List.for_all census_hn
+            ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+       && (not (String.is_substring src ~substring:"Tile_mma register tiling"))
+       && Array.for_all2_exn got_hn wide_ref_hw ~f:Float.equal)
+   end);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
      CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]
