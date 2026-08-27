@@ -9,8 +9,9 @@ module Cc_backend = Cc_backend
 
 (* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the backend
    singletons' context types (no existential): [Backends.query]/[Backends.with_backend] dispatch
-   generic operations, and [copy] pair-matches the constructors to recover type equality for
-   same-backend transfers. *)
+   generic operations, and [copy] correlates two of them ([Backends.pair_contexts]) to recover type
+   equality for same-backend transfers. Nothing here matches the constructors: each dispatcher goes
+   through the one match [Backends] keeps per direction. *)
 
 type compile_frontier = {
   last_writer : int Map.M(Tn).t;
@@ -63,6 +64,12 @@ type t = {
 
 let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
 
+(* The context's backend as a first-class module, for the queries that read nothing FROM the
+   context: [classify_failure], [static_properties] and [hardware_limits] are backend-level
+   functions, so they need no type-recovering dispatch over the wrapped context. *)
+let backend_module ctx : (module BI.Backend) =
+  Backends.backend_module (Backends.wrapped_backend ctx.wrapped)
+
 type task_handle = Ir.Task.t
 
 type routine = {
@@ -92,9 +99,7 @@ let create_from_backend_name ~ordinal backend_name =
 
 let cuda ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "cuda"
 let hip ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "hip"
-
-let metal ?ordinal () =
-  create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "metal"
+let metal ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "metal"
 
 let cpu ?threads () =
   (* Kernel-level CPU parallelism is automatic on both cc backends (pool-rendered Grid loops, see
@@ -142,13 +147,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* The [Tile_mma] rendering census is collected HERE, once, around this routine's
                codegen (gh-ocannl-626): whether a routine tensorized is a property of the compiled
                routine, not of whichever timing harness remembered to bracket the global. Fissioned
@@ -273,17 +272,8 @@ let compile ?name ?lowered_transform ?prelowered ctx comp bindings =
    simply never consulted for a launch failure, and every such failure is fatal by phase default. *)
 let failure_classifier ctx :
     Ir.Schedule_outcome.phase -> exn -> Ir.Schedule_outcome.classified_cause option =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.classify_failure);
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.classify_failure
 
 let poisoned_failure ctx =
   Option.map ctx.ledger.poisoned ~f:(fun (name, exn) ->
@@ -387,40 +377,17 @@ let sync ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backend.await c.BI.device);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backend.await c.BI.device);
     }
 
 let static_properties ctx =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.static_properties ());
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.static_properties ()
 
 let hardware_limits ctx =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.hardware_limits ());
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.hardware_limits ()
 
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
@@ -522,13 +489,7 @@ let to_host ctx (tn : Tn.t) : Nd.t =
     Backends.query ctx.wrapped
       {
         q =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            c
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
             Backend.await c.BI.device;
             if Backend.to_host c node nd then (
               Backend.await c.BI.device;
@@ -604,13 +565,7 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            c
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
             (* Await pending device work BEFORE the upload, mirroring [to_host]: backends with
                host-visible (Shared) buffers implement [from_host] as a direct CPU memcpy, which
                already-queued kernels writing [tn] (e.g. a just-scheduled parameter initialization)
@@ -626,9 +581,9 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
-    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality and
-    the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it falls
-    back to a host round-trip. *)
+    from the same backend, {!Backends.pair_contexts} recovers type equality and the copy dispatches
+    to the backend's [device_to_device] transfer machinery; otherwise it falls back to a host
+    round-trip. *)
 let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
   (* Both lineages, and BEFORE dispatch: the same-backend path runs the transfer schedule directly
      rather than through [to_host], so checking only the host round-trip would let a poisoned source
@@ -649,13 +604,10 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
              (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
                 (Tn.debug_name tn) what)
   in
-  let same (type dev runner event)
-      (module Backend : BI.Backend
-        with type dev = dev
-         and type runner = runner
-         and type event = event)
-      ~(rewrap : (dev, runner, event) BI.context -> Backends.wrapped_context)
-      (sctx : (dev, runner, event) BI.context) (dctx : (dev, runner, event) BI.context) =
+  let same (type d r e) (impl : (d, r, e) Backends.backend_impl) (sctx : (d, r, e) BI.context)
+      (dctx : (d, r, e) BI.context) =
+    let (module Backend) = impl.Backends.bi_module in
+    let rewrap = impl.Backends.bi_wrap in
     match Backend.device_to_device tn ~into_merge_buffer ~dst:dctx ~src:sctx with
     | Some r -> (
         (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the device
@@ -678,20 +630,9 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
           (* The source and destination buffers are physically the same: nothing to transfer. *)
           mark_initialized dst (Set.singleton (module Tn) tn)
   in
-  match (src.wrapped, dst.wrapped) with
-  | Backends.Cc_ctx s, Backends.Cc_ctx d ->
-      same (module Backends.Cc_b) ~rewrap:(fun c -> Backends.Cc_ctx c) s d
-  | Backends.Multidev_cc_ctx s, Backends.Multidev_cc_ctx d ->
-      same (module Backends.Multidev_cc_b) ~rewrap:(fun c -> Backends.Multidev_cc_ctx c) s d
-  | Backends.Cuda_ctx s, Backends.Cuda_ctx d ->
-      same (module Backends.Cuda_b) ~rewrap:(fun c -> Backends.Cuda_ctx c) s d
-  | Backends.Hip_ctx s, Backends.Hip_ctx d ->
-      same (module Backends.Hip_b) ~rewrap:(fun c -> Backends.Hip_ctx c) s d
-  | Backends.Metal_ctx s, Backends.Metal_ctx d ->
-      same (module Backends.Metal_b) ~rewrap:(fun c -> Backends.Metal_ctx c) s d
-  | ( ( Backends.Cc_ctx _ | Backends.Multidev_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Hip_ctx _
-      | Backends.Metal_ctx _ ),
-      _ ) ->
+  match Backends.pair_contexts src.wrapped dst.wrapped with
+  | Backends.Same_backend (impl, s, d) -> same impl s d
+  | Backends.Cross_backend ->
       host_roundtrip
         (Printf.sprintf "cross-backend transfer (%s to %s)" (backend_name src) (backend_name dst))
 
@@ -741,26 +682,16 @@ let get_used_memory ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backend.get_used_memory c.BI.device);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backend.get_used_memory c.BI.device);
     }
 
 let release ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backends.finalize (module Backend) c);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backends.finalize (module Backend) c);
     }
 
 (* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
@@ -788,13 +719,7 @@ let decide_materialized ctx tns =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* Fork the lineage state exactly like a compile would, then record the decisions in the
                fork: the argument context and its other descendants are unaffected. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
@@ -809,13 +734,7 @@ let decide_inline ctx tns =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* Fork like [decide_materialized]; the preference is recorded rather than a placement
                decided, because inlining legality is settled only during optimization
                ([check_and_store_virtual]) — a preferred node the virtualizer rejects still
