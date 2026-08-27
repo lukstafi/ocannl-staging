@@ -23,7 +23,7 @@ let keys =
     ("cc_backend_simd_flags", "auto");
     ("cc_backend_fp_contract", "auto");
     ("cc_vector_bytes", "-1");
-    ("fp16_arithmetic", "false");
+    ("fp16_arithmetic", "auto");
     ("tf32_matmuls", "false");
     ("virtualize_max_visits", "1");
   ]

@@ -226,6 +226,102 @@ let fp8_sum ~name ~first_id () =
 
 let fp8_leg () = p claim_fp8 (Float.equal (fp8_sum ~name:"aw_fp8" ~first_id:9700 ()) 20.0)
 
+(* === f16 residency is the fp16_arithmetic policy's question (gh-ocannl-680) === *)
+(* Universal legs, executed on every backend. Under the default [Fp16_auto] each backend keeps its
+   structural residency — the CPU backends compute f16 in f32 ([narrow_compute_f32]'s blanket), the
+   GPU backends keep storage residency, mirroring their f16-accumulate tensor-unit triples — and
+   under [Fp16_wide] every backend resolves f32, narrowing once per nest. The discrimination: f16's
+   spacing at 2048 is 2, so per-step narrowing absorbs every +1 (2049 ties to even, back to 2048)
+   and leaves 2048, while the wide accumulator reaches 2056, exactly representable. NOTE the
+   default-policy expectations pin [Fp16_auto]'s CURRENT resolution: auto deliberately retains
+   latitude to resolve wide on hardware where that costs nothing (see Numerics.fp16_mode), and a
+   backend exercising it would update these legs, not violate the policy. *)
+let f16_sum ~name ~first_id () =
+  let half = Ir.Ops.half in
+  let hnode = Ll_test.node_factory ~prec:half ~first_id ~dims:[| 8 |] () in
+  let hacc = hnode ~dims:[| 1 |] (name ^ "_acc") in
+  let hxs = hnode (name ^ "_xs") in
+  Ll_test.materialize hacc;
+  Ll_test.materialize hxs;
+  let hi = Ll_test.sym () in
+  let hupd =
+    Ll_test.set hacc
+      [| Ll_test.fixed 0 |]
+      (LL.Binop
+         ( Ir.Ops.Add,
+           (Ll_test.get hacc [| Ll_test.fixed 0 |], half),
+           (Ll_test.get hxs [| Ll_test.iter hi |], half) ))
+  in
+  let ho = Ll_test.optimize ~materialized:[ hacc; hxs ] ~name (Ll_test.loop_n hi 8 hupd) in
+  let hvals =
+    Ll_test.execute ~name ho
+      ~seed:[ (hacc, [| 2048.0 |]); (hxs, Array.create ~len:8 1.0) ]
+      ~read:[ hacc ]
+  in
+  (List.hd_exn hvals).(0)
+
+let claim_f16_default =
+  "the default-policy f16 reduction takes the backend's declared residency (2048 + 1x8: wide 2056 \
+   on CPU, per-step 2048 on GPU)"
+
+let claim_f16_wide = "Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056)"
+
+let claim_f16_wide_matmul =
+  "under Fp16_wide the f16 naive matmul equals the once-narrowed wide-accumulation reference"
+
+let claim_f16_default_matmul =
+  "the default-policy f16 matmul matches the wide reference exactly where the backend widens (CPU) \
+   and diverges where it keeps storage residency (GPU)"
+
+let n16 = 128
+let fa16 = Ll_test.cycle ~dims:[| n16; n16 |] ~modulus:3 ~offset:1. ~stride:0.375
+let fb16 = Ll_test.cycle ~dims:[| n16; n16 |] ~modulus:5 ~offset:(-1.5) ~stride:0.625
+
+(* The f16 twin of the bf16 parity leg's arithmetic, one exactness bracket up: cells are exact in
+   f16 (multiples of 1/8, magnitude below 4), products are multiples of 15/64 with nonzero mean
+   (~0.23), so at n = 128 the running sums drift past 16 — where f16's 1/64-multiple partials stop
+   being representable and per-step narrowing visibly diverges — while the whole reduction stays
+   exact in f32 (multiples of 1/64, magnitude far below 2^20), so the f64 host chain reproduces the
+   kernel's f32 fmaf chain exactly and one narrowing through the library's own conversion gives the
+   normative wide result. *)
+let f16_matmul ~name () =
+  let ma = NTDSL.init ~l:(name ^ "_a") ~prec:Ir.Ops.half ~i:[ n16 ] ~o:[ n16 ] ~f:fa16 () in
+  let mb = NTDSL.init ~l:(name ^ "_b") ~prec:Ir.Ops.half ~i:[ n16 ] ~o:[ n16 ] ~f:fb16 () in
+  let%op mc = ma * mb in
+  Tn.update_prec mc.Tensor.value Ir.Ops.half;
+  run ~name mc
+
+let () =
+  let wide16 = Float.equal (f16_sum ~name:"aw_f16_auto" ~first_id:9740 ()) 2056.0 in
+  Stdio.eprintf "accum_width: default-policy f16 residency on %s is %s (not part of the golden)\n%!"
+    backend_name
+    (if wide16 then "wide" else "storage");
+  p claim_f16_default (Bool.equal wide16 on_cpu);
+  let saved_policy = Numerics.get () in
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+  p claim_f16_wide (Float.equal (f16_sum ~name:"aw_f16_wide" ~first_id:9760 ()) 2056.0);
+  let got_wide16 = f16_matmul ~name:"aw_f16_naive_wide" () in
+  Numerics.set_policy saved_policy;
+  let wide_sums16 =
+    Array.init (n16 * n16) ~f:(fun t ->
+        let i = t / n16 and j = t % n16 in
+        let acc = ref 0.0 in
+        for k = 0 to n16 - 1 do
+          acc := !acc +. (fa16 [| i; k |] *. fb16 [| k; j |])
+        done;
+        !acc)
+  in
+  let mref16 =
+    NTDSL.init ~l:"aw_f16_ref" ~prec:Ir.Ops.half ~i:[ n16 ] ~o:[ n16 ]
+      ~f:(fun idcs -> wide_sums16.((idcs.(0) * n16) + idcs.(1)))
+      ()
+  in
+  let want16 = run ~name:"aw_f16_refc" mref16 in
+  p claim_f16_wide_matmul (Array.for_all2_exn got_wide16 want16 ~f:Float.equal);
+  let got_auto16 = f16_matmul ~name:"aw_f16_naive_auto" () in
+  p claim_f16_default_matmul
+    (Bool.equal (Array.for_all2_exn got_auto16 want16 ~f:Float.equal) on_cpu)
+
 (* In execution order — the GPU skip lines must match the cc run's golden line for line. *)
 let all_claims =
   [

@@ -437,8 +437,9 @@ files.
   `accum_update_parts`), shared by the transform and the emission precisely because three review
   rounds found them drifting one capability at a time (guards, scope-form bases, the logging
   decline); extend nest recognition only there. The
-  widening is inert wherever `comp_prec` is the identity (f32/f64,
-  GPU backends, `narrow_compute_f32=false`, native fp16), and it declines twice more: under
+  widening is inert wherever `acc_prec` is the identity (f32/f64; GPU backends per their
+  residency table above, e.g. f16 there under `Fp16_auto`; `narrow_compute_f32=false` except
+  f16-under-`Fp16_wide`; native fp16 under `Fp16_narrow`), and it declines twice more: under
   `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so the
   rewrite would silence the per-iteration trace — the per-step `Set` form is the traceable one,
   and every tensorized rendering already declines under logging), and on updates mentioning an
@@ -462,7 +463,9 @@ files.
   bf16 accumulate) and fp8→f32; HIP widens only fp8 (RDNA WMMA has genuine bf16/f16 accumulator
   variants and the uniform triples are seeded, so bf16 serial legs deliberately stay narrow —
   width-uniform with the mma legs); Metal's `accum_prec = compute_prec` (fp8→f32); cc's likewise
-  (the CPU accumulator IS a compute intermediate). `narrow_compute_f32` (already in the
+  (the CPU accumulator IS a compute intermediate). Since gh-ocannl-680 every backend's `accum_prec`
+  additionally widens f16→f32 under `Numerics.Fp16_wide` — see the dedicated bullet below.
+  `narrow_compute_f32` (already in the
   schedule-cache key, gh-ocannl-568) reaches a GPU accumulator only where policy-off can restore
   per-step narrowing SCHEDULE-UNIFORMLY: fp8 on CUDA/HIP (nothing tensorizes fp8 destinations).
   CUDA's bf16 residency is structural like Metal's fp8 — the mma accumulate is hardware-f32, so a
@@ -473,14 +476,43 @@ files.
   updates `Where (index-only cond, update, Get_local id)` classify as reductions via
   `Low_level.accum_local_update_op` — a recognizer deliberately separate from both
   `accum_local_update_parts` (whose `(op, contrib)` licenses rebuilding an unguarded update) and
-  `scope_updates_reduce_op` (the hoist license). fp16 is
-  everywhere width-uniform at f16 (native accumulate in every seeded triple); aligning it with
-  `fp16_arithmetic` would need seeding restrictions or an f32-accumulate uniform-f16 emission and
-  remains open. Two traps: `compute_prec`/`accum_prec` bind at `include Pure_C_config` time, so
+  `scope_updates_reduce_op` (the hoist license). Two traps: `compute_prec`/`accum_prec` bind at `include Pure_C_config` time, so
   overriding one without restating the other silently keeps the default pairing — a startup
   width assert in the `C_syntax` functor catches the narrow direction; and `Workgroup_reduce`'s
   warp-shuffle rendering used to hard-error on every narrow accumulator, which gh-ocannl-682 turned
   into the residency gate described in the next bullet.
+- **f16 residency is the ternary `fp16_arithmetic` policy's question** (gh-ocannl-680, refining
+  gh-ocannl-516's boolean; config `auto|true|false`, default `auto`, old boolean spellings intact).
+  `Numerics.fp16_mode`: `Fp16_auto` keeps each backend's structural residency — CPU computes f16 in
+  f32 under `narrow_compute_f32`, GPUs keep storage-width f16 accumulators mirroring the
+  f16-accumulate triple every backend seeds — so `auto` changes nothing numerically vs. the old
+  default, but the uniformity is now POLICY rather than a coincidence of seeding. `Fp16_narrow`
+  (`true`) is unchanged gh-516 opt-in. `Fp16_wide` (`false` — note the repurposing: an explicit
+  old-style `false` now REQUESTS strict wide) gives f16 accumulators f32 residency on every
+  backend, `narrow_compute_f32=false` included: each backend's `accum_prec` widens `Half`, and the
+  mma story is per-backend all-or-nothing (gh-ocannl-545) through ONE predicate,
+  `Numerics.fp16_accum_wide`, consulted by seeding and emission both. CUDA sm_80+ stays tensorized:
+  the uniform-f16 combination routes to the f32-accumulate inline-PTX m16n8k16 arm (the bf16
+  uniform arm's body parameterized by `mma16_spellings` — the PTX fragment layouts are shared by
+  .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its f16-accumulate
+  wmma combo is gated off. Metal (uniform-precision `simdgroup_matrix`, structural) and HIP
+  (rocWMMA has `(f16,f16,f32)` fragments but no d-boundary conversion wired yet) instead UNSEED
+  uniform-f16 mma under the wide policy — `Backend_intf.mma_capability.mma_f16_wide_acc` is the
+  per-backend capability bit, and `Sketch_families.fp16_wide_withholds` (keyed on the DESTINATION's
+  storage precision, so `(f16,f16,f32-storage)` sites are untouched) gates both the tile and
+  staged-layout lookups; the emission hooks decline the same combos for hand-built IR. So `false`
+  trades the f16 tensor-unit legs on Metal/HIP for cross-backend-uniform wide f16 sums. `auto`
+  deliberately RETAINS LATITUDE to later resolve wide on hardware where wide f16 accumulate is
+  free (datacenter NVIDIA runs f32-accumulate f16 mma at full rate; GeForce halves it) — do not
+  write code or tests assuming `auto ≡ narrow` as a contract; `accum_width.ml`'s default-policy
+  legs pin auto's CURRENT resolution and say so. Pinned by: `accum_width.ml`'s universal f16 legs
+  (scalar 2048+1×8 discriminates 2056 wide vs 2048 per-step; matmul parity vs once-narrowed wide
+  reference under `Fp16_wide` on every backend — inputs exact in f32 so schedule reassociation
+  cannot break bitwise equality) and `sketch_family_tree.ml`'s seeding-gate section (mma seeds
+  present under default, withheld under wide-without-arm, restored with the arm). The reproducible
+  profile pins `fp16_arithmetic=auto` (the default, so the profile still changes no math); the
+  performance profile keeps `true`. HIP's wide d-boundary conversion and hardware validation of
+  the CUDA `(mma-f16)` arm are the open remainder.
 - **The warp-shuffle rendering stages at the residency, and gates on it** (gh-ocannl-682).
   `C_syntax.try_warp_reduce` holds `wred_v_*`, the `__shared__ wred_partials_*` slots and every
   `ocannl_shfl_xor` stage at `accum_prec` of the storage precision, and renders the contribution
@@ -489,9 +521,10 @@ files.
   `accum_prec`'d, so nothing else moves). A bf16 `Workgroup_reduce` on CUDA therefore shuffles
   `float` and computes exactly what its serial rendering does, and no backend needs a narrow
   `ocannl_shfl_xor` overload — the two float/double ones remain the whole ask. The gate is on the
-  RESIDENCY, not on storage: f16 everywhere, and bf16 on HIP/Metal, still raise (`accumulator
-  residency` in the message) rather than gaining an untested narrow-shuffle path, since a plain
-  hardware binding would race the accumulator. **RNG-bearing contributions are refused too**, but
+  RESIDENCY, not on storage: f16 under `Fp16_auto`/`Fp16_narrow`, and bf16 on HIP/Metal, still
+  raise (`accumulator residency` in the message) rather than gaining an untested narrow-shuffle
+  path, since a plain hardware binding would race the accumulator; under `Fp16_wide` the f16
+  residency is f32 (gh-ocannl-680), so f16 shuffles float exactly as bf16 on CUDA does. **RNG-bearing contributions are refused too**, but
   only where the residency is actually wider than storage — and the reason is worth holding onto,
   because the first cut of gh-ocannl-682 got it wrong (Codex P1 on staging PR #461). It rendered
   such a contribution at storage precision and widened it once, reasoning that this preserved

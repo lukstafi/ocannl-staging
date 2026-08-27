@@ -967,8 +967,14 @@ struct
 
   (* On CPU a reduction accumulator is an assignment intermediate like any other: it resides at the
      compute precision (gh-ocannl-639). Restated next to the [compute_prec] override because the
-     pair binds at [include] time (see the signature's coupling note, gh-ocannl-663). *)
-  let accum_prec = compute_prec
+     pair binds at [include] time (see the signature's coupling note, gh-ocannl-663). The one
+     divergence is [Fp16_wide] (gh-ocannl-680), whose contract is f32 accumulator residency on
+     every backend unconditionally — [narrow_compute_f32 = false] included, where [compute_prec]
+     leaves half alone but the ACCUMULATOR still widens. *)
+  let accum_prec prec =
+    match prec with
+    | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
+    | _ -> compute_prec prec
 
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
      admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the lane

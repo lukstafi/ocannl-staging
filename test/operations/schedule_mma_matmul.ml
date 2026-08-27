@@ -231,6 +231,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_f32),
                   (16, 16, 8) );
               ];
+            mma_f16_wide_acc = false;
             mma_staged_layouts = [];
             mma_pipeline_depths = [];
           };

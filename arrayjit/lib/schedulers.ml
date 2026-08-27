@@ -32,6 +32,9 @@ let cpu_mma_limits () =
           mma_simd_width = 1;
           mma_tile = (1, 1, 1);
           mma_format_tiles = [];
+          (* No format tiles, so the wide-f16 seeding gate never consults this; the CPU register
+             tiling follows [cpu_compute_prec]/[accum_prec] directly (gh-ocannl-680). *)
+          mma_f16_wide_acc = false;
           mma_staged_layouts = [];
           mma_pipeline_depths = [];
         };

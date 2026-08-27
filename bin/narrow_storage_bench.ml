@@ -167,7 +167,7 @@ let () =
       ("f32", Ir.Ops.single, base);
       ("bf16", Ir.Ops.bfloat16, base);
       ("half", Ir.Ops.half, base);
-      ("half-nat", Ir.Ops.half, { base with Ir.Numerics.fp16_arithmetic = true });
+      ("half-nat", Ir.Ops.half, { base with Ir.Numerics.fp16_arithmetic = Ir.Numerics.Fp16_narrow });
     ]
   in
   let renderings = [ ("default", serial); ("vectorized", vectorize) ] in

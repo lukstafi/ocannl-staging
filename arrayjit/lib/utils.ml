@@ -984,9 +984,11 @@ cc_backend_fast_math=false
 cc_vector_bytes=0
 
 # The numerics gates at their exact defaults, so that a profile switch never silently changes
-# what math is being done (they are the orthogonal axis; see the issue).
+# what math is being done (they are the orthogonal axis; see the issue). fp16_arithmetic=auto
+# resolves deterministically per backend (gh-ocannl-680), so pinning the default keeps the
+# principle: this profile changes no math, and same-machine runs stay reproducible.
 tf32_matmuls=false
-fp16_arithmetic=false
+fp16_arithmetic=auto
 narrow_compute_f32=true
 |}
 
@@ -1007,7 +1009,8 @@ cc_backend_arch_flags=auto
 cc_backend_simd_flags=auto
 
 # Native 16-bit arithmetic where the target has it; ignored on targets that promote fp16 to
-# float, and on the GPU backends.
+# float, and on the GPU backends (whose f16 arithmetic and accumulators are native narrow
+# under this setting, same as under auto -- gh-ocannl-680).
 fp16_arithmetic=true
 |}
 

@@ -43,6 +43,7 @@ let gpu_limits =
           Ir.Backend_intf.mma_simd_width = 32;
           mma_tile = (8, 8, 8);
           mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+          mma_f16_wide_acc = false;
           mma_staged_layouts = [];
           mma_pipeline_depths = [];
         };

@@ -209,17 +209,34 @@ let mma_format_triples ~a_prec ~b_prec ~d_prec =
           List.map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
               (a_format, b_format, d_format)))
 
+(* gh-ocannl-680: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only where
+   the backend's uniform-f16 arm accumulates f32 ([mma_f16_wide_acc] — CUDA's inline-PTX m16n8k16
+   arm on sm_80+); elsewhere (Metal's uniform-precision [simdgroup_matrix], HIP pending its
+   d-boundary conversion) the seeds are withheld and the serial legs carry the f32 residency via
+   [accum_prec], keeping the accumulation width schedule-uniform per backend (gh-ocannl-545/663).
+   Consulting [Numerics.fp16_accum_wide] here — the same predicate the emission hooks consult —
+   is what keeps seeding and emission from drifting apart on which f16 sites tensorize. Applied in
+   the tile AND staged-layout lookups, so no seed escapes the gate. *)
+let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~d_prec =
+  (match d_prec with Ir.Ops.Half_prec _ -> true | _ -> false)
+  && Ir.Numerics.fp16_accum_wide ()
+  && not mma.Ir.Backend_intf.mma_f16_wide_acc
+
 let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
-  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+  if fp16_wide_withholds mma ~d_prec then None
+  else
+    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+        List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
 
 (* The swizzled staged layout, if any, that the backend can read for this site's formats
    (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. *)
 let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec
     : LL.swizzle_kind option =
-  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
-  |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
+  if fp16_wide_withholds mma ~d_prec then None
+  else
+    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+        List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+    |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {
   m_i : Idx.symbol;

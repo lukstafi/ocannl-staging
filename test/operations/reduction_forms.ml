@@ -1355,7 +1355,8 @@ let () =
 let () =
   let policy = Numerics.get () in
   p "the numerics policy is the default the member table's forms are stated for"
-    (policy.Numerics.narrow_compute_f32 && not policy.Numerics.fp16_arithmetic)
+    (policy.Numerics.narrow_compute_f32
+    && Numerics.equal_fp16_mode policy.Numerics.fp16_arithmetic Numerics.Fp16_auto)
 
 let () =
   Stdio.printf "reduction: out[%d] = sum of %d terms, hand-built Low_level, %d members\n" rows cols

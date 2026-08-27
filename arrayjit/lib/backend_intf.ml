@@ -80,6 +80,17 @@ type mma_capability = {
           [nvcuda::wmma] pairs bf16 operands with a [float] accumulator only, so keying on the
           operands alone made the autotuner seed — and time, and rank — 36 candidates per arm on a
           uniformly-bf16 network that every one of them rendered as the lane-0 scalar fallback. *)
+  mma_f16_wide_acc : bool;
+      (** Whether the backend's uniform-f16 arm — an f16-storage destination with f16 operands —
+          can hold the accumulator in f32 and convert once at the [d] boundary, which is what the
+          {!Numerics.Fp16_wide} policy requires of every rendering (gh-ocannl-680). CUDA's
+          inline-PTX [mma.sync.m16n8k16] arm can (sm_80+, the architecturally-defined fragment
+          layouts are shared by .f16 and .bf16); Metal cannot ([simdgroup_matrix] is
+          uniform-precision only, structurally); HIP's rocWMMA has [(f16, f16, f32)] fragments but
+          the d-boundary conversion is not wired yet, so it answers false for now. Where false, the
+          seeding gate in [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds
+          under the wide policy — the serial legs then carry the f32 residency via [accum_prec],
+          keeping the width schedule-uniform per the gh-ocannl-545/663 discipline. *)
   mma_staged_layouts :
     ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
       (** Format triples whose cooperatively staged operand tiles the backend can read in a

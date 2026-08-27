@@ -555,9 +555,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        serial legs here would re-introduce the serial-vs-mma width dependence gh-ocannl-639 removes.
        fp8 has an accumulator format on no backend (its serial arithmetic already bridges through
        float per operator), so it follows the CPU policy: f32 residency, one narrowing per nest,
-       governed by the same [narrow_compute_f32] knob. *)
+       governed by the same [narrow_compute_f32] knob.
+
+       Under [Numerics.Fp16_wide] (gh-ocannl-680) f16 accumulators reside in f32 here too, and the
+       f16-accumulate uniform-f16 rocWMMA legs are withheld with it (the seeding gate via
+       [mma_f16_wide_acc = false], and the combo decline below for hand-built IR) — width stays
+       schedule-uniform. rocWMMA's [(f16, f16, f32)] fragments could carry a tensorized wide arm
+       once a d-boundary conversion is wired; until then the wide policy costs the f16 mma legs on
+       HIP, stated in gh-ocannl-680's resolution. *)
     let accum_prec prec =
       match prec with
+      | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
       | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
       | _ -> prec
 
@@ -646,7 +654,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               match (a_prec, b_prec, d_prec) with
               | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
                   Some ("rocwmma::float16_t", "float", 8, 4)
-              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+              (* The f16-accumulate fragments must not render under [Numerics.Fp16_wide]
+                 (gh-ocannl-680): seeding already withholds such candidates ([mma_f16_wide_acc]);
+                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
+                 rendering whose accumulator follows [accum_prec]. *)
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _
+                when not (Numerics.fp16_accum_wide ()) ->
                   Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
               | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
                   Some ("rocwmma::bfloat16_t", "float", 8, 4)
@@ -883,7 +896,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               match (a_prec, b_prec, d_prec) with
               | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
                   Some ("rocwmma::float16_t", "float", 8, 4)
-              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+              (* The f16-accumulate fragments must not render under [Numerics.Fp16_wide]
+                 (gh-ocannl-680): seeding already withholds such candidates ([mma_f16_wide_acc]);
+                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
+                 rendering whose accumulator follows [accum_prec]. *)
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _
+                when not (Numerics.fp16_accum_wide ()) ->
                   Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
               | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
                   Some ("rocwmma::bfloat16_t", "float", 8, 4)
@@ -2002,6 +2020,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                         ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (16, 16, 16) );
                       ];
+                    (* rocWMMA has [(f16, f16, f32)] fragments, but the d-boundary conversion for
+                       an f16-storage destination is not wired, so the wide-f16 policy unseeds the
+                       uniform-f16 tiles here for now (gh-ocannl-680). *)
+                    mma_f16_wide_acc = false;
                     (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load here
                        (gh-ocannl-481 item 3, D3). *)
                     mma_staged_layouts = [];
