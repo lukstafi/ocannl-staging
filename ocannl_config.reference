@@ -657,6 +657,30 @@
 # architecture flag at all -- the portable baseline, spelled as a word because a config source
 # cannot carry an empty value ("" means unset), which is how the `reproducible` profile pins it.
 # Any other value is passed through verbatim (`-march=native` restores the pre-gh-517 behavior).
+#
+# PERFORMANCE CLIFF on a target without a fused multiply-add INSTRUCTION (gh-ocannl-753). The code
+# generator rewrites every `a*b + c` into a fused multiply-add and spells it `fmaf` / `fma`: in the
+# serial rendering, in the scalar peel of a vectorized loop, and -- where the target offers no
+# whole-vector FMA builtin -- once per lane inside the vector body. Where the ISA has the
+# instruction the compiler contracts all of those into it and no call survives. Where it does not
+# -- `x86-64` and `x86-64-v2`, i.e. anything below AVX2+FMA -- each one stays a libm CALL, and an
+# opaque call cannot be vectorized at any width, so at -O3 the surrounding loop scalarizes too.
+# Measured with clang cross-targeting x86_64: an f32 accumulator loop is one `fmaf` call per lane
+# per iteration at `-march=x86-64` and `-march=x86-64-v2` (4 calls at 4 lanes, 8 at 8) and zero at
+# `-march=x86-64-v3`; the scalar loop is a call per iteration at the first two and `vfmadd` at the
+# third.
+# You reach that target by running on a pre-Haswell / pre-Excavator x86 host, by pinning this key
+# to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to 0, so
+# only the serial calls remain there) or to a baseline `-march`, or by using a toolchain that
+# rejects the probed `-march=native`, in which case the probe falls back to no flag at all and the
+# compiler's own baseline target applies. The default "auto" targets the host, so a modern x86 host
+# and every aarch64 host (NEON `fmla` is baseline) are unaffected.
+# This is a cost of CORRECTNESS, not a defect: an FMA rounds once, and the code generator promises
+# that the vector body, its scalar peel and the serial fallback agree bit for bit -- substituting
+# `a*b + dst` where the instruction is absent would round twice and break that. An opt-in to that
+# trade is deliberately not offered here; it belongs with the approximate-numerics work
+# (gh-ocannl-719). The only setting that removes the calls rather than relocating them is a higher
+# target: `cc_backend_arch_flags=-march=x86-64-v3`, or "auto" on a host that has AVX2 and FMA.
 #cc_backend_arch_flags=auto
 
 # Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections
@@ -665,6 +689,13 @@
 # fuse `a*b+c` into a single rounding differs across compilers and targets, which is why the
 # `reproducible` profile pins it off; the results change either way, so this is a deliberate
 # numerics choice, not an optimization level.
+# It is NOT a lever on the below-AVX2 FMA cliff documented at cc_backend_arch_flags: contraction
+# decides whether a `a*b+c` the codegen wrote as such may become one rounding, while the calls in
+# question are already fused by construction, and on a target without the instruction they stay
+# calls under every value here (measured: `-ffp-contract=fast` at `-march=x86-64` leaves all of
+# them). cc_backend_fast_math below does move them -- clang expands the calls to `mulps`/`addps`
+# under `-ffast-math`, recovering the vectorization at two roundings -- but that is a blanket
+# unsafe-math switch, not the targeted trade gh-ocannl-719 is about.
 #cc_backend_fp_contract=auto
 
 # Explicit SIMD flags appended to the CC backend compiler invocation (gh-ocannl-164).
@@ -687,6 +718,9 @@
 #cc_backend_probe_cache=true
 
 # If true, enables `-ffast-math` for the CC backend. This may change numerical behavior.
+# On a target with no fused multiply-add instruction it also changes the CODE SHAPE: clang expands
+# the codegen's `fmaf` / `fma` calls into a multiply and an add, which vectorizes where the call
+# could not (see the cliff described at cc_backend_arch_flags), at two roundings instead of one.
 #cc_backend_fast_math=false
 
 # If true, compiled dynamic libraries (.dll/.so files) for the CC backend are placed 
