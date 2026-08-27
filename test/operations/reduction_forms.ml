@@ -11,8 +11,8 @@
    was a point in the same product, found by a reviewer rather than by a test.
 
    This test defines the set EXTENSIONALLY: a table of (composition x storage precision), each
-   member naming the form it claims to reach, executed and read back. Two claims per member, and the
-   second is what makes the first trustworthy:
+   member naming the form it claims to reach, executed and read back. Three claims per member, and
+   each makes the one before it trustworthy:
 
    - VALUE. A localizing member must agree BITWISE with the serial baseline's execution; a
    read-modify-write member must agree bitwise with the host's per-step-narrowed reference. Both
@@ -25,7 +25,15 @@
    warp-shuffle tree, [Tile_mma] scalar fallback — and must be the form the member claims. Without
    this a composition that silently stopped reaching its form would keep passing its value claim by
    falling back to another one, which is exactly the false green the issue is about: agreement
-   between two renderings is worthless if they are the same rendering.
+   between two renderings is worthless if they are the same rendering. - DECISION (gh-ocannl-733).
+   The form does not determine WHICH code path produced it: a nest whose accumulated cell is free of
+   the enclosing index is peeled at the enclosing level under a confined guard, while one whose cell
+   mentions it peels the reduction level alone under a lane-private guard the cell separates — and
+   both emit one localized scope with one closing store. So each member also declares what codegen's
+   reduction peel decided, checked against the routine's own peel census
+   ({!Context.routine.peel}) rather than against emitted text. Without it a member can be green over
+   a kernel the code path it is named for never touched, which is the same false green one level
+   down: agreement between two decisions is worthless if they produce the same rendering.
 
    The member list itself is printed, so a form added to codegen without a table entry shows up as a
    golden diff rather than as silence. Members a backend cannot evaluate (SIMD grids off the C
@@ -608,6 +616,48 @@ let form_name = function
   | Mma_fallback -> "Tile_mma scalar fallback"
   | Unrecognized -> "unrecognized"
 
+(* {1 The peel DECISION a member claims}
+
+   The form above is what was RENDERED. It does not determine what was DECIDED, and for the
+   localizing peel the gap is the one gh-ocannl-733 is about: a nest whose accumulated cell is free
+   of the enclosing index is peeled at the ENCLOSING level, taking both levels under a confined
+   guard, while one whose cell mentions it peels the reduction level alone under a lane-private
+   guard admitted because the cell separates the lanes (gh-ocannl-721) — and both emit one localized
+   scope with one closing store. Every claim of [mixed-guard] would be green over the first kernel,
+   in which the escape it exists to exercise never ran.
+
+   So each member also declares what codegen's peel decided, read off the routine's own peel census
+   ({!Context.routine.peel}, [C_syntax.peel_census]) rather than off the emitted text. The
+   declaration separates three provenances the form claim cannot: the peel produced this scope, the
+   scope was already in the IR when codegen met it, and nothing localized at all. *)
+
+type peel_claim =
+  | Peeled of Cs.peel_verdict
+      (** Codegen's peel produced this member's accumulator scope, and every site that localized
+          decided exactly this: that many levels, those guard verdicts. *)
+  | Minted_upstream
+      (** The scope this member renders was in the IR before codegen: a [Schedule] mint
+          ([Unroll ~materialize], [Partition], [Pad]) or virtualization's inline. Codegen's peel was
+          consulted and localized nothing — which is a different fact about the kernel than
+          "localized", and the one this member is really about. *)
+  | No_localization
+      (** Nothing localized: the form is a decline (the per-step read-modify-write members) or a
+          rendering holding the accumulator elsewhere (the SIMD grid, the shuffle tree). *)
+
+let guard_verdict_name = function
+  | LL.Guard_confined -> "a confined guard"
+  | LL.Guard_lane_private -> "a lane-private guard"
+
+let peel_claim_name = function
+  | Peeled { Cs.levels; guards } ->
+      Printf.sprintf "codegen's peel takes %s%s"
+        (match levels with 1 -> "one level" | n -> Printf.sprintf "%d levels" n)
+        (match guards with
+        | [] -> ", unguarded"
+        | gs -> ", through " ^ String.concat ~sep:" then " (List.map gs ~f:guard_verdict_name))
+  | Minted_upstream -> "the scope is minted upstream; codegen's peel localizes nothing"
+  | No_localization -> "codegen's peel localizes nothing"
+
 let is_ident_char c = Char.is_alphanum c || Char.equal c '_'
 
 (* The code name codegen derived for a node is not predictable from its label (it goes through a
@@ -842,7 +892,10 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
   let read tn = Context.get_values ctx tn in
   ( read prog.out,
     List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
-    (!before, !after, !per_op) )
+    (!before, !after, !per_op),
+    (* What the reduction peel DECIDED while emitting this kernel (gh-ocannl-733), as against what
+       the classifier below reads off the emitted text. *)
+    routine.Context.peel )
 
 (* The axis kinds a statement's loops carry. What binds a member to the constructor its coverage
    entry credits it with: an op that names an axis kind must leave that kind in the IR it
@@ -957,6 +1010,15 @@ type member = {
           Scoped to those statements rather than searched for in the whole artifact (Codex P2, round
           2): at f16 the kernel pulls in [half_to_float_emulated], whose body is full of unrelated
           ternaries, so [" ? "] anywhere in the source is true whatever the update renders as. *)
+  peel : peel_claim;
+      (** What codegen's reduction peel must have DECIDED while emitting this member's kernel,
+          checked against the routine's peel census. Pinned in full — levels and guard verdicts —
+          because a decision that swallowed one more level, or admitted a guard on the other ground,
+          renders the same localized scope this member's form claim accepts (gh-ocannl-733). *)
+  peel_claimed : string;
+      (** How that decision is NAMED in the printed table. Backend-uniform, like {!claimed}: the two
+          members whose rendering arm is backend-dependent decide differently on a GPU than on the C
+          backends, and the golden is one file for both. *)
   precisions : string list;
   available : string -> bool;
       (** Whether this backend can evaluate the member at the given storage precision. Per
@@ -977,10 +1039,22 @@ let no_ops _ = []
 let simd_or_localized = if on_cpu then Simd else Localized
 let simd_claimed = "SIMD accumulator grid, or the localized scope where no vector rendering exists"
 
+(* And the DECISION behind that exit: where the vector rendering takes the level the accumulator
+   lives in its grid and codegen's peel localizes nothing, while where it declines the peel is what
+   produced the scope (gh-ocannl-733). *)
+let simd_or_localized_peel =
+  if on_cpu then No_localization else Peeled { Cs.levels = 1; guards = [] }
+
+let simd_peel_claimed =
+  "codegen's peel localizes nothing under the SIMD grid, or peels the reduction level where no \
+   vector rendering exists"
+
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
     ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?(foreign_accesses = 0) ?expect_axis
-    ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ]) ?(available = fun _ -> true) slug what =
+    ?(extra = []) ?(peel = Peeled { Cs.levels = 1; guards = [] }) ?peel_claimed
+    ?(precisions = [ "f32"; "bf16"; "f16" ]) ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
+  let peel_claimed = Option.value peel_claimed ~default:(peel_claim_name peel) in
   {
     slug;
     what;
@@ -995,6 +1069,8 @@ let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(r
     foreign_accesses;
     expect_axis;
     extra;
+    peel;
+    peel_claimed;
     precisions;
     available;
   }
@@ -1007,7 +1083,12 @@ let members =
     (* --- the two [Unroll] representations autotune proposes over small reduction loops --- *)
     member "unroll-annot" "Unroll (annotated: codegen repeats the body)" ~expect_axis:LL.Unrolled
       ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
-    member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~sched:(fun g ->
+    (* The mint's own scope reaches codegen already built, so the peel localizes NOTHING here — it
+       hoists a schedule-minted scope through the levels above it, or, as here, meets one that
+       already spans the whole reduction. The form is the same localized scope [serial] renders
+       (gh-ocannl-733). *)
+    member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~peel:Minted_upstream
+      ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = true } ]);
     (* The output loop is gone, so each of its [rows] copies closes its own cell -- which is not a
        seam but the whole of that cell's reduction. *)
@@ -1015,11 +1096,12 @@ let members =
       ~sched:(fun g -> [ Sched.Unroll { axis = g.r; materialize = true } ]);
     (* --- [Partition]: an index-set specialization of one reduction, so its segment seams must not
        become narrowing points — one scope spans every segment. --- *)
-    member "partition" "Partition of the reduction axis into three segments" ~sched:(fun g ->
+    member "partition" "Partition of the reduction axis into three segments" ~peel:Minted_upstream
+      ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt ]);
     member "partition-then-unroll" "Partition, then Unroll one segment (the seam stays addressable)"
-      ~sched:(fun g ->
+      ~peel:Minted_upstream ~sched:(fun g ->
         let pt, segs = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt; Sched.Unroll { axis = List.hd_exn segs; materialize = false } ]);
     (* Two segment loops over the output axis, each carrying a whole reduction: two sites. *)
@@ -1032,14 +1114,17 @@ let members =
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Unroll { axis = inner; materialize = true } ]);
+    (* Two levels into the scope: after the split the reduction is a two-level nest, and the peel
+       takes the inner half along with the outer one it is rendering. *)
     member "split-then-swap" "Split the reduction axis, then Swap the halves" ~precisions:[ "f32" ]
+      ~peel:(Peeled { Cs.levels = 2; guards = [] })
       ~sched:(fun g ->
         let sp, outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Swap { outer; inner } ]);
     (* --- [Pad]: guarded copies, whose constant-bounded guard the mint must peel into the scope
        --- *)
     member "pad-then-unroll-mat" "Pad the reduction axis, then Unroll ~materialize (guarded copies)"
-      ~sched:(fun g ->
+      ~peel:Minted_upstream ~sched:(fun g ->
         [
           Sched.Pad { axis = g.k; to_multiple_of = 6 };
           Sched.Unroll { axis = g.k; materialize = true };
@@ -1061,10 +1146,16 @@ let members =
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
        rendering NESTED inside a surviving serial reduction level. --- *)
     member "retype-vectorized" "Retype the reduction axis to Vectorized" ~expect:simd_or_localized
-      ~claimed:simd_claimed ~expect_axis:LL.Vectorized ~sched:(fun g ->
+      ~claimed:simd_claimed ~peel:simd_or_localized_peel ~peel_claimed:simd_peel_claimed
+      ~expect_axis:LL.Vectorized ~sched:(fun g ->
         [ Sched.Retype { axis = g.k; ty = LL.Vectorized } ]);
+    (* The peel localizes here on EVERY backend, the SIMD one included: a [Vectorized] level rides
+       into the scope (the vector rendering folds its chains into the scope local), so the surviving
+       outer half is peeled with the inner one inside it. *)
     member "split-then-vectorize-inner" "Split, then Retype the INNER half to Vectorized"
-      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized ~sched:(fun g ->
+      ~expect:simd_or_localized ~claimed:simd_claimed
+      ~peel:(Peeled { Cs.levels = 2; guards = [] })
+      ~expect_axis:LL.Vectorized ~sched:(fun g ->
         (* 32 wide, which every lane ladder a real target has can cover; see {!cols}. *)
         let sp, _outer, inner =
           Sched.split ~axis:g.k ~factor:32 ~outer:LL.Serial ~inner:LL.Serial
@@ -1076,6 +1167,7 @@ let members =
        below the profitability gate, so the SIMD grid declines and the peel takes it. *)
     member "split-then-vectorize-narrow"
       "Split into a two-wide inner half, then Retype it Vectorized" ~expect_axis:LL.Vectorized
+      ~peel:(Peeled { Cs.levels = 2; guards = [] })
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:2 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Retype { axis = inner; ty = LL.Vectorized } ]);
@@ -1092,6 +1184,9 @@ let members =
            are exact whatever the association, and both the shuffle and the localized serial
            baseline narrow to bf16 exactly once. *)
       ~available:(fun prec_name -> on_cpu || shuffle_takes prec_name)
+      ~peel:(if on_cpu then Peeled { Cs.levels = 1; guards = [] } else No_localization)
+      ~peel_claimed:
+        "codegen peels the serialized level, or localizes nothing where the shuffle tree renders"
       ~expect_axis:LL.Workgroup_reduce
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Workgroup_reduce } ]);
     (* The plain [Workgroup] arm: a hardware binding where the backend has an index for the slot,
@@ -1107,12 +1202,13 @@ let members =
        serial baseline under it (gh-ocannl-715): a refused mint round-trips the accumulator per
        copy, which on narrow storage is a different number. --- *)
     member "runtime-guard" "a runtime-extent guard, unscheduled" ~shape:Runtime_guard
+      ~peel:(Peeled { Cs.levels = 1; guards = [ LL.Guard_confined ] })
       ~reference:Guarded_baseline;
     member "runtime-guard-unroll-mat" "a runtime-extent guard under Unroll ~materialize"
-      ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
+      ~shape:Runtime_guard ~peel:Minted_upstream ~reference:Guarded_baseline ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = true } ]);
     member "runtime-guard-partition" "a runtime-extent guard under Partition of the reduction axis"
-      ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
+      ~shape:Runtime_guard ~peel:Minted_upstream ~reference:Guarded_baseline ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt ]);
     (* --- gh-ocannl-721: a guard mixing the enclosing output index with the peeled reduction one.
@@ -1120,8 +1216,14 @@ let members =
        genuinely ENCLOSING symbol at the reduction level — and localization turns on whether the
        cell separates it. Declining leaves one storage read-modify-write per term, which on a
        backend whose policy widens the accumulator is a different number, not a slower one. --- *)
+    (* The verdict is the whole point of this member (gh-ocannl-733): [Guard_lane_private] at ONE
+       level. Were the cell free of [r] — the obvious way to write the shape — the peel would swallow
+       both levels at the outer one under [Guard_confined], and every form and site claim below would
+       still pass over a kernel in which the gh-ocannl-721 escape never ran. *)
     member "mixed-guard" "a guard mixing the enclosing output index with the peeled one"
-      ~shape:Mixed_guard ~reference:Mixed_baseline;
+      ~shape:Mixed_guard
+      ~peel:(Peeled { Cs.levels = 1; guards = [ LL.Guard_lane_private ] })
+      ~reference:Mixed_baseline;
     (* The same shape with the output axis actually BOUND to hardware, which is the form the issue
        states it in: [Workgroup r -> Serial k -> If (r + k < s) (out[r] += x[r,k])]. Where the
        backend binds the dimension this is the lane-private hoist itself — each lane loads and
@@ -1130,22 +1232,25 @@ let members =
        reduction axis is not, which is why this member runs everywhere and [retype-workgroup] does
        not. *)
     member "mixed-guard-workgroup" "the same guard with the output axis bound to a workgroup"
-      ~shape:Mixed_guard ~reference:Mixed_baseline ~expect_axis:LL.Workgroup ~sched:(fun g ->
+      ~shape:Mixed_guard
+      ~peel:(Peeled { Cs.levels = 1; guards = [ LL.Guard_lane_private ] })
+      ~reference:Mixed_baseline ~expect_axis:LL.Workgroup ~sched:(fun g ->
         [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site" ~shape:Virtual_acc
-      ~reference:Owned_cell;
+      ~peel:Minted_upstream ~reference:Owned_cell;
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
-      ~shape:Where_scope ~reference:Guarded_baseline ~extra:[ " ? " ];
+      ~shape:Where_scope ~peel:Minted_upstream ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
        could not fail: a classifier that answered "localized" for everything would pass every other
        member, and the whole table would be measuring nothing. --- *)
     member "decline-data-guard" "a data-dependent guard (not a pure index guard)" ~shape:Data_guard
-      ~expect:Rmw ~reference:Per_step;
+      ~expect:Rmw ~peel:No_localization ~reference:Per_step;
     member "decline-sibling-statement" "a second statement in the reduction level" ~shape:Side_write
-      ~expect:Rmw ~reference:Per_step;
+      ~expect:Rmw ~peel:No_localization ~reference:Per_step;
     member "decline-sibling-unrolled" "the same level Unrolled: one read-modify-write per copy"
-      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols ~expect_axis:LL.Unrolled
+      ~shape:Side_write ~expect:Rmw ~peel:No_localization ~reference:Per_step ~rmw_sites:cols
+      ~expect_axis:LL.Unrolled
       ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
@@ -1165,8 +1270,11 @@ let members =
    The limit is worth stating rather than glossing: this catches a new schedule OP and a new axis
    KIND. It does not catch a new rendering ARM inside an axis kind the table already reaches — if
    such an arm fires for a member the form claim moves and the golden diffs, but an arm reachable
-   only through a shape no member builds is invisible here. Closing that needs a census emitted by
-   codegen itself, in the shape of [C_syntax.mma_census]. *)
+   only through a shape no member builds is invisible here. What the peel census
+   ([C_syntax.peel_census], gh-ocannl-733) closes is the neighbouring gap: for the localizing peel,
+   which DECISION each member's kernel earned, so an arm reached through a shape the table does
+   build cannot be credited to a member that never took it. An arm no member's shape reaches at all
+   still needs a census over the RENDERINGS, in the shape of [C_syntax.mma_census]. *)
 
 type coverage =
   | Covered of string list  (** The members that reach it, by slug. *)
@@ -1358,17 +1466,42 @@ let () =
     (policy.Numerics.narrow_compute_f32
     && Numerics.equal_fp16_mode policy.Numerics.fp16_arithmetic Numerics.Fp16_auto)
 
+(* The [Tile_mma] fallback's own reduction is a serial nest like any other, and codegen's peel is
+   what localizes it — the leg below checks that against the routine's peel census beside the
+   [Tile_mma] one. *)
+let mma_fallback_peel = Peeled { Cs.levels = 1; guards = [] }
+let mma_fallback_peel_claimed = peel_claim_name mma_fallback_peel
+
 let () =
   Stdio.printf "reduction: out[%d] = sum of %d terms, hand-built Low_level, %d members\n" rows cols
     (List.length members + 1);
   List.iteri members ~f:(fun i m ->
       Stdio.printf "  %02d %-27s [%-12s] over %-21s %-70s -> %s\n" (i + 1) m.slug
         (String.concat ~sep:" " m.precisions)
-        (shape_name m.shape) m.what m.claimed);
+        (shape_name m.shape) m.what m.claimed;
+      (* The DECISION on its own line under the form: what codegen's peel must have decided while
+         emitting this member's kernel (gh-ocannl-733). A member that stopped exercising its own
+         code path shows up here as a golden diff, whether or not its form moved. *)
+      Stdio.printf "     %-27s %s\n" "" m.peel_claimed);
   Stdio.printf "  %02d %-27s [%-12s] over %-21s %-70s -> %s\n"
     (List.length members + 1)
     "tile-mma-fallback" "f32 bf16 f16" "small contraction"
-    "Tensorize whose emission preconditions fail (transposed-B operands)" (form_name Mma_fallback)
+    "Tensorize whose emission preconditions fail (transposed-B operands)" (form_name Mma_fallback);
+  Stdio.printf "     %-27s %s\n" "" mma_fallback_peel_claimed
+
+(* The two declarations are not independent, and pinning the relation is what keeps the peel claim
+   from being a free-floating label: a member whose peel localizes nothing must render its
+   accumulator somewhere else — a decline, a SIMD grid, a shuffle tree — unless the scope reached
+   codegen already built, which is exactly what {!Minted_upstream} says and {!No_localization} denies.
+   So the pair (form, decision) is checked for coherence over the whole table, and a member that
+   declares "localized" beside "nothing localized" without saying where the scope came from fails
+   here rather than on some backend. *)
+let () =
+  Verdict.p_all "every member's peel claim is coherent with the form it claims" members ~f:(fun m ->
+      match m.peel with
+      | Peeled _ -> true
+      | Minted_upstream -> same_form m.expect Localized || same_form m.expect Partials_combine
+      | No_localization -> not (same_form m.expect Localized))
 
 (* The baselines: the plain nest with no schedule ops, and the runtime-extent-guarded nest with no
    schedule ops, one of each per precision. Every localizing member is compared against one of them,
@@ -1377,19 +1510,19 @@ let () =
 let baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Plain () in
-      let values, _, _ = execute ~name:("rf_baseline_" ^ prec_name) ~prog ~sched:[] in
+      let values, _, _, _ = execute ~name:("rf_baseline_" ^ prec_name) ~prog ~sched:[] in
       (prec_name, values))
 
 let guarded_baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Runtime_guard () in
-      let values, _, _ = execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[] in
+      let values, _, _, _ = execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[] in
       (prec_name, values))
 
 let mixed_baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Mixed_guard () in
-      let values, _, _ = execute ~name:("rf_mixed_baseline_" ^ prec_name) ~prog ~sched:[] in
+      let values, _, _, _ = execute ~name:("rf_mixed_baseline_" ^ prec_name) ~prog ~sched:[] in
       (prec_name, values))
 
 let baseline prec_name = List.Assoc.find_exn baselines ~equal:String.equal prec_name
@@ -1509,19 +1642,28 @@ let () =
               Printf.sprintf "%s @ %s: its schedule ops left their mark on the lowered IR" m.slug
                 prec_name
             in
+            let peel_claim =
+              Printf.sprintf "%s @ %s: codegen's peel decided what the composition declares" m.slug
+                prec_name
+            in
             if not (m.available prec_name) then begin
               (* Every claim an evaluable leg prints, in the same order: the golden is one file for
                  all backends, so a claim emitted only on the available path leaves a hole rather
                  than a skip. *)
               skipped evidence_claim;
               skipped form_claim;
+              skipped peel_claim;
               skipped value_claim
             end
             else begin
               let name = Printf.sprintf "rf_%s_%s" (routine_stem m.slug) prec_name in
               let prog = make ~prec ~shape:m.shape () in
               let sched = m.sched prog in
-              let got, verified, (before, after, per_op) = execute ~name ~prog ~sched in
+              let got, verified, (before, after, per_op), peel = execute ~name ~prog ~sched in
+              (* The peel census of this kernel, on stderr: it names backend kernels and counts
+                 sites the surrounding structure decides, so it is a diagnostic; the CLAIM it
+                 supports is on stdout. *)
+              Stdio.eprintf "  %s peel census: %s\n%!" name (Cs.peel_summary_string peel);
               (* Every node the shape writes, not only the accumulator. *)
               List.iter verified ~f:(fun (claim, values, want) ->
                   let ok = agrees values want in
@@ -1639,6 +1781,33 @@ let () =
                       name (form_name rendered) (form_name m.expect) reading.node_accesses
                       reading.rmw_statements reading.stores_from_local reading.foreign_local_stores;
                   p form_claim (same_form rendered m.expect && sites_ok && extra_ok));
+              (* And the DECISION, which the form above cannot deliver (gh-ocannl-733). Read off the
+                 routine's peel census rather than off the emitted text: a member declaring a peel
+                 its kernel did not perform fails here even when every textual claim holds, which is
+                 the whole of what this instrument adds. *)
+              let localized_sites =
+                List.filter_map peel.Cs.sites ~f:(fun (_, site) ->
+                    match site with Cs.Peel_localized v -> Some v | _ -> None)
+              in
+              let verdicts vs =
+                String.concat ~sep:", "
+                  (List.map vs ~f:(fun v -> Sexp.to_string (Cs.sexp_of_peel_verdict v)))
+              in
+              (match m.peel with
+              | Peeled want ->
+                  if not (List.for_all localized_sites ~f:(Cs.equal_peel_verdict want)) then
+                    Stdio.eprintf "  %s: localized sites decided [%s], declared [%s]\n" name
+                      (verdicts localized_sites)
+                      (verdicts [ want ]);
+                  Verdict.p_all peel_claim localized_sites ~f:(Cs.equal_peel_verdict want)
+              | Minted_upstream | No_localization ->
+                  (* Over the whole census, so an EMPTY one fails too: "nothing localized" says
+                     nothing where the peel was never consulted, and every composition here reaches
+                     at least one accumulating serial site on both backend families. *)
+                  if not (List.is_empty localized_sites) then
+                    Stdio.eprintf "  %s: declared no localization, got [%s]\n" name
+                      (verdicts localized_sites);
+                  Verdict.p_empty peel_claim ~over:peel.Cs.sites localized_sites);
               let want =
                 match m.reference with
                 | Baseline -> baseline prec_name
@@ -1725,7 +1894,7 @@ let mma_run ~name ~out ~tensorize comp =
     Context.compile ~name ~lowered_transform:transform (Lazy.force base_ctx) comp Idx.Empty
   in
   let ctx = Context.run ctx routine in
-  (Context.get_values ctx out, routine.Context.mma)
+  (Context.get_values ctx out, routine.Context.mma, routine.Context.peel)
 
 let () =
   List.iter precs ~f:(fun (prec_name, prec) ->
@@ -1735,21 +1904,28 @@ let () =
       let value_claim =
         Printf.sprintf "tile-mma-fallback @ %s agrees with its reference value" prec_name
       in
+      let peel_claim =
+        Printf.sprintf "tile-mma-fallback @ %s: codegen's peel decided what the leg declares"
+          prec_name
+      in
       if not on_cpu then begin
         skipped form_claim;
+        skipped peel_claim;
         skipped value_claim
       end
       else begin
         let plain = mma_matmul ~tag:("rfmma_p_" ^ prec_name) ~prec in
-        let want, _ =
+        let want, _, _ =
           mma_run ~name:("rf_mma_plain_" ^ prec_name) ~out:plain.Tensor.value ~tensorize:false
             (Train.forward plain)
         in
         let tiled = mma_matmul ~tag:("rfmma_t_" ^ prec_name) ~prec in
-        let got, census =
+        let got, census, peel =
           mma_run ~name:("rf_mma_fallback_" ^ prec_name) ~out:tiled.Tensor.value ~tensorize:true
             (Train.forward tiled)
         in
+        Stdio.eprintf "  rf_mma_fallback_%s peel census: %s\n%!" prec_name
+          (Cs.peel_summary_string peel);
         (* The census says every [Tile_mma] statement declined; it says NOTHING about how the
            nested fallback reduction then rendered (Codex P2, round 3). If localization inside the
            fallback regressed to per-step read-modify-writes the census would be unchanged, and
@@ -1802,6 +1978,23 @@ let () =
           && census.Cs.statements > 0
           && census.Cs.scalar_fallbacks = census.Cs.statements
           && localized);
+        (* And, as for every table member, WHICH decision localized that fallback reduction
+           (gh-ocannl-733): codegen's peel, at the contraction's own reduction level. The textual
+           reading above says a scope is there; only the census says the peel put it there. *)
+        (match mma_fallback_peel with
+        | Peeled want ->
+            let sites =
+              List.filter_map peel.Cs.sites ~f:(fun (_, site) ->
+                  match site with Cs.Peel_localized v -> Some v | _ -> None)
+            in
+            if not (List.for_all sites ~f:(Cs.equal_peel_verdict want)) then
+              Stdio.eprintf "  rf_mma_fallback_%s: localized sites decided [%s]\n" prec_name
+                (String.concat ~sep:", "
+                   (List.map sites ~f:(fun v -> Sexp.to_string (Cs.sexp_of_peel_verdict v))));
+            Verdict.p_all peel_claim sites ~f:(Cs.equal_peel_verdict want)
+        | Minted_upstream | No_localization ->
+            Verdict.p_empty peel_claim ~over:peel.Cs.sites
+              (List.filter peel.Cs.sites ~f:(fun (_, s) -> Cs.is_localized_peel s)));
         let ok = agrees got want in
         if not ok then
           Stdio.eprintf "  rf_mma_fallback_%s: got [%s] want [%s]\n" prec_name (show got)
