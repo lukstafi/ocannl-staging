@@ -12,8 +12,6 @@ type t =
   | Task : { context_lifetime : ('a[@sexp.opaque]); description : string; work : unit -> unit } -> t
 [@@deriving sexp_of]
 
-let describe (Task task) = task.description
-
 let run (Task task) : unit =
   (* [%log_result "run", task.description]; *)
   task.work ()

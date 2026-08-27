@@ -365,7 +365,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
      [device.next_pool_id] in the caller's tnode-iteration order), allocates the slab through the
      backend's int-in/int-out API, and returns the [buffer_loc]. Phase-1 policy is one pool per
      tnode at offset 0 -- byte-for-byte equivalent to the old per-tnode allocation. [zero_init]
-     selects the old [alloc_zeros] vs [alloc_array] behavior. *)
+     asks for the slab to be zero-filled after it is minted (see the [memset_zero] below); a node
+     the code first-touches ([zero_initialized_by_code]) does not need it. *)
   let allocate (device : _ Backend_intf.device) (tn : Tn.t) ~zero_init : Backend_intf.buffer_loc =
     let pool_id = device.next_pool_id in
     device.next_pool_id <- pool_id + 1;
@@ -820,7 +821,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   [@@deriving sexp_of]
 
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
-  let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
 
   let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?prelowered bindings
       (comp : Assignments.comp) : code =

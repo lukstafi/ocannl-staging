@@ -489,12 +489,10 @@ module Impl = struct
 
   (* --- Compilation and Linking --- *)
   type code = {
-    metal_source : string; (* Store source, compile during link if not already compiled *)
-    compiled_code : Me.Library.t option array; (* Store compiled code per device *)
+    metal_source : string; (* Store source, the library is built during link *)
     func_name : string;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
-    traced_store : Low_level.traced_store;
     launch : Low_level.launch_dims;
   }
   [@@deriving sexp_of]
@@ -508,12 +506,10 @@ module Impl = struct
   [@@deriving sexp_of]
 
   module C_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
-      type nonrec buffer_ptr = buffer_ptr
-
       let procs = Input.procs
       let full_printf_support = false
     end)
@@ -1215,7 +1211,7 @@ module Impl = struct
 
   let compile ~name bindings lowered =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,
@@ -1231,20 +1227,11 @@ using namespace metal;|} in
       @@ Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:metal_includes
            ~builtins:Builtins_metal.builtins ~proc_doc
     in
-    {
-      metal_source = source;
-      compiled_code = Array.create ~len:(num_devs ()) None;
-      (* One slot per device *)
-      func_name = name;
-      kparams;
-      bindings;
-      traced_store = lowered.traced_store;
-      launch;
-    }
+    { metal_source = source; func_name = name; kparams; bindings; launch }
 
   let compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,

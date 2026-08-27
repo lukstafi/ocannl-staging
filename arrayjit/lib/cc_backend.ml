@@ -786,13 +786,6 @@ type procedure = {
 }
 [@@deriving sexp_of]
 
-let get_global_run_id =
-  let next_id = ref 0 in
-  fun () ->
-    Int.incr next_id;
-    if !next_id < 0 then next_id := 0;
-    !next_id
-
 let%track7_sexp c_compile_and_load ~f_path =
   (* The pool restriction (gh-ocannl-530) must be in force before the first [-fopenmp] kernel is
      dlopened, not merely before its first parallel region: libgomp computes its default team size
@@ -803,7 +796,7 @@ let%track7_sexp c_compile_and_load ~f_path =
   let base_name : string = Stdlib.Filename.chop_extension f_path in
   (* There can be only one library with a given name, the object gets cached. Moreover, [Dl.dlclose]
      is not required to unload the library, although ideally it should. *)
-  let run_id = Int.to_string @@ get_global_run_id () in
+  let run_id = Int.to_string @@ Utils.get_global_run_id () in
   let libname =
     let file_stem = Stdlib.Filename.chop_extension @@ Stdlib.Filename.basename f_path in
     if Utils.get_global_flag ~default:false ~arg_name:"output_dlls_in_build_directory" then
@@ -931,16 +924,13 @@ let%track7_sexp c_compile_and_load ~f_path =
   result
 
 module CC_syntax_config (Procs : sig
-  val procs : Low_level.optimized array
+  val procs : Low_level.t array
 end) =
 struct
   include C_syntax.Pure_C_config (struct
-    type nonrec buffer_ptr = buffer_ptr
-
     let procs = Procs.procs
 
-    let full_printf_support =
-      not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+    let full_printf_support = C_syntax.printf_support_unless_uniform ()
   end)
 
   let ident_blacklist = ident_blacklist @ C_syntax.builtin_idents Builtins_cc.builtins
@@ -1183,7 +1173,7 @@ let compilation_copy ~name (build_file : Utils.build_file_channel) filtered_code
 
 let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized) : procedure =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
-    let procs = [| lowered |]
+    let procs = [| lowered.Low_level.llc |]
   end))
   in
   (* gh-ocannl-686: normalize the user-supplied routine name into a legal C identifier ONCE, here,
@@ -1210,7 +1200,7 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
 let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized array) :
     procedure array =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
-    let procs = lowereds
+    let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
   end))
   in
   (* gh-ocannl-686: as in [compile] — mangle before anything derives a file name or a symbol. *)
@@ -1271,9 +1261,9 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
               | Some loc -> resolve loc
               | None ->
                   (* After gh-ocannl-333 there is no host array to fall back on: every in-context
-                     node must be present in [ctx_buffers] (allocated by [alloc_if_needed]). The
-                     [buffer_loc -> base] resolution is backend-private (the shared layer hands us
-                     locations, never pointers). *)
+                     node must be present in [ctx_buffers], put there by [Backends.allocate_delta]
+                     before this link. The [buffer_loc -> base] resolution is backend-private (the
+                     shared layer hands us locations, never pointers). *)
                   raise
                   @@ Utils.User_error
                        [%string
@@ -1282,9 +1272,7 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
             in
             Param_2 (ref (Some c_ptr), link bs ps Ctypes.(ptr void @-> cs))
         | _, (Kparam_pool_slab _ | Kparam_pool_slots _) :: _ ->
-            (* The C backend uses per-tnode pointer params ([`Per_param] codegen); only the Metal
-               backend emits the pooled slab / slot parameters. *)
-            invalid_arg "Cc_backend.link: unexpected pooled kparam (C uses per-tnode pointers)"
+            Backend_intf.unexpected_pooled_kparam ~backend:"Cc_backend"
       in
       (* Reverse the input order because [Indexing.apply] will reverse it again. Important:
          [code.bindings] are traversed in the wrong order but that's OK because [link] only uses

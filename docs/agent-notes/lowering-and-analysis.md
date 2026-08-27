@@ -296,3 +296,13 @@ files.
   ids, gather indices) must be pinned rather than inferred; `Tn.update_infer_prec` under a
   `not (Lazy.is_val prec)` guard is the threefry/one-hot precedent, and the gather guard's precision
   flavors (unsigned/signed/float) branch on the ids' storage precision, not on `index_prec`.
+- `Indexing.Concat` axis indices exist only ABOVE lowering: the loop nest iterates a concatenation's
+  segments one at a time, so what reaches an access index is the segment's own iterator. Post-lowering
+  code (`schedule.ml`, `c_syntax.ml`) therefore never sees one, and a `| Concat _ -> false` arm there
+  is unreachable rather than a decision — which is why `Indexing.axis_index_mentions_symbol` (the one
+  shared "does this index depend on this symbol" predicate, with the set-of-symbols twin
+  `axis_index_mentions_any`) counts a concatenation's iterators as mentioned: the constructor's own
+  reading, safe to share downstream because nothing downstream can present one. Above lowering a
+  `Concat` that DOES arrive is refused loudly, never approximated — `Indexing.reflect_projection` and
+  `Assignments.apply_padding_offset` both raise, because neither a single affine stride nor a
+  single-index shift can express a partition into disjoint sub-ranges (gh-ocannl-773).
