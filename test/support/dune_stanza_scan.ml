@@ -386,7 +386,13 @@ let pieces atom =
     word is a tool on PATH ([python3], [diff]): not something this repository builds, so not a site.
 *)
 type command =
-  | Runs of string  (** the executable, by the path written or the name [%{bin:…}] gave *)
+  | Runs of string  (** the executable, by the path written *)
+  | Runs_public of string
+      (** the executable, by the PUBLIC name [%{bin:…}] gave. Kept apart from {!Runs} because the
+          two carry the same string and mean different things: [%{bin:pkg.probe}] resolves a public
+          name, [(run ./pkg.probe)] names a file, and a consumer matching an
+          [(executable (public_name pkg.probe))] against the first must not accept the second
+          (gh-ocannl-783, Codex P2 round 8) *)
   | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
   | Unknown_directory of string
@@ -449,7 +455,7 @@ let classify_command ~named_deps cmd =
       match String.lsplit2 pform ~on:':' with
       | Some (prefix, path) when List.mem path_pforms prefix ~equal:String.equal ->
           if is_executable path then Runs (program_path path) else Unrecognized cmd
-      | Some (prefix, name) when String.equal prefix binary_pform -> Runs name
+      | Some (prefix, name) when String.equal prefix binary_pform -> Runs_public name
       | Some _ -> Unrecognized cmd
       | None -> (
           if String.equal pform "test" then Runs test_pform
@@ -663,7 +669,7 @@ let executables_run stanza =
             let handed =
               List.filter args ~f:(fun arg ->
                   match classify_command ~named_deps arg with
-                  | Runs _ | Unrecognized _ -> true
+                  | Runs _ | Runs_public _ | Unrecognized _ -> true
                   | External | Unknown_directory _ | Path_rewritten _ -> false)
             in
             match handed with
@@ -1220,7 +1226,9 @@ let sites_of_stanza subdir stanza =
             (* In a test stanza, `%{test}` is the test binary itself, reported as the Test site
                rather than as something the action also runs. *)
             | Runs name when is_test && String.equal name test_pform -> None
-            | Runs name -> Some name
+            (* A public-name run launches a program exactly as a path does; only a CONSUMER
+               matching it against a declared executable has to tell the two apart. *)
+            | Runs name | Runs_public name -> Some name
             | _ -> None)
         in
         let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
@@ -1512,6 +1520,15 @@ type marked_stanza = {
   marked_comments : (int * string) list;
       (** the comments inside its parentheses, each with the line it sits on — not those of a
           [(subdir …)] this walk descends past, since those belong to no stanza *)
+  marked_subdir : string;
+      (** the [(subdir …)] path this stanza was found under, relative to the dune file, or [""] at
+          the top level — so a caller can resolve its modules and its aliases in the directory dune
+          actually applies it to *)
+  marked_sexp : Sexp.t;
+      (** the stanza itself. Carried so that a caller which decided something FROM the marker can go
+          on to ask the stanza the ordinary structural questions — which aliases it attaches to,
+          which modules it names — without having to find it again by name, which for a [(rule …)]
+          (the placement a marker takes on an [(executable)]'s runner) is not possible at all. *)
 }
 
 (** [marked_stanzas content] is {!sites} again, per stanza and with the comments each stanza
@@ -1560,6 +1577,8 @@ let marked_stanzas content =
                is what the XOR's "a marker here declares nothing" arm already says of it. *)
             marked_declares_backend = List.exists sites ~f:(fun s -> s.declares_backend);
             marked_comments = enclosed form;
+            marked_subdir = dir;
+            marked_sexp = sexp;
           };
         ]
   in
@@ -1768,15 +1787,20 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
      to a basename made a rule running the first count as the runner of the second -- crediting a
      local executable with a declaration made elsewhere, and hiding that nothing runs it (Codex P2,
      round 2). *)
+  (* Kept apart, because this consumer does not merely ask WHETHER something runs: it transfers the
+     matched rule's declaration to a specific executable, so `(run ./pkg.probe)` -- a file here --
+     must not be credited to the executable installed as `pkg.probe` (Codex P2, round 15). *)
   let exes_run stanza =
     List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
-        match command with Runs path -> Some path | _ -> None)
-    |> List.dedup_and_sort ~compare:String.compare
+        match command with Runs path -> Some (`File path) | Runs_public name -> Some (`Public name) | _ -> None)
+    |> List.dedup_and_sort ~compare:Poly.compare
   in
   (* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and
-     the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
-     `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and
-     its executable reported as though nothing ran it (Codex P2, round 3). *)
+     the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` records as
+     `Runs_public "pkg.probe"`. Searching only for the first left a public-name runner
+     unrecognised, and its executable reported as though nothing ran it (Codex P2, round 3). This
+     search asks only WHETHER something runs it, so it takes the two together; a consumer deciding
+     WHICH executable a runner belongs to has to keep them apart (round 8). *)
   (* A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`,
      so the executable answers to both spellings and the search for its runners covers the whole
      file rather than its own group -- otherwise descending into the wrapper found both stanzas and
@@ -1785,17 +1809,19 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
   let identities stanza =
     List.concat_map (names_of stanza) ~f:(fun name ->
         let local = name ^ ".exe" in
-        if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
-    @ (match field stanza "public_name" with Some [ Sexp.Atom public ] -> [ public ] | _ -> [])
+        if String.is_empty subdir then [ `File local ] else [ `File local; `File (in_subdir subdir local) ])
+    @ (match field stanza "public_name" with
+      | Some [ Sexp.Atom public ] -> [ `Public public ]
+      | _ -> [])
     @
     match field stanza "public_names" with
-    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
+    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some (`Public p) | _ -> None)
     | None -> []
   in
   let runners_of stanza =
     let wanted = identities stanza in
     List.filter runner_stanzas ~f:(fun s ->
-        List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
+        List.exists (exes_run s) ~f:(List.mem wanted ~equal:Poly.equal))
   in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
      executable, a command it could not place, a program under an unresolvable `chdir`. That is what
@@ -1907,7 +1933,10 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
               match (names_of stanza, exes_run stanza) with
               | name :: _, _ -> name
               | [], [] -> "<unnamed>"
-              | [], exes -> "running " ^ String.concat ~sep:", " exes
+              | [], exes ->
+                  "running "
+                  ^ String.concat ~sep:", "
+                      (List.map exes ~f:(function `File path -> path | `Public name -> name))
             in
             Some
               {

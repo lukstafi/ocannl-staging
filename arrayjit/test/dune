@@ -18,6 +18,59 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
+; The same gate on an alias of its own, so that the focused aggregates below can DEPEND on it and
+; run it before their members (gh-ocannl-783, the shape `test/operations/dune` already uses for its
+; per-test aliases). `dune build @metal-codegen` is a build entry point like any other, so without
+; this the family would serve its members' cached results with a rejected environment spelling
+; ambient. The name is the one dune >= 3.20 generates for the `(test)` stanza above: a rule may add
+; an action to a generated per-test alias, and this one runs the same gate binary, so the alias
+; means the same thing whichever dune is building.
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package arrayjit)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
+; And back onto `runtest`, so that a plain `dune runtest` still runs the rule above: a rule on a
+; per-test alias and on nothing else is one the directory's own suite would otherwise skip
+; silently, which `test/operations/env_var_deps` checks of every `runtest-<name>` rule.
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-env_spelling_gate)))
+
+; This directory's half of the two focused aggregates (gh-ocannl-783); `test/operations/dune` holds
+; the other half and the reasoning. The alias names match across directories on purpose: `dune build
+; @metal-codegen` from the workspace root runs both halves, since dune builds an alias in every
+; directory beneath the one it is given.
+
+; Metal members: both stanzas here name `metal` in their backend marker, which is what
+; `env_var_deps` derives the membership from -- a Metal-pinned stanza this list omits fails it.
+
+(alias
+ (name metal-codegen)
+ (deps
+  (alias runtest-env_spelling_gate)
+  (alias runtest-test_metal_storage_mode)
+  (alias runtest-test_metal_alloc)))
+
+; Lifecycle members. `test_slab_free_on_grow` is listed beyond what the derivation finds and that is
+; deliberate: it pins the free-on-overwrite contract of `Backend_impl.Make_slab` against a mock raw
+; backend of its own, so it names none of the instrumentation modules the derived floor keys on,
+; while being exactly the resource-lifetime question the family is for. The derived floor is a
+; minimum for the list, not a definition of it.
+
+(alias
+ (name lifecycle)
+ (deps
+  (alias runtest-env_spelling_gate)
+  (alias runtest-test_slab_free_on_grow)))
+
 (test
  (name test_numerical_types)
  (package arrayjit)

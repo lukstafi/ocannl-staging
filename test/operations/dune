@@ -105,6 +105,48 @@
   (alias runtest-agent_notes_structure)
   (alias runtest-shell_scripts_parse)))
 
+; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
+; check, a different question: `scans` collects the tests that read the REPOSITORY, these collect
+; the tests that answer for one SUBSYSTEM, so that a change confined to it is revalidated without a
+; backend-wide directory run. Each family alias is spelled the same in every directory that has
+; members, which is what makes `dune build @metal-codegen` from the root run the whole family
+; wherever it lives -- `arrayjit/test/dune` carries the other half of both of these.
+;
+; Membership is DERIVED, never listed twice: `test/operations/env_var_deps` asks each stanza what it
+; IS -- a stanza whose backend marker names `metal` is a Metal member, a stanza whose modules read
+; the resource-lifecycle instrumentation is a lifecycle member -- and fails on one this list omits,
+; the same way it derives the `scans` family from the rules that glob the repository. A list checked
+; against a second copy of itself could only ever confirm that the copy still says what it says.
+;
+; The members are `(test)` stanzas, so what these list are the per-test aliases dune generates from
+; 3.20 rather than hand-written rule fields -- which is the reason `dune-project` declares 3.20 as
+; the floor rather than 3.18.
+
+; The Metal-pinned tests: the executed Metal-only guards and the emitted-MSL structural ones. Every
+; stanza here names `metal` in its backend marker, so no other box can judge any of them, and the
+; backend-wide `@test/operations/runtest` that would otherwise be the way to reach them carries
+; several hundred legs that have nothing to do with Metal.
+
+(alias
+ (name metal-codegen)
+ (deps
+  (alias runtest-env_spelling_gate)
+  (alias runtest-test_metal_pool_bindings)
+  (alias runtest-test_metal_guarded_gather_codegen)
+  (alias runtest-test_metal_pool_slot_width)))
+
+; The resource-lifecycle probes: the tests that drive `Ir.Resource_fault_injection` or read
+; `Ir.Alloc_census`, i.e. the ones that answer for allocation, free and context lifetimes across the
+; cleanup seams. They are cheap and GPU-free, and they are what a change to a resource-owning
+; boundary has to revalidate on every review round.
+
+(alias
+ (name lifecycle)
+ (deps
+  (alias runtest-env_spelling_gate)
+  (alias runtest-resource_fault_injection)
+  (alias runtest-autotune_candidate_release)))
+
 ; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
 ; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
 ; @test/operations/runtest-verdict_ratchet` runs that one test and applies its diff; this stanza is

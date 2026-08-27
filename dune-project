@@ -1,4 +1,10 @@
-(lang dune 3.18)
+(lang dune 3.20)
+
+; 3.20 is the floor the repository's own test workflow needs, not a wish: dune generates the
+; per-test `runtest-<name>` aliases only from 3.20, and the targeted-test arrangement
+; (gh-ocannl-726) and the focused aggregate families (gh-ocannl-783) are built on them. The `dune`
+; constraint in the generated opam files follows this line, so declaring 3.18 while requiring 3.20
+; promised a toolchain on which `@metal-codegen` reaches nothing.
 
 (using ctypes 0.3)
 
