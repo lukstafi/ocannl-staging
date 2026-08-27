@@ -63,7 +63,12 @@ let staging_stem_of name =
   | Some at ->
       let stem = String.prefix name at in
       let stamp = String.drop_prefix name (at + String.length staging_infix) in
-      if String.is_empty stem then None
+      (* Bounded as well as non-empty. [staging_stem] never emits more than [stem_budget] bytes, so a
+         longer stem is a name this module cannot have written — and the sweep deletes by this
+         predicate (Codex P2, round 8). The bound is the whole of what is checkable: a stem at or
+         under the budget is emitted verbatim, and a truncated one is a prefix plus [~] and a digest,
+         which a short basename could also happen to spell. *)
+      if String.is_empty stem || String.length stem > stem_budget then None
       else (
         match String.split stamp ~on:'.' with
         | [ pid; counter; nonce ]

@@ -68,10 +68,17 @@ build_files/
 # somebody named `report.ocannl-stage.backup` from `git status` and so from their own commit, and
 # `[0-9]*` is no better -- git reads that as one digit followed by anything, so `1abc` matches too.
 # A glob has no way to say "one or more digits", so the staging name's fields are fixed-width hex
-# (8, 8, 16) precisely so this rule can be EXACT. The leading `?*` is one-or-more: a bare `*` also
-# matches the EMPTY stem, and `.ocannl-stage.<fields>` is a name the helper never generates and so
-# somebody else's file. It is the same shape atomic_file.ml recognizes, character for character,
-# and the pairing is pinned in test/operations/cache_dir_scan_cases.
+# (8, 8, 16) precisely so this rule can be EXACT over them. The leading `?*` is one-or-more: a bare
+# `*` also matches the EMPTY stem, and `.ocannl-stage.<fields>` is a name the helper never generates
+# and so somebody else's file. The pairing with atomic_file.ml's recognizer is pinned in
+# test/operations/cache_dir_scan_cases.
+#
+# One dimension this rule CANNOT reach, and it is the language's limit rather than an oversight: a
+# generated stem is at most 191 bytes (longer basenames are truncated and digested), and a glob has
+# no way to bound a length -- `?`-repetition would spell it in 192 characters. So a file with a stem
+# longer than that AND this exact 34-character suffix is hidden here while `is_staging_file` rejects
+# it. Nothing DELETES such a file: the recognizer is what the sweep consults, and it is exact. The
+# residue is a name no person plausibly writes being absent from `git status` (Codex P2, round 8).
 ?*.ocannl-stage.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
 # Test artifacts written to the working directory

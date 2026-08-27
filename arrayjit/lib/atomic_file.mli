@@ -55,14 +55,19 @@ val is_staging_file : string -> bool
 
     It recognizes the WHOLE generated name — a non-empty stem, the infix, then the three fixed-width
     hex fields — not merely the presence of the infix, and each field at exactly the width and
-    alphabet generation uses. The sweep deletes what this accepts, so a file someone else named
-    [report.ocannl-stage.backup] must not be accepted, and neither must one whose fields are hex of
-    some other width. Every value this accepts is one the generator can produce: the two are written
-    from the same widths, and the nonce is a full 64-bit draw rather than a masked one.
+    alphabet generation uses, over a stem no longer than generation can emit. The sweep deletes what
+    this accepts, so a file someone else named [report.ocannl-stage.backup] must not be accepted,
+    and neither must one whose fields are hex of some other width or whose stem is longer than the
+    budget. Every value this accepts is one the generator can produce: the two are written from the
+    same widths, and the nonce is a full 64-bit draw rather than a masked one.
 
     The stem is the target's basename where that fits, and a truncation of it plus a digest of the
     whole where it does not: a staging name must stay inside the filesystem's per-component limit
-    however long the name being published is. *)
+    however long the name being published is.
+
+    The repository's [.gitignore] rule is the same shape, and is exact except for the stem's length
+    bound, which a glob has no way to state. That looseness hides a file from [git status]; it never
+    deletes one, because deletion consults this predicate. *)
 
 val is_staging_file_for : path:string -> string -> bool
 (** {!is_staging_file} narrowed to the staging artifacts of ONE published file: whether the NAME is
@@ -73,8 +78,15 @@ val is_staging_file_for : path:string -> string -> bool
     The comparison is caseless. On Windows and on a default macOS volume [Model.bin] and [model.bin]
     are the same file, so a case-sensitive match would leave a model-sized artifact unreclaimed;
     where paths really are case-sensitive, the only effect is that a save also reclaims a
-    case-twin's hour-old abandoned staging file, which the directory-wide sweep would remove
-    anyway. *)
+    case-twin's hour-old abandoned staging file, which the directory-wide sweep would remove anyway.
+
+    The folding is ASCII, which is not the filesystem's: NTFS folds by an upcase table fixed when the
+    volume was formatted and APFS by its own Unicode version, so [Ä.bin] and [ä.bin] are one file
+    there and two names here. The consequence is bounded and is a LEAK, never a wrong deletion — the
+    narrow sweep declines to reclaim a non-ASCII case-twin's artifact, while {!cleanup_stale}, which
+    compares no stems, still reclaims it wherever OCANNL owns the directory. Matching the filesystem
+    exactly would mean carrying a Unicode table and still disagreeing with some volume, so it is
+    left as a known bound rather than approximated (Codex P2, round 8). *)
 
 val ensure_dir : string -> unit
 (** Creates the directory and its missing parents, tolerating concurrent creators. A no-op for

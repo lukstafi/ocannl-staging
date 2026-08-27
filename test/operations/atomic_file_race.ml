@@ -481,6 +481,8 @@ let () =
       "report" ^ AF.staging_infix ^ "1092.0." ^ nonce;
       (* The shape a `[0-9]*` glob would have swallowed: fields that start numeric and go on. *)
       "report" ^ AF.staging_infix ^ "1abc.2bar." ^ nonce;
+      (* Every field right, but a stem longer than generation can emit: it always truncates. *)
+      String.make 192 's' ^ AF.staging_infix ^ "00001092.00000000." ^ nonce;
       AF.staging_infix ^ "4242.0." ^ nonce;
     ]
   in
