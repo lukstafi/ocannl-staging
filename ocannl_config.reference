@@ -679,14 +679,15 @@
 # So `__FMA__` is not necessary (bdver1 lacks it and has no cliff), and the v3 level is not the
 # only way to get FMA3 (bdver2/bdver3 have it without AVX2). The diagnostic that answers the
 # question directly, for your compiler and target TOGETHER rather than through a macro proxy, is to
-# compile and look: `<cc> -march=<target> -O2 -S` over a small `fmaf` loop, then grep the assembly
-# for a call to `fmaf`.
+# compile and look: `<cc> -march=<target> -O2 -S` over a small `fmaf` loop, then
+# `grep -E 'call.*fmaf'` over the assembly. Match the call loosely: gcc on ELF spells it
+# `call fmaf@PLT` while clang on Mach-O spells it `callq _fmaf`, so a pattern pinned to either one
+# reports zero on the other and an FMA-less target then reads as clean.
 # You reach a no-FMA target by running on a pre-Haswell Intel or pre-Bulldozer AMD host, by pinning
-# this
-# key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to 0, so
-# only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain that
-# rejects the probed `-march=native`, in which case the probe falls back to no flag at all and the
-# compiler's own baseline target applies. The default "auto" targets the host, so any host whose
+# this key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to
+# 0, so only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain
+# that rejects the probed `-march=native`, in which case the probe falls back to no flag at all and
+# the compiler's own baseline target applies. The default "auto" targets the host, so any host whose
 # own CPU has FMA is unaffected.
 # For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect: an FMA rounds once,
 # and the code generator promises that the vector body, its scalar peel and the serial fallback
@@ -699,9 +700,13 @@
 # the compiler read the host rather than ones that assert a feature: "auto" (the default) on a host
 # whose CPU has FMA, `cc_backend_arch_flags=-march=native`, or the `-march` naming your exact CPU.
 # Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
-# than a slowdown -- `cc_backend_simd_flags=-mfma` (appended after the architecture flag, so it does
-# not escalate the base target) selects FMA3 specifically and would fault on an FMA4-only Bulldozer,
-# and `-march=x86-64-v3` brings AVX2 that no bdver part can execute.
+# than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
+# escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns
+# `__FMA__` on, so it is safe only where the CPU implements FMA3. What it avoids relative to
+# `-march=x86-64-v3` is bringing AVX2 and the rest of a broader target along with it, so it is the
+# narrower escalation, not a free one; on an FMA4-only Bulldozer (bdver1) it would fault. And
+# `-march=x86-64-v3` brings AVX2, which bdver1 through bdver3 cannot execute -- Excavator (bdver4)
+# can, having both AVX2 and FMA.
 #cc_backend_arch_flags=auto
 
 # Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections

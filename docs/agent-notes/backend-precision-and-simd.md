@@ -770,11 +770,15 @@ files.
   are keyed on `defined(__FMA__)`, so an FMA4-only target skips the whole-vector arm and lands on
   the per-lane `#else` — no libm calls, but precisely the arm gh-ocannl-614/621 measured as gcc's
   spill-or-scalarize hazard. Escaping the libm cliff and taking the good arm are two different
-  questions, and this target answers them differently. Ask the compiler-and-target pair directly
-  rather than a macro: `<cc> -march=<t> -O2 -S` over a small `fmaf` loop, grep for `callq.*fmaf`.
-  (`-march=<t> -E -dM` prints which macros a target defines, which is an input to that question,
-  not the answer to it.) **It is a property of the TARGET, not of which arm of the `#if` chain is
-  taken**:
+  questions, and this target answers them differently. (The bdver family is not uniform on the AVX2
+  half either: Excavator, `bdver4`, has AVX2 and FMA3 both — it is bdver1 through bdver3 that cannot
+  execute AVX2.) Ask the compiler-and-target pair directly rather than a macro: `<cc> -march=<t> -O2
+  -S` over a small `fmaf` loop, then `grep -E 'call.*fmaf'`. Match the call LOOSELY — gcc on ELF
+  spells it `call fmaf@PLT`, clang on Mach-O `callq _fmaf`, and a pattern pinned to one reports zero
+  on the other, so an FMA-less target reads as clean; that is the same dialect trap that cost
+  `Asm_census` 72 rows of silent absence in gh-ocannl-650, one bullet up. (`-march=<t> -E -dM` prints
+  which macros a target defines: an input to the question, not the answer to it.) **It is a property
+  of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
   LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
   so fine" is wrong. And **it is not reached only by exotic hardware**: `cc_backend_arch_flags=none`
