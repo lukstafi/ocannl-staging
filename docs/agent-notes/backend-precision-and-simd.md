@@ -746,43 +746,69 @@ files.
   closes fp16, where gcc scalarizes a 16-bit vector COMPARISON whatever type it is spelled in
   — `_Float16` and `__fp16` alike, at `-O2` and `-O3` — widening every lane to float: 343
   instructions and 172 scalar ops become 9 and 0.
-- **Below x86-64-v3 the FMA is a libm call per element, on BOTH the vector and the scalar path**
-  (gh-ocannl-753, documented rather than fixed). Three facts compose into it, none of them local to
-  the SIMD emission. The simplifier rewrites every `a*b + c` into `Ternop (FMA, …)` unconditionally
-  (`Low_level`, no config gate, no `is_float` guard); `Ops.ternop_c_syntax` spells that `fmaf(` /
-  `fma(` for every C backend; and `C_syntax.vec_fma_builtin`'s x86 rows are guarded on
-  `defined(__FMA__)`, which arrives with `x86-64-v3` (AVX2+FMA) and is absent at `x86-64` and
-  `x86-64-v2`, so `vec_acc_fma` falls through to its per-lane `#else` loop. Where the ISA has the
-  instruction the compiler contracts the calls into it and none survives; where it does not, each
-  stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an opaque call cannot be vectorized
-  at any width, so at `-O3` the surrounding loop scalarizes as well (issue #753's census: 64-byte
-  width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256 scalar, 64 libm calls, 128 stack
-  refs). Two traps in reasoning about it. **It is a property of the TARGET, not of which arm of the
-  `#if` chain is taken**: `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always
-  takes the first arm, and LLVM then scalarizes `llvm.fma` into the same `fmaf` calls below v3 —
-  "clang, so the elementwise builtin, so fine" is wrong. And **it is not reached only by exotic
-  hardware**: `cc_backend_arch_flags=none` (the `reproducible` profile's pin — which also sets
-  `cc_vector_bytes=0`, so only the serial calls remain there), an explicitly pinned baseline
-  `-march`, or a toolchain that rejects the probed `-march=native` (`arch_flags` then falls back to
-  no flag at all) each select a below-v3 target on a modern host. No x86 hardware is needed to
-  check any of this from an Apple Silicon box: Apple clang cross-targets x86_64, and
-  `clang -arch x86_64 -march=<target> -O2 -S` over a four-line `__builtin_elementwise_fma` loop
-  counts `callq _fmaf` directly — 4 calls per iteration at 4 lanes and 8 at 8 lanes under both
-  `x86-64` and `x86-64-v2`, 0 and `vfmadd` under `x86-64-v3`, with the plain scalar `fmaf` loop
-  going the same way. The cliff is a cost of CORRECTNESS and the fix is not obvious: an FMA rounds
-  once, the emission promises the vector body, its scalar peel and the serial fallback agree bit
-  for bit, and `dst = a * b + dst` on a machine without the instruction rounds twice. The
-  wave decision of 2026-08-27 was to document it here and at `cc_backend_arch_flags` in
+- **On a target with no FMA instruction the FMA is a libm call per element, on BOTH the vector and
+  the scalar path** (gh-ocannl-753, documented rather than fixed). Three facts compose into it, none
+  of them local to the SIMD emission. The simplifier rewrites every `a*b + c` into `Ternop (FMA, …)`
+  (`Low_level`, no config gate); `Ops.ternop_c_syntax` spells that `fmaf(` / `fma(` for every C
+  backend; and `C_syntax.vec_fma_builtin`'s x86 rows are guarded on `defined(__FMA__)`, so where
+  that macro is absent the table is empty and `vec_acc_fma` falls through to its per-lane `#else`
+  loop. Where the target has the instruction the compiler contracts the calls into it and none
+  survives; where it does not, each stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an
+  opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
+  (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
+  scalar, 64 libm calls, 128 stack refs). Three traps in reasoning about it, each of which cost this
+  note a review round. **The condition is `__FMA__`, not the `x86-64-v3` level** — those come apart
+  on real parts, and prescribing the level as the fix is actively wrong: AMD Piledriver and
+  Steamroller (`-march=bdver2` / `bdver3`) define `__FMA__` and `__AVX__` but not `__AVX2__`, so
+  they take the fast path already, while `-march=x86-64-v3` would hand them AVX2 they cannot
+  execute. `x86-64` / `x86-64-v2` are just the common named targets without FMA. The remedy is any
+  spelling that gets `__FMA__` without demanding more of the CPU than it has — `-march=native`, a
+  CPU-specific `-march`, or `cc_backend_simd_flags=-mfma`, which `compiler_flags` appends after the
+  architecture flag and which alone (measured, on a baseline `-march=x86-64`) takes every call to
+  zero. **It is a property of the TARGET, not of which arm of the `#if` chain is taken**:
+  `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
+  LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
+  so fine" is wrong. And **it is not reached only by exotic hardware**: `cc_backend_arch_flags=none`
+  (the `reproducible` profile's pin — which also sets `cc_vector_bytes=0`, so only the serial calls
+  remain there), an explicitly pinned FMA-less `-march`, or a toolchain that rejects the probed
+  `-march=native` (`arch_flags` then falls back to no flag at all) each select such a target on a
+  modern host. No x86 hardware is needed to check any of this from an Apple Silicon box: Apple clang
+  cross-targets x86_64, so `clang -arch x86_64 -march=<target> -O2 -S` over a four-line
+  `__builtin_elementwise_fma` loop counts `callq _fmaf` directly — 4 per iteration at 4 lanes and 8
+  at 8 lanes under `x86-64` and `x86-64-v2`, zero (and `vfmadd`) under `x86-64-v3`, `bdver2` and
+  `x86-64 -mfma`, with the plain scalar `fmaf` loop going the same way; `-march=<t> -E -dM` prints
+  which feature macros each target actually defines. **Scope every claim here to the compiler that
+  produced it.** All of the above is clang. The one claim that does not survive the change of
+  compiler is `cc_backend_fast_math`: clang expands the calls to `mulps`/`addps` under `-ffast-math`
+  (verified at `-march=x86-64`), recovering the vectorization at two roundings, but gcc was reported
+  in review to keep the `fmaf` call there at `-O3 -ffast-math` — unverified here, this fleet's Macs
+  have no GNU gcc, and gcc is the common default since `cc_backend_compiler_command` follows
+  `ocamlc -config`. So fast-math is not a portable workaround; raising the target is.
+  `cc_backend_fp_contract` is not a lever either way: the calls are fused by construction, and
+  `-ffp-contract=fast` leaves every one of them.
+  For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious: an
+  FMA rounds once, the emission promises the vector body, its scalar peel and the serial fallback
+  agree bit for bit, and `dst = a * b + dst` on a machine without the instruction rounds twice. The
+  2026-08-27 wave decision was to document that here and at `cc_backend_arch_flags` in
   `ocannl_config.reference`, and to leave the config-gated double-rounding arm to the
   approximate-numerics work (gh-ocannl-719) — where it would have to be taken by the peel and the
-  serial fallback too, or the promise breaks worse than the cliff costs. One measured aside for
-  whoever picks that up: `cc_backend_fast_math=true` ALREADY moves the calls, clang expanding them
-  to `mulps`/`addps` under `-ffast-math` (verified at `-march=x86-64`), so the trade is reachable
-  today — as a blanket unsafe-math switch rather than the targeted knob. `cc_backend_fp_contract`
-  is not a lever either way: the calls are fused by construction, and `-ffp-contract=fast` leaves
-  every one of them. If a fix does land, `test/operations/cc_march_census` is where it shows: its
-  "no FMA accumulator loop calls libm where the ISA has a fused multiply-add" claim excludes the
-  below-v3 rows by design, so widening that claim is the test-side move.
+  serial fallback too, or the promise breaks worse than the cliff costs. If a fix does land,
+  `test/operations/cc_march_census` is where it shows: its "no FMA accumulator loop calls libm where
+  the ISA has a fused multiply-add" claim excludes the FMA-less rows by design, so widening that
+  claim is the test-side move.
+- **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
+  that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
+  docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no
+  `Ops.is_float` guard even though its neighbouring reassociations do, and its own comment is
+  `(* TODO: this is tentative. *)`. Downstream, `Ops.ternop_c_syntax` renders `Byte`, `Uint16`,
+  `Int32`, `Uint32`, `Int64`, `Uint64` and `Fp8` precisions through the DOUBLE-precision `fma(`, and
+  `C_syntax.vec_acc_fma`'s per-lane arm sends anything that is neither `Double` nor `Half` to
+  `fmaf` — single precision. If an integer mul-add reaches either, `int64` operands past 2^53 lose
+  bits and wraparound semantics change, so there `a*b + c` would be the RESTORATION of correctness,
+  not a second rounding: the bit-parity rationale one bullet up is a floating-point argument only,
+  and must not be read as covering the integer path. What is NOT established is reachability — no
+  emitted kernel was inspected for an integer `Ternop (FMA, …)` — which is exactly what an issue on
+  this should settle first, before anything is changed.
 - **"No such hardware" is a claim about a machine, not about the project — so name the machine.**
   The rows above were written from an Arrow Lake-HX box, where AVX-512 is fused off across the
   whole hybrid part, and the note recorded that as if it held everywhere; the machine that actually
