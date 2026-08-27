@@ -5,7 +5,7 @@ directory gains its first stanza of a kind or loses its last, and within a direc
 raw-text floor reported by the claim at the end holds the count up.
 
 arrayjit/lib/dune: nothing that runs a test executable
-arrayjit/test/dune: tests
+arrayjit/test/dune: tests, exe-running rules
 benchmarks/dune: exempt rules (python3, handed %{dep:test_orchestrate.py})
 benchmarks/runners/ocannl/dune: nothing that runs a test executable
 bin/dune: nothing that runs a test executable

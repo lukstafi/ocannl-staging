@@ -22,6 +22,13 @@
 ; installed and a stub that says so where it is not, so a CUDA box builds the CUDA arm, a ROCm box
 ; the HIP arm, and a laptop neither -- without either arm becoming a separate program that can drift
 ; from the other.
+;
+; What a `select` costs is that the arm it picks is compiled ONLY there: `@check` everywhere else
+; builds the stub, so an edit to an arm made off its box is blind (gh-ocannl-758). Hence the rule
+; for anything added here -- an arm holds its vendor kernel source, its compile/load/launch/copy
+; calls and data extractors, and NOTHING else; every shared behaviour, label and threshold lives in
+; fp8_soak.ml, which every box compiles. Each arm's `last_compiled` says where it last really saw a
+; compiler, and the run header prints it.
 
 (executable
  (name fp8_soak)

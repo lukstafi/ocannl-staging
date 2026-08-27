@@ -171,6 +171,20 @@ type axis_index =
           symbol. [Concat] indices are eliminated during lowering. *)
 [@@deriving compare, equal, sexp]
 
+(** Whether the value of [idx] depends on [s]: [s] is the axis's own iterator, appears as a term of
+    its affine combination, or is one of the iterators a [Concat] axis is formed from. A
+    [Fixed_idx]ed or [Sub_axis] axis mentions nothing. *)
+let axis_index_mentions_symbol (s : symbol) (idx : axis_index) : bool =
+  match idx with
+  | Iterator s' -> equal_symbol s s'
+  | Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s') -> equal_symbol s s')
+  | Concat syms -> List.exists syms ~f:(equal_symbol s)
+  | Fixed_idx _ | Sub_axis -> false
+
+(** {!axis_index_mentions_symbol} over a set of symbols: whether [idx] depends on any of [syms]. *)
+let axis_index_mentions_any (syms : symbol list) (idx : axis_index) : bool =
+  List.exists syms ~f:(fun s -> axis_index_mentions_symbol s idx)
+
 type str_osym_map = (string, symbol option, Base.String.comparator_witness) Base.Map.t
 
 let sexp_of_str_osym_map (map : str_osym_map) =
@@ -218,8 +232,6 @@ type projections = {
 (** All the information relevant for code generation. *)
 
 let iterated dim = dim > 1
-let opt_symbol d = if iterated d then Some (get_symbol ()) else None
-let opt_iterator = function None -> Fixed_idx 0 | Some sym -> Iterator sym
 
 (** The iterator symbols of each product component, in [components] order. *)
 let component_iterators (p : projections) : symbol list array =
@@ -313,45 +325,6 @@ let affine_injective ~symbol_range (project_lhs : axis_index array) : bool =
   in
   Set.equal (fixpoint (Set.empty (module Symbol))) all_syms
 
-(** Projections for a pointwise unary operator. Provide only one of [debug_info] or [derived_for].
-*)
-let identity_projections ?debug_info ?derived_for ~lhs_dims () =
-  let product_iterators_opt = Array.map lhs_dims ~f:opt_symbol in
-  let project_lhs = Array.map product_iterators_opt ~f:opt_iterator in
-  let components =
-    Array.filter_mapi lhs_dims ~f:(fun i d ->
-        Option.map product_iterators_opt.(i) ~f:(fun s -> [ (d, s) ]))
-  in
-  let debug_info =
-    match (debug_info, derived_for) with
-    | Some debug_info, _ ->
-        {
-          debug_info with
-          trace = ("indentity_projections", unique_debug_id ()) :: debug_info.trace;
-        }
-    | None, Some derived_for ->
-        {
-          spec = "";
-          derived_for = Sexp.Atom derived_for;
-          trace = [ ("indentity_projections", unique_debug_id ()) ];
-        }
-    | None, None ->
-        {
-          spec = "";
-          derived_for = Sexp.Atom "";
-          trace = [ ("indentity_projections", unique_debug_id ()) ];
-        }
-  in
-  {
-    components;
-    lhs_dims;
-    rhs_dims = [| lhs_dims |];
-    project_lhs;
-    project_rhs = [| project_lhs |];
-    extent_syms = [];
-    debug_info;
-  }
-
 (** The extents of the product-space components of [p]: one entry per component, in [components]
     order. A concatenation component's extent is the sum of its segment extents. Non-iterated
     (dimension-1) axes do not appear. *)
@@ -400,8 +373,15 @@ let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
   if not (List.is_empty !comps) then mismatch ();
   project
 
+(** The row-major flat offset of [projection] into an array of [dims], as one affine index.
+
+    [Concat] is rejected rather than approximated. Its segments partition the axis into disjoint
+    sub-ranges, so the axis's contribution is not a single stride times a single symbol and cannot
+    be written as one term of an affine sum -- the arm this replaces gave every segment symbol the
+    same stride, which is a different index map. The only caller is the [Range_over_offsets] fetch
+    in {!Assignments}, whose indices come from [Low_level.loop_over_dims] and are therefore
+    [Iterator]s and [Fixed_idx]es; [Concat] axes are in any case eliminated during lowering. *)
 let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
-  (* FIXME: handle concatenation *)
   Array.zip_exn dims projection
   |> Array.fold_right ~init:(1, [], 0) ~f:(fun (dim, idx) (stride, symbols, offset) ->
       match idx with
@@ -413,10 +393,11 @@ let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
           in
           (stride * dim, new_symbols @ symbols, offset + (affine_offset * stride))
       | Sub_axis -> (stride * dim, symbols, offset)
-      | Concat syms_list ->
-          (* For Concat, add all symbols with the current stride *)
-          let concat_symbols = List.map syms_list ~f:(fun sym -> (stride, sym)) in
-          (stride * dim, concat_symbols @ symbols, offset))
+      | Concat _ ->
+          raise
+          @@ Utils.User_error
+               "Indexing.reflect_projection: a concatenated axis has no single affine offset; \
+                Concat indices are eliminated during lowering and cannot reach this function")
   |> fun (_, symbols, offset) -> Affine { symbols; offset }
 
 type variable_ref = {

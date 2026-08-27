@@ -494,7 +494,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         memcpy ~dst_base ~dst_offset:loc.offset
 
   type code = {
-    traced_store : Low_level.traced_store;
     ptx : Nvrtc.compile_to_ptx_result;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
@@ -511,16 +510,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   [@@deriving sexp_of]
 
   module Cuda_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
-      type nonrec buffer_ptr = buffer_ptr
-
       let procs = Input.procs
 
-      let full_printf_support =
-        not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+      let full_printf_support = C_syntax.printf_support_unless_uniform ()
     end)
 
     let ident_blacklist =
@@ -2048,11 +2044,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ^^ rparen ^^ semi)
   end
 
-  let%diagn2_sexp compile ~name bindings ({ Low_level.traced_store; _ } as lowered) =
+  let%diagn2_sexp compile ~name bindings lowered =
     (* TODO: The following link seems to claim it's better to expand into loops than use memset.
        https://stackoverflow.com/questions/23712558/how-do-i-best-initialize-a-local-memory-array-to-0 *)
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -2082,11 +2078,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ~builtins:Builtins_cuda.builtins ~proc_doc
     in
     let ptx = cuda_to_ptx ~name source in
-    { traced_store; ptx; kparams; bindings; name; launch }
+    { ptx; kparams; bindings; name; launch }
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -2129,13 +2125,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let kparams_and_names = Array.map kparams_and_docs ~f:fst in
     { ptx; kparams_and_names; bindings }
 
-  let get_global_run_id =
-    let next_id = ref 0 in
-    fun () ->
-      Int.incr next_id;
-      if !next_id < 0 then next_id := 0;
-      !next_id
-
   let link_proc ~prior_context ~name ~(kparams : (string * kparam_source) list)
       ~(launch : Low_level.launch_dims) ~ctx_buffers lowered_bindings run_module =
     let func = Cu.Module.get_function run_module ~name in
@@ -2145,7 +2134,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        closure; region views ([Tensor_at]) are non-owning and must not outlive the slab base. *)
     let ctx_bases = Map.map ctx_buffers ~f:(Slab.resolve_pool device) in
     let%diagn3_sexp work () : unit =
-      let log_id = get_global_run_id () in
+      let log_id = Utils.get_global_run_id () in
       let log_id_prefix = Int.to_string log_id ^ ": " in
       [%log_result
         "Launching",
@@ -2175,10 +2164,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               Indexing.validate_bound_value ~width64:Utils.settings.large_models s !i;
               S.Int !i
           | _name, (Kparam_pool_slab _ | Kparam_pool_slots _) ->
-              (* The CUDA backend uses per-tnode pointer params ([`Per_param] codegen); only the
-                 Metal backend emits the pooled slab / slot parameters. *)
-              invalid_arg
-                "Cuda_backend.link: unexpected pooled kparam (CUDA uses per-tnode pointers)")
+              Backend_intf.unexpected_pooled_kparam ~backend:"Cuda_backend")
       in
       set_ctx @@ ctx_of prior_context;
       [%log "launching the kernel"];

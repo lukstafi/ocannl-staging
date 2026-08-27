@@ -38,3 +38,61 @@ a second rule running the same executable answers for its own run: one declaring
 and the same pair with both declaring passes: true
 a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence: true
 a key spelled in upper case names the same variable, and is asked for under the same name: true
+
+The focused-aggregate rule is put to a tree of one member stanza and a family alias that does
+or does not list it. Nothing else differs between the runs of a pair; the member takes each of
+the shapes dune builds a member in -- a test, an executable with its runner, a plural stanza,
+an inline-test library, a `(subdir …)` group -- and the last run is a stanza neither
+derivation calls a member.
+
+a stanza whose backend marker names metal is reported, naming its family, when the metal-codegen alias does not reach it: true
+the same tree with the member listed in the family stanza passes: true
+a stanza whose modules read the resource-lifecycle instrumentation is reported the same way when the lifecycle alias does not reach it: true
+the same tree with that member listed passes too: true
+an executable whose RUNNER carries the metal marker is a member too, reported when the family does not reach that rule: true
+the same tree with the runner's own alias listed passes: true
+a plural stanza with only one of its two generated aliases listed is reported, naming the one still missing: true
+the same plural stanza with both listed passes: true
+the same one-alias listing is COMPLETE when only that main reads the instrumentation, so the lifecycle family is not asked for its neighbour: true
+an inline-test library carrying the metal marker is a member, reported when the family does not reach the alias dune generates for it: true
+the same library listed under its generated alias passes: true
+a member inside a `(subdir …)` group is aggregated by a family alias in that same group, which the recursive build from the root reaches: true
+a runner that runs another directory's executable of the same name does not aggregate this directory's member: true
+the same runner running this directory's executable does: true
+a runner naming the executable's `(public_name …)` aggregates it as much as one naming its .exe: true
+an executable declared in a `(subdir …)` group is aggregated by the top-level family stanza when the rule that runs it sits at the top level: true
+a marked rule whose only alias is the directory-wide `runtest` has no focused alias to offer, and a family listing `runtest` does not aggregate it: true
+a public name belongs to its own executable, so a rule running the second unit's public name does not aggregate the first: true
+a source that names the instrumentation in a comment, a string and a longer identifier reads none of it, and is no member: true
+a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and is reported without one: true
+a `(subdir …)` group whose actions take the training lock and whose gate does not is reported there too: true
+a module of the same last name reached through another qualifier is not the instrumentation, and its user is no member: true
+`open Ir` and then a bare `Alloc_census.snapshot` is a reference to the instrumentation, and its test is a member: true
+so is `module I = Ir` and then `I.Alloc_census.snapshot`: true
+an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference to the instrumentation: true
+`module Ir = Other` rebinds the qualifier, so a later `Ir.Alloc_census` is not the instrumentation: true
+a rule running a file that shares the executable's public name is not its runner, however alike the two strings are: true
+`open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so neither makes their file a member: true
+nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module it starts at: true
+`open Ir` and then `module Alloc_census = Foo.Alloc_census` rebinds the leaf, so what follows is not the instrumentation: true
+`module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves from where it starts: true
+a functor parameter named `Ir` shadows the qualifier inside the functor's body: true
+`module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a reference to the instrumentation: true
+and goes on doing so when the structure defines something beside the include: true
+`open Ir` inside a wrapper that includes somebody else re-exports the somebody else, so its user is no member: true
+a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature: true
+a wrapper that includes the qualifier and then redefines a leaf does not lend us that leaf: true
+`module Ir : X` inside a signature binds the name for the items after it, so a later `Ir.Alloc_census.t` is the signature's: true
+an include AFTER a definition supersedes it, so the wrapper's leaf is the qualifier's again: true
+an `open` inside a signature reaches the items after it, so `module AC = Alloc_census` there is a reference: true
+a recursive module taking the qualifier's name shadows it, in its own group and after it: true
+rebinding an alias replaces what it meant, so the earlier binding does not keep the later reference alive: true
+every name of a recursive group is in scope in every body, so an alias declared before the group takes `Ir` is bound to the group's: true
+a wrapper that includes the qualifier and then includes somebody else stops naming it, since which leaves the second include brings cannot be read off the tree: true
+`module I = Ir` inside a signature binds, so a later `I.Alloc_census.t` is a reference: true
+an executable run by a `(test)` stanza's custom action is aggregated through the `runtest-<name>` dune generates for that test: true
+two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
+an absolute path ending in the local executable's name is not the local executable: true
+a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true
+a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is reported there too: true
+a stanza neither derivation calls a member is asked for no family alias: true

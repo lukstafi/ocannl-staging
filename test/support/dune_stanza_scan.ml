@@ -386,7 +386,13 @@ let pieces atom =
     word is a tool on PATH ([python3], [diff]): not something this repository builds, so not a site.
 *)
 type command =
-  | Runs of string  (** the executable, by the path written or the name [%{bin:…}] gave *)
+  | Runs of string  (** the executable, by the path written *)
+  | Runs_public of string
+      (** the executable, by the PUBLIC name [%{bin:…}] gave. Kept apart from {!Runs} because the
+          two carry the same string and mean different things: [%{bin:pkg.probe}] resolves a public
+          name, [(run ./pkg.probe)] names a file, and a consumer matching an
+          [(executable (public_name pkg.probe))] against the first must not accept the second
+          (gh-ocannl-783, Codex P2 round 8) *)
   | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
   | Unknown_directory of string
@@ -449,7 +455,7 @@ let classify_command ~named_deps cmd =
       match String.lsplit2 pform ~on:':' with
       | Some (prefix, path) when List.mem path_pforms prefix ~equal:String.equal ->
           if is_executable path then Runs (program_path path) else Unrecognized cmd
-      | Some (prefix, name) when String.equal prefix binary_pform -> Runs name
+      | Some (prefix, name) when String.equal prefix binary_pform -> Runs_public name
       | Some _ -> Unrecognized cmd
       | None -> (
           if String.equal pform "test" then Runs test_pform
@@ -678,7 +684,7 @@ let rec executables_run_with_pins stanza =
             let handed =
               List.filter args ~f:(fun arg ->
                   match classify_command ~named_deps arg with
-                  | Runs _ | Unrecognized _ -> true
+                  | Runs _ | Runs_public _ | Unrecognized _ -> true
                   | External | Unknown_directory _ | Path_rewritten _ -> false)
             in
             match handed with
@@ -1241,7 +1247,9 @@ let sites_of_stanza subdir stanza =
             (* In a test stanza, `%{test}` is the test binary itself, reported as the Test site
                rather than as something the action also runs. *)
             | Runs name when is_test && String.equal name test_pform -> None
-            | Runs name -> Some name
+            (* A public-name run launches a program exactly as a path does; only a CONSUMER
+               matching it against a declared executable has to tell the two apart. *)
+            | Runs name | Runs_public name -> Some name
             | _ -> None)
         in
         let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
@@ -1533,6 +1541,15 @@ type marked_stanza = {
   marked_comments : (int * string) list;
       (** the comments inside its parentheses, each with the line it sits on — not those of a
           [(subdir …)] this walk descends past, since those belong to no stanza *)
+  marked_subdir : string;
+      (** the [(subdir …)] path this stanza was found under, relative to the dune file, or [""] at
+          the top level — so a caller can resolve its modules and its aliases in the directory dune
+          actually applies it to *)
+  marked_sexp : Sexp.t;
+      (** the stanza itself. Carried so that a caller which decided something FROM the marker can go
+          on to ask the stanza the ordinary structural questions — which aliases it attaches to,
+          which modules it names — without having to find it again by name, which for a [(rule …)]
+          (the placement a marker takes on an [(executable)]'s runner) is not possible at all. *)
 }
 
 (** [marked_stanzas content] is {!sites} again, per stanza and with the comments each stanza
@@ -1581,6 +1598,8 @@ let marked_stanzas content =
                is what the XOR's "a marker here declares nothing" arm already says of it. *)
             marked_declares_backend = List.exists sites ~f:(fun s -> s.declares_backend);
             marked_comments = enclosed form;
+            marked_subdir = dir;
+            marked_sexp = sexp;
           };
         ]
   in
@@ -1705,8 +1724,11 @@ let artifact_env_var = "OCANNL_BUILD_FILES_PREFIX"
    round 2 of PR #457). *)
 let exes_run stanza =
   List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
-      match command with Runs path -> Some path | _ -> None)
-  |> List.dedup_and_sort ~compare:String.compare
+      match command with
+      | Runs path -> Some (`File path)
+      | Runs_public name -> Some (`Public name)
+      | _ -> None)
+  |> List.dedup_and_sort ~compare:Poly.compare
 
 (** A directory-qualified path with its [.] and [..] segments resolved, so that two spellings of one
     program compare equal and two programs never do. [..] above the root is kept, since a path
@@ -1731,32 +1753,17 @@ let normalize_path path =
     real program as unrun and credit a same-named local one with this rule's declarations (Codex P2,
     round 4 of PR #484). [commands_in] already tracked the directory for the configuration search;
     this is the same fact answering a second question. *)
-(** The PUBLIC names a stanza runs, by the one spelling that names a public executable:
-    [%{bin:pkg.probe}].
-
-    Read from the raw command rather than from the classified one, because classification strips a
-    leading [./] -- which it must, so that `./probe.exe` is the local `probe.exe` -- and that makes a
-    literal path indistinguishable from a public name: `(run ./pkg.guard)` classified as
-    `Runs "pkg.guard"` matched an executable's `(public_name pkg.guard)`, crediting an unrelated
-    rule's declarations to a program it never launches (Codex P2, round 10 of PR #484). A public name
-    is a NAME and a path is a PATH; only the spelling at the call site tells them apart. *)
-let public_names_run stanza =
-  List.filter_map (commands_in stanza) ~f:(fun (_cwd, _pinned, command) ->
-      match command with
-      | Program (cmd, _) -> (
-          match pieces cmd with
-          | [ Pform pform ] -> (
-              match String.lsplit2 pform ~on:':' with
-              | Some (prefix, name) when String.equal prefix binary_pform -> Some name
-              | _ -> None)
-          | _ -> None)
-      | _ -> None)
-  |> List.dedup_and_sort ~compare:String.compare
-
 let runs_of ~subdir stanza =
   List.filter_map (executables_run_with_pins stanza) ~f:(fun (cwd, pinned, command) ->
       match command with
-      | Runs path -> Some (normalize_path (in_subdir subdir (in_subdir cwd path)), path, pinned)
+      (* A FILE is resolved to a workspace-relative path -- the working directory is part of its
+         identity, since `(chdir ../a (run probe.exe))` in a rule under `b` runs `a`'s program. A
+         PUBLIC name is not a path and is carried as written: `%{bin:pkg.probe}` names the same
+         program from anywhere, and `classify_command` keeps the two apart precisely so a
+         `(run ./pkg.probe)` here is not credited to the executable installed under that name
+         (gh-ocannl-783). *)
+      | Runs path -> Some (`File (normalize_path (in_subdir subdir (in_subdir cwd path))), pinned)
+      | Runs_public name -> Some (`Public name, pinned)
       | _ -> None)
 
 (** The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
@@ -1794,7 +1801,7 @@ let program_public_name stanza ~index =
     basename (Codex P2, round 2 of PR #457).
 
     A public name is not a path and is compared as written: `%{bin:pkg.probe}` names the same program
-    from anywhere, which is what `classify_command` records it as (Codex P2, round 3 of PR #457). *)
+    from anywhere, which is what `classify_command` records as {!Runs_public} (gh-ocannl-783). *)
 let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
   let runner_stanzas =
     match runner_stanzas with
@@ -1811,20 +1818,12 @@ let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
                only where it is in force at every run of this program: an unpinned run of a HELPER
                beside it says nothing about the subject (Codex P2, round 4), and a pin around the
                helper alone protects nothing here (Codex P1, round 1). *)
-            let by_public_name =
-              match public with
-              | None -> false
-              | Some public -> List.mem (public_names_run s) public ~equal:String.equal
-            in
             let mine =
-              List.filter_map (runs_of ~subdir:runner_subdir s)
-                ~f:(fun (resolved, written, pinned) ->
-                  if
-                    String.equal resolved canonical
-                    || (by_public_name
-                       && Option.value_map public ~default:false ~f:(String.equal written))
-                  then Some pinned
-                  else None)
+              List.filter_map (runs_of ~subdir:runner_subdir s) ~f:(fun (identity, pinned) ->
+                  match (identity, public) with
+                  | `File resolved, _ when String.equal resolved canonical -> Some pinned
+                  | `Public name, Some public when String.equal name public -> Some pinned
+                  | _ -> None)
             in
             match mine with
             | [] -> None
@@ -2139,7 +2138,10 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
               match (names_of stanza, exes_run stanza) with
               | name :: _, _ -> name
               | [], [] -> "<unnamed>"
-              | [], exes -> "running " ^ String.concat ~sep:", " exes
+              | [], exes ->
+                  "running "
+                  ^ String.concat ~sep:", "
+                      (List.map exes ~f:(function `File path -> path | `Public name -> name))
             in
             Some
               {

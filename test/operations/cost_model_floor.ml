@@ -311,8 +311,6 @@ let () =
    same check every backend runs on itself at [C_syntax] functor application, where the GPU
    spellings (which shadow these) get covered on their own hardware. *)
 module C_config = Ir.C_syntax.Pure_C_config (struct
-  type buffer_ptr = unit
-
   let procs = [||]
   let full_printf_support = true
 end)

@@ -463,7 +463,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         memcpy ~dst_base ~dst_offset:loc.offset
 
   type code = {
-    traced_store : Low_level.traced_store;
     code : Hiprtc.compile_to_code_result;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
@@ -480,16 +479,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   [@@deriving sexp_of]
 
   module Hip_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
-      type nonrec buffer_ptr = buffer_ptr
-
       let procs = Input.procs
 
-      let full_printf_support =
-        not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+      let full_printf_support = C_syntax.printf_support_unless_uniform ()
     end)
 
     let ident_blacklist =
@@ -1579,9 +1575,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 #define NAN __builtin_nanf("")
 #endif|}
 
-  let%diagn2_sexp compile ~name bindings ({ Low_level.traced_store; _ } as lowered) =
+  let%diagn2_sexp compile ~name bindings lowered =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -1594,11 +1590,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ~builtins:Builtins_hip.builtins ~proc_doc
     in
     let code = hip_to_code ~name source in
-    { traced_store; code; kparams; bindings; name; launch }
+    { code; kparams; bindings; name; launch }
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -1622,13 +1618,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let code = hip_to_code ~name source in
     let kparams_and_names = Array.map kparams_and_docs ~f:fst in
     { code; kparams_and_names; bindings }
-
-  let get_global_run_id =
-    let next_id = ref 0 in
-    fun () ->
-      Int.incr next_id;
-      if !next_id < 0 then next_id := 0;
-      !next_id
 
   (* {2 Post-link scratch validation (gh-ocannl-533)}
 
@@ -1733,7 +1722,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        closure; region views ([Tensor_at]) are non-owning and must not outlive the slab base. *)
     let ctx_bases = Map.map ctx_buffers ~f:(Slab.resolve_pool device) in
     let%diagn3_sexp work () : unit =
-      let log_id = get_global_run_id () in
+      let log_id = Utils.get_global_run_id () in
       let log_id_prefix = Int.to_string log_id ^ ": " in
       [%log_result
         "Launching",
@@ -1763,9 +1752,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               Indexing.validate_bound_value ~width64:Utils.settings.large_models s !i;
               S.Int !i
           | _name, (Kparam_pool_slab _ | Kparam_pool_slots _) ->
-              (* The HIP backend uses per-tnode pointer params ([`Per_param] codegen); only the
-                 Metal backend emits the pooled slab / slot parameters. *)
-              invalid_arg "Hip_backend.link: unexpected pooled kparam (HIP uses per-tnode pointers)")
+              Backend_intf.unexpected_pooled_kparam ~backend:"Hip_backend")
       in
       set_ctx @@ ctx_of prior_context;
       [%log "launching the kernel"];

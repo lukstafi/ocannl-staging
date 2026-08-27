@@ -883,6 +883,334 @@ let generated_init_calls_in_source content =
     source in the tree. *)
 let could_call_generated_init content = String.is_substring content ~substring:generated_module
 
+(** Which of [paths] the source actually REFERS TO, deduplicated and in the order they first
+    appear. Each path is spelled in components — [[ "Ir"; "Alloc_census" ]] — and matches wherever
+    those components appear CONSECUTIVELY inside a real identifier's module path:
+    [Ir.Alloc_census.snapshot ()], [module AC = Ir.Alloc_census], a type [Ir.Alloc_census.t].
+
+    Parsed rather than grepped, for the reason the rest of this module is parsed: a source that
+    names the module in a doc comment, in a string literal, or inside a longer identifier is not
+    reading it, and a derivation built on a substring reads all three as uses. The same argument
+    {!generated_init_calls_in_source} makes, and it applies with more force here, since what is
+    derived from the answer is which focused aggregate a test belongs to (gh-ocannl-783).
+
+    Qualified rather than by bare name, and that is what the path is for: a local or third-party
+    module that happens to be called [Alloc_census] is not the instrumentation, and matching the
+    last component alone would put its user in a family it has nothing to do with. The qualifier
+    carries the provenance the AST does not — the parser resolves no paths — so the caller states
+    how much of it to insist on.
+
+    Every longident in the structure is visited, so a reference in an expression, a type, a pattern
+    or a module expression counts alike. What does not count is a module ALIASED to one of these
+    paths and then used under its alias — but the binding that introduces the alias names the path,
+    which this sees, so a file using the alias has already been counted. And a module bound to the
+    qualifier itself ([module Ir = Somewhere_else]) is read as if it were the real one: the same
+    over-reading direction {!receiver_is_generated} accepts, and the safe one here too. *)
+let module_references_in_source content ~paths =
+  let structure = structure_of content in
+  let rec starts_with components path =
+    match (components, path) with
+    | _, [] -> true
+    | [], _ :: _ -> false
+    | c :: components, p :: path -> String.equal c p && starts_with components path
+  in
+  (* The qualifiers the caller's paths are written under -- [["Ir"]] for [Ir.Alloc_census] -- since
+     a source may reach the same module without writing one: [open Ir] then [Alloc_census.snapshot],
+     or [module I = Ir] then [I.Alloc_census.t]. Both spell a real reference to the same module, and
+     a match that insisted on the literal qualifier would call neither a use (Codex P2, round 6).
+
+     Tracked in ONE traversal, IN SCOPE: a structure's bindings take effect where they sit and end
+     with the structure, and [let open … in] / [let module … in] reach their body and nothing else.
+     A separate collecting pass would have made [module Elsewhere = struct open Ir end] open the
+     qualifier over the whole file, so an unrelated [Alloc_census] outside that module would be read
+     as this one (Codex P2, round 7) -- and here, unlike in {!generated_init_calls_in_source}, the
+     answer decides which focused aggregate a test belongs to, so an over-reading is a family
+     demanding a test that has nothing to do with it. *)
+  let qualifiers =
+    List.filter_map paths ~f:(fun path ->
+        match List.rev path with _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier) | _ -> None)
+    |> List.dedup_and_sort ~compare:(List.compare String.compare)
+  in
+  let aliases = ref [] and opened = ref [] and shadowed = ref [] in
+  (* A name is the qualifier only while nothing has rebound it. [module Ir = Other] shadows it, and
+     a later [Ir.Alloc_census] is Other's -- the same argument the qualified path makes about
+     [Foo.Alloc_census], one component further left (Codex P2, round 8). *)
+  let is_shadowed name = List.mem !shadowed name ~equal:String.equal in
+  (* What a BINDER's target has to be for the name it binds to denote the qualifier: the qualifier
+     itself, not a path that happens to contain it. `open Vendor.Ir` opens Vendor's `Ir`, and
+     reading it as ours would make every bare `Alloc_census` in the file a reference to the
+     instrumentation (Codex P2, round 9). A binding is a WIDE claim -- it decides what a whole scope
+     of unqualified names mean -- so it is the place to be exact. *)
+  let names_qualifier qualifier components =
+    (List.equal String.equal components qualifier
+    && not (List.exists qualifier ~f:is_shadowed))
+    ||
+    match components with
+    | [ single ] ->
+        List.exists !aliases ~f:(fun (alias, of_qualifier, _) ->
+            String.equal alias single && List.equal String.equal of_qualifier qualifier)
+    | _ -> false
+  in
+  (* A name bound to something that is not the qualifier stops denoting it for the rest of its
+     scope -- whether it was bound by a module binding or introduced as a functor's parameter. *)
+  let shadow_name name =
+    aliases := List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a name));
+    if not (is_shadowed name) then shadowed := name :: !shadowed
+  in
+  (* Binding by PATH, for the spellings that carry one rather than a module expression: a
+     signature's `open Ir` (Codex P2, round 16). *)
+  let bind_path alias components =
+    let bound = ref false in
+    List.iter qualifiers ~f:(fun qualifier ->
+        if names_qualifier qualifier components then (
+          bound := true;
+          match alias with
+          | Some alias ->
+              shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
+              aliases :=
+                (alias, qualifier, [])
+                :: List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a alias))
+          | None -> opened := (qualifier, []) :: !opened));
+    match alias with Some alias when not !bound -> shadow_name alias | _ -> ()
+  in
+  let bind_module_expr alias module_expr =
+    let rec unwrap module_expr =
+      match module_expr.pmod_desc with
+      | Pmod_constraint (inner, _) -> unwrap inner
+      | _ -> module_expr
+    in
+    (* The paths a module expression re-exports. A path names itself; and an `include` inside a
+       structure re-exports what it names, so `module I = struct include Ir end` binds `I` to the
+       qualifier as surely as `module I = Ir` does (Codex P2, round 13) -- and goes on doing so when
+       the structure defines other things beside it, since an include exports its contents whatever
+       sits next to it (round 14).
+
+       `open` is NOT one of these. It changes what unqualified names mean INSIDE the structure and
+       exports nothing, so `module I = struct open Ir include Vendor end` re-exports Vendor and
+       reading the open as an export would attribute Vendor's `Alloc_census` to us (round 14). *)
+    (* And the names it REDEFINES after including: `struct include Ir module Alloc_census = Vendor.
+       Alloc_census end` re-exports the qualifier and then overrides one of its leaves, so a
+       reference through the wrapper to that leaf is Vendor's (Codex P2, round 15). Carried with the
+       binding, since it is a fact about this wrapper and not about the qualifier. *)
+    let rec exports module_expr =
+      match (unwrap module_expr).pmod_desc with
+      | Pmod_ident { txt; _ } -> (Option.to_list (flatten_module_path txt), [])
+      | Pmod_structure items ->
+          (* IN ORDER: a definition overrides what an earlier include exported, and a LATER include
+             overrides the definitions before it (Codex P2, round 16). So an include resets the
+             override set to whatever it brings, and a definition adds to it. *)
+          List.fold items ~init:([], []) ~f:(fun (paths, overridden) item ->
+              match item.pstr_desc with
+              | Pstr_include { pincl_mod = inner; _ } ->
+                  (* The LAST include decides, and it decides everything: which leaves a later
+                     include supersedes cannot be read off the parse tree, so `struct include Ir
+                     include Vendor end` is Vendor's and the wrapper stops naming the qualifier
+                     (Codex P2, round 17). That is the loud direction -- a reference through such a
+                     wrapper is reported as no member rather than credited. *)
+                  ignore paths;
+                  exports inner
+              | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
+                  (paths, name :: overridden)
+              | Pstr_recmodule bindings ->
+                  ( paths,
+                    List.filter_map bindings ~f:(fun binding -> binding.pmb_name.txt) @ overridden )
+              | _ -> (paths, overridden))
+      | _ -> ([], [])
+    in
+    let paths, overridden = exports module_expr in
+    let names_any = ref false in
+    List.iter paths ~f:(fun components ->
+        List.iter qualifiers ~f:(fun qualifier ->
+            if names_qualifier qualifier components then (
+              names_any := true;
+              match alias with
+              | Some alias ->
+                  shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
+                  (* Replacing, not prepending: rebinding a name to another wrapper of the same
+                     qualifier would otherwise leave both meanings live, and `matches` takes the
+                     kinder of the two (Codex P2, round 16). *)
+                  aliases :=
+                    (alias, qualifier, overridden)
+                    :: List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a alias))
+              | None -> opened := (qualifier, overridden) :: !opened)));
+    (* Whatever else it was bound to, the NAME now denotes that instead. *)
+    match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
+  in
+  let found = ref [] in
+  let matches components path =
+    let qualifier, name =
+      match List.rev path with
+      | name :: rev_qualifier -> (List.rev rev_qualifier, name)
+      | [] -> ([], "")
+    in
+    (* ANCHORED at the qualifier: `Vendor.Ir.Alloc_census` is Vendor's, and finding our path inside
+       a longer one would call its user a probe (Codex P2, round 10). The same exactness the binders
+       get, for the same reason -- a path names one module, and which one is decided by where it
+       starts. *)
+    (starts_with components path && not (List.exists qualifier ~f:is_shadowed))
+    (* Anchored at the alias for the same reason the direct branch anchors at the qualifier:
+       `Vendor.I.Alloc_census` resolves from `Vendor`, whatever `I` means here (Codex P2, round
+       12). *)
+    || List.exists !aliases ~f:(fun (alias, of_qualifier, overridden) ->
+           List.equal String.equal of_qualifier qualifier
+           && (not (List.mem overridden name ~equal:String.equal))
+           && starts_with components [ alias; name ])
+    (* Under an `open`, the reference begins with the module's own name -- and only while that name
+       still means the opened module: `open Ir` followed by `module Alloc_census = Foo.Alloc_census`
+       rebinds the leaf, and what follows is Foo's (Codex P2, round 11). *)
+    || (List.exists !opened ~f:(fun (of_qualifier, overridden) ->
+            List.equal String.equal of_qualifier qualifier
+            && not (List.mem overridden name ~equal:String.equal))
+       && starts_with components [ name ]
+       && not (is_shadowed name))
+  in
+  let walk =
+    object (self)
+      inherit Ast_traverse.iter as super
+
+      (* A structure is a scope, and its items bind in source order: each is visited under what the
+         items before it bound, and the whole set is dropped when the structure ends. Nested
+         structures go through this method too, which is what confines a `module M = struct open Ir
+         end` to `M`. *)
+      method! structure items =
+        let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
+        List.iter items ~f:(fun item ->
+            (* A recursive group's names are in scope throughout it, so they bind BEFORE their own
+               bodies are walked (Codex P2, round 16). *)
+            (match item.pstr_desc with
+            | Pstr_recmodule bindings ->
+                (* EVERY name first: all of them are in scope in all the bodies, so resolving one
+                   member's target before its neighbours are bound would resolve it against the
+                   outer meaning of a name the group takes (Codex P2, round 17). *)
+                List.iter bindings ~f:(fun binding ->
+                    Option.iter binding.pmb_name.txt ~f:shadow_name);
+                List.iter bindings ~f:(fun binding ->
+                    bind_module_expr binding.pmb_name.txt binding.pmb_expr)
+            | _ -> ());
+            self#structure_item item;
+            match item.pstr_desc with
+            | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
+                bind_module_expr alias pmb_expr
+            | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+            | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+            | _ -> ());
+        aliases := saved_aliases;
+        opened := saved_opened;
+        shadowed := saved_shadowed
+
+      (* The expression spellings reach their BODY. Visited by hand rather than through `super`, so
+         that the binding is in force for the body and gone after it. *)
+      method! expression expr =
+        let scoped ~bind ~body visit =
+          visit ();
+          let saved_aliases = !aliases
+          and saved_opened = !opened
+          and saved_shadowed = !shadowed in
+          bind ();
+          self#expression body;
+          aliases := saved_aliases;
+          opened := saved_opened;
+          shadowed := saved_shadowed
+        in
+        match expr.pexp_desc with
+        | Pexp_open (declaration, body) ->
+            scoped
+              ~bind:(fun () -> bind_module_expr None declaration.popen_expr)
+              ~body
+              (fun () -> self#open_declaration declaration)
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, body) ->
+            scoped
+              ~bind:(fun () -> bind_module_expr alias module_expr)
+              ~body
+              (fun () -> self#module_expr module_expr)
+        | _ -> super#expression expr
+
+      (* A functor's parameter is a module name bound inside its body, and it can be the qualifier's
+         name: `module M (Ir : S) = struct … Ir.Alloc_census … end` refers to the parameter (Codex
+         P2, round 12). Scoped like the other binders -- in force for the body, gone after it. *)
+      method! module_expr module_expr =
+        match module_expr.pmod_desc with
+        | Pmod_functor (parameter, body) ->
+            let saved_aliases = !aliases
+            and saved_opened = !opened
+            and saved_shadowed = !shadowed in
+            (match parameter with
+            | Named ({ txt = name; _ }, module_type) ->
+                self#module_type module_type;
+                Option.iter name ~f:shadow_name
+            | Unit -> ());
+            self#module_expr body;
+            aliases := saved_aliases;
+            opened := saved_opened;
+            shadowed := saved_shadowed
+        | _ -> super#module_expr module_expr
+
+      (* And the module-type spelling of a functor, whose parameter shadows inside the result
+         signature exactly as a module functor's does (Codex P2, round 14). *)
+      method! module_type module_type =
+        match module_type.pmty_desc with
+        | Pmty_functor (parameter, result) ->
+            let saved_aliases = !aliases
+            and saved_opened = !opened
+            and saved_shadowed = !shadowed in
+            (match parameter with
+            | Named ({ txt = name; _ }, argument) ->
+                self#module_type argument;
+                Option.iter name ~f:shadow_name
+            | Unit -> ());
+            self#module_type result;
+            aliases := saved_aliases;
+            opened := saved_opened;
+            shadowed := saved_shadowed
+        | _ -> super#module_type module_type
+
+      (* A signature is a scope too, and `module Ir : X` inside one binds that name for the items
+         after it: the `Ir` in a later `val x : Ir.Alloc_census.t` is the signature's (Codex P2,
+         round 15). Same arrangement as `structure`. *)
+      method! signature signature =
+        let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
+        List.iter signature ~f:(fun item ->
+            (* A recursive group's names are in scope throughout it, so they bind BEFORE their own
+               declarations are walked (Codex P2, round 16). *)
+            (match item.psig_desc with
+            | Psig_recmodule declarations ->
+                List.iter declarations ~f:(fun declaration ->
+                    Option.iter declaration.pmd_name.txt ~f:shadow_name)
+            | _ -> ());
+            self#signature_item item;
+            match item.psig_desc with
+            (* A manifest alias in a signature binds its name to the path it names, exactly as a
+               structure's `module I = Ir` does; only a declaration with no manifest is an opaque
+               module that merely takes the name (Codex P2, round 17). *)
+            | Psig_module
+                { pmd_name = { txt = Some name; _ }; pmd_type = { pmty_desc = Pmty_alias { txt; _ }; _ }; _ }
+              ->
+                Option.iter (flatten_module_path txt) ~f:(bind_path (Some name))
+            | Psig_module { pmd_name = { txt = Some name; _ }; _ }
+            | Psig_modsubst { pms_name = { txt = name; _ }; _ } ->
+                shadow_name name
+            (* A signature's `open` reaches the items after it exactly as a structure's does. *)
+            | Psig_open { popen_expr = { txt; _ }; _ } ->
+                Option.iter (flatten_module_path txt) ~f:(bind_path None)
+            | _ -> ());
+        aliases := saved_aliases;
+        opened := saved_opened;
+        shadowed := saved_shadowed
+
+      method! longident lid =
+        (match flatten_module_path lid with
+        | Some components ->
+            List.iter paths ~f:(fun path ->
+                let spelling = String.concat ~sep:"." path in
+                if matches components path && not (List.mem !found spelling ~equal:String.equal)
+                then found := spelling :: !found)
+        | None -> ());
+        super#longident lid
+    end
+  in
+  walk#structure structure;
+  List.rev !found
+
 type label_use = { key : string option; offset : int }
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on

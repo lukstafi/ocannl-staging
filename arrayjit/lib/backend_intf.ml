@@ -412,6 +412,13 @@ type kparam_source =
   | Static_idx of Indexing.static_symbol
 [@@deriving sexp_of]
 
+(** The link-time impossibility every [`Per_param] backend shares: pooled kparams are emitted only
+    by pooled codegen, so a backend whose {!C_syntax_config.ptr_param_style} is [`Per_param] can
+    never be handed one. Named here, once, next to the constructors whose invariant it states. *)
+let unexpected_pooled_kparam ~backend =
+  invalid_arg
+    (backend ^ ".link: unexpected pooled kparam (" ^ backend ^ " uses per-tnode pointers)")
+
 type 'context routine = {
   context : 'context;
   schedule : Task.t;
@@ -660,7 +667,6 @@ module type Backend = sig
   type code [@@deriving sexp_of]
 
   val empty_optimize_ctx : unit -> Low_level.optimize_ctx
-  val get_optimize_ctx : code -> Low_level.optimize_ctx
 
   val compile :
     Low_level.optimize_ctx ->

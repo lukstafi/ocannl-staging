@@ -835,13 +835,7 @@ let track_symbol reverse_node_map tn idcs =
    Placed before [trace_node_facts] so [is_one_hot_selector_assignment] is available during
    tracing. *)
 
-let axis_index_mentions_symbol (s : Indexing.symbol) (idx : Indexing.axis_index) : bool =
-  match idx with
-  | Indexing.Iterator s' -> Indexing.equal_symbol s s'
-  | Indexing.Affine { symbols; _ } ->
-      List.exists symbols ~f:(fun (_, s') -> Indexing.equal_symbol s s')
-  | Indexing.Concat syms -> List.exists syms ~f:(Indexing.equal_symbol s)
-  | Indexing.Fixed_idx _ | Indexing.Sub_axis -> false
+let axis_index_mentions_symbol = Indexing.axis_index_mentions_symbol
 
 let rec scalar_mentions_symbol (s : Indexing.symbol) (llsc : scalar_t) : bool =
   match llsc with

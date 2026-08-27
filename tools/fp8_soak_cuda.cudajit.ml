@@ -1,6 +1,9 @@
 (* The CUDA arm of the fp8 soak (gh-ocannl-657): narrow every input with [__nv_fp8_e5m2] and hand
-   the codes back. Nothing here knows what the answers are compared against -- fp8_soak.ml owns the
-   comparison, so the HIP arm beside this one is the same shape with a different vendor type.
+   the codes back. Nothing here knows what the answers are compared against, what the vendor type is
+   called in a claim, or which narrowing spellings this platform has -- fp8_soak.ml owns all of that
+   (its [ARM] signature and [cuda_vendor] record), because THIS FILE IS COMPILED ONLY ON A BOX WITH
+   cudajit and every edit to it is made blind everywhere else (gh-ocannl-758). What belongs here is
+   the kernel source and the calls into cudajit; anything else belongs in fp8_soak.ml.
 
    The kernel casts to the vendor type exactly as [Cuda_backend]'s [convert_precision] emits it:
    [(__nv_fp8_e5m2)x] for a float and for a double, which is a saturating round-to-nearest-even
@@ -12,8 +15,11 @@
 open Base
 module Cu = Cuda
 
-let name = "cuda"
-let vendor_type = "__nv_fp8_e5m2"
+(* Update this whenever you compile this file on a box that has cudajit -- the run header prints it,
+   and it is what tells the next editor whether they are editing blind (gh-ocannl-758). *)
+let last_compiled = "on rog-nv-wsl (RTX 5070 Ti Laptop, CUDA 13.3), 2026-08-27, staging PR #490"
+
+let built = true
 
 type bytes_buf =
   (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
@@ -88,54 +94,21 @@ type state = {
   mutable buffer : (Cu.Deviceptr.t * int) option; (* pointer and its size in bytes *)
 }
 
-(* Which [--gpu-architecture] the kernel is built for, which decides WHAT IS BEING MEASURED.
-   [cuda_fp8.hpp] guards its conversions with `#if __CUDA_ARCH__ >= 890`: at or above sm_89 the cast
-   becomes the hardware `cvt` instruction, below it the header's own software emulation. So the two
-   policies sweep two different things, and both are worth having:
+(* Which [--gpu-architecture] the kernel is built for. WHAT the two settings mean, and why the
+   default is [`Device], is documented on [Fp8_soak.ARM.set_arch_policy]; here they are two option
+   lists. Must be set before the first sweep: the module is compiled once, on first use. *)
+let arch_policy : [ `Device | `Backend ] ref = ref `Device
 
-   - [`Device] targets this GPU's own compute capability, which is what "verify the codec against
-   the HARDWARE" means -- gh-ocannl-646's lesson, and the only setting that exercises the
-   instruction a kernel actually runs. - [`Backend] takes [Cuda_backend.gpu_arch_options], the
-   repo's marker-driven policy, which for a source with no arch markers (like this one) passes NO
-   architecture at all and so gets nvrtc's default target -- below 890, hence the software path.
-   That is what an OCANNL fp8 kernel without tensor-core markers is compiled with today, so it is
-   the honest answer to "does the codec agree with what the backend emits".
-
-   Default [`Device]: the issue this program exists for asks about the hardware. *)
-type arch_policy = [ `Device | `Backend ]
-
-let arch_policy : arch_policy ref = ref `Device
-
-(* Must be called before the first sweep: the module is compiled once, on first use. *)
 let set_arch_policy p = arch_policy := p
-
-(* CUDA has one narrowing spelling and it is the platform's own cast: [Cuda_backend] emits
-   [(__nv_fp8_e5m2)x] with nothing wrapped around it, because nothing on this platform needs
-   guarding — gh-ocannl-647's defect is ROCm's, and the HIP arm is where a second, guarded spelling
-   exists to be swept. *)
-let spellings () = [ `Raw ]
-
-let spelling_label = function
-  | `Raw -> "(__nv_fp8_e5m2)x"
-  | `Guarded ->
-      (* Unreachable through [spellings], and named rather than [assert false] so that a future
-         guard on this platform fails to compile here instead of mislabelling a sweep. *)
-      "no guarded spelling on CUDA"
-
 let state = ref None
 
-(* Whether this BOX can run the arm, not whether the build has it: an opam switch with both
-   `cudajit` and `hipjit` in it has both arms compiled, and on a machine with one kind of GPU the
-   default selection must not pick the other -- least of all after finishing the first vendor's
-   several-minute sweep. The reason travels with the answer so a skip is never silent. *)
-let probe () =
+let device_count () : (int, string) Result.t =
   match
     Cu.init ();
     Cu.Device.get_count ()
   with
-  | 0 -> Error "cudajit is linked, but the CUDA driver reports no device"
-  | _ -> Ok ()
-  | exception e -> Error ("cudajit is linked, but CUDA initialization failed: " ^ Exn.to_string e)
+  | n -> Ok n
+  | exception e -> Error (Exn.to_string e)
 
 let init () =
   match !state with
@@ -196,17 +169,24 @@ let init () =
       state := Some st;
       st
 
-let describe () =
+(* ["device"] is the one entry fp8_soak.ml looks up by name; the rest is printed in the run header
+   in order, under labels saying what they are facts about. The device's capability is NOT the
+   architecture the kernel compiled for -- under [--arch=backend] this marker-free source gets
+   nvrtc's default target instead -- so that one is derived in fp8_soak.ml from the compiled
+   kernel's own [__CUDA_ARCH__]. *)
+let device_report () =
   let st = init () in
-  (* The nvrtc options are part of the answer, not decoration: which [--gpu-architecture] the kernel
-     was built for decides whether [(__nv_fp8_e5m2)x] became a hardware conversion or the header's
-     software fallback, and a soak whose record does not say which was measured is asking to be
-     re-derived later. They come from [Cuda_backend], so what is printed is also what the backend
-     would use for a source with these markers. *)
-  Printf.sprintf "%s (compute capability %d.%d, %d SMs); nvrtc options: %s" st.attrs.name
-    st.attrs.compute_capability_major st.attrs.compute_capability_minor
-    st.attrs.multiprocessor_count
-    (if List.is_empty st.options then "(none)" else String.concat ~sep:" " st.options)
+  [
+    ("device", st.attrs.name);
+    ( "device capability",
+      Printf.sprintf "%d.%d" st.attrs.compute_capability_major st.attrs.compute_capability_minor );
+    ("multiprocessors", Int.to_string st.attrs.multiprocessor_count);
+  ]
+
+let compile_options () = (init ()).options
+
+(* Keyed by the macro's own C spelling, which is how fp8_soak.ml looks it up. *)
+let kernel_macros () = [ ("__CUDA_ARCH__", (init ()).cuda_arch) ]
 
 (* One allocation, grown on demand and reused across chunks: 64 chunk-sized [cuMemAlloc]s in a row
    is a way to run into fragmentation on a GPU another process is also using. *)
@@ -218,18 +198,6 @@ let device_buffer st bytes =
       let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes:bytes in
       st.buffer <- Some (ptr, bytes);
       ptr
-
-(* cuda_fp8.hpp: `#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)` selects the hardware
-   conversion; below it the header emulates in software. *)
-let fp8_hardware_arch = 890
-
-let conversion_path () =
-  let st = init () in
-  if st.cuda_arch >= fp8_hardware_arch then
-    Printf.sprintf "hardware cvt (__CUDA_ARCH__ = %d)" st.cuda_arch
-  else if st.cuda_arch = 0 then "unknown (__CUDA_ARCH__ undefined)"
-  else
-    Printf.sprintf "header software path (__CUDA_ARCH__ = %d < %d)" st.cuda_arch fp8_hardware_arch
 
 let block_dim = 256
 
@@ -243,12 +211,16 @@ let fetch st ptr (out : bytes_buf) count =
     ~src:ptr st.stream;
   Cu.Stream.synchronize st.stream
 
-(* [~spelling] is the arms' shared shape; CUDA offers only [`Raw], and [fp8_soak.ml] never asks an
-   arm for a spelling outside its own [spellings ()]. *)
-let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
-  (match spelling with
+(* fp8_soak.ml never asks an arm for a spelling outside the vendor record's own list, CUDA's being
+   [`Raw] alone; this is the vendor boundary's own check on that, so a mistake there cannot sweep
+   the bare cast while a claim says the guarded helpers were swept. *)
+let reject_guarded (spelling : [ `Raw | `Guarded ]) =
+  match spelling with
   | `Raw -> ()
-  | `Guarded -> invalid_arg "fp8_soak: the cuda arm has no guarded narrowing spelling");
+  | `Guarded -> invalid_arg "fp8_soak: the cuda arm has no guarded narrowing spelling"
+
+let narrow_f32 ~(spelling : [ `Raw | `Guarded ]) ~base ~count (out : bytes_buf) =
+  reject_guarded spelling;
   let st = init () in
   let ptr = device_buffer st count in
   Cu.Stream.launch_kernel st.narrow_f32 ~grid_dim_x:(grid_dim st) ~block_dim_x:block_dim
@@ -260,10 +232,8 @@ let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
     ];
   fetch st ptr out count
 
-let narrow_f64 ~spelling ~base ~count ~lows (out : bytes_buf) =
-  (match spelling with
-  | `Raw -> ()
-  | `Guarded -> invalid_arg "fp8_soak: the cuda arm has no guarded narrowing spelling");
+let narrow_f64 ~(spelling : [ `Raw | `Guarded ]) ~base ~count ~lows (out : bytes_buf) =
+  reject_guarded spelling;
   let st = init () in
   let bytes = 4 * count in
   let ptr = device_buffer st bytes in
