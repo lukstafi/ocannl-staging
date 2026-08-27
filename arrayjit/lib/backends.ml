@@ -608,8 +608,7 @@ struct
   type code = { lowered : Low_level.optimized; proc : Backend.procedure } [@@deriving sexp_of]
 
   type code_batch = {
-    lowereds : Low_level.optimized option array;
-    procs : Backend.procedure option array;
+    procs : Backend.procedure array;
     bindings : Indexing.unit_bindings;
         (** Kept for {!link_batch}: the batch's procedures share one set of static-index refs. *)
   }
@@ -621,7 +620,7 @@ struct
 
   let compile_batch ~names bindings lowereds : code_batch =
     let procs = compile_batch ~names bindings lowereds in
-    { lowereds; procs; bindings }
+    { procs; bindings }
 
   let link context (code : code) ctx_buffers : Indexing.lowered_bindings * Task.t =
     let runner_label = get_name context.device in
@@ -650,16 +649,12 @@ struct
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
     let schedules =
-      Array.mapi code_batch.procs ~f:(fun i -> function
-        | Some proc ->
-            let ctx_buffers = Option.value_exn ~here:[%here] ctx_buffers.(i) in
-            let bindings', to_schedule =
-              link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
-            in
-            assert (phys_equal bindings' lowered_bindings);
-            Some
-              (Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
-        | None -> None)
+      Array.map code_batch.procs ~f:(fun proc ->
+          let bindings', to_schedule =
+            link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
+          in
+          assert (phys_equal bindings' lowered_bindings);
+          Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
     in
     (lowered_bindings, schedules)
 
@@ -824,10 +819,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               Schedule.check_hardware_limits_classified ~name:seg_name ~limits seg);
           let batch =
             Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
-                compile_batch
-                  ~names:(Array.of_list_map seg_names ~f:Option.some)
-                  bindings
-                  (Array.of_list_map segments ~f:Option.some))
+                compile_batch ~names:(Array.of_list seg_names) bindings (Array.of_list segments))
           in
           (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O analysis
              need the union footprint, and each segment's [optimized] carries only its filtered
@@ -1190,10 +1182,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                  order on the routine's stream, whose FIFO ordering supplies the grid-wide
                  synchronization at each segment boundary (the same contract consecutive routines on
                  one stream already rely on). *)
-              let bindings, tasks =
-                link_batch context batch (Array.create ~len:count (Some ctx_buffers))
-              in
-              let tasks = Array.to_list (Array.filter_opt tasks) in
+              let bindings, tasks = link_batch context batch ctx_buffers in
+              let tasks = Array.to_list tasks in
               assert (List.length tasks = count);
               (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
                  code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO

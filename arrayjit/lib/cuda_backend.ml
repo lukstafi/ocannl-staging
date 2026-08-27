@@ -500,11 +500,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   [@@deriving sexp_of]
 
   type code_batch = {
-    traced_stores : Low_level.traced_store option array;
     ptx : Nvrtc.compile_to_ptx_result;
     bindings : Indexing.unit_bindings;
-    kparams_and_names :
-      ((string * kparam_source) list * string * Low_level.launch_dims) option array;
+    kparams_and_names : ((string * kparam_source) list * string * Low_level.launch_dims) array;
   }
   [@@deriving sexp_of]
 
@@ -2036,21 +2034,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
-      let procs = Array.filter_opt lowereds
+      let procs = lowereds
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal identifier ONCE, here,
        so the emitted symbol, the module's function lookup and the source artifacts agree. *)
-    let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
+    let names = Array.map names ~f:Syntax.kernel_ident in
     let kparams_and_docs =
-      Array.map2_exn names lowereds
-        ~f:
-          (Option.map2 ~f:(fun name lowered ->
-               let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
-               ((kparams, name, launch), doc)))
+      Array.map2_exn names lowereds ~f:(fun name lowered ->
+          let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
+          ((kparams, name, launch), doc))
     in
-    let all_proc_docs = List.filter_map (Array.to_list kparams_and_docs) ~f:(Option.map ~f:snd) in
+    let all_proc_docs = List.map (Array.to_list kparams_and_docs) ~f:snd in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
     let cuda_includes =
       {|#include <cuda_fp16.h>
@@ -2070,20 +2066,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       else ""
     in
     let source =
-      Syntax.filter_and_prepend_builtins
-        ~routine_names:(List.filter_opt (Array.to_list names))
+      Syntax.filter_and_prepend_builtins ~routine_names:(Array.to_list names)
         ~includes:cuda_includes ~builtins:Builtins_cuda.builtins ~proc_doc:final_doc
     in
 
     let name : string =
-      String.(
-        strip ~drop:(equal_char '_')
-        @@ common_prefix (Array.to_list names |> List.concat_map ~f:Option.to_list))
+      String.(strip ~drop:(equal_char '_') @@ common_prefix (Array.to_list names))
     in
     let ptx = cuda_to_ptx ~name source in
-    let traced_stores = Array.map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.traced_store)) in
-    let kparams_and_names = Array.map kparams_and_docs ~f:(Option.map ~f:fst) in
-    { traced_stores; ptx; kparams_and_names; bindings }
+    let kparams_and_names = Array.map kparams_and_docs ~f:fst in
+    { ptx; kparams_and_names; bindings }
 
   let get_global_run_id =
     let next_id = ref 0 in
@@ -2183,14 +2175,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let run_module = load_module code_batch.ptx in
     prior_context.device.dev.set_builtins_in run_module;
     let procs =
-      Array.mapi code_batch.kparams_and_names ~f:(fun i pns ->
-          Option.value ~default:None
-          @@ Option.map2 pns ctx_buffers.(i) ~f:(fun (kparams, name, launch) ctx_buffers ->
-              let task =
-                link_proc ~prior_context ~name ~kparams ~launch ~ctx_buffers lowered_bindings
-                  run_module
-              in
-              Some task))
+      Array.map code_batch.kparams_and_names ~f:(fun (kparams, name, launch) ->
+          link_proc ~prior_context ~name ~kparams ~launch ~ctx_buffers lowered_bindings run_module)
     in
     (lowered_bindings, procs)
 

@@ -270,10 +270,10 @@ module type Lowered_no_device_backend = sig
   val compile : name:string -> Indexing.unit_bindings -> Low_level.optimized -> procedure
 
   val compile_batch :
-    names:string option array ->
-    Indexing.unit_bindings ->
-    Low_level.optimized option array ->
-    procedure option array
+    names:string array -> Indexing.unit_bindings -> Low_level.optimized array -> procedure array
+  (** Compiles the given procedures -- the segment kernels of one fissioned routine -- as a single
+      compilation unit: one generated source and one C-compiler invocation, with the resulting
+      (dyn-loaded) library shared by every returned procedure. *)
 
   val link_compiled :
     ?lowered_bindings:Indexing.lowered_bindings ->
@@ -354,23 +354,23 @@ module type Lowered_backend = sig
   val compile : name:string -> Indexing.unit_bindings -> Low_level.optimized -> code
 
   val compile_batch :
-    names:string option array ->
-    Indexing.unit_bindings ->
-    Low_level.optimized option array ->
-    code_batch
+    names:string array -> Indexing.unit_bindings -> Low_level.optimized array -> code_batch
+  (** Compiles the given procedures -- the segment kernels of one fissioned routine -- as a single
+      compilation unit (one generated source, one backend-compiler invocation, one module to load at
+      link time). Ideally does not affect execution relative to separate [compile]s, but there can
+      be backend-specific differences. *)
 
   val link : context -> code -> ctx_buffers -> Indexing.lowered_bindings * Task.t
   (** [context] is the prior context, while [ctx_buffers] are the locations of the resulting
       context. The results correspond to the fields {!field:Backend_intf.bindings} and
       {!field:Backend_intf.schedule} of {!Backend_intf.routine}. *)
 
-  val link_batch :
-    context ->
-    code_batch ->
-    ctx_buffers option array ->
-    Indexing.lowered_bindings * Task.t option array
-  (** [context] is the prior context, while the [ctx_buffers] are the locations of the resulting
-      contexts. Returns the schedule tasks for the procedures included in the code batch. *)
+  val link_batch : context -> code_batch -> ctx_buffers -> Indexing.lowered_bindings * Task.t array
+  (** [context] is the prior context, while [ctx_buffers] are the locations of the resulting
+      context -- ONE buffers delta shared by the whole batch, since the batch is the segment kernels
+      of one fissioned routine. Returns the schedule tasks of the batch's procedures, in order,
+      sharing one set of static-index refs (so setting a binding through the routine reaches every
+      kernel). *)
 
   val sequence_segments :
     context ->

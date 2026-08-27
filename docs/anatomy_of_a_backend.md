@@ -108,7 +108,7 @@ Conventionally, the compilation implementation is split into three functions / l
 
 - `compile_main` does the bulk of translating a `Low_level.t` into the backend-specific code.
 - `compile_proc` populates the parameters in the function header, fills-in the function's initialization section that sets up local arrays, clears these arrays (whether local or global) that need to be zero-initialized or reset to zero, appends the `compile_main` code.
-- `compile`, resp. `compile_batch`, compiles the function, resp. functions, into an executable object/file or assembly object/file.
+- `compile`, resp. `compile_batch`, compiles the function, resp. functions, into an executable object/file or assembly object/file. `compile_batch`/`link_batch` serve the segment kernels of one fissioned routine (they are how `Raise_backend.compile`/`link` handle a routine that kernel fission split), compiling them as one unit; there is no user-facing batch entry point.
   - On same-machine CPU backends, these functions also dynamically load (if applicable) the code (since there's shared program memory for all cores) -- `compile_batch` includes the same resulting (dyn-loaded) object in the code output for all functions.
   - On GPU-like backends, we cannot load the code at compile time. For example, the CUDA driver API function `cuModuleLoadDataEx` loads the module into _the current context_, which is device-specific, so it must be called from within `link` or `link_batch`.
     - GPU-like backends necessitate distinguishing between `link` and `link_batch`, to prevent the same code from being loaded as multiple modules.
@@ -149,7 +149,7 @@ Besides routines, calling `from_host`, `to_host` from a backend puts the corresp
 
 OCANNL supports asynchronous data transfers: `from_host` and `to_host` embed the copy in the scheduling mechanism directly, while `device_to_device` *returns a `context routine option`* -- the caller runs `r.schedule` or links a consumer against `r.context`. The transfers themselves synchronize streams in a non-blocking way -- when it's time for the destination stream to copy a node, it waits for the source stream to finish computing the node.
 
-Returning a routine lets `device_to_device` carry the produced merge-buffer node on `r.context.merge_buffer_node`. Linking a consumer of the merge buffer against that context verifies the node *statically, at link time* (raising `Utils.User_error` from `link`/`link_batch` on a mismatch), in the natural producer -> consumer chaining direction (gh-ocannl-288). The runtime `check_merge_buffer` check is kept as a defensive backstop.
+Returning a routine lets `device_to_device` carry the produced merge-buffer node on `r.context.merge_buffer_node`. Linking a consumer of the merge buffer against that context verifies the node *statically, at link time* (raising `Utils.User_error` from `link` on a mismatch), in the natural producer -> consumer chaining direction (gh-ocannl-288). The runtime `check_merge_buffer` check is kept as a defensive backstop.
 
 OCANNL provides explicit _merge buffers_ for performing those tensor node updates, where different versions of a tensor node from two streams feature in the same computation. The `%cd` syntax for using merge buffers is via the `.merge` pseudo-field. For example, the code for merging gradients might be: `[%cd p.grad =+ p.grad.merge]`. In the current design, there's at most one merge buffer per stream, and the memory is reused for merging different nodes.
 
