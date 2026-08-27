@@ -591,6 +591,45 @@ let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_
         && not (Host_inits.mem tn)
       then raise @@ Utils.User_error ("The linked context lacks node " ^ Tnode.debug_name tn))
 
+(* Free one pool and drop its census entry -- the pair every cleanup path must keep together, or a
+   freed slab stays counted (gh-ocannl-550). *)
+let free_and_forget_pool device ~free_pool pool_id =
+  free_pool device ~pool_id;
+  Alloc_census.forget_pool ~device_id:device.device_id ~pool_id
+
+(* The one pool-freeing fold behind the context [finalize] and [Raise_backend.free_delta]
+   (gh-ocannl-767, unifying gh-ocannl-550's cleanup sites): frees the pools reachable through
+   [ctx_buffers] that this context/delta owns. Deduped by [pool_id] -- one pool holds several nodes
+   (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the same id is reached through several
+   keys, and a second visit would free an already-freed slab. Skips keys for which
+   [owned_elsewhere] holds (the enclosing scope's buffers), and per-device constants -- compared by
+   LOCATION, not key presence: a host upload may give a tnode a context-owned working location even
+   when an earlier compile cached a CONSTANT location for the same key, and mistaking the working
+   pool for that constant leaks it (gh-ocannl-571's transfer negative control). [skip_pool] lets
+   [finalize] honor its retry ledger; [before_free]/[after_free] bracket each successful backend
+   free (fault injection, ledger recording -- [after_free] runs only when [free_pool] returned, so
+   a raising free is not recorded as done). *)
+let free_owned_pools ~device ~free_pool ~owned_elsewhere ?(skip_pool = fun _ -> false)
+    ?(before_free = fun _ -> ()) ?(after_free = fun _ -> ()) (ctx_buffers : ctx_buffers) : unit =
+  Map.fold ctx_buffers
+    ~init:(Set.empty (module Int))
+    ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
+      if
+        (not (owned_elsewhere key))
+        && (not
+              (Option.exists
+                 (Hashtbl.find device.constant_buffer_cache key)
+                 ~f:(equal_buffer_loc loc)))
+        && (not (skip_pool loc.pool_id))
+        && not (Set.mem freed loc.pool_id)
+      then (
+        before_free loc.pool_id;
+        free_and_forget_pool device ~free_pool loc.pool_id;
+        after_free loc.pool_id;
+        Set.add freed loc.pool_id)
+      else freed)
+  |> (ignore : Set.M(Int).t -> unit)
+
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
 module Add_device
     (Add_scheduler : functor
@@ -969,9 +1008,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       List.iter !cache_inserts ~f:(Hashtbl.remove device.constant_buffer_cache);
       Option.iter free_pool ~f:(fun free_pool ->
           List.dedup_and_sort !minted ~compare:Int.compare
-          |> List.iter ~f:(fun pool_id ->
-              free_pool device ~pool_id;
-              Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
+          |> List.iter ~f:(free_and_forget_pool device ~free_pool))
     in
     let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
@@ -1106,9 +1143,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      anyone could ever release them. Those are the [Backend_link] declines an autotune search
      absorbs, so they accumulated exactly like the candidates that succeeded.
 
-     Frees the delta of [ctx_buffers] against [context]: keyed by [pool_id] (one pool holds several
-     nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
-     this stands in for it on the path where no context was ever built. *)
+     Frees the delta of [ctx_buffers] against [context] through [free_owned_pools], i.e. the same
+     rule the context [finalize] applies — this stands in for it on the path where no context was
+     ever built. *)
   let free_delta context (ctx_buffers : ctx_buffers) =
     (* Sync first, for the same reason [unwind_partial_delta] and the context [finalize] do
        (gh-ocannl-550, round-five review): [allocate_delta] queues [Host_inits] uploads through
@@ -1118,22 +1155,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        be refusing work, and that must not replace the link failure the caller has to classify. *)
     (try Device.await context.device with _ -> ());
     Option.iter free_pool ~f:(fun free_pool ->
-        Map.fold ctx_buffers
-          ~init:(Set.empty (module Int))
-          ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
-            if
-              (not (Map.mem context.ctx_buffers key))
-              && (not
-                    (Option.exists
-                       (Hashtbl.find context.device.constant_buffer_cache key)
-                       ~f:(equal_buffer_loc loc)))
-              && not (Set.mem freed loc.pool_id)
-            then (
-              free_pool context.device ~pool_id:loc.pool_id;
-              Alloc_census.forget_pool ~device_id:context.device.device_id ~pool_id:loc.pool_id;
-              Set.add freed loc.pool_id)
-            else freed)
-        |> (ignore : Set.M(Int).t -> unit))
+        free_owned_pools ~device:context.device ~free_pool
+          ~owned_elsewhere:(Map.mem context.ctx_buffers) ctx_buffers)
 
   (* Runs [f] on a freshly allocated delta, freeing that delta if [f] raises. Everything after the
      allocation belongs inside: a failure past [make_child] discards the child too, so its pools are
@@ -1248,33 +1271,14 @@ let finalize (type dev runner event)
     Option.iter Backend.free_pool ~f:(fun free_pool ->
         Resource_fault_injection.hit Finalize_before_await;
         Backend.await ctx.device;
-        (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
-           same [pool_id] is reached through several keys; dedup before freeing, or the second visit
-           frees an already-freed slab. [Alloc_census.forget_pool] is idempotent for the same
-           reason, but the backend's [free_pool] is the one that must not run twice. *)
-        Map.fold ctx.ctx_buffers
-          ~init:(Set.empty (module Int))
-          ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
-            if
-              (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
-              (* A host upload may give a tnode a context-owned working location even when an
-                 earlier compile cached a CONSTANT location for the same key. Compare locations, not
-                 key presence: otherwise finalize mistakes the working pool for that constant and
-                 leaks it (gh-ocannl-571's transfer negative control). *)
-              && (not
-                    (Option.exists
-                       (Hashtbl.find ctx.device.constant_buffer_cache key)
-                       ~f:(equal_buffer_loc loc)))
-              && (not (Set.mem ctx.released_pool_ids loc.pool_id))
-              && not (Set.mem freed loc.pool_id)
-            then (
-              Resource_fault_injection.hit Finalize_before_free;
-              free_pool ctx.device ~pool_id:loc.pool_id;
-              ctx.released_pool_ids <- Set.add ctx.released_pool_ids loc.pool_id;
-              Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
-              Set.add freed loc.pool_id)
-            else freed)
-        |> (ignore : Set.M(Int).t -> unit))
+        free_owned_pools ~device:ctx.device ~free_pool
+          ~owned_elsewhere:(fun key ->
+            Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key))
+          ~skip_pool:(Set.mem ctx.released_pool_ids)
+          ~before_free:(fun _ -> Resource_fault_injection.hit Finalize_before_free)
+          ~after_free:(fun pool_id ->
+            ctx.released_pool_ids <- Set.add ctx.released_pool_ids pool_id)
+          ctx.ctx_buffers)
   in
   if Atomic.compare_and_set ctx.finalized false true then
     match cleanup () with
