@@ -2739,6 +2739,15 @@
  (libraries base ocannl stdio ll_test arrayjit.verdict))
 
 (test
+ (name peel_census)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules peel_census)
+ (libraries base ocannl stdio ll_test arrayjit.verdict))
+
+(test
  (name reduction_accumulator_residency)
  (package neural_nets_lib)
  (deps

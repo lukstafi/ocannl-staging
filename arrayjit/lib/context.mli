@@ -56,6 +56,17 @@ type routine = private {
           number, and the census being opt-in made that the default for every new timing harness
           (the defect this closes). Fissioned segments compile inside the same bracket, so their
           kernels are summarized together. *)
+  peel : Ir.C_syntax.peel_summary;
+      (** What the reduction peel DECIDED while emitting this routine (gh-ocannl-733): per
+          accumulating serial site, whether [Low_level.peel_accum_nest] localized it — with how many
+          levels it peeled and which verdict each peeled guard earned — or why it did not.
+
+          A field of the routine, beside {!mma} and collected in the same bracket, because the
+          emitted form does not determine the decision: a nest whose accumulated cell is free of the
+          enclosing index peels BOTH levels under a confined guard, while one whose cell mentions it
+          peels the inner level only, under a lane-private guard the cell separates — and the two
+          render the same localized kernel. A test classifying emitted code is therefore green over
+          either; this field is what lets it say which code path actually ran. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every

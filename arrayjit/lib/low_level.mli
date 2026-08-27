@@ -322,8 +322,72 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
     SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope local
     (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
+val has_accumulating_cell : t -> bool
+(** Whether the tree holds a SELF-RECURRENCE: some [Set] whose value reads the very cell it writes
+    (gh-ocannl-733). This is what makes the localizing peel a live question at a level, and it is
+    the predicate the peel census gates on. Narrower than {!has_accumulation} in two ways, both
+    deliberate: the recurrence is on the CELL rather than on the node, and a [Local_scope] counts
+    only when its body actually reads that cell — {!has_accumulation} must count every scope
+    conservatively, being the predicate that decides whether iteration independence may be asserted,
+    and censusing on it recorded every non-reduction virtualized scope as a declined reduction site.
+*)
+
+type peel_guard_verdict =
+  | Guard_confined  (** [Affine.Confined_to_peel]: the guard mentions no enclosing loop symbol. *)
+  | Guard_lane_private
+      (** [Affine.Lane_private_if_separated], ADMITTED: the guard mentions enclosing loop symbols
+          and the accumulated cell was shown to separate them (gh-ocannl-721). Appears only in a
+          report that reached a base — separation is checked there, so nothing before it can earn
+          this. *)
+  | Guard_lane_private_unresolved
+      (** The same guard in a report that REFUSED: the peel stopped before the base could settle
+          whether the cell separates the enclosing symbols — because the cell shares them
+          ([Refused_cell_shared]) or because the peel never reached a base at all. Distinct from
+          {!Guard_lane_private} so that a refusing report cannot read as an admitted guard beside
+          its own refusal. *)
+[@@deriving sexp, equal, compare]
+(** What {!peel_accum_nest} decided about one [If] it peeled through (gh-ocannl-733). Two shapes
+    that render identically can earn different verdicts here, which is the whole point of reporting
+    them: a test pinning the rendered FORM cannot tell "the guard was confined to the peeled levels"
+    from "the guard mentioned an enclosing lane and the cell separated it". *)
+
+type peel_refusal =
+  | Refused_not_a_nest
+      (** The level's body is neither a single peelable loop, nor a pure-index-guarded [If], nor an
+          accumulation base: a sibling statement, a data-dependent guard, a non-accumulating [Set].
+      *)
+  | Refused_dead_level  (** A level with [to_ < from_], which performs no accesses. *)
+  | Refused_guard_fixed of string
+      (** [Affine.Not_peelable] with its reason: the guard's truth is fixed for the whole nest. *)
+  | Refused_cell_varies
+      (** The accumulation base's cell mentions a peeled level, so it is not one cell across them.
+      *)
+  | Refused_cell_shared
+      (** An admitted [Affine.Lane_private_if_separated] guard whose cell does not separate the
+          enclosing symbols, or does not stay inside the node's box over their full ranges. *)
+[@@deriving sexp, equal, compare]
+(** Why {!peel_accum_nest} stopped, when it did (gh-ocannl-733). *)
+
+type peel_report = {
+  levels : int;  (** Loop levels peeled before the outcome. *)
+  guards : peel_guard_verdict list;
+      (** The verdict of each peeled [If], outermost first. A report carrying a [refusal] never
+          carries an ADMITTED lane-private verdict: those resolve to
+          {!Guard_lane_private_unresolved}, since separation is decided at the base the peel did not
+          reach. *)
+  refusal : peel_refusal option;
+      (** [None] exactly when the peel reached an accumulation base, i.e. when
+          {!peel_accum_nest} returned [Some]. *)
+}
+[@@deriving sexp_of]
+(** What one {!peel_accum_nest} call decided, beyond whether it succeeded (gh-ocannl-733). Reported
+    to the optional [~report] callback on every call, success or refusal; [C_syntax] turns it into
+    the per-routine peel census, so that a test can pin which DECISION produced a kernel and not
+    only which form was rendered. *)
+
 val peel_accum_nest :
   ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
+  ?report:(peel_report -> unit) ->
   loop_bounds:(Indexing.symbol * (int * int)) list ->
   free_of:Indexing.symbol list ->
   t ->
@@ -373,7 +437,14 @@ val peel_accum_nest :
     symbol rather than a constant) peelable. Required rather than defaulted, and derived from the
     program rather than certified by the caller, so that no call site can forget it: the mints of
     [Schedule] need it as much as codegen does, since a refused mint there turns segment seams into
-    narrowing points instead of merely declining an optimization. *)
+    narrowing points instead of merely declining an optimization.
+
+    [report], when given, is called EXACTLY ONCE per call with the {!peel_report} of what was
+    decided — how many levels were peeled, which verdict each peeled guard earned, and the refusal
+    where there was one (gh-ocannl-733). The result alone cannot answer that: two nests differing
+    only in whether the accumulated cell mentions the enclosing index peel a different number of
+    levels under a different guard verdict and render the same localized kernel. Codegen passes a
+    reporter that accumulates the per-routine peel census; the schedule mints pass none. *)
 
 (** {2 Hardware axis analyses}
 

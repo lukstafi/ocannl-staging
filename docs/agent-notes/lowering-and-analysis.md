@@ -213,6 +213,32 @@ files.
   environment both take (do not add a second walker for it — round 7 of gh-693 did, and gh-722
   removed the duplicate). Soundness direction, as everywhere in the engine: a proven "separated" is
   proven, and anything it cannot interpret declines.
+- **The peel's DECISION is carried, not re-derived from the emitted kernel** (gh-ocannl-733). Two
+  nests differing only in whether the accumulated cell mentions the enclosing index peel a different
+  number of levels under a different guard verdict and emit the SAME localized kernel — one scope,
+  one closing store — so classifying emitted code cannot say which path ran, and a test named after
+  one of them stays green over the other. `Low_level.peel_accum_nest ~report` reports, once per
+  call, how many levels it peeled, which verdict each peeled guard earned (`Guard_confined` /
+  `Guard_lane_private`) and the refusal where there was one (`Refused_cell_varies` vs
+  `Refused_cell_shared` vs `Refused_not_a_nest` vs `Refused_dead_level` vs `Refused_guard_fixed`);
+  `C_syntax` accumulates that per routine and `Context.routine.peel` carries the summary, exactly as
+  `routine.mma` carries the `Tile_mma` census. Read that field — do NOT bracket
+  `peel_census_enabled` yourself (`C_syntax.with_peel_census` nests additively, and
+  `Context.compile` calls it). Three things a reader of the census must know: its `levels` counts
+  the rendered level too (the peel is asked of that level's BODY, so it reports one fewer); only
+  sites carrying a CELL self-recurrence are censused (`Low_level.has_accumulating_cell`, NOT the
+  conservative `has_accumulation`, which counts every `Local_scope` and so recorded an ordinary
+  virtualized computation as a declined reduction site), with collection suspended while a localized
+  rendering re-renders the peeled levels inside the scope it just minted; and a routine whose form
+  is localized but whose census localized NOTHING had its scope minted upstream — by a `Schedule`
+  mint (`Unroll ~materialize`, `Partition`, `Pad`) or by virtualization — which is a different fact
+  about the kernel than "codegen localized it". The `reduction_forms` member table declares which of
+  the four (`Peeled` / `Minted_upstream` / `No_localization` / `Never_a_site` — the last being
+  BOTH virtualization members, whose accumulator lives in the inlined scope rather than in a cell, so
+  there is no memory recurrence and no site at all) each member claims, and
+  `test/operations/peel_census.ml` pins the instrument itself, including that a REFUSING report
+  never claims an admitted lane-private guard: separation is settled at the base, so a refusal that
+  never reached one leaves that guard `Guard_lane_private_unresolved`.
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
   intermediates are well-defined; emit guards in natural signed form. Guard shapes are
   canonicalized to ONE shape per role: upper bounds are strict `Cmplt` (`idx < bound`, the natural
