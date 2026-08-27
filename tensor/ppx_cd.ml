@@ -621,8 +621,7 @@ let translate ?ident_label (expr : expression) : result =
                   (let p = Lazy.force projections.Tensor.projections in
                    Ir.Indexing.
                      {
-                       product_space = p.product_space;
-                       product_iterators = p.product_iterators;
+                       components = p.components;
                        extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims]; [%e rhs2_dims]; [%e rhs3_dims] |];
@@ -699,8 +698,7 @@ let translate ?ident_label (expr : expression) : result =
                   (let p = Lazy.force projections.Tensor.projections in
                    Ir.Indexing.
                      {
-                       product_space = p.product_space;
-                       product_iterators = p.product_iterators;
+                       components = p.components;
                        extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims]; [%e rhs2_dims] |];
@@ -772,8 +770,7 @@ let translate ?ident_label (expr : expression) : result =
                   (let p = Lazy.force projections.Tensor.projections in
                    Ir.Indexing.
                      {
-                       product_space = p.product_space;
-                       product_iterators = p.product_iterators;
+                       components = p.components;
                        extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims] |];
@@ -840,8 +837,7 @@ let translate ?ident_label (expr : expression) : result =
                   (let p = Lazy.force projections.Tensor.projections in
                    Ir.Indexing.
                      {
-                       product_space = p.product_space;
-                       product_iterators = p.product_iterators;
+                       components = p.components;
                        extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims] |];

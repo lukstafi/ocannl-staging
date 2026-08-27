@@ -105,8 +105,8 @@ eliminated during lowering — so they must never reach virtualization (see `Non
 
 The translation `Assignments.to_low_level` converts high-level operations to low-level code:
 
-1. **Projections to Loops**: `projections.product_space` elements become nested for loops with fresh
-   loop index symbols; elements in the same list become loops sequenced after each other.
+1. **Projections to Loops**: `projections.components` elements become nested for loops with fresh
+   loop index symbols; the segments within one component become loops sequenced after each other.
 2. **Index Translation**: Tensor indices are derived from `projections.project_lhs` and
    `projections.project_rhs` with symbol substitution.
 3. **Operations**: High-level operations like `Accum_op` become loops over scalar operations.
@@ -116,15 +116,14 @@ The translation `Assignments.to_low_level` converts high-level operations to low
 
 ### Symbol Freshening During Lowering
 
-An important detail: `projections.product_iterators` may be shared across different operations, so
-lowering creates **fresh symbols** for each loop. The substitution map tracks how product iterators
+An important detail: the iterator symbols in `projections.components` may be shared across different
+operations, so lowering creates **fresh symbols** for each loop (one per segment). The substitution map tracks how product iterators
 map to fresh loop iterators, including handling `Affine` indices by substituting each symbol in the
 affine combination.
 
 ### Converting Concatenation to Sequencing
 
-When the elements of `projections.product_space` and `projections.product_iterators` being processed
-are lists of more than one element, we generate one (nested) loop for each as usual, and put the
+When the component being processed has more than one `(dimension, iterator)` segment, we generate one (nested) loop for each as usual, and put the
 loops in sequence (preserving the list order). We remember which of the components was picked for the
 given loop in the recursive call. When we get down to the base case, we select the specific buffer
 out of `Block`, so that the projection of this buffer (i.e. the `project_rhs` at the same position

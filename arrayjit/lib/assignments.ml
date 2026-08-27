@@ -431,16 +431,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       =
     let projections : Indexing.projections = Lazy.force projections in
     let all_prod_iters =
-      Array.to_list projections.product_iterators
-      |> List.concat
-      |> Set.of_list (module Indexing.Symbol)
+      Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
     in
-    let iter_sizes =
-      Array.fold2_exn projections.product_space projections.product_iterators
-        ~init:(Map.empty (module Indexing.Symbol))
-        ~f:(fun acc ds its ->
-          List.fold2_exn ds its ~init:acc ~f:(fun acc d iter -> Map.set acc ~key:iter ~data:d))
-    in
+    let iter_sizes = Indexing.iterator_sizes projections in
     let concat_offset_for syms active =
       let _, offset =
         List.fold syms ~init:(0, None) ~f:(fun (cumul, found) s ->
@@ -460,7 +453,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     in
     let basecase block_iters rev_iters =
       (* Create a substitution from product iterators to loop iterators. Fresh loop symbols are
-         needed because product_iterators may be shared across different operations/tensors, but
+         needed because product iterators may be shared across different operations/tensors, but
          each lowered operation needs private loop symbols to avoid conflicts in low_level.ml's
          symbol-to-tensor tracking. Concat offsets are computed per Concat index using symbol
          order. *)
@@ -582,10 +575,10 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     in
     let rec for_loop block_iters rev_iters = function
       | [] -> basecase block_iters rev_iters
-      | (ds, its) :: product ->
+      | comp :: product ->
           let index = Indexing.get_symbol () in
           Low_level.unflat_lines
-          @@ List.map2_exn ds its ~f:(fun d iter ->
+          @@ List.map comp ~f:(fun (d, iter) ->
               Low_level.For_loop
                 {
                   index;
@@ -597,10 +590,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   axis = Serial;
                 })
     in
-    let for_loops =
-      for_loop [] []
-        (Array.to_list @@ Array.zip_exn projections.product_space projections.product_iterators)
-    in
+    let for_loops = for_loop [] [] (Array.to_list projections.components) in
     (* Need initialization if: initialize_neutral is true AND (not surjective OR not injective)
 
        Not surjective: some positions never written (need init to avoid garbage)
@@ -632,9 +622,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       =
     let projections : Indexing.projections = Lazy.force projections in
     let all_prod_iters =
-      Array.to_list projections.product_iterators
-      |> List.concat
-      |> Set.of_list (module Indexing.Symbol)
+      Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
     in
     let target_projections =
       Array.mapi projections.project_rhs ~f:(fun i project_lhs ->
@@ -647,12 +635,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       Array.map target_projections ~f:(fun proj ->
           initialize_neutral && not (Affine.is_surjective proj && Affine.is_injective proj))
     in
-    let iter_sizes =
-      Array.fold2_exn projections.product_space projections.product_iterators
-        ~init:(Map.empty (module Indexing.Symbol))
-        ~f:(fun acc ds its ->
-          List.fold2_exn ds its ~init:acc ~f:(fun acc d iter -> Map.set acc ~key:iter ~data:d))
-    in
+    let iter_sizes = Indexing.iterator_sizes projections in
     let concat_offset_for syms active =
       let _, offset =
         List.fold syms ~init:(0, None) ~f:(fun (cumul, found) s ->
@@ -787,10 +770,10 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     in
     let rec for_loop block_iters rev_iters = function
       | [] -> basecase block_iters rev_iters
-      | (ds, its) :: product ->
+      | comp :: product ->
           let index = Indexing.get_symbol () in
           Low_level.unflat_lines
-          @@ List.map2_exn ds its ~f:(fun d iter ->
+          @@ List.map comp ~f:(fun (d, iter) ->
               Low_level.For_loop
                 {
                   index;
@@ -802,10 +785,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   axis = Serial;
                 })
     in
-    let for_loops =
-      for_loop [] []
-        (Array.to_list @@ Array.zip_exn projections.product_space projections.product_iterators)
-    in
+    let for_loops = for_loop [] [] (Array.to_list projections.components) in
     let neutral_value = Ops.neutral_elem accum in
     (* Establish the committed neutral element in the lhs margins (device buffers are allocated
        raw). *)
@@ -878,10 +858,10 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         let basecase ~length rev_iters =
           let subst_map =
             let loop_iters = Array.of_list_rev rev_iters in
-            Array.map2_exn loop_iters projections.product_iterators ~f:(fun loop_iter prod_iter ->
+            Array.map2_exn loop_iters projections.components ~f:(fun loop_iter comp ->
                 let prod_iter =
-                  match prod_iter with
-                  | [ prod_iter ] -> prod_iter
+                  match comp with
+                  | [ (_, prod_iter) ] -> prod_iter
                   | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
                 in
                 (prod_iter, Indexing.Iterator loop_iter))
@@ -941,9 +921,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> [])
             in
             let driving =
-              Array.filter_mapi projections.product_iterators ~f:(fun i prod_iter ->
-                  match prod_iter with
-                  | [ s ] when List.mem rhs_symbols s ~equal:Indexing.Symbol.equal -> Some i
+              Array.filter_mapi projections.components ~f:(fun i comp ->
+                  match comp with
+                  | [ (_, s) ] when List.mem rhs_symbols s ~equal:Indexing.Symbol.equal -> Some i
                   | _ -> None)
             in
             match Array.to_list driving with
@@ -951,8 +931,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 (* The peel below assumes the flat store offset is driven solely by the peeled
                    counter axis: every other product axis must be degenerate. *)
                 let others_product =
-                  Array.foldi projections.product_space ~init:1 ~f:(fun j acc d ->
-                      if j = i then acc else List.fold d ~init:acc ~f:( * ))
+                  Array.foldi projections.components ~init:1 ~f:(fun j acc comp ->
+                      if j = i then acc
+                      else List.fold comp ~init:acc ~f:(fun acc (d, _) -> acc * d))
                 in
                 if others_product <> 1 then
                   raise
@@ -973,7 +954,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         in
         let rec for_loop ~tail rev_iters = function
           | [] -> basecase ~length:(if tail then rem else full_length) rev_iters
-          | (i, [ d ]) :: product when i = peel_axis ->
+          | (i, [ (d, _) ]) :: product when i = peel_axis ->
               (* Peel the final counter iteration: interior stores stay full-width and guard-free,
                  the last store writes the [rem] remaining lanes. *)
               let make ~tail ~from_ ~to_ =
@@ -990,7 +971,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
               let tail_loop = make ~tail:true ~from_:(d - 1) ~to_:(d - 1) in
               if d = 1 then tail_loop
               else Low_level.Seq (make ~tail:false ~from_:0 ~to_:(d - 2), tail_loop)
-          | (_, [ d ]) :: product ->
+          | (_, [ (d, _) ]) :: product ->
               let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
@@ -1005,7 +986,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         for_loop
           ~tail:(rem <> 0 && total_elems <= full_length)
           []
-          (List.mapi ~f:(fun i d -> (i, d)) (Array.to_list projections.product_space))
+          (List.mapi ~f:(fun i comp -> (i, comp)) (Array.to_list projections.components))
     | Noop -> Low_level.Noop
     | Block_comment (s, c) -> Low_level.unflat_lines [ Comment s; loop c; Comment "end" ]
     | Seq (c1, c2) ->

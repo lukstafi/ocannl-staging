@@ -32,10 +32,9 @@ let dbg : Idx.projections_debug = { spec = ""; derived_for = Sexp.Atom ""; trace
 (* Scatter projection: lhs[c1*s1 + c2*s2] = rhs[s1, s2], product axes s1 (dim n1), s2 (dim n2). *)
 let scatter_proj s1 s2 ~n1 ~n2 ~c1 ~c2 ~lhs_dim : Idx.projections =
   {
-    product_space = [| [ n1 ]; [ n2 ] |];
+    components = [| [ (n1, s1) ]; [ (n2, s2) ] |];
     lhs_dims = [| lhs_dim |];
     rhs_dims = [| [| n1; n2 |] |];
-    product_iterators = [| [ s1 ]; [ s2 ] |];
     project_lhs = [| Idx.Affine { symbols = [ (c1, s1); (c2, s2) ]; offset = 0 } |];
     project_rhs = [| [| Idx.Iterator s1; Idx.Iterator s2 |] |];
     extent_syms = [];
@@ -127,10 +126,9 @@ let ac4 () =
    virtual (inlined via Stage B unit-coefficient solving) vs materialized. --- *)
 let copy_proj t ~n : Idx.projections =
   {
-    product_space = [| [ n ] |];
+    components = [| [ (n, t) ] |];
     lhs_dims = [| n |];
     rhs_dims = [| [| n |] |];
-    product_iterators = [| [ t ] |];
     project_lhs = [| Idx.Iterator t |];
     project_rhs = [| [| Idx.Iterator t |] |];
     extent_syms = [];
@@ -176,10 +174,9 @@ let run_scatter_then_copy ~materialize_dst =
    non-trivial [rest] (= s1) and the init fallback. *)
 let tri_scatter_proj s1 s2 : Idx.projections =
   {
-    product_space = [| [ 3 ]; [ 2 ] |];
+    components = [| [ (3, s1) ]; [ (2, s2) ] |];
     lhs_dims = [| 3; 4 |];
     rhs_dims = [| [| 3; 2 |] |];
-    product_iterators = [| [ s1 ]; [ s2 ] |];
     project_lhs = [| Idx.Iterator s1; Idx.Affine { symbols = [ (1, s1); (1, s2) ]; offset = 0 } |];
     project_rhs = [| [| Idx.Iterator s1; Idx.Iterator s2 |] |];
     extent_syms = [];
@@ -188,10 +185,9 @@ let tri_scatter_proj s1 s2 : Idx.projections =
 
 let tri_copy_proj a b : Idx.projections =
   {
-    product_space = [| [ 3 ]; [ 4 ] |];
+    components = [| [ (3, a) ]; [ (4, b) ] |];
     lhs_dims = [| 3; 4 |];
     rhs_dims = [| [| 3; 4 |] |];
-    product_iterators = [| [ a ]; [ b ] |];
     project_lhs = [| Idx.Iterator a; Idx.Iterator b |];
     project_rhs = [| [| Idx.Iterator a; Idx.Iterator b |] |];
     extent_syms = [];

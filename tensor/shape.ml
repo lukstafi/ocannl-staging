@@ -2289,7 +2289,7 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
      be in the same iteration group so that they are iterated SEQUENTIALLY (via unflat_lines), not
      NESTED. For (a, b) ++^ "a; b => a^b", i2 and i3 should be in the same group: - First iterate i2
      (RHS[0] active) - Then iterate i3 (RHS[1] active) This is achieved by making them part of the
-     same product_iterators entry. *)
+     same product component. *)
   let symbol_classes : (Idx.symbol, Idx.symbol) Hashtbl.t = Hashtbl.create (module Idx.Symbol) in
   let find_repr sym =
     let rec loop s =
@@ -2327,13 +2327,9 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
           Hash_set.add seen_reprs repr;
           Hashtbl.find components repr))
   in
-  let product_space : int list array =
+  let product_components : Idx.component array =
     Array.of_list_map ordered_components ~f:(fun entries ->
-        List.map entries ~f:(fun (_, d, _) -> d))
-  in
-  let product_iterators : Idx.symbol list array =
-    Array.of_list_map ordered_components ~f:(fun entries ->
-        List.map entries ~f:(fun (_, _, s) -> s))
+        List.map entries ~f:(fun (_, d, s) -> (d, s)))
   in
   let indices_of_sh (sh : t) =
     Array.of_list_map ~f:(Row.get_dim_index proj_env)
@@ -2424,10 +2420,9 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
       try
         Idx.
           {
-            product_space;
+            components = product_components;
             lhs_dims;
             rhs_dims;
-            product_iterators;
             project_lhs;
             project_rhs;
             extent_syms;

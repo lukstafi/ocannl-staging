@@ -31,10 +31,9 @@ let dbg : Idx.projections_debug = { spec = ""; derived_for = Sexp.Atom ""; trace
    accumulates one visit per loop iteration and trips the [virtualize_max_visits = 1] cap. *)
 let elementwise i ~n ~num_rhs ~rhs2_fixed0 : Idx.projections =
   {
-    product_space = [| [ n ] |];
+    components = [| [ (n, i) ] |];
     lhs_dims = [| n |];
     rhs_dims = Array.init num_rhs ~f:(fun _ -> [| n |]);
-    product_iterators = [| [ i ] |];
     project_lhs = [| Idx.Iterator i |];
     project_rhs =
       Array.init num_rhs ~f:(fun k ->
