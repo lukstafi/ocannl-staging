@@ -647,11 +647,9 @@ end
 
 module type Backend = sig
   type code [@@deriving sexp_of]
-  type code_batch [@@deriving sexp_of]
 
   val empty_optimize_ctx : unit -> Low_level.optimize_ctx
   val get_optimize_ctx : code -> Low_level.optimize_ctx
-  val get_optimize_ctx_batch : code_batch -> Low_level.optimize_ctx
 
   val compile :
     Low_level.optimize_ctx ->
@@ -685,28 +683,11 @@ module type Backend = sig
       schedule annotator — pass [~lowered_transform:Fn.id] to keep hand-built code exactly as
       written. *)
 
-  val compile_batch :
-    Low_level.optimize_ctx ->
-    ?names:string array ->
-    ?occupancy:(name:string -> src_n:int -> bool) ->
-    Indexing.unit_bindings ->
-    Assignments.comp array ->
-    code_batch
-  (** [compile_batch] vs. [compile] is mostly about improving the compile time and debugging
-      convenience by generating fewer files -- ideally does not affect execution, but there can be
-      backend-specific differences. Only array entries for which [occupancy] returns true are
-      included. [names] are used to derive names for compilation artifacts. If omitted, they're
-      derived via {!Assignments.get_name_exn}. *)
-
   include Backend_device_common
 
   val link : context -> code -> context routine
   (** Returns the routine for the code's procedure, in a new context derived from the given context.
   *)
-
-  val link_batch : context -> code_batch -> context * context routine option array
-  (** Returns the routines for the procedures included in the code batch. The returned context is
-      downstream of all the returned routines. *)
 
   include
     With_buffer_retrieval_and_syncing

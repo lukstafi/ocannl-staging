@@ -662,8 +662,8 @@ a code object); `metal_backend` defers even source compilation to link time,
 compiling the MSL per device (`Me.Library.on_device`) and validating the launch against the
 device's limits there. This is why the backend interface distinguishes `compile` (produce
 the artifact) from `link` (bind it to a device context) — and batches both
-(`compile_batch`/`link_batch`) so many routines share one compiler invocation and one loaded
-module.
+(`compile_batch`/`link_batch`) for the segment kernels of one fissioned routine, so the
+segments share one compiler invocation and one loaded module.
 
 ## Stage 7: link, contexts, and running
 

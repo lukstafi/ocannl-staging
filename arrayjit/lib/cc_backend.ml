@@ -1205,34 +1205,25 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
   in
   { result = result_library; kparams; bindings; name }
 
-let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized option array) :
-    procedure option array =
+let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized array) :
+    procedure array =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
-    let procs = Array.filter_opt lowereds
+    let procs = lowereds
   end))
   in
   (* gh-ocannl-686: as in [compile] — mangle before anything derives a file name or a symbol. *)
-  let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
+  let names = Array.map names ~f:Syntax.kernel_ident in
   (* FIXME: do we really want all of them, or only the used ones? *)
   let idx_params = Indexing.bound_symbols bindings in
-  let base_name =
-    String.(
-      strip ~drop:(equal_char '_')
-      @@ common_prefix (Array.to_list @@ Array.concat_map ~f:Option.to_array names))
-  in
+  let base_name = String.(strip ~drop:(equal_char '_') @@ common_prefix (Array.to_list names)) in
   let build_file = Utils.open_build_file ~base_name ~extension:".c" in
   let params_and_docs =
-    Array.map2_exn names lowereds ~f:(fun name_opt lowered_opt ->
-        Option.map2 name_opt lowered_opt ~f:(fun name lowered ->
-            Syntax.compile_proc ~name idx_params lowered))
+    Array.map2_exn names lowereds ~f:(fun name lowered -> Syntax.compile_proc ~name idx_params lowered)
   in
-  let all_proc_docs =
-    List.filter_map (Array.to_list params_and_docs) ~f:(Option.map ~f:(fun (_, doc, _) -> doc))
-  in
+  let all_proc_docs = List.map (Array.to_list params_and_docs) ~f:(fun (_, doc, _) -> doc) in
   let combined_proc_doc = PPrint.separate PPrint.hardline all_proc_docs in
   let filtered_code =
-    Syntax.filter_and_prepend_builtins
-      ~routine_names:(List.filter_opt (Array.to_list names))
+    Syntax.filter_and_prepend_builtins ~routine_names:(Array.to_list names)
       ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins ~proc_doc:combined_proc_doc
   in
   Out_channel.output_string build_file.oc filtered_code;
@@ -1240,10 +1231,8 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
   let result_library =
     c_compile_and_load ~f_path:(compilation_copy ~name:base_name build_file filtered_code)
   in
-  (* Note: for simplicity, we share ctx_arrays across all contexts. *)
-  Array.mapi params_and_docs ~f:(fun i opt_params_and_doc ->
-      Option.bind opt_params_and_doc ~f:(fun (kparams, _doc, _launch) ->
-          Option.map names.(i) ~f:(fun name -> { result = result_library; kparams; bindings; name })))
+  Array.mapi params_and_docs ~f:(fun i (kparams, _doc, _launch) ->
+      { result = result_library; kparams; bindings; name = names.(i) })
 
 let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers
     (code : procedure) =

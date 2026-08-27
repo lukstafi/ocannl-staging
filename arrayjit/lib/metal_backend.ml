@@ -497,12 +497,10 @@ module Impl = struct
   [@@deriving sexp_of]
 
   type code_batch = {
-    metal_source : string; (* Store combined source *)
-    compiled_code : Me.Library.t option array; (* Store compiled code per device *)
-    funcs : (string * (string * kparam_source) list * Low_level.launch_dims) option array;
+    metal_source : string; (* Store combined source, compiled per device at link time *)
+    funcs : (string * (string * kparam_source) list * Low_level.launch_dims) array;
         (* func_name * kparams * launch dims *)
     bindings : Indexing.unit_bindings;
-    traced_stores : Low_level.traced_store option array;
   }
   [@@deriving sexp_of]
 
@@ -1224,40 +1222,29 @@ using namespace metal;|} in
 
   let compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
-      let procs = Array.filter_opt lowereds
+      let procs = lowereds
     end))
     in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,
        here, so the emitted symbol, [new_function_with_name] and the [.metal] artifact agree. *)
-    let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
+    let names = Array.map names ~f:Syntax.kernel_ident in
     let idx_params = Indexing.bound_symbols bindings in
     let funcs_and_docs =
-      Array.map2_exn names lowereds
-        ~f:
-          (Option.map2 ~f:(fun name lowered ->
-               let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
-               ((name, kparams, launch), doc)))
+      Array.map2_exn names lowereds ~f:(fun name lowered ->
+          let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
+          ((name, kparams, launch), doc))
     in
-    let all_proc_docs = List.filter_map (Array.to_list funcs_and_docs) ~f:(Option.map ~f:snd) in
+    let all_proc_docs = List.map (Array.to_list funcs_and_docs) ~f:snd in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
     let metal_includes = {|#include <metal_stdlib>
 using namespace metal;|} in
     let source =
       maybe_include_simdgroup_matrix
-      @@ Syntax.filter_and_prepend_builtins
-           ~routine_names:(List.filter_opt (Array.to_list names))
+      @@ Syntax.filter_and_prepend_builtins ~routine_names:(Array.to_list names)
            ~includes:metal_includes ~builtins:Builtins_metal.builtins ~proc_doc:final_doc
     in
-    let traced_stores = Array.map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.traced_store)) in
-    let funcs = Array.map funcs_and_docs ~f:(Option.map ~f:fst) in
-    {
-      metal_source = source;
-      compiled_code = Array.create ~len:(num_devs ()) None;
-      (* One slot per device *)
-      funcs;
-      bindings;
-      traced_stores;
-    }
+    let funcs = Array.map funcs_and_docs ~f:fst in
+    { metal_source = source; funcs; bindings }
 
   (* gh-ocannl-344: from the routine's materialized nodes, assign each distinct pool an index (first
      use order), build the [(pool_index, byte_offset)] slot table (one [uint] pair per node,
@@ -1485,7 +1472,7 @@ using namespace metal;|} in
     in
     (lowered_bindings, task)
 
-  let link_batch prior_context code_batch ctx_buffers_opts =
+  let link_batch prior_context code_batch ctx_buffers =
     let device = prior_context.device.dev in
     (* Name the (debug) source file from the batch's function names — fissioned segments of one
        routine share the routine name as a prefix; a fixed "batch" name would collide across
@@ -1493,22 +1480,17 @@ using namespace metal;|} in
     let base_name =
       String.(
         strip ~drop:(equal_char '_')
-        @@ common_prefix
-             (List.filter_map (Array.to_list code_batch.funcs)
-                ~f:(Option.map ~f:(fun (n, _, _) -> n))))
+        @@ common_prefix (List.map (Array.to_list code_batch.funcs) ~f:(fun (n, _, _) -> n)))
     in
     let base_name = if String.is_empty base_name then "batch" else base_name in
     let library = compile_metal_source ~name:base_name ~source:code_batch.metal_source ~device in
     let lowered_bindings : Indexing.lowered_bindings =
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
-
     let tasks =
-      Array.mapi code_batch.funcs ~f:(fun i func_opt ->
-          Option.bind func_opt ~f:(fun (func_name, kparams, launch) ->
-              Option.map ctx_buffers_opts.(i) ~f:(fun ctx_buffers ->
-                  link_proc ~prior_context ~library ~func_name ~kparams ~launch ~lowered_bindings
-                    ~ctx_buffers)))
+      Array.map code_batch.funcs ~f:(fun (func_name, kparams, launch) ->
+          link_proc ~prior_context ~library ~func_name ~kparams ~launch ~lowered_bindings
+            ~ctx_buffers)
     in
     (lowered_bindings, tasks)
 

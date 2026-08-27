@@ -162,6 +162,76 @@ let plan_alias_spans ~(name : string) ~(limits : hardware_limits) ~(lowered : Lo
                   (Tn.debug_name tn) lo hi);
           Some spans)
 
+(* {2 The shared layout head (gh-ocannl-767)}
+
+   [Raise_backend.compile] + [allocate_delta] on one side and [score_footprint] on the other must
+   lay a routine out IDENTICALLY -- the scorer is the allocator's cost model (gh-ocannl-498), so
+   scoring one layout and allocating another would let a plan report itself under budget while
+   linking asks for a larger pool. The pieces both pipelines run are shared here rather than agreed
+   on by comment: zero-sinking, the segment-store fold-back, the working/constants partition in
+   canonical order, the per-node plan items, and the per-pool cap. *)
+
+(* The per-pool ceiling: 4 GB for uint32 offsets unless [large_models] lifts it. *)
+let pool_cap () = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000
+
+(* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations toward
+   their first use so live spans start there instead of at an up-front zeroing block (which nests
+   the backprop gradient chain's intervals and defeats [plan_arena_offsets]). Reordering only --
+   values are unchanged; gated to keep the planner-off pipeline byte-identical. Runs before
+   scheduling, so segment cuts and cross-nest merges see the sunk order. *)
+let maybe_sink_zeros (lowered : Low_level.optimized) : Low_level.optimized =
+  if buffer_aliasing () then
+    { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
+  else lowered
+
+(* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen -- a
+   hoisted [Stage] registers its packed-constant tile in the segment's filtered store (its
+   placement lands in the shared lineage fork, but the allocator enumerates the traced store) -- so
+   fold segment-added entries back into [into]. Pre-existing keys are shared mutable records
+   (filtered slices alias them), so only genuinely new keys need adding. *)
+let fold_segment_stores ~(into : Low_level.traced_store) (segments : Low_level.optimized list) :
+    unit =
+  List.iter segments ~f:(fun seg ->
+      Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
+          if not (Hashtbl.mem into key) then Hashtbl.add_exn into ~key ~data))
+
+(* Partition a traced store's in-context nodes into the (working, constants) layout groups, each in
+   CANONICAL ([Tn.compare], i.e. uid) order -- the one order both the allocator and the scorer lay
+   out (gh-ocannl-498): the planners are order-sensitive (the arena's greedy coloring breaks
+   equal-size ties by input order, and bump packing's alignment padding and cap segmentation depend
+   on the running offset -- sizes 4 then 64 at alignment 32 occupy 96 bytes, reversed 68). Uid
+   order is deterministic and shared; pool ids are minted per segment before any placement, so
+   nothing else depends on enumeration order. [skip] excludes nodes the caller already holds (the
+   allocator's prior context); slice-alias views own no buffer and are excluded automatically
+   ([is_in_context_force] returns false for them, gh-ocannl-293 293a) -- their materialized parent
+   is laid out like any other node. *)
+let partition_layout_groups ~(plc : Tn.Placements.t) ?(skip = fun (_ : Tn.t) -> false)
+    (store : Low_level.traced_store) :
+    (Tn.t * Low_level.traced_array) list * (Tn.t * Low_level.traced_array) list =
+  let working = ref [] and constants = ref [] in
+  Hashtbl.iteri store ~f:(fun ~key ~data:node ->
+      if Tn.Placements.is_in_context_force plc key 43 && not (skip key) then
+        if node.Low_level.read_only || Tn.Placements.known_constant plc key then
+          constants := (key, node) :: !constants
+        else working := (key, node) :: !working);
+  let canonical l = List.sort !l ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
+  (canonical working, canonical constants)
+
+(* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so that
+   every node's buffer -- not only each pool's base -- is SIMD-aligned (gh-ocannl-164); ≤31 bytes
+   of padding per node. *)
+let layout_item (key : Tn.t) : int * int =
+  (size_in_bytes_of key, max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment)
+
+let layout_items group = List.map group ~f:(fun (key, _) -> layout_item key)
+
+(* The [plan_arena_offsets] input for a layout group under the given live [spans] (gh-ocannl-489):
+   liveness-disjoint same-precision nodes may overlap. *)
+let arena_items ~spans group =
+  List.map group ~f:(fun ((key : Tn.t), _) ->
+      let size, align = layout_item key in
+      (size, align, Ops.prec_string (Lazy.force key.Tn.storage_prec), Hashtbl.find spans key))
+
 type footprint = {
   fp_total : int;
   fp_working : int;
@@ -184,60 +254,35 @@ type footprint = {
    of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
    pool bases are page-rounded by the driver.
 
-   Enumeration is canonical ([Tn.compare], i.e. by uid) rather than [traced_store] order, so the
-   greedy arena coloring is reproducible across processes; [allocate_delta] uses store order to keep
-   pool ids stable and can therefore break size ties differently. *)
+   Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout
+   head above), so scorer/allocator agreement is structural rather than by comment. *)
 let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
     ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) : footprint =
-  let lowered =
-    if buffer_aliasing () then
-      { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
-    else lowered
-  in
+  let lowered = maybe_sink_zeros lowered in
   let segments = Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered in
   let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in
-  (* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen (a
-     hoisted [Stage] registers its packed-constant tile), and [allocate_delta] enumerates the store
-     it is handed -- so score the union, as the compile's own fold-back does. *)
+  (* Score the union store, as the compile's own fold-back does -- but on a copy: scoring must not
+     mutate the routine's own traced store. *)
   let store = Hashtbl.copy lowered.Low_level.traced_store in
-  List.iter segments ~f:(fun seg ->
-      Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
-          if not (Hashtbl.mem store key) then Hashtbl.add_exn store ~key ~data));
+  fold_segment_stores ~into:store segments;
   let plc = lowered.Low_level.optimize_ctx.placements in
-  let working = ref [] and constants = ref [] in
-  Hashtbl.iteri store ~f:(fun ~key ~data:node ->
-      if Tn.Placements.is_in_context_force plc key 47 then
-        if node.Low_level.read_only || Tn.Placements.known_constant plc key then
-          constants := key :: !constants
-        else working := key :: !working);
-  let canonical l = List.sort !l ~compare:Tn.compare in
-  let working = canonical working and constants = canonical constants in
-  let items group =
-    List.map group ~f:(fun key ->
-        ( size_in_bytes_of key,
-          max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
-  in
-  let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
+  let working, constants = partition_layout_groups ~plc store in
+  let cap = pool_cap () in
   let bump ~what group =
     let _, segment_sizes =
       plan_pool_segments ~cap ~what
-        ~debug_name:(fun i -> Tn.debug_name (List.nth_exn group i))
-        (items group)
+        ~debug_name:(fun i -> Tn.debug_name (fst (List.nth_exn group i)))
+        (layout_items group)
     in
     List.fold segment_sizes ~init:0 ~f:( + )
   in
   let fp_dedicated = bump ~what:"Backends.score_footprint" working in
   let fp_planned =
-    Option.value_map spans ~default:0 ~f:(fun spans -> List.count working ~f:(Hashtbl.mem spans))
+    Option.value_map spans ~default:0 ~f:(fun spans ->
+        List.count working ~f:(fun (key, _) -> Hashtbl.mem spans key))
   in
   let arena =
-    Option.bind spans ~f:(fun spans ->
-        plan_arena_offsets ~cap
-          (List.map2_exn working (items working) ~f:(fun key (size, align) ->
-               ( size,
-                 align,
-                 Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                 Hashtbl.find spans key ))))
+    Option.bind spans ~f:(fun spans -> plan_arena_offsets ~cap (arena_items ~spans working))
   in
   let fp_working = match arena with Some (_, total) -> total | None -> fp_dedicated in
   let fp_constants = bump ~what:"Backends.score_footprint" constants in
@@ -579,30 +624,6 @@ let%track6_sexp lower_assignments optim_ctx ?name bindings asgns =
     Assignments.lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name
       (Indexing.bound_symbols bindings) asgns )
 
-let lower_batch_assignments optim_ctx ?names ?occupancy bindings asgns_l =
-  (* One fork for the whole batch: the batch is a single compilation unit, so its members share the
-     lineage state, but the batch as a whole stays hermetic w.r.t. sibling compiles. *)
-  let optim_ctx = Low_level.copy_optimize_ctx optim_ctx in
-  let names =
-    Option.value_or_thunk names ~default:(fun () ->
-        Array.map asgns_l ~f:(fun asgns -> Assignments.get_name_exn asgns))
-  in
-  let prefix_name = String.(strip ~drop:(equal_char '_') @@ common_prefix @@ Array.to_list names) in
-  let unoptim_ll_source = Utils.output_to_build_file ~fname:(prefix_name ^ "-unoptimized.ll") in
-  let ll_source = Utils.output_to_build_file ~fname:(prefix_name ^ ".ll") in
-  let cd_source = Utils.output_to_build_file ~fname:(prefix_name ^ ".cd") in
-  let bound = Indexing.bound_symbols bindings in
-  let occupancy = Option.value occupancy ~default:(fun ~name:_ ~src_n:_ -> true) in
-  Array.unzip
-  @@ Array.mapi names ~f:(fun src_n name ->
-      let asgns = asgns_l.(src_n) in
-      if occupancy ~name ~src_n then
-        ( Some name,
-          Some
-            (Assignments.lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name bound asgns)
-        )
-      else (None, None))
-
 let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_prior_context : unit
     =
   Set.iter from_prior_context ~f:(fun tn ->
@@ -615,28 +636,44 @@ let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_
         && not (Host_inits.mem tn)
       then raise @@ Utils.User_error ("The linked context lacks node " ^ Tnode.debug_name tn))
 
-let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
-    (comps : (Assignments.comp * Low_level.optimized) option array) : Tn.t_set =
-  (* Filtered per comp by its own reconciled traced store, like the single-compile path: the raw
-     assignments over-approximate what the residual schedule needs (gh-ocannl-611, round 3). *)
-  Array.filter_map comps ~f:(fun pair ->
-      Option.map pair ~f:(fun (comp, lowered) ->
-          let raw =
-            Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes
-            |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
-          in
-          match comp.Assignments.asgns with
-          | Assignments.Noop -> raw
-          | _ ->
-              let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
-              let reads, writes = Assignments.collect_nodes_guess_output comp.Assignments.asgns in
-              let mentioned = Set.union reads writes in
-              let demanded =
-                Set.filter inputs ~f:(fun tn ->
-                    (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
-              in
-              Set.union raw demanded))
-  |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
+(* Free one pool and drop its census entry -- the pair every cleanup path must keep together, or a
+   freed slab stays counted (gh-ocannl-550). *)
+let free_and_forget_pool device ~free_pool pool_id =
+  free_pool device ~pool_id;
+  Alloc_census.forget_pool ~device_id:device.device_id ~pool_id
+
+(* The one pool-freeing fold behind the context [finalize] and [Raise_backend.free_delta]
+   (gh-ocannl-767, unifying gh-ocannl-550's cleanup sites): frees the pools reachable through
+   [ctx_buffers] that this context/delta owns. Deduped by [pool_id] -- one pool holds several nodes
+   (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the same id is reached through several
+   keys, and a second visit would free an already-freed slab. Skips keys for which
+   [owned_elsewhere] holds (the enclosing scope's buffers), and per-device constants -- compared by
+   LOCATION, not key presence: a host upload may give a tnode a context-owned working location even
+   when an earlier compile cached a CONSTANT location for the same key, and mistaking the working
+   pool for that constant leaks it (gh-ocannl-571's transfer negative control). [skip_pool] lets
+   [finalize] honor its retry ledger; [before_free]/[after_free] bracket each successful backend
+   free (fault injection, ledger recording -- [after_free] runs only when [free_pool] returned, so
+   a raising free is not recorded as done). *)
+let free_owned_pools ~device ~free_pool ~owned_elsewhere ?(skip_pool = fun _ -> false)
+    ?(before_free = fun _ -> ()) ?(after_free = fun _ -> ()) (ctx_buffers : ctx_buffers) : unit =
+  Map.fold ctx_buffers
+    ~init:(Set.empty (module Int))
+    ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
+      if
+        (not (owned_elsewhere key))
+        && (not
+              (Option.exists
+                 (Hashtbl.find device.constant_buffer_cache key)
+                 ~f:(equal_buffer_loc loc)))
+        && (not (skip_pool loc.pool_id))
+        && not (Set.mem freed loc.pool_id)
+      then (
+        before_free loc.pool_id;
+        free_and_forget_pool device ~free_pool loc.pool_id;
+        after_free loc.pool_id;
+        Set.add freed loc.pool_id)
+      else freed)
+  |> (ignore : Set.M(Int).t -> unit)
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
 module Add_device
@@ -655,8 +692,7 @@ struct
   type code = { lowered : Low_level.optimized; proc : Backend.procedure } [@@deriving sexp_of]
 
   type code_batch = {
-    lowereds : Low_level.optimized option array;
-    procs : Backend.procedure option array;
+    procs : Backend.procedure array;
     bindings : Indexing.unit_bindings;
         (** Kept for {!link_batch}: the batch's procedures share one set of static-index refs. *)
   }
@@ -668,7 +704,7 @@ struct
 
   let compile_batch ~names bindings lowereds : code_batch =
     let procs = compile_batch ~names bindings lowereds in
-    { lowereds; procs; bindings }
+    { procs; bindings }
 
   let link context (code : code) ctx_buffers : Indexing.lowered_bindings * Task.t =
     let runner_label = get_name context.device in
@@ -697,16 +733,12 @@ struct
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
     let schedules =
-      Array.mapi code_batch.procs ~f:(fun i -> function
-        | Some proc ->
-            let ctx_buffers = Option.value_exn ~here:[%here] ctx_buffers.(i) in
-            let bindings', to_schedule =
-              link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
-            in
-            assert (phys_equal bindings' lowered_bindings);
-            Some
-              (Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
-        | None -> None)
+      Array.map code_batch.procs ~f:(fun proc ->
+          let bindings', to_schedule =
+            link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
+          in
+          assert (phys_equal bindings' lowered_bindings);
+          Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
     in
     (lowered_bindings, schedules)
 
@@ -787,21 +819,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   }
   [@@deriving sexp_of]
 
-  type nonrec code_batch = {
-    from_prior_context : Set.M(Tnode).t;
-    lowereds : Low_level.optimized option array;
-    code_batch : code_batch;
-    names : string option array;
-    expected_merge_nodes : Tnode.t option array;
-  }
-  [@@deriving sexp_of]
-
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
   let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
-
-  let get_optimize_ctx_batch (code_batch : code_batch) =
-    Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
-    |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx
 
   let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms ?prelowered
       bindings (comp : Assignments.comp) : code =
@@ -819,16 +838,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           ( Option.value_or_thunk name ~default:(fun () -> Assignments.get_name_exn comp.asgns),
             lowered )
     in
-    (* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations toward
-       their first use so live spans start there instead of at an up-front zeroing block (which
-       nests the backprop gradient chain's intervals and defeats [plan_arena_offsets]). Reordering
-       only -- values are unchanged; gated to keep the planner-off pipeline byte-identical. Before
-       scheduling: segment cuts and cross-nest merges see the sunk order. *)
-    let lowered =
-      if buffer_aliasing () then
-        { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
-      else lowered
-    in
+    let lowered = maybe_sink_zeros lowered in
     let limits = Device.hardware_limits () in
     let lowereds =
       Schedule_outcome.tag Schedule_outcome.Transform (fun () ->
@@ -884,23 +894,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               Schedule.check_hardware_limits_classified ~name:seg_name ~limits seg);
           let batch =
             Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
-                compile_batch
-                  ~names:(Array.of_list_map seg_names ~f:Option.some)
-                  bindings
-                  (Array.of_list_map segments ~f:Option.some))
+                compile_batch ~names:(Array.of_list seg_names) bindings (Array.of_list segments))
           in
           (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O analysis
              need the union footprint, and each segment's [optimized] carries only its filtered
-             slice of the traced store. Schedule ops applied per segment can CREATE tnodes the
-             pre-fission store has never seen — a hoisted [Stage] registers its packed-constant tile
-             in the segment's filtered store (its placement lands in the shared lineage fork, but
-             [allocate_delta] enumerates the traced store) — so fold segment-added entries back in.
-             Pre-existing keys are shared mutable records (filtered slices alias them), so only
-             genuinely new keys need copying. *)
-          List.iter segments ~f:(fun seg ->
-              Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
-                  if not (Hashtbl.mem lowered.Low_level.traced_store key) then
-                    Hashtbl.add_exn lowered.Low_level.traced_store ~key ~data));
+             slice of the traced store -- so fold segment-added entries back in. *)
+          fold_segment_stores ~into:lowered.Low_level.traced_store segments;
           (Either.Second { batch; count = List.length segments }, lowered)
     in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
@@ -955,49 +954,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       alias_spans;
     }
 
-  let%debug3_sexp compile_batch optim_ctx ?names ?occupancy bindings
-      (comps : Assignments.comp array) : code_batch =
-    let names, lowereds =
-      lower_batch_assignments optim_ctx ?names ?occupancy bindings
-      @@ Array.map comps ~f:(fun c -> c.asgns)
-    in
-    let lowereds =
-      Array.map lowereds
-        ~f:
-          (Option.map
-             ~f:
-               (Schedule.maybe_default_schedule ~backend_name:Device.name
-                  ~limits:(Device.hardware_limits ())
-                  ~static_indices:(Indexing.bound_symbols bindings)))
-    in
-    Array.iter2_exn names lowereds ~f:(fun name lowered ->
-        Option.iter lowered ~f:(fun lowered ->
-            Schedule.check_hardware_limits_classified
-              ~name:(Option.value name ~default:"<unnamed>")
-              ~limits:(Device.hardware_limits ()) lowered));
-    let code_batch =
-      Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
-          compile_batch ~names bindings lowereds)
-    in
-    let batch_plc =
-      (Array.find_map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
-      |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx)
-        .placements
-    in
-    let from_prior_context =
-      from_prior_context_batch ~plc:batch_plc
-      @@ Array.mapi lowereds ~f:(fun i -> Option.map ~f:(fun l -> (comps.(i), l)))
-    in
-    {
-      from_prior_context;
-      names;
-      lowereds;
-      code_batch;
-      expected_merge_nodes =
-        Array.map lowereds ~f:(fun lowered ->
-            Option.(join @@ map lowered ~f:(fun optim -> optim.Low_level.merge_node)));
-    }
-
   (* gh-ocannl-344 Phase B/C: allocate a context's delta -- the in-context tnodes not already
      present in [context.ctx_buffers]. Working (non-constant) and constant/read-only nodes are EACH
      packed into pools sized to their group and bump-assigned increasing byte offsets, replacing the
@@ -1011,24 +967,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       ctx_buffers =
     let traced_store = lowered.Low_level.traced_store in
     let device = context.device in
-    let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
-    (* Pass 1: partition the delta, preserving [traced_store] iteration order. Slice-alias views own
-       no buffer and are excluded automatically: [is_in_context_force] returns false for them
-       (gh-ocannl-293 293a). Their parent is materialized and is allocated here (or already present
-       from a prior context) like any other node, since the alias's redirected reads/writes
-       reference the parent in the lowered code. *)
-    let working = ref [] and constants = ref [] in
-    Hashtbl.iteri traced_store ~f:(fun ~key ~data:node ->
-        if
-          Tnode.Placements.is_in_context_force lowered.Low_level.optimize_ctx.placements key 43
-          && not (Map.mem context.ctx_buffers key)
-        then
-          if
-            node.Low_level.read_only
-            || Tn.Placements.known_constant lowered.Low_level.optimize_ctx.placements key
-          then constants := (key, node) :: !constants
-          else working := (key, node) :: !working);
-    let working = List.rev !working and constants = List.rev !constants in
+    let cap = pool_cap () in
+    (* Pass 1: partition the delta into the canonical layout groups (the shared layout head),
+       excluding nodes the prior context already holds. *)
+    let working, constants =
+      partition_layout_groups ~plc:lowered.Low_level.optimize_ctx.placements
+        ~skip:(Map.mem context.ctx_buffers) traced_store
+    in
     let ctx_buffers = ref context.ctx_buffers in
     (* Pack a group of (key, node) into one or more pools, segmenting at the cap. [register] decides
        how the resulting [buffer_loc] is recorded (directly into [ctx_buffers] for working nodes, or
@@ -1080,42 +1025,21 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       List.iter !cache_inserts ~f:(Hashtbl.remove device.constant_buffer_cache);
       Option.iter free_pool ~f:(fun free_pool ->
           List.dedup_and_sort !minted ~compare:Int.compare
-          |> List.iter ~f:(fun pool_id ->
-              free_pool device ~pool_id;
-              Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
+          |> List.iter ~f:(free_and_forget_pool device ~free_pool))
     in
     let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
-        (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
-           [score_footprint] scores. Both planners are order-sensitive -- the arena's greedy
-           coloring breaks equal-size ties by input order, and bump packing's alignment padding and
-           cap segmentation depend on the running offset (sizes 4 then 64 at alignment 32 occupy 96
-           bytes, reversed 68). Scoring one order and allocating another would let a plan report
-           itself under budget while linking asks for a larger pool. [traced_store] order was merely
-           a deterministic order; uid order is deterministic too, and shared with the scorer. Only
-           the layout input is reordered: pool ids are minted per segment before any placement, and
-           registration is order-independent. *)
-        let group = List.sort group ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
-        let items =
-          (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so
-             that every node's buffer — not only each pool's base — is SIMD-aligned (gh-ocannl-164);
-             ≤31 bytes of padding per node. *)
-          List.map group ~f:(fun (key, _) ->
-              ( size_in_bytes_of key,
-                max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
-        in
+        (* [group] arrives in canonical (uid) order from [partition_layout_groups] -- the order
+           [score_footprint] scores, which the order-sensitive planners must see identically
+           (gh-ocannl-498; the rationale lives on the shared layout head). Pool ids are minted per
+           segment before any placement, and registration is order-independent. *)
+        let items = layout_items group in
         (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
            group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
            to bump packing when the arena would exceed the per-pool cap. *)
         let arena_layout =
-          Option.bind arena ~f:(fun spans ->
-              plan_arena_offsets ~cap
-                (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                     ( size,
-                       align,
-                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                       Hashtbl.find spans key ))))
+          Option.bind arena ~f:(fun spans -> plan_arena_offsets ~cap (arena_items ~spans group))
         in
         match arena_layout with
         | Some (offsets, total) ->
@@ -1217,9 +1141,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      anyone could ever release them. Those are the [Backend_link] declines an autotune search
      absorbs, so they accumulated exactly like the candidates that succeeded.
 
-     Frees the delta of [ctx_buffers] against [context]: keyed by [pool_id] (one pool holds several
-     nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
-     this stands in for it on the path where no context was ever built. *)
+     Frees the delta of [ctx_buffers] against [context] through [free_owned_pools], i.e. the same
+     rule the context [finalize] applies — this stands in for it on the path where no context was
+     ever built. *)
   let free_delta context (ctx_buffers : ctx_buffers) =
     (* Sync first, for the same reason [unwind_partial_delta] and the context [finalize] do
        (gh-ocannl-550, round-five review): [allocate_delta] queues [Host_inits] uploads through
@@ -1229,22 +1153,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        be refusing work, and that must not replace the link failure the caller has to classify. *)
     (try Device.await context.device with _ -> ());
     Option.iter free_pool ~f:(fun free_pool ->
-        Map.fold ctx_buffers
-          ~init:(Set.empty (module Int))
-          ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
-            if
-              (not (Map.mem context.ctx_buffers key))
-              && (not
-                    (Option.exists
-                       (Hashtbl.find context.device.constant_buffer_cache key)
-                       ~f:(equal_buffer_loc loc)))
-              && not (Set.mem freed loc.pool_id)
-            then (
-              free_pool context.device ~pool_id:loc.pool_id;
-              Alloc_census.forget_pool ~device_id:context.device.device_id ~pool_id:loc.pool_id;
-              Set.add freed loc.pool_id)
-            else freed)
-        |> (ignore : Set.M(Int).t -> unit))
+        free_owned_pools ~device:context.device ~free_pool
+          ~owned_elsewhere:(Map.mem context.ctx_buffers) ctx_buffers)
 
   (* Runs [f] on a freshly allocated delta, freeing that delta if [f] raises. Everything after the
      allocation belongs inside: a failure past [make_child] discards the child too, so its pools are
@@ -1293,10 +1203,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                  order on the routine's stream, whose FIFO ordering supplies the grid-wide
                  synchronization at each segment boundary (the same contract consecutive routines on
                  one stream already rely on). *)
-              let bindings, tasks =
-                link_batch context batch (Array.create ~len:count (Some ctx_buffers))
-              in
-              let tasks = Array.to_list (Array.filter_opt tasks) in
+              let bindings, tasks = link_batch context batch ctx_buffers in
+              let tasks = Array.to_list tasks in
               assert (List.length tasks = count);
               (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
                  code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO
@@ -1333,68 +1241,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         in
         sync_routine
           { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
-
-  let%debug3_sexp link_batch context code_batch =
-    verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
-      ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
-    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's
-       delta is allocated before the backend linker runs, so a later member's allocation or the link
-       itself raising used to abandon every completed member's pools -- rooted, with no context to
-       reach them, since the member contexts are only derived in the fold below. [free_delta] is
-       applied per member and skips per-device constants exactly as the context [finalize] does, so
-       a partial batch gives back its working pools and leaves the shared constants alone. *)
-    let allocated = ref [] in
-    let unwind_batch () =
-      List.iter !allocated ~f:(fun cb -> try free_delta context cb with _ -> ())
-    in
-    let ctx_buffers, bindings, schedules =
-      match
-        let ctx_buffers =
-          Array.mapi code_batch.lowereds ~f:(fun i ->
-              Option.map ~f:(fun l ->
-                  let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
-                  (* Batch compiles are not liveness-planned in v1 (they do not go through the
-                     fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
-                  let cb = allocate_delta context ~name ~alias_spans:None l in
-                  allocated := cb :: !allocated;
-                  cb))
-        in
-        let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
-        (ctx_buffers, bindings, schedules)
-      with
-      | result -> result
-      | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          unwind_batch ();
-          Stdlib.Printexc.raise_with_backtrace exn backtrace
-    in
-    Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
-      | None -> (context, None)
-      | Some schedule ->
-          let ctx_buffers = Option.value_exn ctx_buffers.(i) in
-          let optimize_ctx = (Option.value_exn code_batch.lowereds.(i)).Low_level.optimize_ctx in
-          let expected_merge_node = code_batch.expected_merge_nodes.(i) in
-          (* Static merge-buffer verification at link time (gh-ocannl-288): check the node provided
-             by the fold-current context before deriving the consumer's child context. *)
-          check_merge_buffer_static ~merge_buffer_node:context.merge_buffer_node
-            ~code_node:expected_merge_node;
-          let context = make_child ~ctx_buffers ~optimize_ctx context in
-          let (inputs, outputs), merge_buffer_input =
-            Low_level.input_and_output_nodes @@ Option.value_exn code_batch.lowereds.(i)
-          in
-          (* gh-ocannl-489: same cross-routine read guard as in [link]. *)
-          Set.iter inputs ~f:(fun tn ->
-              Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
-                  if buffer_overlaps ctx_buffers tn loc then
-                    aliased_read_error ~what:"linking batch member, input" tn));
-          let schedule =
-            Task.prepend schedule ~work:(fun () ->
-                check_merge_buffer context.device ~code_node:expected_merge_node)
-          in
-          let r =
-            sync_routine { context; schedule; bindings; name; inputs; merge_buffer_input; outputs }
-          in
-          (context, Some r))
 end
 
 module Make_device_backend_from_lowered
@@ -1423,33 +1269,14 @@ let finalize (type dev runner event)
     Option.iter Backend.free_pool ~f:(fun free_pool ->
         Resource_fault_injection.hit Finalize_before_await;
         Backend.await ctx.device;
-        (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
-           same [pool_id] is reached through several keys; dedup before freeing, or the second visit
-           frees an already-freed slab. [Alloc_census.forget_pool] is idempotent for the same
-           reason, but the backend's [free_pool] is the one that must not run twice. *)
-        Map.fold ctx.ctx_buffers
-          ~init:(Set.empty (module Int))
-          ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
-            if
-              (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
-              (* A host upload may give a tnode a context-owned working location even when an
-                 earlier compile cached a CONSTANT location for the same key. Compare locations, not
-                 key presence: otherwise finalize mistakes the working pool for that constant and
-                 leaks it (gh-ocannl-571's transfer negative control). *)
-              && (not
-                    (Option.exists
-                       (Hashtbl.find ctx.device.constant_buffer_cache key)
-                       ~f:(equal_buffer_loc loc)))
-              && (not (Set.mem ctx.released_pool_ids loc.pool_id))
-              && not (Set.mem freed loc.pool_id)
-            then (
-              Resource_fault_injection.hit Finalize_before_free;
-              free_pool ctx.device ~pool_id:loc.pool_id;
-              ctx.released_pool_ids <- Set.add ctx.released_pool_ids loc.pool_id;
-              Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
-              Set.add freed loc.pool_id)
-            else freed)
-        |> (ignore : Set.M(Int).t -> unit))
+        free_owned_pools ~device:ctx.device ~free_pool
+          ~owned_elsewhere:(fun key ->
+            Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key))
+          ~skip_pool:(Set.mem ctx.released_pool_ids)
+          ~before_free:(fun _ -> Resource_fault_injection.hit Finalize_before_free)
+          ~after_free:(fun pool_id ->
+            ctx.released_pool_ids <- Set.add ctx.released_pool_ids pool_id)
+          ctx.ctx_buffers)
   in
   if Atomic.compare_and_set ctx.finalized false true then
     match cleanup () with
