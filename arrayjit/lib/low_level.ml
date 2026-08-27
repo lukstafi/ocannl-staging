@@ -2008,6 +2008,27 @@ let rec proc_contains_set_from_vec tn = function
   | If { body; _ } -> proc_contains_set_from_vec tn body
   | _ -> false
 
+(** gh-ocannl-734: a dynamic-gather table that is already committed [Virtual] is unsatisfiable — the
+    gather index is only known at runtime, so recomputation cannot serve the read, while a [Virtual]
+    node owns no buffer to load from. Both [Get_dynamic] arms of the virtualization pipeline report
+    it with this message instead of letting [Tn.Placements.update] answer with a bare provenance
+    collision ("update 152 -> 17 for ... is already virtual"), which named neither the node's two
+    readings nor anything the author could act on.
+
+    The situation is out of contract for the ordinary pipeline — [Assignments] lowering builds no
+    [Get_dynamic], and the one the pipeline does produce comes from [rewrite_one_hot_reductions],
+    which runs after both arms — so it is reached only from hand-built IR through [optimize] /
+    [Ll_test], which is a supported input class for the analysis probes. *)
+let virtualized_gather_table_rejection (tn : Tn.t) ~(decided_by : string) : string =
+  [%string
+    "the program reads %{Tn.debug_name tn} as a dynamic-gather table (Get_dynamic), but \
+     %{Tn.debug_name tn} is virtual in this routine (%{decided_by}). A dynamically-indexed read \
+     cannot be served by inlining -- the gathered row is only known at runtime, so there is no \
+     computation to replay at the read site -- while a virtual node has no buffer to load from, so \
+     the two readings cannot both hold. Materialize %{Tn.debug_name tn} (e.g. via \
+     Train.set_materialized, or Ll_test's ~materialized for hand-built IR) instead of declaring it \
+     virtual; a table whose placement is merely undecided is materialized for you by this arm."]
+
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
     t * Tnode.t Hash_set.t =
   let plc = optim_ctx.placements in
@@ -2308,6 +2329,18 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                   dynamically-indexed reads cannot be served by inlining, and no routine writes a \
                   persistent buffer for the node. Mark %{Tn.debug_name tn} as materialized (e.g. \
                   via Train.set_materialized) in the routine that computes it."]);
+        (* gh-ocannl-734: the LOCAL table's materialization, which the paragraph above always
+           asserted but never performed. Leaving it undecided here let the node stay a
+           virtualization candidate: its setter then reached [cleanup_virtual_llc]'s [Set] arm
+           first, was committed [Virtual 152] and dropped as dead, and cleanup's own [Get_dynamic]
+           arm hit the resulting [152 -> 17] collision. Deciding it here is what the sibling
+           lane-extract gather already does for its counter ([Never_virtual 146]). *)
+        if Tn.Placements.known_virtual plc tn then
+          raise
+            (Utils.User_error
+               (virtualized_gather_table_rejection tn
+                  ~decided_by:"declared virtual, or committed virtual before this read"));
+        Tn.Placements.update plc tn Never_virtual 17;
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope opts ->
         Local_scope
@@ -2536,6 +2569,15 @@ let cleanup_virtual_llc plc ~input_scopes ~static_indices (llc : t) : t =
         llsc
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         (* gh-343: defensive -- the table is a materialized read; recurse into the dynamic index. *)
+        (* gh-ocannl-734: [virtual_llc]'s own [Get_dynamic] arm decides every table it walks, so a
+           table still virtual here was never seen by that arm (a [Get_dynamic] minted after
+           virtualization over a node this cleanup then virtualized). Report it rather than letting
+           the update below answer with a bare provenance collision. *)
+        if Tn.Placements.known_virtual plc tn then
+          raise
+            (Utils.User_error
+               (virtualized_gather_table_rejection tn
+                  ~decided_by:"its setter was inlined into the read sites and dropped as dead"));
         Tn.Placements.update plc tn Never_virtual 17;
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope { id; body; orig_indices; mint } ->
