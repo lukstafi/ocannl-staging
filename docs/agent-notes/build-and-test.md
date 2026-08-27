@@ -753,6 +753,33 @@ that they earn a lookup rather than always-loaded space.
   sweep's GPU boxes, so a codegen change that moves the trajectory leaves those two stale until the
   daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
   multidev_cc leg exists.
+- Two focused aggregates sit beside `scans`, built the same way and answering a narrower question
+  (gh-ocannl-783): `dune build @metal-codegen` runs the Metal-pinned tests — the executed Metal-only
+  guards and the emitted-MSL structural ones — and `dune build @lifecycle` runs the
+  resource-lifecycle probes, the tests that drive `Ir.Resource_fault_injection` or read
+  `Ir.Alloc_census`. Each family alias is spelled identically in `test/operations/dune` and
+  `arrayjit/test/dune`, which is what makes the root-level `@<family>` run both halves: `dune build
+  @foo` builds the alias in the current directory and every directory beneath it. Both run in
+  seconds against warm executables, which is the point — the backend-wide directory run that was
+  previously the only way to reach these legs is neither.
+  - Membership is DERIVED, not written down twice: `env_var_deps` calls a stanza a Metal member when
+    its `; ocannl-backend:` marker names `metal`, and a lifecycle member when its modules name the
+    instrumentation, and fails on a member the family stanza omits — naming the `runtest-<name>` to
+    list and the `@<family>` that would otherwise have skipped it. The derivation is a FLOOR, so a
+    family may list more: `arrayjit/test`'s `test_slab_free_on_grow` is a lifecycle member by intent
+    and names no instrumentation module, since it drives `Backend_impl.Make_slab` against a mock raw
+    backend of its own.
+  - Writing a new family means giving it the same treatment. The derivation has to be a property the
+    member stanza declares for an INDEPENDENT reason (a backend marker, a module it uses, a glob it
+    writes) — a marker comment invented to say "I am in family F" is the second copy of the list
+    again, and a check reading it can only confirm that the copy still says what it says. A family
+    alias is a build entry point, so it depends on `(alias runtest-env_spelling_gate)` first, which
+    is why `arrayjit/test/dune` carries that gate rule and an `(alias (name runtest) …)` stanza
+    aggregating it back.
+  - `env_var_deps --control` puts both derivations to trees this repository does not contain: a
+    member with the family stanza omitted reports and exits 1, the same tree with the member listed
+    passes, and a stanza neither derivation claims is asked for nothing. Extending the check without
+    extending that control leaves the new arm able to stop deciding anything.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization
