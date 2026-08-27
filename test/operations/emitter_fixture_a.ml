@@ -7,6 +7,15 @@ let renders_a_document code = PPrint.string code
 let renders_a_triple ~name code = ([ name ], PPrint.string code, 0)
 let renders_through_an_option code = Some (PPrint.string code)
 let writes_into_a_buffer ~buf code = Buffer.add_string buf code
+type rendered = PPrint.document
+type rendered_again = rendered
+type destination = Buffer.t
+type described = string
+
+let renders_through_an_alias code = PPrint.string code
+let renders_through_a_chain code = PPrint.string code
+let writes_into_an_aliased_buffer ~buf code = Buffer.add_string buf code
+let describes_through_an_alias code = code
 let combines_documents lanes = PPrint.string (Int.to_string lanes)
 let joins_documents left right = PPrint.(left ^^ right)
 let consumes_documents _code = None

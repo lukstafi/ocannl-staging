@@ -55,9 +55,12 @@ let () =
       [
         "renders_a_document";
         "renders_a_triple";
+        "renders_through_a_chain";
+        "renders_through_an_alias";
         "renders_through_an_option";
         "renders_without_an_annotation";
         "writes_into_a_buffer";
+        "writes_into_an_aliased_buffer";
       ];
   (* The near misses, and why each is one: [combines_documents] and [joins_documents] produce a
      document out of numbers and other documents, so they render no program -- and since the scan
@@ -73,7 +76,7 @@ let () =
         List.map e.F.buffer_labels ~f:(fun label -> e.F.name ^ ":~" ^ label))
   in
   same "a buffer-writing emitter comes back with the label its text lands in" ~derived:buffer_labels
-    ~declared:[ "writes_into_a_buffer:~buf" ];
+    ~declared:[ "writes_into_a_buffer:~buf"; "writes_into_an_aliased_buffer:~buf" ];
   let declared = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.declared) in
   let read = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.read) in
   same "every module the fixture's wrapper interface declares was read" ~derived:read

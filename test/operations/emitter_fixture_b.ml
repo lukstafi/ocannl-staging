@@ -10,3 +10,12 @@ let renders_without_an_annotation code =
   ([ "kparam" ], Emitter_fixture_a.renders_a_document code, 0)
 
 let names_the_routine code = Emitter_fixture_a.describes_the_code code
+
+(* The control for how transparent aliases are keyed. [rendered] is [Emitter_fixture_a]'s name for
+   the document type and this module's name for an integer, which is the ordinary situation -- [t]
+   is declared in every module of every library. An alias table keyed by the bare name would read
+   this as a renderer; keyed by the module path it declares in, it reads it as what it is. *)
+type rendered = int
+
+let counts_the_code (code : Emitter_fixture_a.ir) : rendered =
+  String.length (Emitter_fixture_a.describes_the_code code)

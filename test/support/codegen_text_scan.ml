@@ -441,7 +441,17 @@ type emitter = {
     miss here costs a silent omission. What a qualifier cannot survive is an [open], which is why
     {!rejections} refuses that spelling outright instead of guessing. *)
 
-let renders_generated_text ~emitters expr =
+(** The emitter a path names, if any: an emitter's name behind a qualifier, or -- for [aliases] -- a
+    local name this file bound to one. *)
+let emitter_of_path ~emitters ~aliases path =
+  match path with
+  | [ name ] -> List.Assoc.find aliases name ~equal:String.equal
+  | _ ->
+      if Option.is_some (qualifier_of path) then
+        List.find emitters ~f:(fun e -> path_ends path ~name:e.emitter_name)
+      else None
+
+let renders_generated_text ~emitters ~aliases expr =
   let found = ref false in
   let iterator =
     object
@@ -449,10 +459,7 @@ let renders_generated_text ~emitters expr =
 
       method! expression e =
         (match longident_of e with
-        | Some path
-          when List.exists emitters ~f:(fun e -> path_ends path ~name:e.emitter_name)
-               && Option.is_some (qualifier_of path) ->
-            found := true
+        | Some path when Option.is_some (emitter_of_path ~emitters ~aliases path) -> found := true
         | _ -> ());
         super#expression e
     end
@@ -474,7 +481,7 @@ let renders_generated_text ~emitters expr =
     destination. Nothing in the tree has that shape; over-taint costs an inventory line, and the
     alternative -- matching by argument position -- would need the position to survive optional
     arguments the call site omits. *)
-let buffer_destinations ~emitters structure =
+let buffer_destinations ~emitters ~aliases structure =
   let names = ref [] in
   let iterator =
     object
@@ -483,18 +490,16 @@ let buffer_destinations ~emitters structure =
       method! expression e =
         (match e.pexp_desc with
         | Pexp_apply (callee, args) -> (
-            match longident_of callee with
-            | Some path ->
-                List.iter emitters ~f:(fun emitter ->
-                    if path_ends path ~name:emitter.emitter_name then
-                      List.iter emitter.buffer_labels ~f:(fun label ->
-                          List.iter args ~f:(fun (argument_label, argument) ->
-                              let matches =
-                                match argument_label with
-                                | Asttypes.Nolabel -> String.is_empty label
-                                | Asttypes.Labelled l | Asttypes.Optional l -> String.equal l label
-                              in
-                              if matches then names := idents_in argument @ !names)))
+            match Option.bind (longident_of callee) ~f:(emitter_of_path ~emitters ~aliases) with
+            | Some emitter ->
+                List.iter emitter.buffer_labels ~f:(fun label ->
+                    List.iter args ~f:(fun (argument_label, argument) ->
+                        let matches =
+                          match argument_label with
+                          | Asttypes.Nolabel -> String.is_empty label
+                          | Asttypes.Labelled l | Asttypes.Optional l -> String.equal l label
+                        in
+                        if matches then names := idents_in argument @ !names))
             | None -> ())
         | _ -> ());
         super#expression e
@@ -631,6 +636,35 @@ let bindings_of collect =
 let bindings_in_structure structure = bindings_of (fun it -> it#structure structure)
 let bindings_in_expression expr = bindings_of (fun it -> it#expression expr)
 
+(** Local names this file bound to an emitter, to a fixed point: [let write = CR.emit], and
+    [let w = write] after it.
+
+    A qualifier is what attributes a call, and binding the emitter to a name takes the qualifier
+    away at every later call site -- so [write ~buf policy llc] deposited generated text in [buf]
+    and nothing knew it. The file stayed a member (the alias itself names [CR.emit]), which is what
+    made the omission invisible: only the FRAGMENT the test then asserts on went missing, and
+    without even a partial mark (Codex round 1 on lukstafi/ocannl-staging#487).
+
+    Only a name bound to the emitter ITSELF, not a wrapper function around it -- [let write ~buf p
+    llc = CR.emit ~buf p llc] is a definition whose own [buf] parameter carries the taint, and names
+    are file-global here. *)
+let emitter_value_aliases ~emitters bindings =
+  let aliases = ref [] in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter bindings ~f:(fun { names; params; body } ->
+        match (names, params, longident_of body) with
+        | [ name ], [], Some path when not (List.Assoc.mem !aliases name ~equal:String.equal) -> (
+            match emitter_of_path ~emitters ~aliases:!aliases path with
+            | Some emitter ->
+                aliases := (name, emitter) :: !aliases;
+                changed := true
+            | None -> ())
+        | _ -> ())
+  done;
+  !aliases
+
 (** Names carrying generated source, to a fixed point: seeded by [Generated.read], by a direct
     [build_files/] read and by the destinations of a buffer-writing emitter ([seeds]), and spreading
     along [let] bindings whose right-hand side mentions one.
@@ -638,12 +672,12 @@ let bindings_in_expression expr = bindings_of (fun it -> it#expression expr)
     Scope is deliberately ignored -- a name is tainted for the whole file. A scan that itemises what
     a file pins does not need to know which [let] shadowed which; over-reach costs an extra
     inventory line, under-reach costs a missed pin. *)
-let tainted_names ~generated ~utils ~emitters ~seeds bindings =
+let tainted_names ~generated ~utils ~emitters ~aliases ~seeds bindings =
   let tainted = ref (Set.of_list (module String) seeds) in
   let seeded body =
     mentions_generated_read ~generated body
     || reads_artifacts_directly ~utils body
-    || renders_generated_text ~emitters body
+    || renders_generated_text ~emitters ~aliases body
   in
   let changed = ref true in
   while !changed do
@@ -964,6 +998,12 @@ let classify_source ~emitters ~path ~contents =
   let structure = structure_of contents in
   let generated = module_aliases ~target:"Generated" structure in
   let utils = module_aliases ~target:direct_artifact_module structure in
+  (* The bindings come first because the emitter aliases do: an emitter bound to a local name is
+     called without a qualifier afterwards, and every rule below -- membership, taint, the buffer
+     destinations, the pin walk -- has to recognise the same set of calls. Rules that know different
+     routes are how a file stayed listed while the fragment it pins went missing. *)
+  let bindings = bindings_in_structure structure in
+  let aliases = emitter_value_aliases ~emitters bindings in
   let reads_generated = ref false in
   let reads_direct = ref false in
   let renders = ref false in
@@ -980,10 +1020,7 @@ let classify_source ~emitters ~path ~contents =
         | Some p
           when List.exists direct_artifact_names ~f:(fun name -> calls ~aliases:utils p ~name) ->
             reads_direct := true
-        | Some p
-          when List.exists emitters ~f:(fun e -> path_ends p ~name:e.emitter_name)
-               && Option.is_some (qualifier_of p) ->
-            renders := true
+        | Some p when Option.is_some (emitter_of_path ~emitters ~aliases p) -> renders := true
         | _ -> ());
         super#expression e
     end
@@ -991,9 +1028,8 @@ let classify_source ~emitters ~path ~contents =
   scan_reads#structure structure;
   if not (!reads_generated || !reads_direct || !renders) then None
   else
-    let bindings = bindings_in_structure structure in
-    let seeds = buffer_destinations ~emitters structure in
-    let tainted = tainted_names ~generated ~utils ~emitters ~seeds bindings in
+    let seeds = buffer_destinations ~emitters ~aliases structure in
+    let tainted = tainted_names ~generated ~utils ~emitters ~aliases ~seeds bindings in
     let predicates, consumed = predicates ~generated ~tainted bindings in
     (* A predicate's source parameter IS generated source, inside that predicate's body. Adding the
        name to the tainted set is how the literals a helper tests against it -- the banner it slices
@@ -1020,7 +1056,7 @@ let classify_source ~emitters ~path ~contents =
     let mentions_tainted e =
       List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i)
       || mentions_generated_read ~generated e
-      || renders_generated_text ~emitters e
+      || renders_generated_text ~emitters ~aliases e
       || reads_artifacts_directly ~utils e
     in
     let iterator =

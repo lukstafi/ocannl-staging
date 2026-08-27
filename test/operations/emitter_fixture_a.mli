@@ -27,6 +27,24 @@ val writes_into_a_buffer : buf:Buffer.t -> ir -> unit
 (** [Canonical_render.emit]'s shape: the text lands in the caller's buffer, and the label is what
     the scan taints. *)
 
+type rendered = PPrint.document
+(** A transparent alias of the document type. An interface records the path the declaration spells,
+    not what it abbreviates, so a rule reading paths alone sees no document here. *)
+
+type rendered_again = rendered
+(** And an alias of the alias, since one abbreviation resolves nothing if the next does not. *)
+
+type destination = Buffer.t
+(** The same, for the buffer a serializer writes into. *)
+
+type described = string
+(** The control for all three: an alias that is not a document, so following abbreviations must not
+    turn its function into a renderer. *)
+
+val renders_through_an_alias : ir -> rendered
+val renders_through_a_chain : ir -> rendered_again
+val writes_into_an_aliased_buffer : buf:destination -> ir -> unit
+val describes_through_an_alias : ir -> described
 val combines_documents : int -> PPrint.document
 (** [Doc_helpers.int]'s shape: a document out of a number. Given nothing of the library to render,
     so not on the frontier -- reported as a combinator instead of being dropped. *)

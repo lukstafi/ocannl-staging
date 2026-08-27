@@ -370,6 +370,30 @@ let () = CR.emit ~buf policy llc
 let source = Buffer.contents buf
 let () = p "free" (String.is_substring source ~substring:"s0")|ocaml},
       {|"s0" +rendered|} );
+    ( "an emitter bound to a local name is still the emitter",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write = CR.emit
+let () =
+  let buf = Buffer.create 256 in
+  write ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "an alias of that alias is the emitter too",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write = CR.emit
+let write_again = write
+let () =
+  let buf = Buffer.create 256 in
+  write_again ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "a local name bound to something else is not an emitter",
+      {ocaml|let write = Buffer.add_string
+let () =
+  let buf = Buffer.create 256 in
+  write buf (describe shape);
+  p "shapes agree" (String.is_substring (Buffer.contents buf) ~substring:"3x5")|ocaml},
+      "none" );
     ( "a buffer nobody wrote generated text into carries nothing",
       {ocaml|let buf = Buffer.create 256
 let () = Buffer.add_string buf (describe shape)

@@ -57,6 +57,9 @@ ok: source -- a helper that slices on a banner and tests its own parameter pins 
 ok: source -- a fragment named through a binding is still that fragment
 ok: source -- a buffer-writing serializer is an emitter too
 ok: source -- the buffer a serializer writes into carries the text, across bindings
+ok: source -- an emitter bound to a local name is still the emitter
+ok: source -- an alias of that alias is the emitter too
+ok: source -- a local name bound to something else is not an emitter
 ok: source -- a buffer nobody wrote generated text into carries nothing
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it

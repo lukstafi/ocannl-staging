@@ -589,6 +589,11 @@ that they earn a lookup rather than always-loaded space.
   be told about it — which is the hand-maintained frontier again, the one three of the four review
   rounds on gh-ocannl-712 found a member of. Add a renderer to a library and it is on the frontier
   the day it is exported; nothing to update.
+  - Both types are followed through the library's own abbreviations for them (`type rendered =
+    PPrint.document`), since an interface records the path a declaration spells rather than what it
+    abbreviates. Those are keyed by the module path they are declared in, never by the bare name:
+    `t` is declared in every module of every library, and a bare-name table made emitters of 400
+    values returning some `t` or other (Codex round 1 on #487).
   - The second condition is what keeps generic names out. `Indexing.Doc_helpers.int : int ->
     PPrint.document` renders no program, and since the scan matches an emitter by NAME behind any
     qualifier, admitting it made members of every test calling `Bench_args.int` or
@@ -607,6 +612,14 @@ that they earn a lookup rather than always-loaded space.
     neural_nets_lib` — each `.opam` file's build command — where arrayjit's stanzas are disabled and
     its libraries come from the switch. The member interfaces sit beside that wrapper in the
     installed directory, and `Emitter_frontier` looks for them there.
+- **An indirection between the call site and the emitter is followed, at both levels.** In the
+  library, a transparent type alias (above). In the test, a value alias: `let write = CR.emit` takes
+  the qualifier away from every later call, so `write ~buf policy llc` deposited generated text in
+  `buf` and nothing knew it — the file stayed a member (the alias itself names `CR.emit`), and only
+  the FRAGMENT it then asserts on went missing, without even a partial mark.
+  `Codegen_text_scan.emitter_value_aliases` resolves those to a fixed point, and membership, taint,
+  buffer destinations and the pin walk all go through the one resolver, since rules that know
+  different routes are how a file stays listed while its pin disappears.
 - **An `open` that hides a route is refused, not approximated.** Every route is attributed by the
   qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
   like a local function of that name and drops the file out of the census. `Codegen_text_scan.

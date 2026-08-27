@@ -30,6 +30,11 @@
     [CR.emit ~buf policy llc] deposits generated text in [buf], so [buf] carries the same taint a
     returned document would.
 
+    Both types are recognised through the library's own abbreviations for them: an interface records
+    the path a declaration spells, so [type rendered = PPrint.document] followed by
+    [val emit : ir -> rendered] would otherwise hide the document behind a name (see
+    {!transparent_aliases}).
+
     Over-inclusion is deliberate here, and it is the direction this whole scan errs in: a fragment
     renderer like [C_syntax.pp_scalar] is an emitter by this rule, and if a test calls it, it is
     pinning emitted text. The cost of a name too many is an inventory line; the cost of a name too
@@ -75,19 +80,55 @@ type t = {
 
 let path_components path = String.split (Path.name path) ~on:'.'
 
+type aliases = { documents : Set.M(String).t; buffers : Set.M(String).t }
+(** TRANSPARENT type declarations that are a document, or a buffer, by another name --
+    [type rendered = PPrint.document] and [val emit : ir -> rendered]. Held as the QUALIFIED keys
+    {!transparent_aliases} builds, never as bare names: [t] is declared in every module of every
+    library, so a bare-name table makes one module's transparent [t] speak for all of them. That is
+    not a small over-inclusion -- it made emitters of 400 values returning some [t] or other, and
+    of `Tree_map.add`. *)
+
+let no_aliases = { documents = Set.empty (module String); buffers = Set.empty (module String) }
+
+(** The keys a type path could name, innermost scope first.
+
+    [scope] is where the type is USED, as a path prefix ["Ir__Low_level.Canonical_render."]. A path
+    with a dot in it already says which module it came from and is looked up as it stands; a bare one
+    is a type in scope, so every enclosing module is a candidate -- [policy] inside
+    [Canonical_render] and [t] inside [Low_level] are both spelled bare where they are used.
+
+    What this cannot resolve is a path through a local module alias: [C_syntax] binds
+    [module Tn = Tnode] and its interface records [Tn.t], which names no module this scan reads.
+    Resolving those wants a typing environment; the cost of not doing it is that a transparent alias
+    reached that way is not expanded, which is the same limit -- and the same direction -- as the
+    rest of this module's path reading. *)
+let alias_keys ~scope path_name =
+  if String.contains path_name '.' then [ path_name ]
+  else
+    let enclosing =
+      String.split scope ~on:'.' |> List.filter ~f:(Fn.non String.is_empty)
+    in
+    List.folding_map (List.rev enclosing) ~init:[] ~f:(fun outer component ->
+        let inner = component :: outer in
+        (inner, String.concat ~sep:"." (inner @ [ path_name ])))
+    |> List.rev
+
 (** The type every renderer in this tree produces. Matched on the path's shape rather than on one
     spelling of it: the same type prints as [PPrint.document] and as [PPrint.ToBuffer.document]
-    depending on which alias the interface reached for. *)
-let is_document path =
-  match List.rev (path_components path) with
+    depending on which alias the interface reached for -- or under a name of the library's own, if it
+    declared one transparently. *)
+let is_document ~aliases ~scope path =
+  (match List.rev (path_components path) with
   | "document" :: _ -> List.exists (path_components path) ~f:(String.equal "PPrint")
-  | _ -> false
+  | _ -> false)
+  || List.exists (alias_keys ~scope (Path.name path)) ~f:(Set.mem aliases.documents)
 
 (** A buffer the caller supplies for the text to land in. [Buffer.t] arrives under whichever module
     the defining file had open -- [Stdlib.Buffer.t], [Base.Buffer.t], bare [Buffer.t] -- so the
-    last two components are what identifies it. *)
-let is_buffer path =
-  match List.rev (path_components path) with "t" :: "Buffer" :: _ -> true | _ -> false
+    last two components are what identifies it, and a transparent alias of it counts as well. *)
+let is_buffer ~aliases ~scope path =
+  (match List.rev (path_components path) with "t" :: "Buffer" :: _ -> true | _ -> false)
+  || List.exists (alias_keys ~scope (Path.name path)) ~f:(Set.mem aliases.buffers)
 
 (** The arrow spine of a type: what the value is applied to, and what is left when it is. *)
 let rec spine ty =
@@ -128,18 +169,53 @@ and children ~want ty =
     an arrow only on the way out: [Utils.output_to_build_file], whose result is
     [(PPrint.document -> unit) option], takes documents from its caller and prints them; it renders
     nothing. *)
-let rec produces_document ty =
+let rec produces_document ~aliases ~scope ty =
   match Types.get_desc ty with
-  | Types.Tconstr (path, args, _) -> is_document path || List.exists args ~f:produces_document
-  | Types.Tlink t | Types.Tsubst (t, _) | Types.Tpoly (t, _) -> produces_document t
-  | Types.Tarrow (_, _, cod, _) -> produces_document cod
+  | Types.Tconstr (path, args, _) ->
+      is_document ~aliases ~scope path || List.exists args ~f:(produces_document ~aliases ~scope)
+  | Types.Tlink t | Types.Tsubst (t, _) | Types.Tpoly (t, _) -> produces_document ~aliases ~scope t
+  | Types.Tarrow (_, _, cod, _) -> produces_document ~aliases ~scope cod
   | _ ->
       (* A tuple's components and anything else composite, through the compiler's own traversal --
          see {!children}, whose reasoning this shares. The arrow is the one case that must NOT go
          through it: what a result accepts is not what it produces. *)
       let found = ref false in
-      Btype.iter_type_expr (fun component -> if produces_document component then found := true) ty;
+      Btype.iter_type_expr
+        (fun component -> if produces_document ~aliases ~scope component then found := true)
+        ty;
       !found
+
+(** The transparent type declarations that ARE a document or a buffer, by the name they declare.
+
+    A library may export [type rendered = PPrint.document] and then [val emit : ir -> rendered], and
+    the interface records the declared path, not what it abbreviates -- so a rule reading the path
+    alone would find no document, and the renderer would be silently absent from both lists
+    (Codex round 1 on lukstafi/ocannl-staging#487). Resolving abbreviations properly wants a typing
+    environment; what is needed here is narrower and needs none, since the declarations arrive in the
+    same interfaces the values do: take every manifest that is a document (or a buffer), then repeat
+    until nothing new is found, so a chain of abbreviations resolves like a single one.
+
+    Keyed by the declared NAME rather than by its full path, which is the one place this errs: two
+    libraries could declare that name for different types, and the second would be read as an alias
+    of the first. That direction costs an inventory line; keying by path would need the path as each
+    USE site spells it, which inside its own interface is the bare name again. *)
+let transparent_aliases manifests =
+  let rec settle aliases =
+    let next =
+      List.fold manifests ~init:aliases ~f:(fun acc (key, scope, manifest) ->
+          let acc =
+            if produces_document ~aliases ~scope manifest then
+              { acc with documents = Set.add acc.documents key }
+            else acc
+          in
+          if mentions ~want:(is_buffer ~aliases ~scope) manifest then
+            { acc with buffers = Set.add acc.buffers key }
+          else acc)
+    in
+    if Set.equal next.documents aliases.documents && Set.equal next.buffers aliases.buffers then next
+    else settle next
+  in
+  settle no_aliases
 
 let label_name = function
   | Asttypes.Nolabel -> ""
@@ -187,70 +263,72 @@ type kind = Renders | Combines
     The limit that leaves: a renderer of something CONSTANT -- [unit -> PPrint.document] for a fixed
     preamble -- is given nothing and would not be derived. None exists today, and the shape is
     visible in this rule rather than hidden in a list. *)
-let classify_value ~origin ~name val_type =
+let classify_value ~aliases ~scope ~origin ~name val_type =
   let doms, result = spine val_type in
   let buffer_labels =
     List.filter_map doms ~f:(fun (label, dom) ->
-        if mentions ~want:is_buffer dom then Some (label_name label) else None)
+        if mentions ~want:(is_buffer ~aliases ~scope) dom then Some (label_name label) else None)
     |> List.dedup_and_sort ~compare:String.compare
   in
   let given_something_to_render =
     List.exists doms ~f:(fun (_, dom) -> mentions ~want:is_rendered_type dom)
   in
-  if produces_document result || not (List.is_empty buffer_labels) then
+  if produces_document ~aliases ~scope result || not (List.is_empty buffer_labels) then
     Some
-      ((if given_something_to_render then Renders else Combines), { name; origins = [ origin ]; buffer_labels })
+      ( (if given_something_to_render then Renders else Combines),
+        { name; origins = [ origin ]; buffer_labels } )
   else None
 
 (* -------------------------------------------------------------- signatures *)
 
-type tables = {
-  renders : (string, emitter) Hashtbl.t;
-  combines : (string, emitter) Hashtbl.t;
-}
-(** The two buckets, filled by one walk. *)
+type tables = { renders : (string, emitter) Hashtbl.t; combines : (string, emitter) Hashtbl.t }
+(** The two buckets, filled once every interface has been read. *)
 
-(** The values an interface exports, with the modules and module types it nests.
+type collected = {
+  mutable values : (string * string * string * Types.type_expr) list;
+      (** Origin, scope, name and type of every exported value, in reading order. The scope is the
+          module path the value is declared in, as the interfaces spell it
+          ([Ir__Low_level.Canonical_render.]), which is what a bare type name in its type resolves
+          against. *)
+  mutable manifests : (string * string * Types.type_expr) list;
+      (** Every transparent type declaration, by the name it declares. Collected in the same walk as
+          the values and consumed before them: whether a value produces a document can depend on an
+          abbreviation declared anywhere in these interfaces, so nothing is classified until all of
+          them have been read. *)
+}
+
+(** The values and transparent types an interface exports, with the modules and module types it
+    nests.
 
     Module types are walked as well as modules: a signature is what some module implements, and the
     backends implement [C_syntax_config] -- so a renderer declared only there is still one a call
     site can reach. *)
-let rec walk_signature ~prefix ~found items =
+let rec walk_signature ~prefix ~scope ~into items =
   List.iter items ~f:(fun item ->
       match item with
-      | Types.Sig_value (id, vd, _) -> (
+      | Types.Sig_value (id, vd, _) ->
           let name = Ident.name id in
-          match classify_value ~origin:(prefix ^ name) ~name vd.Types.val_type with
-          | None -> ()
-          | Some (kind, value) ->
-              (* One name, one entry per bucket: [to_doc] is three modules' renderer, and a name that
-                 both renders and combines (through different modules) belongs on the frontier, so
-                 the buckets are kept apart and the frontier wins where they overlap. *)
-              let table = match kind with Renders -> found.renders | Combines -> found.combines in
-              let key = name in
-              let merged =
-                match Hashtbl.find table key with
-                | None -> value
-                | Some previous ->
-                    {
-                      value with
-                      origins = previous.origins @ value.origins;
-                      buffer_labels = previous.buffer_labels @ value.buffer_labels;
-                    }
-              in
-              Hashtbl.set table ~key ~data:merged)
+          into.values <- (prefix ^ name, scope, name, vd.Types.val_type) :: into.values
+      | Types.Sig_type (id, declaration, _, _) ->
+          Option.iter declaration.Types.type_manifest ~f:(fun manifest ->
+              into.manifests <- (scope ^ Ident.name id, scope, manifest) :: into.manifests)
       | Types.Sig_module (id, _, md, _, _) ->
-          walk_module_type ~prefix:(prefix ^ Ident.name id ^ ".") ~found md.Types.md_type
+          walk_module_type
+            ~prefix:(prefix ^ Ident.name id ^ ".")
+            ~scope:(scope ^ Ident.name id ^ ".") ~into md.Types.md_type
       | Types.Sig_modtype (id, md, _) ->
           Option.iter md.Types.mtd_type
-            ~f:(walk_module_type ~prefix:(prefix ^ Ident.name id ^ ".") ~found)
-      | Types.Sig_type _ | Types.Sig_typext _ | Types.Sig_class _ | Types.Sig_class_type _ -> ())
+            ~f:
+              (walk_module_type
+                 ~prefix:(prefix ^ Ident.name id ^ ".")
+                 ~scope:(scope ^ Ident.name id ^ ".") ~into)
+      | Types.Sig_typext _ | Types.Sig_class _ | Types.Sig_class_type _ -> ())
 
-and walk_module_type ~prefix ~found = function
-  | Types.Mty_signature items -> walk_signature ~prefix ~found items
+and walk_module_type ~prefix ~scope ~into = function
+  | Types.Mty_signature items -> walk_signature ~prefix ~scope ~into items
   (* A functor's parameter is what the caller supplies; its BODY is what the application exports,
      and [C_syntax.C_syntax] -- where [compile_proc] lives -- is exactly such a body. *)
-  | Types.Mty_functor (_, body) -> walk_module_type ~prefix ~found body
+  | Types.Mty_functor (_, body) -> walk_module_type ~prefix ~scope ~into body
   (* A named signature ([Mty_ident]) and an alias ([Mty_alias]) both point elsewhere; the elsewhere
      is a module of the same library, walked in its own right. Open for the same reason the type
      match above is: [Types.module_type] differs between the compilers this builds on. *)
@@ -314,9 +392,7 @@ let read_signature path = (Cmi_format.read_cmi path).Cmi_format.cmi_sign
     the whole installed directory is on disk, while an in-workspace build hands over the object
     directory. Whatever is still missing is reported, never assumed absent. *)
 let derive paths =
-  let found =
-    { renders = Hashtbl.create (module String); combines = Hashtbl.create (module String) }
-  in
+  let into = { values = []; manifests = [] } in
   let available =
     List.map paths ~f:(fun path -> (module_of_path path, path))
     |> Map.of_alist_reduce (module String) ~f:(fun first _ -> first)
@@ -341,7 +417,8 @@ let derive paths =
         let declared =
           List.concat_map group ~f:(fun (wrapper_module, wrapper) ->
               let items = read_signature wrapper in
-              walk_signature ~prefix:(prefix_of wrapper_module) ~found items;
+              walk_signature ~prefix:(prefix_of wrapper_module) ~scope:(wrapper_module ^ ".")
+                ~into items;
               List.filter_map (top_level_aliases items) ~f:(member_of ~library))
           |> List.dedup_and_sort ~compare:String.compare
         in
@@ -361,9 +438,33 @@ let derive paths =
               | None, None -> Second target)
         in
         List.iter read ~f:(fun (target, path) ->
-            walk_signature ~prefix:(prefix_of target) ~found (read_signature path));
+            walk_signature ~prefix:(prefix_of target) ~scope:(target ^ ".") ~into
+              (read_signature path));
         { library; declared; read = List.map read ~f:fst; missing })
   in
+  (* Every interface has been read before anything is classified: an abbreviation declared in one of
+     them decides whether a value in another produces a document. *)
+  let aliases = transparent_aliases into.manifests in
+  let buckets = { renders = Hashtbl.create (module String); combines = Hashtbl.create (module String) } in
+  List.iter (List.rev into.values) ~f:(fun (origin, scope, name, val_type) ->
+      match classify_value ~aliases ~scope ~origin ~name val_type with
+      | None -> ()
+      | Some (kind, value) ->
+          (* One name, one entry per bucket: [to_doc] is three modules' renderer, and a name that
+             both renders and combines (through different modules) belongs on the frontier, so the
+             buckets are kept apart and the frontier wins where they overlap. *)
+          let table = match kind with Renders -> buckets.renders | Combines -> buckets.combines in
+          let merged =
+            match Hashtbl.find table name with
+            | None -> value
+            | Some previous ->
+                {
+                  value with
+                  origins = previous.origins @ value.origins;
+                  buffer_labels = previous.buffer_labels @ value.buffer_labels;
+                }
+          in
+          Hashtbl.set table ~key:name ~data:merged);
   let collect table =
     Hashtbl.data table
     |> List.map ~f:(fun e ->
@@ -374,11 +475,11 @@ let derive paths =
            })
     |> List.sort ~compare:(fun a b -> String.compare a.name b.name)
   in
-  let emitters = collect found.renders in
+  let emitters = collect buckets.renders in
   (* A name that renders under one module and merely combines under another is on the frontier: the
      scan matches names, and the rendering spelling is the one that has to be caught. *)
   let combinators =
-    List.filter (collect found.combines) ~f:(fun c ->
+    List.filter (collect buckets.combines) ~f:(fun c ->
         not (List.exists emitters ~f:(fun e -> String.equal e.name c.name)))
   in
   { emitters; combinators; interfaces }
