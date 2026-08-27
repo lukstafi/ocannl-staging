@@ -1782,20 +1782,44 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
      file rather than its own group -- otherwise descending into the wrapper found both stanzas and
      then discarded the relationship between them (Codex P2, round 4). *)
   let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
-  let identities stanza =
-    List.concat_map (names_of stanza) ~f:(fun name ->
-        let local = name ^ ".exe" in
-        if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
-    @ (match field stanza "public_name" with Some [ Sexp.Atom public ] -> [ public ] | _ -> [])
-    @
+  (* The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
+     POSITIONALLY with [(names a b)], which is what lets one name of an [(executables …)] be asked
+     about on its own (gh-ocannl-747); [-] is dune's placeholder for a name that is not installed. *)
+  let public_names stanza =
     match field stanza "public_names" with
     | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
-    | None -> []
+    | None -> ( match field stanza "public_name" with Some [ Sexp.Atom p ] -> [ p ] | _ -> [])
   in
-  let runners_of stanza =
-    let wanted = identities stanza in
+  let local_identities name =
+    let local = name ^ ".exe" in
+    if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ]
+  in
+  (* The spellings ONE name of the stanza answers to. Asked per name rather than per stanza: an
+     [(executables (names a b))] declares two programs, and a rule running `b.exe` is not a runner
+     of `a` -- it links neither `a`'s main module nor anything only `a` links. *)
+  let identities stanza ~index ~name =
+    local_identities name
+    @
+    match List.nth (public_names stanza) index with
+    | Some public when not (String.equal public "-") -> [ public ]
+    | _ -> []
+  in
+  let runners_of stanza ~index ~name =
+    let wanted = identities stanza ~index ~name in
     List.filter runner_stanzas ~f:(fun s ->
         List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
+  in
+  (* Dune's own main-module rule (gh-ocannl-747): the executable named [a] is built from the module
+     [a] of the stanza's module set, and every module that is no name's main module is linked into
+     all of them. Matched case-insensitively, since a module name is the capitalized source
+     basename and the [(names …)] field spells the file's.
+
+     What it decides is attribution. Before it, an [(executables (names a b) (modules a b))] stanza
+     combined both programs into one subject, so a rule running EITHER counted as a runner of both:
+     with `a.ml` calling the initializer and only `b.exe`'s rule omitting the declaration, `a` was
+     reported undeclared over a rule that runs neither its main module nor its initializer. *)
+  let main_module_of modules name =
+    List.find modules ~f:(fun m -> String.equal (String.lowercase m) (String.lowercase name))
   in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
      executable, a command it could not place, a program under an unresolvable `chdir`. That is what
@@ -1817,18 +1841,19 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
     | Sexp.List [] | Sexp.Atom _ -> false
   in
   let module_subjects =
-    List.filter_map stanzas ~f:(fun stanza ->
+    List.concat_map stanzas ~f:(fun stanza ->
         match head stanza with
         | Some h when List.mem module_bearing_heads h ~equal:String.equal -> (
             let modules = modules_of ~directory_modules stanzas stanza in
             let callers = List.filter modules ~f:calls in
             let readers = List.filter modules ~f:(fun m -> (not (calls m)) && reads_prefix m) in
             let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
-            let subject artifact_verdict artifact_deps_site =
+            let subject ?(as_name = name) ?(callers = callers) ?(readers = readers) artifact_verdict
+                artifact_deps_site =
               Some
                 {
                   artifact_head = h;
-                  artifact_name = name;
+                  artifact_name = as_name;
                   artifact_callers = callers;
                   artifact_readers = readers;
                   artifact_deps_site;
@@ -1844,7 +1869,8 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
              declaration for a direct reader without ever requiring one, which leaves exactly the
              stale run this check is about (Codex P2, round 3). Which of the two it is decides only
              the wording of the verdict. *)
-            let decide ~all ~any site =
+            let decide ?as_name ?(callers = callers) ?(readers = readers) ~all ~any site =
+              let subject = subject ?as_name ~callers ~readers in
               match (callers, readers, all, any) with
               | [], [], _, false -> None
               | [], [], _, true -> subject Artifact_stale_declaration site
@@ -1854,7 +1880,9 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
             in
             let declares args = declares_env_var args artifact_env_var in
             match h with
-            | "library" -> (
+            | "library" ->
+                Option.to_list
+                @@
                 if
                   (* A library module CALLING the initializer is prohibited whether or not the
                      library also has inline tests: `init` empties the artifact directory of
@@ -1865,30 +1893,48 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                      where the library's own tests run, and not judged at all where it has none. *)
                   not (List.is_empty callers)
                 then subject Artifact_in_library "-"
-                else
+                else (
                   match field stanza "inline_tests" with
                   | None -> None
                   | Some inline ->
                       let declared = declares (field_in inline "deps") in
                       decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
-            | "executable" | "executables" -> (
-                let names = names_of stanza in
-                match runners_of stanza with
-                | [] ->
-                    if List.is_empty callers && List.is_empty readers then None
-                    else subject Artifact_unrun "-"
-                | runners ->
-                    let declared = List.map runners ~f:(fun r -> declares (field r "deps")) in
-                    decide ~all:(List.for_all declared ~f:Fn.id)
-                      ~any:(List.exists declared ~f:Fn.id)
-                      (Printf.sprintf "the `(deps …)` of the %d rule%s running %s"
-                         (List.length runners)
-                         (if List.length runners = 1 then "" else "s")
-                         (String.concat ~sep:", " (List.map names ~f:(fun n -> n ^ ".exe")))))
+            | "executable" | "executables" ->
+                (* One subject per NAME, since one name is one program: its own main module plus
+                   every module no name claims, judged against the rules that run IT (gh-ocannl-747).
+                   For the single-name shape -- everything in this repository -- that is the same
+                   partition as before, the whole module set against every runner. *)
+                let names = match names_of stanza with [] -> [ "<unnamed>" ] | names -> names in
+                let mains = List.filter_map names ~f:(main_module_of modules) in
+                let shared =
+                  List.filter modules ~f:(fun m -> not (List.mem mains m ~equal:String.equal))
+                in
+                List.concat_mapi names ~f:(fun index name ->
+                    let own = Option.to_list (main_module_of modules name) @ shared in
+                    let callers = List.filter own ~f:calls in
+                    let readers =
+                      List.filter own ~f:(fun m -> (not (calls m)) && reads_prefix m)
+                    in
+                    let decide = decide ~as_name:name ~callers ~readers in
+                    Option.to_list
+                      (match runners_of stanza ~index ~name with
+                      | [] ->
+                          if List.is_empty callers && List.is_empty readers then None
+                          else subject ~as_name:name ~callers ~readers Artifact_unrun "-"
+                      | runners ->
+                          let declared =
+                            List.map runners ~f:(fun r -> declares (field r "deps"))
+                          in
+                          decide ~all:(List.for_all declared ~f:Fn.id)
+                            ~any:(List.exists declared ~f:Fn.id)
+                            (Printf.sprintf "the `(deps …)` of the %d rule%s running %s.exe"
+                               (List.length runners)
+                               (if List.length runners = 1 then "" else "s")
+                               name)))
             | _ ->
                 let declared = declares (field stanza "deps") in
-                decide ~all:declared ~any:declared "its `(deps …)`")
-        | _ -> None)
+                Option.to_list (decide ~all:declared ~any:declared "its `(deps …)`"))
+        | _ -> [])
   in
   (* The converse over the stanzas the question above does not reach. A `(rule …)` names no modules,
      so it is a subject only through the executable it runs -- and a rule that declares the variable

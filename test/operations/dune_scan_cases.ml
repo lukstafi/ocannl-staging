@@ -1219,6 +1219,42 @@ let artifact_cases =
       {dune|(library (name l) (modules l) (libraries base))|dune},
       [],
       [] );
+    (* gh-ocannl-747: an `(executables …)` declares one program per name, and dune builds each from
+       its OWN main module -- `a` from `a.ml`. Combining them into one subject made a rule running
+       either count as a runner of both, so `b.exe`'s missing declaration was reported against `a`,
+       whose main module and initializer `b` does not link. Attribution follows dune's rule now: one
+       subject per name, its main module plus whatever no name claims. *)
+    ( "one of two executables in a stanza calls the initializer",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:a.exe})))
+(rule (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* The other name, with the declarations swapped: what is reported is the program whose module
+       calls, and it is reported over ITS runner. *)
+    ( "and the same stanza with the declaration on the wrong rule",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps ocannl_config) (action (run %{dep:a.exe})))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: undeclared (a)"; "executables b: stale declaration" ] );
+    (* A module that is no name's main module is linked into every program of the stanza, so it is
+       every name's caller and every runner has to declare -- the combining behaviour, kept where it
+       is the right answer. *)
+    ( "a shared module's call belongs to both programs",
+      {dune|(executables (names a b) (modules a b helper))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:a.exe})))
+(rule (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "helper" ],
+      [ "executables a: declared (helper)"; "executables b: undeclared (helper)" ] );
+    (* And `(public_names …)` pairs positionally with `(names …)`, so a runner naming one program's
+       public name is that program's runner and not the other's. `-` is dune's placeholder for a
+       name that is not installed. *)
+    ( "a public name answers for its own program only",
+      {dune|(executables (names a b) (public_names - pkg.b) (modules a b))
+(rule (deps ocannl_config) (action (run %{bin:pkg.b})))|dune},
+      [ "a" ],
+      [ "executables a: unrun (a)" ] );
   ]
 
 (* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,

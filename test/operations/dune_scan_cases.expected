@@ -91,6 +91,10 @@ ok: artifact declaration -- an executable nothing in the file runs has no deps f
 ok: artifact declaration -- a plain library module calling the initializer is reported as such
 ok: artifact declaration -- adding inline tests does not license a library initializer
 ok: artifact declaration -- and a library that does not call it is not a subject
+ok: artifact declaration -- one of two executables in a stanza calls the initializer
+ok: artifact declaration -- and the same stanza with the declaration on the wrong rule
+ok: artifact declaration -- a shared module's call belongs to both programs
+ok: artifact declaration -- a public name answers for its own program only
 ok: artifact across subdirs -- a top-level rule is the runner of a nested executable
 ok: artifact across subdirs -- and the same rule without the declaration is reported, not taken for absent
 ok: artifact default modules -- a single-module test with no modules field owns its own source
