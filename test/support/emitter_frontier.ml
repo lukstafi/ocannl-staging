@@ -51,13 +51,25 @@
 
 open Base
 
+type destination = At_label of string | At_position of int
+(** Where a call to a buffer-writing emitter leaves its text: an argument named by its label, or the
+    n-th of the arguments that carry none. Positions count only the unlabelled arguments, which is
+    what makes them survive an optional argument the call site omits. *)
+
 type emitter = {
   name : string;  (** The value's name, which is what a call site spells behind its qualifier. *)
   origins : string list;  (** Every qualified path defining it, sorted. *)
-  buffer_labels : string list;
-      (** Labels of its [Buffer.t] parameters: the arguments generated text lands in. Sorted;
-          [""] stands for an unlabelled one. *)
+  destinations : destination list;
+      (** Its [Buffer.t] parameters: where the generated text lands when the emitter writes rather
+          than returns. Sorted, deduplicated. *)
 }
+
+let render_destination = function
+  | At_label label -> "~" ^ label
+  | At_position position -> Printf.sprintf "argument %d" position
+
+let compare_destination a b =
+  String.compare (render_destination a) (render_destination b)
 
 type interface = {
   library : string;  (** The wrapper module's name, [Ir] for [arrayjit.ir]. *)
@@ -265,18 +277,24 @@ type kind = Renders | Combines
     visible in this rule rather than hidden in a list. *)
 let classify_value ~aliases ~scope ~origin ~name val_type =
   let doms, result = spine val_type in
-  let buffer_labels =
-    List.filter_map doms ~f:(fun (label, dom) ->
-        if mentions ~want:(is_buffer ~aliases ~scope) dom then Some (label_name label) else None)
-    |> List.dedup_and_sort ~compare:String.compare
+  let destinations =
+    List.folding_map doms ~init:0 ~f:(fun position (label, dom) ->
+        let unlabelled = match label with Asttypes.Nolabel -> true | _ -> false in
+        let next = if unlabelled then position + 1 else position in
+        ( next,
+          if mentions ~want:(is_buffer ~aliases ~scope) dom then
+            Some (if unlabelled then At_position position else At_label (label_name label))
+          else None ))
+    |> List.filter_opt
+    |> List.dedup_and_sort ~compare:compare_destination
   in
   let given_something_to_render =
     List.exists doms ~f:(fun (_, dom) -> mentions ~want:is_rendered_type dom)
   in
-  if produces_document ~aliases ~scope result || not (List.is_empty buffer_labels) then
+  if produces_document ~aliases ~scope result || not (List.is_empty destinations) then
     Some
       ( (if given_something_to_render then Renders else Combines),
-        { name; origins = [ origin ]; buffer_labels } )
+        { name; origins = [ origin ]; destinations } )
   else None
 
 (* -------------------------------------------------------------- signatures *)
@@ -461,7 +479,7 @@ let derive paths =
                 {
                   value with
                   origins = previous.origins @ value.origins;
-                  buffer_labels = previous.buffer_labels @ value.buffer_labels;
+                  destinations = previous.destinations @ value.destinations;
                 }
           in
           Hashtbl.set table ~key:name ~data:merged);
@@ -471,7 +489,7 @@ let derive paths =
            {
              e with
              origins = List.dedup_and_sort e.origins ~compare:String.compare;
-             buffer_labels = List.dedup_and_sort e.buffer_labels ~compare:String.compare;
+             destinations = List.dedup_and_sort e.destinations ~compare:compare_destination;
            })
     |> List.sort ~compare:(fun a b -> String.compare a.name b.name)
   in

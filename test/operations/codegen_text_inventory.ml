@@ -116,7 +116,10 @@ let () =
         {
           Scan.emitter_name = e.Emitter_frontier.name;
           Scan.origins = e.Emitter_frontier.origins;
-          Scan.buffer_labels = e.Emitter_frontier.buffer_labels;
+          Scan.destinations =
+            List.map e.Emitter_frontier.destinations ~f:(function
+              | Emitter_frontier.At_label label -> Scan.At_label label
+              | Emitter_frontier.At_position position -> Scan.At_position position);
         })
   in
   let present name = List.exists all_ml ~f:(fun (n, _) -> String.equal n name) in
@@ -207,15 +210,15 @@ let () =
   printf "interfaces read: %s\n"
     (String.concat ~sep:", "
        (List.map frontier.Emitter_frontier.interfaces ~f:(fun i -> i.Emitter_frontier.library)));
-  List.iter emitters ~f:(fun e ->
-      printf "%s%s [%s]\n" e.Scan.emitter_name
-        (match e.Scan.buffer_labels with
+  List.iter frontier.Emitter_frontier.emitters ~f:(fun e ->
+      printf "%s%s [%s]\n" e.Emitter_frontier.name
+        (match e.Emitter_frontier.destinations with
         | [] -> ""
-        | labels ->
-            " writes into ~"
-            ^ String.concat ~sep:" ~"
-                (List.map labels ~f:(fun l -> if String.is_empty l then "(unlabelled)" else l)))
-        (String.concat ~sep:" " e.Scan.origins));
+        | destinations ->
+            " writes into "
+            ^ String.concat ~sep:" "
+                (List.map destinations ~f:Emitter_frontier.render_destination))
+        (String.concat ~sep:" " e.Emitter_frontier.origins));
   (* The other half of the derivation, printed rather than dropped. These produce a document out of
      strings, numbers and other documents -- nothing the libraries define -- so they render no
      program, and matching such a name behind any qualifier would make a member of every test that

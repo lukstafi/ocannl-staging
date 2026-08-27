@@ -612,14 +612,24 @@ that they earn a lookup rather than always-loaded space.
     neural_nets_lib` — each `.opam` file's build command — where arrayjit's stanzas are disabled and
     its libraries come from the switch. The member interfaces sit beside that wrapper in the
     installed directory, and `Emitter_frontier` looks for them there.
-- **An indirection between the call site and the emitter is followed, at both levels.** In the
-  library, a transparent type alias (above). In the test, a value alias: `let write = CR.emit` takes
-  the qualifier away from every later call, so `write ~buf policy llc` deposited generated text in
-  `buf` and nothing knew it — the file stayed a member (the alias itself names `CR.emit`), and only
-  the FRAGMENT it then asserts on went missing, without even a partial mark.
-  `Codegen_text_scan.emitter_value_aliases` resolves those to a fixed point, and membership, taint,
-  buffer destinations and the pin walk all go through the one resolver, since rules that know
-  different routes are how a file stays listed while its pin disappears.
+- **An indirection between the call site and the emitter is followed wherever one file can see
+  it.** In the library, a transparent type alias (above). In the test, four shapes, all of which
+  left the FILE listed while the fragment it asserts on went missing — the invisible-omission shape,
+  since a member itemising nothing looks exactly like a member with nothing to itemise. A module
+  alias (`module CR = …` then `CR.emit`) was always fine, since emitters match by name behind any
+  qualifier; `Codegen_text_scan.emitter_aliases` adds the value alias (`let write = CR.emit`) and
+  the wrapper (`let write ~buf p llc = CR.emit ~buf p llc`, whose own parameter is where the
+  caller's buffer arrives — by label, or by position among the unlabelled arguments); and
+  `module_alias_targets` resolves an `open` of an aliased emitter module, which the rejection below
+  would otherwise miss. Membership, taint, the buffer destinations and the pin walk all go through
+  the one resolver: rules that know different routes are how a file stays listed while its pin
+  disappears.
+- **What no file-local rule can follow now says so.** A buffer is where generated text lands with no
+  name to carry it, and the ways to fill one do not end (a wrapper reaching its parameter through a
+  local binding, PPrint's own `ToBuffer` renderers, a buffer in a record). So a substring test whose
+  haystack reads a `Buffer.contents` this scan never saw filled marks that file's itemisation
+  **partial** rather than dropping the fragment silently — the file is listed, the fragment is
+  unnamed, and the inventory says which.
 - **An `open` that hides a route is refused, not approximated.** Every route is attributed by the
   qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
   like a local function of that name and drops the file out of the census. `Codegen_text_scan.

@@ -45,6 +45,10 @@ val renders_through_an_alias : ir -> rendered
 val renders_through_a_chain : ir -> rendered_again
 val writes_into_an_aliased_buffer : buf:destination -> ir -> unit
 val describes_through_an_alias : ir -> described
+val writes_into_an_unlabelled_buffer : ir -> Buffer.t -> unit
+(** A destination with no label, which a call site can only address by position. The position counts
+    the arguments that carry no label, so an optional one the caller omits does not move it. *)
+
 val combines_documents : int -> PPrint.document
 (** [Doc_helpers.int]'s shape: a document out of a number. Given nothing of the library to render,
     so not on the frontier -- reported as a combinator instead of being dropped. *)

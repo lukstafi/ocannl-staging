@@ -140,15 +140,19 @@ let golden_cases =
     such a set once it has one -- which call sites it recognises, which it refuses, and where the
     text a buffer-writing emitter deposits travels. *)
 let emitters =
-  let emitter ?(buffer_labels = []) name origin =
-    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.buffer_labels = buffer_labels }
+  let emitter ?(destinations = []) name origin =
+    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.destinations = destinations }
   in
   [
     emitter "compile_proc" "Ir.C_syntax.C_syntax.compile_proc";
     emitter "compile_main" "Ir.C_syntax.C_syntax.compile_main";
     emitter "to_doc" "Ir.Low_level.to_doc";
     emitter "to_doc_cstyle" "Ir.Low_level.to_doc_cstyle";
-    emitter "emit" "Ir.Low_level.Canonical_render.emit" ~buffer_labels:[ "buf" ];
+    emitter "emit" "Ir.Low_level.Canonical_render.emit" ~destinations:[ Scan.At_label "buf" ];
+    (* An emitter whose buffer carries no label, so a call site addresses it by position. Nothing in
+       the libraries has that shape today; the rule has to have it either way, since a position is
+       what an unlabelled destination is. *)
+    emitter "render_into" "Ir.Low_level.render_into" ~destinations:[ Scan.At_position 0 ];
   ]
 
 let render_site = function
@@ -387,6 +391,34 @@ let () =
   write_again ~buf policy llc;
   p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
       {|"s0" +rendered|} );
+    (* Round 2's genre, and the last shape of it a scan of one file can follow: the emitter behind a
+       WRAPPER, whose own parameter is what the caller's buffer arrives through. *)
+    ( "a wrapper around an emitter carries its caller's buffer",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write ~buf policy llc = CR.emit ~buf policy llc
+let () =
+  let output = Buffer.create 256 in
+  write ~buf:output policy llc;
+  p "free" (String.is_substring (Buffer.contents output) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "a wrapper whose buffer parameter carries no label is addressed by position",
+      {ocaml|module LL = Ir.Low_level
+let write buf llc = LL.render_into buf llc
+let () =
+  let output = Buffer.create 256 in
+  write output llc;
+  p "radix" (String.is_substring (Buffer.contents output) ~substring:"-0.0")|ocaml},
+      {|"-0.0" +rendered|} );
+    (* And the backstop for the shapes it cannot: PPrint's own buffer renderer is not an emitter of
+       ours, so nothing taints [buf] -- the file is a member through [LL.to_doc] all the same, and
+       what must not happen is the fragment vanishing with no sign. *)
+    ( "a buffer this scan did not see filled marks the itemisation partial",
+      {ocaml|module LL = Ir.Low_level
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (Buffer.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
     ( "a local name bound to something else is not an emitter",
       {ocaml|let write = Buffer.add_string
 let () =
@@ -438,6 +470,13 @@ let () =
       {ocaml|let go () =
   let open Test_utils.Generated in
   String.is_substring (read "r") ~substring:"threadgroup float"|ocaml},
+      1 );
+    ( "opening an ALIAS of the emitter's module hides it under a name no origin spells",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+open CR
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
       1 );
     (* The controls. Opening a module is ordinary OCaml; what is refused is opening one whose names
        this scan attributes, and then using one of THOSE names. *)

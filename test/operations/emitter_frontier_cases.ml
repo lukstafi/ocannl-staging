@@ -61,6 +61,7 @@ let () =
         "renders_without_an_annotation";
         "writes_into_a_buffer";
         "writes_into_an_aliased_buffer";
+        "writes_into_an_unlabelled_buffer";
       ];
   (* The near misses, and why each is one: [combines_documents] and [joins_documents] produce a
      document out of numbers and other documents, so they render no program -- and since the scan
@@ -71,12 +72,18 @@ let () =
   same "the fixture's document combinators are told apart from its renderers"
     ~derived:(names derived.F.combinators)
     ~declared:[ "combines_documents"; "joins_documents" ];
-  let buffer_labels =
+  let destinations =
     List.concat_map derived.F.emitters ~f:(fun e ->
-        List.map e.F.buffer_labels ~f:(fun label -> e.F.name ^ ":~" ^ label))
+        List.map e.F.destinations ~f:(fun destination ->
+            e.F.name ^ ": " ^ F.render_destination destination))
   in
-  same "a buffer-writing emitter comes back with the label its text lands in" ~derived:buffer_labels
-    ~declared:[ "writes_into_a_buffer:~buf"; "writes_into_an_aliased_buffer:~buf" ];
+  same "a buffer-writing emitter comes back with where its text lands" ~derived:destinations
+    ~declared:
+      [
+        "writes_into_a_buffer: ~buf";
+        "writes_into_an_aliased_buffer: ~buf";
+        "writes_into_an_unlabelled_buffer: argument 1";
+      ];
   let declared = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.declared) in
   let read = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.read) in
   same "every module the fixture's wrapper interface declares was read" ~derived:read
