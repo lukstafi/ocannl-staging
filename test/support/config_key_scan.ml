@@ -299,7 +299,6 @@ let could_call_generated_init content = String.is_substring content ~substring:g
     over-reading direction {!receiver_is_generated} accepts, and the safe one here too. *)
 let module_references_in_source content ~paths =
   let structure = structure_of content in
-  let found = ref [] in
   let rec starts_with components path =
     match (components, path) with
     | _, [] -> true
@@ -310,6 +309,82 @@ let module_references_in_source content ~paths =
     starts_with components path
     || match components with [] -> false | _ :: rest -> contains rest path
   in
+  (* The qualifiers the caller's paths are written under -- [["Ir"]] for [Ir.Alloc_census] -- since
+     a source may reach the same module without writing one: [open Ir] then [Alloc_census.snapshot],
+     or [module I = Ir] then [I.Alloc_census.t]. Both spell a real reference to the same module, and
+     a match that insisted on the literal qualifier would call neither a use (Codex P2, round 6).
+     Collected in a first pass, exactly as {!generated_init_calls_in_source} collects its aliases,
+     and for the same reason: OCaml lets neither be used before it is bound. *)
+  let qualifiers =
+    List.filter_map paths ~f:(fun path ->
+        match List.rev path with _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier) | _ -> None)
+    |> List.dedup_and_sort ~compare:(List.compare String.compare)
+  in
+  let aliases = ref [] and opened = ref [] in
+  let names_qualifier qualifier components =
+    contains components qualifier
+    ||
+    match components with
+    | [ single ] ->
+        List.exists !aliases ~f:(fun (alias, of_qualifier) ->
+            String.equal alias single && List.equal String.equal of_qualifier qualifier)
+    | _ -> false
+  in
+  let bind_module_expr alias module_expr =
+    let rec unwrap module_expr =
+      match module_expr.pmod_desc with
+      | Pmod_constraint (inner, _) -> unwrap inner
+      | _ -> module_expr
+    in
+    match (unwrap module_expr).pmod_desc with
+    | Pmod_ident { txt; _ } -> (
+        match flatten_module_path txt with
+        | None -> ()
+        | Some components ->
+            List.iter qualifiers ~f:(fun qualifier ->
+                if names_qualifier qualifier components then
+                  match alias with
+                  | Some alias -> aliases := (alias, qualifier) :: !aliases
+                  | None -> opened := qualifier :: !opened))
+    | _ -> ()
+  in
+  let binders =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
+            bind_module_expr alias pmb_expr
+        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
+        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  binders#structure structure;
+  let found = ref [] in
+  let matches components path =
+    let qualifier, name =
+      match List.rev path with
+      | name :: rev_qualifier -> (List.rev rev_qualifier, name)
+      | [] -> ([], "")
+    in
+    contains components path
+    || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
+           List.equal String.equal of_qualifier qualifier && contains components [ alias; name ])
+    (* Under an `open`, the reference begins with the module's own name -- STARTS with, not
+       contains, so that `Foo.Alloc_census` stays Foo's. *)
+    || (List.exists !opened ~f:(List.equal String.equal qualifier)
+       && starts_with components [ name ])
+  in
   let walk =
     object
       inherit Ast_traverse.iter as super
@@ -319,9 +394,7 @@ let module_references_in_source content ~paths =
         | Some components ->
             List.iter paths ~f:(fun path ->
                 let spelling = String.concat ~sep:"." path in
-                if
-                  contains components path
-                  && not (List.mem !found spelling ~equal:String.equal)
+                if matches components path && not (List.mem !found spelling ~equal:String.equal)
                 then found := spelling :: !found)
         | None -> ());
         super#longident lid

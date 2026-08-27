@@ -315,6 +315,13 @@ let lifecycle_modules =
 
 let lifecycle_module_names = List.map lifecycle_modules ~f:(String.concat ~sep:".")
 
+(* What a source has to SPELL for any reference to reach the instrumentation: the module's own name.
+   The qualifier is not part of that -- `open Ir` then `Alloc_census.snapshot` writes a real
+   reference and no `Ir.Alloc_census` anywhere (Codex P2, round 6) -- so the textual filter narrows
+   on the last component alone and the parse decides. *)
+let lifecycle_module_leaves =
+  List.filter_map lifecycle_modules ~f:(fun path -> List.last path)
+
 let lifecycle_family =
   {
     family_alias = "lifecycle";
@@ -665,7 +672,7 @@ let main () =
            focused alias for a test that never touches the instrumentation (Codex P2, round 4). *)
         if
           not
-            (List.exists lifecycle_module_names ~f:(fun m ->
+            (List.exists lifecycle_module_leaves ~f:(fun m ->
                  String.is_substring content ~substring:m))
         then None
         else
@@ -2324,6 +2331,8 @@ type family_probe_source =
   | Reads  (** a real reference to the instrumentation *)
   | Mentions_only  (** the module named in a comment and a string literal, and nowhere else *)
   | Same_named  (** a module of the same LAST name, reached through another qualifier *)
+  | Opened  (** `open Ir`, then the module named without its qualifier *)
+  | Qualifier_aliased  (** `module I = Ir`, then the module named through the alias *)
   | Neither
 
 let family_probe = function
@@ -2332,6 +2341,13 @@ let family_probe = function
       (* Somebody else's `Alloc_census`, and a bare one: real references, to a module whose
          provenance is not the instrumentation's (Codex P2, round 5). *)
       "module Alloc_census = Foo.Alloc_census\nlet () = ignore (Foo.Alloc_census.snapshot ())\n"
+  | Opened ->
+      (* The same reference with the qualifier opened rather than written: no `Ir.Alloc_census`
+         anywhere in the text (Codex P2, round 6). *)
+      "open Ir\n\nlet () = ignore (Alloc_census.snapshot ())\n"
+  | Qualifier_aliased ->
+      (* And with the qualifier itself bound to a name of the source's choosing. *)
+      "module I = Ir\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
   | Mentions_only ->
       (* The module NAMED where naming it reads nothing -- the shape a substring derivation calls a
          probe (Codex P2, round 4). Also as a longer identifier, since that is the third way a text
@@ -2436,6 +2452,11 @@ let family_control () =
   (* And a module of the same last name reached through another qualifier: a real reference, to
      something that is not the instrumentation. *)
   let same_named = run ~probe:Same_named ~metal:false ~lifecycle:true ~family:None () in
+  (* The two spellings that reach the instrumentation without writing its qualifier. Both ARE
+     members, so the tree without a family stanza is the reported one -- the discriminating
+     direction, since a derivation that missed them would pass this tree silently. *)
+  let opened_probe = run ~probe:Opened ~metal:false ~lifecycle:true ~family:None () in
+  let aliased_probe = run ~probe:Qualifier_aliased ~metal:false ~lifecycle:true ~family:None () in
   (* The negative control: neither derivation calls this stanza a member, so no family alias is
      asked for. A derivation that over-claimed would fail this correct tree. *)
   let no_member = run ~metal:false ~lifecycle:false ~family:None () in
@@ -2481,6 +2502,8 @@ let family_control () =
     && String.is_substring (snd subdir_unlocked) ~substring:"(subdir child"
   in
   let same_named_ok = listed_ok same_named in
+  let opened_probe_ok = omitted_ok lifecycle_family.family_alias opened_probe in
+  let aliased_probe_ok = omitted_ok lifecycle_family.family_alias aliased_probe in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2504,6 +2527,8 @@ let family_control () =
   if not subdir_ungated_ok then report "family alias in a group with no gate" subdir_ungated;
   if not subdir_unlocked_ok then report "locked group whose gate takes no lock" subdir_unlocked;
   if not same_named_ok then report "a same-named module of another provenance" same_named;
+  if not opened_probe_ok then report "the qualifier opened rather than written" opened_probe;
+  if not aliased_probe_ok then report "the qualifier bound to another name" aliased_probe;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2582,6 +2607,11 @@ let family_control () =
     "a module of the same last name reached through another qualifier is not the instrumentation, \
      and its user is no member"
     same_named_ok;
+  Verdict.p
+    "`open Ir` and then a bare `Alloc_census.snapshot` is a reference to the instrumentation, and \
+     its test is a member"
+    opened_probe_ok;
+  Verdict.p "so is `module I = Ir` and then `I.Alloc_census.snapshot`" aliased_probe_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
