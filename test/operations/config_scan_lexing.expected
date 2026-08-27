@@ -115,6 +115,8 @@ ok: key list -- a qualified projector that is not the standard fst does not proj
 ok: key list -- a rebound standard root is a rebound trusted name
 ok: key list -- a qualified concatenation operator is not the standard one
 ok: key list -- an open of a library providing List is not a rebinding
+ok: key list -- an unresolvable rebinding is not reached past
+ok: key list -- and a use BEFORE it still sees the resolvable one
 ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader
 ok: could read the environment -- does not name it at all

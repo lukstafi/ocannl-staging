@@ -359,7 +359,30 @@ type env_reader_reads = {
           success, which is a pass proving nothing (Codex P2, round 4 of PR #484). *)
 }
 
-(** {2 Resolving a list of keys}
+(** {2 What this resolver is for, and what it is not}
+
+    It exists to catch a guard whose DECLARATIONS DRIFTED from its key list — a key added to the list
+    and not to the rule's [(env_var …)], which is how the three guards in this tree were built and
+    how the next one will be maintained. Against that it is exact: it resolves the list or refuses,
+    and every construct it follows is named and every name it trusts is checked for rebinding.
+
+    It is NOT robust against a source written to deceive it, and that is a deliberate boundary rather
+    than an unfinished edge. A guard can always put its keys behind an abstraction this scan cannot
+    see through — an [open] of a module exporting its own [List], a combinator that ignores its list
+    argument, a key computed at run time — and each such shape is closed only by trusting one fewer
+    name, which the next shape reopens. The line is that a test author is not an adversary: nobody
+    writes [open Shared] over a custom [List] to slip a configuration read past a scanner, and a
+    scanner that spent its complexity on that possibility would be harder to trust than the
+    convention it replaced.
+
+    What keeps that boundary honest is the direction the residual falls in. Where this scan cannot
+    follow a construct it REFUSES, so the failure is loud and at the site; the shapes it can still be
+    fooled by all require the source to name something standard and mean something else. If that
+    trade stops being the right one, the answer is a structural contract — a guard's keys spelled as
+    one literal list in a fixed shape, matched rather than inferred — not another name added to the
+    tables below.
+
+    {2 Resolving a list of keys}
 
     A guard hands the reader its keys one at a time out of a list, so what the scan has to resolve is
     the LIST — and resolving it is what lets the check refuse everything else. The alternative it
@@ -517,7 +540,10 @@ let rec resolve_elements ~bindings ~before expr =
           List.filter bindings ~f:(fun (bound, at, _) ->
               String.equal bound name && at <= before)
           |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
-          |> Option.map ~f:(fun (_, _, elements) -> elements)
+          (* The latest binding decides, INCLUDING a tombstone: a rebinding this scan could not
+             resolve refuses the use rather than letting it reach past to an older list that no
+             longer holds (Codex P2, round 11 of PR #484). *)
+          |> Option.bind ~f:(fun (_, _, elements) -> elements)
       (* `a @ b`, which is how a guard adds one key to a list it shares with something else. *)
       (* The OPERATOR is named too: `Shared.( @ )` may ignore its operands and return another list,
          and a basename match read it as the standard concatenation (Codex P2, round 10 of PR
@@ -562,22 +588,44 @@ let resolve_keys ~bindings ~before expr =
           match element with Str value -> Continue (value :: acc) | Pair _ -> Stop None)
         ~finish:(fun acc -> Some (List.rev acc))
 
-(** Every top-level [let name = <list>] of the structure, each with the offset its binding ends at,
-    for {!resolve_elements} to pick the one visible at a use. Built in source order, so a binding
-    built out of an earlier one resolves and a REBINDING does not reach backwards. *)
+(** Every top-level [let name = <list-shaped expression>] of the structure, each with the offset its
+    binding ends at and what it resolved to, for {!resolve_elements} to pick the one visible at a
+    use. Built in source order, so a binding built out of an earlier one resolves and a REBINDING
+    does not reach backwards.
+
+    An entry whose value is [None] is a tombstone: a rebinding this scan could not resolve, recorded
+    so that a use after it refuses instead of reaching past it. *)
 let list_bindings_of structure =
   List.fold structure ~init:[] ~f:(fun bindings item ->
       match item.pstr_desc with
       | Pstr_value (_, value_bindings) ->
           let at = item.pstr_loc.loc_end.pos_cnum in
           List.fold value_bindings ~init:bindings ~f:(fun bindings binding ->
-              match
-                ( pattern_name binding.pvb_pat,
-                  resolve_elements ~bindings ~before:binding.pvb_loc.loc_start.pos_cnum
-                    binding.pvb_expr )
-              with
-              | Some name, Some elements -> (name, at, elements) :: bindings
-              | _ -> bindings)
+              match pattern_name binding.pvb_pat with
+              | None -> bindings
+              | Some name ->
+                  (* A binding this scan cannot resolve is recorded as a TOMBSTONE rather than
+                     skipped: skipping it let a later use reach back to an earlier, resolvable
+                     binding of the same name and answer with a list that no longer holds (Codex P2,
+                     round 11). Only a list-shaped expression is recorded at all, so an unrelated
+                     `let guarded = 3` does not bury a list binding. *)
+                  let resolved =
+                    resolve_elements ~bindings ~before:binding.pvb_loc.loc_start.pos_cnum
+                      binding.pvb_expr
+                  in
+                  (* List-SHAPED, not list-resolved: a `[ … ]` whose elements this scan cannot read
+                     is exactly the rebinding a tombstone has to record, so the shape is judged by
+                     the constructor rather than by whether the contents came out. An application is
+                     included for the `a @ b` and `List.map …` spellings, which are how a list is
+                     built here. *)
+                  let list_shaped =
+                    Option.is_some resolved
+                    ||
+                    match binding.pvb_expr.pexp_desc with
+                    | Pexp_construct ({ txt = Lident ("::" | "[]"); _ }, _) | Pexp_apply _ -> true
+                    | _ -> false
+                  in
+                  if list_shaped then (name, at, resolved) :: bindings else bindings)
       | _ -> bindings)
 
 (** Which configuration keys [content] reads straight from the environment.

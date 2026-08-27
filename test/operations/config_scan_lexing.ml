@@ -589,6 +589,18 @@ let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
 let guarded = [ "profile" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([ "profile" ], false) );
+    (* A rebinding this scan cannot resolve is a TOMBSTONE, not an absence: reaching past it to the
+       earlier list answers with keys that no longer hold (Codex P2, round 11 of PR #484). *)
+    ( "an unresolvable rebinding is not reached past",
+      {ocaml|let guarded = [ "profile" ]
+let guarded = [ Sys.argv.(1) ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and a use BEFORE it still sees the resolvable one",
+      {ocaml|let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let guarded = [ Sys.argv.(1) ]|ocaml},
+      ([ "profile" ], false) );
     ( "the binding does not escape the lambda it was established at",
       {ocaml|let guarded = [ "log_level" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))

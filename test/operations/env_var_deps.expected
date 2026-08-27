@@ -74,6 +74,8 @@ many runs of it answer for each (gh-ocannl-749). A key read this way cannot be o
 a commandline flag or a config file, so every run depends on the variable unconditionally --
 and EVERY one of them declares it or pins it with `setenv`, since dune invalidates each rule
 on its own deps.
+  OCANNL_DASHED_ONLY_KEY                 test/operations/dune, executable config_var_spellings (3 runs of config_var_spellings.exe)
+  OCANNL_DEMO_KEY                        test/operations/dune, executable config_var_spellings (3 runs of config_var_spellings.exe)
   OCANNL_PROFILE                         test/operations/dune, test config_profiles (1 run of it)
   OCANNL_AUTOTUNE_BEAM_WIDTH             test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_AUTOTUNE_ROUNDS                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
@@ -175,6 +177,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
   test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale
   test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
+  test/operations/dune:OCANNL_DEMO_KEY -- a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot be declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one drawing the unknown-key warning onto the stream those goldens capture
+  test/operations/dune:OCANNL_DASHED_ONLY_KEY -- the same fixture's second synthetic key, tracked for the same reason
   test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
 Artifact-directory declarations, by dune file. A stanza whose modules call

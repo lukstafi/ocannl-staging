@@ -100,6 +100,12 @@ let exempt_declarations =
     ( "test/operations/dune:OCANNL_BACKEDN",
       "the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than \
        read, so both write to the stream the golden holds" );
+    ( "test/operations/dune:OCANNL_DEMO_KEY",
+      "a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot be \
+       declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one drawing \
+       the unknown-key warning onto the stream those goldens capture" );
+    ( "test/operations/dune:OCANNL_DASHED_ONLY_KEY",
+      "the same fixture's second synthetic key, tracked for the same reason" );
     ( "test/operations/dune:ocannl-log_level",
       "the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that \
        gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning" );
@@ -1235,10 +1241,13 @@ let main () =
          be claimed by nobody, taking its environment reads out of the check silently (Codex P2,
          round 10). Refused rather than approximated: a scan that cannot place a file's modules
          should say so, which is the same answer it gives an unresolvable key. *)
+      (* `(include_subdirs …)` is a STANZA, not a field of one: asking `Scan.field` for it searched
+         the children of every other stanza and never fired, so the refusal this was supposed to be
+         did not exist (Codex P2, round 11 -- my own round-10 fix, dead on arrival). *)
       List.iter stanzas ~f:(fun stanza ->
-          match (Scan.head stanza, Scan.field stanza "include_subdirs") with
-          | Some _, Some args when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal)
-            ->
+          match stanza with
+          | Sexp.List (Sexp.Atom "include_subdirs" :: args)
+            when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
               fail
                 (Printf.sprintf
                    "%s declares `(include_subdirs %s)`, which puts a descendant directory's modules \
@@ -1390,11 +1399,18 @@ let main () =
                          `read_env_var "PROFILE"` reads the same `OCANNL_PROFILE` as the lowercase
                          spelling. A case-sensitive membership test dropped it as an unknown key and
                          asked for no declaration -- a silent pass over a variable the guard does
-                         observe (Codex P2, round 5). *)
+                         observe (Codex P2, round 5).
+
+                         Every resolved key is asked for, KNOWN OR NOT: the reader builds and
+                         consults `OCANNL_<KEY>` whatever the registry says, so a misspelled key is
+                         still a variable the run depends on, and filtering it out recorded neither
+                         a requirement nor a refusal (Codex P2, round 11). An unknown one cannot be
+                         declared -- the sibling check refuses a declaration naming no key OCANNL
+                         reads -- so a pin is the way to satisfy it, which is what the synthetic
+                         keys in `config_var_spellings` already do. *)
                       let keys =
                         List.concat_map reads ~f:(fun (_, r) -> r.Sources.reader_keys)
                         |> List.map ~f:String.lowercase
-                        |> List.filter ~f:(Set.mem Utils.known_config_keys)
                         |> List.dedup_and_sort ~compare:String.compare
                       in
                       List.iter keys ~f:(fun key ->
@@ -1446,11 +1462,17 @@ let main () =
                                     then serves that run's previous output across a change of it, \
                                     so the guard that would have reported the variable never runs. \
                                     Add the declaration to every rule that runs %s, or pin the \
-                                    variable there with `(setenv %s …)`"
+                                    variable there with `(setenv %s …)`%s"
                                    where key Sources.env_reader (List.length missing)
                                    (List.length runners)
                                    (if List.length runners = 1 then "" else "s")
-                                   program var program var))))));
+                                   program var program var
+                                   (if Set.mem Utils.known_config_keys key then ""
+                                    else
+                                      Printf.sprintf
+                                        ". `%s` is no configuration key OCANNL reads, so it cannot \
+                                         be declared -- pin it, or fix the spelling"
+                                        key)))))));
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
   in
@@ -1993,15 +2015,23 @@ let shouting_probe =
     \    guarded\n"
     (String.uppercase guard_key)
 
-let guard_probe =
+let guard_of key =
   Printf.sprintf
-    "let guarded = [ %S; %S ]\n\
+    "let guarded = [ %S ]\n\
      let () =\n\
     \  List.iter\n\
     \    (fun arg_name ->\n\
     \      match Utils.read_env_var arg_name with Some _ -> exit 1 | None -> ())\n\
     \    guarded\n"
-    guard_key guard_non_key
+    key
+
+let guard_probe = guard_of guard_key
+
+(* A guard on a key the registry does not know. The reader builds and consults `OCANNL_<KEY>`
+   whatever the registry says, so the run depends on it -- and it cannot be DECLARED, the sibling
+   check refusing a declaration naming no key OCANNL reads, so a pin is the only way to answer for
+   it (Codex P2, round 11 of PR #484). *)
+let unknown_key_probe = guard_of guard_non_key
 
 (* A dynamic reach whose key list is in ANOTHER compilation unit -- the reviewer's own example. The
    source names no configuration key at all, so the candidate fallback resolves to nothing and the
@@ -2030,6 +2060,8 @@ let guard_rule ~target ~declares ~pins =
     | `No -> "  (run ./guard.exe)"
     | `Around_the_run ->
         Printf.sprintf "  (setenv %s 1\n   (run ./guard.exe))" (Utils.env_var_name guard_key)
+    | `Around_the_run_unknown ->
+        Printf.sprintf "  (setenv %s 1\n   (run ./guard.exe))" (Utils.env_var_name guard_non_key)
     (* The pin on a SIBLING branch of the same action: `setenv` scopes over what it wraps, so this
        rule's run of the guard is as exposed to the ambient variable as an unpinned one. A check
        reading the rule's setenvs as a flat set would credit it (Codex P1, round 1). *)
@@ -2087,6 +2119,18 @@ let guard_subject ~arm =
      out of scope, `Utils` being where the reader lives. *)
   (* And a PLAIN library, run by nothing of its own: the requirement would fall on every stanza that
      links it, so the read is reported rather than attributed (Codex P2, round 6). *)
+  (* The mode this scan refuses to model. It shipped dead once -- matched as a FIELD of a stanza
+     rather than as a stanza -- so it has an arm of its own now: a refusal with no control is a
+     refusal nobody has seen happen (Codex P2, round 11). *)
+  (* The unknown-key guard, once answered for and once not. *)
+  | `Unknown_key -> executable named ^ one ~declares:false ~pins:`No
+  | `Unknown_key_pinned ->
+      executable named
+      ^ guard_rule ~target:"guard.actual" ~declares:false ~pins:`Around_the_run_unknown
+  | `Include_subdirs ->
+      "(include_subdirs unqualified)\n\n"
+      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+          (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
   | `Plain_library ->
       "(library\n\
       \ (name guard)\n\
@@ -2162,6 +2206,9 @@ let guard_control () =
   let in_a_subdir = run `In_a_subdir ~at:"t/gen/guard.ml" in
   let module_without_source = run `Module_without_source in
   let utils_lookalike = run `Utils_lookalike ~at:"t/utils.ml" in
+  let unknown_key = run `Unknown_key ~probe:unknown_key_probe in
+  let unknown_key_pinned = run `Unknown_key_pinned ~probe:unknown_key_probe in
+  let include_subdirs = run `Include_subdirs in
   let plain_library = run `Plain_library in
   let inline_library = run `Inline_tests_library in
   let inline_library_declares = run `Inline_tests_library_declares in
@@ -2183,8 +2230,6 @@ let guard_control () =
   let undeclared_ok =
     reports undeclared diagnostic
     && names_the_key (snd undeclared)
-    (* And the non-key is not asked for, in the very run that asks for everything it can. *)
-    && not (says (snd undeclared) (Utils.env_var_name guard_non_key))
   in
   let declared_ok = passes declared diagnostic in
   let pinned_ok = passes pinned diagnostic in
@@ -2198,6 +2243,12 @@ let guard_control () =
   let utils_lookalike_ok =
     reports utils_lookalike diagnostic && names_the_key (snd utils_lookalike)
   in
+  let unknown_key_ok =
+    reports unknown_key "no configuration key OCANNL reads"
+    && String.is_substring (snd unknown_key) ~substring:(Utils.env_var_name guard_non_key)
+  in
+  let unknown_key_pinned_ok = passes unknown_key_pinned diagnostic in
+  let include_subdirs_ok = reports include_subdirs "include_subdirs unqualified" in
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
   in
@@ -2225,6 +2276,9 @@ let guard_control () =
   if not in_a_subdir_ok then report "in-a-subdir" in_a_subdir;
   if not module_without_source_ok then report "module-without-source" module_without_source;
   if not utils_lookalike_ok then report "utils-lookalike" utils_lookalike;
+  if not unknown_key_ok then report "unknown-key" unknown_key;
+  if not unknown_key_pinned_ok then report "unknown-key-pinned" unknown_key_pinned;
+  if not include_subdirs_ok then report "include-subdirs" include_subdirs;
   if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
@@ -2266,6 +2320,13 @@ let guard_control () =
   Verdict.p
     "a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt"
     utils_lookalike_ok;
+  Verdict.p
+    "a key the registry does not know is still asked for, and is reported as undeclarable"
+    unknown_key_ok;
+  Verdict.p "and pinning it is the way to answer for one" unknown_key_pinned_ok;
+  Verdict.p
+    "a dune file whose module sets this scan cannot place is refused, not approximated"
+    include_subdirs_ok;
   Verdict.p
     "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
     plain_library_ok;
