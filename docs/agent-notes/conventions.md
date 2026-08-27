@@ -146,3 +146,28 @@ files.
   mechanism: one `flock` replacing a directory-plus-pid-file dance with its reclaim races and
   `kill -0` pid-reuse hole, one `run_capped` replacing three hand-rolled background-and-publish-pid
   call sites.
+- Any file OCANNL publishes for a later process to read — a schedule-cache entry, a checkpoint, the
+  cc probe cache — goes through `Utils.Atomic_file` (`arrayjit/lib/atomic_file.mli`), never through
+  a hand-rolled `<path>.tmp`. Three parts, and a hand-rolled copy usually has one or two: a unique
+  staging name (a fixed `.tmp` lets two writers stream into one file and commit a mixture), removal
+  on every failing path, and `cleanup_stale` for the writer killed inside its commit window, which
+  cannot clean up after itself. The NAME alone has to satisfy three things at once, each of them a
+  review finding against an earlier draft: it is recognized whole
+  (`<stem>.ocannl-stage.<pid>.<counter>.<nonce>`, the three fields fixed-width hex), because the
+  sweep deletes whatever the predicate accepts and a substring match would take out somebody's
+  `report.ocannl-stage.backup`; the target contributes a BOUNDED stem (truncation plus a digest, cut
+  at a UTF-8 boundary — APFS and Windows both refuse a malformed name), or a long checkpoint name
+  pushes the staging name past the 255-byte component limit; and pid-plus-counter is not unique
+  across hosts or pid namespaces sharing a filesystem, so a nonce joins them and the file is created
+  `O_EXCL` — a taken name is retried, never shared. Generator, recognizer and the `.gitignore` rule
+  must describe the SAME set: the fields are fixed-width precisely so a glob can be exact (git reads
+  `[0-9]*` as a digit then anything, so a variable-width field hides an ordinary file from its
+  author), and the nonce is a full 64-bit draw so no value the recognizer accepts is one the
+  generator cannot produce. Names are compared caselessly, since `Model.bin` and
+  `model.bin` are one file on Windows and on a default macOS volume. The Windows halves
+  are measured, not inferred (gh-ocannl-588): a live mapping blocks neither the rename nor a delete
+  but PINS the file's size, so reopening the target for writing is the one operation Windows
+  refuses — publish by rename, never by truncation; close the staging file before renaming or
+  removing it, since the C runtime opens without `FILE_SHARE_DELETE`; and expect a rename to fail
+  transiently while another process holds the target open, which is why the commit retries a
+  bounded number of times.

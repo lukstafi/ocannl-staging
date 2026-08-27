@@ -573,41 +573,34 @@ let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
     (List.filter_map key_components ~f:(fun name ->
          match component name with "" -> None | part -> Some part))
 
-let rec ensure_dir dir =
-  if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()
-  else if Stdlib.Sys.file_exists dir then ()
-  else (
-    ensure_dir (Stdlib.Filename.dirname dir);
-    (* Concurrent creators race benignly. *)
-    try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ())
-
+let ensure_dir = Utils.Atomic_file.ensure_dir
 let cache_file ~dir ~key = Stdlib.Filename.concat dir (sanitize key ^ ".sexp")
-let next_tmp_id : Utils.atomic_int = Atomic.make 0
 
 let store ~dir ~key entry =
   ensure_dir dir;
+  (* A writer killed between staging and commit leaves its staging file behind; nothing else in the
+     process would ever remove it, and a cache directory is long-lived. Sweep once per process, from
+     the writers rather than on a timer. *)
+  Utils.Atomic_file.cleanup_stale_once dir;
   let file = cache_file ~dir ~key in
-  (* A fixed [file.tmp] lets concurrent writers overwrite or rename one another's staging file. Give
-     each attempt its own artifact, and remove it on every failure path: the committed entry is
-     either the old complete file or the new complete file, never an intention left in [.tmp]. *)
-  let tmp =
-    Printf.sprintf "%s.tmp.%d.%d" file (Unix.getpid ()) (Atomic.fetch_and_add next_tmp_id 1)
-  in
-  let cleanup_tmp () =
-    if Stdlib.Sys.file_exists tmp then try Stdlib.Sys.remove tmp with _ -> ()
-  in
-  match
-    Stdio.Out_channel.write_all tmp ~data:(Sexp.to_string_hum (sexp_of_entry entry));
-    Resource_fault_injection.hit Schedule_cache_before_commit;
-    try Stdlib.Sys.rename tmp file with Stdlib.Sys_error _ -> cleanup_tmp ()
-  with
-  | () -> ()
-  | exception exn ->
-      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      cleanup_tmp ();
-      Stdlib.Printexc.raise_with_backtrace exn backtrace
+  (* Uniqueness, failure cleanup and the Windows-safe commit all live in [Atomic_file]: the
+     committed entry is either the old complete file or the new complete file, never an intention.
+     The injection point sits in the staged-but-uncommitted window, which is what makes that
+     guarantee testable. *)
+  try
+    Utils.Atomic_file.write_all ~path:file
+      ~data:(Sexp.to_string_hum (sexp_of_entry entry))
+      ~before_commit:(fun () -> Resource_fault_injection.hit Schedule_cache_before_commit)
+      ()
+  with Stdlib.Sys_error _ ->
+    (* The cache is an optimization, so a filesystem refusal — a directory that turned unwritable, a
+       Windows peer still holding this entry open past the bounded commit retry — means the tuning
+       result is not saved, not that the run fails. [publish] has already removed the staging file;
+       an earlier complete entry is still in place. *)
+    ()
 
 let lookup ~dir ~key =
+  Utils.Atomic_file.cleanup_stale_once dir;
   let file = cache_file ~dir ~key in
   if not (Stdlib.Sys.file_exists file) then None
   else

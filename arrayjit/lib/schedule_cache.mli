@@ -244,9 +244,14 @@ val cache_key : limits:Backend_intf.hardware_limits -> canonical -> backend:stri
     distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
-(** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates
-    concurrent writers (last write wins; each writer uses a unique temp file + rename). A failed
-    write/commit removes its temp artifact and leaves an earlier complete entry intact. *)
+(** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Publication goes
+    through {!Utils.Atomic_file}, so concurrent writers tolerate each other (last write wins) and a
+    failed write or commit removes its own staging artifact and leaves an earlier complete entry
+    intact. A filesystem refusal is not propagated: the cache is an optimization, and an entry that
+    could not be written is a future miss rather than a failed run. *)
 
 val lookup : dir:string -> key:string -> entry option
-(** [None] on missing file, unparsable content, or version/digest mismatch. *)
+(** [None] on missing file, unparsable content, or version/digest mismatch.
+
+    Together with {!store} this is where the cache directory's crash-stale staging files are swept
+    ({!Utils.Atomic_file.cleanup_stale_once}), once per directory per process. *)
