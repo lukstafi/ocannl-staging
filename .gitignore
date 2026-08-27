@@ -59,6 +59,12 @@ build_files/
 # directory, and an unanchored pattern would hide a stray copy anywhere in the tree.
 /autotune_cache*/
 
+# Staging files of Utils.Atomic_file: a publication that was interrupted between staging and
+# rename, anywhere a checkpoint or cache is written into the tree. Unanchored, because the
+# artifact sits beside whatever file was being published. The helper's own sweep removes them
+# once they are stale; this keeps one from reaching a commit in the meantime.
+*.ocannl-stage.*
+
 # Test artifacts written to the working directory
 # (test/operations/test_safetensors.ml, test/training/tokenizer_roundtrip.ml).
 /mini_tokenizer.json
