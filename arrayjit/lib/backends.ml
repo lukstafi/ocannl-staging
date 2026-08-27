@@ -1383,8 +1383,10 @@ let hip_impl = { bi_backend = Hip; bi_module = (module Hip_b); bi_wrap = (fun c 
 let metal_impl =
   { bi_backend = Metal; bi_module = (module Metal_b); bi_wrap = (fun c -> Metal_ctx c) }
 
-(* The two matches over the closed disjunctions, one per direction. Every dispatcher below goes
-   through them, so a new backend adds arms here and nowhere else. *)
+(* The matches over the closed disjunctions -- one per question anyone asks of them: which impl a
+   backend constructor names, which impl and context a wrapped context carries, and whether two
+   wrapped contexts carry the same one. Every dispatcher below goes through these, so a new backend
+   adds arms here and nowhere else. *)
 
 let impl_of_backend : backend -> packed_impl = function
   | Cc -> Packed_impl cc_impl

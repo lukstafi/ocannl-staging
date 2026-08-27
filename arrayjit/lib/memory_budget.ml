@@ -1,9 +1,5 @@
-(** gh-ocannl-498 rematerialization: the budget-driven recompute-vs-store planner.
-
-    A deterministic planning pass over {!Context}'s analyze-only surface -- it lowers and scores,
-    never compiles, links or executes -- kept out of [context.ml] because it needs nothing of the
-    context beyond {!Context.lowered_for_decisions}, {!Context.hardware_limits} and
-    {!Context.decide_inline}. *)
+(* gh-ocannl-498 rematerialization: the budget-driven recompute-vs-store planner. The contract is
+   in memory_budget.mli; this file holds the reasoning behind each step of the selection. *)
 
 open Base
 module Tn = Ir.Tnode
