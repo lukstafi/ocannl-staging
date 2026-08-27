@@ -687,8 +687,11 @@
 # this key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to
 # 0, so only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain
 # that rejects the probed `-march=native`, in which case the probe falls back to no flag at all and
-# the compiler's own baseline target applies. The default "auto" targets the host, so any host whose
-# own CPU has FMA is unaffected.
+# the compiler's own baseline target applies. So do NOT rule the cliff out from the CPU alone: under
+# the default "auto" an FMA-capable host is safe only if the `-march=native` probe actually
+# succeeded, or if the compiler's own default target already includes FMA. Where it matters, answer
+# it for the box in front of you with the compile-and-grep diagnostic above rather than from the
+# part number.
 # For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect: an FMA rounds once,
 # and the code generator promises that the vector body, its scalar peel and the serial fallback
 # agree bit for bit -- substituting `a*b + dst` where the instruction is absent would round twice
