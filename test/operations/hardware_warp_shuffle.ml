@@ -20,8 +20,12 @@
    backend's accumulator RESIDENCY ([C_syntax_config.accum_prec], gh-ocannl-663) rather than at the
    node's storage precision, so a bf16 reduction on a backend that widens bf16 shuffles f32 and
    narrows once into the cell — the same width its serial rendering accumulates at. Where the
-   residency stays narrow (f16 everywhere; bf16 on HIP and Metal) there is nothing wider to shuffle
-   and the rendering keeps refusing loudly. *)
+   residency stays narrow (bf16 on HIP and Metal; f16 under the default [fp16_arithmetic] policy)
+   there is nothing wider to shuffle and the rendering keeps refusing loudly.
+
+   f16's residency is a POLICY question (gh-ocannl-680), so it gets both legs: the refusal under the
+   default policy, and — at the very end of this file, under [Numerics.Fp16_wide] — the twin of the
+   bf16 legs, where every backend resolves f16 accumulators to f32 and the shuffle carries float. *)
 
 open Base
 open Ocannl
@@ -30,6 +34,7 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Asgns = Ir.Assignments
 module Idx = Ir.Indexing
+module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
@@ -332,8 +337,8 @@ let claim_bf16_types =
    never at bf16 storage"
 
 let claim_narrow_refused =
-  "an f16 accumulator, whose residency no GPU backend widens, is refused by the warp-shuffle \
-   rendering (GPU) or runs serially (CPU)"
+  "an f16 accumulator whose residency stays narrow, as the default fp16_arithmetic policy resolves \
+   it on every GPU backend, is refused by the warp-shuffle rendering (GPU) or runs serially (CPU)"
 
 let () =
   if widens_bf16 then begin
@@ -353,11 +358,14 @@ let () =
       && not (has "__nv_bfloat16 wred_partials_"))
   end
   else skipped claim_bf16_types;
-  (* The other half of the gate: f16 resolves to itself on every GPU backend (CUDA's seeded wmma
-     triple accumulates f16 natively, RDNA has genuine f16 accumulator variants, MSL's [half] is a
-     native scalar), so there is no wider value to shuffle and the rendering must keep refusing —
-     loudly, since binding the index like a plain [Workgroup] axis would race the accumulator. On
-     the C backends [warp_size = 0] and the loop is simply serial, which is its correct meaning. *)
+  (* The other half of the gate: under the default [fp16_arithmetic] policy f16 resolves to itself
+     on every GPU backend (CUDA's seeded wmma triple accumulates f16 natively, RDNA has genuine f16
+     accumulator variants, MSL's [half] is a native scalar), so there is no wider value to shuffle
+     and the rendering must keep refusing — loudly, since binding the index like a plain
+     [Workgroup] axis would race the accumulator. On the C backends [warp_size = 0] and the loop is
+     simply serial, which is its correct meaning. This pins what [Fp16_auto] resolves to TODAY, not
+     a contract that it always will (gh-ocannl-680 keeps latitude to resolve wide on hardware where
+     wide f16 accumulate is free); the wide policy's twin legs are at the end of this file. *)
   let n = 32 in
   let hv = Array.init n ~f:(fun k -> Float.of_int (k % 5) *. 0.5) in
   let expected = Array.fold hv ~init:0. ~f:( +. ) in
@@ -448,3 +456,75 @@ let () =
        gh-ocannl-517's business, not this test's. *)
     p claim_rng_refused (Float.is_finite (run ~name:"bf16_rng_wshfl" ~transform rs))
   else skipped claim_rng_refused
+
+(* --- gh-ocannl-680: the f16 twin of the bf16 legs, under [Numerics.Fp16_wide]. That policy gives
+   f16 reduction accumulators f32 residency on EVERY backend, so an f16 [Workgroup_reduce] passes
+   the residency gate the leg above pins the refusal of, and shuffles float exactly as bf16 does on
+   CUDA. The policy is what changes; the rendering is unchanged, which is the point — the same
+   residency staging, the same once-narrowed value, on backends where f16 is the storage precision
+   a model actually trains in.
+
+   The terms [1 + (k mod 11)/1024] are the f16 analogue of the bf16 legs' [1 + (k mod 7)/128]:
+   1/1024 is ulp(1) at f16's 10 stored mantissa bits as 1/128 is at bf16's 7, so each term is exact
+   in f16, while the partial sums are not — and the modulus is 11 rather than 7 because at f16's
+   finer grid a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value.
+   Over 32 lanes the exact f32 total 32.1513671875 narrows once to 32.15625, against 32.125 for a
+   tree staged at f16 and 32.09375 for a per-step read-modify-write of the f16 cell; over 128 lanes
+   the totals are 128.625 / 128.5 / 128.125, and that case also stages per-warp partials, pinning
+   the shared slots' element type. Every f32 partial sum is a multiple of 1/1024 below 2^8, so the
+   tree's reassociation is exact and the claims are bitwise rather than approximate. *)
+
+let f16_term k = 1.0 +. (Float.of_int (k % 11) /. 1024.0)
+
+let f16_sum ~name ~n =
+  let x = NTDSL.init ~l:(name ^ "_x") ~prec:half ~o:[ n ] ~f:(fun idcs -> f16_term idcs.(0)) () in
+  let%op s = x ++ "i=>0" in
+  Tn.update_prec s.Tensor.value half;
+  run ~name
+    ~transform:
+      (reduce_transform ~n s.Tensor.value ~body_of:(fun i ->
+           LL.Set
+             {
+               tn = s.Tensor.value;
+               idcs = [| f0 |];
+               llsc =
+                 Binop
+                   ( Ir.Ops.Add,
+                     (Get (s.Tensor.value, [| f0 |]), half),
+                     (Get (x.Tensor.value, [| it i |]), half) );
+               debug = "";
+             }))
+    s
+
+let claim_f16_wide_1w =
+  "under Fp16_wide an f16 single-warp Workgroup_reduce accumulates at the widened residency (32 \
+   terms narrow once to 32.15625, not the 32.125 an f16-staged tree or the 32.09375 a per-step \
+   narrowing gives)"
+
+let claim_f16_wide_4w =
+  "under Fp16_wide an f16 four-warp Workgroup_reduce stages its per-warp partials at the widened \
+   residency (128 terms narrow once to 128.625, not the 128.5 an f16-staged tree or the 128.125 a \
+   per-step narrowing gives)"
+
+let claim_f16_wide_types =
+  "under Fp16_wide the emitted f16 shuffle declares its staging register and its per-warp slots at \
+   the residency type, never at half storage"
+
+let () =
+  let saved = Numerics.get () in
+  Exn.protect
+    ~finally:(fun () -> Numerics.set_policy saved)
+    ~f:(fun () ->
+      Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
+      p claim_f16_wide_1w (Float.equal (f16_sum ~name:"f16_wide_1warp_wshfl" ~n:32) 32.15625);
+      p claim_f16_wide_4w (Float.equal (f16_sum ~name:"f16_wide_4warp_wshfl" ~n:128) 128.625);
+      if on_gpu then begin
+        let src = Generated.read "f16_wide_4warp_wshfl" in
+        let has sub = String.is_substring src ~substring:sub in
+        (* "half wred_v_" also catches CUDA's "__half wred_v_" as a substring. *)
+        p claim_f16_wide_types
+          (has "float wred_v_" && has "float wred_partials_"
+          && (not (has "half wred_v_"))
+          && not (has "half wred_partials_"))
+      end
+      else skipped claim_f16_wide_types)
