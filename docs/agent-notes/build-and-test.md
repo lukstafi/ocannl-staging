@@ -655,6 +655,21 @@ that they earn a lookup rather than always-loaded space.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- The two opam caches are not one cache seen twice. `ci.yml` caches the built dependency switch
+  `_opam`, where its ~180 compiled packages live; `gh-pages-api.yml` caches opam's ROOT `~/.opam`
+  while its switch is a LOCAL `_opam` that nothing caches, so that job recompiles the dependencies
+  on every run and its entry buys only the download cache and the repository index. Both keys are
+  built by `.github/actions/pin-revisions`, which resolves every `pin-depends` entry with
+  `git ls-remote` and digests the shas: a key over `hashFiles('*.opam')` alone is blind to the
+  branch-tracking pins (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move
+  while the opam files stay byte-identical. A LITERAL key is worse still — an exact hit means
+  actions/cache does not SAVE, so the entry is frozen from the day it was first written until the
+  7-day read eviction retires it, and the workflow's verdict becomes a fact about the calendar
+  (gh-ocannl-732: one tree, two different failing steps, decided by cache state).
+- `gh-pages-api.yml` triggers only on a push to master, so no change to it can be tried on a pull
+  request first: it is the one workflow whose edits land untested. Prefer changes there whose worst
+  case is a slower run, and prefer pieces `ci.yml` shares, since the PR's own `ci` run is then what
+  exercises them.
 - Windows is off the per-PR matrix (62-74min against 20 on macOS and 29 on ubuntu) and runs on a
   twice-weekly schedule, together with an ubuntu job on the OCaml floor the opam files claim
   (`>= 5.3.0`, against 5.5 everywhere else). Both are reachable on demand through
