@@ -102,6 +102,16 @@ let open_staging path ~binary =
         Stdlib.set_binary_mode_out oc binary;
         (staging, oc)
     | exception Unix.Unix_error (Unix.EEXIST, _, _) when n < staging_attempts -> attempt (n + 1)
+    (* A filesystem refusal reaches the caller as [Sys_error], whichever operation refused. Opening
+       through [Unix] is an implementation choice — it is what makes the creation exclusive — and it
+       must not change what a caller catches: [Schedule_cache.store] treats a refusal as a future
+       cache miss, and an unconverted [Unix_error] from this open would escape that handler and
+       abort a tuning run (Codex P2, round 3). Only the filesystem's own errors are converted;
+       whatever [f] or [before_commit] raise passes through untouched. *)
+    | exception Unix.Unix_error (error, fn, arg) ->
+        raise
+          (Stdlib.Sys_error
+             (Printf.sprintf "%s: %s %s (%s)" staging fn arg (Unix.error_message error)))
   in
   attempt 1
 

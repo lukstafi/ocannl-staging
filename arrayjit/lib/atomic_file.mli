@@ -97,7 +97,14 @@ val with_channel :
 
     Any exception from [f], from [before_commit] or from the rename closes the channel, removes the
     staging file, and is re-raised with its original backtrace. The target is left exactly as it
-    was. *)
+    was.
+
+    Every FILESYSTEM refusal — a missing or unwritable directory, an exhausted disk, a rename the
+    platform declines past its retries — reaches the caller as [Sys_error], whichever operation
+    refused it. That the staging file is opened through [Unix] (which is what makes its creation
+    exclusive) is an implementation detail and does not change what a caller catches, so a
+    best-effort writer like [Schedule_cache.store] needs one handler and not a taxonomy. Exceptions
+    raised by [f] and [before_commit] are the caller's own and pass through unchanged. *)
 
 val write_all :
   ?before_commit:(unit -> unit) -> ?binary:bool -> path:string -> data:string -> unit -> unit

@@ -341,6 +341,44 @@ let () =
   Verdict.p "a failed streamed publish removes its own staging file"
     (List.is_empty (staging_leftovers ()))
 
+(* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the schedule
+   cache treats a refusal as a future miss rather than a failed tuning run -- needs one handler, not
+   a taxonomy of the operations the helper happens to use internally; the exclusive open raises
+   [Unix_error], and letting that escape would have walked straight past such a handler (Codex P2,
+   round 3). What [f] and [before_commit] raise is the caller's own and must NOT be converted. *)
+let classify f =
+  match f () with
+  | () -> `Returned
+  | exception Stdlib.Sys_error _ -> `Sys_error
+  | exception Failure msg when String.is_substring msg ~substring:"gh780" -> `Caller
+  | exception _ -> `Other
+
+let () =
+  reset_dir ();
+  let refusals =
+    [
+      (* The directory does not exist. *)
+      Stdlib.Filename.concat (Stdlib.Filename.concat dir "no_such_dir") "x.bin";
+      (* A path component that is a file rather than a directory. *)
+      Stdlib.Filename.concat target "x.bin";
+    ]
+  in
+  AF.write_all ~path:target ~data:"seed" ();
+  Verdict.p_all "every filesystem refusal reaches the caller as Sys_error" refusals ~f:(fun path ->
+      Poly.equal `Sys_error (classify (fun () -> AF.write_all ~path ~data:"payload" ())));
+  Verdict.p "an exception from the caller's own writer is not converted"
+    (Poly.equal `Caller
+       (classify (fun () ->
+            AF.with_channel ~path:target () ~f:(fun _oc ->
+                (failwith "gh780 caller failure" : unit)))));
+  Verdict.p "an exception from the commit hook is not converted"
+    (Poly.equal `Caller
+       (classify (fun () ->
+            AF.write_all ~path:target ~data:"payload"
+              ~before_commit:(fun () -> failwith "gh780 hook failure")
+              ())));
+  Verdict.p "a refused publish leaves no staging file" (List.is_empty (staging_leftovers ()))
+
 (* Crash-stale cleanup: the writer that dies in its commit window cannot clean up after itself, so
    the sweep must — by age, and only over this module's own artifacts. *)
 let age_seconds = 3600.
