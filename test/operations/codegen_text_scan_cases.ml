@@ -132,6 +132,25 @@ let golden_cases =
       "none" );
   ]
 
+(** The emitters these cases are written against.
+
+    A FIXTURE, not the frontier. The live census derives its set from the compiler libraries'
+    compiled interfaces ({!Emitter_frontier}, gh-ocannl-748) and [emitter_frontier_cases] controls
+    that derivation on interfaces built to break it; what is pinned HERE is what the scan does with
+    such a set once it has one -- which call sites it recognises, which it refuses, and where the
+    text a buffer-writing emitter deposits travels. *)
+let emitters =
+  let emitter ?(buffer_labels = []) name origin =
+    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.buffer_labels = buffer_labels }
+  in
+  [
+    emitter "compile_proc" "Ir.C_syntax.C_syntax.compile_proc";
+    emitter "compile_main" "Ir.C_syntax.C_syntax.compile_main";
+    emitter "to_doc" "Ir.Low_level.to_doc";
+    emitter "to_doc_cstyle" "Ir.Low_level.to_doc_cstyle";
+    emitter "emit" "Ir.Low_level.Canonical_render.emit" ~buffer_labels:[ "buf" ];
+  ]
+
 let render_site = function
   | None -> "none"
   | Some (s : Scan.site) ->
@@ -341,6 +360,22 @@ let render llc =
   Buffer.contents buf
 let () = p "free" (String.is_substring (render llc) ~substring:"s0")|ocaml},
       {|"s0" +rendered|} );
+    (* Round 5's genre: the write and the read of a buffer-writing emitter can sit in different
+       bindings, and then neither carries taint -- the first binds no name, the second calls no
+       emitter. The DESTINATION is what the text lands in, so it is seeded from the call. *)
+    ( "the buffer a serializer writes into carries the text, across bindings",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let buf = Buffer.create 256
+let () = CR.emit ~buf policy llc
+let source = Buffer.contents buf
+let () = p "free" (String.is_substring source ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "a buffer nobody wrote generated text into carries nothing",
+      {ocaml|let buf = Buffer.create 256
+let () = Buffer.add_string buf (describe shape)
+let source = Buffer.contents buf
+let () = p "shapes agree" (String.is_substring source ~substring:"3x5")|ocaml},
+      "none" );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );
@@ -348,6 +383,52 @@ let () = p "free" (String.is_substring (render llc) ~substring:"s0")|ocaml},
       {ocaml|(* Generated.read would answer this, but the check is on values. *)
 let () = p "values" (Array.for_all2_exn got want ~f:Float.equal)|ocaml},
       "none" );
+  ]
+
+(** Spellings the scan refuses rather than approximates: {!Scan.rejections}. Each case is a source
+    and how many refusals it earns.
+
+    Every route is attributed by the qualifier at the call site, and an [open] takes the qualifier
+    away -- after which the call reads exactly like a local function of the same name and the file
+    drops out of the census silently. Refusing is what keeps that convention from being adopted
+    without anyone noticing; the negative controls below are the shapes that must stay legal, since
+    a refusal that fires on an innocent file is a broken build (gh-ocannl-748). *)
+let rejection_cases =
+  [
+    ( "opening the reader hides its calls from the qualifier",
+      {ocaml|open Test_utils.Generated
+let () = p "shared" (String.is_substring (read "r") ~substring:"__shared__")|ocaml},
+      1 );
+    ( "opening an ALIAS of the reader hides them just the same",
+      {ocaml|module G = Test_utils.Generated
+open G
+let () = assert_emits ~routine:"r" ~contains:"__syncthreads()" "synced"|ocaml},
+      1 );
+    ( "opening the emitter's module hides the render",
+      {ocaml|open Ir.Low_level.Canonical_render
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      1 );
+    ( "an open in expression position is an open",
+      {ocaml|let go () =
+  let open Test_utils.Generated in
+  String.is_substring (read "r") ~substring:"threadgroup float"|ocaml},
+      1 );
+    (* The controls. Opening a module is ordinary OCaml; what is refused is opening one whose names
+       this scan attributes, and then using one of THOSE names. *)
+    ( "opening Utils without reading the artifact directory is fine",
+      {ocaml|open Utils
+let () = p "tree" (Tree_map.is_empty (Tree_map.empty ()))|ocaml},
+      0 );
+    ( "a name an emitter shares with an unopened module is not hidden",
+      {ocaml|open Base
+let () = p "count" (to_doc rows = 3)|ocaml},
+      0 );
+    ( "the qualified spelling is what everything already uses",
+      {ocaml|module G = Test_utils.Generated
+let () = G.assert_emits ~routine:"r" ~contains:"__shared__" "shared"|ocaml},
+      0 );
   ]
 
 (** The goldens a test's own output makes members, or does not: {!Scan.classify_associated}. Each
@@ -407,11 +488,20 @@ let () =
       else fail "golden -- %s: expected [%s], found [%s]" name expected found);
   List.iter source_cases ~f:(fun (name, source, expected) ->
       let found =
-        try render_site (Scan.classify_source ~path:"case.ml" ~contents:source)
+        try render_site (Scan.classify_source ~emitters ~path:"case.ml" ~contents:source)
         with _ ->
           fail "source -- %s: the snippet does not parse" name;
           "<unparsed>"
       in
       if String.equal (String.strip found) (String.strip expected) then
         printf "ok: source -- %s\n" name
-      else fail "source -- %s: expected [%s], found [%s]" name expected found)
+      else fail "source -- %s: expected [%s], found [%s]" name expected found);
+  List.iter rejection_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try List.length (Scan.rejections ~emitters ~path:"case.ml" ~contents:source)
+        with _ ->
+          fail "rejection -- %s: the snippet does not parse" name;
+          -1
+      in
+      if expected = found then printf "ok: rejection -- %s\n" name
+      else fail "rejection -- %s: expected %d refusals, found %d" name expected found)

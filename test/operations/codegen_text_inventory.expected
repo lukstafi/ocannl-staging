@@ -3,6 +3,58 @@ every golden listed here, on the backend whose family it names, and every test s
 it. The rules are stated in test/support/codegen_text_scan.ml; the counts scanned go to
 stderr, since a tally in a golden moves on every correct addition anywhere (gh-ocannl-665).
 
+== emitters the census was taken with ==
+interfaces read: Ir, Utils
+binop_syntax [Ir.C_syntax.C_syntax_config.binop_syntax Ir.C_syntax.Pure_C_config.binop_syntax]
+compile_main [Ir.C_syntax.C_syntax.compile_main]
+compile_proc [Ir.C_syntax.C_syntax.compile_proc]
+debug_float [Ir.C_syntax.C_syntax.debug_float]
+default_binop_syntax [Ir.C_syntax.default_binop_syntax]
+emit writes into ~buf [Ir.Low_level.Canonical_render.emit]
+function_header_doc [Ir.Low_level.function_header_doc]
+local_array_decl [Ir.C_syntax.C_syntax.local_array_decl]
+operand_ptr [Ir.C_syntax.C_syntax.operand_ptr]
+pp_array_offset [Ir.C_syntax.C_syntax.pp_array_offset]
+pp_array_offset_dyn [Ir.C_syntax.C_syntax.pp_array_offset_dyn]
+pp_axis_index [Ir.Indexing.Doc_helpers.pp_axis_index]
+pp_indices [Ir.Indexing.Doc_helpers.pp_indices]
+pp_ll [Ir.C_syntax.C_syntax.pp_ll]
+pp_pipelined_rotation [Ir.C_syntax.C_syntax.pp_pipelined_rotation]
+pp_scalar [Ir.C_syntax.C_syntax.pp_scalar]
+pp_scope_id [Ir.C_syntax.C_syntax.pp_scope_id]
+pp_static_symbol [Ir.Indexing.Doc_helpers.pp_static_symbol]
+pp_symbol [Ir.Indexing.Doc_helpers.pp_symbol]
+pp_tn_offset [Ir.C_syntax.C_syntax.pp_tn_offset]
+render_mma_fragment_scope [Ir.C_syntax.C_syntax.render_mma_fragment_scope]
+ternop_syntax [Ir.C_syntax.C_syntax_config.ternop_syntax Ir.C_syntax.Pure_C_config.ternop_syntax]
+to_doc [Ir.Assignments.to_doc Ir.Low_level.to_doc Ir.Ndarray.to_doc]
+to_doc_cstyle [Ir.Low_level.to_doc_cstyle]
+to_doc_inline [Ir.Ndarray.to_doc_inline]
+try_mma_fragment_scope [Ir.C_syntax.C_syntax.try_mma_fragment_scope]
+unop_syntax [Ir.C_syntax.C_syntax_config.unop_syntax Ir.C_syntax.Pure_C_config.unop_syntax]
+vec_acc_combine [Ir.C_syntax.C_syntax.vec_acc_combine]
+vec_acc_fma [Ir.C_syntax.C_syntax.vec_acc_fma]
+vec_acc_grid_fold [Ir.C_syntax.C_syntax.vec_acc_grid_fold]
+vec_acc_lane_fold [Ir.C_syntax.C_syntax.vec_acc_lane_fold]
+vec_bridge [Ir.C_syntax.C_syntax.vec_bridge]
+vec_ext_typ [Ir.C_syntax.C_syntax.vec_ext_typ]
+vec_unop_syntax [Ir.C_syntax.C_syntax_config.vec_unop_syntax Ir.C_syntax.Pure_C_config.vec_unop_syntax]
+
+document combinators, given nothing of the libraries to render, so not on the frontier:
+!^ [Ir.Indexing.Doc_helpers.!^]
+^^ [Ir.Indexing.Doc_helpers.^^]
+comma_sep [Ir.Indexing.Doc_helpers.comma_sep]
+doc_of_sexp [Utils.doc_of_sexp]
+int [Ir.Indexing.Doc_helpers.int]
+mma_fragment_syntax [Ir.C_syntax.C_syntax_config.mma_fragment_syntax]
+pp_comma [Ir.Indexing.Doc_helpers.pp_comma]
+pp_local_defs [Ir.C_syntax.C_syntax.pp_local_defs]
+pp_log_statement [Ir.C_syntax.C_syntax_config.pp_log_statement Ir.C_syntax.Pure_C_config.pp_log_statement]
+styled_log_arg [Ir.C_syntax.C_syntax_config.styled_log_arg Ir.C_syntax.Pure_C_config.styled_log_arg]
+vec_splat [Ir.C_syntax.C_syntax.vec_splat]
+vec_typedef_doc [Ir.C_syntax.C_syntax.vec_typedef_doc]
+wrap_conversion [Ir.C_syntax.C_syntax.wrap_conversion]
+
 == goldens holding emitted kernel or IR text ==
 roots scanned: arrayjit/test, test
 arrayjit/test/test_cross_cse.expected [c ll] markers c-for c-prec-cast ll-assign ll-loop
@@ -12,6 +64,7 @@ arrayjit/test/test_zero_out_codegen.expected [c] markers c-align-attr c-decl-ban
 test/einsum/inline_permuted_view-c_fwd.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end ll-loop
 test/einsum/test_cse-cse_d_fwd.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end ll-loop
 test/operations/canonical_render.expected [ll] markers ll-assign
+test/operations/cost_model_floor.expected [derived] beside test/operations/cost_model_floor.ml
 test/operations/ll_printer_constants.expected [derived] beside test/operations/ll_printer_constants.ml
 test/operations/micrograd_demo_logging-cc-0-0.log.expected [c ll routine-log] markers c-prec-cast c-restrict ll-assign routine-log
 test/operations/micrograd_demo_logging-hip-0-0.log.expected [c ll routine-log] markers c-prec-cast ll-assign routine-log
@@ -59,6 +112,7 @@ test/operations/canonical_render.ml [renders generated text in memory]
     "?"
     "s0"
 test/operations/cc_march_census.ml
+test/operations/cost_model_floor.ml [renders generated text in memory]
 test/operations/cpu_parallel.ml
     "#pragma omp parallel for"
     "Pool-backed Grid rendering"
@@ -353,3 +407,6 @@ every scanned root meets its golden floor: true
 every scanned root meets its source-site floor: true
 every source handed over parsed as OCaml: true
 every exclusion still names a file the globs hand over: true
+every module the scanned library interfaces declare was read: true
+every scanned library declares modules: true
+no source hides a route to generated text behind an open: true

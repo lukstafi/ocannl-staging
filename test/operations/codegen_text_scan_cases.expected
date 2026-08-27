@@ -56,5 +56,14 @@ ok: source -- a helper that hard-codes the fragment pins it, taking the source a
 ok: source -- a helper that slices on a banner and tests its own parameter pins both
 ok: source -- a fragment named through a binding is still that fragment
 ok: source -- a buffer-writing serializer is an emitter too
+ok: source -- the buffer a serializer writes into carries the text, across bindings
+ok: source -- a buffer nobody wrote generated text into carries nothing
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it
+ok: rejection -- opening the reader hides its calls from the qualifier
+ok: rejection -- opening an ALIAS of the reader hides them just the same
+ok: rejection -- opening the emitter's module hides the render
+ok: rejection -- an open in expression position is an open
+ok: rejection -- opening Utils without reading the artifact directory is fine
+ok: rejection -- a name an emitter shares with an unopened module is not hidden
+ok: rejection -- the qualified spelling is what everything already uses

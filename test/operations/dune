@@ -1870,14 +1870,34 @@
 (executable
  (name codegen_text_inventory)
  (modules codegen_text_inventory)
- (libraries base stdio test_utils arrayjit.verdict))
+ (libraries base stdio test_utils emitter_frontier arrayjit.verdict))
+
+; The `.cmi` dependencies are the emitter frontier's source (gh-ocannl-748): the set of values that
+; hand a test generated text is derived from the compiler libraries' compiled interfaces rather than
+; listed in the scan. Both spellings of each library are asked for, because which one exists depends
+; on how dune was invoked, and a derivation handed nothing reports a smaller census rather than an
+; error:
+;
+;   - the object directory holds every module's interface in an ordinary in-workspace build, and the
+;     glob is what forces them to be built;
+;   - `%{lib:...}` resolves the wrapper interface in a PACKAGE-FILTERED build (`dune build -p
+;     neural_nets_lib`, which each .opam file's build command runs), where arrayjit's own stanzas
+;     are disabled and its libraries come from the switch instead. The member interfaces sit beside
+;     that wrapper in the installed directory, and `Emitter_frontier` looks for them there.
+;
+; Whether the hand-over was complete is not assumed either way: the wrapper interface declares the
+; library's modules, and the test fails when one of them was not read.
 
 (rule
- ; ocannl-backend: none -- links no backend: it reads goldens and test sources as text.
+ ; ocannl-backend: none -- links no backend: it reads goldens, test sources and compiled interfaces.
  (target codegen_text_inventory.actual)
  (package neural_nets_lib)
  (deps
   ocannl_config
+  %{lib:arrayjit.ir:ir.cmi}
+  %{lib:arrayjit.utils:utils.cmi}
+  (glob_files ../../arrayjit/lib/.ir.objs/byte/*.cmi)
+  (glob_files ../../arrayjit/lib/.utils.objs/byte/*.cmi)
   (glob_files_rec ../../test/*.expected)
   (glob_files_rec ../../test/*.ml)
   (glob_files_rec ../../arrayjit/test/*.expected)

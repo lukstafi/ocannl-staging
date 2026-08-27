@@ -57,6 +57,19 @@
  (preprocess
   (pps ppxlib.metaquot)))
 
+; The emitter frontier is derived from the compiler libraries' COMPILED interfaces (gh-ocannl-748),
+; so this one reads `.cmi` files through `compiler-libs`. It stays out of [test_utils] because
+; that library reads OCaml SOURCES through ppxlib, and the two put different modules under the same
+; top-level names (`Parsetree`, `Longident`, `Asttypes`, `Location`): keeping them in separate
+; compilation units is what makes each file's spelling unambiguous. Nothing but `base` besides, so
+; every consumer of [test_utils] can link it.
+
+(library
+ (name emitter_frontier)
+ (package neural_nets_lib)
+ (modules emitter_frontier)
+ (libraries base compiler-libs.common))
+
 (library
  (name ll_test)
  (package neural_nets_lib)
