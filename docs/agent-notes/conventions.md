@@ -146,3 +146,15 @@ files.
   mechanism: one `flock` replacing a directory-plus-pid-file dance with its reclaim races and
   `kill -0` pid-reuse hole, one `run_capped` replacing three hand-rolled background-and-publish-pid
   call sites.
+- Any file OCANNL publishes for a later process to read — a schedule-cache entry, a checkpoint, the
+  cc probe cache — goes through `Utils.Atomic_file` (`arrayjit/lib/atomic_file.mli`), never through
+  a hand-rolled `<path>.tmp`. Three parts, and a hand-rolled copy usually has one or two: a staging
+  name carrying the writer's pid AND a per-process counter (a fixed `.tmp` lets two writers stream
+  into one file and commit a mixture), removal on every failing path, and `cleanup_stale` for the
+  writer killed inside its commit window, which cannot clean up after itself. The Windows halves
+  are measured, not inferred (gh-ocannl-588): a live mapping blocks neither the rename nor a delete
+  but PINS the file's size, so reopening the target for writing is the one operation Windows
+  refuses — publish by rename, never by truncation; close the staging file before renaming or
+  removing it, since the C runtime opens without `FILE_SHARE_DELETE`; and expect a rename to fail
+  transiently while another process holds the target open, which is why the commit retries a
+  bounded number of times.
