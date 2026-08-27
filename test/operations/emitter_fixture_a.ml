@@ -1,0 +1,13 @@
+(* The implementations are beside the point -- what this fixture library exists for is its
+   INTERFACES, which emitter_frontier_cases reads back through the compiler. See the .mli. *)
+
+type ir = string
+
+let renders_a_document code = PPrint.string code
+let renders_a_triple ~name code = ([ name ], PPrint.string code, 0)
+let renders_through_an_option code = Some (PPrint.string code)
+let writes_into_a_buffer ~buf code = Buffer.add_string buf code
+let combines_documents lanes = PPrint.string (Int.to_string lanes)
+let joins_documents left right = PPrint.(left ^^ right)
+let consumes_documents _code = None
+let describes_the_code code = code

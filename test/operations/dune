@@ -1915,6 +1915,29 @@
  (action
   (diff codegen_text_inventory.expected codegen_text_inventory.actual)))
 
+; Interfaces built to break the emitter derivation: a library whose .mli declares every shape
+; `Emitter_frontier` has to answer for, beside the near misses that decide the rule. Its second
+; module carries no .mli and no annotation, which is `C_syntax.compile_proc`'s situation -- the
+; member that makes the derivation read compiled interfaces rather than sources -- and having two
+; modules is also what makes dune wrap the library, so its interface carries the module aliases the
+; derivation takes its module list from.
+
+(library
+ (name emitter_fixture)
+ (package neural_nets_lib)
+ (modules emitter_fixture_a emitter_fixture_b)
+ (libraries pprint))
+
+(test
+ ; ocannl-backend: none -- links no backend: it reads the fixture library's compiled interfaces.
+ (name emitter_frontier_cases)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files .emitter_fixture.objs/byte/*.cmi))
+ (modules emitter_frontier_cases)
+ (libraries base stdio emitter_frontier arrayjit.verdict))
+
 ; What the codegen-text classifier calls a member, on input built to break it rather than on
 ; whatever the tree holds today -- including, for every marker a claim label could plausibly
 ; contain, the nearest legitimate golden it must leave alone.
