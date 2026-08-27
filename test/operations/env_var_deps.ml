@@ -318,32 +318,47 @@ let lifecycle_family =
    probe is added. There were 7 on 2026-08-27. *)
 let family_member_floor = 4
 
-(* The stanza kinds a family member can be: the ones that name their own modules AND run. A
-   `(library)` whose modules read the instrumentation is the instrumentation's own implementation or
-   a shared helper, not a probe anything can run. *)
-let family_member_kinds = [ "test"; "tests"; "executable"; "executables" ]
+(* The stanza kinds that name their own modules, and so can be asked whether one of them reads the
+   lifecycle instrumentation. A `(library)` whose modules read it is the instrumentation's own
+   implementation or a shared helper, not a probe anything can run. *)
+let family_module_kinds = [ "test"; "tests"; "executable"; "executables" ]
 
-(* The aliases a family stanza can list to reach a member. For a `(test)`/`(tests)` stanza that is
-   the `runtest-<name>` dune generates for it (>= 3.20); for an `(executable)`, which has no alias
-   at all, it is the alias of whichever rule in the file RUNS it -- the same placement the
-   `ocannl_config` dep and the backend marker take; and for a rule, its own. Deliberately NOT
-   `runtest`: a family listing the directory's whole `runtest` would run the directory, which is the
-   run these aggregates exist to avoid. *)
-let family_member_aliases stanzas stanza =
+(* Whether a rule runs the executable a stanza named `name` builds. The path is compared WHOLE, not
+   by basename: `../other/probe.exe` is another directory's executable, and crediting a member with
+   a rule that runs it would report the member as aggregated by a family that never runs it (Codex
+   P2, round 1). A path this comparison declines leaves the member unaggregated, which is reported
+   -- the direction that asks the author to say what they meant. *)
+let runs_executable_named ~name command =
+  match command with
+  | Scan.Runs path ->
+      let path = Option.value (String.chop_prefix path ~prefix:"./") ~default:path in
+      String.equal path (name ^ ".exe")
+  | _ -> false
+
+(* The aliases a family stanza can list to reach a member, as GROUPS: the member is aggregated when
+   every group has one of its aliases reached. The grouping is what a plural stanza needs -- `(tests
+   (names a b))` builds two tests with an alias each, and reaching one of them leaves the other one
+   out of the family while the stanza as a whole looked covered (Codex P2, round 1). Within a group
+   any alias will do: two rules running one executable are two ways of running it.
+
+   For a `(test)`/`(tests)` stanza the aliases are the `runtest-<name>` dune generates (>= 3.20), one
+   group per name; for an `(executable)`, which has no alias at all, they are the aliases of the
+   rules that RUN it -- the same placement the `ocannl_config` dep and the backend marker take, one
+   group per executable; and for a rule, its own aliases. Deliberately NOT `runtest`: a family
+   listing the directory's whole `runtest` would run the directory, which is the run these
+   aggregates exist to avoid. *)
+let family_member_alias_groups stanzas stanza =
   match Scan.head stanza with
-  | Some ("test" | "tests") -> List.map (Scan.names_of stanza) ~f:(fun name -> "runtest-" ^ name)
+  | Some ("test" | "tests") -> List.map (Scan.names_of stanza) ~f:(fun name -> [ "runtest-" ^ name ])
   | Some ("executable" | "executables") ->
-      let exes = List.map (Scan.names_of stanza) ~f:(fun name -> name ^ ".exe") in
-      List.concat_map stanzas ~f:(fun other ->
-          if
-            List.exists (Scan.executables_run other) ~f:(fun (_cwd, command) ->
-                match command with
-                | Scan.Runs path ->
-                    List.mem exes (Stdlib.Filename.basename path) ~equal:String.equal
-                | _ -> false)
-          then aliases_of other
-          else [])
-  | _ -> aliases_of stanza
+      List.map (Scan.names_of stanza) ~f:(fun name ->
+          List.concat_map stanzas ~f:(fun other ->
+              if
+                List.exists (Scan.executables_run other) ~f:(fun (_cwd, command) ->
+                    runs_executable_named ~name command)
+              then aliases_of other
+              else []))
+  | _ -> ( match aliases_of stanza with [] -> [ [] ] | aliases -> [ aliases ])
 
 (* A stanza's identity for the family report: the kind and the name a reader would look it up by. *)
 let family_member_identity stanza =
@@ -1044,90 +1059,107 @@ let main () =
                          scans_suite scans_suite)));
       (* The focused aggregates (gh-ocannl-783): the same completeness question, asked of two more
          families whose membership is derived from what the member stanza declares. *)
-      let metal_marked =
-        List.filter_map marked ~f:(fun stanza ->
+      (* The stanzas as dune applies them, each with the `(subdir …)` it sits under. `marked_stanzas`
+         makes the same descent and carries the same pairing, so the two readings of one file agree
+         about which stanzas it holds and where. *)
+      let file_stanzas = List.map marked ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp)) in
+      (* Dune resolves a default module set within ONE directory, so the stanzas that can narrow a
+         stanza's claim are that subdirectory's, not the file's: an explicit `(modules probe)` in
+         `(subdir a …)` must not remove `b/probe.ml` from what a default-module stanza in `(subdir b
+         …)` builds (Codex P2, round 1). *)
+      let stanzas_in subdir =
+        List.filter_map file_stanzas ~f:(fun (sub, stanza) ->
+            if String.equal sub subdir then Some stanza else None)
+      in
+      (* The Metal derivation reads the MARKED stanza, whatever kind it is. For an `(executable)` the
+         marker's required placement is the rule that runs it (gh-ocannl-659), so a Metal test in
+         that form carries its marker on an unnamed `(rule …)`: asking the question of the executable
+         stanza instead would find no marker and let the family omit the test while this scan passed
+         (Codex P2, round 1). Whatever stanza carries the marker is the member, and its own aliases
+         are what the family has to list. *)
+      let metal_members =
+        List.filter marked ~f:(fun stanza ->
             match Scan.backend_rule_of stanza with
             | Scan.Names_backend (_, body) | Scan.Declares_and_names (_, body) ->
                 (* The marker admits several words, comma-separated, where a stanza honestly names
                    two backends -- so membership is "names metal among them", not "is spelled
                    metal". *)
-                if
-                  List.mem (String.split body.Scan.backend ~on:',') "metal" ~equal:String.equal
-                then Some (Printf.sprintf "%s %s" stanza.Scan.marked_head stanza.Scan.marked_name)
-                else None
+                List.mem (String.split body.Scan.backend ~on:',') "metal" ~equal:String.equal
             | Scan.Runs_nothing | Scan.Marker_without_run _ | Scan.Declares_variable
             | Scan.Names_twice _ | Scan.Names_neither ->
-                None)
-        |> Set.of_list (module String)
+                false)
+        |> List.map ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp))
       in
-      (* The same descent `marked_stanzas` makes, so that the two readings of a `(subdir …)` agree
-         about which stanzas the file holds. *)
-      let file_stanzas = Scan.walk "" stanzas ~f:(fun subdir stanza -> [ (subdir, stanza) ]) in
-      let all_stanzas = List.map file_stanzas ~f:snd in
-      let is_runner stanza =
-        match Scan.head stanza with
-        | Some kind -> List.mem family_member_kinds kind ~equal:String.equal
-        | None -> false
-      in
-      let is_metal_member (_subdir, stanza) =
-        is_runner stanza && Set.mem metal_marked (family_member_identity stanza)
-      in
-      let is_lifecycle_member (subdir, stanza) =
-        if not (is_runner stanza) then false
-        else
-          let here = Scan.in_subdir dir subdir in
-          (* Dune's default module set is the directory less what other stanzas claim, which is why
-             the whole file's stanzas are handed over: a `(test (name t))` with no `(modules …)`
-             builds whatever no other stanza took. *)
-          let directory = if String.is_empty here then "." else here in
-          let directory_modules =
-            List.filter_map source_files ~f:(fun (path, _) ->
-                if String.equal (Stdlib.Filename.dirname path) directory then
-                  Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
-                else None)
-          in
-          List.exists (Scan.modules_of ~directory_modules all_stanzas stanza) ~f:(fun module_name ->
-              Set.mem lifecycle_sources
-                (String.lowercase (Scan.in_subdir here (module_name ^ ".ml"))))
+      let lifecycle_members =
+        List.filter file_stanzas ~f:(fun (subdir, stanza) ->
+            match Scan.head stanza with
+            | Some kind when List.mem family_module_kinds kind ~equal:String.equal ->
+                let here = Scan.in_subdir dir subdir in
+                let directory = if String.is_empty here then "." else here in
+                let directory_modules =
+                  List.filter_map source_files ~f:(fun (path, _) ->
+                      if String.equal (Stdlib.Filename.dirname path) directory then
+                        Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
+                      else None)
+                in
+                List.exists
+                  (Scan.modules_of ~directory_modules (stanzas_in subdir) stanza)
+                  ~f:(fun module_name ->
+                    Set.mem lifecycle_sources
+                      (String.lowercase (Scan.in_subdir here (module_name ^ ".ml"))))
+            | _ -> false)
       in
       List.iter
-        [ (metal_family, is_metal_member); (lifecycle_family, is_lifecycle_member) ]
-        ~f:(fun (family, is_member) ->
+        [ (metal_family, metal_members); (lifecycle_family, lifecycle_members) ]
+        ~f:(fun (family, members) ->
           let reaches = aliases_reached_from stanzas family.family_alias in
-          List.iter file_stanzas ~f:(fun (subdir, stanza) ->
-              if is_member (subdir, stanza) then (
-                let identity = family_member_identity stanza in
-                let aliases = family_member_aliases all_stanzas stanza in
-                let aggregated =
-                  String.is_empty subdir && List.exists aliases ~f:(Set.mem reaches)
-                in
-                family_table :=
-                  (dune_file, family.family_alias, identity, aggregated) :: !family_table;
-                if not aggregated then
-                  if not (String.is_empty subdir) then
-                    fail
-                      (Printf.sprintf
-                         "%s: the %s in `(subdir %s …)` %s, and an alias is per directory -- the \
-                          `%s` stanza in this file cannot reach into the subdirectory. Give that \
-                          directory its own dune file with an `(alias (name %s) (deps …))` stanza"
-                         dune_file identity subdir family.family_is family.family_alias
-                         family.family_alias)
-                  else
-                    fail
-                      (Printf.sprintf
-                         "%s: the %s %s, and the `%s` alias does not reach it -- `dune build @%s` \
-                          would skip it silently. List %s in this file's `(alias (name %s) (deps \
-                          …))` stanza, adding the stanza if this directory has no member yet"
-                         dune_file identity family.family_is family.family_alias family.family_alias
-                         (match aliases with
-                         | [] ->
-                             "the alias of the rule that runs it -- it has none, being an \
-                              `(executable)` no rule in this file runs"
-                         | aliases ->
-                             String.concat ~sep:" or "
-                               (List.map aliases ~f:(fun alias ->
-                                    Printf.sprintf "`(alias %s)`" alias)))
-                         family.family_alias))));
+          List.iter members ~f:(fun (subdir, stanza) ->
+              let identity = family_member_identity stanza in
+              let groups = family_member_alias_groups (stanzas_in subdir) stanza in
+              (* EVERY group, not any: a plural stanza is several tests, and a family that reaches
+                 one of them omits the rest (Codex P2, round 1). *)
+              let aggregated =
+                String.is_empty subdir
+                && (not (List.is_empty groups))
+                && List.for_all groups ~f:(fun group -> List.exists group ~f:(Set.mem reaches))
+              in
+              (* The groups still to be reached, which is what the author has to list -- a plural
+                 stanza half in the family should be told about its other half, not about all of
+                 its aliases again. *)
+              let missing =
+                List.filter groups ~f:(fun group ->
+                    not (List.exists group ~f:(Set.mem reaches)))
+              in
+              family_table :=
+                (dune_file, family.family_alias, identity, aggregated) :: !family_table;
+              if not aggregated then
+                if not (String.is_empty subdir) then
+                  fail
+                    (Printf.sprintf
+                       "%s: the %s in `(subdir %s …)` %s, and an alias is per directory -- the `%s` \
+                        stanza in this file cannot reach into the subdirectory. Give that directory \
+                        its own dune file with an `(alias (name %s) (deps …))` stanza"
+                       dune_file identity subdir family.family_is family.family_alias
+                       family.family_alias)
+                else
+                  fail
+                    (Printf.sprintf
+                       "%s: the %s %s, and the `%s` alias does not reach %s -- `dune build @%s` \
+                        would skip %s silently. List %s in this file's `(alias (name %s) (deps …))` \
+                        stanza, adding the stanza if this directory has no member yet"
+                       dune_file identity family.family_is family.family_alias
+                       (if List.length groups > 1 then "all of it" else "it")
+                       family.family_alias
+                       (if List.length groups > 1 then "part of it" else "it")
+                       (match List.concat missing with
+                       | [] ->
+                           "the alias of the rule that runs it -- it has none, being an \
+                            `(executable)` no rule in this file runs"
+                       | aliases ->
+                           String.concat ~sep:" or "
+                             (List.map aliases ~f:(fun alias ->
+                                  Printf.sprintf "`(alias %s)`" alias)))
+                       family.family_alias)));
       (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
          merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
          in the file rather than of the golden diffs alone, since any rule can be given such an
@@ -1976,26 +2008,64 @@ let family_gate =
  (deps (alias runtest-gate)))
 |dune}
 
-(* The subject: one `(test)` stanza which is, or is not, a member of the family named -- by its
+(* The three shapes a member stanza takes, because the derivation reads each of them differently and
+   the differences are where it went wrong (Codex P2, round 1). A `(test)` carries its marker itself
+   and dune generates its alias; an `(executable)` runs nothing, so its marker is REQUIRED to sit on
+   the rule that runs it and the alias to list is that rule's; and a `(tests)` is several tests
+   behind one stanza, each with an alias the family has to reach. *)
+type family_shape =
+  | Single_test  (** `(test (name probe) …)` *)
+  | Exe_with_runner  (** `(executable (name probe) …)` plus the `(rule)` that runs it *)
+  | Plural_tests  (** `(tests (names probe probe2) …)` *)
+
+let family_member_stanza ~shape ~metal =
+  let marker =
+    Printf.sprintf
+      " ; ocannl-backend: %s -- a synthetic control fixture, judged on this marker alone.\n"
+      (if metal then "metal" else "cc")
+  in
+  match shape with
+  | Single_test ->
+      Printf.sprintf
+        "(test\n%s (name probe)\n (modules probe)\n (deps ocannl_config)\n (libraries base))\n"
+        marker
+  | Plural_tests ->
+      Printf.sprintf
+        "(tests\n%s (names probe probe2)\n (modules probe probe2)\n (deps ocannl_config)\n \
+         (libraries base))\n"
+        marker
+  | Exe_with_runner ->
+      (* The runner depends on the gate's alias, since its own alias is a build entry point like any
+         other -- the same reason the family stanzas below do. *)
+      Printf.sprintf
+        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(rule\n%s (alias \
+         probe_run)\n (deps ocannl_config (alias runtest-gate) %%{dep:probe.exe})\n (action\n  (run \
+         ./probe.exe)))\n"
+        marker
+
+(* Which aliases the family stanza lists, when there is one. `Every` is what a correct dune file
+   writes; `First_only` is the plural stanza half-listed, which is the shape that used to pass. *)
+type family_listing = Every | First_only
+
+let family_listed_aliases ~shape ~listing =
+  match (shape, listing) with
+  | Exe_with_runner, _ -> [ "probe_run" ]
+  | Single_test, _ -> [ "runtest-probe" ]
+  | Plural_tests, First_only -> [ "runtest-probe" ]
+  | Plural_tests, Every -> [ "runtest-probe"; "runtest-probe2" ]
+
+(* The subject: one member stanza which is, or is not, a member of the family named -- by its
    backend marker for `metal-codegen`, by what `probe.ml` names for `lifecycle` -- and, optionally,
    the family alias stanza that aggregates it. Everything else is held fixed across the runs. *)
-let family_subject ~metal ~family =
-  Printf.sprintf
-    {dune|%s
-(test
- ; ocannl-backend: %s -- a synthetic control fixture, judged on this marker alone.
- (name probe)
- (modules probe)
- (deps ocannl_config)
- (libraries base))
-%s|dune}
-    family_gate
-    (if metal then "metal" else "cc")
+let family_subject ~shape ~metal ~family ~listing =
+  Printf.sprintf "%s\n%s%s" family_gate
+    (family_member_stanza ~shape ~metal)
     (match family with
     | None -> ""
     | Some family ->
-        Printf.sprintf "\n(alias\n (name %s)\n (deps\n  (alias runtest-gate)\n  (alias runtest-probe)))\n"
-          family)
+        Printf.sprintf "\n(alias\n (name %s)\n (deps\n  (alias runtest-gate)\n%s))\n" family
+          (String.concat ~sep:"\n"
+             (List.map (family_listed_aliases ~shape ~listing) ~f:(Printf.sprintf "  (alias %s)"))))
 
 (* The lifecycle derivation reads the module's SOURCE, so the two spellings of `probe.ml` are what
    makes the stanza a member or not. Syntactically valid OCaml either way: the checker parses the
@@ -2015,9 +2085,15 @@ let family_control () =
   List.iter context ~f:(fun (file, content) ->
       write_file (Stdlib.Filename.concat root file) content);
   write_file (Stdlib.Filename.concat root "t/gate.ml") "let () = ()\n";
-  let paths = "t/dune" :: "t/gate.ml" :: "t/probe.ml" :: List.map context ~f:fst in
-  let run ~metal ~lifecycle ~family =
-    write_file (Stdlib.Filename.concat root "t/dune") (family_subject ~metal ~family);
+  (* The plural shape's second module. Written once and always present: which stanza CLAIMS it is
+     what differs between the shapes, and an unclaimed source is not itself a finding here. *)
+  write_file (Stdlib.Filename.concat root "t/probe2.ml") "let () = ()\n";
+  let paths =
+    "t/dune" :: "t/gate.ml" :: "t/probe.ml" :: "t/probe2.ml" :: List.map context ~f:fst
+  in
+  let run ?(shape = Single_test) ?(listing = Every) ~metal ~lifecycle ~family () =
+    write_file (Stdlib.Filename.concat root "t/dune")
+      (family_subject ~shape ~metal ~family ~listing);
     write_file (Stdlib.Filename.concat root "t/probe.ml") (family_probe ~lifecycle);
     run_checker ~root ~exe ("." :: paths)
   in
@@ -2026,38 +2102,59 @@ let family_control () =
       (describe_status status) text
   in
   let exited n (status, _) = match status with Unix.WEXITED m -> m = n | _ -> false in
-  let unreached = "does not reach it" in
-  let metal_omitted = run ~metal:true ~lifecycle:false ~family:None in
-  let metal_listed = run ~metal:true ~lifecycle:false ~family:(Some metal_family.family_alias) in
-  let lifecycle_omitted = run ~metal:false ~lifecycle:true ~family:None in
-  let lifecycle_listed =
-    run ~metal:false ~lifecycle:true ~family:(Some lifecycle_family.family_alias)
-  in
+  let unreached = "alias does not reach" in
+  let metal = Some metal_family.family_alias and lifecycle = Some lifecycle_family.family_alias in
+  let metal_omitted = run ~metal:true ~lifecycle:false ~family:None () in
+  let metal_listed = run ~metal:true ~lifecycle:false ~family:metal () in
+  let lifecycle_omitted = run ~metal:false ~lifecycle:true ~family:None () in
+  let lifecycle_listed = run ~metal:false ~lifecycle:true ~family:lifecycle () in
+  (* The marker's placement on an `(executable)` is the RULE that runs it, so the derivation has to
+     read it there and the alias to list is the rule's. *)
+  let runner_omitted = run ~shape:Exe_with_runner ~metal:true ~lifecycle:false ~family:None () in
+  let runner_listed = run ~shape:Exe_with_runner ~metal:true ~lifecycle:false ~family:metal () in
+  (* A plural stanza is several tests: listing one of its aliases leaves the other out of the
+     family, which is what the stanza-level reading used to accept. *)
+  let plural_half = run ~shape:Plural_tests ~listing:First_only ~metal:true ~lifecycle:false ~family:metal () in
+  let plural_whole = run ~shape:Plural_tests ~metal:true ~lifecycle:false ~family:metal () in
   (* The negative control: neither derivation calls this stanza a member, so no family alias is
      asked for. A derivation that over-claimed would fail this correct tree. *)
-  let no_member = run ~metal:false ~lifecycle:false ~family:None in
+  let no_member = run ~metal:false ~lifecycle:false ~family:None () in
   let omitted_ok family (result : Unix.process_status * string) =
     exited 1 result
     && String.is_substring (snd result) ~substring:unreached
     && String.is_substring (snd result) ~substring:family
     && String.is_substring (snd result) ~substring:"t/dune"
   in
-  let listed_ok result = exited 0 result && not (String.is_substring (snd result) ~substring:unreached) in
+  let listed_ok result =
+    exited 0 result && not (String.is_substring (snd result) ~substring:unreached)
+  in
   let metal_omitted_ok = omitted_ok metal_family.family_alias metal_omitted in
   let lifecycle_omitted_ok = omitted_ok lifecycle_family.family_alias lifecycle_omitted in
+  let runner_omitted_ok = omitted_ok metal_family.family_alias runner_omitted in
+  let plural_half_ok =
+    omitted_ok metal_family.family_alias plural_half
+    && String.is_substring (snd plural_half) ~substring:"runtest-probe2"
+  in
   let metal_listed_ok = listed_ok metal_listed in
   let lifecycle_listed_ok = listed_ok lifecycle_listed in
+  let runner_listed_ok = listed_ok runner_listed in
+  let plural_whole_ok = listed_ok plural_whole in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
   if not lifecycle_omitted_ok then report "lifecycle, family stanza omitted" lifecycle_omitted;
   if not lifecycle_listed_ok then report "lifecycle, family stanza listing it" lifecycle_listed;
+  if not runner_omitted_ok then report "executable + runner, family stanza omitted" runner_omitted;
+  if not runner_listed_ok then report "executable + runner, runner listed" runner_listed;
+  if not plural_half_ok then report "plural stanza, one alias listed" plural_half;
+  if not plural_whole_ok then report "plural stanza, both aliases listed" plural_whole;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
      The focused-aggregate rule is put to a tree of one member stanza and a family alias that does\n\
-     or does not list it. Nothing else differs between the runs; the fifth is a stanza neither\n\
-     derivation calls a member.\n\n";
+     or does not list it. Nothing else differs between the runs of a pair; the member takes each of\n\
+     the three shapes a member can take, and the last run is a stanza neither derivation calls a\n\
+     member.\n\n";
   Verdict.p
     "a stanza whose backend marker names metal is reported, naming its family, when the \
      metal-codegen alias does not reach it"
@@ -2068,6 +2165,16 @@ let family_control () =
      when the lifecycle alias does not reach it"
     lifecycle_omitted_ok;
   Verdict.p "the same tree with that member listed passes too" lifecycle_listed_ok;
+  Verdict.p
+    "an executable whose RUNNER carries the metal marker is a member too, reported when the family \
+     does not reach that rule"
+    runner_omitted_ok;
+  Verdict.p "the same tree with the runner's own alias listed passes" runner_listed_ok;
+  Verdict.p
+    "a plural stanza with only one of its two generated aliases listed is reported, naming the one \
+     still missing"
+    plural_half_ok;
+  Verdict.p "the same plural stanza with both listed passes" plural_whole_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 

@@ -118,10 +118,9 @@
 ; the same way it derives the `scans` family from the rules that glob the repository. A list checked
 ; against a second copy of itself could only ever confirm that the copy still says what it says.
 ;
-; The members are `(test)` stanzas, so what these list are the per-test aliases dune >= 3.20
-; generates rather than hand-written rule fields. An `(alias …)` stanza is evaluated only when its
-; own alias is built, so on an older dune these two are inert rather than breaking `dune build` or
-; `dune runtest`; what an older dune cannot do is run them.
+; The members are `(test)` stanzas, so what these list are the per-test aliases dune generates from
+; 3.20 rather than hand-written rule fields -- which is the reason `dune-project` declares 3.20 as
+; the floor rather than 3.18.
 
 ; The Metal-pinned tests: the executed Metal-only guards and the emitted-MSL structural ones. Every
 ; stanza here names `metal` in its backend marker, so no other box can judge any of them, and the

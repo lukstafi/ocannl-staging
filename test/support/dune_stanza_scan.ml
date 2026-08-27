@@ -1512,6 +1512,15 @@ type marked_stanza = {
   marked_comments : (int * string) list;
       (** the comments inside its parentheses, each with the line it sits on — not those of a
           [(subdir …)] this walk descends past, since those belong to no stanza *)
+  marked_subdir : string;
+      (** the [(subdir …)] path this stanza was found under, relative to the dune file, or [""] at
+          the top level — so a caller can resolve its modules and its aliases in the directory dune
+          actually applies it to *)
+  marked_sexp : Sexp.t;
+      (** the stanza itself. Carried so that a caller which decided something FROM the marker can go
+          on to ask the stanza the ordinary structural questions — which aliases it attaches to,
+          which modules it names — without having to find it again by name, which for a [(rule …)]
+          (the placement a marker takes on an [(executable)]'s runner) is not possible at all. *)
 }
 
 (** [marked_stanzas content] is {!sites} again, per stanza and with the comments each stanza
@@ -1560,6 +1569,8 @@ let marked_stanzas content =
                is what the XOR's "a marker here declares nothing" arm already says of it. *)
             marked_declares_backend = List.exists sites ~f:(fun s -> s.declares_backend);
             marked_comments = enclosed form;
+            marked_subdir = dir;
+            marked_sexp = sexp;
           };
         ]
   in
