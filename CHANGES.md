@@ -46,6 +46,17 @@
   unchanged. It is a deterministic planning pass over `Context`'s analyze-only surface, so it sat in
   `context.mli` only by history. `test/operations/memory_budget` is renamed
   `memory_budget_planner`, so that the test executable's module does not shadow the library's.
+- **The fp8 soak's vendor arms hold only their jit calls** (gh-ocannl-758). A file behind a dune
+  `select` is compiled on its own box and nowhere else, so an edit to `fp8_soak_cuda.cudajit.ml` or
+  `fp8_soak_hip.hipjit.ml` made elsewhere is blind — twice in two days one shipped through a green
+  CI having only ever been parsed. Everything that is not a call into a vendor's jit library now
+  lives in `tools/fp8_soak.ml`, which every box compiles: per-vendor `vendor` records carry each
+  platform's name, C type, narrowing spellings and labels, the probe and header wording, and the
+  thresholds that say what a reported kernel macro means, while an arm is left with its kernel
+  source, its compile/load/launch/copy calls, and data extractors. The `.missing` stubs mirror no
+  vendor knowledge at all. Each arm also records where it last really compiled — box, date, commit —
+  which the run header prints beside the arm's source path, so the next editor knows whether they
+  are editing blind.
 
 ## [1.0.1] -- 2026-08-26
 

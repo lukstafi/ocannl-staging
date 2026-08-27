@@ -167,15 +167,35 @@ files.
   helpers: they take the source text from `Hip_backend.fp8_guard_source ()`, i.e. from
   `Builtins_hip`, which raises if either helper is renamed — the same discipline as the host side
   reaching `builtins.c` by `extern`. Nothing else in the suite sweeps the guard exhaustively.
-- Adding a vendor to the soak is a module of its `ARM` signature plus one `select` clause in
-  `tools/dune` — not a second program, which is how the CUDA and HIP sweeps drifted apart the first
-  time. The HIP arm (`tools/fp8_soak_hip.hipjit.ml`) was written on the CUDA box, where the `select`
-  resolves to the stub, and first compiled on a ROCm box a wave later (gh-ocannl-757): **every name
-  in it resolved unchanged**, which is the mechanical-mirror discipline paying off — what it needed
-  was the things a mirror cannot know, the backend's own hiprtc include options
-  (`Hip_backend.hip_include_options`, lifted out of `Impl` exactly as `cuda_include_options` was)
-  and a kernel that reports `HIP_FP8_CVT_FAST_PATH` so a run says which side of the header's
-  compile-time split it swept.
+- Adding a vendor to the soak is a module of its `ARM` signature, a `vendor` record beside it, and
+  one `select` clause in `tools/dune` — not a second program, which is how the CUDA and HIP sweeps
+  drifted apart the first time. The HIP arm (`tools/fp8_soak_hip.hipjit.ml`) was written on the CUDA
+  box, where the `select` resolves to the stub, and first compiled on a ROCm box a wave later
+  (gh-ocannl-757): **every name in it resolved unchanged**, which is the mechanical-mirror
+  discipline paying off — what it needed was the things a mirror cannot know, the backend's own
+  hiprtc include options (`Hip_backend.hip_include_options`, lifted out of `Impl` exactly as
+  `cuda_include_options` was) and a kernel that reports `HIP_FP8_CVT_FAST_PATH` so a run says which
+  side of the header's compile-time split it swept.
+- **A file behind a dune `select` is compiled only on a box that has the library it selects for**,
+  so every edit to one made elsewhere is blind — `@check` on a laptop compiles the `.missing` stub
+  and says nothing about the arm. Two fp8-soak arms shipped through a green CI having only ever been
+  parsed before this was addressed (gh-ocannl-758). The rule that keeps the exposure small is that
+  **an arm holds its vendor kernel source, its compile/load/launch/copy calls, and data extractors,
+  and nothing else**: the vendor's name and C type, its narrowing spellings and their labels, the
+  probe and header wording, the thresholds that say what a reported macro MEANS, and every claim
+  label live in `fp8_soak.ml`, which every box compiles — as the per-vendor `vendor` records beside
+  the `ARM` signature. A change to how the soak behaves then never edits an arm, and the `.missing`
+  stubs mirror no vendor knowledge at all (`built = false` is what the selection reads; nothing else
+  in a stub is reachable, because an unbuilt arm is refused before it is asked anything). The same
+  shape applies to any future `select`-gated file.
+- **Each arm records where it last really compiled** — `last_compiled`: box, date, commit — and the
+  run header prints it beside the arm's source path, so an editor on another box knows whether they
+  are editing blind and a sweep's output is also the record that the file still compiles somewhere.
+  Update it when you compile the arm on a box that has its vendor library, which is also the moment
+  to run the sweep: `opam exec -- dune build tools/fp8_soak.exe` then
+  `./_build/default/tools/fp8_soak.exe --sweep=f32` (add `--spelling=both` on HIP) takes about ten
+  seconds on either GPU box and exercises every path an arm has. `dune build @check` alone proves
+  the arm compiles but never calls it.
 
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends

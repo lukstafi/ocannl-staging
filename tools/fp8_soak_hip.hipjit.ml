@@ -29,7 +29,7 @@ module H = Hip
 
 (* Update this whenever you compile this file on a box that has hipjit -- the run header prints it,
    and it is what tells the next editor whether they are editing blind (gh-ocannl-758). *)
-let last_compiled = "on minix-amd-wsl (Radeon 8060S / gfx1151, hipjit), 2026-08-27, commit 0000000"
+let last_compiled = "on minix-amd-wsl (Radeon 8060S, gfx1151, ROCm 7.14), 2026-08-27, commit 4042bf4d"
 
 let built = true
 

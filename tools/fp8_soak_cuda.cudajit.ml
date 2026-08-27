@@ -17,7 +17,7 @@ module Cu = Cuda
 
 (* Update this whenever you compile this file on a box that has cudajit -- the run header prints it,
    and it is what tells the next editor whether they are editing blind (gh-ocannl-758). *)
-let last_compiled = "on rog-nv-wsl (RTX 5070 Ti, cudajit), 2026-08-27, commit 0000000"
+let last_compiled = "on rog-nv-wsl (RTX 5070 Ti Laptop, CUDA 13.3), 2026-08-27, commit 4042bf4d"
 
 let built = true
 
