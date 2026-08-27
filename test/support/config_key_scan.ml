@@ -388,10 +388,12 @@ let module_references_in_source content ~paths =
     (starts_with components path && not (List.exists qualifier ~f:is_shadowed))
     || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
            List.equal String.equal of_qualifier qualifier && contains components [ alias; name ])
-    (* Under an `open`, the reference begins with the module's own name -- STARTS with, not
-       contains, so that `Foo.Alloc_census` stays Foo's. *)
+    (* Under an `open`, the reference begins with the module's own name -- and only while that name
+       still means the opened module: `open Ir` followed by `module Alloc_census = Foo.Alloc_census`
+       rebinds the leaf, and what follows is Foo's (Codex P2, round 11). *)
     || (List.exists !opened ~f:(List.equal String.equal qualifier)
-       && starts_with components [ name ])
+       && starts_with components [ name ]
+       && not (is_shadowed name))
   in
   let walk =
     object (self)

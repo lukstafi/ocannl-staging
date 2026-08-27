@@ -1352,10 +1352,16 @@ let main () =
                  8). *)
               | Some name
                 when is_gate stanza && Set.mem gate_names name
-                     && List.exists (Scan.executables_run stanza) ~f:(fun (_cwd, command) ->
+                     && List.exists (Scan.executables_run stanza) ~f:(fun (cwd, command) ->
                          match command with
+                         (* Resolved, not by basename: `(chdir other (run ./gate.exe))` runs
+                            another directory's binary, and granting the exemption to it would let
+                            the merged alias run the generated test AND something unrelated (Codex
+                            P2, round 11). The same resolution the family's runner matching makes. *)
                          | Scan.Runs path ->
-                             String.equal (Stdlib.Filename.basename path) (name ^ ".exe")
+                             String.equal
+                               (normalize_path (Scan.in_subdir subdir (Scan.in_subdir cwd path)))
+                               (normalize_path (Scan.in_subdir subdir (name ^ ".exe")))
                          | _ -> false) ->
                   ()
               | Some name when Set.mem generated name ->
@@ -2170,7 +2176,7 @@ let floor_control () =
    backend marker, the lifecycle one reads its modules' sources, and a control that ran only the
    first would leave the second able to stop finding anything. *)
 
-let family_gate =
+let family_gate ~elsewhere =
   Printf.sprintf
     {dune|(test
  ; ocannl-backend: none -- the ambient gate of this synthetic tree; it runs on no device.
@@ -2184,12 +2190,13 @@ let family_gate =
  (alias runtest-gate)
  (deps ocannl_config (universe))
  (action
-  (run %%{dep:gate.exe})))
+  %s))
 
 (alias
  (name runtest)
  (deps (alias runtest-gate)))
 |dune}
+    (if elsewhere then "(chdir nested (run ./gate.exe))" else "(run %{dep:gate.exe})")
 
 (* The three shapes a member stanza takes, because the derivation reads each of them differently and
    the differences are where it went wrong (Codex P2, round 1). A `(test)` carries its marker itself
@@ -2214,6 +2221,8 @@ type family_shape =
   | Subdir_unlocked_gate  (** a group whose actions take the training lock and whose gate does not *)
   | Subdir_alias_collision
       (** a group with a `(test (name probe))` and a hand-written rule on `runtest-probe` *)
+  | Gate_elsewhere
+      (** the rule on `runtest-gate` runs ANOTHER directory's `gate.exe`, so it is no gate *)
 
 let family_marker ~metal =
   Printf.sprintf
@@ -2223,7 +2232,7 @@ let family_marker ~metal =
 let family_member_stanza ~shape ~metal =
   let marker = family_marker ~metal in
   match shape with
-  | Single_test ->
+  | Single_test | Gate_elsewhere ->
       Printf.sprintf
         "(test\n%s (name probe)\n (modules probe)\n (deps ocannl_config)\n (libraries base))\n"
         marker
@@ -2343,6 +2352,7 @@ let family_listed_aliases ~shape ~listing =
   match (shape, listing) with
   | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
+  | Gate_elsewhere, _ -> [ "runtest-probe" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
       | Public_name_by_path | Subdir_exe_top_runner ),
       _ ) ->
@@ -2356,7 +2366,8 @@ let family_listed_aliases ~shape ~listing =
    backend marker for `metal-codegen`, by what `probe.ml` names for `lifecycle` -- and, optionally,
    the family alias stanza that aggregates it. Everything else is held fixed across the runs. *)
 let family_subject ~shape ~metal ~family ~listing =
-  Printf.sprintf "%s\n%s%s" family_gate
+  Printf.sprintf "%s\n%s%s"
+    (family_gate ~elsewhere:(match shape with Gate_elsewhere -> true | _ -> false))
     (family_member_stanza ~shape ~metal)
     (match (family, family_listed_aliases ~shape ~listing) with
     | None, _ | _, [] -> ""
@@ -2378,6 +2389,7 @@ type family_probe_source =
   | Qualifier_shadowed  (** the qualifier's NAME rebound to another module, then used *)
   | Nested_qualifier  (** somebody else's module of the qualifier's name, opened and aliased *)
   | Nested_path  (** somebody else's module of the qualifier's name, written out in full *)
+  | Leaf_shadowed  (** the qualifier opened, and then the LEAF rebound to another module *)
   | Neither
 
 let family_probe = function
@@ -2406,6 +2418,10 @@ let family_probe = function
       (* And written out rather than bound: the path names Vendor's module, and our components sit
          inside it (Codex P2, round 10). *)
       "let () = ignore (Vendor.Ir.Alloc_census.snapshot ())\n"
+  | Leaf_shadowed ->
+      (* The open is ours and the leaf is not: after the rebinding, `Alloc_census` is Foo's (Codex
+         P2, round 11). *)
+      "open Ir\n\nmodule Alloc_census = Foo.Alloc_census\n\nlet () = ignore (Alloc_census.snapshot ())\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2528,6 +2544,11 @@ let family_control () =
   (* Somebody else's module of the qualifier's name, opened and aliased. *)
   let nested_qualifier = run ~probe:Nested_qualifier ~metal:false ~lifecycle:true ~family:None () in
   let nested_path = run ~probe:Nested_path ~metal:false ~lifecycle:true ~family:None () in
+  (* The qualifier opened and the LEAF then rebound: what follows is Foo's. *)
+  let leaf_shadowed = run ~probe:Leaf_shadowed ~metal:false ~lifecycle:true ~family:None () in
+  (* And a rule on the gate's generated alias that runs another directory's binary: not the gate,
+     so the collision is not the deliberate one. *)
+  let gate_elsewhere = run ~shape:Gate_elsewhere ~metal:true ~lifecycle:false ~family:metal () in
   (* And the alias collision one directory down: dune generates a `(test)` stanza's alias in the
      directory it applies the stanza to, so a rule in the same group can merge with it. *)
   let subdir_collision =
@@ -2589,6 +2610,11 @@ let family_control () =
   let public_by_path_ok = omitted_ok lifecycle_family.family_alias public_by_path in
   let nested_qualifier_ok = listed_ok nested_qualifier in
   let nested_path_ok = listed_ok nested_path in
+  let leaf_shadowed_ok = listed_ok leaf_shadowed in
+  let gate_elsewhere_ok =
+    exited 1 gate_elsewhere
+    && String.is_substring (snd gate_elsewhere) ~substring:"the alias dune generates"
+  in
   let subdir_collision_ok =
     exited 1 subdir_collision
     && String.is_substring (snd subdir_collision) ~substring:"the alias dune generates"
@@ -2624,6 +2650,8 @@ let family_control () =
   if not public_by_path_ok then report "a file sharing the public name" public_by_path;
   if not nested_qualifier_ok then report "another module named like the qualifier" nested_qualifier;
   if not nested_path_ok then report "that module's path written out" nested_path;
+  if not leaf_shadowed_ok then report "the opened module's leaf rebound" leaf_shadowed;
+  if not gate_elsewhere_ok then report "a gate alias running another binary" gate_elsewhere;
   if not subdir_collision_ok then report "an alias collision inside a group" subdir_collision;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
@@ -2727,6 +2755,14 @@ let family_control () =
   Verdict.p
     "nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module it starts at"
     nested_path_ok;
+  Verdict.p
+    "`open Ir` and then `module Alloc_census = Foo.Alloc_census` rebinds the leaf, so what follows \
+     is not the instrumentation"
+    leaf_shadowed_ok;
+  Verdict.p
+    "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
+     deliberate gate collision, and is reported"
+    gate_elsewhere_ok;
   Verdict.p
     "a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is \
      reported there too"
