@@ -1840,32 +1840,58 @@ type module_set =
           a module does not link it, so demanding a declaration of it would be a demand about a
           module the test never builds (Codex P2, round 3). *)
 
+(* Dune's ordered-set language, evaluated with its GROUPING rather than flattened.
+
+   `\` is a binary difference between what stands to its left and what stands to its right, WITHIN
+   the parentheses that hold it -- so `(modules (:standard \ helper) guard)` subtracts `helper` from
+   the default set and then adds `guard`, and flattening the whole field to `:standard \ helper
+   guard` subtracted `guard` as well (Codex P2, round 6 of PR #484). A module wrongly subtracted is a
+   module no stanza claims, which takes its reads out of every check phrased over a stanza's modules
+   -- silently.
+
+   The result of evaluating a set is what it includes, what it subtracts, and whether `:standard` is
+   among its terms; a nested set contributes all three to the one that holds it. Over-subtracting
+   remains the safe direction where a term cannot be evaluated, since what falls out of one stanza's
+   claim is caught by the census over sources no stanza claims. *)
+type ordered_set = { standard : bool; included : string list; excluded : string list }
+
+let empty_set = { standard = false; included = []; excluded = [] }
+
+let union a b =
+  {
+    standard = a.standard || b.standard;
+    included = a.included @ b.included;
+    excluded = a.excluded @ b.excluded;
+  }
+
+let difference left right =
+  {
+    standard = left.standard;
+    (* What the right-hand side would have ADDED is what the left loses; what it subtracts in turn is
+       a nesting this language admits and dune resolves the same way. *)
+    included = List.filter left.included ~f:(fun m -> not (List.mem right.included m ~equal:String.equal));
+    excluded = left.excluded @ right.included;
+  }
+
+let rec eval_ordered_set terms =
+  match List.split_while terms ~f:(fun t -> not (Sexp.equal t (Sexp.Atom "\\"))) with
+  | left, [] -> List.fold left ~init:empty_set ~f:(fun acc term -> union acc (eval_term term))
+  | left, _ :: right -> difference (eval_ordered_set left) (eval_ordered_set right)
+
+and eval_term = function
+  | Sexp.Atom ":standard" -> { empty_set with standard = true }
+  | Sexp.Atom name -> { empty_set with included = [ name ] }
+  | Sexp.List terms -> eval_ordered_set terms
+
 let explicit_modules stanza =
   match field stanza "modules" with
   | None -> Default_less []
-  | Some args -> (
-      let flat = List.concat_map args ~f:atoms in
-      if not (List.mem flat ":standard" ~equal:String.equal) then
-        (* FLAT, not the top-level atoms: dune's ordered-set language nests, so
-           `(modules (guard helper \ helper))` is one nested expression and reading only the atoms
-           at the top level resolved it to no modules at all -- which unclaims every source of the
-           stanza and takes it out of every check phrased over its modules (Codex P2, round 4). The
-           subtraction is then the same rule as below, applied to the same flattened atoms. *)
-        match List.split_while flat ~f:(fun a -> not (String.equal a "\\")) with
-        | listed, [] -> Named listed
-        | listed, _ :: excluded ->
-            Named
-              (List.filter listed ~f:(fun m ->
-                   not (List.mem excluded m ~equal:String.equal)))
+  | Some args ->
+      let set = eval_ordered_set args in
+      if set.standard then Default_less set.excluded
       else
-        (* Everything after a subtraction operator is subtracted. Dune's ordered-set language nests,
-           so the atoms are read flat and the FIRST `\` divides them: over-subtracting narrows this
-           stanza's claim, and what falls out of one stanza's claim is caught by the census check
-           over sources no stanza claims -- whereas over-claiming would demand a declaration of a
-           module the stanza does not build. *)
-        match List.split_while flat ~f:(fun a -> not (String.equal a "\\")) with
-        | _, [] -> Default_less []
-        | _, _ :: excluded -> Default_less excluded)
+        Named
+          (List.filter set.included ~f:(fun m -> not (List.mem set.excluded m ~equal:String.equal)))
 
 (** The modules a stanza owns, given every module the directory holds. Dune's default set is the
     directory less what other stanzas claim, which is what makes an explicit list elsewhere in the

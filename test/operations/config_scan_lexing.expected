@@ -98,6 +98,8 @@ ok: key list -- a list written at the iteration
 ok: key list -- a projection of a table, appended to a literal
 ok: key list -- the reader handed straight to the iteration is answered as well
 ok: key list -- a list from another compilation unit is unresolved
+ok: key list -- a qualified list does not resolve through a local binding of the same name
+ok: key list -- an unknown higher-order call establishes nothing, decoy list or not
 ok: key list -- an incidental literal does not answer for an unresolved reach
 ok: key list -- a list whose elements are not literals is unresolved
 ok: key list -- a later rebinding does not reach backwards

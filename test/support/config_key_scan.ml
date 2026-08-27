@@ -393,6 +393,31 @@ let is_named name expr =
   | Some path -> ( match List.last path with Some last -> String.equal last name | None -> false)
   | None -> false
 
+(** The higher-order functions whose argument semantics this scan knows: each applies its function
+    argument to every element of its list argument, so a lambda handed to one is reached with exactly
+    the elements of that list.
+
+    Named, and qualified by their container. Recording an iteration for ANY call that happened to
+    carry a resolvable list and a one-parameter lambda let a wrapper's decoy argument supply the keys
+    -- the reader was then blessed with a list it is never handed, and the reach that should have
+    been refused was reported as answered (Codex P2, round 6 of PR #484). A call outside this table
+    establishes nothing, so the reader's parameter stays unbound and the reach is refused. *)
+let iteration_combinators =
+  [
+    ("List", [ "iter"; "map"; "concat_map"; "filter_map"; "iteri"; "for_all"; "exists" ]);
+    ("Array", [ "iter"; "map"; "concat_map"; "filter_map"; "iteri"; "for_all"; "exists" ]);
+  ]
+
+let is_iteration expr =
+  match longident_of expr with
+  | Some path -> (
+      match List.rev path with
+      | last :: container :: _ ->
+          List.exists iteration_combinators ~f:(fun (name, functions) ->
+              String.equal name container && List.mem functions last ~equal:String.equal)
+      | _ -> false)
+  | None -> false
+
 (** The elements of the list [expr] denotes, where this scan can say.
 
     [bindings] carries each top-level name with the offset its binding ENDS at, and [before] is where
@@ -406,14 +431,15 @@ let rec resolve_elements ~bindings ~before expr =
   | Some elements -> Some elements
   | None -> (
       match expr.pexp_desc with
-      | Pexp_ident { txt; _ } -> (
-          match List.last (flatten_longident txt) with
-          | Some name ->
-              List.filter bindings ~f:(fun (bound, at, _) ->
-                  String.equal bound name && at <= before)
-              |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
-              |> Option.map ~f:(fun (_, _, elements) -> elements)
-          | None -> None)
+      (* UNQUALIFIED only. A qualified path names a list in another compilation unit, which this scan
+         has not read: resolving `Shared.guarded` through a local `guarded` of the same basename
+         answers with the wrong keys AND suppresses the unresolved-reach failure that would have
+         reported it, which is the silent direction twice over (Codex P2, round 6 of PR #484). *)
+      | Pexp_ident { txt = Lident name; _ } ->
+          List.filter bindings ~f:(fun (bound, at, _) ->
+              String.equal bound name && at <= before)
+          |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
+          |> Option.map ~f:(fun (_, _, elements) -> elements)
       (* `a @ b`, which is how a guard adds one key to a list it shares with something else. *)
       | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
         when is_named "@" op ->
@@ -577,9 +603,7 @@ let env_reader_reads_in_source content =
         | Pexp_apply (f, args) -> (
             (* The iteration is recorded before the walk descends, so a reader call inside the
                lambda finds its parameter bound. *)
-            (match longident_of f with
-            | Some _ -> record_iteration ~before:expr.pexp_loc.loc_start.pos_cnum args
-            | None -> ());
+            if is_iteration f then record_iteration ~before:expr.pexp_loc.loc_start.pos_cnum args;
             match longident_of f with
             | Some path when names_the_reader ~offset:f.pexp_loc.loc_start.pos_cnum path -> (
                 (* Blessed before the walk descends into [f], so the identifier arm below does not

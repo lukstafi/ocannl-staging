@@ -417,6 +417,14 @@ let artifact_config_key = "build_files_prefix"
 (* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
 let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 
+(* The module that DEFINES the environment reader, and so names every configuration key there is
+   while passing them to it. Every other library module reaching the reader is reported
+   (gh-ocannl-749, Codex P2 round 6): a guard in a plain library is run by whatever links it, which
+   puts the declaration on every such stanza -- a relationship nothing follows, and the same argument
+   `Artifact_in_library` makes for the initializer. Named rather than derived, being one file with
+   one reason. *)
+let env_reader_home = "utils.ml"
+
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -1235,11 +1243,10 @@ let main () =
                 | Some (("test" | "tests" | "executable" | "executables") as kind) -> Some kind
                 (* A library with inline tests is RUN by dune, under `(inline_tests (deps …))`, so a
                    module of it reading the environment goes stale the same way (Codex P2, round 2).
-                   A plain `(library)` is not: `Utils` DEFINES this reader and passes it every key
-                   there is, and a requirement placed there would fall on every stanza that links the
-                   library, where nothing follows it. *)
-                | Some "library" when Option.is_some (Scan.field stanza "inline_tests") ->
-                    Some "library"
+                   A plain `(library)` is judged too, but differently: it is not run, so there is no
+                   `deps` field that could answer for it, and the reads are REPORTED (Codex P2, round
+                   6). *)
+                | Some "library" -> Some "library"
                 | _ -> None
               in
               match kind with
@@ -1279,14 +1286,20 @@ let main () =
                                  P1 round 1, P2 round 4). *)
                               List.map runners ~f:(fun (r, pins) ->
                                   (Scan.field r "deps", pins)) ))
-                    | "library" ->
-                        let inline = Option.value (Scan.field stanza "inline_tests") ~default:[] in
-                        [
-                          ( named (),
-                            modules,
-                            "its inline tests",
-                            [ (Scan.field_in inline "deps", no_pins) ] );
-                        ]
+                    | "library" -> (
+                        match Scan.field stanza "inline_tests" with
+                        | Some inline ->
+                            [
+                              ( named (),
+                                modules,
+                                "its inline tests",
+                                [ (Scan.field_in inline "deps", no_pins) ] );
+                            ]
+                        (* A plain library runs under nothing of its own. Its reads are reported
+                           below, against an EMPTY runner list -- which is the same shape as an
+                           executable nothing runs, and says the same thing: there is no `deps` field
+                           in reach that a change of the variable could invalidate. *)
+                        | None -> [ (named (), modules, "whatever links it", []) ])
                     | _ -> [ (named (), modules, "it", [ (Scan.field stanza "deps", no_pins) ]) ]
                   in
                   List.iter programs ~f:(fun (name, own_modules, program, runners) ->
@@ -1295,7 +1308,11 @@ let main () =
                           (if String.is_empty subdir then "" else " (subdir " ^ subdir ^ ")")
                           kind name
                       in
-                      let sources = List.filter_map own_modules ~f:source_of_module in
+                      let sources =
+                        List.filter_map own_modules ~f:source_of_module
+                        |> List.filter ~f:(fun (source, _) ->
+                            not (String.equal source env_reader_home))
+                      in
                       let reads =
                         List.map sources ~f:(fun (source, content) ->
                             ( source,
@@ -1343,6 +1360,16 @@ let main () =
                             || Set.mem pins var
                           in
                           match (runners, List.filter runners ~f:(fun r -> not (answers r))) with
+                          | [], _ when String.equal kind "library" ->
+                              fail
+                                (Printf.sprintf
+                                   "%s reads the configuration key `%s` straight from the \
+                                    environment, from a library module -- a library runs under \
+                                    nothing of its own, so the requirement would fall on every \
+                                    stanza that links it, where nothing follows it. Move the read \
+                                    into the executable's own modules, or give the library inline \
+                                    tests and declare `(env_var %s)` there"
+                                   where key var)
                           | [], _ ->
                               fail
                                 (Printf.sprintf
@@ -1998,6 +2025,13 @@ let guard_subject ~arm =
   (* A `(library)` with inline tests is RUN by dune, under `(inline_tests (deps …))`, so a module of
      it reading the environment goes stale the same way an executable's does. A plain `(library)` is
      out of scope, `Utils` being where the reader lives. *)
+  (* And a PLAIN library, run by nothing of its own: the requirement would fall on every stanza that
+     links it, so the read is reported rather than attributed (Codex P2, round 6). *)
+  | `Plain_library ->
+      "(library\n\
+      \ (name guard)\n\
+      \ (modules guard)\n\
+      \ (libraries arrayjit.utils))\n"
   | `Inline_tests_library ->
       "(library\n\
        ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
@@ -2061,6 +2095,7 @@ let guard_control () =
   let pinned_beside_helper = run `Pins_beside_a_helper in
   let implicit = run `Implicit_modules in
   let in_a_subdir = run `In_a_subdir ~at:"t/gen/guard.ml" in
+  let plain_library = run `Plain_library in
   let inline_library = run `Inline_tests_library in
   let inline_library_declares = run `Inline_tests_library_declares in
   let second_bare = run `Second_runner_bare in
@@ -2090,6 +2125,9 @@ let guard_control () =
   let pinned_beside_helper_ok = passes pinned_beside_helper diagnostic in
   let implicit_ok = reports implicit diagnostic && names_the_key (snd implicit) in
   let in_a_subdir_ok = reports in_a_subdir diagnostic && names_the_key (snd in_a_subdir) in
+  let plain_library_ok =
+    reports plain_library "from a library module" && names_the_key (snd plain_library)
+  in
   let inline_library_ok = reports inline_library diagnostic && names_the_key (snd inline_library) in
   let inline_library_declares_ok = passes inline_library_declares diagnostic in
   (* The count is what says the SECOND runner is what failed: one of the two, not both, and not the
@@ -2107,6 +2145,7 @@ let guard_control () =
   if not implicit_ok then report "implicit-modules" implicit;
   if not pinned_beside_helper_ok then report "pinned-beside-a-helper" pinned_beside_helper;
   if not in_a_subdir_ok then report "in-a-subdir" in_a_subdir;
+  if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
     report "inline-tests-library-declares" inline_library_declares;
@@ -2140,6 +2179,9 @@ let guard_control () =
   Verdict.p
     "a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules"
     in_a_subdir_ok;
+  Verdict.p
+    "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
+    plain_library_ok;
   Verdict.p
     "a library with inline tests is run by dune, so its modules are asked the same question"
     inline_library_ok;

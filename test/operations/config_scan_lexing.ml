@@ -481,6 +481,21 @@ let () = List.iter guarded ~f:Utils.read_env_var|ocaml},
     ( "a list from another compilation unit is unresolved",
       {ocaml|let () = List.iter Shared.guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([], true) );
+    (* And it stays unresolved when a LOCAL binding shares its basename: resolving `Shared.guarded`
+       through a local `guarded` would answer with the wrong keys and swallow the refusal that
+       reports it (Codex P2, round 6 of PR #484). *)
+    ( "a qualified list does not resolve through a local binding of the same name",
+      {ocaml|let guarded = [ "profile" ]
+let () = List.iter Shared.guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* Only the combinators whose argument semantics this scan knows establish an iteration. A
+       wrapper carrying a decoy list otherwise supplied the keys, blessing the reader with a list it
+       is never handed (Codex P2, round 6). *)
+    ( "an unknown higher-order call establishes nothing, decoy list or not",
+      {ocaml|let guarded = [ "log_level" ]
+let decoy = [ "profile" ]
+let () = apply decoy guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
     ( "an incidental literal does not answer for an unresolved reach",
       {ocaml|let label = "profile"
 let () = ignore (Utils.read_env_var Sys.argv.(1))|ocaml},

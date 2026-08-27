@@ -1354,6 +1354,15 @@ let artifact_default_modules_cases =
       [ "t"; "helper" ],
       [ "t" ],
       [ "test t: undeclared (t)" ] );
+    (* Grouping is semantics: `\\` is a difference between what stands to its left and right INSIDE
+       the parentheses that hold it, so a nested difference does not reach the terms beside it.
+       Flattening the field subtracted `guard` as well, which unclaims its source silently (Codex P2,
+       round 6). *)
+    ( "a nested difference does not subtract the terms beside it",
+      {dune|(test (name t) (modules (:standard \ helper) guard) (deps ocannl_config))|dune},
+      [ "t"; "helper"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
     ( "a set difference over :standard is still the default set",
       {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
       [ "t"; "helper" ],

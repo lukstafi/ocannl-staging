@@ -106,6 +106,7 @@ ok: artifact default modules -- a single-module test with no modules field owns 
 ok: artifact default modules -- and is reported when it does not declare
 ok: artifact default modules -- :standard is the same default written down
 ok: artifact default modules -- a nested ordered set is still an explicit list
+ok: artifact default modules -- a nested difference does not subtract the terms beside it
 ok: artifact default modules -- a set difference over :standard is still the default set
 ok: artifact default modules -- a module subtracted from :standard is not the stanza's
 ok: artifact default modules -- a module another stanza names explicitly is not in the default set
