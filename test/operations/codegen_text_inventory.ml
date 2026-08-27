@@ -18,12 +18,33 @@
 
     {1 What the golden holds}
 
-    The inventory itself: every member, and under each source site the fragments it pins. That is a
-    list that moves when someone adds a pin -- which is the point, and is not the tally
-    gh-ocannl-665 warns about, because the line that appears names the pin that appeared. The COUNTS
-    go to stderr, and what the counts were there for -- the assurance that a scan reporting nothing
-    scanned something -- is kept as floors, which fail the run rather than printing (gh-ocannl-701).
-*)
+    The inventory itself: every member, and under each source site the fragments it pins, preceded
+    by the emitter frontier the census was taken with. That is a list that moves when someone adds a
+    pin -- which is the point, and is not the tally gh-ocannl-665 warns about, because the line that
+    appears names the pin that appeared. The COUNTS go to stderr, and what the counts were there for
+    -- the assurance that a scan reporting nothing scanned something -- is kept as floors, which
+    fail the run rather than printing (gh-ocannl-701).
+
+    {1 The emitter frontier}
+
+    A test can reach generated text in memory, by calling a renderer and never touching
+    [build_files/]. Which values those are used to be a list of five names inside the scan, and it
+    was the one hand-maintained frontier left in it: three of the four review rounds on
+    gh-ocannl-712 found a member it did not name, each time silently -- a route the list misses does
+    not shrink the inventory visibly, it just leaves files off it.
+
+    So the set is derived, from the compiler libraries' COMPILED interfaces (gh-ocannl-748): a value
+    whose result is a [PPrint.document], or which takes a [Buffer.t] to write into, is an emitter
+    whatever it is called. The types are read rather than the sources because the flagship member
+    has neither an [.mli] nor a return annotation -- [C_syntax.compile_proc]'s document exists only
+    as an inferred type, and a source scan would have to be told about it, which is the frontier
+    again.
+
+    The derivation's own silent failure is being handed nothing: a glob that stops matching leaves a
+    scan finding no emitters and reporting a smaller census cheerfully. What closes that is the
+    relationship this test pins -- the modules a library's wrapper interface DECLARES against the
+    ones whose interfaces were actually read. Neither side is written down here; they are compared,
+    and a difference fails the run with both lists on stderr. *)
 
 open Base
 open Stdio
@@ -85,6 +106,22 @@ let () =
   in
   let golden_files = of_suffix ".expected" in
   let all_ml = of_suffix ".ml" in
+  (* The emitter frontier, derived from the interfaces dune handed over rather than listed here. See
+     the header: the derivation is what keeps a renderer added to a library from silently widening
+     the blind spot, and the module-coverage claim below is what keeps the derivation from failing
+     silently in its turn. *)
+  let frontier = Emitter_frontier.derive (List.map (of_suffix ".cmi") ~f:snd) in
+  let emitters =
+    List.map frontier.Emitter_frontier.emitters ~f:(fun e ->
+        {
+          Scan.emitter_name = e.Emitter_frontier.name;
+          Scan.origins = e.Emitter_frontier.origins;
+          Scan.destinations =
+            List.map e.Emitter_frontier.destinations ~f:(function
+              | Emitter_frontier.At_label label -> Scan.At_label label
+              | Emitter_frontier.At_position position -> Scan.At_position position);
+        })
+  in
   let present name = List.exists all_ml ~f:(fun (n, _) -> String.equal n name) in
   let source_files =
     (* Two kinds of argument are a second copy of a source already in the list, and both would make
@@ -120,11 +157,15 @@ let () =
         if is_excluded name then None else Scan.classify_golden ~path:name ~contents:(read on_disk))
   in
   let unparsed = ref [] in
+  let rejected = ref [] in
   let sites =
     List.filter_map source_files ~f:(fun (name, on_disk) ->
         if is_excluded name then None
         else
-          try Scan.classify_source ~path:name ~contents:(read on_disk)
+          let contents = read on_disk in
+          try
+            rejected := Scan.rejections ~emitters ~path:name ~contents @ !rejected;
+            Scan.classify_source ~emitters ~path:name ~contents
           with _ ->
             unparsed := name :: !unparsed;
             None)
@@ -152,6 +193,7 @@ let () =
       Verdict.fail
         (Printf.sprintf
            "%s does not parse as OCaml, so the scan cannot say whether it pins emitted text" path));
+  List.iter (List.sort !rejected ~compare:String.compare) ~f:Verdict.fail;
   let golden_paths = List.map goldens ~f:(fun g -> g.Scan.path) in
   let site_paths = List.map sites ~f:(fun s -> s.Scan.site_path) in
   Floors.report ~floors:golden_floors ~noun:"golden" ~what:"Goldens holding emitted text"
@@ -164,7 +206,29 @@ let () =
      every golden listed here, on the backend whose family it names, and every test source under\n\
      it. The rules are stated in test/support/codegen_text_scan.ml; the counts scanned go to\n\
      stderr, since a tally in a golden moves on every correct addition anywhere (gh-ocannl-665).\n";
-  printf "== goldens holding emitted kernel or IR text ==\n";
+  printf "== emitters the census was taken with ==\n";
+  printf "interfaces read: %s\n"
+    (String.concat ~sep:", "
+       (List.map frontier.Emitter_frontier.interfaces ~f:(fun i -> i.Emitter_frontier.library)));
+  List.iter frontier.Emitter_frontier.emitters ~f:(fun e ->
+      printf "%s%s [%s]\n" e.Emitter_frontier.name
+        (match e.Emitter_frontier.destinations with
+        | [] -> ""
+        | destinations ->
+            " writes into "
+            ^ String.concat ~sep:" "
+                (List.map destinations ~f:Emitter_frontier.render_destination))
+        (String.concat ~sep:" " e.Emitter_frontier.origins));
+  (* The other half of the derivation, printed rather than dropped. These produce a document out of
+     strings, numbers and other documents -- nothing the libraries define -- so they render no
+     program, and matching such a name behind any qualifier would make a member of every test that
+     calls `Bench_args.int`. A renderer that lands here is a miss, and listing them is what makes
+     that miss a line in a diff rather than an absence (gh-ocannl-748). *)
+  printf "\ndocument combinators, given nothing of the libraries to render, so not on the frontier:\n";
+  List.iter frontier.Emitter_frontier.combinators ~f:(fun c ->
+      printf "%s [%s]\n" c.Emitter_frontier.name
+        (String.concat ~sep:" " c.Emitter_frontier.origins));
+  printf "\n== goldens holding emitted kernel or IR text ==\n";
   printf "roots scanned: %s\n"
     (String.concat ~sep:", " (Floors.roots ~floors:golden_floors golden_paths));
   List.iter
@@ -201,8 +265,40 @@ let () =
     Floors.violations ~floors:source_floors ~noun:"site"
       ~floors_name:"codegen_text_inventory.source_floors" site_paths
   in
+  (* The derivation's own tripwire. A scan handed no interfaces derives no emitters, drops every
+     in-memory site from the census and says so cheerfully -- the silent direction again. So the
+     relationship is pinned instead of the result: a library's wrapper interface DECLARES its
+     modules (it is a list of aliases, one per module), and every declared module must be one whose
+     own interface this run actually read. Neither list is written here; a difference fails, with
+     both on stderr. *)
+  let declared =
+    List.concat_map frontier.Emitter_frontier.interfaces ~f:(fun i ->
+        List.map i.Emitter_frontier.declared ~f:(fun m -> i.Emitter_frontier.library ^ ": " ^ m))
+    |> List.sort ~compare:String.compare
+  in
+  let read_interfaces =
+    List.concat_map frontier.Emitter_frontier.interfaces ~f:(fun i ->
+        List.map i.Emitter_frontier.read ~f:(fun m -> i.Emitter_frontier.library ^ ": " ^ m))
+    |> List.sort ~compare:String.compare
+  in
+  eprintf "Modules declared by the wrapper interfaces: %s\n" (String.concat ~sep:" " declared);
+  eprintf "Modules whose interface was read: %s\n" (String.concat ~sep:" " read_interfaces);
+  List.iter frontier.Emitter_frontier.interfaces ~f:(fun i ->
+      List.iter i.Emitter_frontier.missing ~f:(fun m ->
+          Verdict.fail
+            (Printf.sprintf
+               "%s declares module %s, whose interface was not handed over and is not beside its \
+                wrapper -- the emitter frontier is derived from these, so a census taken without \
+                it is short by however many renderers it exports"
+               i.Emitter_frontier.library m)));
   List.iter (golden_violations @ source_violations) ~f:Verdict.fail;
   Verdict.p "every scanned root meets its golden floor" (List.is_empty golden_violations);
   Verdict.p "every scanned root meets its source-site floor" (List.is_empty source_violations);
   Verdict.p "every source handed over parsed as OCaml" (List.is_empty !unparsed);
-  Verdict.p "every exclusion still names a file the globs hand over" (List.is_empty stale)
+  Verdict.p "every exclusion still names a file the globs hand over" (List.is_empty stale);
+  Verdict.p "every module the scanned library interfaces declare was read"
+    (List.equal String.equal declared read_interfaces);
+  Verdict.p_all "every scanned library declares modules" frontier.Emitter_frontier.interfaces
+    ~f:(fun i -> not (List.is_empty i.Emitter_frontier.declared));
+  Verdict.p "no source hides a route to generated text behind an open"
+    (List.is_empty !rejected)

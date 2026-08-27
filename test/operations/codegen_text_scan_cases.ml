@@ -132,6 +132,29 @@ let golden_cases =
       "none" );
   ]
 
+(** The emitters these cases are written against.
+
+    A FIXTURE, not the frontier. The live census derives its set from the compiler libraries'
+    compiled interfaces ({!Emitter_frontier}, gh-ocannl-748) and [emitter_frontier_cases] controls
+    that derivation on interfaces built to break it; what is pinned HERE is what the scan does with
+    such a set once it has one -- which call sites it recognises, which it refuses, and where the
+    text a buffer-writing emitter deposits travels. *)
+let emitters =
+  let emitter ?(destinations = []) name origin =
+    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.destinations = destinations }
+  in
+  [
+    emitter "compile_proc" "Ir.C_syntax.C_syntax.compile_proc";
+    emitter "compile_main" "Ir.C_syntax.C_syntax.compile_main";
+    emitter "to_doc" "Ir.Low_level.to_doc";
+    emitter "to_doc_cstyle" "Ir.Low_level.to_doc_cstyle";
+    emitter "emit" "Ir.Low_level.Canonical_render.emit" ~destinations:[ Scan.At_label "buf" ];
+    (* An emitter whose buffer carries no label, so a call site addresses it by position. Nothing in
+       the libraries has that shape today; the rule has to have it either way, since a position is
+       what an unlabelled destination is. *)
+    emitter "render_into" "Ir.Low_level.render_into" ~destinations:[ Scan.At_position 0 ];
+  ]
+
 let render_site = function
   | None -> "none"
   | Some (s : Scan.site) ->
@@ -341,6 +364,107 @@ let render llc =
   Buffer.contents buf
 let () = p "free" (String.is_substring (render llc) ~substring:"s0")|ocaml},
       {|"s0" +rendered|} );
+    (* Round 5's genre: the write and the read of a buffer-writing emitter can sit in different
+       bindings, and then neither carries taint -- the first binds no name, the second calls no
+       emitter. The DESTINATION is what the text lands in, so it is seeded from the call. *)
+    ( "the buffer a serializer writes into carries the text, across bindings",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let buf = Buffer.create 256
+let () = CR.emit ~buf policy llc
+let source = Buffer.contents buf
+let () = p "free" (String.is_substring source ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "an emitter bound to a local name is still the emitter",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write = CR.emit
+let () =
+  let buf = Buffer.create 256 in
+  write ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "an alias of that alias is the emitter too",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write = CR.emit
+let write_again = write
+let () =
+  let buf = Buffer.create 256 in
+  write_again ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    (* Round 2's genre, and the last shape of it a scan of one file can follow: the emitter behind a
+       WRAPPER, whose own parameter is what the caller's buffer arrives through. *)
+    ( "a wrapper around an emitter carries its caller's buffer",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let write ~buf policy llc = CR.emit ~buf policy llc
+let () =
+  let output = Buffer.create 256 in
+  write ~buf:output policy llc;
+  p "free" (String.is_substring (Buffer.contents output) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
+    ( "a wrapper whose buffer parameter carries no label is addressed by position",
+      {ocaml|module LL = Ir.Low_level
+let write buf llc = LL.render_into buf llc
+let () =
+  let output = Buffer.create 256 in
+  write output llc;
+  p "radix" (String.is_substring (Buffer.contents output) ~substring:"-0.0")|ocaml},
+      {|"-0.0" +rendered|} );
+    (* And the backstop for the shapes it cannot: PPrint's own buffer renderer is not an emitter of
+       ours, so nothing taints [buf] -- the file is a member through [LL.to_doc] all the same, and
+       what must not happen is the fragment vanishing with no sign. *)
+    ( "a buffer this scan did not see filled marks the itemisation partial",
+      {ocaml|module LL = Ir.Low_level
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (Buffer.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "a buffer read through an alias of Buffer marks it partial just the same",
+      {ocaml|module LL = Ir.Low_level
+module B = Buffer
+let () =
+  let buf = B.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (B.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "an unattributed buffer read travels along bindings like taint does",
+      {ocaml|module LL = Ir.Low_level
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  let source = Buffer.contents buf in
+  p "radix" (String.is_substring source ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "an unattributed buffer reaching a helper marks it partial too",
+      {ocaml|module LL = Ir.Low_level
+let has src sub = String.is_substring src ~substring:sub
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  let source = Buffer.contents buf in
+  p "radix" (has source "-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "a buffer aliased under a signature constraint is still a buffer",
+      {ocaml|module LL = Ir.Low_level
+module B = (Buffer : module type of Buffer)
+let () =
+  let buf = B.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (B.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "a local name bound to something else is not an emitter",
+      {ocaml|let write = Buffer.add_string
+let () =
+  let buf = Buffer.create 256 in
+  write buf (describe shape);
+  p "shapes agree" (String.is_substring (Buffer.contents buf) ~substring:"3x5")|ocaml},
+      "none" );
+    ( "a buffer nobody wrote generated text into carries nothing",
+      {ocaml|let buf = Buffer.create 256
+let () = Buffer.add_string buf (describe shape)
+let source = Buffer.contents buf
+let () = p "shapes agree" (String.is_substring source ~substring:"3x5")|ocaml},
+      "none" );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );
@@ -348,6 +472,111 @@ let () = p "free" (String.is_substring (render llc) ~substring:"s0")|ocaml},
       {ocaml|(* Generated.read would answer this, but the check is on values. *)
 let () = p "values" (Array.for_all2_exn got want ~f:Float.equal)|ocaml},
       "none" );
+  ]
+
+(** Spellings the scan refuses rather than approximates: {!Scan.rejections}. Each case is a source
+    and how many refusals it earns.
+
+    Every route is attributed by the qualifier at the call site, and an [open] takes the qualifier
+    away -- after which the call reads exactly like a local function of the same name and the file
+    drops out of the census silently. Refusing is what keeps that convention from being adopted
+    without anyone noticing; the negative controls below are the shapes that must stay legal, since
+    a refusal that fires on an innocent file is a broken build (gh-ocannl-748). *)
+let rejection_cases =
+  [
+    ( "opening the reader hides its calls from the qualifier",
+      {ocaml|open Test_utils.Generated
+let () = p "shared" (String.is_substring (read "r") ~substring:"__shared__")|ocaml},
+      1 );
+    ( "opening an ALIAS of the reader hides them just the same",
+      {ocaml|module G = Test_utils.Generated
+open G
+let () = assert_emits ~routine:"r" ~contains:"__syncthreads()" "synced"|ocaml},
+      1 );
+    ( "opening the emitter's module hides the render",
+      {ocaml|open Ir.Low_level.Canonical_render
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      1 );
+    ( "an open in expression position is an open",
+      {ocaml|let go () =
+  let open Test_utils.Generated in
+  String.is_substring (read "r") ~substring:"threadgroup float"|ocaml},
+      1 );
+    ( "opening an ALIAS of the emitter's module hides it under a name no origin spells",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+open CR
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      1 );
+    (* The controls. Opening a module is ordinary OCaml; what is refused is opening one whose names
+       this scan attributes, and then using one of THOSE names. *)
+    ( "opening a module a FUNCTOR produced hides the emitter too",
+      {ocaml|let compile optimized =
+  let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
+    let procs = [| optimized |]
+  end)) in
+  let open Syntax in
+  let _kparams, doc, _launch = compile_proc ~name [] optimized in
+  doc_to_string doc|ocaml},
+      1 );
+    ( "opening a functor application directly hides the emitter as surely",
+      {ocaml|let compile optimized =
+  let open Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
+    let procs = [| optimized |]
+  end)) in
+  let _kparams, doc, _launch = compile_proc ~name [] optimized in
+  doc_to_string doc|ocaml},
+      1 );
+    ( "an include hides the emitter as an open does",
+      {ocaml|include Ir.Low_level.Canonical_render
+
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      1 );
+    ( "a name the file binds for itself is never refused",
+      {ocaml|open Ir.Low_level
+
+let to_doc x = local_render x
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc value)|ocaml},
+      0 );
+    ( "an open governs its own scope, not the whole file",
+      {ocaml|let render_row row =
+  let open Ir.Low_level in
+  describe row
+let to_doc row = PPrint.string (render_row row)
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
+      0 );
+    ( "a structure-level open governs the items after it",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let () = p "before" (emit_count = 3)
+open CR
+let () = emit ~buf policy llc|ocaml},
+      1 );
+    ( "an open inside a nested module dies with it",
+      {ocaml|module Inner = struct
+  open Ir.Low_level
+  let () = p "inner" (describe llc <> "")
+end
+
+let to_doc row = PPrint.string (render_row row)
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
+      0 );
+    ( "opening Utils without reading the artifact directory is fine",
+      {ocaml|open Utils
+let () = p "tree" (Tree_map.is_empty (Tree_map.empty ()))|ocaml},
+      0 );
+    ( "a name an emitter shares with an unopened module is not hidden",
+      {ocaml|open Base
+let () = p "count" (to_doc rows = 3)|ocaml},
+      0 );
+    ( "the qualified spelling is what everything already uses",
+      {ocaml|module G = Test_utils.Generated
+let () = G.assert_emits ~routine:"r" ~contains:"__shared__" "shared"|ocaml},
+      0 );
   ]
 
 (** The goldens a test's own output makes members, or does not: {!Scan.classify_associated}. Each
@@ -407,11 +636,20 @@ let () =
       else fail "golden -- %s: expected [%s], found [%s]" name expected found);
   List.iter source_cases ~f:(fun (name, source, expected) ->
       let found =
-        try render_site (Scan.classify_source ~path:"case.ml" ~contents:source)
+        try render_site (Scan.classify_source ~emitters ~path:"case.ml" ~contents:source)
         with _ ->
           fail "source -- %s: the snippet does not parse" name;
           "<unparsed>"
       in
       if String.equal (String.strip found) (String.strip expected) then
         printf "ok: source -- %s\n" name
-      else fail "source -- %s: expected [%s], found [%s]" name expected found)
+      else fail "source -- %s: expected [%s], found [%s]" name expected found);
+  List.iter rejection_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try List.length (Scan.rejections ~emitters ~path:"case.ml" ~contents:source)
+        with _ ->
+          fail "rejection -- %s: the snippet does not parse" name;
+          -1
+      in
+      if expected = found then printf "ok: rejection -- %s\n" name
+      else fail "rejection -- %s: expected %d refusals, found %d" name expected found)

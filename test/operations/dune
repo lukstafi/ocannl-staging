@@ -1914,14 +1914,44 @@
 (executable
  (name codegen_text_inventory)
  (modules codegen_text_inventory)
- (libraries base stdio test_utils arrayjit.verdict))
+ (libraries base stdio test_utils emitter_frontier arrayjit.verdict))
+
+; The `.cmi` dependencies are the emitter frontier's source (gh-ocannl-748): the set of values that
+; hand a test generated text is derived from the compiler libraries' compiled interfaces rather than
+; listed in the scan. Both spellings of each library are asked for, because which one exists depends
+; on how dune was invoked, and a derivation handed nothing reports a smaller census rather than an
+; error:
+;
+;   - the object directory holds every module's interface in an ordinary in-workspace build, and the
+;     glob is what forces them to be built;
+;   - `%{lib:...}` resolves the wrapper interface in a PACKAGE-FILTERED build (`dune build -p
+;     neural_nets_lib`, which each .opam file's build command runs), where arrayjit's own stanzas
+;     are disabled and its libraries come from the switch instead. The member interfaces sit beside
+;     that wrapper in the installed directory, and `Emitter_frontier` looks for them there.
+;
+; Both of `arrayjit.utils`' wrapper interfaces are named, and that is not belt-and-braces: the
+; library has a module of its own name, so `utils.cmi` is that MODULE and dune's generated alias
+; module -- the one that lists every member -- is `utils__.cmi`. Reading only the former discovers
+; the members `utils.ml` happens to alias, which is the whole list today and need not stay so,
+; while the declared-versus-read tripwire goes on passing over the shorter list. In a workspace
+; build the object-directory glob hands over both; under `-p` only what is named here arrives.
+;
+; Whether the hand-over was complete is not assumed either way: the wrapper interface declares the
+; library's modules, and the test fails when one of them was not read. Nor can the copies be stale:
+; this executable links `test_utils`, which links `arrayjit.ir` and `arrayjit.utils`, so dune has
+; compiled those interfaces for this very build before the rule runs.
 
 (rule
- ; ocannl-backend: none -- links no backend: it reads goldens and test sources as text.
+ ; ocannl-backend: none -- links no backend: it reads goldens, test sources and compiled interfaces.
  (target codegen_text_inventory.actual)
  (package neural_nets_lib)
  (deps
   ocannl_config
+  %{lib:arrayjit.ir:ir.cmi}
+  %{lib:arrayjit.utils:utils.cmi}
+  %{lib:arrayjit.utils:utils__.cmi}
+  (glob_files ../../arrayjit/lib/.ir.objs/byte/*.cmi)
+  (glob_files ../../arrayjit/lib/.utils.objs/byte/*.cmi)
   (glob_files_rec ../../test/*.expected)
   (glob_files_rec ../../test/*.ml)
   (glob_files_rec ../../arrayjit/test/*.expected)
@@ -1938,6 +1968,29 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff codegen_text_inventory.expected codegen_text_inventory.actual)))
+
+; Interfaces built to break the emitter derivation: a library whose .mli declares every shape
+; `Emitter_frontier` has to answer for, beside the near misses that decide the rule. Its second
+; module carries no .mli and no annotation, which is `C_syntax.compile_proc`'s situation -- the
+; member that makes the derivation read compiled interfaces rather than sources -- and having two
+; modules is also what makes dune wrap the library, so its interface carries the module aliases the
+; derivation takes its module list from.
+
+(library
+ (name emitter_fixture)
+ (package neural_nets_lib)
+ (modules emitter_fixture_a emitter_fixture_b)
+ (libraries pprint))
+
+(test
+ ; ocannl-backend: none -- links no backend: it reads the fixture library's compiled interfaces.
+ (name emitter_frontier_cases)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files .emitter_fixture.objs/byte/*.cmi))
+ (modules emitter_frontier_cases)
+ (libraries base stdio emitter_frontier arrayjit.verdict))
 
 ; What the codegen-text classifier calls a member, on input built to break it rather than on
 ; whatever the tree holds today -- including, for every marker a claim label could plausibly

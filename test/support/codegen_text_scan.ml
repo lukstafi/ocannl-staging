@@ -47,11 +47,15 @@
     - through {!Test_utils.Generated}, the freshness-checked artifact reader;
     - by opening [build_files/] itself, which two tests predating that module still do, and which
       the inventory tags, since such a read is unchecked for freshness;
-    - {b in memory}, by calling the emitter or a dump printer and rendering the document it returns
-      -- [C_syntax]'s [compile_proc] / [compile_main], [Low_level]'s [to_doc] / [to_doc_cstyle].
-      Such a test never touches [build_files/] at all, and every one of them was invisible: the
-      three [arrayjit/test] codegen tests whose GOLDENS the inventory already listed, plus
-      [ll_printer_constants], which pins the spelling of every dumped float constant.
+    - {b in memory}, by calling an emitter and rendering the document it returns, or by handing one
+      the buffer to write into -- [C_syntax]'s [compile_proc] / [compile_main], [Low_level]'s
+      [to_doc] / [to_doc_cstyle], [Canonical_render]'s [emit]. Such a test never touches
+      [build_files/] at all, and every one of them was invisible: the three [arrayjit/test] codegen
+      tests whose GOLDENS the inventory already listed, plus [ll_printer_constants], which pins the
+      spelling of every dumped float constant. WHICH values those are is not decided here: the
+      caller passes the set, and [codegen_text_inventory] derives it from the compiler libraries'
+      interfaces through {!Emitter_frontier} (gh-ocannl-748), so a renderer added to a library is on
+      the frontier the day it is exported.
 
     Under each member the inventory itemises the text it pins, found by the same literal-spelling
     discipline the configuration scan uses: the argument of a substring test, {e at the call site}.
@@ -338,10 +342,30 @@ let qualifier_of path =
     unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated], IS
     the target -- and a scan of one file cannot see it; a shared helper of that shape would have to
     be added to the seeds here. *)
+(** The name a module expression ultimately reaches, by its last component.
+
+    Four spellings, all of them the same module as far as any call site is concerned: the path
+    itself, a path under a signature constraint ([(Buffer : module type of Buffer)]), and a functor
+    APPLICATION, which names its functor -- [Ir.C_syntax.C_syntax (Cfg)] is the module whose values
+    the interfaces record under [C_syntax], and is how every backend and codegen test reaches
+    [compile_proc]. Reading only the bare path left each of the others attributing nothing, which
+    for an [open] means the call under it is neither refused nor recognised (Codex rounds 4 and 5 on
+    lukstafi/ocannl-staging#487). A [struct ... end] reaches no name and answers [None]. *)
+let rec module_source_name = function
+  | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
+  | { pmod_desc = Pmod_constraint (inner, _); _ } -> module_source_name inner
+  | { pmod_desc = Pmod_apply (functor_, _); _ } -> module_source_name functor_
+  | { pmod_desc = Pmod_apply_unit functor_; _ } -> module_source_name functor_
+  | _ -> None
+
 let module_aliases ~target structure =
   let aliases = Hash_set.of_list (module String) [ target ] in
-  let resolves path =
-    match List.last (flatten_longident path) with
+  (* Through the same spellings {!module_source_name} reads, so a constrained alias
+     ([module B = (Buffer : module type of Buffer)]) is the module it constrains -- otherwise the
+     backstop that reads [B.contents] does not fire, and a backstop that fails silently is worse
+     than none (Codex round 5). *)
+  let resolves module_expr =
+    match module_source_name module_expr with
     | Some last -> Hash_set.mem aliases last
     | None -> false
   in
@@ -351,21 +375,15 @@ let module_aliases ~target structure =
 
       method! structure_item item =
         (match item.pstr_desc with
-        | Pstr_module
-            {
-              pmb_name = { txt = Some alias; _ };
-              pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ };
-              _;
-            }
-          when resolves txt ->
+        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr; _ }
+          when resolves pmb_expr ->
             Hash_set.add aliases alias
         | _ -> ());
         super#structure_item item
 
       method! expression expr =
         (match expr.pexp_desc with
-        | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
-          when resolves txt ->
+        | Pexp_letmodule ({ txt = Some alias; _ }, module_expr, _) when resolves module_expr ->
             Hash_set.add aliases alias
         | _ -> ());
         super#expression expr
@@ -408,12 +426,30 @@ let direct_artifact_names = [ "build_files_dir"; "build_file" ]
 
 let direct_artifact_module = "Utils"
 
-(** The emitters and dump printers that hand a test generated text without an artifact in between:
-    [C_syntax.compile_proc] / [compile_main] and [Low_level.to_doc] / [to_doc_cstyle].
+type destination = At_label of string | At_position of int
+(** Where a call to a buffer-writing emitter leaves its text: an argument named by its label, or the
+    n-th of the arguments that carry none. Positions count only the unlabelled arguments, so an
+    optional argument the call site omits does not shift them. *)
 
-    [emit] is [Low_level.Canonical_render]'s serializer, which writes into a buffer rather than
-    returning a document -- a shape neither of the other two has, and one that kept
-    [canonical_render] off the census entirely (Codex P2, round 4).
+type emitter = {
+  emitter_name : string;  (** The value's name, which is what a call site spells. *)
+  origins : string list;
+      (** The qualified paths defining it, as the interfaces spell them
+          ([Ir.Low_level.Canonical_render.emit]). Used to reject an [open] that would hide a call
+          from this scan. Empty for a local name this file bound to an emitter. *)
+  destinations : destination list;
+      (** The arguments generated text lands in, for an emitter that writes into a buffer rather
+          than returning a document. *)
+}
+(** An emitter: a library value that hands a test generated text without an artifact in between --
+    [C_syntax.compile_proc] / [compile_main], [Low_level.to_doc] / [to_doc_cstyle],
+    [Canonical_render.emit].
+
+    This set is DERIVED from the compiler libraries' interfaces rather than listed here
+    (gh-ocannl-748; see {!Emitter_frontier}, and [codegen_text_inventory] for the hand-over). It was
+    a written list until then, and it was the one hand-maintained frontier left in this scan: three
+    of the four review rounds on gh-ocannl-712 found a member of exactly that shape, because a route
+    the list does not name does not shrink the inventory visibly -- it just leaves files off it.
 
     Matched by NAME behind any qualifier, rather than against a resolved module. That is deliberate,
     and it is the one place this scan errs toward including: the qualifier here is routinely a local
@@ -421,16 +457,20 @@ let direct_artifact_module = "Utils"
     which no alias table can resolve to a target, so demanding one would reinstate exactly the blind
     spot this family exists to close. A qualifier is still required, so a test's own [to_doc] is not
     swept in; and if some unrelated [X.to_doc] appears one day it costs an inventory line, whereas a
-    miss here costs a silent omission.
+    miss here costs a silent omission. What a qualifier cannot survive is an [open], which is why
+    {!rejections} refuses that spelling outright instead of guessing. *)
 
-    This list is a FRONTIER, and the one hand-maintained thing left in this scan: a way of getting
-    emitted text into a test that it does not name does not shrink the inventory visibly, it just
-    leaves files off. Three of the four review rounds on gh-ocannl-712 found a member of exactly
-    that shape. Deriving the set from the emitters the libraries actually export, rather than
-    listing it, is the standing follow-up (gh-ocannl-748). *)
-let emitter_names = [ "compile_proc"; "compile_main"; "to_doc"; "to_doc_cstyle"; "emit" ]
+(** The emitter a path names, if any: an emitter's name behind a qualifier, or -- for [aliases] -- a
+    local name this file bound to one. *)
+let emitter_of_path ~emitters ~aliases path =
+  match path with
+  | [ name ] -> List.Assoc.find aliases name ~equal:String.equal
+  | _ ->
+      if Option.is_some (qualifier_of path) then
+        List.find emitters ~f:(fun e -> path_ends path ~name:e.emitter_name)
+      else None
 
-let renders_generated_text expr =
+let renders_generated_text ~emitters ~aliases expr =
   let found = ref false in
   let iterator =
     object
@@ -438,16 +478,72 @@ let renders_generated_text expr =
 
       method! expression e =
         (match longident_of e with
-        | Some path
-          when List.exists emitter_names ~f:(fun n -> path_ends path ~name:n)
-               && Option.is_some (qualifier_of path) ->
-            found := true
+        | Some path when Option.is_some (emitter_of_path ~emitters ~aliases path) -> found := true
         | _ -> ());
         super#expression e
     end
   in
   iterator#expression expr;
   !found
+
+(** The names an emitter call deposits generated text INTO: the arguments at an emitter's buffer
+    labels.
+
+    [Canonical_render.emit] writes into its [~buf] rather than returning a document, and a caller
+    can split the write from the read across bindings --
+    [let () = CR.emit ~buf policy llc] and [let source = Buffer.contents buf] later. Neither binding
+    carries taint on its own: the first binds no name, the second calls no emitter. So the
+    DESTINATION is seeded directly, and [buf] is generated source for the rest of the file, exactly
+    as a returned document would be (gh-ocannl-748, from Codex round 5 on gh-ocannl-712).
+
+    An emitter whose buffer argument is unlabelled takes every positional argument of the call as a
+    destination. Nothing in the tree has that shape; over-taint costs an inventory line, and the
+    alternative -- matching by argument position -- would need the position to survive optional
+    arguments the call site omits. *)
+(** Each parameter with its position among the parameters that carry no label, which is how a call
+    site addresses it. A labelled parameter keeps its label and takes no position. *)
+let positional_params params =
+  List.folding_map params ~init:0 ~f:(fun position (label, name) ->
+      match label with
+      | Asttypes.Nolabel -> (position + 1, (position, (label, name)))
+      | _ -> (position, (position, (label, name))))
+
+(** The unlabelled arguments of an application, in order. *)
+let positional args =
+  List.filter_map args ~f:(fun (label, arg) ->
+      match label with Asttypes.Nolabel -> Some arg | _ -> None)
+
+(** The argument a destination names at one call site. *)
+let argument_at ~destination args =
+  match destination with
+  | At_label label ->
+      List.find_map args ~f:(fun (argument_label, argument) ->
+          match argument_label with
+          | Asttypes.Labelled l | Asttypes.Optional l when String.equal l label -> Some argument
+          | _ -> None)
+  | At_position position -> List.nth (positional args) position
+
+let buffer_destinations ~emitters ~aliases structure =
+  let names = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        (match e.pexp_desc with
+        | Pexp_apply (callee, args) -> (
+            match Option.bind (longident_of callee) ~f:(emitter_of_path ~emitters ~aliases) with
+            | Some emitter ->
+                List.iter emitter.destinations ~f:(fun destination ->
+                    Option.iter (argument_at ~destination args) ~f:(fun argument ->
+                        names := idents_in argument @ !names))
+            | None -> ())
+        | _ -> ());
+        super#expression e
+    end
+  in
+  iterator#structure structure;
+  !names
 
 let reads_artifacts_directly ~utils expr =
   let found = ref false in
@@ -467,10 +563,6 @@ let reads_artifacts_directly ~utils expr =
   iterator#expression expr;
   !found
 
-(** The unlabelled arguments of an application, in order. *)
-let positional args =
-  List.filter_map args ~f:(fun (label, arg) ->
-      match label with Asttypes.Nolabel -> Some arg | _ -> None)
 
 (** The labelled arguments that name a fragment of text to look for. [~substring] and [~contains]
     are the assertion spellings; [~pattern] is [String.substr_index]/[substr_index_all], which the
@@ -577,18 +669,139 @@ let bindings_of collect =
 let bindings_in_structure structure = bindings_of (fun it -> it#structure structure)
 let bindings_in_expression expr = bindings_of (fun it -> it#expression expr)
 
-(** Names carrying generated source, to a fixed point: seeded by [Generated.read] and by a direct
-    [build_files/] read, and spreading along [let] bindings whose right-hand side mentions one.
+(** Every [let]-bound value in the file with its parameters AND their labels, in order, stopping at
+    the first parameter this scan does not follow.
+
+    {!bindings_of} drops the labels, because the pin walk matches a predicate's arguments by
+    position. An emitter's destination is matched by label as readily as by position, so the
+    wrapper analysis below needs them kept. *)
+let labelled_bindings structure =
+  let found = ref [] in
+  let peel expr =
+    let rec go acc expr =
+      match expr.pexp_desc with
+      | Pexp_function (params, _, body) -> (
+          let rec take = function
+            | [] -> []
+            | param :: rest -> (
+                match param.pparam_desc with
+                | Pparam_val (label, None, pat) -> (
+                    match bound_name pat with Some p -> (label, p) :: take rest | None -> [])
+                | _ -> [])
+          in
+          let taken = take params in
+          let acc = acc @ taken in
+          match body with
+          | Pfunction_body inner when List.length taken = List.length params -> go acc inner
+          | Pfunction_body inner -> (acc, inner)
+          | Pfunction_cases _ -> (acc, expr))
+      | _ -> (acc, expr)
+    in
+    go [] expr
+  in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! value_binding vb =
+        (match bound_name vb.pvb_pat with
+        | Some name ->
+            let params, body = peel vb.pvb_expr in
+            found := (name, params, body) :: !found
+        | None -> ());
+        super#value_binding vb
+    end
+  in
+  iterator#structure structure;
+  List.rev !found
+
+(** Local names that reach an emitter, to a fixed point, with where a call to each of them leaves
+    its generated text.
+
+    A qualifier is what attributes a call, and putting the emitter behind a local name takes the
+    qualifier away at every later call site. Two shapes, both of which left a test's fragment out of
+    the inventory while the FILE stayed listed -- the invisible-omission shape, since a member that
+    itemises nothing looks exactly like a member with nothing to itemise (Codex rounds 1 and 2 on
+    lukstafi/ocannl-staging#487):
+
+    - an {b alias}, [let write = CR.emit] and [let w = write] after it, which is the emitter under
+      another name and carries its destinations unchanged;
+    - a {b wrapper}, [let write ~buf p llc = CR.emit ~buf p llc], whose own parameter is what the
+      caller's buffer arrives through -- so the wrapper's destinations are the positions and labels
+      of ITS parameters that reach a destination of the emitter it calls.
+
+    A wrapper's parameter counts when the destination argument mentions it directly. Reaching one
+    through a local binding inside the wrapper is not followed, and does not pass silently: the
+    caller's buffer is then read untainted, which {!classify_source} reports as an itemisation this
+    scan cannot complete. *)
+let emitter_aliases ~emitters structure =
+  let candidates = labelled_bindings structure in
+  let aliases = ref [] in
+  let known path = emitter_of_path ~emitters ~aliases:!aliases path in
+  let wrapper_destinations ~params body =
+    let found = ref [] in
+    let iterator =
+      object
+        inherit Ast_traverse.iter as super
+
+        method! expression e =
+          (match e.pexp_desc with
+          | Pexp_apply (callee, args) -> (
+              match Option.bind (longident_of callee) ~f:known with
+              | Some emitter ->
+                  List.iter emitter.destinations ~f:(fun destination ->
+                      Option.iter (argument_at ~destination args) ~f:(fun argument ->
+                          let carried = idents_in argument in
+                          List.iter (positional_params params) ~f:(fun (position, (label, name)) ->
+                              if List.mem carried name ~equal:String.equal then
+                                found :=
+                                  (match label with
+                                  | Asttypes.Nolabel -> At_position position
+                                  | Asttypes.Labelled l | Asttypes.Optional l -> At_label l)
+                                  :: !found)))
+              | None -> ())
+          | _ -> ());
+          super#expression e
+      end
+    in
+    iterator#expression body;
+    List.dedup_and_sort !found ~compare:Poly.compare
+  in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter candidates ~f:(fun (name, params, body) ->
+        if not (List.Assoc.mem !aliases name ~equal:String.equal) then
+          let found =
+            match params with
+            | [] ->
+                Option.bind (longident_of body) ~f:(fun path ->
+                    Option.map (known path) ~f:(fun emitter ->
+                        { emitter with emitter_name = name }))
+            | _ -> (
+                match wrapper_destinations ~params body with
+                | [] -> None
+                | destinations -> Some { emitter_name = name; origins = []; destinations })
+          in
+          Option.iter found ~f:(fun emitter ->
+              aliases := (name, emitter) :: !aliases;
+              changed := true))
+  done;
+  !aliases
+
+(** Names carrying generated source, to a fixed point: seeded by [Generated.read], by a direct
+    [build_files/] read and by the destinations of a buffer-writing emitter ([seeds]), and spreading
+    along [let] bindings whose right-hand side mentions one.
 
     Scope is deliberately ignored -- a name is tainted for the whole file. A scan that itemises what
     a file pins does not need to know which [let] shadowed which; over-reach costs an extra
     inventory line, under-reach costs a missed pin. *)
-let tainted_names ~generated ~utils bindings =
-  let tainted = ref (Set.empty (module String)) in
+let tainted_names ~generated ~utils ~emitters ~aliases ~seeds bindings =
+  let tainted = ref (Set.of_list (module String) seeds) in
   let seeded body =
     mentions_generated_read ~generated body
     || reads_artifacts_directly ~utils body
-    || renders_generated_text body
+    || renders_generated_text ~emitters ~aliases body
   in
   let changed = ref true in
   while !changed do
@@ -806,13 +1019,182 @@ let render_pin = function
   | Interpolated rendered -> Some rendered
   | Computed -> None
 
-(** [classify_source ~path ~contents] is [Some] when the file reads generated source at all.
+(** What each module alias in the file ultimately names, by last component: [module CR =
+    Ir.Low_level.Canonical_render] answers [CR -> "Canonical_render"], and [module C = CR] answers
+    the same for [C].
+
+    {!module_aliases} answers the same question for ONE known target, which is what the artifact
+    readers need. The emitters need it the other way round -- there are dozens of origin modules and
+    one opened name to place -- and an [open] of an aliased emitter module is otherwise invisible
+    twice over: not rejected, and not recognised at the call site either (Codex round 2 on
+    lukstafi/ocannl-staging#487). *)
+let module_alias_targets structure =
+  let targets = Hashtbl.create (module String) in
+  let resolve name = Option.value (Hashtbl.find targets name) ~default:name in
+  let record alias expr =
+    match module_source_name expr with
+    | Some target -> Hashtbl.set targets ~key:alias ~data:(resolve target)
+    | None -> ()
+  in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr; _ } -> record alias pmb_expr
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = Some alias; _ }, module_expr, _) -> record alias module_expr
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure structure;
+  resolve
+
+(** Every name the file binds anywhere: a [let], a parameter, a pattern in a match.
+
+    What this is for is the refusal below, and the direction matters. A name the file binds is a
+    name an unqualified call MIGHT resolve to instead of to the opened module's, and telling which
+    takes the scoping this scan deliberately does not carry -- [open Ir.Low_level] followed by
+    [let to_doc x = local_render x] and then [to_doc value] is valid code calling the local
+    function. Refusing it would fail the repository-wide inventory on a file that hides nothing,
+    and a false refusal is a red build for everyone, where a refusal not made is one more member of
+    the residue the partial marker already covers (Codex round 6 on lukstafi/ocannl-staging#487). *)
+let names_bound_anywhere structure =
+  let found = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! pattern p =
+        (match p.ppat_desc with Ppat_var { txt; _ } -> found := txt :: !found | _ -> ());
+        super#pattern p
+    end
+  in
+  iterator#structure structure;
+  Set.of_list (module String) !found
+
+(** Spellings this scan refuses rather than approximates, each reported as a failure by
+    [codegen_text_inventory].
+
+    Every route to generated text is attributed by the QUALIFIER at the call site --
+    [Generated.read], [Utils.build_file], [Syntax.compile_proc]. An [open] removes the qualifier,
+    and then the call is indistinguishable from a local function of the same name, so the file drops
+    out of the census entirely: the silent direction, and the one every miss on gh-ocannl-712 took.
+
+    The alternative to refusing is to track opened modules with their scope, which is one more
+    approximation with one more edge. Refusing is a checkable fact, and it costs nothing: the
+    qualified spelling is what every test in the tree already uses (gh-ocannl-748, from Codex round
+    5).
 
     Raises if [contents] does not parse. *)
-let classify_source ~path ~contents =
+let rejections ~emitters ~path ~contents =
   let structure = structure_of contents in
   let generated = module_aliases ~target:"Generated" structure in
   let utils = module_aliases ~target:direct_artifact_module structure in
+  let resolve = module_alias_targets structure in
+  (* Which names an open of [opened_name] would make unqualified: the artifact readers by their
+     module, the emitters by the module whose interface defines them -- through the file's own
+     module aliases, since [open CR] after [module CR = Ir.Low_level.Canonical_render] opens the
+     emitter's module under a name no origin spells. *)
+  let hidden_by opened_name =
+    let of_module names = List.map names ~f:(fun name -> (opened_name, name)) in
+    let opened_target = resolve opened_name in
+    (if Hash_set.mem generated opened_name then of_module [ "read"; "assert_emits"; "assert_omits" ]
+     else [])
+    @ (if Hash_set.mem utils opened_name then of_module direct_artifact_names else [])
+    @ List.filter_map emitters ~f:(fun emitter ->
+          let defined_in origin =
+            match List.rev (String.split origin ~on:'.') with
+            | _value :: enclosing :: _ -> String.equal enclosing opened_target
+            | _ -> false
+          in
+          if List.exists emitter.origins ~f:defined_in then Some (opened_name, emitter.emitter_name)
+          else None)
+  in
+  (* Through {!module_source_name}, so that opening a functor application directly --
+     [let open Ir.C_syntax.C_syntax (Cfg) in compile_proc ...], with no intermediate module to
+     alias -- is the same open as one through a name. *)
+  let opened_name declaration = module_source_name declaration.popen_expr in
+  let extend hidden declaration =
+    match opened_name declaration with Some name -> hidden_by name @ hidden | None -> hidden
+  in
+  (* Names the file binds for itself are struck from every refusal: see {!names_bound_anywhere}. *)
+  let bound = names_bound_anywhere structure in
+  let found = ref [] in
+  (* Each open is judged over ITS OWN scope, which is what tells a file that hides a route from one
+     that merely opens a module somewhere. Comparing the file's opens against the file's unqualified
+     uses cross-products the two: a scoped [let open Ir.Low_level in ...] that calls nothing would
+     then refuse an unrelated local [to_doc] elsewhere in the file, and this check fails the
+     repository-wide inventory -- a false refusal is a red build on valid code (Codex round 3 on
+     lukstafi/ocannl-staging#487). A structure-level open governs the items after it, an
+     expression-level one its body, and a nested structure's opens die with it, which is the
+     language's own rule. *)
+  let walker =
+    object (self)
+      inherit [ (string * string) list ] Ast_traverse.map_with_context as super
+
+      method! structure hidden items =
+        ignore
+          (List.fold items ~init:hidden ~f:(fun hidden item ->
+               ignore (self#structure_item hidden item : structure_item);
+               match item.pstr_desc with
+               | Pstr_open declaration -> extend hidden declaration
+               (* An [include] removes the qualifier exactly as an [open] does, and for the rest of
+                  the structure just the same -- it also re-exports, which is beside the point here:
+                  what matters is that [emit] afterwards is the emitter's (Codex round 6). *)
+               | Pstr_include declaration ->
+                   (match module_source_name declaration.pincl_mod with
+                   | Some name -> hidden_by name @ hidden
+                   | None -> hidden)
+               | _ -> hidden));
+        items
+
+      method! expression hidden e =
+        (match e.pexp_desc with
+        | Pexp_open (declaration, body) ->
+            ignore (self#expression (extend hidden declaration) body : expression)
+        | Pexp_ident { txt = Longident.Lident name; _ } ->
+            if not (Set.mem bound name) then
+              List.iter hidden ~f:(fun (opened, hidden_name) ->
+                  if String.equal name hidden_name then found := (opened, name) :: !found);
+            ignore (super#expression hidden e : expression)
+        | _ -> ignore (super#expression hidden e : expression));
+        e
+    end
+  in
+  ignore (walker#structure [] structure : structure);
+  List.dedup_and_sort !found ~compare:Poly.compare
+  |> List.map ~f:(fun (opened, name) ->
+         Printf.sprintf
+           "%s opens %s and then uses %s unqualified, which this scan attributes by its qualifier \
+            -- so the call is invisible to it and the file can drop out of the inventory. Write \
+            %s.%s (or an alias of it) instead."
+           path opened name opened name)
+
+(** [classify_source ~emitters ~path ~contents] is [Some] when the file reads generated source at
+    all.
+
+    Raises if [contents] does not parse. *)
+let classify_source ~emitters ~path ~contents =
+  let structure = structure_of contents in
+  let generated = module_aliases ~target:"Generated" structure in
+  let utils = module_aliases ~target:direct_artifact_module structure in
+  (* The bindings come first because the emitter aliases do: an emitter bound to a local name is
+     called without a qualifier afterwards, and every rule below -- membership, taint, the buffer
+     destinations, the pin walk -- has to recognise the same set of calls. Rules that know different
+     routes are how a file stayed listed while the fragment it pins went missing. *)
+  let bindings = bindings_in_structure structure in
+  let aliases = emitter_aliases ~emitters structure in
+  (* [Buffer] under whatever name this file gave it, for the backstop below: [module B = Buffer]
+     then [B.contents buf] reads a buffer as surely as the bare spelling does. Resolved the way the
+     artifact readers are. *)
+  let buffers = module_aliases ~target:"Buffer" structure in
   let reads_generated = ref false in
   let reads_direct = ref false in
   let renders = ref false in
@@ -829,10 +1211,7 @@ let classify_source ~path ~contents =
         | Some p
           when List.exists direct_artifact_names ~f:(fun name -> calls ~aliases:utils p ~name) ->
             reads_direct := true
-        | Some p
-          when List.exists emitter_names ~f:(fun name -> path_ends p ~name)
-               && Option.is_some (qualifier_of p) ->
-            renders := true
+        | Some p when Option.is_some (emitter_of_path ~emitters ~aliases p) -> renders := true
         | _ -> ());
         super#expression e
     end
@@ -840,8 +1219,8 @@ let classify_source ~path ~contents =
   scan_reads#structure structure;
   if not (!reads_generated || !reads_direct || !renders) then None
   else
-    let bindings = bindings_in_structure structure in
-    let tainted = tainted_names ~generated ~utils bindings in
+    let seeds = buffer_destinations ~emitters ~aliases structure in
+    let tainted = tainted_names ~generated ~utils ~emitters ~aliases ~seeds bindings in
     let predicates, consumed = predicates ~generated ~tainted bindings in
     (* A predicate's source parameter IS generated source, inside that predicate's body. Adding the
        name to the tainted set is how the literals a helper tests against it -- the banner it slices
@@ -868,8 +1247,59 @@ let classify_source ~path ~contents =
     let mentions_tainted e =
       List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i)
       || mentions_generated_read ~generated e
-      || renders_generated_text e || reads_artifacts_directly ~utils e
+      || renders_generated_text ~emitters ~aliases e
+      || reads_artifacts_directly ~utils e
     in
+    (* The backstop for every indirection this scan cannot follow. A buffer is where generated text
+       lands without a name to carry it, and the ways it can be filled do not end: an emitter behind
+       a wrapper whose parameter reaches it through a local binding, a document handed to PPrint's
+       own [ToBuffer] renderers, a buffer stored in a record. Each of those leaves a test asserting
+       on [Buffer.contents buf] with [buf] untainted -- and, before this, leaves the FILE listed
+       with the fragment silently missing, which is the shape every miss on gh-ocannl-712 and
+       gh-ocannl-748 took. So a text test whose haystack reads a buffer this scan did not see filled
+       marks the itemisation partial: the file is still listed, the fragment is still unnamed, and
+       the inventory SAYS so. *)
+    let reads_a_buffer_inline e =
+      let found = ref false in
+      let iterator =
+        object
+          inherit Ast_traverse.iter as super
+
+          method! expression inner =
+            (match longident_of inner with
+            | Some path when calls ~aliases:buffers path ~name:"contents" -> found := true
+            | _ -> ());
+            super#expression inner
+        end
+      in
+      iterator#expression e;
+      !found
+    in
+    (* And through the bindings the read travels along, to a fixed point, exactly as taint does: a
+       test that writes [let source = Buffer.contents buf] and asserts on [source] later is the same
+       situation one binding removed, and the backstop has to see it or it is a backstop only for
+       the shape someone happened to write first. Nothing here is subtracted from taint -- a name the
+       taint walk reached is recorded as a pin before this is consulted. *)
+    let buffer_derived =
+      let derived = ref (Set.empty (module String)) in
+      let changed = ref true in
+      while !changed do
+        changed := false;
+        List.iter bindings ~f:(fun { names; params = _; body } ->
+            if not (List.for_all names ~f:(Set.mem !derived)) then
+              if
+                reads_a_buffer_inline body
+                || List.exists (idents_in body) ~f:(fun i -> Set.mem !derived i)
+              then (
+                derived := List.fold names ~init:!derived ~f:Set.add;
+                changed := true))
+      done;
+      !derived
+    in
+    let reads_a_buffer e =
+      reads_a_buffer_inline e || List.exists (idents_in e) ~f:(fun i -> Set.mem buffer_derived i)
+    in
+    let unattributed = ref false in
     let iterator =
       object
         inherit Ast_traverse.iter as super
@@ -879,6 +1309,8 @@ let classify_source ~path ~contents =
           | Some { text; tested; inherent } ->
               if inherent || Option.value_map tested ~default:false ~f:mentions_tainted then
                 record text
+              else if Option.value_map tested ~default:false ~f:reads_a_buffer then
+                unattributed := true
           | None -> (
               match e.pexp_desc with
               | Pexp_apply (callee, args) -> (
@@ -888,14 +1320,18 @@ let classify_source ~path ~contents =
                       | None -> ()
                       | Some predicate -> (
                           let args = positional args in
+                          let source = Option.bind predicate.source_at ~f:(List.nth args) in
                           let source_ok =
                             match predicate.source_at with
                             | None -> true
-                            | Some j -> (
-                                match List.nth args j with
-                                | Some a -> mentions_tainted a
-                                | None -> false)
+                            | Some _ -> Option.value_map source ~default:false ~f:mentions_tainted
                           in
+                          (* The backstop belongs on this path as much as on a direct test: a helper
+                             is how a test reads a buffer one indirection further out, and a guard
+                             that fires only for the spelling written first is not one (Codex round
+                             5). *)
+                          if (not source_ok) && Option.value_map source ~default:false ~f:reads_a_buffer
+                          then unattributed := true;
                           match (source_ok, Option.bind predicate.text_at ~f:(List.nth args)) with
                           | true, Some text -> record text
                           | _ -> ()))
@@ -910,7 +1346,7 @@ let classify_source ~path ~contents =
       {
         site_path = path;
         pins = List.filter_map all ~f:render_pin |> List.dedup_and_sort ~compare:String.compare;
-        partial = List.exists all ~f:(function Computed -> true | _ -> false);
+        partial = !unattributed || List.exists all ~f:(function Computed -> true | _ -> false);
         direct = !reads_direct;
         rendered = !renders;
       }

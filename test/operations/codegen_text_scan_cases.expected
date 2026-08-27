@@ -56,5 +56,32 @@ ok: source -- a helper that hard-codes the fragment pins it, taking the source a
 ok: source -- a helper that slices on a banner and tests its own parameter pins both
 ok: source -- a fragment named through a binding is still that fragment
 ok: source -- a buffer-writing serializer is an emitter too
+ok: source -- the buffer a serializer writes into carries the text, across bindings
+ok: source -- an emitter bound to a local name is still the emitter
+ok: source -- an alias of that alias is the emitter too
+ok: source -- a wrapper around an emitter carries its caller's buffer
+ok: source -- a wrapper whose buffer parameter carries no label is addressed by position
+ok: source -- a buffer this scan did not see filled marks the itemisation partial
+ok: source -- a buffer read through an alias of Buffer marks it partial just the same
+ok: source -- an unattributed buffer read travels along bindings like taint does
+ok: source -- an unattributed buffer reaching a helper marks it partial too
+ok: source -- a buffer aliased under a signature constraint is still a buffer
+ok: source -- a local name bound to something else is not an emitter
+ok: source -- a buffer nobody wrote generated text into carries nothing
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it
+ok: rejection -- opening the reader hides its calls from the qualifier
+ok: rejection -- opening an ALIAS of the reader hides them just the same
+ok: rejection -- opening the emitter's module hides the render
+ok: rejection -- an open in expression position is an open
+ok: rejection -- opening an ALIAS of the emitter's module hides it under a name no origin spells
+ok: rejection -- opening a module a FUNCTOR produced hides the emitter too
+ok: rejection -- opening a functor application directly hides the emitter as surely
+ok: rejection -- an include hides the emitter as an open does
+ok: rejection -- a name the file binds for itself is never refused
+ok: rejection -- an open governs its own scope, not the whole file
+ok: rejection -- a structure-level open governs the items after it
+ok: rejection -- an open inside a nested module dies with it
+ok: rejection -- opening Utils without reading the artifact directory is fine
+ok: rejection -- a name an emitter shares with an unopened module is not hidden
+ok: rejection -- the qualified spelling is what everything already uses
