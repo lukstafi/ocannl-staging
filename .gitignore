@@ -68,9 +68,11 @@ build_files/
 # somebody named `report.ocannl-stage.backup` from `git status` and so from their own commit, and
 # `[0-9]*` is no better -- git reads that as one digit followed by anything, so `1abc` matches too.
 # A glob has no way to say "one or more digits", so the staging name's fields are fixed-width hex
-# (8, 8, 16) precisely so this rule can be EXACT. It is the same shape atomic_file.ml recognizes,
-# character for character, and the pairing is pinned in test/operations/cache_dir_scan_cases.
-*.ocannl-stage.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+# (8, 8, 16) precisely so this rule can be EXACT. The leading `?*` is one-or-more: a bare `*` also
+# matches the EMPTY stem, and `.ocannl-stage.<fields>` is a name the helper never generates and so
+# somebody else's file. It is the same shape atomic_file.ml recognizes, character for character,
+# and the pairing is pinned in test/operations/cache_dir_scan_cases.
+?*.ocannl-stage.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
 # Test artifacts written to the working directory
 # (test/operations/test_safetensors.ml, test/training/tokenizer_roundtrip.ml).

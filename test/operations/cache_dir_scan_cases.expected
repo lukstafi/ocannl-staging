@@ -24,6 +24,8 @@ ok: glob -- the staging-file rule matches a generated name
 ok: glob -- and spares a file merely carrying the infix
 ok: glob -- and spares fields that merely start numeric
 ok: glob -- and spares fields of the wrong width
+ok: glob -- a one-character stem is still the helper's
+ok: glob -- and a name with no stem at all is not
 ok: built-in default -- the default a search falls back to
 ok: built-in default -- an empty default names no directory
 ok: built-in default -- another key's default is not this one's
