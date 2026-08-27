@@ -11,3 +11,13 @@ not one this workspace builds. Nothing else differs between the three runs.
 an external command handed a file this workspace builds is a stanza the rule reaches, reported by name when it declares neither: true
 the same stanza, declaring its backend, passes with the raw-text floor naming it too: true
 the same command handed nothing of this workspace is a stanza neither reader sees: true
+
+The focused-aggregate rule is put to a tree of one member stanza and a family alias that does
+or does not list it. Nothing else differs between the runs; the fifth is a stanza neither
+derivation calls a member.
+
+a stanza whose backend marker names metal is reported, naming its family, when the metal-codegen alias does not reach it: true
+the same tree with the member listed in the family stanza passes: true
+a stanza whose modules read the resource-lifecycle instrumentation is reported the same way when the lifecycle alias does not reach it: true
+the same tree with that member listed passes too: true
+a stanza neither derivation calls a member is asked for no family alias: true
