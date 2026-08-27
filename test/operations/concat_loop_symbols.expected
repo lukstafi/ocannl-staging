@@ -1,0 +1,12 @@
+concat forward emits a loop of the first segment's width (3): true
+concat forward emits a loop of the second segment's width (2): true
+every concat forward loop binder is bound exactly once: true
+no concat forward binder is shadowed in the canonical render: true
+concat backward emits a loop of the first segment's width (3): true
+concat backward emits a loop of the second segment's width (2): true
+every concat backward loop binder is bound exactly once: true
+no concat backward binder is shadowed in the canonical render: true
+concat forward values are the two segments in order: true
+first segment's gradient is all ones: true
+second segment's gradient is all ones: true
+concat loop widths: fwd 2,3 / bwd 5,5,2,3

@@ -576,9 +576,15 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     let rec for_loop block_iters rev_iters = function
       | [] -> basecase block_iters rev_iters
       | comp :: product ->
-          let index = Indexing.get_symbol () in
           Low_level.unflat_lines
           @@ List.map comp ~f:(fun (d, iter) ->
+              (* One fresh symbol per SEGMENT, not per component: a concatenation component's
+                 segments become sibling loops with DIFFERENT bounds, and a shared binder makes
+                 every flat symbol-keyed scanner misread them -- [def_loop_ranges] keeps only the
+                 last segment's width, [affine_accesses] collects two ranges for one symbol, and
+                 the canonical render reports the second binder as shadowed, declining the routine
+                 for both digest caches (gh-ocannl-765). *)
+              let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
                   index;
@@ -771,9 +777,10 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     let rec for_loop block_iters rev_iters = function
       | [] -> basecase block_iters rev_iters
       | comp :: product ->
-          let index = Indexing.get_symbol () in
           Low_level.unflat_lines
           @@ List.map comp ~f:(fun (d, iter) ->
+              (* One fresh symbol per SEGMENT -- see [loop_accum]'s [for_loop] (gh-ocannl-765). *)
+              let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
                   index;
