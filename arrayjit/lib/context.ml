@@ -51,7 +51,10 @@ let create_ledger () =
 
 type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
-  device_id : int;
+  ordinal : int;
+      (** The backend's device ordinal this context runs on -- what {!Backends.make_context} was
+          given. NOT {!Ir.Backend_intf.device.device_id}, which is a process-global counter across
+          all backends. *)
   initialized_nodes : Set.M(Tn).t;
   frontier : (compile_frontier[@sexp.opaque]);
   ledger : (execution_ledger[@sexp.opaque]);
@@ -77,31 +80,28 @@ type routine = {
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
 
 (** Create a context from a backend name *)
-let create_from_backend_name ~device_id backend_name =
+let create_from_backend_name ~ordinal backend_name =
   let backend = Backends.get_backend ~backend_name () in
   {
-    wrapped = Backends.make_context ~device_id backend;
-    device_id;
+    wrapped = Backends.make_context ~ordinal backend;
+    ordinal;
     initialized_nodes = Set.empty (module Tn);
     frontier = empty_frontier;
     ledger = create_ledger ();
   }
 
-let cuda ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "cuda"
+let cuda ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "cuda"
+let hip ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "hip"
 
-let hip ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "hip"
-
-let metal ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "metal"
+let metal ?ordinal () =
+  create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "metal"
 
 let cpu ?threads () =
   (* Kernel-level CPU parallelism is automatic on both cc backends (pool-rendered Grid loops, see
      [automatic_cpu_schedule]); [threads] > 1 selects the multidev_cc debugging backend, which
      exposes multiple worker-domain devices. *)
   let backend_name = match threads with None | Some 1 -> "cc" | Some _ -> "multidev_cc" in
-  create_from_backend_name ~device_id:0 backend_name
+  create_from_backend_name ~ordinal:0 backend_name
 
 (* gh-ocannl-536 landing step 5: backend selection is not candidate compilation, so it does not use
    the compile-phase policy — but it used to catch everything, which turned a broken driver, an
@@ -123,7 +123,7 @@ let auto () =
               ("Context.auto: no backend available; tried "
               ^ String.concat ~sep:", " (List.rev unavailable))
         | name :: rest -> (
-            match create_from_backend_name ~device_id:0 name with
+            match create_from_backend_name ~ordinal:0 name with
             | ctx -> ctx
             | exception exn when advances_to_next_backend exn ->
                 try_backends (Exn.to_string exn :: unavailable) rest)
@@ -133,7 +133,7 @@ let auto () =
       (* Use the configured backend. An unknown name already raises a message naming it
          ([Backends.get_backend]); an unusable one keeps its own failure rather than being relabeled
          as a spelling mistake. *)
-      create_from_backend_name ~device_id:0 backend_name
+      create_from_backend_name ~ordinal:0 backend_name
 
 let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate ctx comp bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
@@ -735,7 +735,7 @@ let points_2d ?from_axis ~xdim ~ydim ctx (tn : Tn.t) =
   Nd.retrieve_2d_points ?from_axis ?padding ~xdim ~ydim nd
 
 let is_initialized ctx node = Set.mem ctx.initialized_nodes node
-let device_id ctx = ctx.device_id
+let ordinal ctx = ctx.ordinal
 
 let get_used_memory ctx =
   Backends.query ctx.wrapped

@@ -150,8 +150,8 @@ type wrapped_context =
 
 val wrapped_backend : wrapped_context -> backend
 
-val make_context : ?device_id:int -> backend -> wrapped_context
-(** A fresh root context (empty [optimize_ctx]) on the backend's device [device_id] (default 0).
+val make_context : ?ordinal:int -> backend -> wrapped_context
+(** A fresh root context (empty [optimize_ctx]) on the backend's device [ordinal] (default 0).
     Raises when the backend's hardware or library is unavailable. *)
 
 type 'a ctx_op = {

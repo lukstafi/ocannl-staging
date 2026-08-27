@@ -34,6 +34,11 @@
   runtime `Invalid_argument` threaded through three layers; it is now impossible to express. A
   whole-routine transform returns a singleton (`fun o -> [ f o ]`), a fissioning one returns one
   element per kernel segment.
+- `Context.t`'s device field and the `?device_id` parameters of `Context.cuda`/`hip`/`metal` and
+  `Backends.make_context` are renamed to `ordinal` (gh-ocannl-776): the value IS the backend's
+  device ordinal, while `Backend_intf.device.device_id` is a process-global counter across all
+  backends, so the old name answered a different question than it asked on multi-backend runs. The
+  accessor is now `Context.ordinal`. No deprecated alias.
 
 ## [1.0.1] -- 2026-08-26
 

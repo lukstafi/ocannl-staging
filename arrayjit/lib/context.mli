@@ -64,14 +64,14 @@ type routine = private {
 
 (** {2 Context creation} *)
 
-val cuda : ?device_id:int -> unit -> t
-(** Create a CUDA context. *)
+val cuda : ?ordinal:int -> unit -> t
+(** Create a CUDA context on the backend's device [ordinal] (default 0). *)
 
-val hip : ?device_id:int -> unit -> t
-(** Create an AMD HIP (ROCm) context. *)
+val hip : ?ordinal:int -> unit -> t
+(** Create an AMD HIP (ROCm) context on the backend's device [ordinal] (default 0). *)
 
-val metal : ?device_id:int -> unit -> t
-(** Create a Metal context. *)
+val metal : ?ordinal:int -> unit -> t
+(** Create a Metal context on the backend's device [ordinal] (default 0). *)
 
 val cpu : ?threads:int -> unit -> t
 (** Create a CPU context. [threads] > 1 selects the [multidev_cc] backend (multiple worker-domain
@@ -359,8 +359,10 @@ val is_initialized : t -> Ir.Tnode.t -> bool
 val backend_name : t -> string
 (** Get the name of the backend. *)
 
-val device_id : t -> int
-(** Get the device ID. *)
+val ordinal : t -> int
+(** The backend's device ordinal this context runs on -- what {!cuda}/{!hip}/{!metal} was given.
+    This is NOT {!Ir.Backend_intf.device.device_id}, which counts device instances process-globally
+    across all backends; two contexts on different backends share ordinal 0. *)
 
 val get_used_memory : t -> int
 (** (An upper bound of) the memory used for arrays on the context's device, in bytes. Device-wide:

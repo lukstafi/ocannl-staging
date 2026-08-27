@@ -1349,10 +1349,10 @@ let wrapped_backend = function
   | Hip_ctx _ -> Hip
   | Metal_ctx _ -> Metal
 
-let make_context ?(device_id = 0) backend =
+let make_context ?(ordinal = 0) backend =
   let fresh (type dev runner event)
       (module B : Backend with type dev = dev and type runner = runner and type event = event) =
-    let device = B.get_device ~ordinal:device_id in
+    let device = B.get_device ~ordinal in
     B.make_context ~optimize_ctx:(B.empty_optimize_ctx ()) device
   in
   match backend with

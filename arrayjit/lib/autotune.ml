@@ -2443,7 +2443,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
-  let device = Context.device_id ctx in
+  let device = Context.ordinal ctx in
   (* The tuned computation's name, for the calibration rows and log lines of every candidate
      (gh-ocannl-635). READ from [name] rather than re-derived (gh-ocannl-669): every compile below
      is passed the same [?name], and this is the same [Option.value_or_thunk ... get_name_exn] they
@@ -2555,13 +2555,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
     Option.iter timing_ctx ~f:(fun tctx ->
         if
           (not (String.equal (Context.backend_name tctx) backend))
-          || Context.device_id tctx <> Context.device_id ctx
+          || Context.ordinal tctx <> Context.ordinal ctx
         then
           invalid_arg
             (Printf.sprintf
                "Autotune.tune: timing_ctx must be on the same backend and device as the target \
                 context (timing: %s device %d, target: %s device %d)"
-               (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
+               (Context.backend_name tctx) (Context.ordinal tctx) backend (Context.ordinal ctx)));
 
     (* Device work, not a pure query: the GPU backends lazily initialize the device and read driver
        attributes here, so a driver or enumeration error surfaces at this line — the first thing
