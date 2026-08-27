@@ -338,14 +338,14 @@ let module_references_in_source content ~paths =
     ||
     match components with
     | [ single ] ->
-        List.exists !aliases ~f:(fun (alias, of_qualifier) ->
+        List.exists !aliases ~f:(fun (alias, of_qualifier, _) ->
             String.equal alias single && List.equal String.equal of_qualifier qualifier)
     | _ -> false
   in
   (* A name bound to something that is not the qualifier stops denoting it for the rest of its
      scope -- whether it was bound by a module binding or introduced as a functor's parameter. *)
   let shadow_name name =
-    aliases := List.filter !aliases ~f:(fun (a, _) -> not (String.equal a name));
+    aliases := List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a name));
     if not (is_shadowed name) then shadowed := name :: !shadowed
   in
   let bind_module_expr alias module_expr =
@@ -363,26 +363,35 @@ let module_references_in_source content ~paths =
        `open` is NOT one of these. It changes what unqualified names mean INSIDE the structure and
        exports nothing, so `module I = struct open Ir include Vendor end` re-exports Vendor and
        reading the open as an export would attribute Vendor's `Alloc_census` to us (round 14). *)
+    (* And the names it REDEFINES after including: `struct include Ir module Alloc_census = Vendor.
+       Alloc_census end` re-exports the qualifier and then overrides one of its leaves, so a
+       reference through the wrapper to that leaf is Vendor's (Codex P2, round 15). Carried with the
+       binding, since it is a fact about this wrapper and not about the qualifier. *)
     let rec exports module_expr =
       match (unwrap module_expr).pmod_desc with
-      | Pmod_ident { txt; _ } -> Option.to_list (flatten_module_path txt)
+      | Pmod_ident { txt; _ } -> (Option.to_list (flatten_module_path txt), [])
       | Pmod_structure items ->
-          List.concat_map items ~f:(fun item ->
+          List.fold items ~init:([], []) ~f:(fun (paths, overridden) item ->
               match item.pstr_desc with
-              | Pstr_include { pincl_mod = inner; _ } -> exports inner
-              | _ -> [])
-      | _ -> []
+              | Pstr_include { pincl_mod = inner; _ } ->
+                  let inner_paths, inner_overridden = exports inner in
+                  (paths @ inner_paths, overridden @ inner_overridden)
+              | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
+                  (paths, name :: overridden)
+              | _ -> (paths, overridden))
+      | _ -> ([], [])
     in
+    let paths, overridden = exports module_expr in
     let names_any = ref false in
-    List.iter (exports module_expr) ~f:(fun components ->
+    List.iter paths ~f:(fun components ->
         List.iter qualifiers ~f:(fun qualifier ->
             if names_qualifier qualifier components then (
               names_any := true;
               match alias with
               | Some alias ->
                   shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
-                  aliases := (alias, qualifier) :: !aliases
-              | None -> opened := qualifier :: !opened)));
+                  aliases := (alias, qualifier, overridden) :: !aliases
+              | None -> opened := (qualifier, overridden) :: !opened)));
     (* Whatever else it was bound to, the NAME now denotes that instead. *)
     match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
   in
@@ -401,13 +410,16 @@ let module_references_in_source content ~paths =
     (* Anchored at the alias for the same reason the direct branch anchors at the qualifier:
        `Vendor.I.Alloc_census` resolves from `Vendor`, whatever `I` means here (Codex P2, round
        12). *)
-    || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
+    || List.exists !aliases ~f:(fun (alias, of_qualifier, overridden) ->
            List.equal String.equal of_qualifier qualifier
+           && (not (List.mem overridden name ~equal:String.equal))
            && starts_with components [ alias; name ])
     (* Under an `open`, the reference begins with the module's own name -- and only while that name
        still means the opened module: `open Ir` followed by `module Alloc_census = Foo.Alloc_census`
        rebinds the leaf, and what follows is Foo's (Codex P2, round 11). *)
-    || (List.exists !opened ~f:(List.equal String.equal qualifier)
+    || (List.exists !opened ~f:(fun (of_qualifier, overridden) ->
+            List.equal String.equal of_qualifier qualifier
+            && not (List.mem overridden name ~equal:String.equal))
        && starts_with components [ name ]
        && not (is_shadowed name))
   in
@@ -498,6 +510,25 @@ let module_references_in_source content ~paths =
             opened := saved_opened;
             shadowed := saved_shadowed
         | _ -> super#module_type module_type
+
+      (* A signature is a scope too, and `module Ir : X` inside one binds that name for the items
+         after it: the `Ir` in a later `val x : Ir.Alloc_census.t` is the signature's (Codex P2,
+         round 15). Same arrangement as `structure`. *)
+      method! signature signature =
+        let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
+        List.iter signature ~f:(fun item ->
+            self#signature_item item;
+            match item.psig_desc with
+            | Psig_module { pmd_name = { txt = Some name; _ }; _ }
+            | Psig_modsubst { pms_name = { txt = name; _ }; _ } ->
+                shadow_name name
+            | Psig_recmodule declarations ->
+                List.iter declarations ~f:(fun declaration ->
+                    Option.iter declaration.pmd_name.txt ~f:shadow_name)
+            | _ -> ());
+        aliases := saved_aliases;
+        opened := saved_opened;
+        shadowed := saved_shadowed
 
       method! longident lid =
         (match flatten_module_path lid with

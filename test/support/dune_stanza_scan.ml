@@ -1787,10 +1787,13 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
      to a basename made a rule running the first count as the runner of the second -- crediting a
      local executable with a declaration made elsewhere, and hiding that nothing runs it (Codex P2,
      round 2). *)
+  (* Kept apart, because this consumer does not merely ask WHETHER something runs: it transfers the
+     matched rule's declaration to a specific executable, so `(run ./pkg.probe)` -- a file here --
+     must not be credited to the executable installed as `pkg.probe` (Codex P2, round 15). *)
   let exes_run stanza =
     List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
-        match command with Runs path | Runs_public path -> Some path | _ -> None)
-    |> List.dedup_and_sort ~compare:String.compare
+        match command with Runs path -> Some (`File path) | Runs_public name -> Some (`Public name) | _ -> None)
+    |> List.dedup_and_sort ~compare:Poly.compare
   in
   (* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and
      the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` records as
@@ -1806,17 +1809,19 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
   let identities stanza =
     List.concat_map (names_of stanza) ~f:(fun name ->
         let local = name ^ ".exe" in
-        if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
-    @ (match field stanza "public_name" with Some [ Sexp.Atom public ] -> [ public ] | _ -> [])
+        if String.is_empty subdir then [ `File local ] else [ `File local; `File (in_subdir subdir local) ])
+    @ (match field stanza "public_name" with
+      | Some [ Sexp.Atom public ] -> [ `Public public ]
+      | _ -> [])
     @
     match field stanza "public_names" with
-    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
+    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some (`Public p) | _ -> None)
     | None -> []
   in
   let runners_of stanza =
     let wanted = identities stanza in
     List.filter runner_stanzas ~f:(fun s ->
-        List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
+        List.exists (exes_run s) ~f:(List.mem wanted ~equal:Poly.equal))
   in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
      executable, a command it could not place, a program under an unresolvable `chdir`. That is what
@@ -1928,7 +1933,10 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
               match (names_of stanza, exes_run stanza) with
               | name :: _, _ -> name
               | [], [] -> "<unnamed>"
-              | [], exes -> "running " ^ String.concat ~sep:", " exes
+              | [], exes ->
+                  "running "
+                  ^ String.concat ~sep:", "
+                      (List.map exes ~f:(function `File path -> path | `Public name -> name))
             in
             Some
               {

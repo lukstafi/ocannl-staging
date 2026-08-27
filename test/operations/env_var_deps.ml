@@ -431,7 +431,18 @@ let runner_aliases file_stanzas ~identities:(file, public) =
                unrelated rule with this executable (Codex P2, round 8). *)
             | Scan.Runs_public name -> List.mem public name ~equal:String.equal
             | _ -> false)
-      then List.map (aliases_of stanza) ~f:(fun alias -> (runner_subdir, alias))
+      then
+        (* A `(test)` with a custom action can be the runner, and its focused entry point is the
+           `runtest-<name>` dune generates -- `aliases_of` reports the directory-wide `runtest` for
+           it, which is filtered out as a suite alias and would leave the executable reachable by
+           nothing (Codex P2, round 15). *)
+        let attached =
+          match Scan.head stanza with
+          | Some ("test" | "tests") ->
+              List.map (Scan.names_of stanza) ~f:(fun name -> "runtest-" ^ name)
+          | _ -> aliases_of stanza
+        in
+        List.map attached ~f:(fun alias -> (runner_subdir, alias))
       else [])
 
 (* The units a stanza contributes, with the aliases that reach each. A directory-wide suite alias is
@@ -2236,6 +2247,7 @@ type family_shape =
   | Gate_elsewhere
       (** the rule on `runtest-gate` runs ANOTHER directory's `gate.exe`, so it is no gate *)
   | Sibling_defaults  (** two stanzas that omit `(modules …)`, each with its own main *)
+  | Test_stanza_runner  (** an `(executable)` run by a `(test)` stanza's custom action *)
   | Runner_absolute  (** a rule running an ABSOLUTE path that ends in the local executable's name *)
 
 let family_marker ~metal =
@@ -2314,6 +2326,14 @@ let family_member_stanza ~shape ~metal =
          probe probe2)\n (libraries base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config \
          (alias runtest-gate))\n (action\n  (run %%{bin:pkg.probe2})))\n"
         marker
+  | Test_stanza_runner ->
+      (* A `(test)` with a custom action as the runner: dune's focused entry point for it is the
+         `runtest-harness` alias it generates. *)
+      Printf.sprintf
+        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(test\n%s (name \
+         harness)\n (modules harness)\n (deps ocannl_config %%{dep:probe.exe})\n (libraries \
+         base)\n (action\n  (run ./probe.exe)))\n"
+        marker
   | Sibling_defaults ->
       (* Two tests, neither naming its modules: dune gives each its own main and shares the rest, so
          only the one whose main reads the instrumentation is a member. *)
@@ -2381,6 +2401,7 @@ let family_listed_aliases ~shape ~listing =
   | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
   | Sibling_defaults, _ -> [ "runtest-probe" ]
+  | Test_stanza_runner, _ -> [ "runtest-harness" ]
   | Runner_absolute, _ -> [ "probe_run" ]
   | Gate_elsewhere, _ -> [ "runtest-probe" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
@@ -2426,6 +2447,8 @@ type family_probe_source =
   | Include_with_definition  (** the same wrapper, with an unrelated definition beside the include *)
   | Open_not_export  (** the qualifier OPENED in a wrapper that includes somebody else *)
   | Module_type_functor  (** the qualifier's name as a MODULE TYPE functor's parameter *)
+  | Include_then_override  (** the qualifier included, and then one of its leaves redefined *)
+  | Signature_module  (** the qualifier's name declared as a module INSIDE a signature *)
   | Neither
 
 let family_probe = function
@@ -2479,6 +2502,13 @@ let family_probe = function
   | Module_type_functor ->
       (* The module-type spelling of a functor: the `Ir` in the result signature is the parameter. *)
       "module type F = functor (Ir : S) -> sig\n  val x : Ir.Alloc_census.t\nend\n"
+  | Include_then_override ->
+      (* The wrapper re-exports the qualifier and then overrides the leaf, so a reference through
+         the wrapper to THAT leaf is Vendor's (Codex P2, round 15). *)
+      "module I = struct\n  include Ir\n\n  module Alloc_census = Vendor.Alloc_census\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Signature_module ->
+      (* A signature binds module names for the items after it. *)
+      "module type S = sig\n  module Ir : X\n\n  val x : Ir.Alloc_census.t\nend\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2621,6 +2651,16 @@ let family_control () =
   let module_type_functor =
     run ~probe:Module_type_functor ~metal:false ~lifecycle:true ~family:None ()
   in
+  (* A wrapper that re-exports the qualifier and then overrides the leaf, and a signature that binds
+     the qualifier's name: neither reference is ours. *)
+  let include_then_override =
+    run ~probe:Include_then_override ~metal:false ~lifecycle:true ~family:None ()
+  in
+  let signature_module = run ~probe:Signature_module ~metal:false ~lifecycle:true ~family:None () in
+  (* And a `(test)` stanza as the runner of a lifecycle executable. *)
+  let test_stanza_runner =
+    run ~shape:Test_stanza_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
+  in
   (* Two default-module tests, only one of whose mains reads the instrumentation: listing that one
      alias is complete. *)
   let sibling_defaults =
@@ -2703,6 +2743,9 @@ let family_control () =
   in
   let open_not_export_ok = listed_ok open_not_export in
   let module_type_functor_ok = listed_ok module_type_functor in
+  let include_then_override_ok = listed_ok include_then_override in
+  let signature_module_ok = listed_ok signature_module in
+  let test_stanza_runner_ok = listed_ok test_stanza_runner in
   let sibling_defaults_ok = listed_ok sibling_defaults in
   let runner_absolute_ok = omitted_ok lifecycle_family.family_alias runner_absolute in
   let gate_elsewhere_ok =
@@ -2752,6 +2795,9 @@ let family_control () =
     report "a re-export beside a definition" include_with_definition;
   if not open_not_export_ok then report "an open mistaken for a re-export" open_not_export;
   if not module_type_functor_ok then report "a module-type functor parameter" module_type_functor;
+  if not include_then_override_ok then report "an overridden leaf" include_then_override;
+  if not signature_module_ok then report "a module bound inside a signature" signature_module;
+  if not test_stanza_runner_ok then report "a test stanza as the runner" test_stanza_runner;
   if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
   if not runner_absolute_ok then report "an absolute runner path" runner_absolute;
   if not gate_elsewhere_ok then report "a gate alias running another binary" gate_elsewhere;
@@ -2883,6 +2929,17 @@ let family_control () =
   Verdict.p
     "a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature"
     module_type_functor_ok;
+  Verdict.p
+    "a wrapper that includes the qualifier and then redefines a leaf does not lend us that leaf"
+    include_then_override_ok;
+  Verdict.p
+    "`module Ir : X` inside a signature binds the name for the items after it, so a later \
+     `Ir.Alloc_census.t` is the signature's"
+    signature_module_ok;
+  Verdict.p
+    "an executable run by a `(test)` stanza's custom action is aggregated through the \
+     `runtest-<name>` dune generates for that test"
+    test_stanza_runner_ok;
   Verdict.p
     "two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the \
      instrumentation is a member"

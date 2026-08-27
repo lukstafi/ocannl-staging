@@ -54,6 +54,9 @@ a functor parameter named `Ir` shadows the qualifier inside the functor's body: 
 and goes on doing so when the structure defines something beside the include: true
 `open Ir` inside a wrapper that includes somebody else re-exports the somebody else, so its user is no member: true
 a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature: true
+a wrapper that includes the qualifier and then redefines a leaf does not lend us that leaf: true
+`module Ir : X` inside a signature binds the name for the items after it, so a later `Ir.Alloc_census.t` is the signature's: true
+an executable run by a `(test)` stanza's custom action is aggregated through the `runtest-<name>` dune generates for that test: true
 two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
 an absolute path ending in the local executable's name is not the local executable: true
 a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true
