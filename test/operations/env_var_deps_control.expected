@@ -43,4 +43,6 @@ a module of the same last name reached through another qualifier is not the inst
 `open Ir` and then a bare `Alloc_census.snapshot` is a reference to the instrumentation, and its test is a member: true
 so is `module I = Ir` and then `I.Alloc_census.snapshot`: true
 an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference to the instrumentation: true
+`module Ir = Other` rebinds the qualifier, so a later `Ir.Alloc_census` is not the instrumentation: true
+a rule running a file that shares the executable's public name is not its runner, however alike the two strings are: true
 a stanza neither derivation calls a member is asked for no family alias: true

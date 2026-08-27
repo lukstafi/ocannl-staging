@@ -326,9 +326,14 @@ let module_references_in_source content ~paths =
         match List.rev path with _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier) | _ -> None)
     |> List.dedup_and_sort ~compare:(List.compare String.compare)
   in
-  let aliases = ref [] and opened = ref [] in
+  let aliases = ref [] and opened = ref [] and shadowed = ref [] in
+  (* A name is the qualifier only while nothing has rebound it. [module Ir = Other] shadows it, and
+     a later [Ir.Alloc_census] is Other's -- the same argument the qualified path makes about
+     [Foo.Alloc_census], one component further left (Codex P2, round 8). *)
+  let is_shadowed name = List.mem !shadowed name ~equal:String.equal in
   let names_qualifier qualifier components =
-    contains components qualifier
+    (contains components qualifier
+    && not (List.exists qualifier ~f:is_shadowed))
     ||
     match components with
     | [ single ] ->
@@ -342,16 +347,26 @@ let module_references_in_source content ~paths =
       | Pmod_constraint (inner, _) -> unwrap inner
       | _ -> module_expr
     in
-    match (unwrap module_expr).pmod_desc with
+    let names_any = ref false in
+    (match (unwrap module_expr).pmod_desc with
     | Pmod_ident { txt; _ } -> (
         match flatten_module_path txt with
         | None -> ()
         | Some components ->
             List.iter qualifiers ~f:(fun qualifier ->
-                if names_qualifier qualifier components then
+                if names_qualifier qualifier components then (
+                  names_any := true;
                   match alias with
-                  | Some alias -> aliases := (alias, qualifier) :: !aliases
-                  | None -> opened := qualifier :: !opened))
+                  | Some alias ->
+                      shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
+                      aliases := (alias, qualifier) :: !aliases
+                  | None -> opened := qualifier :: !opened)))
+    | _ -> ());
+    (* Whatever else it was bound to, the NAME now denotes that instead. *)
+    match alias with
+    | Some alias when not !names_any ->
+        aliases := List.filter !aliases ~f:(fun (a, _) -> not (String.equal a alias));
+        if not (is_shadowed alias) then shadowed := alias :: !shadowed
     | _ -> ()
   in
   let found = ref [] in
@@ -361,7 +376,7 @@ let module_references_in_source content ~paths =
       | name :: rev_qualifier -> (List.rev rev_qualifier, name)
       | [] -> ([], "")
     in
-    contains components path
+    (contains components path && not (List.exists qualifier ~f:is_shadowed))
     || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
            List.equal String.equal of_qualifier qualifier && contains components [ alias; name ])
     (* Under an `open`, the reference begins with the module's own name -- STARTS with, not
@@ -378,7 +393,7 @@ let module_references_in_source content ~paths =
          structures go through this method too, which is what confines a `module M = struct open Ir
          end` to `M`. *)
       method! structure items =
-        let saved_aliases = !aliases and saved_opened = !opened in
+        let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
         List.iter items ~f:(fun item ->
             self#structure_item item;
             match item.pstr_desc with
@@ -388,18 +403,22 @@ let module_references_in_source content ~paths =
             | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
             | _ -> ());
         aliases := saved_aliases;
-        opened := saved_opened
+        opened := saved_opened;
+        shadowed := saved_shadowed
 
       (* The expression spellings reach their BODY. Visited by hand rather than through `super`, so
          that the binding is in force for the body and gone after it. *)
       method! expression expr =
         let scoped ~bind ~body visit =
           visit ();
-          let saved_aliases = !aliases and saved_opened = !opened in
+          let saved_aliases = !aliases
+          and saved_opened = !opened
+          and saved_shadowed = !shadowed in
           bind ();
           self#expression body;
           aliases := saved_aliases;
-          opened := saved_opened
+          opened := saved_opened;
+          shadowed := saved_shadowed
         in
         match expr.pexp_desc with
         | Pexp_open (declaration, body) ->

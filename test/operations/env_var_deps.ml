@@ -418,7 +418,12 @@ let runner_aliases file_stanzas ~identities:(file, public) =
                 let resolved =
                   normalize_path (Scan.in_subdir runner_subdir (Scan.in_subdir cwd path))
                 in
-                String.equal resolved file || List.mem public path ~equal:String.equal
+                String.equal resolved file
+            (* And a public name only where the command RESOLVED one. `(run ./pkg.probe)` and `(run
+               %{bin:pkg.probe})` carry the same string and name different things -- a file here, an
+               installed program -- so reading the first as a public-name runner would credit an
+               unrelated rule with this executable (Codex P2, round 8). *)
+            | Scan.Runs_public name -> List.mem public name ~equal:String.equal
             | _ -> false)
       then List.map (aliases_of stanza) ~f:(fun alias -> (runner_subdir, alias))
       else [])
@@ -2193,6 +2198,8 @@ type family_shape =
   | Public_name_runner  (** an installed executable, run by its `(public_name …)` *)
   | Public_names_crossed
       (** two installed executables, and a rule running the SECOND one's public name *)
+  | Public_name_by_path
+      (** an installed executable, and a rule running a FILE that shares its public name *)
   | Subdir_exe_top_runner  (** the executable in a group, the rule that runs it at the top level *)
   | Runtest_only_rule  (** a marked rule whose only alias is the directory-wide `runtest` *)
   | Subdir_ungated  (** the member and its family alias in a group with no gate of its own *)
@@ -2264,6 +2271,14 @@ let family_member_stanza ~shape ~metal =
          probe probe2)\n (libraries base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config \
          (alias runtest-gate))\n (action\n  (run %%{bin:pkg.probe2})))\n"
         marker
+  | Public_name_by_path ->
+      (* The same public name, run as a path: `(run ./pkg.probe)` names a file in this directory,
+         not the installed program, and `classify_command` reports both as the same string. *)
+      Printf.sprintf
+        "(executable\n (name probe)\n (public_name pkg.probe)\n (modules probe)\n (libraries \
+         base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config (alias runtest-gate))\n \
+         (action\n  (run ./pkg.probe)))\n"
+        marker
   | Public_name_runner ->
       (* An installed executable, whose companion rule runs it by the name it installs under --
          which is what `Scan.executables_run` reports, and not the `.exe` file. *)
@@ -2309,7 +2324,7 @@ let family_listed_aliases ~shape ~listing =
   | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
-      | Subdir_exe_top_runner ),
+      | Public_name_by_path | Subdir_exe_top_runner ),
       _ ) ->
       [ "probe_run" ]
   | Single_test, _ -> [ "runtest-probe" ]
@@ -2340,6 +2355,7 @@ type family_probe_source =
   | Opened  (** `open Ir`, then the module named without its qualifier *)
   | Qualifier_aliased  (** `module I = Ir`, then the module named through the alias *)
   | Scoped_open  (** the qualifier opened inside a nested module, and named OUTSIDE it *)
+  | Qualifier_shadowed  (** the qualifier's NAME rebound to another module, then used *)
   | Neither
 
 let family_probe = function
@@ -2355,6 +2371,10 @@ let family_probe = function
   | Qualifier_aliased ->
       (* And with the qualifier itself bound to a name of the source's choosing. *)
       "module I = Ir\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Qualifier_shadowed ->
+      (* The qualifier's name rebound: what `Ir.Alloc_census` names after this is Other's (Codex
+         P2, round 8). *)
+      "module Ir = Other\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2470,6 +2490,14 @@ let family_control () =
   let aliased_probe = run ~probe:Qualifier_aliased ~metal:false ~lifecycle:true ~family:None () in
   (* And the same open, one scope away from the reference. *)
   let scoped_open = run ~probe:Scoped_open ~metal:false ~lifecycle:true ~family:None () in
+  (* And the qualifier's own name rebound to another module. *)
+  let shadowed_qualifier =
+    run ~probe:Qualifier_shadowed ~metal:false ~lifecycle:true ~family:None ()
+  in
+  (* A rule running a FILE that shares the executable's public name is not its runner. *)
+  let public_by_path =
+    run ~shape:Public_name_by_path ~metal:false ~lifecycle:true ~family:lifecycle ()
+  in
   (* The negative control: neither derivation calls this stanza a member, so no family alias is
      asked for. A derivation that over-claimed would fail this correct tree. *)
   let no_member = run ~metal:false ~lifecycle:false ~family:None () in
@@ -2518,6 +2546,8 @@ let family_control () =
   let opened_probe_ok = omitted_ok lifecycle_family.family_alias opened_probe in
   let aliased_probe_ok = omitted_ok lifecycle_family.family_alias aliased_probe in
   let scoped_open_ok = listed_ok scoped_open in
+  let shadowed_qualifier_ok = listed_ok shadowed_qualifier in
+  let public_by_path_ok = omitted_ok lifecycle_family.family_alias public_by_path in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2544,6 +2574,8 @@ let family_control () =
   if not opened_probe_ok then report "the qualifier opened rather than written" opened_probe;
   if not aliased_probe_ok then report "the qualifier bound to another name" aliased_probe;
   if not scoped_open_ok then report "the qualifier opened in another scope" scoped_open;
+  if not shadowed_qualifier_ok then report "the qualifier's name rebound" shadowed_qualifier;
+  if not public_by_path_ok then report "a file sharing the public name" public_by_path;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2631,6 +2663,14 @@ let family_control () =
     "an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference \
      to the instrumentation"
     scoped_open_ok;
+  Verdict.p
+    "`module Ir = Other` rebinds the qualifier, so a later `Ir.Alloc_census` is not the \
+     instrumentation"
+    shadowed_qualifier_ok;
+  Verdict.p
+    "a rule running a file that shares the executable's public name is not its runner, however \
+     alike the two strings are"
+    public_by_path_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
