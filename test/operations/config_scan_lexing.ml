@@ -565,6 +565,19 @@ let () = Other.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|oca
       {ocaml|let guarded = [ "profile" ]
 let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([ "profile" ], false) );
+    (* The map callee being right does not make its argument right: `~f:Other.fst` may return the
+       other column (Codex P2, round 9 of PR #484). *)
+    ( "a qualified projector that is not the standard fst does not project",
+      {ocaml|let keys = [ ("profile", "virtualize_max_visits") ]
+let guarded = List.map keys ~f:Other.fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* Rebinding an approved ROOT leaves the whitelisted path intact and changes what it means. *)
+    ( "a rebound standard root is a rebound trusted name",
+      {ocaml|module Base = Shared
+let guarded = [ "profile" ]
+let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
     ( "an open of a library providing List is not a rebinding",
       {ocaml|open Base
 let guarded = [ "profile" ]

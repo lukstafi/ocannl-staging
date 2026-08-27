@@ -1370,6 +1370,13 @@ let artifact_default_modules_cases =
       [ "t"; "guard" ],
       [ "guard" ],
       [ "test t: undeclared (guard)" ] );
+    (* An empty nested difference is an empty SET, not a subtraction: its exclusion must not escape
+       into the `:standard` beside it (Codex P2, round 9). *)
+    ( "an empty nested difference takes nothing out of :standard",
+      {dune|(test (name t) (modules :standard (guard \ guard)) (deps ocannl_config))|dune},
+      [ "t"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
     ( "a set difference over :standard is still the default set",
       {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
       [ "t"; "helper" ],

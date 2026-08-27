@@ -1876,7 +1876,11 @@ let difference left right =
        a nesting this language admits and dune resolves the same way. *)
     included =
       List.filter left.included ~f:(fun m -> not (List.mem right.included m ~equal:String.equal));
-    excluded = left.excluded @ right.included;
+    (* An exclusion is only meaningful against `:standard`, whose members are not known here. Where
+       the left side is a CONCRETE set the subtraction has already happened above, and carrying a
+       symbolic exclusion out of it let `(guard \ guard)` -- an empty set -- take `guard` out of a
+       `:standard` beside it (Codex P2, round 9 of PR #484). *)
+    excluded = (if left.standard then left.excluded @ right.included else left.excluded);
   }
 
 let rec eval_ordered_set terms =

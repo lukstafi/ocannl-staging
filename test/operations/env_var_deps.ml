@@ -1307,9 +1307,26 @@ let main () =
                          the check without anything saying so (Codex P2, round 8). It is reported,
                          except where the directory itself was never scanned -- that boundary is
                          stated in the golden and reported by the gate half above. *)
+                      (* A module dune is TOLD has no implementation is not a missing input: an
+                         `.mli` performs no run-time read, so there is nothing for this check to
+                         look at (Codex P2, round 9). *)
+                      let without_implementation =
+                        List.concat_map
+                          [ "modules_without_implementation"; "virtual_modules" ]
+                          ~f:(fun field ->
+                            match Scan.field stanza field with
+                            | Some args ->
+                                List.filter_map args ~f:(function
+                                  | Sexp.Atom m -> Some (String.lowercase m)
+                                  | _ -> None)
+                            | None -> [])
+                      in
                       List.iter own_modules ~f:(fun module_name ->
                           if
                             Option.is_none (source_of_module module_name)
+                            && (not
+                                  (List.mem without_implementation (String.lowercase module_name)
+                                     ~equal:String.equal))
                             && Set.mem scanned_dirs directory
                           then
                             fail

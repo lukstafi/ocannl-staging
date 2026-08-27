@@ -111,6 +111,8 @@ ok: key list -- a file that rebinds List resolves nothing
 ok: key list -- and one that rebinds fst does not project a table
 ok: key list -- a nested Other.List.iter is not the standard combinator
 ok: key list -- but a standard root in front of it is
+ok: key list -- a qualified projector that is not the standard fst does not project
+ok: key list -- a rebound standard root is a rebound trusted name
 ok: key list -- an open of a library providing List is not a rebinding
 ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader

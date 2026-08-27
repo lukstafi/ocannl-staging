@@ -404,8 +404,11 @@ let is_named name expr =
     establishes nothing, so the reader's parameter stays unbound and the reach is refused. *)
 let iteration_combinators =
   [
-    ("List", [ "iter"; "map"; "concat_map"; "filter_map"; "iteri"; "for_all"; "exists" ]);
-    ("Array", [ "iter"; "map"; "concat_map"; "filter_map"; "iteri"; "for_all"; "exists" ]);
+    (* `iteri` is deliberately absent: its callback takes the index AND the element, a shape
+       {!lambda_body} does not read, so advertising it refused guards that use it (Codex P2, round
+       9). Fewer names trusted is the direction this table moves in. *)
+    ("List", [ "iter"; "map"; "concat_map"; "filter_map"; "for_all"; "exists" ]);
+    ("Array", [ "iter"; "map"; "concat_map"; "filter_map"; "for_all"; "exists" ]);
   ]
 
 (** Whether [expr] names [fn] of [container] — [List.map] and not any callee whose basename is
@@ -431,6 +434,14 @@ let names_standard ~container ~fn path =
 let is_qualified ~container ~fn expr =
   match longident_of expr with Some path -> names_standard ~container ~fn path | None -> false
 
+(** A value of the standard library, unqualified or under one of {!standard_roots}. *)
+let is_standard_value name expr =
+  match longident_of expr with
+  | Some [ only ] -> String.equal only name
+  | Some [ root; last ] ->
+      String.equal last name && List.mem standard_roots root ~equal:String.equal
+  | _ -> false
+
 (** The names the resolver reads as meaning what they usually mean: the containers whose combinators
     it knows, and the values it projects a table with.
 
@@ -442,7 +453,10 @@ let is_qualified ~container ~fn expr =
 
     Which restores the property the rest of this section rests on: everything the resolver follows is
     named, and everything it cannot name refuses. *)
-let trusted_modules = [ "List"; "Array" ]
+(* The approved ROOTS are trusted names as much as the containers are: `module Base = Shared` leaves
+   `Base.List.iter` a whitelisted path whose meaning has changed underneath it (Codex P2, round 9 of
+   PR #484). *)
+let trusted_modules = [ "List"; "Array" ] @ standard_roots
 
 let trusted_values = [ "fst"; "snd"; "@" ]
 
@@ -515,8 +529,11 @@ let rec resolve_elements ~bindings ~before expr =
       | Pexp_apply (f, args) when is_qualified ~container:"List" ~fn:"map" f ->
           let picker =
             List.find_map args ~f:(fun (_, arg) ->
-                if is_named "fst" arg then Some `Fst
-                else if is_named "snd" arg then Some `Snd
+                (* The PROJECTOR is named too: `~f:Other.fst` may return the other column, and a
+                   basename match read it as the standard one -- the map callee being right does not
+                   make its argument right (Codex P2, round 9 of PR #484). *)
+                if is_standard_value "fst" arg then Some `Fst
+                else if is_standard_value "snd" arg then Some `Snd
                 else None)
           in
           let source =
