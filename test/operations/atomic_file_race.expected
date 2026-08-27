@@ -1,6 +1,8 @@
 the completeness test accepts a whole payload: true
 the completeness test rejects a truncated payload: true
-the completeness test rejects a payload cut on the lattice but mixed: true
+the completeness test rejects a truncation aligned to the length lattice: true
+the completeness test rejects a payload missing its terminator: true
+the completeness test rejects a payload whose body mixes two writers: true
 the completeness test rejects an empty file: true
 the blocked writer reaches its commit window: true
 a staged payload is invisible until it commits: true
@@ -10,12 +12,24 @@ the competing publish did not disturb the blocked writer's staging file: true
 the released writer commits its own complete payload: true
 the blocked writer waited rather than timing out: true
 no staging file survives the interleaving: true
-every read under concurrent publication observes a complete payload: true
+every writer met the readers at the rendezvous: true
+every reader saw publication start: true
+every reader read while publication was still in progress: true
+every read under concurrent publication observes a payload some writer published: true
 no read under concurrent publication finds the path missing: true
 every concurrent writer committed every round: true
+every publication was accounted for: true
 the file left by the race is a complete payload: true
 the race leaves no staging file behind: true
 the race leaves only the published file: true
+a target named to the filesystem's limit publishes: true
+every staging name fits one filesystem component: true
+a long target's staging file is recognized as that target's: true
+a differently-cased spelling of the target claims its staging files: true
+every attempt stages exactly one file: true
+no two staging names repeat: true
+a differently-cased short target claims its staging files too: true
+the repeated publishing left only the published file: true
 a publish that fails in its commit window raises: true
 a failed publish leaves the previous payload: true
 a failed publish removes its own staging file: true

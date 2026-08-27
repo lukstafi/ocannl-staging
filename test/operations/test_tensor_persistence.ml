@@ -474,10 +474,14 @@ let () =
     Unix.utimes planted stamp stamp;
     planted
   in
-  let abandoned =
-    plant (Stdlib.Filename.basename path ^ Utils.Atomic_file.staging_infix ^ "4242.0")
-  in
-  let other = plant ("someone_elses.safetensors" ^ Utils.Atomic_file.staging_infix ^ "4242.0") in
+  (* A name the publication helper itself would have produced: stem, infix, pid, counter, nonce. The
+     claim below is what keeps this test honest if that shape ever changes -- an unrecognized plant
+     would otherwise make the sweep claim pass by sweeping nothing. *)
+  let staged_name target = target ^ Utils.Atomic_file.staging_infix ^ "4242.0.00c0ffee00c0ffee" in
+  let abandoned = plant (staged_name (Stdlib.Filename.basename path)) in
+  let other = plant (staged_name "someone_elses.safetensors") in
+  Verdict.p "the planted staging name is recognized as this checkpoint's"
+    (Utils.Atomic_file.is_staging_file_for ~path (Stdlib.Filename.basename abandoned));
   (* Save different values over the same path. [set_values] goes through a fresh host buffer, so it
      does not disturb the mapping. *)
   let ctx = Context.set_values ctx tn v2 in

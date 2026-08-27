@@ -6,16 +6,24 @@
    writers sharing one staging artifact (uniqueness), a writer that fails between staging and commit
    (failure cleanup), and a writer killed in that window (crash-stale cleanup).
 
-   Everything here is bounded by fixed iteration counts rather than by wall-clock time, and the one
+   Everything here is bounded by fixed iteration counts rather than by wall-clock time, and every
    place a domain waits for another spins under an explicit cap that FAILS the run rather than
-   hanging it. The reader's notion of a well-formed payload is itself controlled, on hand-built torn
-   and mixed payloads, so a leg that reports "every read was complete" is reporting a check that can
-   say otherwise.
+   hanging it. Two things make the stress leg able to fail rather than merely pass:
 
-   The stress leg was controlled the other way too, by hand: replacing its writers' [AF.write_all]
-   with a direct [Out_channel.write_all] onto the published path makes "every read under concurrent
-   publication observes a complete payload" report false. The volume below is chosen to reproduce
-   that reliably, so a regression in the helper is caught rather than raced past. *)
+   - Its readers are compared against the EXACT set of payloads the writers published, not against a
+     shape. A shape check accepted a torn read whose truncation happened to land on the length
+     lattice (Codex P2, round 2); the payloads are self-describing now, and the shape check is kept
+     only to control that counterexample explicitly.
+   - Readers and writers are made to overlap by a rendezvous rather than by hoping the scheduler
+     interleaves them. On one core the readers could otherwise finish every read against the seeded
+     file before a writer ran at all, and pass while publication truncated the target in place
+     (Codex P2, round 2). Each reader now reads once before any writer proceeds past its first
+     round, and keeps reading until the writers are done; every reader is claimed to have observed
+     the file mid-run.
+
+   The stress leg was controlled by hand in the other direction too: replacing its writers'
+   [AF.write_all] with a direct [Out_channel.write_all] onto the published path makes "every read
+   under concurrent publication observes a payload some writer published" report false. *)
 
 open Base
 module AF = Utils.Atomic_file
@@ -35,19 +43,32 @@ let reset_dir () =
   List.iter (listing ()) ~f:(fun name ->
       try Stdlib.Sys.remove (Stdlib.Filename.concat dir name) with _ -> ())
 
-(* A payload is a run of one character whose length encodes the round. Torn reads are visible from
-   both sides: a prefix or a suffix of a longer payload has a length off the lattice, and a payload
-   two writers interleaved into one file has more than one character. *)
+(* A payload is SELF-DESCRIBING: it names its writer, its round and its own body length, and ends
+   with a terminator. Length alone is not enough — a run of one character truncated by a multiple of
+   the step is a shorter round's payload exactly (Codex P2, round 2) — but a body that disagrees
+   with its declared length, or a payload missing its terminator, is torn however it was cut. Mixing
+   two writers' bytes shows up in the body's characters. *)
 let base_length = 997
 let length_step = 41
+
 let payload ~writer ~round =
-  String.make (base_length + (length_step * round)) (Char.of_int_exn writer)
+  let tag = Char.of_int_exn writer in
+  let body_length = base_length + (length_step * round) in
+  Printf.sprintf "%c|%d|%d|%s|END" tag round body_length (String.make body_length tag)
 
 let is_well_formed data =
-  (not (String.is_empty data))
-  && String.for_all data ~f:(Char.equal data.[0])
-  && String.length data >= base_length
-  && Int.rem (String.length data - base_length) length_step = 0
+  match String.split data ~on:'|' with
+  | [ tag; round; declared; body; "END" ] -> (
+      String.length tag = 1
+      &&
+      match (Stdlib.int_of_string_opt round, Stdlib.int_of_string_opt declared) with
+      | Some round, Some declared ->
+          round >= 0
+          && declared = base_length + (length_step * round)
+          && String.length body = declared
+          && String.for_all body ~f:(Char.equal tag.[0])
+      | _ -> false)
+  | _ -> false
 
 let read_published () = try Some (Stdio.In_channel.read_all target) with _ -> None
 
@@ -73,8 +94,18 @@ let () =
   Verdict.p "the completeness test accepts a whole payload" (is_well_formed good);
   Verdict.p "the completeness test rejects a truncated payload"
     (not (is_well_formed (String.prefix good 512)));
-  Verdict.p "the completeness test rejects a payload cut on the lattice but mixed"
-    (not (is_well_formed (String.prefix good base_length ^ String.make length_step 'b')));
+  (* The counterexample the length-lattice shape check accepted: round 3's payload cut to exactly
+     round 1's length. Under a shape check keyed on length alone the two are indistinguishable. *)
+  Verdict.p "the completeness test rejects a truncation aligned to the length lattice"
+    (not
+       (is_well_formed
+          (String.prefix good (String.length (payload ~writer:(Char.to_int 'a') ~round:1)))));
+  Verdict.p "the completeness test rejects a payload missing its terminator"
+    (not (is_well_formed (String.drop_suffix good 4)));
+  Verdict.p "the completeness test rejects a payload whose body mixes two writers"
+    (not
+       (is_well_formed
+          (String.prefix good (String.length good - 8) ^ String.make 4 'b' ^ "|END")));
   Verdict.p "the completeness test rejects an empty file" (not (is_well_formed ""))
 
 (* A staged-but-uncommitted writer is invisible, and it obstructs nobody: while one publish sits in
@@ -116,59 +147,159 @@ let () =
   Verdict.p "the blocked writer waited rather than timing out" !waited;
   Verdict.p "no staging file survives the interleaving" (List.is_empty (staging_leftovers ()))
 
-(* The stress leg. Fixed counts, no timing dependence: whatever order the domains happen to run in,
-   every read must land on a complete payload and every publish must commit. *)
+(* The stress leg. Fixed counts and a rendezvous, so the interleaving is arranged rather than hoped
+   for: every writer publishes its first round and then WAITS for every reader to have read, and
+   every reader keeps reading until the writers are done. Both halves are needed — the first makes
+   readers observe a directory under publication, the second keeps them reading through it. *)
 let writers = 4
 let rounds = 150
 let readers = 2
 let reads_per_reader = 400
 
+(* A ceiling on the reader loop, so a starved writer domain cannot turn "read until the writers
+   finish" into an unbounded run. Far above [reads_per_reader]: reaching it is a pathology, and the
+   overlap claim below is what would then fail. *)
+let max_reads = 20_000
+
+let total_publications = writers * rounds
+
+let await ?(limit = spin_limit) predicate =
+  let rec loop n =
+    if predicate () then true
+    else if n >= limit then false
+    else (
+      Unix.sleepf spin_pause;
+      loop (n + 1))
+  in
+  loop 0
+
 let () =
   reset_dir ();
-  AF.write_all ~path:target ~data:(payload ~writer:(Char.to_int 'a') ~round:0) ();
+  let seed = payload ~writer:(Char.to_int 'a') ~round:0 in
+  AF.write_all ~path:target ~data:seed ();
+  (* Every payload any writer will publish, plus the seed: what a reader observes must be one of
+     these EXACTLY, not merely a string shaped like one. *)
+  let published = Hash_set.create (module String) in
+  Hash_set.add published seed;
+  for i = 0 to writers - 1 do
+    for round = 0 to rounds - 1 do
+      Hash_set.add published (payload ~writer:(Char.to_int 'a' + i) ~round)
+    done
+  done;
   let refusals = Array.create ~len:writers 0 in
+  (* Each observation carries the number of publications completed when it was taken, which is how
+     a reader proves it read while writers were running rather than before or after them. *)
   let observations = Array.create ~len:readers [] in
-  let go = Atomic.make false in
+  let committed = Atomic.make 0 in
+  let readers_started = Atomic.make 0 in
+  let writers_finished = Atomic.make 0 in
+  let writers_met = Array.create ~len:writers false in
+  let readers_met = Array.create ~len:readers false in
+  let publish_round i writer round =
+    (try
+       AF.write_all ~path:target ~data:(payload ~writer ~round) ();
+       Atomic.incr committed
+     with _ -> refusals.(i) <- refusals.(i) + 1);
+    ()
+  in
   let writer_domains =
     Array.init writers ~f:(fun i ->
         Domain.spawn (fun () ->
             let writer = Char.to_int 'a' + i in
-            while not (Atomic.get go) do
-              Domain.cpu_relax ()
+            publish_round i writer 0;
+            (* The rendezvous: no writer runs ahead until every reader has taken a read against a
+               file that is already being republished. *)
+            writers_met.(i) <- await (fun () -> Atomic.get readers_started >= readers);
+            for round = 1 to rounds - 1 do
+              publish_round i writer round
             done;
-            for round = 0 to rounds - 1 do
-              try AF.write_all ~path:target ~data:(payload ~writer ~round) ()
-              with _ -> refusals.(i) <- refusals.(i) + 1
-            done))
+            Atomic.incr writers_finished))
   in
   let reader_domains =
     Array.init readers ~f:(fun i ->
         Domain.spawn (fun () ->
-            while not (Atomic.get go) do
-              Domain.cpu_relax ()
-            done;
-            let seen = ref [] in
-            for _ = 1 to reads_per_reader do
-              seen := read_published () :: !seen
-            done;
+            readers_met.(i) <- await (fun () -> Atomic.get committed >= 1);
+            let seen = ref [ (read_published (), Atomic.get committed) ] in
+            Atomic.incr readers_started;
+            let rec loop n =
+              if n >= max_reads then ()
+              else if n >= reads_per_reader && Atomic.get writers_finished >= writers then ()
+              else (
+                seen := (read_published (), Atomic.get committed) :: !seen;
+                loop (n + 1))
+            in
+            loop 1;
             observations.(i) <- !seen))
   in
-  Atomic.set go true;
   Array.iter writer_domains ~f:Domain.join;
   Array.iter reader_domains ~f:Domain.join;
-  let seen = List.concat (Array.to_list observations) in
+  let per_reader = Array.to_list observations in
+  let seen = List.concat per_reader in
+  Verdict.p_all ~min:writers "every writer met the readers at the rendezvous"
+    (Array.to_list writers_met) ~f:Fn.id;
+  Verdict.p_all ~min:readers "every reader saw publication start" (Array.to_list readers_met)
+    ~f:Fn.id;
+  (* The overlap claim. A reader that ran entirely before or entirely after the writers would have
+     every observation at 0 or at [total_publications], and could pass every claim below while
+     publication truncated the target in place. *)
+  Verdict.p_all ~min:readers "every reader read while publication was still in progress" per_reader
+    ~f:(fun obs -> List.exists obs ~f:(fun (_, at) -> at > 0 && at < total_publications));
   Verdict.p_all ~min:(readers * reads_per_reader)
-    "every read under concurrent publication observes a complete payload" seen ~f:(function
-    | None -> false
-    | Some data -> is_well_formed data);
+    "every read under concurrent publication observes a payload some writer published" seen
+    ~f:(function
+    | None, _ -> false
+    | Some data, _ -> Hash_set.mem published data);
   Verdict.p_none ~min:(readers * reads_per_reader)
-    "no read under concurrent publication finds the path missing" seen ~f:Option.is_none;
+    "no read under concurrent publication finds the path missing" seen ~f:(fun (data, _) ->
+      Option.is_none data);
   Verdict.p_all ~min:writers "every concurrent writer committed every round"
     (Array.to_list refusals) ~f:(fun n -> n = 0);
+  Verdict.p "every publication was accounted for" (Atomic.get committed = total_publications);
   Verdict.p "the file left by the race is a complete payload"
     (Option.value_map (read_published ()) ~default:false ~f:is_well_formed);
   Verdict.p "the race leaves no staging file behind" (List.is_empty (staging_leftovers ()));
   Verdict.p "the race leaves only the published file"
+    (List.equal String.equal (listing ()) [ "published.bin" ])
+
+(* A staging name is a DERIVED name, and the two things derivation must guarantee are that it fits
+   where the target fits and that no two attempts pick the same one. Both are observed through the
+   commit window, which is the only moment a staging file exists. *)
+let () =
+  reset_dir ();
+  (* A basename close to the per-component limit: with the old four-character suffix it fit, and
+     with a naive suffix it would not (Codex P2, round 2). *)
+  let long_name = String.make 240 'n' ^ ".bin" in
+  let long_target = Stdlib.Filename.concat dir long_name in
+  let staged = ref [] in
+  let capture () = staged := staging_leftovers () @ !staged in
+  AF.write_all ~path:long_target ~data:"payload" ~before_commit:capture ();
+  Verdict.p "a target named to the filesystem's limit publishes"
+    (Stdlib.Sys.file_exists long_target);
+  Verdict.p_all "every staging name fits one filesystem component" !staged ~f:(fun name ->
+      String.length name <= 255);
+  Verdict.p_all "a long target's staging file is recognized as that target's" !staged
+    ~f:(AF.is_staging_file_for ~path:long_target);
+  (* Case: on Windows and on a default macOS volume these two spellings are one file. *)
+  let shouting = Stdlib.Filename.concat dir (String.uppercase long_name) in
+  Verdict.p_all "a differently-cased spelling of the target claims its staging files" !staged
+    ~f:(AF.is_staging_file_for ~path:shouting);
+  (* Uniqueness within a process, observed rather than assumed: each attempt's staging file is
+     captured in its own commit window, and no name repeats. Uniqueness ACROSS processes rests on
+     exclusive creation, which no single-process test can exercise. *)
+  reset_dir ();
+  let names = ref [] in
+  for round = 0 to 49 do
+    AF.write_all ~path:target
+      ~data:(payload ~writer:(Char.to_int 'a') ~round)
+      ~before_commit:(fun () -> names := staging_leftovers () @ !names)
+      ()
+  done;
+  Verdict.p_all ~min:50 "every attempt stages exactly one file" !names ~f:AF.is_staging_file;
+  Verdict.p "no two staging names repeat"
+    (List.length (List.dedup_and_sort !names ~compare:String.compare) = List.length !names);
+  Verdict.p_all ~min:50 "a differently-cased short target claims its staging files too" !names
+    ~f:(AF.is_staging_file_for ~path:(Stdlib.Filename.concat dir "PUBLISHED.BIN"));
+  Verdict.p "the repeated publishing left only the published file"
     (List.equal String.equal (listing ()) [ "published.bin" ])
 
 (* A writer that fails in its commit window leaves the previous entry and no artifact — for a
@@ -214,6 +345,11 @@ let () =
    the sweep must — by age, and only over this module's own artifacts. *)
 let age_seconds = 3600.
 
+(* A staging name a writer could have produced: the generated shape is stem, infix, pid, counter and
+   a hexadecimal nonce, and only names of that shape are the sweep's to delete. *)
+let nonce = "00c0ffee00c0ffee"
+let staged_name ~target ~counter = target ^ AF.staging_infix ^ "4242." ^ Int.to_string counter ^ "." ^ nonce
+
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
   Stdio.Out_channel.write_all path ~data:"abandoned";
@@ -225,8 +361,8 @@ let () =
   reset_dir ();
   let seed = payload ~writer:(Char.to_int 'a') ~round:0 in
   AF.write_all ~path:target ~data:seed ();
-  let stale = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.0") ~age:7200. in
-  let fresh = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.1") ~age:0. in
+  let stale = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:0) ~age:7200. in
+  let fresh = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:1) ~age:0. in
   let bystander = plant_staging ~name:"unrelated.bin" ~age:7200. in
   (* Names carrying the infix that this module did NOT generate. The sweep deletes what the
      predicate accepts, so each of these is a file somebody else owns (Codex P2, round 1): a
@@ -236,8 +372,10 @@ let () =
     [
       "report" ^ AF.staging_infix ^ "backup";
       "report" ^ AF.staging_infix ^ "4242";
-      "report" ^ AF.staging_infix ^ "host7.0";
-      AF.staging_infix ^ "4242.0";
+      "report" ^ AF.staging_infix ^ "4242.0";
+      "report" ^ AF.staging_infix ^ "host7.0." ^ nonce;
+      "report" ^ AF.staging_infix ^ "4242.0.nonsense";
+      AF.staging_infix ^ "4242.0." ^ nonce;
     ]
   in
   let planted_impostors = List.map impostors ~f:(fun name -> plant_staging ~name ~age:7200.) in
@@ -252,7 +390,7 @@ let () =
   Verdict.p_all "the published file's own staging files are recognized as its"
     [ stale; fresh ]
     ~f:(fun path -> AF.is_staging_file_for ~path:target (Stdlib.Filename.basename path));
-  let other_target = plant_staging ~name:("other.bin" ^ AF.staging_infix ^ "4242.9") ~age:7200. in
+  let other_target = plant_staging ~name:(staged_name ~target:"other.bin" ~counter:9) ~age:7200. in
   Verdict.p "another target's staging file is not recognized as this one's"
     (not (AF.is_staging_file_for ~path:target (Stdlib.Filename.basename other_target)));
   AF.cleanup_stale_for ~max_age_seconds:age_seconds target;
@@ -260,7 +398,7 @@ let () =
     (not (Stdlib.Sys.file_exists stale));
   Verdict.p "the narrow sweep spares another target's staging file"
     (Stdlib.Sys.file_exists other_target);
-  let stale = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.0") ~age:7200. in
+  let stale = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:0) ~age:7200. in
   AF.cleanup_stale ~max_age_seconds:age_seconds dir;
   Verdict.p "the sweep removes an abandoned staging file" (not (Stdlib.Sys.file_exists stale));
   Verdict.p "the sweep removes another target's abandoned staging file too"
@@ -280,7 +418,7 @@ let () =
   AF.cleanup_stale_once ~max_age_seconds:age_seconds absent;
   AF.ensure_dir absent;
   let planted_after_creation =
-    let path = Stdlib.Filename.concat absent ("late.bin" ^ AF.staging_infix ^ "4242.0") in
+    let path = Stdlib.Filename.concat absent (staged_name ~target:"late.bin" ~counter:0) in
     Stdio.Out_channel.write_all path ~data:"abandoned";
     let stamp = Unix.time () -. 7200. in
     Unix.utimes path stamp stamp;
@@ -293,7 +431,7 @@ let () =
   (* The once-per-process form sweeps this directory exactly once, however many writers call it: a
      staging file abandoned after that first sweep survives until the next process. *)
   AF.cleanup_stale_once ~max_age_seconds:age_seconds dir;
-  let after_once = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.2") ~age:7200. in
+  let after_once = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:2) ~age:7200. in
   AF.cleanup_stale_once ~max_age_seconds:age_seconds dir;
   Verdict.p "the once-per-process sweep does not run a second time"
     (Stdlib.Sys.file_exists after_once);

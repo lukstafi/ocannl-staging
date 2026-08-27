@@ -2,29 +2,62 @@ open Base
 
 let staging_infix = ".ocannl-stage."
 
-(* The sweep DELETES what this recognizes, so recognition is the whole generated name and not a
-   search for the infix: `report.ocannl-stage.backup` is somebody's file, and answering "staging" on
-   it would make the sweep destructive over names it was never promised. A staging name is
-   [<target-basename>] ^ [staging_infix] ^ [<pid>] ^ "." ^ [<counter>], both numeric, and this
-   returns the target's basename exactly when [name] is one — which is also how a caller asks about
-   ONE published file rather than about a whole directory. *)
-let staging_target name =
+(* A staging name has to satisfy three things at once, and the first two pull against each other:
+   it must be recognizable (the sweep DELETES what it recognizes), it must stay inside the
+   filesystem's per-component limit however long the target's name is, and it must be unique among
+   every writer that can reach this directory. So the target's contribution is a bounded STEM
+   derived from its basename, and everything after the infix is the writer's identity. *)
+let max_component_bytes = 255
+
+(* What the target may contribute. The rest is the infix, a pid, a counter and a nonce; 64 bytes
+   covers a 64-bit pid printed in full. *)
+let stem_budget = max_component_bytes - 64
+let short_digest s = String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string s)) 8
+
+(* Bounded, and a function of the basename alone — which is what lets the recognizer below rebuild
+   it from the target instead of storing it. A long checkpoint name used to fit only because the
+   old suffix was four characters (Codex P2, round 2); now it is truncated and disambiguated by a
+   digest of the whole name, so two long names that share a prefix still get distinct stems. *)
+let staging_stem basename =
+  if String.length basename <= stem_budget then basename
+  else
+    (* The digest is taken over the LOWERCASED name so that the stem stays caseless too: on a
+       case-insensitive volume [Model.bin] and [model.bin] are one file, and a case-sensitive digest
+       would give their stems different tails that no caseless comparison could reconcile. *)
+    String.prefix basename (stem_budget - 9) ^ "~" ^ short_digest (String.lowercase basename)
+
+(* [<stem>] ^ [staging_infix] ^ [<pid>] ^ "." ^ [<counter>] ^ "." ^ [<nonce>]. Recognition is the
+   whole shape rather than a search for the infix: `report.ocannl-stage.backup` is somebody's file,
+   and answering "staging" on it would make the sweep destructive over names it was never promised
+   (Codex P2, round 1). Returns the stem exactly when [name] is a staging name — which is also how
+   a caller asks about ONE published file rather than about a whole directory. *)
+let staging_stem_of name =
   let numeric part = (not (String.is_empty part)) && String.for_all part ~f:Char.is_digit in
+  let hex part =
+    (not (String.is_empty part))
+    && String.for_all part ~f:(fun c -> Char.is_digit c || Char.between c ~low:'a' ~high:'f')
+  in
   match List.last (String.substr_index_all name ~may_overlap:false ~pattern:staging_infix) with
   | None -> None
   | Some at ->
-      let target = String.prefix name at in
+      let stem = String.prefix name at in
       let stamp = String.drop_prefix name (at + String.length staging_infix) in
-      if String.is_empty target then None
+      if String.is_empty stem then None
       else (
         match String.split stamp ~on:'.' with
-        | [ pid; counter ] when numeric pid && numeric counter -> Some target
+        | [ pid; counter; nonce ] when numeric pid && numeric counter && hex nonce -> Some stem
         | _ -> None)
 
-let is_staging_file name = Option.is_some (staging_target name)
+let is_staging_file name = Option.is_some (staging_stem_of name)
 
 let is_staging_file_for ~path name =
-  Option.exists (staging_target name) ~f:(String.equal (Stdlib.Filename.basename path))
+  (* Caseless, unconditionally. On Windows and on a default macOS volume `Model.bin` and `model.bin`
+     ARE the same target, so a case-sensitive comparison would leave a model-sized artifact
+     unreclaimed there (Codex P2, round 2). Where paths really are case-sensitive the only effect is
+     that one target's save also reclaims a case-twin's staging file — which is an OCANNL staging
+     file, abandoned for over an hour, and something the directory-wide sweep would remove anyway. *)
+  Option.exists (staging_stem_of name)
+    ~f:(String.Caseless.equal (staging_stem (Stdlib.Filename.basename path)))
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()
@@ -34,14 +67,43 @@ let rec ensure_dir dir =
     (* Concurrent creators race benignly. *)
     try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ())
 
-(* Distinguishes the staging files of two writers inside ONE process; the pid distinguishes them
-   across processes. Both halves are needed: the autotuner writes cache entries from several domains
-   of one process, and several tuning processes share a cache directory. *)
+(* The counter distinguishes the staging files of two writers inside ONE process; the pid
+   distinguishes processes on one host. Neither is enough on a filesystem shared between hosts or
+   pid namespaces, where two writers can hold the same pid and both counters start at zero (Codex
+   P1, round 2) — so a nonce joins them, and, because a nonce only makes a collision unlikely,
+   the file is CREATED EXCLUSIVELY: a name already taken is retried rather than opened. *)
 let next_staging_id : int Atomic.t = Atomic.make 0
 
+let fresh_nonce () =
+  let state = Stdlib.Random.State.make_self_init () in
+  Printf.sprintf "%08x%08x" (Stdlib.Random.State.bits state) (Stdlib.Random.State.bits state)
+
 let staging_path path =
-  Printf.sprintf "%s%s%d.%d" path staging_infix (Unix.getpid ())
-    (Atomic.fetch_and_add next_staging_id 1)
+  let name =
+    Printf.sprintf "%s%s%d.%d.%s"
+      (staging_stem (Stdlib.Filename.basename path))
+      staging_infix (Unix.getpid ())
+      (Atomic.fetch_and_add next_staging_id 1)
+      (fresh_nonce ())
+  in
+  Stdlib.Filename.concat (Stdlib.Filename.dirname path) name
+
+let staging_attempts = 8
+
+(* Exclusive creation is what turns "no two writers pick the same name" from a probability into a
+   guarantee: a collision — same host, same pid namespace, or an old artifact that happens to
+   collide — fails the open rather than sharing the file. *)
+let open_staging path ~binary =
+  let rec attempt n =
+    let staging = staging_path path in
+    match Unix.openfile staging [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] 0o666 with
+    | fd ->
+        let oc = Unix.out_channel_of_descr fd in
+        Stdlib.set_binary_mode_out oc binary;
+        (staging, oc)
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) when n < staging_attempts -> attempt (n + 1)
+  in
+  attempt 1
 
 let remove_quietly path =
   if Stdlib.Sys.file_exists path then try Stdlib.Sys.remove path with _ -> ()
@@ -70,10 +132,13 @@ let commit ~staging ~path =
 (* No [ensure_dir] here: publishing is not directory management, and creating one silently would
    turn a save to a mistyped path into a save that succeeds somewhere nobody looks. A caller whose
    directory may be missing calls [ensure_dir] first, as [Schedule_cache.store] does. *)
-let publish ?before_commit ~path ~f () =
-  let staging = staging_path path in
+let with_channel ?before_commit ?(binary = true) ~path ~f () =
+  let staging, oc = open_staging path ~binary in
   match
-    let result = f staging in
+    let result = f oc in
+    (* Closed BEFORE the commit, not after: a still-open staging file cannot be renamed on Windows,
+       and an unflushed buffer would commit a truncated payload on every platform. *)
+    Stdlib.close_out oc;
     Option.iter before_commit ~f:(fun hook -> hook ());
     commit ~staging ~path;
     result
@@ -81,27 +146,14 @@ let publish ?before_commit ~path ~f () =
   | result -> result
   | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (* Closed before it is removed, for the same reason: Windows refuses to delete a file this
+         process still holds open. Closing twice is why this is the [_noerr] form. *)
+      Stdlib.close_out_noerr oc;
       remove_quietly staging;
       Stdlib.Printexc.raise_with_backtrace exn backtrace
 
-let write_all ?before_commit ~path ~data () =
-  publish ?before_commit ~path () ~f:(fun staging -> Stdio.Out_channel.write_all staging ~data)
-
-let with_channel ?before_commit ?(binary = true) ~path ~f () =
-  publish ?before_commit ~path () ~f:(fun staging ->
-      let oc = if binary then Stdlib.open_out_bin staging else Stdlib.open_out staging in
-      match f oc with
-      | result ->
-          (* Closed BEFORE the commit, not after: a still-open staging file cannot be renamed on
-             Windows, and an unflushed buffer would commit a truncated payload on every platform. *)
-          Stdlib.close_out oc;
-          result
-      | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          (* Likewise before [publish]'s handler removes it: Windows refuses to delete a file this
-             process still holds open. *)
-          Stdlib.close_out_noerr oc;
-          Stdlib.Printexc.raise_with_backtrace exn backtrace)
+let write_all ?before_commit ?binary ~path ~data () =
+  with_channel ?before_commit ?binary ~path () ~f:(fun oc -> Stdlib.output_string oc data)
 
 let default_max_age_seconds = 3600.
 
