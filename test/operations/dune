@@ -1208,6 +1208,19 @@
  (modules scope_over_materialized)
  (libraries base ocannl ll_test))
 
+; gh-ocannl-734: the placement contract for a dynamic-gather table reaching optimize BEFORE cleanup
+; -- an undecided table is materialized by the gather, a table declared virtual is refused with an
+; actionable message. Picks its backend from the environment for the two executed legs.
+
+(test
+ (name gather_table_placement)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules gather_table_placement)
+ (libraries base ocannl ll_test))
+
 (test
  (name virtual_diagonal)
  (package neural_nets_lib)

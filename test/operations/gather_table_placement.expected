@@ -1,0 +1,10 @@
+a gather table left undecided is materialized by the gather: true
+the gather reads the table row the runtime index names: true
+a table read both plainly and as a gather table is materialized: true
+the plain and the gathered reading agree on the materialized table: true
+gathering from a node declared virtual is refused: true
+the refusal names the node: true
+the refusal names the gather reading: true
+the refusal names the virtualization decision: true
+the refusal says what to do instead: true
+the refusal is not the raw provenance collision: true
