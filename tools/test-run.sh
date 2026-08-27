@@ -14,8 +14,10 @@
 #   - A verdict FILE, not a process probe: waiter loops on `pgrep -x dune`
 #     match the editor's immortal `dune ocaml-merlin` daemons and spin forever
 #     (one PR review accumulated ten such stranded shells); `kill -0 $pid` can
-#     latch onto a recycled pid. `wait` here polls for the verdict file with a
-#     hard timeout, so it cannot strand.
+#     latch onto a recycled pid, and answers yes for a ZOMBIE -- which is why
+#     every liveness question here reads process state too (proc_alive,
+#     group_alive). `wait` here polls for the verdict file with a hard timeout,
+#     so it cannot strand.
 #
 # Usage:
 #   tools/test-run.sh run   [--cap N] [DUNE ARGS...]   # foreground; digest; dune's status
@@ -456,6 +458,67 @@ wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 # group.
 group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 
+# "Is anything in this process group still RUNNING?" -- the group-scale twin of
+# the zombie filter proc_alive applies per pid, and for the same reason: a
+# zombie is a process-table entry, so `kill -0 -- -PGID` succeeds on a group
+# whose every member has already exited, and group_verified does not rescue the
+# check either -- a zombie leader still prints its recorded lstart. Reading such
+# a group as alive makes `stop` announce "orphaned process group N ignored TERM"
+# for a group holding nothing but corpses, which is exactly the report someone
+# consults when working out why a worktree lock will not clear. Under an init
+# that reaps, the corpse is transient and the bare probe merely lost a race with
+# it; under one that does not -- the ordinary container case -- it is PERMANENT,
+# so waiting it out was never the fix (gh-ocannl-742; the same misreading cost
+# scripts/setup-ocaml-env.sh 30s on every failed ssh fetch, and this is that
+# script's `group_alive` ladder).
+#
+# States are not signal-visible, so they are read where the system publishes
+# them: /proc on Linux (with the shell's own `read`, no fork per process), `ps`
+# on the BSDs and macOS. Where neither answers -- a Cygwin `ps` takes no `-o`,
+# and that shell is supported here -- it degrades to the signal alone, which
+# over-reports; Cygwin reaps its own children, so the motivating case does not
+# arise on that path.
+#
+# The signal probe stays as a NECESSARY condition rather than only a fallback:
+# every caller follows this with a kill to the same group, and keeping it first
+# makes this predicate a strict narrowing of the bare `kill -0` it replaces --
+# it can turn a phantom alive into dead and never the reverse, whatever the
+# state reader sees (a group of another uid, say, which `ps -A` lists and no
+# kill of ours could reach).
+group_alive() { # <pgid>; exits 0 iff some member is not a zombie
+  local pgid=$1 f line states found
+  # Same rule as proc_alive: 0 and negatives are kill specials (caller's own
+  # group, broadcast), so only a positive decimal integer is a pgid at all.
+  case $pgid in '' | *[!0-9]* | 0) return 1 ;; esac
+  kill -0 -- "-$pgid" 2>/dev/null || return 1
+  if [ -r /proc/self/stat ]; then
+    found=0
+    for f in /proc/[0-9]*/stat; do
+      read -r line <"$f" 2>/dev/null || continue
+      # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
+      line=${line##*) }
+      # shellcheck disable=SC2086
+      set -- $line
+      [ "${3:-}" = "$pgid" ] || continue
+      found=1
+      [ "$1" = Z ] || return 0
+    done
+    # Every member this procfs published for the group is a zombie: dead. Having
+    # published NONE of it, though, while the signal above said the group is
+    # there, is a procfs that did not ANSWER the question rather than one
+    # answering "empty" -- a Cygwin/MSYS /proc whose stat lays its fields out
+    # differently would land here -- so fall through to `ps` and to the
+    # over-reporting default instead of inventing a death.
+    [ "$found" = 1 ] && return 1
+  fi
+  if states=$(ps -A -o pgid=,stat= 2>/dev/null) && [ -n "$states" ]; then
+    printf '%s\n' "$states" |
+      awk -v g="$pgid" '$1 == g && $2 !~ /^[Zz]/ { alive = 1 } END { exit !alive }'
+    return $?
+  fi
+  return 0
+}
+
 # Make the launched run discoverable (`last` pointer, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
@@ -758,13 +821,15 @@ case $sub in
       # the lock. The group is recorded (only when it is truly its own, see
       # the supervisor comment), so reap any survivors first.
       if group_verified "$run_dir" &&
-         pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
+         pgid=$(cat "$run_dir/pgid") && group_alive "$pgid"; then
         kill -TERM -- "-$pgid" 2>/dev/null
         sleep 2
         # Revalidate before escalating: TERM usually empties the group within
         # the grace, and a numeric pgid could be recycled during it -- KILL
-        # only a group whose recorded leader identity still matches.
-        group_verified "$run_dir" &&
+        # only a group whose recorded leader identity still matches and that
+        # still holds something running (a group emptied by the TERM can be
+        # left holding unreaped corpses, which pass group_verified).
+        group_verified "$run_dir" && group_alive "$pgid" &&
           kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
@@ -1139,7 +1204,7 @@ case $sub in
       # worktree's history.
       echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
     elif group_verified "$run_dir" &&
-         pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
+         pg=$(cat "$run_dir/pgid") && group_alive "$pg"; then
       # SIGKILL can remove wrapper and supervisor around a dune that survives
       # in its own recorded group -- still holding the worktree lock, beyond
       # its cap. Identity is the group LEADER's recorded start token (the
@@ -1151,7 +1216,7 @@ case $sub in
       # cap and would otherwise hold the worktree lock indefinitely.
       kill -TERM -- "-$pg" 2>/dev/null
       sleep 2
-      if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
+      if group_verified "$run_dir" && group_alive "$pg"; then
         kill -KILL -- "-$pg" 2>/dev/null
         echo "orphaned process group $pg ignored TERM; escalated to KILL"
       else
