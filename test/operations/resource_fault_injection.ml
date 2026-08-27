@@ -286,8 +286,11 @@ let () =
         SC.store ~dir:resource_cache_dir ~key:cache_key (cache_entry "new" 1.))
   in
   let leftovers =
+    (* The staging naming scheme belongs to the helper that creates these files, so ask it rather
+       than spelling an infix again here: a change to the scheme must not quietly turn this into a
+       filter that matches nothing. *)
     Array.to_list (Stdlib.Sys.readdir resource_cache_dir)
-    |> List.filter ~f:(String.is_substring ~substring:".tmp.")
+    |> List.filter ~f:Utils.Atomic_file.is_staging_file
   in
   p "cache-store injection fired" (raised && hits = 1);
   p "failed cache commit preserves the old entry and removes its staging file"

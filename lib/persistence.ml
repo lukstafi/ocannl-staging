@@ -374,45 +374,38 @@ let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
         (offset + byte_length, entry_with_offset :: acc))
   in
   let entries_with_offsets = List.rev entries_with_offsets in
-  (* Write to temp file, then rename for atomicity *)
-  let tmp_path = path ^ ".tmp" in
-  let oc = Stdlib.open_out_bin tmp_path in
-  match
-    let header =
-      {
-        version = 1;
-        alignment;
-        tensors =
-          List.map entries_with_offsets ~f:(function `Existing (m, _) -> m | `New (m, _) -> m);
-      }
-    in
-    write_header oc header;
-    let cursor = ref 0 in
-    List.iter entries_with_offsets ~f:(fun entry ->
-        let meta = match entry with `Existing (m, _) -> m | `New (m, _) -> m in
-        (* Fill the alignment gap ahead of this payload. *)
-        Stdlib.output_string oc (String.make (meta.offset - !cursor) '\000');
-        (match entry with
-        | `Existing (_, payload) -> Stdlib.output_bytes oc payload
-        | `New (_, tn) ->
-            let nd = Hashtbl.find_exn host_of tn.Tn.uid in
-            let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
-            let _n = Nd.write_payload_to_channel ?padding nd oc in
-            ());
-        cursor := meta.offset + meta.byte_length)
-  with
-  | () -> (
-      Stdlib.close_out oc;
-      (* A rename that fails -- a filesystem that does refuse to replace a file this process still
-         has mapped, say -- must not leave the temp file behind either. *)
-      try Stdlib.Sys.rename tmp_path path
-      with exn ->
-        (try Stdlib.Sys.remove tmp_path with _ -> ());
-        raise exn)
-  | exception exn ->
-      Stdlib.close_out_noerr oc;
-      (try Stdlib.Sys.remove tmp_path with _ -> ());
-      raise exn
+  (* A save killed between streaming and commit cannot run its own cleanup, and what it abandons is
+     the size of the model. The next save of that checkpoint is the event that reclaims it — but
+     only over ITS OWN staging files: a checkpoint sits among the user's other files, where another
+     process's publication is none of this call's business. *)
+  Utils.Atomic_file.cleanup_stale_for path;
+  (* Stream into a staging sibling, then rename over [path]. [Atomic_file] owns the whole dance:
+     the staging name is unique per writer, so two processes checkpointing the same path no longer
+     stream into one file, and the staging artifact is removed on every failing path — including a
+     rename a filesystem refuses because this process still has the target mapped. *)
+  Utils.Atomic_file.with_channel ~path () ~f:(fun oc ->
+      let header =
+        {
+          version = 1;
+          alignment;
+          tensors =
+            List.map entries_with_offsets ~f:(function `Existing (m, _) -> m | `New (m, _) -> m);
+        }
+      in
+      write_header oc header;
+      let cursor = ref 0 in
+      List.iter entries_with_offsets ~f:(fun entry ->
+          let meta = match entry with `Existing (m, _) -> m | `New (m, _) -> m in
+          (* Fill the alignment gap ahead of this payload. *)
+          Stdlib.output_string oc (String.make (meta.offset - !cursor) '\000');
+          (match entry with
+          | `Existing (_, payload) -> Stdlib.output_bytes oc payload
+          | `New (_, tn) ->
+              let nd = Hashtbl.find_exn host_of tn.Tn.uid in
+              let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
+              let _n = Nd.write_payload_to_channel ?padding nd oc in
+              ());
+          cursor := meta.offset + meta.byte_length))
 
 let load ~ctx ?prefix_namespace ?mmap path =
   let prefix_namespace =

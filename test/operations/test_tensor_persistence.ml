@@ -462,6 +462,29 @@ let () =
   let mapping = Lazy.force (Option.value_exn (Ir.Host_inits.find tn)) in
   Verdict.p "the mapping reads the checkpoint's values"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1);
+  (* A save killed between streaming and its commit leaves a staging file the size of the model, and
+     no cleanup of its own can run. Stand one in, aged past the sweep's threshold, and let the save
+     below be the event that reclaims it (Codex P2, round 1). A second one, belonging to a different
+     checkpoint in the same directory, is what makes the scope claim: this save is not licensed to
+     delete another publication's artifact. *)
+  let plant name =
+    let planted = Stdlib.Filename.concat (Stdlib.Filename.dirname path) name in
+    Stdio.Out_channel.write_all planted ~data:"abandoned checkpoint";
+    let stamp = Unix.time () -. (2. *. Utils.Atomic_file.default_max_age_seconds) in
+    Unix.utimes planted stamp stamp;
+    planted
+  in
+  (* A name the publication helper itself would have produced: stem, infix, pid, counter, nonce. The
+     claim below is what keeps this test honest if that shape ever changes -- an unrecognized plant
+     would otherwise make the sweep claim pass by sweeping nothing. *)
+  let staged_name target =
+    Printf.sprintf "%s%s%08x.%08x.%s" target Utils.Atomic_file.staging_infix 4242 0
+      "00c0ffee00c0ffee"
+  in
+  let abandoned = plant (staged_name (Stdlib.Filename.basename path)) in
+  let other = plant (staged_name "someone_elses.safetensors") in
+  Verdict.p "the planted staging name is recognized as this checkpoint's"
+    (Utils.Atomic_file.is_staging_file_for ~path (Stdlib.Filename.basename abandoned));
   (* Save different values over the same path. [set_values] goes through a fresh host buffer, so it
      does not disturb the mapping. *)
   let ctx = Context.set_values ctx tn v2 in
@@ -470,6 +493,10 @@ let () =
         Persistence.save ~ctx ~appending:false loaded path)
   in
   Verdict.p "saving over a checkpoint with a live mapping succeeds" saved;
+  Verdict.p "a save reclaims this checkpoint's abandoned staging file"
+    (not (Stdlib.Sys.file_exists abandoned));
+  Verdict.p "a save leaves another checkpoint's staging file alone" (Stdlib.Sys.file_exists other);
+  (try Stdlib.Sys.remove other with _ -> ());
   Verdict.p "the live mapping still reads the values it was taken from"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1)
 
@@ -482,9 +509,20 @@ let () =
   let tn = List.hd_exn (Set.to_list reloaded) in
   Verdict.p "the file on disk holds what the save wrote"
     (Array.equal Float.equal (Context.get_values ctx tn) v2);
-  (* A save whose rename fails leaves its temp file behind, so clean up both. *)
+  (* [Persistence.save] publishes through [Atomic_file], which removes its own staging file on every
+     failing path, so only the checkpoint itself is left to clean up. Looking for one is what proves
+     that. The scan is narrowed to staging files of THIS checkpoint: the directory is the shared
+     system temp directory, where another process's in-flight publication is none of this test's
+     business — neither to fail on nor to delete. *)
+  let dir = Stdlib.Filename.dirname live_mapping_path in
+  let abandoned =
+    Array.to_list (Stdlib.Sys.readdir dir)
+    |> List.filter ~f:(Utils.Atomic_file.is_staging_file_for ~path:live_mapping_path)
+  in
+  Verdict.p_empty "no checkpoint save left a staging file behind" ~over:[ live_mapping_path ]
+    abandoned;
   List.iter
-    [ live_mapping_path; live_mapping_path ^ ".tmp" ]
+    (live_mapping_path :: List.map abandoned ~f:(Stdlib.Filename.concat dir))
     ~f:(fun path -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
 
   Stdio.printf "=== All persistence tests completed ===\n"

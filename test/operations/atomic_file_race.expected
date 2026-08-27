@@ -1,0 +1,67 @@
+the completeness test accepts a whole payload: true
+the completeness test rejects a truncated payload: true
+the completeness test rejects a truncation aligned to the length lattice: true
+the completeness test rejects a payload missing its terminator: true
+the completeness test rejects a payload whose body mixes two writers: true
+the completeness test rejects an empty file: true
+the blocked writer reaches its commit window: true
+a staged payload is invisible until it commits: true
+exactly the blocked writer's staging file is present: true
+a competing publish commits while another writer holds its staging file: true
+the competing publish did not disturb the blocked writer's staging file: true
+the released writer commits its own complete payload: true
+the blocked writer waited rather than timing out: true
+no staging file survives the interleaving: true
+every writer met the readers at the rendezvous: true
+every reader saw a payload go half-written: true
+every reader's gated read saw a whole payload while one was half-written: true
+every reader kept reading until the writers were done: true
+every read under concurrent publication observes a payload some writer published: true
+no read under concurrent publication finds the path missing: true
+every concurrent writer committed every round: true
+every publication was accounted for: true
+the file left by the race is a complete payload: true
+the race leaves no staging file behind: true
+the race leaves only the published file: true
+a target named to the filesystem's limit publishes: true
+every staging name fits one filesystem component: true
+a long target's staging file is recognized as that target's: true
+every fixture name is a valid component on a 255-byte filesystem: true
+the long fixtures exercise the truncating stem: true
+a multibyte target name publishes: true
+every staging name of a multibyte target is itself valid UTF-8: true
+a multibyte target's staging file fits one filesystem component: true
+a multibyte target's staging file is recognized as that target's: true
+a differently-cased spelling of the target claims its staging files: true
+every attempt stages exactly one file: true
+no two staging names repeat: true
+a differently-cased short target claims its staging files too: true
+the repeated publishing left only the published file: true
+a publish that fails in its commit window raises: true
+a failed publish leaves the previous payload: true
+a failed publish removes its own staging file: true
+a streamed publish commits its whole payload: true
+a streamed publish that raises mid-write raises: true
+a failed streamed publish leaves the previous payload: true
+a failed streamed publish removes its own staging file: true
+every filesystem refusal reaches the caller as Sys_error: true
+an exception from the caller's own writer is not converted: true
+an exception from the commit hook is not converted: true
+a refused publish leaves no staging file: true
+every planted staging file is recognized as one: true
+the bystander is not recognized as a staging file: true
+no name that merely contains the infix is recognized as a staging file: true
+the published file's own staging files are recognized as its: true
+another target's staging file is not recognized as this one's: true
+the narrow sweep removes this target's abandoned staging file: true
+the narrow sweep spares another target's staging file: true
+the sweep removes an abandoned staging file: true
+the sweep removes another target's abandoned staging file too: true
+the sweep spares a staging file young enough to be in flight: true
+the sweep spares the published file: true
+the sweep spares an aged file that is not a staging artifact: true
+the sweep spares every aged file that merely contains the infix: true
+the published file still reads as it was written: true
+a directory that did not exist yet does not consume its one sweep: true
+the once-per-process sweep does not run a second time: true
+the unconditional sweep still removes it: true

@@ -315,6 +315,36 @@ let declares_required_glob content =
    backslash literally sees no match and reports the directory still ignored; and [\*] is a literal
    asterisk rather than a wildcard, so ignoring the escape over-matches as readily as it
    under-matches. Both checked against `git check-ignore` (Codex P2, round 5). *)
+(* A character class, git's own reading of one: members and [a-z] ranges, negated by a leading [!]
+   or [^], a [\\] escaping the next character, and a []] in the first position taken literally.
+   [None] for an unterminated [[], which git does NOT read as a literal bracket -- the pattern then
+   matches nothing at all, `[abc` included. Every one of those readings is measured against
+   `git check-ignore` rather than assumed, and the unterminated one is where the assumption would
+   have been wrong; the cases are pinned in [cache_dir_scan_cases]. *)
+let parse_class pattern at =
+  let n = String.length pattern in
+  let negated, start =
+    let start = at + 1 in
+    if start < n && (Char.equal pattern.[start] '!' || Char.equal pattern.[start] '^') then
+      (true, start + 1)
+    else (false, start)
+  in
+  let rec scan k acc ~first =
+    if k >= n then None
+    else if Char.equal pattern.[k] ']' && not first then Some (negated, List.rev acc, k + 1)
+    else if Char.equal pattern.[k] '\\' && k + 1 < n then
+      scan (k + 2) (`Char pattern.[k + 1] :: acc) ~first:false
+    else if k + 2 < n && Char.equal pattern.[k + 1] '-' && not (Char.equal pattern.[k + 2] ']')
+    then scan (k + 3) (`Range (pattern.[k], pattern.[k + 2]) :: acc) ~first:false
+    else scan (k + 1) (`Char pattern.[k] :: acc) ~first:false
+  in
+  scan start [] ~first:true
+
+let class_matches members c =
+  List.exists members ~f:(function
+    | `Char member -> Char.equal member c
+    | `Range (low, high) -> Char.between c ~low ~high)
+
 let glob_matches pattern name =
   let np = String.length pattern and nn = String.length name in
   let rec go i j =
@@ -324,6 +354,13 @@ let glob_matches pattern name =
       | '\\' when i + 1 < np -> j < nn && Char.equal name.[j] pattern.[i + 1] && go (i + 2) (j + 1)
       | '*' -> go (i + 1) j || (j < nn && go i (j + 1))
       | '?' -> j < nn && go (i + 1) (j + 1)
+      | '[' -> (
+          match parse_class pattern i with
+          | Some (negated, members, next) ->
+              j < nn
+              && Bool.equal negated (not (class_matches members name.[j]))
+              && go next (j + 1)
+          | None -> false)
       | c -> j < nn && Char.equal name.[j] c && go (i + 1) (j + 1)
   in
   go 0 0
@@ -368,7 +405,7 @@ let root_directory_glob pattern =
 let unreadable_patterns content =
   List.filter_map content ~f:(fun { pattern; negated = _ } ->
       match root_directory_glob pattern with
-      | Some glob when String.is_substring glob ~substring:"**" || String.contains glob '[' ->
+      | Some glob when String.is_substring glob ~substring:"**" ->
           Some pattern
       | _ -> None)
 

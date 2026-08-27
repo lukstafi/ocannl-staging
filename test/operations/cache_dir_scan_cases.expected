@@ -11,6 +11,21 @@ ok: use -- an alias of an alias is an alias
 ok: use -- a bare store is not a call into the cache module
 ok: use -- nor is a same-named operation on another module
 ok: use -- a traversal keeps its separators, for the prefix rule to reject
+ok: glob -- a range class
+ok: glob -- a range class rejects outside its range
+ok: glob -- a negated class
+ok: glob -- a negated class rejects its members
+ok: glob -- a bracket first in a class is a member
+ok: glob -- the rest of that class still applies
+ok: glob -- an escape inside a class
+ok: glob -- an escaped member excludes others
+ok: glob -- an unterminated class matches nothing, not a literal bracket
+ok: glob -- the staging-file rule matches a generated name
+ok: glob -- and spares a file merely carrying the infix
+ok: glob -- and spares fields that merely start numeric
+ok: glob -- and spares fields of the wrong width
+ok: glob -- a one-character stem is still the helper's
+ok: glob -- and a name with no stem at all is not
 ok: built-in default -- the default a search falls back to
 ok: built-in default -- an empty default names no directory
 ok: built-in default -- another key's default is not this one's

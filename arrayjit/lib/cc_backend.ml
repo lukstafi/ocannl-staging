@@ -206,6 +206,11 @@ let cached_probe ?(validate = fun _ -> true) ~name ~compute () =
   with
   | None -> compute ()
   | Some path -> (
+      (* Before the read, not after a miss: a hit is the common path, so sweeping only on the miss
+         side would leave a staging file abandoned by a killed writer sitting in the probe directory
+         for as long as the entry it was meant to replace stays valid (Codex P2, round 4). Once per
+         directory per process either way. *)
+      (try Utils.Atomic_file.cleanup_stale_once (Stdlib.Filename.dirname path) with _ -> ());
       let cached =
         try
           let data = Stdio.In_channel.read_all path in
@@ -221,20 +226,12 @@ let cached_probe ?(validate = fun _ -> true) ~name ~compute () =
       | Some value -> value
       | None ->
           let value = compute () in
-          (try
-             (* Publish by rename so a concurrent reader sees either the old file or the whole new
-                one, never a partial write. Staging inside the same (private) directory keeps the
-                rename on one volume, which it requires, and keeps the staging file unreadable to
-                anyone else too. *)
-             let tmp =
-               Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname path) "ocannl_cc_probe_"
-                 ".tmp"
-             in
-             Stdio.Out_channel.write_all tmp ~data:(probe_cache_marker ^ value);
-             try Stdlib.Sys.rename tmp path
-             with e ->
-               (try Stdlib.Sys.remove tmp with _ -> ());
-               raise e
+          (* Publish by rename so a concurrent reader sees either the old file or the whole new one,
+             never a partial write. [Atomic_file] stages inside the same (private) directory, which
+             keeps the rename on one volume — it requires that — and keeps the staging file
+             unreadable to anyone else too. The probe cache is an optimization, so every failure
+             here is swallowed: the value has already been computed. *)
+          (try Utils.Atomic_file.write_all ~path ~data:(probe_cache_marker ^ value) ()
            with _ -> ());
           value)
 

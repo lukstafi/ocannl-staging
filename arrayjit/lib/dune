@@ -11,8 +11,9 @@
  (public_name arrayjit.utils)
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL_UTILS))
- (modules utils datatypes cpu_topology)
- ; `unix` for `Unix.environment`, which the unknown-environment-variable warning walks.
+ (modules utils datatypes cpu_topology atomic_file)
+ ; `unix` for `Unix.environment`, which the unknown-environment-variable warning walks, and for
+ ; `Atomic_file`'s pid, mtime and sub-second sleep.
  (libraries base stdio unix pprint ppx_minidebug.runtime ppx_minidebug.db)
  (foreign_stubs
   (language c)
