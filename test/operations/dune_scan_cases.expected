@@ -87,6 +87,7 @@ ok: artifact declaration -- a rule running an executable built elsewhere is not 
 ok: artifact declaration -- nor is one whose command this scan cannot place
 ok: artifact declaration -- an alias stanza aggregating with a declaration behind nothing
 ok: artifact declaration -- a runner naming the executable's public name is its runner
+ok: artifact declaration -- a local path spelled like the public name is not a runner of it
 ok: artifact declaration -- an executable nothing in the file runs has no deps field to answer for it
 ok: artifact declaration -- a plain library module calling the initializer is reported as such
 ok: artifact declaration -- adding inline tests does not license a library initializer

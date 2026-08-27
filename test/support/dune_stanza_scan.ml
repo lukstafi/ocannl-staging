@@ -1731,6 +1731,28 @@ let normalize_path path =
     real program as unrun and credit a same-named local one with this rule's declarations (Codex P2,
     round 4 of PR #484). [commands_in] already tracked the directory for the configuration search;
     this is the same fact answering a second question. *)
+(** The PUBLIC names a stanza runs, by the one spelling that names a public executable:
+    [%{bin:pkg.probe}].
+
+    Read from the raw command rather than from the classified one, because classification strips a
+    leading [./] -- which it must, so that `./probe.exe` is the local `probe.exe` -- and that makes a
+    literal path indistinguishable from a public name: `(run ./pkg.guard)` classified as
+    `Runs "pkg.guard"` matched an executable's `(public_name pkg.guard)`, crediting an unrelated
+    rule's declarations to a program it never launches (Codex P2, round 10 of PR #484). A public name
+    is a NAME and a path is a PATH; only the spelling at the call site tells them apart. *)
+let public_names_run stanza =
+  List.filter_map (commands_in stanza) ~f:(fun (_cwd, _pinned, command) ->
+      match command with
+      | Program (cmd, _) -> (
+          match pieces cmd with
+          | [ Pform pform ] -> (
+              match String.lsplit2 pform ~on:':' with
+              | Some (prefix, name) when String.equal prefix binary_pform -> Some name
+              | _ -> None)
+          | _ -> None)
+      | _ -> None)
+  |> List.dedup_and_sort ~compare:String.compare
+
 let runs_of ~subdir stanza =
   List.filter_map (executables_run_with_pins stanza) ~f:(fun (cwd, pinned, command) ->
       match command with
@@ -1789,11 +1811,18 @@ let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
                only where it is in force at every run of this program: an unpinned run of a HELPER
                beside it says nothing about the subject (Codex P2, round 4), and a pin around the
                helper alone protects nothing here (Codex P1, round 1). *)
+            let by_public_name =
+              match public with
+              | None -> false
+              | Some public -> List.mem (public_names_run s) public ~equal:String.equal
+            in
             let mine =
-              List.filter_map (runs_of ~subdir:runner_subdir s) ~f:(fun (resolved, written, pinned) ->
+              List.filter_map (runs_of ~subdir:runner_subdir s)
+                ~f:(fun (resolved, written, pinned) ->
                   if
                     String.equal resolved canonical
-                    || Option.value_map public ~default:false ~f:(String.equal written)
+                    || (by_public_name
+                       && Option.value_map public ~default:false ~f:(String.equal written))
                   then Some pinned
                   else None)
             in

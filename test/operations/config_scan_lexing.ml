@@ -578,6 +578,12 @@ let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
 let guarded = [ "profile" ]
 let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([], true) );
+    ( "a qualified concatenation operator is not the standard one",
+      {ocaml|let left = [ "profile" ]
+let right = [ "log_level" ]
+let guarded = Shared.( @ ) left right
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
     ( "an open of a library providing List is not a rebinding",
       {ocaml|open Base
 let guarded = [ "profile" ]

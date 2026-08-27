@@ -1230,6 +1230,25 @@ let main () =
          `(subdir gen …)` applies its stanzas to another directory, so a nested program's modules
          live there and its runners may sit at either level -- and a walk that saw only the top level
          read the wrapper as a stanza with no modules and skipped its body (Codex P2, round 2). *)
+      (* `(include_subdirs unqualified)` puts a descendant directory's modules into a stanza's
+         module set, which the per-directory census below does not model -- and the module would then
+         be claimed by nobody, taking its environment reads out of the check silently (Codex P2,
+         round 10). Refused rather than approximated: a scan that cannot place a file's modules
+         should say so, which is the same answer it gives an unresolvable key. *)
+      List.iter stanzas ~f:(fun stanza ->
+          match (Scan.head stanza, Scan.field stanza "include_subdirs") with
+          | Some _, Some args when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal)
+            ->
+              fail
+                (Printf.sprintf
+                   "%s declares `(include_subdirs %s)`, which puts a descendant directory's modules \
+                    into its stanzas' module sets -- this check derives a stanza's modules from its \
+                    own directory, so it cannot say which modules those stanzas own, nor which \
+                    environment reads go with them. Teach it the mode, or keep the guard's modules \
+                    beside their dune file"
+                   dune_file
+                   (String.concat ~sep:" " (List.concat_map args ~f:Scan.atoms)))
+          | _ -> ());
       List.iter artifact_groups ~f:(fun (subdir, here, group) ->
           let directory = if String.is_empty here then "." else here in
           let directory_modules =

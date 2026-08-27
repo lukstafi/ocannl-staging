@@ -1196,6 +1196,14 @@ let artifact_cases =
 (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{bin:pkg.probe})))|dune},
       [ "probe" ],
       [ "executable probe: declared (probe)" ] );
+    (* A public name is a NAME and a path is a PATH: classification strips a leading `./`, so a rule
+       running a local file spelled like the public name was read as its runner (Codex P2, round
+       10). *)
+    ( "a local path spelled like the public name is not a runner of it",
+      {dune|(executable (name probe) (public_name pkg.probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ./pkg.probe)))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
     ( "an executable nothing in the file runs has no deps field to answer for it",
       {dune|(executable (name probe) (modules probe))|dune},
       [ "probe" ],

@@ -519,8 +519,11 @@ let rec resolve_elements ~bindings ~before expr =
           |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
           |> Option.map ~f:(fun (_, _, elements) -> elements)
       (* `a @ b`, which is how a guard adds one key to a list it shares with something else. *)
+      (* The OPERATOR is named too: `Shared.( @ )` may ignore its operands and return another list,
+         and a basename match read it as the standard concatenation (Codex P2, round 10 of PR
+         #484). *)
       | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
-        when is_named "@" op ->
+        when is_standard_value "@" op ->
           Option.both
             (resolve_elements ~bindings ~before left)
             (resolve_elements ~bindings ~before right)
