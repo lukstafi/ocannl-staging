@@ -412,13 +412,24 @@ let iteration_combinators =
     [map]. Every construct {!resolve_elements} follows is named this way, and anything it cannot name
     refuses: a local [map] that ignores its argument otherwise had its input projected as though it
     were the standard one (Codex P2, round 7 of PR #484). *)
+(* The roots a standard container may legitimately be reached under. Anything else in front of it is
+   somebody's own module: `Other.List.iter` is not `List.iter`, and a custom iterator may call the
+   callback with keys the list does not hold -- so accepting it on the penultimate component blessed
+   the callback with a list it is never handed (Codex P2, round 8 of PR #484). *)
+let standard_roots = [ "Stdlib"; "Base"; "Core" ]
+
+let names_standard ~container ~fn path =
+  match List.rev path with
+  | last :: owner :: rest ->
+      String.equal last fn && String.equal owner container
+      && (match rest with
+         | [] -> true
+         | [ root ] -> List.mem standard_roots root ~equal:String.equal
+         | _ -> false)
+  | _ -> false
+
 let is_qualified ~container ~fn expr =
-  match longident_of expr with
-  | Some path -> (
-      match List.rev path with
-      | last :: owner :: _ -> String.equal last fn && String.equal owner container
-      | _ -> false)
-  | None -> false
+  match longident_of expr with Some path -> names_standard ~container ~fn path | None -> false
 
 (** The names the resolver reads as meaning what they usually mean: the containers whose combinators
     it knows, and the values it projects a table with.
@@ -466,12 +477,9 @@ let rebound_trusted_names structure =
 
 let is_iteration expr =
   match longident_of expr with
-  | Some path -> (
-      match List.rev path with
-      | last :: container :: _ ->
-          List.exists iteration_combinators ~f:(fun (name, functions) ->
-              String.equal name container && List.mem functions last ~equal:String.equal)
-      | _ -> false)
+  | Some path ->
+      List.exists iteration_combinators ~f:(fun (container, functions) ->
+          List.exists functions ~f:(fun fn -> names_standard ~container ~fn path))
   | None -> false
 
 (** The elements of the list [expr] denotes, where this scan can say.

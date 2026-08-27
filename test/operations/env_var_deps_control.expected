@@ -24,6 +24,8 @@ a `setenv` over a SIBLING branch of the same action does not pin this run, and i
 and an unpinned run of a HELPER beside a pinned guard does not un-pin it: true
 a stanza reaching for dune's default module set is judged too, not skipped for lack of a `(modules …)` field: true
 a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules: true
+a module the stanza names and this check was handed no source for is reported, not read as one that makes no reads: true
+a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt: true
 a guard in a plain library is reported, there being no `deps` field in reach to declare it: true
 a library with inline tests is refused the same way, being linkable all the same: true
 and declaring the variable in `(inline_tests (deps …))` is no licence: that invalidates the inline runner alone: true

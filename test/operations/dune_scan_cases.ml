@@ -1363,6 +1363,13 @@ let artifact_default_modules_cases =
       [ "t"; "helper"; "guard" ],
       [ "guard" ],
       [ "test t: undeclared (guard)" ] );
+    (* An outer term re-adds what a nested difference removed: dune links both, and keeping the
+       exclusion to subtract at the end dropped `guard` (Codex P2, round 8). *)
+    ( "an outer term cancels a nested exclusion",
+      {dune|(test (name t) (modules (t guard \ guard) guard) (deps ocannl_config))|dune},
+      [ "t"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
     ( "a set difference over :standard is still the default set",
       {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
       [ "t"; "helper" ],

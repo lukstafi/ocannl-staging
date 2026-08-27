@@ -422,8 +422,9 @@ let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
    (gh-ocannl-749, Codex P2 round 6): a guard in a plain library is run by whatever links it, which
    puts the declaration on every such stanza -- a relationship nothing follows, and the same argument
    `Artifact_in_library` makes for the initializer. Named rather than derived, being one file with
-   one reason. *)
-let env_reader_home = "utils.ml"
+   one reason -- and by its repository PATH, since a basename match would extend the exemption to any
+   `utils.ml` a test directory adds, silently skipping its reads (Codex P2, round 8). *)
+let env_reader_home = "arrayjit/lib/utils.ml"
 
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
@@ -1258,6 +1259,7 @@ let main () =
                     Option.map (source_of ~dir:here module_name) ~f:(fun on_disk ->
                         (module_name ^ ".ml", In_channel.read_all on_disk))
                   in
+                  let path_of source = Scan.in_subdir here source in
                   let named () =
                     match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>"
                   in
@@ -1299,10 +1301,29 @@ let main () =
                           (if String.is_empty subdir then "" else " (subdir " ^ subdir ^ ")")
                           kind name
                       in
+                      (* A module the scan was handed no source for is one it cannot answer for, and
+                         reading it as a module with no reads is the silent direction: a new source
+                         root added without extending this rule's globs would take its guards out of
+                         the check without anything saying so (Codex P2, round 8). It is reported,
+                         except where the directory itself was never scanned -- that boundary is
+                         stated in the golden and reported by the gate half above. *)
+                      List.iter own_modules ~f:(fun module_name ->
+                          if
+                            Option.is_none (source_of_module module_name)
+                            && Set.mem scanned_dirs directory
+                          then
+                            fail
+                              (Printf.sprintf
+                                 "%s names the module `%s`, and this check was handed no `%s.ml` \
+                                  from %s to read -- a module it cannot see is one whose \
+                                  environment reads it cannot check, which looks exactly like a \
+                                  module that makes none. Add the directory to the rule's globs, or \
+                                  name the generated source among them"
+                                 where module_name (String.lowercase module_name) directory));
                       let sources =
                         List.filter_map own_modules ~f:source_of_module
                         |> List.filter ~f:(fun (source, _) ->
-                            not (String.equal source env_reader_home))
+                            not (String.equal (path_of source) env_reader_home))
                       in
                       let reads =
                         List.map sources ~f:(fun (source, content) ->
@@ -2006,6 +2027,16 @@ let guard_subject ~arm =
      field left off, which is the common shape and the one the check skipped entirely while it was
      a clause of a walk guarded on that field being written down (Codex P2, round 1). *)
   | `Implicit_modules -> executable "" ^ one ~declares:false ~pins:`No
+  (* A module the stanza NAMES and the scan was handed no source for. Reading it as a module with no
+     reads is the silent direction (Codex P2, round 8). *)
+  | `Module_without_source ->
+      Printf.sprintf "(executable\n (name guard)\n (modules guard helper)\n (libraries arrayjit.utils))\n\n%s"
+        (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
+  (* A test directory's own `utils.ml`: the exemption belongs to the module that DEFINES the reader,
+     at its repository path, and a basename match would extend it to this one (Codex P2, round 8). *)
+  | `Utils_lookalike ->
+      Printf.sprintf "(executable\n (name guard)\n (modules guard utils)\n (libraries arrayjit.utils))\n\n%s"
+        (guard_rule ~target:"guard.actual" ~declares:false ~pins:`No)
   (* The same program one directory down. A `(subdir …)` applies its stanzas to another directory,
      so the modules live there and the runner may sit at either level -- and a walk over the
      top-level forms alone read the wrapper as a stanza with no modules (Codex P2, round 2). *)
@@ -2066,13 +2097,15 @@ let guard_control () =
   let context = control_context () in
   List.iter context ~f:(fun (file, content) ->
       write_file (Stdlib.Filename.concat root file) content);
-  let paths = "t/dune" :: "t/guard.ml" :: "t/gen/guard.ml" :: List.map context ~f:fst in
+  let paths =
+    "t/dune" :: "t/guard.ml" :: "t/gen/guard.ml" :: "t/utils.ml" :: List.map context ~f:fst
+  in
   (* The probe goes where the stanza's modules live, which for the subdir arm is one level down. Both
      places are handed to the checker on every run, and the arm that is not using one writes an inert
      source there, so the argument list -- and hence which globs the checker believes it was given --
      is the same in every arm. *)
   let run ?(probe = guard_probe) ?(at = "t/guard.ml") arm =
-    List.iter [ "t/guard.ml"; "t/gen/guard.ml" ] ~f:(fun path ->
+    List.iter [ "t/guard.ml"; "t/gen/guard.ml"; "t/utils.ml" ] ~f:(fun path ->
         write_file
           (Stdlib.Filename.concat root path)
           (if String.equal path at then probe else "let () = ()\n"));
@@ -2091,6 +2124,8 @@ let guard_control () =
   let pinned_beside_helper = run `Pins_beside_a_helper in
   let implicit = run `Implicit_modules in
   let in_a_subdir = run `In_a_subdir ~at:"t/gen/guard.ml" in
+  let module_without_source = run `Module_without_source in
+  let utils_lookalike = run `Utils_lookalike ~at:"t/utils.ml" in
   let plain_library = run `Plain_library in
   let inline_library = run `Inline_tests_library in
   let inline_library_declares = run `Inline_tests_library_declares in
@@ -2121,6 +2156,12 @@ let guard_control () =
   let pinned_beside_helper_ok = passes pinned_beside_helper diagnostic in
   let implicit_ok = reports implicit diagnostic && names_the_key (snd implicit) in
   let in_a_subdir_ok = reports in_a_subdir diagnostic && names_the_key (snd in_a_subdir) in
+  let module_without_source_ok =
+    reports module_without_source "handed no `helper.ml`"
+  in
+  let utils_lookalike_ok =
+    reports utils_lookalike diagnostic && names_the_key (snd utils_lookalike)
+  in
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
   in
@@ -2146,6 +2187,8 @@ let guard_control () =
   if not implicit_ok then report "implicit-modules" implicit;
   if not pinned_beside_helper_ok then report "pinned-beside-a-helper" pinned_beside_helper;
   if not in_a_subdir_ok then report "in-a-subdir" in_a_subdir;
+  if not module_without_source_ok then report "module-without-source" module_without_source;
+  if not utils_lookalike_ok then report "utils-lookalike" utils_lookalike;
   if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
@@ -2180,6 +2223,13 @@ let guard_control () =
   Verdict.p
     "a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules"
     in_a_subdir_ok;
+  Verdict.p
+    "a module the stanza names and this check was handed no source for is reported, not read as one \
+     that makes no reads"
+    module_without_source_ok;
+  Verdict.p
+    "a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt"
+    utils_lookalike_ok;
   Verdict.p
     "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
     plain_library_ok;

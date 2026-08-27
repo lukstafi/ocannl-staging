@@ -1857,11 +1857,16 @@ type ordered_set = { standard : bool; included : string list; excluded : string 
 
 let empty_set = { standard = false; included = []; excluded = [] }
 
+(* A term that INCLUDES a name cancels an exclusion of it made elsewhere in the same set:
+   `(modules (main guard \ guard) guard)` links `guard`, the nested difference having been undone by
+   the term beside it. Keeping both and subtracting at the end dropped it (Codex P2, round 8). *)
 let union a b =
   {
     standard = a.standard || b.standard;
     included = a.included @ b.included;
-    excluded = a.excluded @ b.excluded;
+    excluded =
+      List.filter a.excluded ~f:(fun m -> not (List.mem b.included m ~equal:String.equal))
+      @ List.filter b.excluded ~f:(fun m -> not (List.mem a.included m ~equal:String.equal));
   }
 
 let difference left right =
@@ -1869,7 +1874,8 @@ let difference left right =
     standard = left.standard;
     (* What the right-hand side would have ADDED is what the left loses; what it subtracts in turn is
        a nesting this language admits and dune resolves the same way. *)
-    included = List.filter left.included ~f:(fun m -> not (List.mem right.included m ~equal:String.equal));
+    included =
+      List.filter left.included ~f:(fun m -> not (List.mem right.included m ~equal:String.equal));
     excluded = left.excluded @ right.included;
   }
 
@@ -1888,10 +1894,10 @@ let explicit_modules stanza =
   | None -> Default_less []
   | Some args ->
       let set = eval_ordered_set args in
+      (* A subtraction has already removed what it removes, so what is left is the set. Under
+         `:standard` the exclusions are what a caller needs, the default set not being known here. *)
       if set.standard then Default_less set.excluded
-      else
-        Named
-          (List.filter set.included ~f:(fun m -> not (List.mem set.excluded m ~equal:String.equal)))
+      else Named (List.dedup_and_sort set.included ~compare:String.compare)
 
 (** The modules a stanza owns, given every module the directory holds. Dune's default set is the
     directory less what other stanzas claim, which is what makes an explicit list elsewhere in the

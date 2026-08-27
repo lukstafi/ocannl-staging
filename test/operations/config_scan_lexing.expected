@@ -109,6 +109,8 @@ ok: key list -- and an inner iteration binds its own
 ok: key list -- a local map does not project a table
 ok: key list -- a file that rebinds List resolves nothing
 ok: key list -- and one that rebinds fst does not project a table
+ok: key list -- a nested Other.List.iter is not the standard combinator
+ok: key list -- but a standard root in front of it is
 ok: key list -- an open of a library providing List is not a rebinding
 ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader

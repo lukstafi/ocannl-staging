@@ -555,6 +555,16 @@ let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([], true) );
     (* An `open` is not a rebinding: `Base.List.map` is `List.map`, and this repository opens Base
        everywhere. *)
+    (* A nested module ending in `List` is not the standard one: a custom iterator may call the
+       callback with keys the list does not hold (Codex P2, round 8 of PR #484). *)
+    ( "a nested Other.List.iter is not the standard combinator",
+      {ocaml|let guarded = [ "profile" ]
+let () = Other.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "but a standard root in front of it is",
+      {ocaml|let guarded = [ "profile" ]
+let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
     ( "an open of a library providing List is not a rebinding",
       {ocaml|open Base
 let guarded = [ "profile" ]
