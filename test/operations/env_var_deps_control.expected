@@ -42,4 +42,5 @@ a `(subdir …)` group whose actions take the training lock and whose gate does 
 a module of the same last name reached through another qualifier is not the instrumentation, and its user is no member: true
 `open Ir` and then a bare `Alloc_census.snapshot` is a reference to the instrumentation, and its test is a member: true
 so is `module I = Ir` and then `I.Alloc_census.snapshot`: true
+an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference to the instrumentation: true
 a stanza neither derivation calls a member is asked for no family alias: true

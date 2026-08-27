@@ -313,8 +313,14 @@ let module_references_in_source content ~paths =
      a source may reach the same module without writing one: [open Ir] then [Alloc_census.snapshot],
      or [module I = Ir] then [I.Alloc_census.t]. Both spell a real reference to the same module, and
      a match that insisted on the literal qualifier would call neither a use (Codex P2, round 6).
-     Collected in a first pass, exactly as {!generated_init_calls_in_source} collects its aliases,
-     and for the same reason: OCaml lets neither be used before it is bound. *)
+
+     Tracked in ONE traversal, IN SCOPE: a structure's bindings take effect where they sit and end
+     with the structure, and [let open … in] / [let module … in] reach their body and nothing else.
+     A separate collecting pass would have made [module Elsewhere = struct open Ir end] open the
+     qualifier over the whole file, so an unrelated [Alloc_census] outside that module would be read
+     as this one (Codex P2, round 7) -- and here, unlike in {!generated_init_calls_in_source}, the
+     answer decides which focused aggregate a test belongs to, so an over-reading is a family
+     demanding a test that has nothing to do with it. *)
   let qualifiers =
     List.filter_map paths ~f:(fun path ->
         match List.rev path with _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier) | _ -> None)
@@ -348,28 +354,6 @@ let module_references_in_source content ~paths =
                   | None -> opened := qualifier :: !opened))
     | _ -> ()
   in
-  let binders =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! structure_item item =
-        (match item.pstr_desc with
-        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
-            bind_module_expr alias pmb_expr
-        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
-        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
-        | _ -> ());
-        super#structure_item item
-
-      method! expression expr =
-        (match expr.pexp_desc with
-        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
-        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
-        | _ -> ());
-        super#expression expr
-    end
-  in
-  binders#structure structure;
   let found = ref [] in
   let matches components path =
     let qualifier, name =
@@ -386,8 +370,49 @@ let module_references_in_source content ~paths =
        && starts_with components [ name ])
   in
   let walk =
-    object
+    object (self)
       inherit Ast_traverse.iter as super
+
+      (* A structure is a scope, and its items bind in source order: each is visited under what the
+         items before it bound, and the whole set is dropped when the structure ends. Nested
+         structures go through this method too, which is what confines a `module M = struct open Ir
+         end` to `M`. *)
+      method! structure items =
+        let saved_aliases = !aliases and saved_opened = !opened in
+        List.iter items ~f:(fun item ->
+            self#structure_item item;
+            match item.pstr_desc with
+            | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
+                bind_module_expr alias pmb_expr
+            | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+            | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+            | _ -> ());
+        aliases := saved_aliases;
+        opened := saved_opened
+
+      (* The expression spellings reach their BODY. Visited by hand rather than through `super`, so
+         that the binding is in force for the body and gone after it. *)
+      method! expression expr =
+        let scoped ~bind ~body visit =
+          visit ();
+          let saved_aliases = !aliases and saved_opened = !opened in
+          bind ();
+          self#expression body;
+          aliases := saved_aliases;
+          opened := saved_opened
+        in
+        match expr.pexp_desc with
+        | Pexp_open (declaration, body) ->
+            scoped
+              ~bind:(fun () -> bind_module_expr None declaration.popen_expr)
+              ~body
+              (fun () -> self#open_declaration declaration)
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, body) ->
+            scoped
+              ~bind:(fun () -> bind_module_expr alias module_expr)
+              ~body
+              (fun () -> self#module_expr module_expr)
+        | _ -> super#expression expr
 
       method! longident lid =
         (match flatten_module_path lid with

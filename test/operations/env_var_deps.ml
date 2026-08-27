@@ -1124,7 +1124,13 @@ let main () =
           in
           if Set.mem gated_here (in_directory subdir alias) then
             gated := (where, alias) :: !gated
-          else if Map.mem gateless dune_file then gateless_used := Set.add !gateless_used dune_file
+            (* The exemption is a statement about ONE directory -- `benchmarks/dune` runs python3
+               over the orchestrator's own tests and links no OCANNL executable -- and a `(subdir
+               …)` group of that file is a different directory, whose stanzas the recorded reason
+               says nothing about (Codex P2, round 7). Applying it there would exempt a nested
+               OCANNL-linked test on the strength of its parent's reason. *)
+          else if String.is_empty subdir && Map.mem gateless dune_file then
+            gateless_used := Set.add !gateless_used dune_file
           else
             fail
               (Printf.sprintf
@@ -2333,6 +2339,7 @@ type family_probe_source =
   | Same_named  (** a module of the same LAST name, reached through another qualifier *)
   | Opened  (** `open Ir`, then the module named without its qualifier *)
   | Qualifier_aliased  (** `module I = Ir`, then the module named through the alias *)
+  | Scoped_open  (** the qualifier opened inside a nested module, and named OUTSIDE it *)
   | Neither
 
 let family_probe = function
@@ -2348,6 +2355,10 @@ let family_probe = function
   | Qualifier_aliased ->
       (* And with the qualifier itself bound to a name of the source's choosing. *)
       "module I = Ir\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Scoped_open ->
+      (* The open is real and so is the reference, and they are in different scopes: what
+         `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
+      "module Elsewhere = struct\n  open Ir\nend\n\nlet () = ignore (Alloc_census.snapshot ())\n"
   | Mentions_only ->
       (* The module NAMED where naming it reads nothing -- the shape a substring derivation calls a
          probe (Codex P2, round 4). Also as a longer identifier, since that is the third way a text
@@ -2457,6 +2468,8 @@ let family_control () =
      direction, since a derivation that missed them would pass this tree silently. *)
   let opened_probe = run ~probe:Opened ~metal:false ~lifecycle:true ~family:None () in
   let aliased_probe = run ~probe:Qualifier_aliased ~metal:false ~lifecycle:true ~family:None () in
+  (* And the same open, one scope away from the reference. *)
+  let scoped_open = run ~probe:Scoped_open ~metal:false ~lifecycle:true ~family:None () in
   (* The negative control: neither derivation calls this stanza a member, so no family alias is
      asked for. A derivation that over-claimed would fail this correct tree. *)
   let no_member = run ~metal:false ~lifecycle:false ~family:None () in
@@ -2504,6 +2517,7 @@ let family_control () =
   let same_named_ok = listed_ok same_named in
   let opened_probe_ok = omitted_ok lifecycle_family.family_alias opened_probe in
   let aliased_probe_ok = omitted_ok lifecycle_family.family_alias aliased_probe in
+  let scoped_open_ok = listed_ok scoped_open in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2529,6 +2543,7 @@ let family_control () =
   if not same_named_ok then report "a same-named module of another provenance" same_named;
   if not opened_probe_ok then report "the qualifier opened rather than written" opened_probe;
   if not aliased_probe_ok then report "the qualifier bound to another name" aliased_probe;
+  if not scoped_open_ok then report "the qualifier opened in another scope" scoped_open;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2612,6 +2627,10 @@ let family_control () =
      its test is a member"
     opened_probe_ok;
   Verdict.p "so is `module I = Ir` and then `I.Alloc_census.snapshot`" aliased_probe_ok;
+  Verdict.p
+    "an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference \
+     to the instrumentation"
+    scoped_open_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
