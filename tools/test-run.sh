@@ -830,18 +830,18 @@ case $sub in
       # the supervisor comment), so reap any survivors first.
       if group_verified "$run_dir" &&
          pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
-        # Reachability is the entry condition and the KILL below is
-        # unconditional: this reap is what stands between a surviving dune and
-        # a released worktree lock, and a census that missed a just-forked
-        # child must never be able to call it off. group_alive decides only
-        # whether the TERM's grace is worth sitting out -- a group holding
-        # nothing but unreaped corpses (see there) would otherwise cost this
-        # path two seconds every time, and getting THAT wrong costs only a
-        # less graceful shutdown.
-        if group_alive "$pgid"; then
-          kill -TERM -- "-$pgid" 2>/dev/null
-          sleep 2
-        fi
+        # Reachability is the entry condition, and BOTH signals below go out on
+        # it alone: this reap is what stands between a surviving dune and a
+        # released worktree lock, and a census that missed a just-forked child
+        # must be able neither to call it off nor to downgrade it -- a child
+        # denied its TERM loses the chance to flush output and release what it
+        # holds. group_alive decides only the GRACE, asked after the TERM so
+        # that a member that census could have missed is included: waiting has
+        # a point only where something can still act on the signal, and a group
+        # holding nothing but unreaped corpses (see there) would otherwise cost
+        # this path two seconds every time.
+        kill -TERM -- "-$pgid" 2>/dev/null
+        group_alive "$pgid" && sleep 2
         # Revalidate before escalating: TERM usually empties the group within
         # the grace, and a numeric pgid could be recycled during it -- KILL
         # only a group whose recorded leader identity still matches.
@@ -1233,38 +1233,33 @@ case $sub in
       #
       # Reachability, not liveness, opens this branch, and every signal below
       # is sent on it alone: a census is a snapshot, so a child forked while it
-      # was taken is missing from it, and letting that veto the reap would
-      # leave the child holding the lock with nothing left to reap it.
-      # group_alive decides what to REPORT, which is where the phantom lived
-      # (gh-ocannl-742): a group of unreaped corpses announced as a runaway
-      # dune ignoring TERM.
-      if group_alive "$pg"; then
-        kill -TERM -- "-$pg" 2>/dev/null
-        sleep 2
-        if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
-          # Read the state BEFORE the KILL -- the KILL is what makes the answer
-          # stale -- but send the KILL either way.
-          if group_alive "$pg"; then still=running; else still=corpses; fi
-          kill -KILL -- "-$pg" 2>/dev/null
-          if [ "$still" = running ]; then
-            echo "orphaned process group $pg ignored TERM; escalated to KILL"
-          else
-            # Not "cleared": only the parent that forked them can reap
-            # corpses, and here there is no parent left to do it.
-            echo "orphaned process group $pg stopped on TERM; only unreaped" \
-                 "exited processes remain in it"
-          fi
+      # was taken is missing from it, and letting that veto -- or downgrade --
+      # the reap would leave the child holding the lock, or take away the TERM
+      # it needed to shut down cleanly. group_alive decides only the GRACE and
+      # the WORDING, which is where the phantom lived (gh-ocannl-742): a group
+      # of unreaped corpses announced as a runaway dune ignoring TERM.
+      kill -TERM -- "-$pg" 2>/dev/null
+      # Asked AFTER the TERM, so a member the earlier census could have missed
+      # is included: a grace has a point only where something can still act on
+      # the signal, and corpses under a non-reaping init would otherwise cost
+      # every stop two seconds.
+      group_alive "$pg" && sleep 2
+      if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
+        # Something is still there. Whether it is WORK or only corpses decides
+        # the sentence; the KILL goes out either way, and the state is read
+        # first because the KILL is what makes the answer stale.
+        if group_alive "$pg"; then still=running; else still=corpses; fi
+        kill -KILL -- "-$pg" 2>/dev/null
+        if [ "$still" = running ]; then
+          echo "orphaned process group $pg ignored TERM; escalated to KILL"
         else
-          echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+          # Not "cleared": only the parent that forked them can reap corpses,
+          # and here there is no parent left to do it.
+          echo "process group $pg holds only unreaped exited processes;" \
+               "nothing of the run was still running"
         fi
       else
-        # Verified, reachable, and nothing in it running: corpses under a
-        # reaper that will not reap them. The KILL still goes out (it costs
-        # nothing against corpses and covers a fork that raced the census);
-        # what changes is that the operator is told what is actually there.
-        kill -KILL -- "-$pg" 2>/dev/null
-        echo "process group $pg holds only unreaped exited processes;" \
-             "nothing of the run was still running"
+        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
       fi
     elif wrapper_alive "$run_dir"; then
       # The run is MANAGED right now: either just launched (supervisor pid

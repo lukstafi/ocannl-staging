@@ -383,10 +383,13 @@ that they earn a lookup rather than always-loaded space.
   it can turn a phantom alive into dead and never the reverse. A state read is still a CENSUS, and a
   census is a SNAPSHOT — a child forked while the glob is being read is not in it, and a leader that
   exited into a zombie during it is — so both callers let that answer shorten a reap or reword a
-  report but never SKIP one: every signal goes out on reachability alone, and liveness decides only
-  whether the TERM grace is worth sitting out and which sentence the operator reads. A census
-  allowed to veto cleanup buys the phantom back as a survivor mutating `_build` behind a released
-  worktree lock, which is the worse of the two failures. Whether the bare probe over-reports at all
+  report but never SKIP or DOWNGRADE one: TERM and KILL both go out on reachability alone, and
+  liveness decides only whether the grace is worth sitting out (asked AFTER the TERM, so a member
+  the earlier census could have missed is included — a wait has a point only where something can
+  still act on the signal) and which sentence the operator reads. A census allowed to veto cleanup
+  buys the phantom back as a survivor mutating `_build` behind a released worktree lock; one
+  allowed to skip just the TERM costs a child the chance to flush its output and release what it
+  holds. Both are worse than the phantom. Whether the bare probe over-reports at all
   is a property of the kernel, so a local pass proves less than it looks: Linux (and every container
   on it) counts the zombie and says alive, while Darwin's `killpg` already answers `ESRCH` once a
   group holds only corpses, and under a PID 1 that does not reap the zombie is PERMANENT, so a retry
