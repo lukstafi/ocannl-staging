@@ -95,6 +95,39 @@ type comp = {
 let to_comp asgns = { asgns; embedded_nodes = Set.empty (module Tnode) }
 let empty_comp = to_comp Noop
 
+(** The buffers an [accum_rhs] mentions, in argument order. For [Rev_sides] these are the
+    WRITTEN-TO buffers -- the constructor reverses the assignment's roles -- so a caller that cares
+    about the direction still matches [Rev_sides], but only for the direction. Destructuring the
+    arities lives here and nowhere else: before, four traversals each repeated it, so a new
+    [accum_rhs] constructor meant four silent omissions waiting to happen. *)
+let buffers_of_accum_rhs : accum_rhs -> buffer list = function
+  | Ternop { rhs1; rhs2; rhs3; _ } -> [ rhs1; rhs2; rhs3 ]
+  | Binop { rhs1; rhs2; _ } -> [ rhs1; rhs2 ]
+  | Unop { rhs; _ } -> [ rhs ]
+  | Block { rhses; _ } -> Array.to_list rhses
+  | Rev_sides { lhses; _ } -> Array.to_list lhses
+
+(** Whether the assignment's roles are reversed: [Rev_sides]' buffers are written and its
+    enclosing [Accum_op]'s [lhs] is read. *)
+let is_rev_sides = function Rev_sides _ -> true | _ -> false
+
+(** Folds [f] over the LEAF statements ([Accum_op], [Set_vec_unop], [Fetch]) in execution order,
+    skipping the [Noop] / [Seq] / [Block_comment] scaffolding. Descending is what the queries below
+    used to each write for themselves, and forgetting to descend through a [Block_comment] loses
+    statements silently -- so the recursion is written once. [f] still matches on {!t} (the leaf
+    kinds mean different things to different queries), and its scaffolding arm is unreachable. *)
+let fold_leaves (asgns : t) ~init ~f =
+  let rec loop acc = function
+    | Noop -> acc
+    | Seq (t1, t2) -> loop (loop acc t1) t2
+    | Block_comment (_, t) -> loop acc t
+    | (Accum_op _ | Set_vec_unop _ | Fetch _) as leaf -> f acc leaf
+  in
+  loop init asgns
+
+(** {!fold_leaves} for a [f] that only has effects. *)
+let iter_leaves (asgns : t) ~f = fold_leaves asgns ~init:() ~f:(fun () leaf -> f leaf)
+
 let is_total ~initialize_neutral ~projections =
   initialize_neutral && Affine.is_surjective projections
 
@@ -113,27 +146,17 @@ let%debug3_sexp context_nodes ~(plc : Tn.Placements.t) (asgns : t) : Tn.t_set =
     if Tn.Placements.is_in_context_force plc tn 34 then Set.singleton (module Tn) tn else empty
   in
   let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
-  let rec loop = function
-    | Noop -> empty
-    | Seq (t1, t2) -> loop t1 + loop t2
-    | Block_comment (_, t) -> loop t
-    | Accum_op { lhs; rhs; _ } ->
-        let rhses =
-          match rhs with
-          | Unop { rhs; _ } -> [ of_node rhs ]
-          | Binop { rhs1; rhs2; _ } -> [ of_node rhs1; of_node rhs2 ]
-          | Ternop { rhs1; rhs2; rhs3; _ } -> [ of_node rhs1; of_node rhs2; of_node rhs3 ]
-          | Block { rhses; _ } -> Array.to_list rhses |> List.map ~f:of_node
-          | Rev_sides { lhses; _ } -> Array.to_list lhses |> List.map ~f:of_node
-        in
-        Set.union_list (module Tn) (one lhs :: rhses)
-    | Set_vec_unop { lhs; rhs; _ } -> Set.union (one lhs) (of_node rhs)
-    (* A slice-alias view's parent must be in context too (it backs the view); the alias itself is
-       dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
-    | Fetch { array; fetch_op = Slice { sliced; _ }; _ } -> one array + one sliced
-    | Fetch { array; _ } -> one array
-  in
-  loop asgns
+  fold_leaves asgns ~init:empty ~f:(fun acc leaf ->
+      match leaf with
+      | Accum_op { lhs; rhs; _ } ->
+          Set.union_list (module Tn)
+            (acc :: one lhs :: List.map (buffers_of_accum_rhs rhs) ~f:of_node)
+      | Set_vec_unop { lhs; rhs; _ } -> acc + one lhs + of_node rhs
+      (* A slice-alias view's parent must be in context too (it backs the view); the alias itself
+         is dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
+      | Fetch { array; fetch_op = Slice { sliced; _ }; _ } -> acc + one array + one sliced
+      | Fetch { array; _ } -> acc + one array
+      | Noop | Seq _ | Block_comment _ -> acc)
 
 (** In the second set, returns the nodes that are not read from after being written to. In the first
     set, returns the nodes that are ever read from. The second set is also used as the set of nodes
@@ -152,17 +175,12 @@ let%debug3_sexp collect_nodes_guess_output (asgns : t) : Tn.t_set * Tn.t_set =
         (i1 + i2, o1 + o2 - (i1 + i2))
     | Block_comment (_, t) -> loop t
     | Accum_op { lhs; rhs; _ } ->
-        let inputs, outputs =
-          match rhs with
-          | Unop { rhs; _ } -> (of_node rhs, one lhs)
-          | Binop { rhs1; rhs2; _ } -> (of_node rhs1 + of_node rhs2, one lhs)
-          | Ternop { rhs1; rhs2; rhs3; _ } -> (of_node rhs1 + of_node rhs2 + of_node rhs3, one lhs)
-          | Block { rhses; _ } ->
-              (Array.fold rhses ~init:empty ~f:(fun acc buf -> acc + of_node buf), one lhs)
-          | Rev_sides { lhses; _ } ->
-              (one lhs, Array.fold lhses ~init:empty ~f:(fun acc buf -> acc + of_node buf))
+        let buffers =
+          List.fold (buffers_of_accum_rhs rhs) ~init:empty ~f:(fun acc buf -> acc + of_node buf)
         in
-        (inputs, outputs)
+        (* [Rev_sides] reverses the roles: its buffers are written, and the assignment's [lhs] is
+           what it reads. *)
+        if is_rev_sides rhs then (one lhs, buffers) else (buffers, one lhs)
     | Set_vec_unop { lhs; rhs; _ } -> (of_node rhs, one lhs)
     (* Materialize the slice parent too, so it can back a zero-copy alias view of [array]; harmless
        in the copy-fallback case where the parent is read by the copy loop (gh-ocannl-293 293a). *)
@@ -178,43 +196,39 @@ let collect_written (asgns : t) : Tn.t_set =
   let open Utils.Set_O in
   let empty = Set.empty (module Tn) in
   let one = Set.singleton (module Tn) in
-  let rec loop = function
-    | Noop -> empty
-    | Seq (t1, t2) -> loop t1 + loop t2
-    | Block_comment (_, t) -> loop t
-    | Accum_op { rhs = Rev_sides { lhses; _ }; _ } ->
-        Array.fold lhses ~init:empty ~f:(fun acc buf ->
-            match buf with Node rhs -> acc + one rhs | Merge_buffer _ -> acc)
-    | Accum_op { lhs; _ } | Set_vec_unop { lhs; _ } -> one lhs
-    | Fetch { array; _ } -> one array
-  in
-  loop asgns
+  let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
+  fold_leaves asgns ~init:empty ~f:(fun acc leaf ->
+      match leaf with
+      (* [Rev_sides] reverses the roles: the written-to nodes are its buffers, not the [lhs]. *)
+      | Accum_op { rhs = Rev_sides _ as rhs; _ } ->
+          List.fold (buffers_of_accum_rhs rhs) ~init:acc ~f:(fun acc buf -> acc + of_node buf)
+      | Accum_op { lhs; _ } | Set_vec_unop { lhs; _ } -> acc + one lhs
+      | Fetch { array; _ } -> acc + one array
+      | Noop | Seq _ | Block_comment _ -> acc)
 
 let sequential l =
   Option.value ~default:Noop @@ List.reduce l ~f:(fun sts another_st -> Seq (sts, another_st))
 
 let sequence l =
-  Option.value ~default:{ asgns = Noop; embedded_nodes = Set.empty (module Tn) }
-  @@ List.reduce l
-       ~f:(fun
-           { asgns = sts; embedded_nodes = embs } { asgns = another_st; embedded_nodes = emb } ->
-         { asgns = Seq (sts, another_st); embedded_nodes = Set.union embs emb })
+  {
+    asgns = sequential (List.map l ~f:(fun c -> c.asgns));
+    embedded_nodes = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.embedded_nodes));
+  }
 
 let collect_neutral_elem (asgns : t) : float option =
-  let rec loop acc = function
-    | Noop -> acc
-    | Seq (t1, t2) -> loop (loop acc t1) t2
-    | Block_comment (_, t) -> loop acc t
-    | Accum_op { accum; _ } -> (
-        let neutral = Ops.neutral_elem accum in
-        match acc with
-        | None -> Some (Some neutral)
-        | Some (Some v) when Float.( = ) v neutral -> acc
-        | Some (Some _) -> Some None
-        | Some None -> acc)
-    | Set_vec_unop _ | Fetch _ -> acc
+  let folded =
+    fold_leaves asgns ~init:None ~f:(fun acc leaf ->
+        match leaf with
+        | Accum_op { accum; _ } -> (
+            let neutral = Ops.neutral_elem accum in
+            match acc with
+            | None -> Some (Some neutral)
+            | Some (Some v) when Float.( = ) v neutral -> acc
+            | Some (Some _) -> Some None
+            | Some None -> acc)
+        | Set_vec_unop _ | Fetch _ | Noop | Seq _ | Block_comment _ -> acc)
   in
-  match loop None asgns with None -> None | Some v -> v
+  match folded with None -> None | Some v -> v
 
 let%track4_sexp to_low_level ?(static_indices = []) code =
   let open Indexing in
@@ -1029,13 +1043,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     && Option.is_none (Tn.get_padding sliced)
     && Option.is_none (Tn.get_padding array)
   in
-  let rec mark_aliases (c : t) : unit =
-    match c with
-    | Noop -> ()
-    | Seq (c1, c2) ->
-        mark_aliases c1;
-        mark_aliases c2
-    | Block_comment (_, c) -> mark_aliases c
+  let mark_aliases (c : t) : unit =
+    iter_leaves c ~f:(function
     | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
         if slice_alias_eligible ~array ~sliced then (
           (* The view's write semantics (a write through [array] is a write to [sliced]'s sub-range,
@@ -1045,7 +1054,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
              materialization of slice parents. Provenance 27. *)
           Tn.update_memory_mode sliced On_device 27;
           Tn.set_alias_of array ~parent:sliced ~batch_idx)
-    | Fetch _ | Accum_op _ | Set_vec_unop _ -> ()
+    | Fetch _ | Accum_op _ | Set_vec_unop _ | Noop | Seq _ | Block_comment _ -> ())
   in
   mark_aliases code;
   loop code
@@ -1075,28 +1084,12 @@ let get_ident_within_code ?no_dots c =
              Set.add (Option.value ~default:Utils.no_ints old) tn.uid))
   in
   let tn = function Node tn -> tn | Merge_buffer tn -> tn in
-  let rec loop (c : t) =
-    match c with
-    | Noop -> ()
-    | Seq (c1, c2) ->
-        loop c1;
-        loop c2
-    | Block_comment (_, c) -> loop c
+  iter_leaves c ~f:(function
     | Accum_op { lhs; rhs; _ } ->
-        let rhses =
-          match rhs with
-          | Unop { rhs; _ } -> [ tn rhs ]
-          | Binop { rhs1; rhs2; _ } -> [ tn rhs1; tn rhs2 ]
-          | Ternop { rhs1; rhs2; rhs3; _ } -> [ tn rhs1; tn rhs2; tn rhs3 ]
-          | Block { rhses; _ } -> Array.to_list rhses |> List.map ~f:tn
-          | Rev_sides { lhses; _ } -> Array.to_list lhses |> List.map ~f:tn
-        in
-        List.iter ~f:visit (lhs :: rhses)
-    | Set_vec_unop { op = _; lhs; rhs; projections = _; projections_debug = _ } ->
-        List.iter ~f:visit [ lhs; tn rhs ]
-    | Fetch { array; fetch_op = _; dims = _ } -> visit array
-  in
-  loop c;
+        List.iter ~f:visit (lhs :: List.map (buffers_of_accum_rhs rhs) ~f:tn)
+    | Set_vec_unop { lhs; rhs; _ } -> List.iter ~f:visit [ lhs; tn rhs ]
+    | Fetch { array; _ } -> visit array
+    | Noop | Seq _ | Block_comment _ -> ());
   let repeating_nograd_idents =
     Hashtbl.filter nograd_idents ~f:(fun ids -> List.length (Set.to_list ids) > 1)
   in
