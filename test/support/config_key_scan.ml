@@ -381,7 +381,11 @@ let module_references_in_source content ~paths =
       | name :: rev_qualifier -> (List.rev rev_qualifier, name)
       | [] -> ([], "")
     in
-    (contains components path && not (List.exists qualifier ~f:is_shadowed))
+    (* ANCHORED at the qualifier: `Vendor.Ir.Alloc_census` is Vendor's, and finding our path inside
+       a longer one would call its user a probe (Codex P2, round 10). The same exactness the binders
+       get, for the same reason -- a path names one module, and which one is decided by where it
+       starts. *)
+    (starts_with components path && not (List.exists qualifier ~f:is_shadowed))
     || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
            List.equal String.equal of_qualifier qualifier && contains components [ alias; name ])
     (* Under an `open`, the reference begins with the module's own name -- STARTS with, not

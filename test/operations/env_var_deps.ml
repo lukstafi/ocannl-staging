@@ -1332,9 +1332,15 @@ let main () =
          merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
          in the file rather than of the golden diffs alone, since any rule can be given such an
          alias; the ambient gate is the one rule that means to share it. *)
-      let generated = generated_runtest_names stanzas in
-      let gate_names = gate_generated_names stanzas in
-      List.iter stanzas ~f:(fun stanza ->
+      (* Per `(subdir …)` group, like the gate, lock and family checks: dune generates a stanza's
+         alias in the directory it applies the stanza to, and a top-level reading of a file with a
+         group sees neither the group's `(test)` names nor the rules that could collide with them
+         (Codex P2, round 10). *)
+      List.iter subdirs ~f:(fun subdir ->
+      let here = stanzas_in subdir in
+      let generated = generated_runtest_names here in
+      let gate_names = gate_generated_names here in
+      List.iter here ~f:(fun stanza ->
           List.iter (aliases_of stanza) ~f:(fun alias ->
               match String.chop_prefix alias ~prefix:"runtest-" with
               (* The one deliberate collision: a rule sharing the alias dune generates for a
@@ -1360,10 +1366,12 @@ let main () =
                         test as well as this rule, and naming `runtest` beside it is a dependency \
                         cycle. Name the alias after the GOLDEN this rule checks, qualified where a \
                         run writes several"
-                       dune_file alias name
-                       (Stdlib.Filename.dirname dune_file)
+                       (if String.is_empty subdir then dune_file
+                        else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir)
+                       alias name
+                       (Scan.in_subdir (Stdlib.Filename.dirname dune_file) subdir)
                        alias)
-              | _ -> ()));
+              | _ -> ())));
       (* And one alias checks one golden: two golden diffs sharing an alias make the targeted run
          two tests, which is the isolation this arrangement is for -- and the prefix relation above
          admits the pair, since `foo.expected` and `foo-extension.expected` both accept
@@ -2204,6 +2212,8 @@ type family_shape =
   | Runtest_only_rule  (** a marked rule whose only alias is the directory-wide `runtest` *)
   | Subdir_ungated  (** the member and its family alias in a group with no gate of its own *)
   | Subdir_unlocked_gate  (** a group whose actions take the training lock and whose gate does not *)
+  | Subdir_alias_collision
+      (** a group with a `(test (name probe))` and a hand-written rule on `runtest-probe` *)
 
 let family_marker ~metal =
   Printf.sprintf
@@ -2227,7 +2237,7 @@ let family_member_stanza ~shape ~metal =
         "(library\n%s (name probelib)\n (modules probe)\n (inline_tests\n  (deps \
          ocannl_config))\n (libraries base))\n"
         marker
-  | Subdir_member | Subdir_ungated | Subdir_unlocked_gate ->
+  | Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision ->
       (* Dune lets a `(subdir …)` group carry its own alias stanza, and the recursive `@<family>`
          build from the root reaches it. The family stanza therefore goes INSIDE the group here,
          which is the arrangement the check used to reject -- and the group needs an ambient gate of
@@ -2255,13 +2265,23 @@ let family_member_stanza ~shape ~metal =
         | Subdir_unlocked_gate -> "  (locks ocannl_training_test)\n"
         | _ -> ""
       in
+      (* The collision: a hand-written rule on the alias dune generates for the group's own `(test)`
+         stanza. Building that alias would run both. *)
+      let collision =
+        match shape with
+        | Subdir_alias_collision ->
+            " (rule\n  ; ocannl-backend: none -- a synthetic control fixture, judged on this \
+             marker alone.\n  (alias runtest-probe)\n  (deps ocannl_config (alias \
+             runtest-childgate))\n  (action\n   (run %{dep:childgate.exe})))\n"
+        | _ -> ""
+      in
       Printf.sprintf
         "(subdir\n child\n%s (test\n%s  (name probe)\n  (modules probe)\n%s  (deps \
-         ocannl_config)\n  (libraries base))\n (alias\n  (name %s)\n  (deps %s(alias \
+         ocannl_config)\n  (libraries base))\n%s (alias\n  (name %s)\n  (deps %s(alias \
          runtest-probe))))\n"
         gate
         (String.substr_replace_all marker ~pattern:" ; " ~with_:"  ; ")
-        locks metal_family.family_alias gate_dep
+        locks collision metal_family.family_alias gate_dep
   | Public_names_crossed ->
       (* Two installed executables behind one stanza, and a rule running the SECOND one's public
          name. Nothing here runs `probe`, so a family listing that rule aggregates `probe2` and
@@ -2321,7 +2341,7 @@ type family_listing = Every | First_only
 
 let family_listed_aliases ~shape ~listing =
   match (shape, listing) with
-  | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate), _ -> []
+  | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
       | Public_name_by_path | Subdir_exe_top_runner ),
@@ -2357,6 +2377,7 @@ type family_probe_source =
   | Scoped_open  (** the qualifier opened inside a nested module, and named OUTSIDE it *)
   | Qualifier_shadowed  (** the qualifier's NAME rebound to another module, then used *)
   | Nested_qualifier  (** somebody else's module of the qualifier's name, opened and aliased *)
+  | Nested_path  (** somebody else's module of the qualifier's name, written out in full *)
   | Neither
 
 let family_probe = function
@@ -2381,6 +2402,10 @@ let family_probe = function
          so a bare `Alloc_census` would be in scope, and aliased under the qualifier's own name
          (Codex P2, round 9). *)
       "module Ir = Vendor.Ir\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n\nmodule Also = struct\n  open Vendor.Ir\n\n  let () = ignore (Alloc_census.snapshot ())\nend\n"
+  | Nested_path ->
+      (* And written out rather than bound: the path names Vendor's module, and our components sit
+         inside it (Codex P2, round 10). *)
+      "let () = ignore (Vendor.Ir.Alloc_census.snapshot ())\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2502,6 +2527,12 @@ let family_control () =
   in
   (* Somebody else's module of the qualifier's name, opened and aliased. *)
   let nested_qualifier = run ~probe:Nested_qualifier ~metal:false ~lifecycle:true ~family:None () in
+  let nested_path = run ~probe:Nested_path ~metal:false ~lifecycle:true ~family:None () in
+  (* And the alias collision one directory down: dune generates a `(test)` stanza's alias in the
+     directory it applies the stanza to, so a rule in the same group can merge with it. *)
+  let subdir_collision =
+    run ~shape:Subdir_alias_collision ~metal:true ~lifecycle:false ~family:None ()
+  in
   (* A rule running a FILE that shares the executable's public name is not its runner. *)
   let public_by_path =
     run ~shape:Public_name_by_path ~metal:false ~lifecycle:true ~family:lifecycle ()
@@ -2557,6 +2588,12 @@ let family_control () =
   let shadowed_qualifier_ok = listed_ok shadowed_qualifier in
   let public_by_path_ok = omitted_ok lifecycle_family.family_alias public_by_path in
   let nested_qualifier_ok = listed_ok nested_qualifier in
+  let nested_path_ok = listed_ok nested_path in
+  let subdir_collision_ok =
+    exited 1 subdir_collision
+    && String.is_substring (snd subdir_collision) ~substring:"the alias dune generates"
+    && String.is_substring (snd subdir_collision) ~substring:"(subdir child"
+  in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2586,6 +2623,8 @@ let family_control () =
   if not shadowed_qualifier_ok then report "the qualifier's name rebound" shadowed_qualifier;
   if not public_by_path_ok then report "a file sharing the public name" public_by_path;
   if not nested_qualifier_ok then report "another module named like the qualifier" nested_qualifier;
+  if not nested_path_ok then report "that module's path written out" nested_path;
+  if not subdir_collision_ok then report "an alias collision inside a group" subdir_collision;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2685,6 +2724,13 @@ let family_control () =
     "`open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so \
      neither makes their file a member"
     nested_qualifier_ok;
+  Verdict.p
+    "nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module it starts at"
+    nested_path_ok;
+  Verdict.p
+    "a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is \
+     reported there too"
+    subdir_collision_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
