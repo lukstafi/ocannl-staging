@@ -173,6 +173,7 @@ test/operations/schedule_ldmatrix_matmul.ml [also pins text this scan cannot nam
     "wmma::mma_sync"
 test/operations/schedule_mma_matmul.ml [also pins text this scan cannot name]
     "#elif "
+    "(mma-f16)"
     "(wmma-bf16)"
     "(wmma-tf32)"
     "/* simdgroup fragment reduction body begins */"
@@ -192,6 +193,7 @@ test/operations/schedule_mma_matmul.ml [also pins text this scan cannot name]
     "full blocks 8x40 of 8x40"
     "matrix_a, 16, 16, 8"
     "mma.sync.aligned.m16n8k16"
+    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
     "mma.sync.aligned.m16n8k32"
     "narrow storage bridged: a:bfloat16 b:bfloat16"
     "narrow storage bridged: a:fp8 b:fp8"
@@ -199,6 +201,7 @@ test/operations/schedule_mma_matmul.ml [also pins text this scan cannot name]
     "narrow storage bridged: d:half a:half b:half"
     "nvcuda::wmma"
     "precision::tf32"
+    "rocwmma"
     "rocwmma::mma_sync"
     "simdgroup"
     "simdgroup_bfloat8x8"
