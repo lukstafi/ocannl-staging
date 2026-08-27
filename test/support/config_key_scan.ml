@@ -274,6 +274,43 @@ let generated_init_calls_in_source content =
     source in the tree. *)
 let could_call_generated_init content = String.is_substring content ~substring:generated_module
 
+(** Which of [modules] the source actually REFERS TO, as module path components of a real
+    identifier — [Ir.Alloc_census.snapshot ()], [module AC = Ir.Alloc_census], a type
+    [Ir.Alloc_census.t] — deduplicated and in the order they first appear.
+
+    Parsed rather than grepped, for the reason the rest of this module is parsed: a source that
+    names the module in a doc comment, in a string literal, or inside a longer identifier is not
+    reading it, and a derivation built on a substring reads all three as uses. The same argument
+    {!generated_init_calls_in_source} makes, and it applies with more force here, since what is
+    derived from the answer is which focused aggregate a test belongs to (gh-ocannl-783).
+
+    Every longident in the structure is visited, so a reference in an expression, a type, a pattern
+    or a module expression counts alike. What does not count is a module ALIASED to one of these
+    names elsewhere — the same over-reading direction {!receiver_is_generated} accepts, and not
+    worth a binder pass here: an alias is introduced by a binding that names the module, which this
+    already sees. *)
+let module_references_in_source content ~modules =
+  let structure = structure_of content in
+  let found = ref [] in
+  let walk =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! longident lid =
+        (match flatten_module_path lid with
+        | Some path ->
+            List.iter path ~f:(fun component ->
+                if
+                  List.mem modules component ~equal:String.equal
+                  && not (List.mem !found component ~equal:String.equal)
+                then found := component :: !found)
+        | None -> ());
+        super#longident lid
+    end
+  in
+  walk#structure structure;
+  List.rev !found
+
 type label_use = { key : string option; offset : int }
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on

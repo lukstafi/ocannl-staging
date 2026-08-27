@@ -35,4 +35,7 @@ the same runner running this directory's executable does: true
 a runner naming the executable's `(public_name …)` aggregates it as much as one naming its .exe: true
 an executable declared in a `(subdir …)` group is aggregated by the top-level family stanza when the rule that runs it sits at the top level: true
 a marked rule whose only alias is the directory-wide `runtest` has no focused alias to offer, and a family listing `runtest` does not aggregate it: true
+a public name belongs to its own executable, so a rule running the second unit's public name does not aggregate the first: true
+a source that names the instrumentation in a comment, a string and a longer identifier reads none of it, and is no member: true
+a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and is reported without one: true
 a stanza neither derivation calls a member is asked for no family alias: true
