@@ -1056,18 +1056,24 @@ let module_alias_targets structure =
   iterator#structure structure;
   resolve
 
-(** Every name used unqualified in [structure]: what an [open] would bring into scope. *)
-let unqualified_uses structure =
+(** Every name the file binds anywhere: a [let], a parameter, a pattern in a match.
+
+    What this is for is the refusal below, and the direction matters. A name the file binds is a
+    name an unqualified call MIGHT resolve to instead of to the opened module's, and telling which
+    takes the scoping this scan deliberately does not carry -- [open Ir.Low_level] followed by
+    [let to_doc x = local_render x] and then [to_doc value] is valid code calling the local
+    function. Refusing it would fail the repository-wide inventory on a file that hides nothing,
+    and a false refusal is a red build for everyone, where a refusal not made is one more member of
+    the residue the partial marker already covers (Codex round 6 on lukstafi/ocannl-staging#487). *)
+let names_bound_anywhere structure =
   let found = ref [] in
   let iterator =
     object
       inherit Ast_traverse.iter as super
 
-      method! expression e =
-        (match e.pexp_desc with
-        | Pexp_ident { txt = Longident.Lident name; _ } -> found := name :: !found
-        | _ -> ());
-        super#expression e
+      method! pattern p =
+        (match p.ppat_desc with Ppat_var { txt; _ } -> found := txt :: !found | _ -> ());
+        super#pattern p
     end
   in
   iterator#structure structure;
@@ -1118,6 +1124,8 @@ let rejections ~emitters ~path ~contents =
   let extend hidden declaration =
     match opened_name declaration with Some name -> hidden_by name @ hidden | None -> hidden
   in
+  (* Names the file binds for itself are struck from every refusal: see {!names_bound_anywhere}. *)
+  let bound = names_bound_anywhere structure in
   let found = ref [] in
   (* Each open is judged over ITS OWN scope, which is what tells a file that hides a route from one
      that merely opens a module somewhere. Comparing the file's opens against the file's unqualified
@@ -1137,6 +1145,13 @@ let rejections ~emitters ~path ~contents =
                ignore (self#structure_item hidden item : structure_item);
                match item.pstr_desc with
                | Pstr_open declaration -> extend hidden declaration
+               (* An [include] removes the qualifier exactly as an [open] does, and for the rest of
+                  the structure just the same -- it also re-exports, which is beside the point here:
+                  what matters is that [emit] afterwards is the emitter's (Codex round 6). *)
+               | Pstr_include declaration ->
+                   (match module_source_name declaration.pincl_mod with
+                   | Some name -> hidden_by name @ hidden
+                   | None -> hidden)
                | _ -> hidden));
         items
 
@@ -1145,8 +1160,9 @@ let rejections ~emitters ~path ~contents =
         | Pexp_open (declaration, body) ->
             ignore (self#expression (extend hidden declaration) body : expression)
         | Pexp_ident { txt = Longident.Lident name; _ } ->
-            List.iter hidden ~f:(fun (opened, hidden_name) ->
-                if String.equal name hidden_name then found := (opened, name) :: !found);
+            if not (Set.mem bound name) then
+              List.iter hidden ~f:(fun (opened, hidden_name) ->
+                  if String.equal name hidden_name then found := (opened, name) :: !found);
             ignore (super#expression hidden e : expression)
         | _ -> ignore (super#expression hidden e : expression));
         e

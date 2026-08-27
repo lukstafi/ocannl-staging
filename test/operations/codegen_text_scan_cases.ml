@@ -530,6 +530,19 @@ let () =
   let _kparams, doc, _launch = compile_proc ~name [] optimized in
   doc_to_string doc|ocaml},
       1 );
+    ( "an include hides the emitter as an open does",
+      {ocaml|include Ir.Low_level.Canonical_render
+
+let () =
+  emit ~buf policy llc;
+  p "free" (String.is_substring (Buffer.contents buf) ~substring:"s0")|ocaml},
+      1 );
+    ( "a name the file binds for itself is never refused",
+      {ocaml|open Ir.Low_level
+
+let to_doc x = local_render x
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc value)|ocaml},
+      0 );
     ( "an open governs its own scope, not the whole file",
       {ocaml|let render_row row =
   let open Ir.Low_level in

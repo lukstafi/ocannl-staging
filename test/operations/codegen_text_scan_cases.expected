@@ -77,6 +77,8 @@ ok: rejection -- an open in expression position is an open
 ok: rejection -- opening an ALIAS of the emitter's module hides it under a name no origin spells
 ok: rejection -- opening a module a FUNCTOR produced hides the emitter too
 ok: rejection -- opening a functor application directly hides the emitter as surely
+ok: rejection -- an include hides the emitter as an open does
+ok: rejection -- a name the file binds for itself is never refused
 ok: rejection -- an open governs its own scope, not the whole file
 ok: rejection -- a structure-level open governs the items after it
 ok: rejection -- an open inside a nested module dies with it

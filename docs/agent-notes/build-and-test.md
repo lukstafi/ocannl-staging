@@ -639,9 +639,12 @@ that they earn a lookup rather than always-loaded space.
   the read travels along, by the same fixed point taint uses — marks that file's itemisation
   **partial** rather than dropping the fragment silently — the file is listed, the fragment is
   unnamed, and the inventory says which.
-- **An `open` that hides a route is refused, not approximated — over its own scope.** A structure
-  open governs the items after it, `let open M in` its body, and a nested structure's opens die with
-  it. Judging the file's opens against the file's unqualified uses cross-products the two, and a
+- **An `open` (or `include`) that hides a route is refused, not approximated — over its own scope,
+  and never over a name the file binds.** A structure open governs the items after it, `let open M
+  in` its body, and a nested structure's opens die with it. A name the file binds anywhere is struck
+  from every refusal: `open Ir.Low_level` followed by a local `let to_doc` is valid code calling the
+  local function, and refusing it would red the build for everyone, where a refusal not made is one
+  more member of the residue the partial marker covers. Judging the file's opens against the file's unqualified uses cross-products the two, and a
   false refusal on valid code is a red build for everyone (Codex round 3 on #487). Every route is attributed by the
   qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
   like a local function of that name and drops the file out of the census. `Codegen_text_scan.
