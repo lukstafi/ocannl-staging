@@ -1886,7 +1886,9 @@
 ;     that wrapper in the installed directory, and `Emitter_frontier` looks for them there.
 ;
 ; Whether the hand-over was complete is not assumed either way: the wrapper interface declares the
-; library's modules, and the test fails when one of them was not read.
+; library's modules, and the test fails when one of them was not read. Nor can the copies be stale:
+; this executable links `test_utils`, which links `arrayjit.ir` and `arrayjit.utils`, so dune has
+; compiled those interfaces for this very build before the rule runs.
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads goldens, test sources and compiled interfaces.

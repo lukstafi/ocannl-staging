@@ -574,18 +574,45 @@ that they earn a lookup rather than always-loaded space.
   the spelling you are moving, re-run what it names, and promote its own golden last.
 - **A test reaches generated text three ways, and the inventory tags which.** Through
   `Test_utils.Generated` (the freshness-checked artifact reader); by opening `build_files/` itself,
-  which two tests predating that module still do; or **in memory**, calling the emitter or a dump
-  printer and rendering the document — `C_syntax.compile_proc`/`compile_main`,
-  `Low_level.to_doc`/`to_doc_cstyle`. That third route touches no artifact at all, and modelling
-  only the first two made an entire scan root look empty: the `arrayjit` tests cannot link
-  `test_utils` (it is a `neural_nets_lib` library), so every one of them takes it. If you add a way
-  to get emitted text into a test, add it to `Codegen_text_scan.emitter_names` — a route the scan
-  does not know about does not shrink the inventory visibly, it just leaves files off it. That list
-  is the one hand-maintained thing left in the scan, and it is the frontier three of the four review
-  rounds on gh-ocannl-712 found a member of: `compile_proc`/`compile_main` return a document,
-  `to_doc`/`to_doc_cstyle` too, and `Canonical_render.emit` writes into a buffer instead. Deriving
-  the set from what the libraries export, rather than listing it, is the standing follow-up
-  (gh-ocannl-748).
+  which two tests predating that module still do; or **in memory**, calling an emitter and
+  rendering the document it returns, or handing one the buffer to write into —
+  `C_syntax.compile_proc`/`compile_main`, `Low_level.to_doc`/`to_doc_cstyle`,
+  `Canonical_render.emit`. That third route touches no artifact at all, and modelling only the
+  first two made an entire scan root look empty: the `arrayjit` tests cannot link `test_utils` (it
+  is a `neural_nets_lib` library), so every one of them takes it.
+- **The emitter frontier is derived, not listed** (gh-ocannl-748): `Emitter_frontier` reads the
+  compiler libraries' COMPILED interfaces — the `.cmi` files the inventory's rule depends on — and
+  calls a value an emitter when its result is a `PPrint.document` (through tuples and options
+  alike), or it takes a `Buffer.t` to write into, AND it is given something of the libraries to
+  render. Types rather than sources, because `C_syntax.compile_proc` has neither an `.mli` nor a
+  return annotation: its document exists only as an inferred type, and a source scan would have to
+  be told about it — which is the hand-maintained frontier again, the one three of the four review
+  rounds on gh-ocannl-712 found a member of. Add a renderer to a library and it is on the frontier
+  the day it is exported; nothing to update.
+  - The second condition is what keeps generic names out. `Indexing.Doc_helpers.int : int ->
+    PPrint.document` renders no program, and since the scan matches an emitter by NAME behind any
+    qualifier, admitting it made members of every test calling `Bench_args.int` or
+    `Random.State.int` — six files, three of them slow training tests. Those excluded values are
+    PRINTED in the golden as `document combinators`, so a renderer that lands in that bucket
+    (`vec_splat`, which assembles C text out of strings) is a line in a diff rather than an absence.
+  - A derivation fails more quietly than a list: handed nothing, it reports a smaller census
+    cheerfully. What the inventory pins is therefore a relationship — a library's wrapper interface
+    DECLARES its modules (it is a list of aliases), and every declared module must be one whose own
+    interface the run read. Both lists go to stderr. `emitter_frontier_cases` controls the rule on
+    a fixture library whose `.mli` spells every shape and every near miss, and controls the
+    tripwire by deriving from a wrapper alone in a directory of its own.
+  - The rule asks for each library twice, and needs to: the object directory (`glob_files
+    ../../arrayjit/lib/.ir.objs/byte/*.cmi`) is what exists in an ordinary build and what forces the
+    interfaces to be built, while `%{lib:arrayjit.ir:ir.cmi}` is what resolves under `dune build -p
+    neural_nets_lib` — each `.opam` file's build command — where arrayjit's stanzas are disabled and
+    its libraries come from the switch. The member interfaces sit beside that wrapper in the
+    installed directory, and `Emitter_frontier` looks for them there.
+- **An `open` that hides a route is refused, not approximated.** Every route is attributed by the
+  qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
+  like a local function of that name and drops the file out of the census. `Codegen_text_scan.
+  rejections` fails the inventory on that spelling — for the artifact readers and for an emitter's
+  own module alike — rather than tracking opened scopes, which is one more approximation with one
+  more edge. Write the qualified spelling, which is what every test already does.
 - Each golden in that inventory carries the family that must re-record it, and the DECLARING
   extension wins over the markers: a `.hip.expected` spells CUDA's `__global__` launch vocabulary
   and is still HIP. A fragment the scan cannot name at its call site — text a helper computes —
