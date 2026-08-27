@@ -1257,8 +1257,13 @@ let members =
        never a question (gh-ocannl-733). *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site" ~shape:Virtual_acc
       ~peel:Never_a_site ~reference:Owned_cell;
+    (* Virtualization's other spelling, and the same peel story: the accumulator lives in the
+       inlined scope rather than in a cell, so no level holds a self-recurrence and the peel is
+       never consulted. Both virtualization members are {!Never_a_site}, which is the fact that
+       separates them from the schedule mints — those DO meet the peel, at a real reduction site,
+       and are refused there. *)
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
-      ~shape:Where_scope ~peel:Minted_upstream ~reference:Guarded_baseline ~extra:[ " ? " ];
+      ~shape:Where_scope ~peel:Never_a_site ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
        could not fail: a classifier that answered "localized" for everything would pass every other
        member, and the whole table would be measuring nothing. --- *)

@@ -234,8 +234,8 @@ files.
   mint (`Unroll ~materialize`, `Partition`, `Pad`) or by virtualization — which is a different fact
   about the kernel than "codegen localized it". The `reduction_forms` member table declares which of
   the four (`Peeled` / `Minted_upstream` / `No_localization` / `Never_a_site` — the last being
-  virtualization's inlined accumulator, which owns its cell and opens from a zero-init, so there is
-  no memory recurrence and no site at all) each member claims, and
+  BOTH virtualization members, whose accumulator lives in the inlined scope rather than in a cell, so
+  there is no memory recurrence and no site at all) each member claims, and
   `test/operations/peel_census.ml` pins the instrument itself, including that a REFUSING report
   never claims an admitted lane-private guard: separation is settled at the base, so a refusal that
   never reached one leaves that guard `Guard_lane_private_unresolved`.

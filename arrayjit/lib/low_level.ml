@@ -5336,6 +5336,9 @@ let has_accumulating_cell (llc : t) : bool =
         Tnode.equal tn tn'
         && Array.length idcs = Array.length idcs'
         && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
+    (* A scope NESTED inside a larger value — [a[i] = f(scope { … a[i] … })] — is a recurrence like
+       any other read; the scope that IS the written value is the case above, judged by its shape.
+    *)
     | Local_scope { body; _ } -> stmt_reads_cell ~tn ~idcs body
     | Get_dynamic { dyn_value; _ } -> arg dyn_value
     | Ternop (_, a, b, c) -> arg a || arg b || arg c
@@ -5353,6 +5356,13 @@ let has_accumulating_cell (llc : t) : bool =
     match llc with
     | Seq (a, b) -> loop a || loop b
     | If { body; _ } | For_loop { body; _ } -> loop body
+    (* A scope over the written cell is judged by {!scope_accum_updates}, not by whether it reads
+       that cell: EVERY scope opens by loading the cell it will write back, so a plain virtualized
+       computation reads its own cell in its initializer and would count as a recurrence on that
+       basis alone (Codex P2, round 3). What makes it one is the rest of the body carrying a
+       scope-local accumulation, which is exactly what the recognizer asks. *)
+    | Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; _ } ->
+        Option.is_some (scope_accum_updates ~tn ~idcs ~id sbody)
     | Set { tn; idcs; llsc; _ } -> reads_cell ~tn ~idcs llsc
     | _ -> false
   in
