@@ -2463,6 +2463,9 @@ type family_probe_source =
   | Signature_open  (** the qualifier opened inside a signature, then a leaf named unqualified *)
   | Recursive_module  (** the qualifier's name taken by a recursive module *)
   | Rebound_wrapper  (** an alias of the qualifier, rebound to a wrapper that overrides the leaf *)
+  | Recursive_group  (** a recursive group binding an alias BEFORE it takes the qualifier's name *)
+  | Include_then_include  (** the qualifier included, and then somebody else included after it *)
+  | Signature_alias  (** a manifest module alias inside a signature, used by a later declaration *)
   | Neither
 
 let family_probe = function
@@ -2537,6 +2540,17 @@ let family_probe = function
       (* The name first aliases the qualifier and is then rebound to a wrapper that overrides the
          leaf: the second binding is what stands. *)
       "module I = Ir\n\nmodule I = struct\n  include Ir\n\n  module Alloc_census = Vendor.Alloc_census\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Recursive_group ->
+      (* Every name of the group is in scope in every body, so `I` here is bound to the group's own
+         `Ir`, not to the qualifier (Codex P2, round 17). *)
+      "module rec I : sig\n  val x : int\nend = Ir\n\nand Ir : sig\n  val x : int\nend = struct\n  let x = 0\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Include_then_include ->
+      (* The later include decides the leaf, and which leaves it brings cannot be read off the tree
+         -- so the wrapper stops naming the qualifier (Codex P2, round 17). *)
+      "module I = struct\n  include Ir\n\n  include Vendor\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Signature_alias ->
+      (* A manifest alias binds, so the later declaration is a real reference. *)
+      "module type S = sig\n  module I = Ir\n\n  val x : I.Alloc_census.t\nend\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2692,6 +2706,11 @@ let family_control () =
   let signature_open = run ~probe:Signature_open ~metal:false ~lifecycle:true ~family:None () in
   let recursive_module = run ~probe:Recursive_module ~metal:false ~lifecycle:true ~family:None () in
   let rebound_wrapper = run ~probe:Rebound_wrapper ~metal:false ~lifecycle:true ~family:None () in
+  let recursive_group = run ~probe:Recursive_group ~metal:false ~lifecycle:true ~family:None () in
+  let include_then_include =
+    run ~probe:Include_then_include ~metal:false ~lifecycle:true ~family:None ()
+  in
+  let signature_alias = run ~probe:Signature_alias ~metal:false ~lifecycle:true ~family:None () in
   (* And a `(test)` stanza as the runner of a lifecycle executable. *)
   let test_stanza_runner =
     run ~shape:Test_stanza_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
@@ -2784,6 +2803,9 @@ let family_control () =
   let signature_open_ok = omitted_ok lifecycle_family.family_alias signature_open in
   let recursive_module_ok = listed_ok recursive_module in
   let rebound_wrapper_ok = listed_ok rebound_wrapper in
+  let recursive_group_ok = listed_ok recursive_group in
+  let include_then_include_ok = listed_ok include_then_include in
+  let signature_alias_ok = omitted_ok lifecycle_family.family_alias signature_alias in
   let test_stanza_runner_ok = listed_ok test_stanza_runner in
   let sibling_defaults_ok = listed_ok sibling_defaults in
   let runner_absolute_ok = omitted_ok lifecycle_family.family_alias runner_absolute in
@@ -2840,6 +2862,9 @@ let family_control () =
   if not signature_open_ok then report "an open inside a signature" signature_open;
   if not recursive_module_ok then report "a recursive module of the qualifier's name" recursive_module;
   if not rebound_wrapper_ok then report "an alias rebound to a wrapper" rebound_wrapper;
+  if not recursive_group_ok then report "a recursive group taking the qualifier's name" recursive_group;
+  if not include_then_include_ok then report "an include after the qualifier's" include_then_include;
+  if not signature_alias_ok then report "a manifest alias in a signature" signature_alias;
   if not test_stanza_runner_ok then report "a test stanza as the runner" test_stanza_runner;
   if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
   if not runner_absolute_ok then report "an absolute runner path" runner_absolute;
@@ -2993,6 +3018,17 @@ let family_control () =
     "rebinding an alias replaces what it meant, so the earlier binding does not keep the later \
      reference alive"
     rebound_wrapper_ok;
+  Verdict.p
+    "every name of a recursive group is in scope in every body, so an alias declared before the \
+     group takes `Ir` is bound to the group's"
+    recursive_group_ok;
+  Verdict.p
+    "a wrapper that includes the qualifier and then includes somebody else stops naming it, since \
+     which leaves the second include brings cannot be read off the tree"
+    include_then_include_ok;
+  Verdict.p
+    "`module I = Ir` inside a signature binds, so a later `I.Alloc_census.t` is a reference"
+    signature_alias_ok;
   Verdict.p
     "an executable run by a `(test)` stanza's custom action is aggregated through the \
      `runtest-<name>` dune generates for that test"

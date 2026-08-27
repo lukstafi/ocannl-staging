@@ -393,8 +393,13 @@ let module_references_in_source content ~paths =
           List.fold items ~init:([], []) ~f:(fun (paths, overridden) item ->
               match item.pstr_desc with
               | Pstr_include { pincl_mod = inner; _ } ->
-                  let inner_paths, inner_overridden = exports inner in
-                  (paths @ inner_paths, inner_overridden)
+                  (* The LAST include decides, and it decides everything: which leaves a later
+                     include supersedes cannot be read off the parse tree, so `struct include Ir
+                     include Vendor end` is Vendor's and the wrapper stops naming the qualifier
+                     (Codex P2, round 17). That is the loud direction -- a reference through such a
+                     wrapper is reported as no member rather than credited. *)
+                  ignore paths;
+                  exports inner
               | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
                   (paths, name :: overridden)
               | Pstr_recmodule bindings ->
@@ -465,6 +470,11 @@ let module_references_in_source content ~paths =
                bodies are walked (Codex P2, round 16). *)
             (match item.pstr_desc with
             | Pstr_recmodule bindings ->
+                (* EVERY name first: all of them are in scope in all the bodies, so resolving one
+                   member's target before its neighbours are bound would resolve it against the
+                   outer meaning of a name the group takes (Codex P2, round 17). *)
+                List.iter bindings ~f:(fun binding ->
+                    Option.iter binding.pmb_name.txt ~f:shadow_name);
                 List.iter bindings ~f:(fun binding ->
                     bind_module_expr binding.pmb_name.txt binding.pmb_expr)
             | _ -> ());
@@ -560,6 +570,13 @@ let module_references_in_source content ~paths =
             | _ -> ());
             self#signature_item item;
             match item.psig_desc with
+            (* A manifest alias in a signature binds its name to the path it names, exactly as a
+               structure's `module I = Ir` does; only a declaration with no manifest is an opaque
+               module that merely takes the name (Codex P2, round 17). *)
+            | Psig_module
+                { pmd_name = { txt = Some name; _ }; pmd_type = { pmty_desc = Pmty_alias { txt; _ }; _ }; _ }
+              ->
+                Option.iter (flatten_module_path txt) ~f:(bind_path (Some name))
             | Psig_module { pmd_name = { txt = Some name; _ }; _ }
             | Psig_modsubst { pms_name = { txt = name; _ }; _ } ->
                 shadow_name name

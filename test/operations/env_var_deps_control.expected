@@ -60,6 +60,9 @@ an include AFTER a definition supersedes it, so the wrapper's leaf is the qualif
 an `open` inside a signature reaches the items after it, so `module AC = Alloc_census` there is a reference: true
 a recursive module taking the qualifier's name shadows it, in its own group and after it: true
 rebinding an alias replaces what it meant, so the earlier binding does not keep the later reference alive: true
+every name of a recursive group is in scope in every body, so an alias declared before the group takes `Ir` is bound to the group's: true
+a wrapper that includes the qualifier and then includes somebody else stops naming it, since which leaves the second include brings cannot be read off the tree: true
+`module I = Ir` inside a signature binds, so a later `I.Alloc_census.t` is a reference: true
 an executable run by a `(test)` stanza's custom action is aggregated through the `runtest-<name>` dune generates for that test: true
 two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
 an absolute path ending in the local executable's name is not the local executable: true
