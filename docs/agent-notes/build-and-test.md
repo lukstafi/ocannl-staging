@@ -626,6 +626,35 @@ that they earn a lookup rather than always-loaded space.
     literally: the alias must begin with the golden's name, since what a reader has in hand when
     they reach for the alias is the golden that just failed, and an alias that renames it is one
     they construct empty.
+- **A `(test)` stanza can only diff the one `<name>.expected` beside it**, so a test whose output
+  legitimately differs per backend converts to an `(executable)` plus a diff rule that reads the
+  resolved backend name — `(rule (target ocannl_backend.txt) … (run %{bin:ocannl_read_config}
+  "--read=backend"))`, whose reader normalizes the deprecated aliases so `multicore_cc` finds the
+  `multidev_cc` golden — and diffs `<name>-%{read:ocannl_backend.txt}.expected`. That is the
+  gh-ocannl-700 shape (`micrograd_demo_logging-<backend>-0-0.log.expected`), and gh-ocannl-787 gave
+  it to `test/training/transformer_names`, whose sampled names are exact by construction per
+  SCHEDULER: `Multidev` differs from `Sync` in execution order and device split, so the training
+  trajectory and the sampling RNG state diverge and no promotion serves both. Two mechanics come
+  with the conversion. `%{read:…}` works in a rule's `deps` as well as its action, which matters
+  because the action must be wrapped in `(no-infer …)` — otherwise `with-stdout-to <name>.actual`
+  registers a target and plain `dune build` (@all) runs the training that the `(test)` stanza only
+  ran under `runtest` — and `no-infer` also drops the dependency `diff` would have inferred on its
+  golden, so the golden goes in `deps` by hand. And the new `runtest-<name>` alias is a build entry
+  point, so the directory needs a `runtest-env_spelling_gate` rule for it to depend on and an
+  `(alias (name runtest) (deps (alias runtest-<name>)))` stanza, both of which `env_var_deps`
+  checks.
+- Splitting a golden per backend is a decision about WHAT the golden holds, not a formatting choice:
+  split only where a scheduler's freedom makes cross-backend determinism impossible, and only for
+  output worth keeping pinned. gh-ocannl-787 kept `transformer_names`' sampled names pinned rather
+  than relocating them under the gh-ocannl-725 rule, because that rule's own standard is that the
+  stdout claim replacing a relocated value must FAIL on a wrong value, and no cheap claim over
+  sampled names does — "non-empty, from the training alphabet, properly terminated" passes on an
+  untrained model sampling gibberish, while the name-likeness of `holern`/`cern` is the legible
+  canary that the model learned name structure. The cost of the split is a golden only some machine
+  re-records: cc, multidev_cc and metal are recorded on the reference Mac, cuda and hip only on the
+  sweep's GPU boxes, so a codegen change that moves the trajectory leaves those two stale until the
+  daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
+  multidev_cc leg exists.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization

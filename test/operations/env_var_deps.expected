@@ -131,6 +131,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/ppx/dune                            @runtest-test_ppx_name_conflict-ppx
   test/ppx/dune                            @runtest-test_ppx_op-ppx
   test/training/dune                       @runtest
+  test/training/dune                       @runtest-env_spelling_gate
+  test/training/dune                       @runtest-transformer_names
   test/training/dune                       @slow
   test/training/dune                       @slow-cifar_conv
   test/training/dune                       @slow-env_spelling_gate
