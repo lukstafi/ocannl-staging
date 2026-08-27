@@ -39,6 +39,13 @@
   device ordinal, while `Backend_intf.device.device_id` is a process-global counter across all
   backends, so the old name answered a different question than it asked on multi-backend runs. The
   accessor is now `Context.ordinal`. No deprecated alias.
+- The gh-ocannl-498 memory-budget planner moves out of `Context` into its own
+  `arrayjit.memory_budget` library (gh-ocannl-776): `Context.plan_memory_budget` is
+  `Memory_budget.fit`, `Context.memory_budget` is `Memory_budget.t`, `Context.budget_plan` is
+  `Memory_budget.plan`, and `Context.footprint` / `Context.compare_relief_ratio` move across
+  unchanged. It is a deterministic planning pass over `Context`'s analyze-only surface, so it sat in
+  `context.mli` only by history. `test/operations/memory_budget` is renamed
+  `memory_budget_planner`, so that the test executable's module does not shadow the library's.
 
 ## [1.0.1] -- 2026-08-26
 

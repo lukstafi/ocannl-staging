@@ -55,7 +55,7 @@ val score_footprint :
 
     Scored over the routine's whole in-context node set rather than a context's allocation delta, so
     the number depends only on the code and the placements — the precondition for a deterministic
-    selector ({!Context.plan_memory_budget}). It is therefore a {e model} of the peak, not a
+    selector ([Memory_budget.fit]). It is therefore a {e model} of the peak, not a
     prediction of {!Context.get_used_memory}: the real allocator skips nodes a prior context already
     holds, and the driver page-rounds pool bases. Enumeration is canonical (by {!Ir.Tnode.uid}) so
     the greedy coloring is reproducible across processes. *)

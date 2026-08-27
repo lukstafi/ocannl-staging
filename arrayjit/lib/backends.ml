@@ -249,7 +249,7 @@ type footprint = {
 
    Scored over the routine's whole in-context node set, not a context's allocation delta, so the
    number depends only on the code and the placements -- the precondition for a deterministic budget
-   selector ([Context.plan_memory_budget]) whose choices do not drift with how much of the graph a
+   selector ([Memory_budget.fit]) whose choices do not drift with how much of the graph a
    particular context has already allocated. It is therefore a MODEL of the peak, not a prediction
    of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
    pool bases are page-rounded by the driver.

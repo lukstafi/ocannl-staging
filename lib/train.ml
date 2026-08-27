@@ -1325,7 +1325,7 @@ let memory_budget_setting () =
   in
   match String.lowercase raw with
   | "" | "0" | "off" | "false" | "none" -> None
-  | "minimize" -> Some Context.Minimize
+  | "minimize" -> Some Memory_budget.Minimize
   | lower ->
       let lower = Option.value (String.chop_suffix lower ~suffix:"b") ~default:lower in
       let mult, digits =
@@ -1343,18 +1343,18 @@ let memory_budget_setting () =
       (* The suffix scaling is where a syntactically fine setting turns into nonsense: "5000000000G"
          parses, then wraps to a negative or tiny target that the planner would honor as an
          unreachably tight budget and rematerialize hard against. Reject instead. *)
-      if n <= 0 || n > Int.max_value / mult then bad () else Some (Context.Bytes (n * mult))
+      if n <= 0 || n > Int.max_value / mult then bad () else Some (Memory_budget.Bytes (n * mult))
 
 (** gh-ocannl-498: plan [comp]'s inlining decision vector against a device-memory budget and return
     the context to compile it from. [budget] overrides the config key [memory_budget]; with neither,
     this is the identity on [ctx] and returns [None] — the default-off path does not lower, score or
-    decide anything. See {!Context.plan_memory_budget} for what the planner does and what it
-    requires (config [buffer_aliasing]). *)
+    decide anything. See {!Memory_budget.fit} for what the planner does and what it requires (config
+    [buffer_aliasing]). *)
 let fit_memory_budget ?budget ?max_candidates ?name ctx comp bindings =
   match match budget with Some _ as b -> b | None -> memory_budget_setting () with
   | None -> (ctx, None)
   | Some budget ->
-      let ctx, plan = Context.plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings in
+      let ctx, plan = Memory_budget.fit ?name ?max_candidates ~budget ctx comp bindings in
       (ctx, Some plan)
 
 (** Dumps [comp] as a [.cd] file in the build directory, for the [?output_cd_file] argument of
