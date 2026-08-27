@@ -44,8 +44,10 @@ let commit ~staging ~path =
   in
   attempt 1
 
+(* No [ensure_dir] here: publishing is not directory management, and creating one silently would
+   turn a save to a mistyped path into a save that succeeds somewhere nobody looks. A caller whose
+   directory may be missing calls [ensure_dir] first, as [Schedule_cache.store] does. *)
 let publish ?before_commit ~path ~f () =
-  ensure_dir (Stdlib.Filename.dirname path);
   let staging = staging_path path in
   match
     let result = f staging in

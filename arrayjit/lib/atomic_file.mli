@@ -54,6 +54,10 @@ val publish : ?before_commit:(unit -> unit) -> path:string -> f:(string -> 'a) -
     then renames it over [path] and returns [f]'s result. [f] must leave no handle open on the
     staging file when it returns.
 
+    [path]'s directory must exist — publishing is not directory management, and creating one here
+    would turn a write to a mistyped path into a success nobody looks at. Call {!ensure_dir} first
+    where the directory is the caller's to create.
+
     [?before_commit] runs after [f] and before the rename. It is the seam a caller uses to observe
     or to fail the window in which the payload is staged but not yet committed — the resource
     fault-injection points do exactly that.
