@@ -28,6 +28,13 @@
   `update_gate` arms -- the ppx hoists inline declarations above the enclosing `match`/`if`, so the
   arms differ only where gating changes the emitted assignment.
 
+- `?lowered_transform` and `?lowered_transforms` on `Context.compile` / `Context.compile_outcome` /
+  backend `compile` are unified into one list-returning `?lowered_transform :
+  Low_level.optimized -> Low_level.optimized list` (gh-ocannl-768). Their mutual exclusion was a
+  runtime `Invalid_argument` threaded through three layers; it is now impossible to express. A
+  whole-routine transform returns a singleton (`fun o -> [ f o ]`), a fissioning one returns one
+  element per kernel segment.
+
 ## [1.0.1] -- 2026-08-26
 
 > Release note: theme — consolidation after 1.0: making a green result mean what it says. This is

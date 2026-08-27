@@ -71,7 +71,7 @@ let () =
   let serial_comp = named "mmp_naive" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_naive = nonzero "cpupack_naive" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -122,7 +122,7 @@ let () =
   let transform opt = Sched.apply (pack_schedule opt) opt in
   let ctx_a = Context.auto () in
   let ctx_a, routine_a =
-    Context.compile ~lowered_transform:transform ctx_a pack_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a pack_comp Ir.Indexing.Empty
   in
   let ctx_a = Context.run ctx_a routine_a in
   let got_packed = Context.get_values ctx_a mc1.Tensor.value in

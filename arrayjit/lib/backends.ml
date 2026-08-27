@@ -822,8 +822,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
   let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
 
-  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms ?prelowered
-      bindings (comp : Assignments.comp) : code =
+  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?prelowered bindings
+      (comp : Assignments.comp) : code =
     let (name : string), (lowered : Low_level.optimized) =
       match prelowered with
       | None -> lower_assignments optim_ctx ?name bindings comp.asgns
@@ -842,16 +842,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let limits = Device.hardware_limits () in
     let lowereds =
       Schedule_outcome.tag Schedule_outcome.Transform (fun () ->
-          match (lowered_transform, lowered_transforms) with
-          | Some _, Some _ ->
-              invalid_arg
-                "Backend.compile: pass at most one of lowered_transform, lowered_transforms"
-          | Some transform, None -> [ transform lowered ]
-          | None, Some transforms -> (
-              match transforms lowered with
-              | [] -> invalid_arg "Backend.compile: lowered_transforms returned an empty list"
+          match lowered_transform with
+          | Some transform -> (
+              (* The transform returns the routine's kernel segments: a singleton for a
+                 whole-routine schedule, one element per segment for a fissioning one. *)
+              match transform lowered with
+              | [] -> invalid_arg "Backend.compile: lowered_transform returned an empty list"
               | segments -> segments)
-          | None, None ->
+          | None ->
               (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
                  (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
                  pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may

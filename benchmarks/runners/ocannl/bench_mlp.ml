@@ -260,7 +260,7 @@ let () =
                   (Ir.Ops.prec_string
                      (Stdlib.Lazy.force fc.Ir.Low_level.fc_tn.Ir.Tnode.storage_prec))
                   fc.Ir.Low_level.fc_recompute_cost);
-            o)
+            [ o ])
           ctx comp bindings
       with
       | (_ : Context.t), (_ : Context.routine) -> ()

@@ -93,8 +93,7 @@ val advances_to_next_backend : exn -> bool
 
 val compile :
   ?name:string ->
-  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
-  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   ?prelowered:Ir.Low_level.optimized ->
   t ->
   Ir.Assignments.comp ->
@@ -108,10 +107,11 @@ val compile :
     {!Ir.Assignments.get_name_exn}, which raises if the comp contains no block comment.
     [lowered_transform] rewrites the optimized lowered code before backend compilation — the seam
     for schedule transforms and for hand-annotating hardware axis types in tests
-    (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural seam for transforms
-    that split the routine into several kernels (fission): the returned segments run back-to-back on
-    the routine's stream with device-side events at the boundaries, like
-    {!Ir.Schedule.maybe_default_schedules}' segments. Pass at most one of the two.
+    (docs/proposals/axis-types-for-loops.md). It returns the routine's kernel segments, so a
+    whole-routine transform returns a singleton ([fun o -> [ f o ]]) and a transform that splits the
+    routine into several kernels (fission) returns one element per segment; the segments run
+    back-to-back on the routine's stream with device-side events at the boundaries, like
+    {!Ir.Schedule.maybe_default_schedules}' segments. It must return a non-empty list.
 
     [prelowered] (gh-ocannl-562) is a test seam: it replaces this compile's lowering of [comp] with
     the given optimized code, which then drives codegen AND the analysis layer (I/O classification,
@@ -123,8 +123,7 @@ val compile :
 
 val compile_outcome :
   ?name:string ->
-  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
-  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   ?prelowered:Ir.Low_level.optimized ->
   provenance:Ir.Schedule_outcome.provenance ->
   ?candidate:string ->

@@ -192,7 +192,7 @@ let phase3 () =
     (rejected (fun () ->
          ignore
            (Context.compile ~name:"pls_impure_scope" ~prelowered:opt
-              ~lowered_transform:(fun o -> o)
+              ~lowered_transform:(fun o -> [ o ])
               (Context.auto ()) Ir.Assignments.empty_comp Ir.Indexing.Empty)))
 
 (* The other three ways a body can reach outside itself. Each would make the placement of a scope
@@ -355,7 +355,7 @@ let phase6 () =
     (rejected (fun () ->
          ignore
            (Context.compile ~name:"pls_impure_siblings" ~prelowered:opt
-              ~lowered_transform:(fun o -> o)
+              ~lowered_transform:(fun o -> [ o ])
               (Context.auto ()) Ir.Assignments.empty_comp Ir.Indexing.Empty)))
 
 let () =

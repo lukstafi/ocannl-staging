@@ -81,7 +81,9 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let run ?ctx ~name ~transform comp =
   let ctx = match ctx with Some ctx -> ctx | None -> Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx (named name comp) Ir.Indexing.Empty
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx (named name comp) Ir.Indexing.Empty
   in
   Context.run ctx routine
 

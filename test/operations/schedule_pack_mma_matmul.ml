@@ -136,7 +136,9 @@ let run_composed ~name ~a ~b (out : Tensor.t) =
   let comp = named name (Train.forward out) in
   let transform opt = Sched.apply (composed_schedule ~a ~b opt) opt in
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   let ctx = Context.run ctx routine in
   Context.get_values ctx out.Tensor.value
 
@@ -144,7 +146,7 @@ let run_serial ~name (out : Tensor.t) =
   let comp = named name (Train.forward out) in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx comp Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   nonzero name (Context.get_values ctx out.Tensor.value)
@@ -219,7 +221,9 @@ let () =
   let transform opt = if on_cpu then Sched.apply (grid_schedule opt) opt else opt in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named "pmm_grid_mma" (Train.forward gc1))
       Ir.Indexing.Empty
   in
@@ -278,7 +282,9 @@ let () =
   let transform opt = if on_cpu then Sched.apply (par_packed_schedule opt) opt else opt in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named "pmm_par_packed" (Train.forward pp1))
       Ir.Indexing.Empty
   in
@@ -349,7 +355,9 @@ let () =
   let transform opt = if on_cpu then Sched.apply (gridpack_schedule opt) opt else opt in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named "pmm_gridpack" (Train.forward hc1))
       Ir.Indexing.Empty
   in
@@ -426,7 +434,9 @@ let () =
   let transform opt = if on_cpu then Sched.apply (mixed_schedule opt) opt else opt in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named "pmm_mixed" (Train.forward mx1))
       Ir.Indexing.Empty
   in

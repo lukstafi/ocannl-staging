@@ -82,7 +82,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun o ->
           r := Some (o, SC.canonicalize ~static_indices o);
-          o)
+          [ o ])
         cctx step bindings
     in
     Option.value_exn !r

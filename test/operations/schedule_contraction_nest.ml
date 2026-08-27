@@ -76,7 +76,7 @@ let values ctx t = Context.get_values ctx t.Tensor.value
 let run_serial ~name fwd outs =
   let ctx, routine =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       (Context.auto ()) (named name fwd) Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
@@ -88,7 +88,7 @@ let capture fwd =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) fwd Ir.Indexing.Empty
   in
   Option.value_exn ~here:[%here] !captured
@@ -158,7 +158,7 @@ let execute_seeds ~tag ~routine ~fwd ~outs ~wants ~close seeds =
       match
         let ctx, r =
           Context.compile
-            ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
+            ~lowered_transform:(fun o -> [ Sched.apply (Autotune.sketch_schedule ~p:q o) o ])
             (Context.auto ()) fwd Ir.Indexing.Empty
         in
         let ctx = Context.run ctx r in
@@ -273,7 +273,7 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     let q = List.hd_exn gpu_seeds in
     let _ctx, _r =
       Context.compile
-        ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
+        ~lowered_transform:(fun o -> [ Sched.apply (Autotune.sketch_schedule ~p:q o) o ])
         (Context.auto ()) fwd Ir.Indexing.Empty
     in
     Generated.assert_emits ~routine:(tag ^ "_sched") ~contains:shared

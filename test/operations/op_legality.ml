@@ -204,7 +204,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun o ->
         captured := Some o;
-        o)
+        [ o ])
       ctx mm_comp Idx.Empty
   in
   let mm_opt = Option.value_exn !captured in

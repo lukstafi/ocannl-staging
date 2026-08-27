@@ -87,7 +87,7 @@ let () =
   let ctx_a = Context.auto () in
   let ctx_a, routine_a =
     Context.compile
-      ~lowered_transform:(annotate ~outer_axis:LL.Grid ~inner_axis:LL.Workgroup)
+      ~lowered_transform:(fun o -> [ (annotate ~outer_axis:LL.Grid ~inner_axis:LL.Workgroup) o ])
       ctx_a annot_comp Ir.Indexing.Empty
   in
   let ctx_a = Context.run ctx_a routine_a in
@@ -119,7 +119,7 @@ let () =
   let ctx_u = Context.auto () in
   let ctx_u, routine_u =
     Context.compile
-      ~lowered_transform:(annotate ~outer_axis:LL.Serial ~inner_axis:LL.Unrolled)
+      ~lowered_transform:(fun o -> [ (annotate ~outer_axis:LL.Serial ~inner_axis:LL.Unrolled) o ])
       ctx_u unroll_comp Ir.Indexing.Empty
   in
   let ctx_u = Context.run ctx_u routine_u in
@@ -161,7 +161,9 @@ let () =
   match
     try
       ignore
-        (Context.compile ~lowered_transform:annotate_mixed ctx_m mixed_comp Ir.Indexing.Empty
+        (Context.compile
+           ~lowered_transform:(fun o -> [ annotate_mixed o ])
+           ctx_m mixed_comp Ir.Indexing.Empty
           : Context.t * Context.routine);
       None
     with Invalid_argument msg -> Some msg

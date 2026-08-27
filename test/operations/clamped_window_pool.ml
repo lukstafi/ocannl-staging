@@ -96,7 +96,11 @@ let () =
     Train.set_materialized x.Tensor.value;
     Train.set_materialized y.Tensor.value;
     let ctx, routine =
-      Context.compile ~lowered_transform:transform ctx (named name (Train.forward y)) Idx.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx
+        (named name (Train.forward y))
+        Idx.Empty
     in
     let ctx = Context.run ctx routine in
     (x, y, Context.get_values ctx y.Tensor.value)
@@ -159,7 +163,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         bwd_census := census opt.LL.llc;
-        opt)
+        [ opt ])
       ctx update Idx.Empty
   in
   let ctx = Context.run ctx routine in

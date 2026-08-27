@@ -146,7 +146,7 @@ let () =
   let serial_comp = named "pipe_mm_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "pd_serial" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -240,7 +240,7 @@ let () =
       applied
     in
     let ctx = Context.auto () in
-    Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
   in
   let%op mc0b = ma * mb in
   let%op mc1 = ma * mb in
@@ -433,7 +433,9 @@ let () =
       opt
     in
     ignore
-      (Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+      (Context.compile
+         ~lowered_transform:(fun o -> [ transform o ])
+         (Context.auto ()) comp Ir.Indexing.Empty
         : Context.t * Context.routine)
   in
   expect_invalid "pipeline_depth 0 is rejected" ~substring:"pipeline_depth must be >= 1"
@@ -562,7 +564,8 @@ let () =
   let declines_at_codegen ~feature ~substring transform =
     let%op mcr = ma * mb in
     match
-      Context.compile_outcome ~lowered_transform:(transform ~out:mcr.Tensor.value)
+      Context.compile_outcome
+        ~lowered_transform:(fun o -> [ (transform ~out:mcr.Tensor.value) o ])
         ~provenance:SO.Candidate ~candidate:feature (Context.auto ())
         (named ("pipe_mm_" ^ feature) (Train.forward mcr))
         Ir.Indexing.Empty
@@ -589,7 +592,7 @@ let () =
       ~substring:"outside its rotor loop" (fun () ->
         ignore
           (Context.compile
-             ~lowered_transform:(rotorless_transform ~out:mcr2.Tensor.value)
+             ~lowered_transform:(fun o -> [ (rotorless_transform ~out:mcr2.Tensor.value) o ])
              (Context.auto ())
              (named "pipe_mm_rotorless_user" (Train.forward mcr2))
              Ir.Indexing.Empty
@@ -653,7 +656,9 @@ let () =
   in
   let%op mc4 = ma * mb in
   ignore
-    (Context.compile ~lowered_transform:seed_transform (Context.auto ())
+    (Context.compile
+       ~lowered_transform:(fun o -> [ seed_transform o ])
+       (Context.auto ())
        (named "pipe_mm_seeds" (Train.forward mc4))
        Ir.Indexing.Empty
       : Context.t * Context.routine);

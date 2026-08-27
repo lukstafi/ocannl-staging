@@ -120,7 +120,9 @@ let make_pair n =
 
 let run_forward ?(transform = fun opt -> opt) comp =
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   Context.run ctx routine
 
 (* --- 1. Both operands hoisted, dividing extents --- *)
@@ -213,7 +215,9 @@ let () =
       opt
     in
     let (_ : Context.t * _) =
-      Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        (Context.auto ()) comp Ir.Indexing.Empty
     in
     !d
   in

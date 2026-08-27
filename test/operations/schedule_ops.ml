@@ -58,7 +58,9 @@ let () =
     let%op c = a + b in
     let comp = named name (Train.forward c) in
     let ctx = Context.auto () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let ctx = Context.run ctx routine in
     Context.get_values ctx c.Tensor.value
   in
@@ -147,7 +149,7 @@ let () =
       ~lowered_transform:(fun opt ->
         let sched = Sched.default_gpu ~min_parallel:1 opt in
         sched_len := List.length sched;
-        Sched.apply sched opt)
+        [ Sched.apply sched opt ])
       ctx combo Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
@@ -181,7 +183,9 @@ let () =
     let%op mc = ma * mb in
     let comp = named name (Train.forward mc) in
     let ctx = Context.auto () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let ctx = Context.run ctx routine in
     Context.get_values ctx mc.Tensor.value
   in

@@ -162,7 +162,9 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
         match
           try
             ignore
-              (Context.compile ~lowered_transform:transform ctx
+              (Context.compile
+                 ~lowered_transform:(fun o -> [ transform o ])
+                 ctx
                  (named (name ^ "_mma") (Train.forward t0))
                  Ir.Indexing.Empty
                 : Context.t * Context.routine);
@@ -179,7 +181,7 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
       let ctx_s = Context.auto () in
       let ctx_s, routine_s =
         Context.compile
-          ~lowered_transform:(fun opt -> opt)
+          ~lowered_transform:(fun opt -> [ opt ])
           ctx_s
           (named (name ^ "_serial") (Train.forward serial))
           Ir.Indexing.Empty
@@ -189,7 +191,9 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
     in
     with_target @@ fun t0 transform ->
     let ctx, routine =
-      Context.compile ~lowered_transform:transform (Context.auto ())
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        (Context.auto ())
         (named (name ^ "_mma") (Train.forward t0))
         Ir.Indexing.Empty
     in

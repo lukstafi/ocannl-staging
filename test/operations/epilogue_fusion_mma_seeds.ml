@@ -63,7 +63,7 @@ let census tag ~m ~n ~k =
     Context.compile
       ~lowered_transform:(fun opt ->
         capture := Some opt;
-        opt)
+        [ opt ])
       ctx fwd Ir.Indexing.Empty
   in
   let opt = Option.value_exn ~here:[%here] !capture in
@@ -116,7 +116,7 @@ let census tag ~m ~n ~k =
         let ctx = Context.auto () in
         let ctx, routine =
           Context.compile
-            ~lowered_transform:(fun opt -> Sched.apply (Autotune.sketch_schedule ~p:q opt) opt)
+            ~lowered_transform:(fun opt -> [ Sched.apply (Autotune.sketch_schedule ~p:q opt) opt ])
             ctx fwd Ir.Indexing.Empty
         in
         let ctx = Context.run ctx routine in

@@ -132,8 +132,8 @@ let () =
       let comp = Train.forward out in
       let outcome =
         Context.compile_outcome ~name:"hip_scratch_over_budget"
-          ~lowered_transform:
-            (over_budget_transform ~out_tn:out.Tensor.value ~src_tn:src.Tensor.value ~rows)
+          ~lowered_transform:(fun o ->
+            [ (over_budget_transform ~out_tn:out.Tensor.value ~src_tn:src.Tensor.value ~rows) o ])
           ~provenance:SO.User_schedule ~candidate:"over-budget scratch" ctx comp Idx.Empty
       in
       match outcome with

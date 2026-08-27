@@ -246,7 +246,7 @@ let exec ~name ~n (llc, dst, src) ~src_vals =
   let ctx = Context.set_values ctx src src_vals in
   let ctx, routine =
     Context.compile ~name
-      ~lowered_transform:(fun o -> { o with LL.llc = LL.Seq (LL.Zero_out dst, llc) })
+      ~lowered_transform:(fun o -> [ { o with LL.llc = LL.Seq (LL.Zero_out dst, llc) } ])
       ctx comp Idx.Empty
   in
   let ctx = Context.run ctx routine in

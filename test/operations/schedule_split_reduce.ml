@@ -163,9 +163,13 @@ let run_forward ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name
   let ctx, routine =
     match transforms with
     | None ->
-        Context.compile ~lowered_transform:transform ctx (named name (Train.forward t)) Idx.Empty
+        Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          ctx
+          (named name (Train.forward t))
+          Idx.Empty
     | Some transforms ->
-        Context.compile ~lowered_transforms:transforms ctx (named name (Train.forward t)) Idx.Empty
+        Context.compile ~lowered_transform:transforms ctx (named name (Train.forward t)) Idx.Empty
   in
   let ctx = Context.run ctx routine in
   Context.get_values ctx t.Tensor.value
@@ -360,9 +364,12 @@ let run_update ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name 
   let ctx = Train.init_params ctx IDX.empty loss in
   let ctx, routine =
     match transforms with
-    | None -> Context.compile ~lowered_transform:transform ctx (named name update) Idx.Empty
+    | None ->
+        Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          ctx (named name update) Idx.Empty
     | Some transforms ->
-        Context.compile ~lowered_transforms:transforms ctx (named name update) Idx.Empty
+        Context.compile ~lowered_transform:transforms ctx (named name update) Idx.Empty
   in
   let ctx = Context.run ctx routine in
   Context.get_values ctx grad
@@ -483,7 +490,9 @@ let () =
     match
       try
         ignore
-          (Context.compile ~lowered_transform:transform (Context.auto ())
+          (Context.compile
+             ~lowered_transform:(fun o -> [ transform o ])
+             (Context.auto ())
              (named name (Train.forward t))
              Idx.Empty
             : Context.t * Context.routine);

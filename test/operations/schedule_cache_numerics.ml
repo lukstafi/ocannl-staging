@@ -89,7 +89,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         canon := Some (SC.canonicalize ~static_indices:[] opt);
-        opt)
+        [ opt ])
       ctx tune_comp Ir.Indexing.Empty
   in
   let canon = Option.value_exn ~here:[%here] !canon in

@@ -81,7 +81,7 @@ let () =
   let serial_comp = named "smem_mm_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "smem_serial" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -140,7 +140,9 @@ let () =
   let ctx_a = Context.auto () in
   if has_shared then (
     let ctx_a, routine_a =
-      Context.compile ~lowered_transform:transform ctx_a smem_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx_a smem_comp Ir.Indexing.Empty
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
@@ -165,7 +167,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform ctx_a smem_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              ctx_a smem_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -220,7 +224,9 @@ let () =
   let ctx_b = Context.auto () in
   if has_shared then (
     let ctx_b, routine_b =
-      Context.compile ~lowered_transform:bcast_transform ctx_b bcast_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ bcast_transform o ])
+        ctx_b bcast_comp Ir.Indexing.Empty
     in
     let ctx_b = Context.run ctx_b routine_b in
     let got_b = Context.get_values ctx_b cb.Tensor.value in
@@ -243,7 +249,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:bcast_transform ctx_b bcast_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ bcast_transform o ])
+              ctx_b bcast_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg

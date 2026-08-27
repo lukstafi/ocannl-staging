@@ -69,7 +69,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           captured := seeds_of opt;
-          opt)
+          [ opt ])
         (Context.auto ()) comp Ir.Indexing.Empty
     in
     List.length !captured
@@ -90,7 +90,9 @@ let () =
         in
         match
           let sctx, sroutine =
-            Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+            Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              (Context.auto ()) comp Ir.Indexing.Empty
           in
           let sctx = Context.run sctx sroutine in
           Context.get_values sctx y.Tensor.value

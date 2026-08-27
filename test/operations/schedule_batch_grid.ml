@@ -58,7 +58,7 @@ let nonzero name (a : float array) =
 let compile_serial ~name tensor =
   let ctx, routine =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       (Context.auto ())
       (named name (Train.forward tensor))
       Ir.Indexing.Empty
@@ -91,7 +91,7 @@ let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) fwd Ir.Indexing.Empty
   in
   let opt = Option.value_exn ~here:[%here] !captured in
@@ -164,7 +164,7 @@ let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
         match
           let ctx, routine =
             Context.compile
-              ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
+              ~lowered_transform:(fun o -> [ Sched.apply (Autotune.sketch_schedule ~p:q o) o ])
               (Context.auto ()) fwd Ir.Indexing.Empty
           in
           Context.get_values (Context.run ctx routine) cand.Tensor.value
@@ -313,7 +313,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ())
       (named "qkv_mma" (Train.forward cand))
       Ir.Indexing.Empty

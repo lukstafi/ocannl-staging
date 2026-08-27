@@ -92,7 +92,9 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
    summary is a field of the routine, so a caller cannot forget to ask. *)
 let compile_with_census ~transform comp =
   let ctx = Context.auto () in
-  let _ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let _ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   routine.Context.mma
 
 let renderings summary = List.map summary.Ir.C_syntax.renderings ~f:snd
@@ -191,7 +193,9 @@ let () =
     in
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:transform ctx
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx
         (named name (Train.forward c))
         Ir.Indexing.Empty
     in
@@ -210,7 +214,7 @@ let () =
        let sctx = Context.auto () in
        let sctx, sroutine =
          Context.compile
-           ~lowered_transform:(fun opt -> opt)
+           ~lowered_transform:(fun opt -> [ opt ])
            sctx
            (named (name ^ "_serial") (Train.forward c2))
            Ir.Indexing.Empty
@@ -244,7 +248,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           captured := Some (Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt);
-          opt)
+          [ opt ])
         ctx (named name comp) Ir.Indexing.Empty
     in
     Option.value_exn !captured
@@ -351,7 +355,7 @@ let () =
         ~lowered_transform:(fun opt ->
           captured :=
             Some (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:mma_limits opt);
-          opt)
+          [ opt ])
         ctx (named name comp) Ir.Indexing.Empty
     in
     Option.value_exn !captured
@@ -431,7 +435,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       ctx
       (named "tmd_swizzled_seeds" (Train.forward c))
       Ir.Indexing.Empty

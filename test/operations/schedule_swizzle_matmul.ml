@@ -100,7 +100,7 @@ let () =
   let serial_comp = named "swz_mm_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "swz_serial" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -156,7 +156,9 @@ let () =
   let ctx_a = Context.auto () in
   if on_gpu then (
     let ctx_a, routine_a =
-      Context.compile ~lowered_transform:transform ctx_a smem_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx_a smem_comp Ir.Indexing.Empty
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
@@ -179,7 +181,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform ctx_a smem_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              ctx_a smem_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -205,7 +209,9 @@ let () =
   let ctx_b = Context.auto () in
   if on_gpu then (
     let ctx_b, routine_b =
-      Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_b128 o ])
+        ctx_b smem_b128_comp Ir.Indexing.Empty
     in
     let ctx_b = Context.run ctx_b routine_b in
     let got = Context.get_values ctx_b mc1b.Tensor.value in
@@ -228,7 +234,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform_b128 o ])
+              ctx_b smem_b128_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -252,7 +260,9 @@ let () =
   let ctx_p = Context.auto () in
   if on_gpu then (
     let ctx_p, routine_p =
-      Context.compile ~lowered_transform:transform_pad ctx_p smem_pad_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_pad o ])
+        ctx_p smem_pad_comp Ir.Indexing.Empty
     in
     let ctx_p = Context.run ctx_p routine_p in
     let got = Context.get_values ctx_p mc1p.Tensor.value in
@@ -275,7 +285,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform_pad ctx_p smem_pad_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform_pad o ])
+              ctx_p smem_pad_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -343,7 +355,9 @@ let () =
   let ctx_c = Context.auto () in
   if on_gpu then (
     let ctx_c, routine_c =
-      Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ staged_transform o ])
+        ctx_c staged_comp Ir.Indexing.Empty
     in
     let ctx_c = Context.run ctx_c routine_c in
     let got_staged = Context.get_values ctx_c mc2.Tensor.value in
@@ -372,7 +386,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ staged_transform o ])
+              ctx_c staged_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -392,7 +408,7 @@ let () =
     match
       try
         ignore
-          (Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
+          (Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
             : Context.t * Context.routine);
         None
       with Invalid_argument msg -> Some msg
@@ -576,7 +592,7 @@ let () =
     match
       try
         ignore
-          (Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
+          (Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
             : Context.t * Context.routine);
         None
       with Invalid_argument msg -> Some msg

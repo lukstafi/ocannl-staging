@@ -148,7 +148,7 @@ let () =
   let serial_comp = named "mm_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "mm_serial" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -185,7 +185,7 @@ let () =
         inspect opt;
         Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt
       in
-      Context.compile ~lowered_transform:transform (Context.auto ())
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) (Context.auto ())
         (named name (Train.forward tensor))
         Ir.Indexing.Empty
     in
@@ -198,7 +198,7 @@ let () =
   let compile_serial ~name tensor =
     let ctx, routine =
       Context.compile
-        ~lowered_transform:(fun opt -> opt)
+        ~lowered_transform:(fun opt -> [ opt ])
         (Context.auto ())
         (named name (Train.forward tensor))
         Ir.Indexing.Empty
@@ -334,7 +334,7 @@ let () =
   let transform opt = Sched.apply (mma_schedule ~out:mc1.Tensor.value opt) opt in
   let ctx_a = Context.auto () in
   let ctx_a, routine_a =
-    Context.compile ~lowered_transform:transform ctx_a mma_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a mma_comp Ir.Indexing.Empty
   in
   let ctx_a = Context.run ctx_a routine_a in
   let got_mma = Context.get_values ctx_a mc1.Tensor.value in
@@ -385,7 +385,7 @@ let () =
   let ctx_hs = Context.auto () in
   let ctx_hs, routine_hs =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       ctx_hs
       (named "mm_h_serial" (Train.forward mch0))
       Ir.Indexing.Empty
@@ -397,7 +397,7 @@ let () =
   let transform_h opt = Sched.apply (mma_schedule ~out:mch1.Tensor.value opt) opt in
   let ctx_h = Context.auto () in
   let ctx_h, routine_h =
-    Context.compile ~lowered_transform:transform_h ctx_h
+    Context.compile ~lowered_transform:(fun o -> [ transform_h o ]) ctx_h
       (named "mm_h_mma" (Train.forward mch1))
       Ir.Indexing.Empty
   in
@@ -582,7 +582,7 @@ let () =
     let ctx_bs = Context.auto () in
     let ctx_bs, routine_bs =
       Context.compile
-        ~lowered_transform:(fun opt -> opt)
+        ~lowered_transform:(fun opt -> [ opt ])
         ctx_bs
         (named ("mm_" ^ tag ^ "_serial") (Train.forward mcb0))
         Ir.Indexing.Empty
@@ -594,7 +594,7 @@ let () =
     let transform_b opt = Sched.apply (mma_schedule ?bm ~out:mcb1.Tensor.value opt) opt in
     let ctx_b = Context.auto () in
     let ctx_b, routine_b =
-      Context.compile ~lowered_transform:transform_b ctx_b
+      Context.compile ~lowered_transform:(fun o -> [ transform_b o ]) ctx_b
         (named ("mm_" ^ tag ^ "_mma") (Train.forward mcb1))
         Ir.Indexing.Empty
     in
@@ -726,7 +726,7 @@ let () =
      let ctx_fs = Context.auto () in
      let ctx_fs, routine_fs =
        Context.compile
-         ~lowered_transform:(fun opt -> opt)
+         ~lowered_transform:(fun opt -> [ opt ])
          ctx_fs
          (named ("mm_" ^ tag ^ "_serial") (Train.forward mcf0))
          Ir.Indexing.Empty
@@ -738,7 +738,7 @@ let () =
      let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
      let ctx_f8 = Context.auto () in
      let ctx_f8, routine_f8 =
-       Context.compile ~lowered_transform:transform_f8 ctx_f8
+       Context.compile ~lowered_transform:(fun o -> [ transform_f8 o ]) ctx_f8
          (named ("mm_" ^ tag ^ "_mma") (Train.forward mcf1))
          Ir.Indexing.Empty
      in
@@ -796,7 +796,7 @@ let () =
     let ctx_e0 = Context.auto () in
     let ctx_e0, routine_e0 =
       Context.compile
-        ~lowered_transform:(fun opt -> opt)
+        ~lowered_transform:(fun opt -> [ opt ])
         ctx_e0
         (named "mm_edge_serial" (Train.forward ec0))
         Ir.Indexing.Empty
@@ -823,7 +823,7 @@ let () =
     let transform_e opt = Sched.apply (edge_schedule opt) opt in
     let ctx_e = Context.auto () in
     let ctx_e, routine_e =
-      Context.compile ~lowered_transform:transform_e ctx_e
+      Context.compile ~lowered_transform:(fun o -> [ transform_e o ]) ctx_e
         (named "mm_edge_mma" (Train.forward ec1))
         Ir.Indexing.Empty
     in
@@ -869,7 +869,7 @@ let () =
     let ctx_w0 = Context.auto () in
     let ctx_w0, routine_w0 =
       Context.compile
-        ~lowered_transform:(fun opt -> opt)
+        ~lowered_transform:(fun opt -> [ opt ])
         ctx_w0
         (named "mm_width_serial" (Train.forward wc0))
         Ir.Indexing.Empty
@@ -893,7 +893,7 @@ let () =
     let transform_w opt = Sched.apply (width_schedule opt) opt in
     let ctx_w = Context.auto () in
     let ctx_w, routine_w =
-      Context.compile ~lowered_transform:transform_w ctx_w
+      Context.compile ~lowered_transform:(fun o -> [ transform_w o ]) ctx_w
         (named "mm_width_mma" (Train.forward wc1))
         Ir.Indexing.Empty
     in
@@ -934,7 +934,7 @@ let () =
     let ctx_f0 = Context.auto () in
     let ctx_f0, routine_f0 =
       Context.compile
-        ~lowered_transform:(fun opt -> opt)
+        ~lowered_transform:(fun opt -> [ opt ])
         ctx_f0
         (named "mm_fused_serial" (Train.forward fc0))
         Ir.Indexing.Empty
@@ -958,7 +958,7 @@ let () =
     let transform_f opt = Sched.apply (fused_schedule opt) opt in
     let ctx_f = Context.auto () in
     let ctx_f, routine_f =
-      Context.compile ~lowered_transform:transform_f ctx_f
+      Context.compile ~lowered_transform:(fun o -> [ transform_f o ]) ctx_f
         (named "mm_fused_mma" (Train.forward fc1))
         Ir.Indexing.Empty
     in
@@ -1057,7 +1057,9 @@ let () =
   let ctx_c = Context.auto () in
   if on_gpu then (
     let ctx_c, routine_c =
-      Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ staged_transform o ])
+        ctx_c staged_comp Ir.Indexing.Empty
     in
     let ctx_c = Context.run ctx_c routine_c in
     let got_staged = Context.get_values ctx_c mc3.Tensor.value in
@@ -1115,7 +1117,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ staged_transform o ])
+              ctx_c staged_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -1145,7 +1149,7 @@ let () =
     in
     let ctx_d = Context.auto () in
     let ctx_d, routine_d =
-      Context.compile ~lowered_transform:transform_hs ctx_d
+      Context.compile ~lowered_transform:(fun o -> [ transform_hs o ]) ctx_d
         (named "mm_h_staged_mma" (Train.forward mchs))
         Ir.Indexing.Empty
     in
@@ -1194,7 +1198,7 @@ let () =
     in
     let ctx_u = Context.auto () in
     let ctx_u, routine_u =
-      Context.compile ~lowered_transform:transform_hu ctx_u
+      Context.compile ~lowered_transform:(fun o -> [ transform_hu o ]) ctx_u
         (named "mm_hu_staged_mma" (Train.forward mchu))
         Ir.Indexing.Empty
     in
@@ -1239,7 +1243,7 @@ let () =
     let serial_comp = named ("mm_" ^ tag ^ "_serial") (Train.forward serial) in
     let ctx0 = Context.auto () in
     let ctx0, routine0 =
-      Context.compile ~lowered_transform:(fun opt -> opt) ctx0 serial_comp Ir.Indexing.Empty
+      Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx0 serial_comp Ir.Indexing.Empty
     in
     let ctx0 = Context.run ctx0 routine0 in
     let want = nonzero ("mm_" ^ tag ^ "_serial") (Context.get_values ctx0 serial.Tensor.value) in
@@ -1247,7 +1251,7 @@ let () =
     let transform opt = Sched.apply (mma_schedule ~out:tensorized.Tensor.value opt) opt in
     let ctx1 = Context.auto () in
     let ctx1, routine1 =
-      Context.compile ~lowered_transform:transform ctx1 mma_comp Ir.Indexing.Empty
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx1 mma_comp Ir.Indexing.Empty
     in
     let ctx1 = Context.run ctx1 routine1 in
     let got = Context.get_values ctx1 tensorized.Tensor.value in
@@ -1300,8 +1304,9 @@ let () =
   match
     try
       ignore
-        (Context.compile ~lowered_transform:bad_transform (Context.auto ()) bad_comp
-           Ir.Indexing.Empty
+        (Context.compile
+           ~lowered_transform:(fun o -> [ bad_transform o ])
+           (Context.auto ()) bad_comp Ir.Indexing.Empty
           : Context.t * Context.routine);
       None
     with Invalid_argument msg -> Some msg

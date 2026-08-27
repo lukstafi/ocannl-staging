@@ -40,7 +40,7 @@ let capture comp =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       ctx comp Ir.Indexing.Empty
   in
   Option.value_exn ~here:[%here] !captured

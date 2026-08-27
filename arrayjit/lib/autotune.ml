@@ -709,9 +709,9 @@ let model_prefilter ~keep_fraction (scored : ('a * float option) list) : ('a * f
     A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
     re-lowers (with fresh symbols) on every call, so schedules are rebound structurally inside the
     transform closure, after checking the fresh code's canonical digest against the base compile's.
-    Whole-routine candidates go through the singular [?lowered_transform] seam; fissioned candidates
-    through the plural [?lowered_transforms] seam, with per-segment schedules keyed by the
-    pre-schedule segment's canonical digest. *)
+    Whole-routine candidates return a singleton from the [?lowered_transform] seam; fissioned
+    candidates return one element per segment, with per-segment schedules keyed by the pre-schedule
+    segment's canonical digest. *)
 
 type whole_flavor =
   | W_saved of SC.saved_schedule
@@ -1123,7 +1123,7 @@ let compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is
                 [ { u_key = None; u_saved = saved; u_registry = registry; u_opt = opt' } ],
                 [ opt' ],
                 digest_after );
-          opt'
+          [ opt' ]
         in
         Context.compile_outcome ?name ~lowered_transform:transform ~provenance ~candidate ctx comp
           bindings
@@ -1250,7 +1250,7 @@ let compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is
           captured := Some (form, units, posts, digest_after);
           posts
         in
-        Context.compile_outcome ?name ~lowered_transforms:transforms ~provenance ~candidate ctx comp
+        Context.compile_outcome ?name ~lowered_transform:transforms ~provenance ~candidate ctx comp
           bindings
   in
   (* The [Tile_mma] rendering census travels on the routine ([Context.routine.mma], gh-ocannl-626):
@@ -1920,9 +1920,9 @@ let validate_segments_for_model (segs : LL.optimized list) =
       LL.validate_parallel_classified o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
-let compile_advisory ?name ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
+let compile_advisory ?name ?on_fallback ?fallback_if lowered_transform ctx comp bindings =
   match
-    Context.compile_outcome ?name ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
+    Context.compile_outcome ?name ~lowered_transform ~provenance:Outcome.Advisory ctx comp bindings
   with
   | Ok result -> result
   | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
@@ -2614,7 +2614,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
              break the exactly-once contract for direct [tune] callers. *)
           !on_candidate_attempt "baseline";
           base_capture := Some (opt, SC.canonicalize ~static_indices opt);
-          opt)
+          [ opt ])
         ~provenance:Outcome.Candidate ~candidate:"baseline" search_ctx comp bindings
     in
     let base_opt, canon =

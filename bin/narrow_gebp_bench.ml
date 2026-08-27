@@ -203,7 +203,9 @@ let () =
        census only appends to a list, so it does not perturb what is compiled or timed. Since
        gh-ocannl-626 it travels on the compiled routine, and the "did this tensorize" predicate is
        shared with [schedule_bench] rather than re-derived here. *)
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let mma = routine.Context.mma in
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in

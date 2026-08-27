@@ -103,7 +103,7 @@ let run_plain name y =
   let ctx = Context.auto () in
   let ctx, routine =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       ctx
       (named name (Train.forward y))
       Ir.Indexing.Empty
@@ -136,7 +136,9 @@ let () =
     in
     let ctx = Train.init_params ctx Ir.Indexing.Empty y in
     let ctx, routine =
-      Context.compile ~lowered_transform:transform ctx
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx
         (named (tag ^ "_det") (Train.forward y))
         Ir.Indexing.Empty
     in
@@ -185,7 +187,9 @@ let () =
    in
    let ctx = Context.auto () in
    let ctx, routine =
-     Context.compile ~lowered_transform:transform ctx
+     Context.compile
+       ~lowered_transform:(fun o -> [ transform o ])
+       ctx
        (named "cvm_det" (Train.forward mc))
        Ir.Indexing.Empty
    in
@@ -264,7 +268,9 @@ let () =
     in
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:transform ctx
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx
         (named name (Train.forward y))
         Ir.Indexing.Empty
     in
@@ -345,7 +351,9 @@ let () =
        opt
    in
    match
-     Context.compile ~lowered_transform:transform (Context.auto ())
+     Context.compile
+       ~lowered_transform:(fun o -> [ transform o ])
+       (Context.auto ())
        (named "cvg2_hoist" (Train.forward y))
        Ir.Indexing.Empty
    with
@@ -370,7 +378,9 @@ let () =
        opt
      in
      ignore
-       (Context.compile ~lowered_transform:transform (Context.auto ())
+       (Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          (Context.auto ())
           (named "cvs2_probe" (Train.forward y))
           Ir.Indexing.Empty));
     let want2 =
@@ -383,7 +393,9 @@ let () =
       let transform (opt : LL.optimized) = Sched.apply (Autotune.sketch_schedule ~p:p_ opt) opt in
       let ctx = Context.auto () in
       let ctx, routine =
-        Context.compile ~lowered_transform:transform ctx
+        Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          ctx
           (named tag (Train.forward y))
           Ir.Indexing.Empty
       in
@@ -509,7 +521,9 @@ let () =
       in
       let ctx = Context.auto () in
       let ctx, routine =
-        Context.compile ~lowered_transform:transform ctx
+        Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          ctx
           (named name (Train.forward y))
           Ir.Indexing.Empty
       in
@@ -589,7 +603,7 @@ let () =
       |> List.map ~f:(fun (_, _, _, post) -> post)
     in
     let ctx, routine =
-      Context.compile ~lowered_transforms:transforms ctx
+      Context.compile ~lowered_transform:transforms ctx
         (named name (Train.forward y))
         Ir.Indexing.Empty
     in

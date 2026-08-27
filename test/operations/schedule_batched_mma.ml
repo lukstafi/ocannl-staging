@@ -87,7 +87,7 @@ let gpu_mma_seeds opt =
 let compile_serial ~name tensor =
   let ctx, routine =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       (Context.auto ())
       (named name (Train.forward tensor))
       Ir.Indexing.Empty
@@ -102,7 +102,7 @@ let with_lowering ~name tensor ~(transform : LL.optimized -> LL.optimized) =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        transform opt)
+        [ transform opt ])
       (Context.auto ())
       (named name (Train.forward tensor))
       Ir.Indexing.Empty
@@ -256,7 +256,7 @@ let () =
     let want =
       let ctx, routine =
         Context.compile
-          ~lowered_transform:(fun opt -> opt)
+          ~lowered_transform:(fun opt -> [ opt ])
           (Context.auto ())
           (named (tag ^ "_bf16_serial") (Train.forward ref_t))
           Ir.Indexing.Empty
@@ -271,7 +271,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           captured := Some opt;
-          opt)
+          [ opt ])
         (Context.auto ()) fwd Ir.Indexing.Empty
     in
     let opt = Option.value_exn ~here:[%here] !captured in
@@ -310,7 +310,7 @@ let () =
         match
           let ctx, routine =
             Context.compile
-              ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
+              ~lowered_transform:(fun o -> [ Sched.apply (Autotune.sketch_schedule ~p:q o) o ])
               (Context.auto ()) fwd Ir.Indexing.Empty
           in
           Context.get_values (Context.run ctx routine) cand.Tensor.value

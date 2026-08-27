@@ -80,7 +80,9 @@ let () =
   let comp = named "mm_hosted" (Train.forward mc) in
   let transform = grid_workgroup_schedule ~mc:mc.Tensor.value in
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   let ctx = Context.run ctx routine in
   let values = Context.get_values ctx mc.Tensor.value in
   Verdict.pass_fail "scheduled matmul over small constant operands compiles and matches reference"
@@ -131,7 +133,9 @@ let () =
       (Ll_test.count_set opt mz.Tensor.value = 0);
     grid_workgroup_schedule ~mc:mc3.Tensor.value opt
   in
-  let ctx3, routine3 = Context.compile ~lowered_transform:transform3 ctx3 comp3 Ir.Indexing.Empty in
+  let ctx3, routine3 =
+    Context.compile ~lowered_transform:(fun o -> [ transform3 o ]) ctx3 comp3 Ir.Indexing.Empty
+  in
   let ctx3 = Context.run ctx3 routine3 in
   let values3 = Context.get_values ctx3 mc3.Tensor.value in
   Verdict.pass_fail

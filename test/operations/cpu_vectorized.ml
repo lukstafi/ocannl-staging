@@ -71,7 +71,9 @@ let () =
   let run ~name ~transform t =
     let comp = named name (Train.forward t) in
     let ctx = Context.auto () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let ctx = Context.run ctx routine in
     Context.get_values ctx t.Tensor.value
   in

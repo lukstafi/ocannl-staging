@@ -148,7 +148,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ())
       (named "lpp_site" (Train.forward out))
       Ir.Indexing.Empty

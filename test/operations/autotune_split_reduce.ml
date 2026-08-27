@@ -96,7 +96,7 @@ let capture_base comp =
     Context.compile
       ~lowered_transform:(fun opt ->
         capture := Some opt;
-        opt)
+        [ opt ])
       ctx comp Ir.Indexing.Empty
   in
   Option.value_exn ~here:[%here] !capture
@@ -172,7 +172,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         capture := Some opt;
-        opt)
+        [ opt ])
       ctx (named "asr_emb" update) Ir.Indexing.Empty
   in
   let emb_opt = Option.value_exn ~here:[%here] !capture in
@@ -225,7 +225,7 @@ let () =
   let sctx = Context.auto () in
   let _sctx, _sroutine =
     Context.compile
-      ~lowered_transforms:(fun opt ->
+      ~lowered_transform:(fun opt ->
         let sites = Autotune.split_reduce_sites opt in
         let s = List.hd_exn sites in
         let op, _, _, _ =
@@ -391,7 +391,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         capture := Some opt;
-        opt)
+        [ opt ])
       pctx
       (named "asr_cg_probe" (Train.grad_update loss_p))
       Ir.Indexing.Empty

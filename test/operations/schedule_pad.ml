@@ -83,7 +83,7 @@ let simd_width = 32
 let run_serial ~name (out : Tensor.t) =
   let ctx, routine =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       (Context.auto ())
       (named name (Train.forward out))
       Ir.Indexing.Empty
@@ -137,7 +137,9 @@ let () =
   in
   let transform opt = Sched.apply (padded_schedule opt) opt in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform (Context.auto ())
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      (Context.auto ())
       (named "pad_packed" (Train.forward pc1))
       Ir.Indexing.Empty
   in
@@ -227,7 +229,9 @@ let () =
     in
     let transform opt = Sched.apply (staged_schedule opt) opt in
     let ctx, routine =
-      Context.compile ~lowered_transform:transform (Context.auto ())
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        (Context.auto ())
         (named "pad_gpu_mma" (Train.forward gc1))
         Ir.Indexing.Empty
     in
@@ -305,7 +309,9 @@ let () =
     | _ -> opt
   in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform (Context.auto ())
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      (Context.auto ())
       (named "pad_seeded" (Train.forward sc1))
       Ir.Indexing.Empty
   in
@@ -339,7 +345,9 @@ let () =
   let rejected =
     try
       let _ctx, _routine =
-        Context.compile ~lowered_transform:transform (Context.auto ())
+        Context.compile
+          ~lowered_transform:(fun o -> [ transform o ])
+          (Context.auto ())
           (named "pad_unstaged" (Train.forward nc))
           Ir.Indexing.Empty
       in
