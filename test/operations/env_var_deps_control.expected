@@ -48,6 +48,8 @@ a rule running a file that shares the executable's public name is not its runner
 `open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so neither makes their file a member: true
 nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module it starts at: true
 `open Ir` and then `module Alloc_census = Foo.Alloc_census` rebinds the leaf, so what follows is not the instrumentation: true
+`module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves from where it starts: true
+a functor parameter named `Ir` shadows the qualifier inside the functor's body: true
 a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true
 a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is reported there too: true
 a stanza neither derivation calls a member is asked for no family alias: true

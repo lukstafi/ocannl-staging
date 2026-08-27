@@ -305,10 +305,6 @@ let module_references_in_source content ~paths =
     | [], _ :: _ -> false
     | c :: components, p :: path -> String.equal c p && starts_with components path
   in
-  let rec contains components path =
-    starts_with components path
-    || match components with [] -> false | _ :: rest -> contains rest path
-  in
   (* The qualifiers the caller's paths are written under -- [["Ir"]] for [Ir.Alloc_census] -- since
      a source may reach the same module without writing one: [open Ir] then [Alloc_census.snapshot],
      or [module I = Ir] then [I.Alloc_census.t]. Both spell a real reference to the same module, and
@@ -346,6 +342,12 @@ let module_references_in_source content ~paths =
             String.equal alias single && List.equal String.equal of_qualifier qualifier)
     | _ -> false
   in
+  (* A name bound to something that is not the qualifier stops denoting it for the rest of its
+     scope -- whether it was bound by a module binding or introduced as a functor's parameter. *)
+  let shadow_name name =
+    aliases := List.filter !aliases ~f:(fun (a, _) -> not (String.equal a name));
+    if not (is_shadowed name) then shadowed := name :: !shadowed
+  in
   let bind_module_expr alias module_expr =
     let rec unwrap module_expr =
       match module_expr.pmod_desc with
@@ -368,11 +370,7 @@ let module_references_in_source content ~paths =
                   | None -> opened := qualifier :: !opened)))
     | _ -> ());
     (* Whatever else it was bound to, the NAME now denotes that instead. *)
-    match alias with
-    | Some alias when not !names_any ->
-        aliases := List.filter !aliases ~f:(fun (a, _) -> not (String.equal a alias));
-        if not (is_shadowed alias) then shadowed := alias :: !shadowed
-    | _ -> ()
+    match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
   in
   let found = ref [] in
   let matches components path =
@@ -386,8 +384,12 @@ let module_references_in_source content ~paths =
        get, for the same reason -- a path names one module, and which one is decided by where it
        starts. *)
     (starts_with components path && not (List.exists qualifier ~f:is_shadowed))
+    (* Anchored at the alias for the same reason the direct branch anchors at the qualifier:
+       `Vendor.I.Alloc_census` resolves from `Vendor`, whatever `I` means here (Codex P2, round
+       12). *)
     || List.exists !aliases ~f:(fun (alias, of_qualifier) ->
-           List.equal String.equal of_qualifier qualifier && contains components [ alias; name ])
+           List.equal String.equal of_qualifier qualifier
+           && starts_with components [ alias; name ])
     (* Under an `open`, the reference begins with the module's own name -- and only while that name
        still means the opened module: `open Ir` followed by `module Alloc_census = Foo.Alloc_census`
        rebinds the leaf, and what follows is Foo's (Codex P2, round 11). *)
@@ -443,6 +445,26 @@ let module_references_in_source content ~paths =
               ~body
               (fun () -> self#module_expr module_expr)
         | _ -> super#expression expr
+
+      (* A functor's parameter is a module name bound inside its body, and it can be the qualifier's
+         name: `module M (Ir : S) = struct … Ir.Alloc_census … end` refers to the parameter (Codex
+         P2, round 12). Scoped like the other binders -- in force for the body, gone after it. *)
+      method! module_expr module_expr =
+        match module_expr.pmod_desc with
+        | Pmod_functor (parameter, body) ->
+            let saved_aliases = !aliases
+            and saved_opened = !opened
+            and saved_shadowed = !shadowed in
+            (match parameter with
+            | Named ({ txt = name; _ }, module_type) ->
+                self#module_type module_type;
+                Option.iter name ~f:shadow_name
+            | Unit -> ());
+            self#module_expr body;
+            aliases := saved_aliases;
+            opened := saved_opened;
+            shadowed := saved_shadowed
+        | _ -> super#module_expr module_expr
 
       method! longident lid =
         (match flatten_module_path lid with

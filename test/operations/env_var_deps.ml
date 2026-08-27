@@ -2390,6 +2390,8 @@ type family_probe_source =
   | Nested_qualifier  (** somebody else's module of the qualifier's name, opened and aliased *)
   | Nested_path  (** somebody else's module of the qualifier's name, written out in full *)
   | Leaf_shadowed  (** the qualifier opened, and then the LEAF rebound to another module *)
+  | Alias_nested  (** the qualifier aliased, and the alias then reached through another module *)
+  | Functor_parameter  (** the qualifier's name introduced as a functor's parameter *)
   | Neither
 
 let family_probe = function
@@ -2422,6 +2424,13 @@ let family_probe = function
       (* The open is ours and the leaf is not: after the rebinding, `Alloc_census` is Foo's (Codex
          P2, round 11). *)
       "open Ir\n\nmodule Alloc_census = Foo.Alloc_census\n\nlet () = ignore (Alloc_census.snapshot ())\n"
+  | Alias_nested ->
+      (* The alias is ours and the path is not: `Vendor.I.Alloc_census` resolves from Vendor
+         (Codex P2, round 12). *)
+      "module I = Ir\n\nlet () = ignore (Vendor.I.Alloc_census.snapshot ())\n"
+  | Functor_parameter ->
+      (* The qualifier's NAME as a functor parameter: inside the body it is the parameter. *)
+      "module M (Ir : S) = struct\n  let () = ignore (Ir.Alloc_census.snapshot ())\nend\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2546,6 +2555,11 @@ let family_control () =
   let nested_path = run ~probe:Nested_path ~metal:false ~lifecycle:true ~family:None () in
   (* The qualifier opened and the LEAF then rebound: what follows is Foo's. *)
   let leaf_shadowed = run ~probe:Leaf_shadowed ~metal:false ~lifecycle:true ~family:None () in
+  (* The alias reached through another module, and the qualifier's name as a functor parameter. *)
+  let alias_nested = run ~probe:Alias_nested ~metal:false ~lifecycle:true ~family:None () in
+  let functor_parameter =
+    run ~probe:Functor_parameter ~metal:false ~lifecycle:true ~family:None ()
+  in
   (* And a rule on the gate's generated alias that runs another directory's binary: not the gate,
      so the collision is not the deliberate one. *)
   let gate_elsewhere = run ~shape:Gate_elsewhere ~metal:true ~lifecycle:false ~family:metal () in
@@ -2611,6 +2625,8 @@ let family_control () =
   let nested_qualifier_ok = listed_ok nested_qualifier in
   let nested_path_ok = listed_ok nested_path in
   let leaf_shadowed_ok = listed_ok leaf_shadowed in
+  let alias_nested_ok = listed_ok alias_nested in
+  let functor_parameter_ok = listed_ok functor_parameter in
   let gate_elsewhere_ok =
     exited 1 gate_elsewhere
     && String.is_substring (snd gate_elsewhere) ~substring:"the alias dune generates"
@@ -2651,6 +2667,8 @@ let family_control () =
   if not nested_qualifier_ok then report "another module named like the qualifier" nested_qualifier;
   if not nested_path_ok then report "that module's path written out" nested_path;
   if not leaf_shadowed_ok then report "the opened module's leaf rebound" leaf_shadowed;
+  if not alias_nested_ok then report "the alias reached through another module" alias_nested;
+  if not functor_parameter_ok then report "the qualifier's name as a functor parameter" functor_parameter;
   if not gate_elsewhere_ok then report "a gate alias running another binary" gate_elsewhere;
   if not subdir_collision_ok then report "an alias collision inside a group" subdir_collision;
   if not no_member_ok then report "neither derivation's member" no_member;
@@ -2759,6 +2777,13 @@ let family_control () =
     "`open Ir` and then `module Alloc_census = Foo.Alloc_census` rebinds the leaf, so what follows \
      is not the instrumentation"
     leaf_shadowed_ok;
+  Verdict.p
+    "`module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves \
+     from where it starts"
+    alias_nested_ok;
+  Verdict.p
+    "a functor parameter named `Ir` shadows the qualifier inside the functor's body"
+    functor_parameter_ok;
   Verdict.p
     "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
      deliberate gate collision, and is reported"
