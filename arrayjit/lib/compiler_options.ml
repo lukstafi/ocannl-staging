@@ -6,11 +6,11 @@
 (* Clang processes floating-point switches left-to-right, so every override here has to stay AFTER
    the umbrella flag or [-ffast-math] silently re-enables what it disables.
 
-   [-fhonor-infinities] re-enables the one piece of IEEE behavior this codebase relies on as a
-   VALUE rather than as a test: [C_syntax] deliberately emits [(-INFINITY)] for the neutral element
-   of a [Max] accumulation and for [Nn_blocks.default_mask_fill], so a masked softmax's sentinel has
-   to survive the subtraction and the [exp]. Under bare [-ffast-math] ([-ffinite-math-only]) that
-   only ever held by accident of which optimization the compiler happened to pick -- adding
+   [-fhonor-infinities] re-enables the one piece of IEEE behavior this codebase relies on as a VALUE
+   rather than as a test: [C_syntax] deliberately emits [(-INFINITY)] for the neutral element of a
+   [Max] accumulation and for [Nn_blocks.default_mask_fill], so a masked softmax's sentinel has to
+   survive the subtraction and the [exp]. Under bare [-ffast-math] ([-ffinite-math-only]) that only
+   ever held by accident of which optimization the compiler happened to pick -- adding
    [-fno-associative-math] for gh-ocannl-735 changed the pick, and HIP's causally masked half
    softmax started returning [exp(0)] and [exp(1)] where the mask demands exact zeros. NaN stays
    unhonored: it is only ever TESTED for here, and that has its own documented shape (a range

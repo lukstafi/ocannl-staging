@@ -15,12 +15,8 @@ let build ~uses_rocwmma ~with_debug =
 let () =
   let cases =
     [
-      ( false,
-        false,
-        [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-fhonor-infinities" ] );
-      ( false,
-        true,
-        [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-fhonor-infinities"; "-g" ] );
+      (false, false, [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-fhonor-infinities" ]);
+      (false, true, [ "-Ihip"; "-ffast-math"; "-fno-associative-math"; "-fhonor-infinities"; "-g" ]);
       ( true,
         false,
         [
@@ -45,6 +41,5 @@ let () =
     ]
   in
   Verdict.p_all "every HIPRTC variant keeps both fast-math overrides, in order, after the umbrella"
-    cases
-    ~f:(fun (uses_rocwmma, with_debug, want) ->
+    cases ~f:(fun (uses_rocwmma, with_debug, want) ->
       List.equal String.equal (build ~uses_rocwmma ~with_debug) want)
