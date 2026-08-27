@@ -219,10 +219,9 @@ let dbg : Idx.projections_debug = { spec = ""; derived_for = Sexp.Atom ""; trace
 
 let copy_proj t ~n : Idx.projections =
   {
-    product_space = [| [ n ] |];
+    components = [| [ (n, t) ] |];
     lhs_dims = [| n |];
     rhs_dims = [| [| n |] |];
-    product_iterators = [| [ t ] |];
     project_lhs = [| iter t |];
     project_rhs = [| [| iter t |] |];
     extent_syms = [];

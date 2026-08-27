@@ -226,14 +226,29 @@ files.
 - **An ordinary assignment never puts two DISTINCT tensor nodes under one `For_loop`** — each gets its
   own `Low_level.loop_over_dims` (`Assignments.to_low_level`), and a `Block` concat produces several
   loops that all write the SAME node. The exception is its mirror, `Rev_sides` (the `++^` gradient,
-  which scatters one RHS into the component gradients): `loop_accum_rev` emits a `For_loop` per
-  component of a product level SHARING ONE index symbol, and its basecase writes a different member
-  of `lhses` under each — so one symbol really does own several tnodes, and `track_symbol` records
-  them all. Shared-loop behaviour (`reverse_node_map : Symbol.t -> Tnode.t list`, gh-ocannl-134) is
-  therefore reachable from the DSL after all: `test/operations/test_block_tensor.ml`'s gradient
-  fixtures are the regression coverage to keep in mind when changing concat lowering or the
-  virtualizer's symbol ownership, alongside the hand-built `test/operations/virtual_shared_loop.ml`
-  (`ll_test`), which is still the way to reach shapes the DSL does not emit.
+  which scatters one RHS into the component gradients): its sibling segment loops each write a
+  different member of `lhses`, so an ENCLOSING product level's iterator — which indexes all of
+  them — owns several tnodes, and `track_symbol` records them all. Shared-loop behaviour
+  (`reverse_node_map : Symbol.t -> Tnode.t list`, gh-ocannl-134) is therefore reachable from the
+  DSL after all; `test/operations/concat_loop_symbols.ml` pins that a batched concat gradient still
+  produces it. The sibling segment loops themselves no longer share a binder: lowering mints one
+  loop symbol per SEGMENT (gh-ocannl-765), because a shared binder is misread by every flat
+  symbol-keyed scanner — `def_loop_ranges` keeps the last segment's width, `affine_accesses`
+  collects two ranges for one symbol, and the canonical render calls the second binder shadowed,
+  which declines the routine for both digest caches. `test/operations/test_block_tensor.ml`'s
+  gradient fixtures are the regression coverage to keep in mind when changing concat lowering or
+  the virtualizer's symbol ownership, alongside the hand-built
+  `test/operations/virtual_shared_loop.ml` (`ll_test`), which is still the way to reach shapes the
+  DSL does not emit.
+- **The product-space loop nest is walked in ONE place**, `to_low_level`'s `with_product_loops`
+  (gh-ocannl-764): it emits a loop per segment of each `Indexing.components` entry, applies the
+  gh-490 extent guards, and calls back once per block (per choice of concat segments) with that
+  block's substitution (`block_subst`), the fresh symbols' loop widths (the gh-504 clamp bounds)
+  and an `is_allowed` selector over the block buffers. `loop_accum` and `loop_accum_rev` are then
+  only their own role assignments. `Set_vec_unop` reuses `block_subst` but keeps its own nest, and
+  its four divergences are commented at the seam rather than left to drift: the nest is split for
+  the tail peel, `Concat` is rejected rather than resolved, `Empty_block` is unreachable there, and
+  neither the extent guard nor the clamp is wired in.
 - A lowering-time reader of `Indexing.variable_ref` must force a dims lazy (or otherwise finish
   inference) FIRST: forcing dims is what runs `Shape.finish_inference` and fills row-var-bound refs
   (`..d..` captures such as layer norm's `/. dim d`). "Inference is already forced by now" is not an

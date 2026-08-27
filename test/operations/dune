@@ -1070,6 +1070,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name concat_loop_symbols)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules concat_loop_symbols)
+ (libraries base ocannl stdio ll_test arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name virtual_shared_loop)
  (package neural_nets_lib)
  (deps

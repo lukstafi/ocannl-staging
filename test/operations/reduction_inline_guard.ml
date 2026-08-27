@@ -30,10 +30,9 @@ let dbg : Idx.projections_debug = { spec = ""; derived_for = Sexp.Atom ""; trace
 (* Row-sum reduce: prod[i] = sum_k a[i, k], product axes i (dim n), k (dim kdim). *)
 let reduce_proj i k ~n ~kdim : Idx.projections =
   {
-    product_space = [| [ n ]; [ kdim ] |];
+    components = [| [ (n, i) ]; [ (kdim, k) ] |];
     lhs_dims = [| n |];
     rhs_dims = [| [| n; kdim |] |];
-    product_iterators = [| [ i ]; [ k ] |];
     project_lhs = [| Idx.Iterator i |];
     project_rhs = [| [| Idx.Iterator i; Idx.Iterator k |] |];
     extent_syms = [];
@@ -55,10 +54,9 @@ let reduce_asgn ~dst ~src proj =
    visit cap, so before the recompute-cost guard it was always virtualized. *)
 let copy_proj t ~n : Idx.projections =
   {
-    product_space = [| [ n ] |];
+    components = [| [ (n, t) ] |];
     lhs_dims = [| n |];
     rhs_dims = [| [| n |] |];
-    product_iterators = [| [ t ] |];
     project_lhs = [| Idx.Iterator t |];
     project_rhs = [| [| Idx.Iterator t |] |];
     extent_syms = [];

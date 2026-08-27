@@ -281,9 +281,10 @@ does each tensor index into it?*
 
 ```ocaml
 type projections = {
-  product_space : int list array;        (* the iteration space, one entry per loop *)
-  product_iterators : symbol list array;  (* its iterator symbols (lists ≠ singleton
-                                             only for concatenation components) *)
+  components : (int * symbol) list array; (* the iteration space: one entry per product
+                                             component, pairing each of its segments'
+                                             dimension with its iterator symbol (lists ≠
+                                             singleton only for concatenation) *)
   lhs_dims : int array;
   rhs_dims : int array array;
   project_lhs : axis_index array;        (* product-space point → LHS index, per axis *)
@@ -302,8 +303,7 @@ For our matmul assignment `n22 =:+ w * x ~logic:"@"`, with `n22 : 2×2`, `w : 2�
 `x : 2×3`, the derived record is (symbols renamed for readability):
 
 ```
-product_space     = [| [2]; [2]; [3] |]        (* batch row i, output col j, input k *)
-product_iterators = [| [i]; [j]; [k] |]
+components        = [| [(2, i)]; [(2, j)]; [(3, k)] |]  (* batch row i, out col j, in k *)
 project_lhs       = [| Iterator i; Iterator j |]                        (* n22[i, j] *)
 project_rhs       = [| [| Iterator j; Iterator k |];                    (* w[j, k]   *)
                        [| Iterator i; Iterator k |] |]                  (* x[i, k]   *)
@@ -350,9 +350,9 @@ that generates the constraints.
 of nested `For_loop`s over scalar `Set`/`Get` operations (the full grammar is at the top of
 [lowering_and_inlining.md](lowering_and_inlining.md)). The recipe for each `Accum_op`:
 
-1. every entry of `projections.product_space` becomes a `For_loop` with a **fresh** symbol
-   (product iterators may be shared between operations, so lowering α-renames; the
-   substitution also rewrites symbols inside `Affine` indices);
+1. every segment of every entry of `projections.components` becomes a `For_loop` with a
+   **fresh** symbol (product iterators may be shared between operations, so lowering
+   α-renames; the substitution also rewrites symbols inside `Affine` indices);
 2. the loop body is a `Set` of `lhs` at `project_lhs`, whose right-hand side combines
    `accum` with the `Get`s of the rhs buffers at their `project_rhs` indices — unless
    `initialize_neutral` holds *and* the projection is provably injective
