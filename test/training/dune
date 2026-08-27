@@ -45,6 +45,53 @@
  (action
   (run %{dep:env_spelling_gate.exe})))
 
+; The same gate for the per-test `runtest-<name>` aliases (gh-ocannl-703, gh-ocannl-726). A rule
+; that diffs a golden sits on an alias of its own, so that ONE of them can be rerun targeted --
+; `dune build @test/training/runtest-transformer_names` -- and a per-test alias is a build entry
+; point like any other, so the ambient gate has to reach it. It sits on an alias of its own that
+; every such rule DEPENDS on, which runs the gate BEFORE the diff -- the same shape the slow rules
+; use. The name is the one dune >= 3.20 generates for the `env_spelling_gate` `(test)` stanza above:
+; a rule may add an action to a generated per-test alias, and this one runs the same gate binary, so
+; the alias means the same thing whichever dune is building.
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
+; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
+; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
+; @test/training/runtest-transformer_names` runs that one test and applies its diff; this stanza is
+; what keeps `dune runtest` running them. Attaching such a rule to `runtest` as well would defeat
+; the point: a rule on two aliases makes building either alias build both, so a per-test alias that
+; also named `runtest` would pull the whole directory in behind it. A `runtest-<name>` rule missing
+; from this list is one plain `dune runtest` skips silently, which `test/operations/env_var_deps`
+; checks -- the same check it makes of the `slow` suite.
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-transformer_names)))
+
+; The resolved backend name, for the per-backend goldens below (the gh-ocannl-700 shape, as in
+; `test/operations/micrograd_demo_logging-<backend>-0-0.log.expected`). Reads the same configuration
+; the run itself will read -- config file, environment, command line -- and normalizes the
+; deprecated aliases, so `OCANNL_BACKEND=multicore_cc` names the `multidev_cc` golden.
+
+(rule
+ (target ocannl_backend.txt)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (run %{bin:ocannl_read_config} "--read=backend")))
+
 ; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
 ; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
 ; @test/training/slow-mlp_names` -- without rebuilding the whole `@slow` suite; this stanza is what
@@ -285,18 +332,47 @@
 ; dataset lives on device (batches via @| batch_n — no per-step host transfers), and the loss
 ; accumulates on device so the loop syncs once per epoch. NOTE: ~10s on cc, ~36s on the metal
 ; backend with a fresh tune cache (batch 128 / 2.5k steps).
+;
+; Its golden is PER BACKEND (gh-ocannl-787, the gh-ocannl-700 shape), which is why this is an
+; `(executable)` plus a diff rule rather than a `(test)` stanza: a `(test)` can only diff the one
+; `<name>.expected` beside it. The three sampled names at the end of the run are the human-legible
+; canary that the model learned name structure -- the loss thresholds are their quantitative proxy,
+; not their replacement -- and they are exact by construction only PER SCHEDULER: `Multidev` is free
+; to differ from `Sync` in execution order and device split, so its training trajectory and the
+; sampling RNG state legitimately diverge and no single promotion serves both. Recorded on this
+; repository's reference Mac for cc, multidev_cc and metal; the cuda and hip goldens carry the
+; previously shared golden verbatim, which is the content they were passing against in the daily
+; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/runtest-transformer_names`
+; and `dune promote`.
 
-(test
+(executable
  (name transformer_names)
- (package neural_nets_lib)
- (locks ocannl_training_test)
- (deps
-  ocannl_config
-  (env_var OCANNL_BACKEND))
  (modules transformer_names)
  (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(rule
+ (alias runtest-transformer_names)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  (alias runtest-env_spelling_gate)
+  "transformer_names-%{read:ocannl_backend.txt}.expected"
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ ; no-infer keeps transformer_names.actual from becoming a build target, so plain `dune build`
+ ; (@all) does not run this training exe -- only `@runtest` and `@runtest-transformer_names` do,
+ ; which is what the `(test)` stanza this replaced gave for free.
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     transformer_names.actual
+     (run %{dep:transformer_names.exe}))
+    (diff
+     "transformer_names-%{read:ocannl_backend.txt}.expected"
+     transformer_names.actual)))))
 
 ; tokenizer_roundtrip is a fast integration test for the dataprep BPE tokenizer -> tensor bridge
 ; (hermetic: it writes its own minimal tokenizer.json, no network access).

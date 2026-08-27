@@ -185,28 +185,31 @@ let unique_debug_id =
     Int.incr projections_uid;
     !projections_uid
 
+type component = (int * symbol) list [@@deriving compare, equal, sexp]
+(** One component of the product space: its [(dimension, iterator)] segments. Singleton except for
+    concatenation components, which are a connected component of symbols participating in
+    concatenated axes -- their segments are iterated SEQUENTIALLY, one loop each, in list order.
+    Pairing the dimension with its iterator makes the same-index invariant structural: there is no
+    way to hold a dimension whose iterator is elsewhere (gh-ocannl-775). *)
+
 type projections = {
-  product_space : int list array;
-      (** The product space dimensions that an operation should parallelize (map-reduce) over.
-          Singletons except for concatenation dimensions. *)
+  components : component array;
+      (** The product space that an operation should parallelize (map-reduce) over: one component
+          per iterated axis (concatenation of the relevant batch, output, input axes), each carrying
+          its segments' dimensions and iterator symbols. Iterators may be shared between operations;
+          lowering creates fresh symbols for loop indices. *)
   lhs_dims : int array;  (** The dimensions of the LHS array. *)
   rhs_dims : int array array;
       (** The dimensions of the RHS arrays, needed for deriving projections from other projections.
       *)
-  product_iterators : symbol list array;
-      (** The product space iterators (concatentation of the relevant batch, output, input axes) for
-          iterating over the [product_space] axes, where same axes are at same array indices. These
-          may be shared; lowering creates fresh symbols for loop indices. Singletons except for
-          concatenation dimensions. A concatenation dimension is a connected component of symbols
-          participating in concatenated axes. *)
   project_lhs : axis_index array;
-      (** A projection that takes an [product_space]-bound index and produces an index into the
-          result of an operation. *)
+      (** A projection that takes a [components]-bound index and produces an index into the result
+          of an operation. *)
   project_rhs : axis_index array array;
       (** [project_rhs.(i)] Produces an index into the [i+1]th argument of an operation. *)
   extent_syms : (symbol * static_symbol) list;
       (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value is
-          the axis's runtime extent. The corresponding [product_space] entry is the maximum extent
+          the axis's runtime extent. The corresponding segment's dimension is the maximum extent
           (the symbol's declared range); lowering guards the loop body with [iterator < value] when
           the symbol is among the routine's bindings. *)
   debug_info : (projections_debug[@sexp.ignore] [@compare.ignore] [@equal.ignore]);
@@ -217,6 +220,21 @@ type projections = {
 let iterated dim = dim > 1
 let opt_symbol d = if iterated d then Some (get_symbol ()) else None
 let opt_iterator = function None -> Fixed_idx 0 | Some sym -> Iterator sym
+
+(** The iterator symbols of each product component, in [components] order. *)
+let component_iterators (p : projections) : symbol list array =
+  Array.map p.components ~f:(List.map ~f:snd)
+
+(** Every product iterator of [p], across all components and all their segments. *)
+let all_iterators (p : projections) : symbol list =
+  Array.to_list p.components |> List.concat_map ~f:(List.map ~f:snd)
+
+(** The per-segment dimension of every product iterator of [p]. *)
+let iterator_sizes (p : projections) : int Map.M(Symbol).t =
+  Array.fold p.components
+    ~init:(Map.empty (module Symbol))
+    ~f:(fun acc comp ->
+      List.fold comp ~init:acc ~f:(fun acc (d, iter) -> Map.set acc ~key:iter ~data:d))
 
 (** Coalesce an affine [symbols] list into canonical [(coeff, symbol)] terms: repeated symbols are
     summed and zero-coefficient terms dropped. Order is unspecified. *)
@@ -300,11 +318,9 @@ let affine_injective ~symbol_range (project_lhs : axis_index array) : bool =
 let identity_projections ?debug_info ?derived_for ~lhs_dims () =
   let product_iterators_opt = Array.map lhs_dims ~f:opt_symbol in
   let project_lhs = Array.map product_iterators_opt ~f:opt_iterator in
-  let product_space =
-    Array.filter_map lhs_dims ~f:(fun d -> if iterated d then Some [ d ] else None)
-  in
-  let product_iterators =
-    Array.filter_map product_iterators_opt ~f:(Option.map ~f:(fun s -> [ s ]))
+  let components =
+    Array.filter_mapi lhs_dims ~f:(fun i d ->
+        Option.map product_iterators_opt.(i) ~f:(fun s -> [ (d, s) ]))
   in
   let debug_info =
     match (debug_info, derived_for) with
@@ -327,21 +343,20 @@ let identity_projections ?debug_info ?derived_for ~lhs_dims () =
         }
   in
   {
-    product_space;
+    components;
     lhs_dims;
     rhs_dims = [| lhs_dims |];
-    product_iterators;
     project_lhs;
     project_rhs = [| project_lhs |];
     extent_syms = [];
     debug_info;
   }
 
-(** The extents of the product-space components of [p]: one entry per component, in [product_space]
+(** The extents of the product-space components of [p]: one entry per component, in [components]
     order. A concatenation component's extent is the sum of its segment extents. Non-iterated
     (dimension-1) axes do not appear. *)
 let prod_dims (p : projections) : int array =
-  Array.map p.product_space ~f:(List.fold ~init:0 ~f:( + ))
+  Array.map p.components ~f:(List.fold ~init:0 ~f:(fun acc (d, _) -> acc + d))
 
 (** The identity projection of a tensor laid out over the full product space of [p] (e.g. the
     (output x kernel) pair space of a windowed reduction): the tensor's axes are the product
@@ -362,9 +377,11 @@ let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
             "Indexing.prod_project_for: product-space tensor dimensions %s are inconsistent with \
              the operation's product space %s (proxy shape vs. projections mismatch)"
             (dims_to_string dims)
-            (Sexp.to_string_hum ([%sexp_of: int list array] p.product_space)))
+            (Sexp.to_string_hum ([%sexp_of: component array] p.components)))
   in
-  let comps = ref (Array.to_list (Array.zip_exn (prod_dims p) p.product_iterators)) in
+  let comps =
+    ref (Array.to_list (Array.zip_exn (prod_dims p) (component_iterators p)))
+  in
   let take_first_by_extent d =
     let rec go acc = function
       | [] -> mismatch ()

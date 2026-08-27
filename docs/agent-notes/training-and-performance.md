@@ -26,6 +26,17 @@ files.
   matching the params' grad `Fetch`es; intermediate grads must keep their per-micro-step zeroing
   since backprop `=+` relies on it), `Outlier_detector` (z-score vs sliding window; nan during
   warmup, and a constant window gives std 0 → infinite z). Executed parity: `loop_utils.ml`.
+- Optimizer state that survives across invocations of a routine must be MATERIALIZED, or lowering
+  fails with `Stale optimize_ctx: No computations found for #N: <node>` — the virtualizer treats an
+  undetermined read-before-write node as an inlining candidate, and the computation defining it is
+  in the previous invocation, not this one. `sgd_one` materializes its `sgd_momentum` buffer for
+  exactly this reason (gh-ocannl-772); a new optimizer with its own buffers owes the same. The
+  option matrix has executed coverage in `test/operations/sgd_variants.ml`, which compares a
+  multi-step trajectory against a host simulation — reach for that shape rather than a structural
+  check, since `~momentum` had been dead on arrival with a green suite behind it.
+- `Train.to_routine` returns `Context.t * Context.routine` (gh-ocannl-772), like `Context.compile`
+  and `Train.run_once`. `routine.Context.context` is the same value, so both spellings work; prefer
+  chaining the returned context.
 - Metal training recipe: `Train.every_non_literal_materialized loss` (kernel fission then cuts
   every cross-nest edge) + `Autotune.tune ~rounds:0 ~timing_ctx:scratch`. `~rounds:0` keeps
   .expected files schedule-invariant (preset seeds preserve reduction order); `?timing_ctx` on a

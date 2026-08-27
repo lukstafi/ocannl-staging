@@ -133,7 +133,7 @@ tensor records, alongside its `value : Tnode.t` and `shape : Shape.t`:
 
 - `forward : Assignments.comp` — the code that computes this tensor *and all subtensors it
   consumed*;
-- `diff : diff option`, where `diff` holds `grad : Tnode.t`, `zero_grads : Assignments.t`,
+- `diff : diff option`, where `diff` holds `grad : Tnode.t`, `zero_grads : Assignments.comp`,
   and `backprop : Assignments.comp`.
 
 Every operation — `+`, `*`, `relu`, einsum — funnels into the internal constructor
@@ -255,7 +255,8 @@ reduce to: build a comp as above, then call `Context.compile` — the door to ev
 `tensor/row.ml` (the solver); consumed via `arrayjit/lib/indexing.ml`.*
 
 While tensors were being constructed, each operation eagerly registered its shape constraints
-(`Shape.propagate_shapes`, called from `Tensor.op` and `Tensor.raw_binop`/`raw_unop`) and ran
+(`Shape.propagate_shapes`, called from `Tensor.make_projections`, which serves both `Tensor.op`
+and the `Tensor.raw_*` accumulations) and ran
 the cheap first solver stage. But nothing forced final answers: the `projections` field of
 every `Accum_op` is a `lazy` closing over that operation's `Shape.update_step`.
 
@@ -280,9 +281,10 @@ does each tensor index into it?*
 
 ```ocaml
 type projections = {
-  product_space : int list array;        (* the iteration space, one entry per loop *)
-  product_iterators : symbol list array;  (* its iterator symbols (lists ≠ singleton
-                                             only for concatenation components) *)
+  components : (int * symbol) list array; (* the iteration space: one entry per product
+                                             component, pairing each of its segments'
+                                             dimension with its iterator symbol (lists ≠
+                                             singleton only for concatenation) *)
   lhs_dims : int array;
   rhs_dims : int array array;
   project_lhs : axis_index array;        (* product-space point → LHS index, per axis *)
@@ -301,8 +303,7 @@ For our matmul assignment `n22 =:+ w * x ~logic:"@"`, with `n22 : 2×2`, `w : 2�
 `x : 2×3`, the derived record is (symbols renamed for readability):
 
 ```
-product_space     = [| [2]; [2]; [3] |]        (* batch row i, output col j, input k *)
-product_iterators = [| [i]; [j]; [k] |]
+components        = [| [(2, i)]; [(2, j)]; [(3, k)] |]  (* batch row i, out col j, in k *)
 project_lhs       = [| Iterator i; Iterator j |]                        (* n22[i, j] *)
 project_rhs       = [| [| Iterator j; Iterator k |];                    (* w[j, k]   *)
                        [| Iterator i; Iterator k |] |]                  (* x[i, k]   *)
@@ -349,9 +350,9 @@ that generates the constraints.
 of nested `For_loop`s over scalar `Set`/`Get` operations (the full grammar is at the top of
 [lowering_and_inlining.md](lowering_and_inlining.md)). The recipe for each `Accum_op`:
 
-1. every entry of `projections.product_space` becomes a `For_loop` with a **fresh** symbol
-   (product iterators may be shared between operations, so lowering α-renames; the
-   substitution also rewrites symbols inside `Affine` indices);
+1. every segment of every entry of `projections.components` becomes a `For_loop` with a
+   **fresh** symbol (product iterators may be shared between operations, so lowering
+   α-renames; the substitution also rewrites symbols inside `Affine` indices);
 2. the loop body is a `Set` of `lhs` at `project_lhs`, whose right-hand side combines
    `accum` with the `Get`s of the rhs buffers at their `project_rhs` indices — unless
    `initialize_neutral` holds *and* the projection is provably injective

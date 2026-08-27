@@ -120,8 +120,7 @@ let () =
 
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
-  let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = sgd_routine.Context.context in
+  let ctx, sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
   let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
 
@@ -181,13 +180,12 @@ let () =
   Train.set_materialized eval_logits.value;
 
   (* Forward-only routine via %cd .forward -- no grad_update, no sgd_update *)
-  let eval_routine =
+  let ctx, eval_routine =
     Train.to_routine sgd_routine.Context.context eval_bindings
       [%cd
         ~~("eval forward";
            eval_batch_loss.forward)]
   in
-  let ctx = eval_routine.Context.context in
 
   (* Compute test loss and accuracy across all test batches *)
   let test_loss = ref 0. in

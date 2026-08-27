@@ -23,12 +23,47 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      # No `opam pin` of its own below beyond `opam pin -n .`, so the pin-depends
+      # entries the action reads out of the opam files are the whole set here --
+      # hence no `extra-specs`, unlike `ci.yml`'s call.
+      - name: Resolve pinned dependency revisions
+        id: pins
+        uses: ./.github/actions/pin-revisions
+
+      # This caches opam's ROOT, not a built switch: setup-ocaml below makes a
+      # LOCAL switch (`_opam` in the workspace, per `current-switch` in the run
+      # log), which nothing here caches, so `Deps` compiles the ~180 dependencies
+      # from source on every run and what this entry buys is the download cache
+      # and the repository index. `ci.yml` caches `_opam` instead, and the two do
+      # not converge in this commit: caching a switch brings the depext trap with
+      # it (depexts are SYSTEM packages, so they live on the runner and not in
+      # `_opam`, and a hit yields a switch whose OCaml bindings have no libraries
+      # to link against -- `ci.yml` carries an unconditional depext step for
+      # exactly that), and this workflow triggers only on push to master, so no
+      # change to it can be tried on a pull request first. Converging on `_opam`
+      # is worth doing -- it is where this job's three minutes go -- but as its
+      # own change, deliberately; the key, whose worst case is one cold run, is
+      # what lands here.
+      #
+      # The key must still move with the dependencies. It was the literal
+      # `opam-ubuntu-22.04-5.5.0`: an exact hit every run, and an exact hit means
+      # actions/cache does not SAVE ("Cache hit occurred on the primary key ...,
+      # not saving cache"), so whatever root was captured the day the entry was
+      # first written was served back until the 7-day read eviction retired it --
+      # freshness as a function of the calendar rather than of the dependencies,
+      # which is what made gh-ocannl-698's runs fail in two different steps on
+      # one tree (gh-ocannl-732). Keyed on the opam files and the resolved pin revisions
+      # it moves when they do, and `restore-keys` keeps the miss warm: the
+      # previous root is restored, this run refreshes it, and the post step
+      # writes it back under the new key.
       - name: Cache opam
         id: cache-opam
         uses: actions/cache@v6
         with:
           path: ~/.opam
-          key: opam-ubuntu-22.04-5.5.0
+          key: opam-root-ubuntu-22.04-5.5.0-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.digest }}
+          restore-keys: |
+            opam-root-ubuntu-22.04-5.5.0-
 
       - uses: ocaml/setup-ocaml@v3
         with:

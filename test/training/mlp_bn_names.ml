@@ -182,8 +182,7 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
 
-  let sgd_step = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = sgd_step.Context.context in
+  let ctx, sgd_step = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
   let open Operation.At in
   let step_ref = IDX.find_exn sgd_step.Context.bindings step_n in
   Train.set_materialized batch_loss.value;
@@ -261,8 +260,7 @@ let () =
     ~~("mlp_names eval";
        eval_loss.forward)
   in
-  let eval_step = Train.to_routine sgd_step.Context.context IDX.empty eval_comp in
-  let ctx = eval_step.Context.context in
+  let ctx, eval_step = Train.to_routine sgd_step.Context.context IDX.empty eval_comp in
   let mean_loss_over (ctx_arr, tgt_arr, n) =
     let nb = n / batch_size in
     if nb = 0 then 0.0
@@ -321,8 +319,7 @@ let () =
   in
   Train.set_materialized infer_logits.value;
   Train.set_materialized infer_input.value;
-  let infer_step = Train.to_routine eval_step.Context.context infer_bindings infer_comp in
-  let ctx = infer_step.Context.context in
+  let ctx, infer_step = Train.to_routine eval_step.Context.context infer_bindings infer_comp in
   let counter_ref = IDX.find_exn infer_step.Context.bindings counter_n in
   counter_ref := 0;
 

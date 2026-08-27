@@ -24,8 +24,7 @@ let () =
 
   (* Compile the forward computation, set the inputs on-device via the context, then run
      (gh-ocannl-333: values live on devices, set on demand through the context). *)
-  let routine = Train.to_routine ctx Train.IDX.empty (Train.forward result) in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty (Train.forward result) in
   let ctx = Context.set_values ctx cond.value [| 0.0 |] in
   let ctx = Context.set_values ctx a.value [| 1.0 |] in
   let ctx = Context.set_values ctx b.value [| 2.0 |] in

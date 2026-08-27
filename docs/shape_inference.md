@@ -450,7 +450,7 @@ There is an important and intentional difference between `dims` in the `arrayjit
 
 ### Concatenation
 
-Projections inference for `Concat` variants is significantly more than deriving the `Concat` constructors of the `axis_index` type: concatenation affects how `product_space` and `product_iterators` are computed. Without any use of `Concat`, the `product_space` and `product_iterators` fields would be arrays of singleton lists. With occurrences of `Concat`, we need to build a hypergraph where vertices are the symbols (or canonical `proj_id`s), and hyperedges are the `Concat` axis indices. We decompose this graph into connected components. Then, `product_iterators` lists are the connected components, and `product_space` lists are the sizes of the corresponding dimensions (mapping over the array and the lists).
+Projections inference for `Concat` variants is significantly more than deriving the `Concat` constructors of the `axis_index` type: concatenation affects how the `components` field is computed. Without any use of `Concat`, `components` would be an array of singleton lists. With occurrences of `Concat`, we need to build a hypergraph where vertices are the symbols (or canonical `proj_id`s), and hyperedges are the `Concat` axis indices. We decompose this graph into connected components. Then, each `components` entry is one connected component, pairing each of its symbols with the size of the corresponding dimension.
 
 Importantly, dim-1 projections that participate in `Concat` axes are not converted to `Fixed_idx 0` expressions; we need symbols for all `Concat` participants for book-keeping during lowering.
 

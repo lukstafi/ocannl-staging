@@ -14,8 +14,10 @@
 #   - A verdict FILE, not a process probe: waiter loops on `pgrep -x dune`
 #     match the editor's immortal `dune ocaml-merlin` daemons and spin forever
 #     (one PR review accumulated ten such stranded shells); `kill -0 $pid` can
-#     latch onto a recycled pid. `wait` here polls for the verdict file with a
-#     hard timeout, so it cannot strand.
+#     latch onto a recycled pid, and answers yes for a ZOMBIE -- which is why
+#     every liveness question here reads process state too (proc_alive,
+#     group_alive). `wait` here polls for the verdict file with a hard timeout,
+#     so it cannot strand.
 #
 # Usage:
 #   tools/test-run.sh run   [--cap N] [DUNE ARGS...]   # foreground; digest; dune's status
@@ -456,6 +458,75 @@ wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 # group.
 group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 
+# "Is anything in this process group still RUNNING?" -- the group-scale twin of
+# the zombie filter proc_alive applies per pid, and for the same reason: a
+# zombie is a process-table entry, so `kill -0 -- -PGID` succeeds on a group
+# whose every member has already exited, and group_verified does not rescue the
+# check either -- a zombie leader still prints its recorded lstart. Reading such
+# a group as alive makes `stop` announce "orphaned process group N ignored TERM"
+# for a group holding nothing but corpses, which is exactly the report someone
+# consults when working out why a worktree lock will not clear. Under an init
+# that reaps, the corpse is transient and the bare probe merely lost a race with
+# it; under one that does not -- the ordinary container case -- it is PERMANENT,
+# so waiting it out was never the fix (gh-ocannl-742; the same misreading cost
+# scripts/setup-ocaml-env.sh 30s on every failed ssh fetch, and this is that
+# script's `group_alive` ladder).
+#
+# States are not signal-visible, so they are read where the system publishes
+# them: /proc on Linux (with the shell's own `read`, no fork per process), `ps`
+# on the BSDs and macOS. Where neither answers -- a Cygwin `ps` takes no `-o`,
+# and that shell is supported here -- it degrades to the signal alone, which
+# over-reports; Cygwin reaps its own children, so the motivating case does not
+# arise on that path.
+#
+# The signal probe stays as a NECESSARY condition rather than only a fallback:
+# every caller follows this with a kill to the same group, and keeping it first
+# makes this predicate a strict narrowing of the bare `kill -0` it replaces --
+# it can turn a phantom alive into dead and never the reverse, whatever the
+# state reader sees (a group of another uid, say, which `ps -A` lists and no
+# kill of ours could reach).
+#
+# It remains a CENSUS, and a census is a SNAPSHOT: the glob (or the `ps`) is
+# taken at one instant, so a child forked while it is being read is not in it,
+# while a leader that exited into a zombie during that instant is. Both callers
+# are therefore written so that this answer can shorten a reap or reword a
+# report but never SKIP one -- the signals go out on reachability alone. A wrong
+# answer then costs a less graceful shutdown, never a survivor left mutating
+# _build behind a released worktree lock (Codex review round 1, P1).
+group_alive() { # <pgid>; exits 0 iff some member is not a zombie
+  local pgid=$1 f line states found
+  # Same rule as proc_alive: 0 and negatives are kill specials (caller's own
+  # group, broadcast), so only a positive decimal integer is a pgid at all.
+  case $pgid in '' | *[!0-9]* | 0) return 1 ;; esac
+  kill -0 -- "-$pgid" 2>/dev/null || return 1
+  if [ -r /proc/self/stat ]; then
+    found=0
+    for f in /proc/[0-9]*/stat; do
+      read -r line <"$f" 2>/dev/null || continue
+      # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
+      line=${line##*) }
+      # shellcheck disable=SC2086
+      set -- $line
+      [ "${3:-}" = "$pgid" ] || continue
+      found=1
+      [ "$1" = Z ] || return 0
+    done
+    # Every member this procfs published for the group is a zombie: dead. Having
+    # published NONE of it, though, while the signal above said the group is
+    # there, is a procfs that did not ANSWER the question rather than one
+    # answering "empty" -- a Cygwin/MSYS /proc whose stat lays its fields out
+    # differently would land here -- so fall through to `ps` and to the
+    # over-reporting default instead of inventing a death.
+    [ "$found" = 1 ] && return 1
+  fi
+  if states=$(ps -A -o pgid=,stat= 2>/dev/null) && [ -n "$states" ]; then
+    printf '%s\n' "$states" |
+      awk -v g="$pgid" '$1 == g && $2 !~ /^[Zz]/ { alive = 1 } END { exit !alive }'
+    return $?
+  fi
+  return 0
+}
+
 # Make the launched run discoverable (`last` pointer, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
@@ -759,8 +830,18 @@ case $sub in
       # the supervisor comment), so reap any survivors first.
       if group_verified "$run_dir" &&
          pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
+        # Reachability is the entry condition, and BOTH signals below go out on
+        # it alone: this reap is what stands between a surviving dune and a
+        # released worktree lock, and a census that missed a just-forked child
+        # must be able neither to call it off nor to downgrade it -- a child
+        # denied its TERM loses the chance to flush output and release what it
+        # holds. group_alive decides only the GRACE, asked after the TERM so
+        # that a member that census could have missed is included: waiting has
+        # a point only where something can still act on the signal, and a group
+        # holding nothing but unreaped corpses (see there) would otherwise cost
+        # this path two seconds every time.
         kill -TERM -- "-$pgid" 2>/dev/null
-        sleep 2
+        group_alive "$pgid" && sleep 2
         # Revalidate before escalating: TERM usually empties the group within
         # the grace, and a numeric pgid could be recycled during it -- KILL
         # only a group whose recorded leader identity still matches.
@@ -1149,11 +1230,34 @@ case $sub in
       # conservative side: clean that up by hand. TERM gets a bounded grace,
       # then a revalidated KILL -- an orphan that ignores TERM has lost its
       # cap and would otherwise hold the worktree lock indefinitely.
+      #
+      # Reachability, not liveness, opens this branch, and every signal below
+      # is sent on it alone: a census is a snapshot, so a child forked while it
+      # was taken is missing from it, and letting that veto -- or downgrade --
+      # the reap would leave the child holding the lock, or take away the TERM
+      # it needed to shut down cleanly. group_alive decides only the GRACE and
+      # the WORDING, which is where the phantom lived (gh-ocannl-742): a group
+      # of unreaped corpses announced as a runaway dune ignoring TERM.
       kill -TERM -- "-$pg" 2>/dev/null
-      sleep 2
+      # Asked AFTER the TERM, so a member the earlier census could have missed
+      # is included: a grace has a point only where something can still act on
+      # the signal, and corpses under a non-reaping init would otherwise cost
+      # every stop two seconds.
+      group_alive "$pg" && sleep 2
       if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
+        # Something is still there. Whether it is WORK or only corpses decides
+        # the sentence; the KILL goes out either way, and the state is read
+        # first because the KILL is what makes the answer stale.
+        if group_alive "$pg"; then still=running; else still=corpses; fi
         kill -KILL -- "-$pg" 2>/dev/null
-        echo "orphaned process group $pg ignored TERM; escalated to KILL"
+        if [ "$still" = running ]; then
+          echo "orphaned process group $pg ignored TERM; escalated to KILL"
+        else
+          # Not "cleared": only the parent that forked them can reap corpses,
+          # and here there is no parent left to do it.
+          echo "process group $pg holds only unreaped exited processes;" \
+               "nothing of the run was still running"
+        fi
       else
         echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
       fi

@@ -159,10 +159,9 @@ let build () =
 let train_phase ?budget ~label () =
   let ctx, comp, scalar_loss, mem0 = build () in
   let plan = ref None in
-  let routine =
+  let ctx, routine =
     Train.to_routine ctx ?budget ~budget_report:(fun r -> plan := Some r) IDX.empty comp
   in
-  let ctx = routine.Context.context in
   let open Operation.At in
   let losses = ref [] in
   for _ = 1 to 6 do

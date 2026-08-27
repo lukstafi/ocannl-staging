@@ -181,6 +181,16 @@ files.
   Do not infer the boundary from the `Non_virtual` comments at the raise sites: several describe
   reachability that has since changed, and 52 is enforced earlier still (`trace_node_facts` raises
   `invalid_arg` on a `Concat` index, so the virtualizer's arm never sees one).
+- **A dynamic-gather table (`Get_dynamic`) materializes at the read, and a table declared `Virtual`
+  is refused** (gh-ocannl-734, `test/operations/gather_table_placement.ml`): the gathered row is
+  only known at runtime, so no computation can be replayed at the read site — `virtual_llc`'s
+  `Get_dynamic` arm therefore commits an undecided table `Never_virtual 17` right there, exactly as
+  the sibling lane-extract gather does for its packed-uniform counter (`Never_virtual 146`), and a
+  table that is already `Virtual` gets a `User_error` naming the node, both readings and
+  `set_materialized`. Both `Get_dynamic` arms (`virtual_llc`'s and `cleanup_virtual_llc`'s) carry
+  that check, so neither can answer a hand-built gather with a bare provenance collision. Only
+  hand-built IR reaches this: `Assignments` lowering emits no `Get_dynamic`, and the pipeline's own
+  comes from `rewrite_one_hot_reductions`, downstream of both arms.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 - Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,

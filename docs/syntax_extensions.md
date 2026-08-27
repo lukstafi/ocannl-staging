@@ -387,7 +387,7 @@ Inline declarations can also be used outside of assignments for creating non-dif
 
 ```ocaml
   let%cd mlp_result = mlp { point } in
-  let result_routine =
+  let _, result_routine =
     Train.to_routine sgd_routine.Context.context IDX.empty
       [%cd ~~("mlp infer"; mlp_result.forward)]
   in

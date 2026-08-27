@@ -13,9 +13,12 @@
 >   by PR #70.** The proposal's approach of *carefully using grad-free intermediates* is
 >   superseded by the root fix — composite init expressions can no longer leak
 >   `zero_grads`/backprop into training.
-> - **The `Train.to_routine` API-return concern (part 2) is RESOLVED by investigation — no API
->   break.** The updated context is already readable off the routine (`routine.Context.context`)
->   (PR #70's new `test/operations/test_composite_param_init.ml` uses exactly this idiom).
+> - **The `Train.to_routine` API-return concern (part 2) landed after all, under gh-ocannl-772
+>   (2026-08-27).** The 2026-06-24 investigation deferred it because the updated context is also
+>   readable off the routine (`routine.Context.context`); the API asymmetry with `run_once`
+>   nevertheless kept confusing readers, so `to_routine` now returns
+>   `Context.t * Context.routine` and all in-tree callers were adapted. The sections below are
+>   retained as written at the time.
 >
 > **What remains live of this proposal is the ergonomic centered/scaled init API only** —
 > a convenience `centered_uniform1` / range-parameterized `uniform1 ~low ~high` / `xavier`
@@ -59,7 +62,7 @@ Related: gh-ocannl-116, task-28c898b7.
 **~~Superseded / resolved by PR #70 (kept for record):~~**
 
 - ~~The centered init function does not create gradient-carrying intermediate nodes -- only the final param tensor itself should have `Require_grad`.~~ **RESOLVED at the root by PR #70** (`Tensor.param ~require_grad` is the sole grad path; init expressions are forward-only `NTDSL`/`Prohibit_grad`; PDSL retired). Any composite init is now grad-safe regardless.
-- ~~`Train.to_routine` returns `Context.t * Context.routine`; all in-tree callers updated.~~ **DROPPED — no API break.** The updated context is readable off the routine (`routine.Context.context`).
+- `Train.to_routine` returns `Context.t * Context.routine`; all in-tree callers updated. **Deferred in 2026-06 (the context is also readable off the routine), landed under gh-ocannl-772 in 2026-08.**
 
 ## Context
 
@@ -71,11 +74,13 @@ Related: gh-ocannl-116, task-28c898b7.
 - `lib/train.ml` lines 110-113: `sgd_update` iterates `loss.Tensor.params` and calls `sgd_one` on every param with a `diff` field, including init-time intermediates if they carry `Require_grad`. *(Update 2026-06-12: incorrect — `params` is populated only by `Tensor.param` (`tensor/tensor.ml:678` sets `params = Set.singleton t`); op nodes merely union subtensor `params` (`tensor.ml:372`), so init intermediates never appear there. The real leak is via `zero_grads`: `Tensor.op` folds subtensor `zero_grads` into the new node's `diff.zero_grads` (`tensor.ml:438-446`), so a composite param's training-step zeroing references the intermediates' grad tnodes, which fail `verify_prior_context` at link (`arrayjit/lib/backends.ml:301-306`).)*
 - The key insight: init-time arithmetic intermediates should use `Prohibit_grad`; only the outermost param tensor needs `Require_grad`.
 
-### ~~to_routine context threading~~ (SUPERSEDED — no API change, use the routine's stored context)
+### to_routine context threading (landed under gh-ocannl-772)
 
-> **(2026-06-24) RESOLVED by investigation, confirmed by PR #70.** No `to_routine` API break:
-> the updated context is already stored in the routine and readable as
-> `routine.Context.context`. The section below is retained for the historical record.
+> **(2026-06-24) Deferred by investigation, confirmed by PR #70:** the updated context is also
+> stored in the routine and readable as `routine.Context.context`, so nothing was blocked.
+> **(2026-08-27) Landed anyway under gh-ocannl-772**, on the ground that the asymmetry with
+> `run_once` (which returns its context) is a readability cost the redundancy does not pay for.
+> The section below describes the state before that change.
 
 - `lib/train.ml` lines 139-155 *(Update 2026-06-12: was 186-203)*: `to_routine` calls `Context.compile ctx comp bindings` which returns `(Context.t * Context.routine)`, but discards the context with `let _ctx, routine = ...`.
 - `lib/train.ml` line 161 *(Update 2026-06-12: was 208)*: `init_params` already returns `Context.t` after compile+run, showing the pattern.
@@ -99,7 +104,7 @@ Related: gh-ocannl-116, task-28c898b7.
 
 **Centered init**: Add `centered_uniform1` (and optionally a range-parameterized `uniform1 ~low ~high`) in `operation.ml`, building on `uniform1` plus the affine recentering, exposed through `Make_DSL` so the `%op` record syntax picks it up. Then replace the host-side recentering loops in `test/training/fsm_transformer.ml` and `test/training/transformer_names.ml`.
 
-**~~to_routine~~**: ~~Change return type from `Context.routine` to `Context.t * Context.routine`.~~ **DROPPED — no API change** (read `routine.Context.context`).
+**to_routine**: Change return type from `Context.routine` to `Context.t * Context.routine`. **Landed under gh-ocannl-772 (2026-08-27).**
 
 ## Scope
 
@@ -164,15 +169,11 @@ should be dropped — its motivating gap does not exist.
    into the PRNG conversion; with `sub` as the new outermost node that flow
    changes. Either put the affine transform inside the final op's `op_asn` or
    add a non-default-precision param test.
-5. *Part (b): no breaking change.* `routine.Context.context` is exactly the updated context (`context.ml:201` stores `updated_ctx` in the
-   routine), and the idiom `Train.to_routine prev_routine.Context.context
-   ...` is already standard in-tree (16 caller files checked). Returning
-   `Context.t * routine` would churn all of them to expose redundant
-   information. Do instead: fix the misleading comment at `lib/train.ml:155`
-   ("ctx is discarded here" — it is not, it is inside the routine) and
-   document the idiom in `to_routine`'s docstring. If tuple-consistency with
-   `Context.compile` is still wanted, add a new function rather than breaking
-   `to_routine`.
+5. *Part (b): breaking, but cheap.* `routine.Context.context` is exactly the updated context
+   (`context.ml:201` stores `updated_ctx` in the routine), so the 2026-06 review recommended
+   documenting the idiom instead of churning the callers. gh-ocannl-772 reversed that call in
+   2026-08: the churn is mechanical, and matching `Context.compile`/`run_once` removes a
+   standing "who owns the post-compile context" question from every reader of `train.ml`.
 
 **Open decision points for Łukasz:**
 

@@ -9,5 +9,8 @@ guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU): true
 a bf16 single-warp Workgroup_reduce accumulates at the widened residency (32 terms narrow once to 32.75, not the 32.5 a bf16-staged tree or the 32.25 a per-step narrowing gives): true
 a bf16 four-warp Workgroup_reduce stages its per-warp partials at the widened residency (128 terms narrow once to 131, not the 130 a bf16-staged tree or the 128 a per-step narrowing gives): true
 the emitted shuffle declares its staging register and its per-warp slots at the residency type, never at bf16 storage: true
-an f16 accumulator, whose residency no GPU backend widens, is refused by the warp-shuffle rendering (GPU) or runs serially (CPU): true
+an f16 accumulator whose residency stays narrow, as the default fp16_arithmetic policy resolves it on every GPU backend, is refused by the warp-shuffle rendering (GPU) or runs serially (CPU): true
 a bf16 Workgroup_reduce whose contribution mentions an RNG conversion is refused where the residency is wider than storage (GPU) or runs serially (CPU): true
+under Fp16_wide an f16 single-warp Workgroup_reduce accumulates at the widened residency (32 terms narrow once to 32.15625, not the 32.125 an f16-staged tree or the 32.09375 a per-step narrowing gives): true
+under Fp16_wide an f16 four-warp Workgroup_reduce stages its per-warp partials at the widened residency (128 terms narrow once to 128.625, not the 128.5 an f16-staged tree or the 128.125 a per-step narrowing gives): true
+under Fp16_wide the emitted f16 shuffle declares its staging register and its per-warp slots at the residency type, never at half storage: true

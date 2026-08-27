@@ -505,9 +505,7 @@ let is_surjective (proj : Idx.projections) =
       false
     else
       let lhs_symbol_set = Set.of_list (module Idx.Symbol) lhs_symbols in
-      let product_symbol_set =
-        Set.of_list (module Idx.Symbol) (Array.to_list proj.Idx.product_iterators |> List.concat)
-      in
+      let product_symbol_set = Set.of_list (module Idx.Symbol) (Idx.all_iterators proj) in
       (* Count only LHS axes that need coverage by iterator symbols. [Fixed_idx 0] on a trivial (dim
          <= 1) axis is already covered: there is a single position and it is written. Counting such
          axes would spuriously fail the symbol-count check below for scalar / all-dims-1 tensors,
@@ -521,17 +519,15 @@ let is_surjective (proj : Idx.projections) =
       if not (Set.is_subset lhs_symbol_set ~of_:product_symbol_set) then false
       else if has_sub_axis then
         (* Conservative: Sub_axis case is complex, so assume non-surjective. This is pessimistic but
-           safe - Sub_axis would require comparing lhs_dims and product_space dimensions
+           safe - Sub_axis would require comparing lhs_dims and product-component dimensions
            carefully. *)
         false
       else if has_affine then
         (* For Affine indices with strides: check coefficient compatibility. A strided access
            pattern may skip elements. *)
         let symbol_dims =
-          Array.foldi proj.Idx.product_iterators ~init:[] ~f:(fun i acc syms ->
-              let dims = proj.Idx.product_space.(i) in
-              let pairs = List.zip_exn syms dims in
-              List.fold pairs ~init:acc ~f:(fun acc (sym, d) ->
+          Array.fold proj.Idx.components ~init:[] ~f:(fun acc comp ->
+              List.fold comp ~init:acc ~f:(fun acc (d, sym) ->
                   if Set.mem lhs_symbol_set sym then (sym, d) :: acc else acc))
           |> Map.of_alist_exn (module Idx.Symbol)
         in
@@ -559,24 +555,16 @@ let is_surjective (proj : Idx.projections) =
         Set.length lhs_symbol_set >= non_trivial_lhs_count
 
 let is_injective (proj : Idx.projections) =
-  let all_product_iterators =
-    Set.of_list (module Idx.Symbol) (Array.to_list proj.Idx.product_iterators |> List.concat)
-  in
+  let all_product_iterators = Set.of_list (module Idx.Symbol) (Idx.all_iterators proj) in
   let product_iterator_sets =
-    Array.fold proj.Idx.product_iterators ~init:[ [] ] ~f:(fun acc syms ->
-        List.concat_map acc ~f:(fun combination -> List.map syms ~f:(fun s -> s :: combination)))
+    Array.fold proj.Idx.components ~init:[ [] ] ~f:(fun acc comp ->
+        List.concat_map acc ~f:(fun combination ->
+            List.map comp ~f:(fun (_, s) -> s :: combination)))
     |> List.map ~f:(Set.of_list (module Idx.Symbol))
   in
   (* Per-symbol loop width (range), derived from the product space. Symbols absent from the product
      space (e.g. static indices) default to range 1 and are treated as pinned/static. *)
-  let symbol_range_map =
-    Array.fold2_exn proj.Idx.product_iterators proj.Idx.product_space
-      ~init:(Map.empty (module Idx.Symbol))
-      ~f:(fun acc syms dims ->
-        match List.zip syms dims with
-        | Ok pairs -> List.fold pairs ~init:acc ~f:(fun acc (s, d) -> Map.set acc ~key:s ~data:d)
-        | Unequal_lengths -> acc)
-  in
+  let symbol_range_map = Idx.iterator_sizes proj in
   let symbol_range s = Map.find symbol_range_map s |> Option.value ~default:1 in
   (* gh-133 Stage B: the affine LHS map must be injective over its non-static symbols (mixed-radix
      per-position criterion + whole-LHS pinning fixpoint). Previously any [Affine] position with

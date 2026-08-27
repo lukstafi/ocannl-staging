@@ -22,8 +22,7 @@ let () =
   let b = make_tensor ~input_dims:[ 1 ] ~output_dims:[ 3 ] "b" [| 1.0; 0.0; 1.0 |] in
   let%cd fwd = { c } =:+ a * b ~logic:"@" in
   Train.set_materialized c.value;
-  let routine = Train.to_routine ctx Train.IDX.empty fwd in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty fwd in
   Train.run ctx routine;
   let vals = Context.get_values ctx c.value in
   (* a = [[1,2,3],[4,5,6]], b col-vec [1;0;1], c = [1*1+2*0+3*1, 4*1+5*0+6*1] = [4, 10] *)

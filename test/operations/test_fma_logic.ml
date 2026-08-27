@@ -32,8 +32,7 @@ let () =
   let b = make_tensor ~output_dims:[ 4 ] "b" [| 0.5; 0.5; 0.5; 0.5 |] in
   let%cd fwd = { out } =: fma a x b ~logic:"." in
   Train.set_materialized out.value;
-  let routine = Train.to_routine ctx Train.IDX.empty fwd in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty fwd in
   Train.run ctx routine;
   print_values ctx "fma pointwise (a*x + b)" out;
   Stdio.printf "expected = [10.5 40.5 90.5 160.5]\n";
@@ -44,8 +43,7 @@ let () =
   let r = make_tensor ~output_dims:[ 1 ] "r" [| 10.0 |] in
   let%cd fwd2 = { out2 } =: fma p q r ~logic:"@" in
   Train.set_materialized out2.value;
-  let routine2 = Train.to_routine ctx Train.IDX.empty fwd2 in
-  let ctx = routine2.Context.context in
+  let ctx, routine2 = Train.to_routine ctx Train.IDX.empty fwd2 in
   Train.run ctx routine2;
   print_values ctx "fma compose-accumulate (p @ q + r)" out2;
   Stdio.printf "expected = [16]\n"

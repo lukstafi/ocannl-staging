@@ -95,6 +95,39 @@ type comp = {
 let to_comp asgns = { asgns; embedded_nodes = Set.empty (module Tnode) }
 let empty_comp = to_comp Noop
 
+(** The buffers an [accum_rhs] mentions, in argument order. For [Rev_sides] these are the
+    WRITTEN-TO buffers -- the constructor reverses the assignment's roles -- so a caller that cares
+    about the direction still matches [Rev_sides], but only for the direction. Destructuring the
+    arities lives here and nowhere else: before, four traversals each repeated it, so a new
+    [accum_rhs] constructor meant four silent omissions waiting to happen. *)
+let buffers_of_accum_rhs : accum_rhs -> buffer list = function
+  | Ternop { rhs1; rhs2; rhs3; _ } -> [ rhs1; rhs2; rhs3 ]
+  | Binop { rhs1; rhs2; _ } -> [ rhs1; rhs2 ]
+  | Unop { rhs; _ } -> [ rhs ]
+  | Block { rhses; _ } -> Array.to_list rhses
+  | Rev_sides { lhses; _ } -> Array.to_list lhses
+
+(** Whether the assignment's roles are reversed: [Rev_sides]' buffers are written and its
+    enclosing [Accum_op]'s [lhs] is read. *)
+let is_rev_sides = function Rev_sides _ -> true | _ -> false
+
+(** Folds [f] over the LEAF statements ([Accum_op], [Set_vec_unop], [Fetch]) in execution order,
+    skipping the [Noop] / [Seq] / [Block_comment] scaffolding. Descending is what the queries below
+    used to each write for themselves, and forgetting to descend through a [Block_comment] loses
+    statements silently -- so the recursion is written once. [f] still matches on {!t} (the leaf
+    kinds mean different things to different queries), and its scaffolding arm is unreachable. *)
+let fold_leaves (asgns : t) ~init ~f =
+  let rec loop acc = function
+    | Noop -> acc
+    | Seq (t1, t2) -> loop (loop acc t1) t2
+    | Block_comment (_, t) -> loop acc t
+    | (Accum_op _ | Set_vec_unop _ | Fetch _) as leaf -> f acc leaf
+  in
+  loop init asgns
+
+(** {!fold_leaves} for a [f] that only has effects. *)
+let iter_leaves (asgns : t) ~f = fold_leaves asgns ~init:() ~f:(fun () leaf -> f leaf)
+
 let is_total ~initialize_neutral ~projections =
   initialize_neutral && Affine.is_surjective projections
 
@@ -113,27 +146,17 @@ let%debug3_sexp context_nodes ~(plc : Tn.Placements.t) (asgns : t) : Tn.t_set =
     if Tn.Placements.is_in_context_force plc tn 34 then Set.singleton (module Tn) tn else empty
   in
   let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
-  let rec loop = function
-    | Noop -> empty
-    | Seq (t1, t2) -> loop t1 + loop t2
-    | Block_comment (_, t) -> loop t
-    | Accum_op { lhs; rhs; _ } ->
-        let rhses =
-          match rhs with
-          | Unop { rhs; _ } -> [ of_node rhs ]
-          | Binop { rhs1; rhs2; _ } -> [ of_node rhs1; of_node rhs2 ]
-          | Ternop { rhs1; rhs2; rhs3; _ } -> [ of_node rhs1; of_node rhs2; of_node rhs3 ]
-          | Block { rhses; _ } -> Array.to_list rhses |> List.map ~f:of_node
-          | Rev_sides { lhses; _ } -> Array.to_list lhses |> List.map ~f:of_node
-        in
-        Set.union_list (module Tn) (one lhs :: rhses)
-    | Set_vec_unop { lhs; rhs; _ } -> Set.union (one lhs) (of_node rhs)
-    (* A slice-alias view's parent must be in context too (it backs the view); the alias itself is
-       dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
-    | Fetch { array; fetch_op = Slice { sliced; _ }; _ } -> one array + one sliced
-    | Fetch { array; _ } -> one array
-  in
-  loop asgns
+  fold_leaves asgns ~init:empty ~f:(fun acc leaf ->
+      match leaf with
+      | Accum_op { lhs; rhs; _ } ->
+          Set.union_list (module Tn)
+            (acc :: one lhs :: List.map (buffers_of_accum_rhs rhs) ~f:of_node)
+      | Set_vec_unop { lhs; rhs; _ } -> acc + one lhs + of_node rhs
+      (* A slice-alias view's parent must be in context too (it backs the view); the alias itself
+         is dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
+      | Fetch { array; fetch_op = Slice { sliced; _ }; _ } -> acc + one array + one sliced
+      | Fetch { array; _ } -> acc + one array
+      | Noop | Seq _ | Block_comment _ -> acc)
 
 (** In the second set, returns the nodes that are not read from after being written to. In the first
     set, returns the nodes that are ever read from. The second set is also used as the set of nodes
@@ -152,17 +175,12 @@ let%debug3_sexp collect_nodes_guess_output (asgns : t) : Tn.t_set * Tn.t_set =
         (i1 + i2, o1 + o2 - (i1 + i2))
     | Block_comment (_, t) -> loop t
     | Accum_op { lhs; rhs; _ } ->
-        let inputs, outputs =
-          match rhs with
-          | Unop { rhs; _ } -> (of_node rhs, one lhs)
-          | Binop { rhs1; rhs2; _ } -> (of_node rhs1 + of_node rhs2, one lhs)
-          | Ternop { rhs1; rhs2; rhs3; _ } -> (of_node rhs1 + of_node rhs2 + of_node rhs3, one lhs)
-          | Block { rhses; _ } ->
-              (Array.fold rhses ~init:empty ~f:(fun acc buf -> acc + of_node buf), one lhs)
-          | Rev_sides { lhses; _ } ->
-              (one lhs, Array.fold lhses ~init:empty ~f:(fun acc buf -> acc + of_node buf))
+        let buffers =
+          List.fold (buffers_of_accum_rhs rhs) ~init:empty ~f:(fun acc buf -> acc + of_node buf)
         in
-        (inputs, outputs)
+        (* [Rev_sides] reverses the roles: its buffers are written, and the assignment's [lhs] is
+           what it reads. *)
+        if is_rev_sides rhs then (one lhs, buffers) else (buffers, one lhs)
     | Set_vec_unop { lhs; rhs; _ } -> (of_node rhs, one lhs)
     (* Materialize the slice parent too, so it can back a zero-copy alias view of [array]; harmless
        in the copy-fallback case where the parent is read by the copy loop (gh-ocannl-293 293a). *)
@@ -178,43 +196,39 @@ let collect_written (asgns : t) : Tn.t_set =
   let open Utils.Set_O in
   let empty = Set.empty (module Tn) in
   let one = Set.singleton (module Tn) in
-  let rec loop = function
-    | Noop -> empty
-    | Seq (t1, t2) -> loop t1 + loop t2
-    | Block_comment (_, t) -> loop t
-    | Accum_op { rhs = Rev_sides { lhses; _ }; _ } ->
-        Array.fold lhses ~init:empty ~f:(fun acc buf ->
-            match buf with Node rhs -> acc + one rhs | Merge_buffer _ -> acc)
-    | Accum_op { lhs; _ } | Set_vec_unop { lhs; _ } -> one lhs
-    | Fetch { array; _ } -> one array
-  in
-  loop asgns
+  let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
+  fold_leaves asgns ~init:empty ~f:(fun acc leaf ->
+      match leaf with
+      (* [Rev_sides] reverses the roles: the written-to nodes are its buffers, not the [lhs]. *)
+      | Accum_op { rhs = Rev_sides _ as rhs; _ } ->
+          List.fold (buffers_of_accum_rhs rhs) ~init:acc ~f:(fun acc buf -> acc + of_node buf)
+      | Accum_op { lhs; _ } | Set_vec_unop { lhs; _ } -> acc + one lhs
+      | Fetch { array; _ } -> acc + one array
+      | Noop | Seq _ | Block_comment _ -> acc)
 
 let sequential l =
   Option.value ~default:Noop @@ List.reduce l ~f:(fun sts another_st -> Seq (sts, another_st))
 
 let sequence l =
-  Option.value ~default:{ asgns = Noop; embedded_nodes = Set.empty (module Tn) }
-  @@ List.reduce l
-       ~f:(fun
-           { asgns = sts; embedded_nodes = embs } { asgns = another_st; embedded_nodes = emb } ->
-         { asgns = Seq (sts, another_st); embedded_nodes = Set.union embs emb })
+  {
+    asgns = sequential (List.map l ~f:(fun c -> c.asgns));
+    embedded_nodes = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.embedded_nodes));
+  }
 
 let collect_neutral_elem (asgns : t) : float option =
-  let rec loop acc = function
-    | Noop -> acc
-    | Seq (t1, t2) -> loop (loop acc t1) t2
-    | Block_comment (_, t) -> loop acc t
-    | Accum_op { accum; _ } -> (
-        let neutral = Ops.neutral_elem accum in
-        match acc with
-        | None -> Some (Some neutral)
-        | Some (Some v) when Float.( = ) v neutral -> acc
-        | Some (Some _) -> Some None
-        | Some None -> acc)
-    | Set_vec_unop _ | Fetch _ -> acc
+  let folded =
+    fold_leaves asgns ~init:None ~f:(fun acc leaf ->
+        match leaf with
+        | Accum_op { accum; _ } -> (
+            let neutral = Ops.neutral_elem accum in
+            match acc with
+            | None -> Some (Some neutral)
+            | Some (Some v) when Float.( = ) v neutral -> acc
+            | Some (Some _) -> Some None
+            | Some None -> acc)
+        | Set_vec_unop _ | Fetch _ | Noop | Seq _ | Block_comment _ -> acc)
   in
-  match loop None asgns with None -> None | Some v -> v
+  match folded with None -> None | Some v -> v
 
 let%track4_sexp to_low_level ?(static_indices = []) code =
   let open Indexing in
@@ -422,25 +436,31 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     in
     Low_level.unflat_lines @@ padding_loops @ [ llc ]
   in
-  let is_allowed_by_concat ~concat_syms_opt ~block_iters i =
-    match concat_syms_opt with
-    | None -> true
-    | Some syms -> Array.mem ~equal:Indexing.equal_symbol block_iters syms.(i)
-  in
-  let rec loop_accum ~initialize_neutral ~accum ~(op : Ops.op) ~lhs ~rhses projections : Low_level.t
-      =
-    let projections : Indexing.projections = Lazy.force projections in
-    let all_prod_iters =
-      Array.to_list projections.product_iterators
-      |> List.concat
-      |> Set.of_list (module Indexing.Symbol)
+  (* gh-ocannl-764: the product-loop machinery, written once. [Empty_block] is raised while
+     substituting an index that needs a product iterator the current block did not descend into --
+     the index belongs to a different concat segment, so this block contributes no statement for
+     it. *)
+  let exception Empty_block in
+  (* The per-block substitution from product iterators to this block's fresh loop symbols, plus the
+     loop widths of those fresh symbols (the gh-504 clamp bounds). Fresh loop symbols are needed
+     because product iterators may be shared across different operations/tensors, but each lowered
+     operation needs private loop symbols to avoid conflicts in low_level.ml's symbol-to-tensor
+     tracking. [block_iters] are the product iterators of the segments descended into, [rev_iters]
+     their loop symbols in reverse (innermost-first) order.
+
+     [on_concat] is the one policy the three walkers below legitimately disagree on: the two
+     accumulation walkers RESOLVE a [Concat] index to its active segment plus that segment's offset
+     (this is what eliminates [Concat] during lowering), while [Set_vec_unop] REJECTS one. *)
+  let block_subst ~(iter_sizes : int Map.M(Indexing.Symbol).t) ~all_prod_iters ~on_concat
+      ~(block_iters : Indexing.symbol array) ~(rev_iters : Indexing.symbol list) =
+    let subst_map =
+      let loop_iters = Array.of_list_rev rev_iters in
+      Array.map2_exn block_iters loop_iters ~f:(fun block_iter loop_iter ->
+          (block_iter, Indexing.Iterator loop_iter))
+      |> Array.to_list
+      |> Map.of_alist_exn (module Indexing.Symbol)
     in
-    let iter_sizes =
-      Array.fold2_exn projections.product_space projections.product_iterators
-        ~init:(Map.empty (module Indexing.Symbol))
-        ~f:(fun acc ds its ->
-          List.fold2_exn ds its ~init:acc ~f:(fun acc d iter -> Map.set acc ~key:iter ~data:d))
-    in
+    (* The flat offset at which [active]'s segment starts within its concatenated axis. *)
     let concat_offset_for syms active =
       let _, offset =
         List.fold syms ~init:(0, None) ~f:(fun (cumul, found) s ->
@@ -458,134 +478,106 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       in
       Option.value ~default:0 offset
     in
+    let subst_index = function
+      | (Indexing.Fixed_idx _ | Indexing.Sub_axis) as idx -> idx
+      | Indexing.Iterator s
+        when Set.mem all_prod_iters s
+             && not (Array.mem ~equal:Indexing.equal_symbol block_iters s) ->
+          raise Empty_block
+      | Indexing.Iterator s as idx -> Option.value ~default:idx (Map.find subst_map s)
+      | Indexing.Affine { symbols; offset } ->
+          (* [subst_map] only ever maps to [Iterator], so the two failing branches are unreachable;
+             they are spelled out rather than wildcarded so that widening the map is a build error
+             right here. *)
+          let symbols =
+            List.map symbols ~f:(fun (coeff, s) ->
+                match Map.find subst_map s with
+                | Some (Indexing.Iterator s') -> (coeff, s')
+                | Some (Indexing.Affine _) ->
+                    failwith "Affine substitution in Affine index not supported"
+                | Some (Indexing.Concat _) ->
+                    failwith "Concat substitution in Affine index not supported"
+                | Some (Indexing.Fixed_idx _) | Some Indexing.Sub_axis | None -> (coeff, s))
+          in
+          Indexing.Affine { symbols; offset }
+      | Indexing.Concat syms -> (
+          match on_concat with
+          | `Reject who -> raise @@ Utils.User_error ("Concat indexing not supported in " ^ who)
+          | `Resolve role -> (
+              (* Find the active segment (the one this block descended into) and resolve to its
+                 loop symbol, shifted by the segment's offset within the concatenated axis. *)
+              let active =
+                List.find_map syms ~f:(fun s ->
+                    if Array.mem ~equal:Indexing.equal_symbol block_iters s then
+                      match Map.find subst_map s with
+                      | Some (Indexing.Iterator s') -> Some (s', concat_offset_for syms s)
+                      | _ -> None
+                    else None)
+              in
+              match active with
+              | Some (s', 0) -> Indexing.Iterator s'
+              | Some (s', offset) -> Indexing.Affine { symbols = [ (1, s') ]; offset }
+              | None ->
+                  raise
+                  @@ Utils.User_error
+                       ("Concat index could not be resolved to an active component during " ^ role
+                      ^ " lowering")))
+    in
+    let fresh_sizes =
+      Map.fold subst_map
+        ~init:(Map.empty (module Indexing.Symbol))
+        ~f:(fun ~key ~data acc ->
+          match (data, Map.find iter_sizes key) with
+          | Indexing.Iterator s', Some d -> Map.set acc ~key:s' ~data:d
+          | _ -> acc)
+    in
+    (subst_index, fresh_sizes)
+  in
+  (* The product-space loop nest of one assignment: one loop per SEGMENT of each component (a fresh
+     symbol each, gh-ocannl-765), extent-guarded, calling [f] at the innermost level of every block
+     -- i.e. once per choice of concat segments. [f] receives the block's substitution, the fresh
+     symbols' loop widths, and [is_allowed i], which says whether block buffer [i] is the one this
+     block selects: a single LHS [Concat] whose segment count matches [arity] selects among the
+     buffers, otherwise every buffer participates. [f] raising [Empty_block] -- directly, or from
+     [subst_index] -- means this block contributes nothing. *)
+  let with_product_loops ~(projections : Indexing.projections) ~arity ~role ~f : Low_level.t =
+    let all_prod_iters =
+      Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
+    in
+    let iter_sizes = Indexing.iterator_sizes projections in
+    let concat_syms_opt =
+      match
+        Array.filter_map projections.project_lhs ~f:(function
+          | Indexing.Concat syms -> Some syms
+          | _ -> None)
+      with
+      | [| syms |] when List.length syms = arity -> Some (Array.of_list syms)
+      | _ -> None
+    in
     let basecase block_iters rev_iters =
-      (* Create a substitution from product iterators to loop iterators. Fresh loop symbols are
-         needed because product_iterators may be shared across different operations/tensors, but
-         each lowered operation needs private loop symbols to avoid conflicts in low_level.ml's
-         symbol-to-tensor tracking. Concat offsets are computed per Concat index using symbol
-         order. *)
-      let exception Empty_block in
       let block_iters = Array.of_list_rev block_iters in
-      let concat_syms_opt =
-        match
-          Array.filter_map projections.project_lhs ~f:(function
-            | Indexing.Concat syms -> Some syms
-            | _ -> None)
-        with
-        | [| syms |] when List.length syms = Array.length rhses -> Some (Array.of_list syms)
-        | _ -> None
+      let subst_index, fresh_sizes =
+        block_subst ~iter_sizes ~all_prod_iters ~on_concat:(`Resolve role) ~block_iters ~rev_iters
       in
-      let subst_map =
-        let loop_iters = Array.of_list_rev rev_iters in
-        Array.map2_exn block_iters loop_iters ~f:(fun block_iter loop_iter ->
-            (block_iter, Indexing.Iterator loop_iter))
-        |> Array.to_list
-        |> Map.of_alist_exn (module Indexing.Symbol)
+      let is_allowed i =
+        match concat_syms_opt with
+        | None -> true
+        | Some syms -> Array.mem ~equal:Indexing.equal_symbol block_iters syms.(i)
       in
-      (* Substitute in projections - including inside Affine indices *)
-      let subst_index = function
-        | (Indexing.Fixed_idx _ | Indexing.Sub_axis) as idx -> idx
-        | Iterator s
-          when Set.mem all_prod_iters s
-               && not (Array.mem ~equal:Indexing.equal_symbol block_iters s) ->
-            raise Empty_block
-        | Indexing.Iterator s as idx -> Option.value ~default:idx (Map.find subst_map s)
-        | Indexing.Affine { symbols; offset } ->
-            let symbols =
-              List.map symbols ~f:(fun (coeff, s) ->
-                  match Map.find subst_map s with
-                  | Some (Indexing.Iterator s') -> (coeff, s')
-                  | Some (Indexing.Affine _) ->
-                      failwith "Affine substitution in Affine index not supported"
-                  | Some (Indexing.Concat _) ->
-                      failwith "Concat substitution in Affine index not supported"
-                  | Some (Indexing.Fixed_idx _) | Some Indexing.Sub_axis | None -> (coeff, s))
-            in
-            Indexing.Affine { symbols; offset }
-        | Indexing.Concat syms -> (
-            (* For Block lowering: find the active component (in block_iters) and resolve to it with
-               the appropriate offset based on Concat symbol order. *)
-            let active =
-              List.find_mapi syms ~f:(fun _i s ->
-                  if Array.mem ~equal:Indexing.equal_symbol block_iters s then
-                    match Map.find subst_map s with
-                    | Some (Indexing.Iterator s') ->
-                        let offset = concat_offset_for syms s in
-                        Some (s', offset)
-                    | _ -> None
-                  else None)
-            in
-            match active with
-            | Some (s', 0) -> Indexing.Iterator s'
-            | Some (s', offset) -> Indexing.Affine { symbols = [ (1, s') ]; offset }
-            | None ->
-                raise
-                @@ Utils.User_error
-                     "Concat index could not be resolved to an active component during Block \
-                      lowering")
-      in
-      try
-        let lhs_idcs : Indexing.axis_index array =
-          Array.map projections.project_lhs ~f:subst_index
-        in
-        let open Low_level in
-        (* gh-504 clamped windows: ranges of the fresh loop symbols, for bounding the semantic
-           indices of each access. *)
-        let fresh_sizes =
-          Map.fold subst_map
-            ~init:(Map.empty (module Indexing.Symbol))
-            ~f:(fun ~key ~data acc ->
-              match (data, Map.find iter_sizes key) with
-              | Indexing.Iterator s', Some d -> Map.set acc ~key:s' ~data:d
-              | _ -> acc)
-        in
-        let lhs_conds = ref [] and rhs_conds = ref [] in
-        let lhs_ll = get (Node lhs) lhs_idcs in
-        let rhses_ll =
-          Array.filter_mapi projections.project_rhs ~f:(fun i rhs_idcs ->
-              try
-                if not (is_allowed_by_concat ~concat_syms_opt ~block_iters i) then None
-                else
-                  let rhs_idcs = Array.map ~f:subst_index rhs_idcs in
-                  Some (get ~clamp:(accum, fresh_sizes, rhs_conds) rhses.(i) rhs_idcs)
-              with Empty_block -> None)
-        in
-        if Array.is_empty rhses_ll then raise Empty_block;
-        let rhs2 =
-          try apply_op op rhses_ll
-          with Invalid_argument _ ->
-            raise
-            @@ Utils.User_error
-                 "Ambiguous indices in concatenation: multiple blocks viable for same position"
-        in
-        (* Out-of-range reads contribute the accumulation identity: exactly the semantics of a
-           padded window spec, so clamping is semantically exact (gh-504). *)
-        let rhs2 =
-          match !rhs_conds with
-          | [] -> rhs2
-          | conds ->
-              let cond, _ = and_all conds in
-              apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
-        in
-        let clamp = (accum, fresh_sizes, lhs_conds) in
-        let stmt =
-          if initialize_neutral && can_skip_accumulation ~projections then
-            set ~clamp lhs lhs_idcs rhs2
-          else set ~clamp lhs lhs_idcs @@ apply_op (Ops.Binop accum) [| lhs_ll; rhs2 |]
-        in
-        (* An out-of-range write target (the transposed clamp of a backward scatter) skips the whole
-           statement. *)
-        match !lhs_conds with
-        | [] -> stmt
-        | conds -> Low_level.If { cond = and_all conds; body = stmt }
-      with Empty_block -> Low_level.Noop
+      try f ~subst_index ~fresh_sizes ~is_allowed with Empty_block -> Low_level.Noop
     in
     let rec for_loop block_iters rev_iters = function
       | [] -> basecase block_iters rev_iters
-      | (ds, its) :: product ->
-          let index = Indexing.get_symbol () in
+      | comp :: product ->
           Low_level.unflat_lines
-          @@ List.map2_exn ds its ~f:(fun d iter ->
+          @@ List.map comp ~f:(fun (d, iter) ->
+              (* One fresh symbol per SEGMENT, not per component: a concatenation component's
+                 segments become sibling loops with DIFFERENT bounds, and a shared binder makes
+                 every flat symbol-keyed scanner misread them -- [def_loop_ranges] keeps only the
+                 last segment's width, [affine_accesses] collects two ranges for one symbol, and
+                 the canonical render reports the second binder as shadowed, declining the routine
+                 for both digest caches (gh-ocannl-765). *)
+              let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
                   index;
@@ -597,9 +589,57 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   axis = Serial;
                 })
     in
+    for_loop [] [] (Array.to_list projections.components)
+  in
+  let rec loop_accum ~initialize_neutral ~accum ~(op : Ops.op) ~lhs ~rhses projections : Low_level.t
+      =
+    let projections : Indexing.projections = Lazy.force projections in
     let for_loops =
-      for_loop [] []
-        (Array.to_list @@ Array.zip_exn projections.product_space projections.product_iterators)
+      with_product_loops ~projections ~arity:(Array.length rhses) ~role:"Block"
+        ~f:(fun ~subst_index ~fresh_sizes ~is_allowed ->
+          let lhs_idcs : Indexing.axis_index array =
+            Array.map projections.project_lhs ~f:subst_index
+          in
+          let open Low_level in
+          let lhs_conds = ref [] and rhs_conds = ref [] in
+          let lhs_ll = get (Node lhs) lhs_idcs in
+          let rhses_ll =
+            Array.filter_mapi projections.project_rhs ~f:(fun i rhs_idcs ->
+                try
+                  if not (is_allowed i) then None
+                  else
+                    let rhs_idcs = Array.map ~f:subst_index rhs_idcs in
+                    Some (get ~clamp:(accum, fresh_sizes, rhs_conds) rhses.(i) rhs_idcs)
+                with Empty_block -> None)
+          in
+          if Array.is_empty rhses_ll then raise Empty_block;
+          let rhs2 =
+            try apply_op op rhses_ll
+            with Invalid_argument _ ->
+              raise
+              @@ Utils.User_error
+                   "Ambiguous indices in concatenation: multiple blocks viable for same position"
+          in
+          (* Out-of-range reads contribute the accumulation identity: exactly the semantics of a
+             padded window spec, so clamping is semantically exact (gh-504). *)
+          let rhs2 =
+            match !rhs_conds with
+            | [] -> rhs2
+            | conds ->
+                let cond, _ = and_all conds in
+                apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
+          in
+          let clamp = (accum, fresh_sizes, lhs_conds) in
+          let stmt =
+            if initialize_neutral && can_skip_accumulation ~projections then
+              set ~clamp lhs lhs_idcs rhs2
+            else set ~clamp lhs lhs_idcs @@ apply_op (Ops.Binop accum) [| lhs_ll; rhs2 |]
+          in
+          (* An out-of-range write target (the transposed clamp of a backward scatter) skips the
+             whole statement. *)
+          match !lhs_conds with
+          | [] -> stmt
+          | conds -> Low_level.If { cond = and_all conds; body = stmt })
     in
     (* Need initialization if: initialize_neutral is true AND (not surjective OR not injective)
 
@@ -631,11 +671,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
   and loop_accum_rev ~initialize_neutral ~accum ~(op : Ops.op) ~lhs ~lhses projections : Low_level.t
       =
     let projections : Indexing.projections = Lazy.force projections in
-    let all_prod_iters =
-      Array.to_list projections.product_iterators
-      |> List.concat
-      |> Set.of_list (module Indexing.Symbol)
-    in
     let target_projections =
       Array.mapi projections.project_rhs ~f:(fun i project_lhs ->
           { projections with lhs_dims = projections.rhs_dims.(i); project_lhs })
@@ -647,164 +682,55 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       Array.map target_projections ~f:(fun proj ->
           initialize_neutral && not (Affine.is_surjective proj && Affine.is_injective proj))
     in
-    let iter_sizes =
-      Array.fold2_exn projections.product_space projections.product_iterators
-        ~init:(Map.empty (module Indexing.Symbol))
-        ~f:(fun acc ds its ->
-          List.fold2_exn ds its ~init:acc ~f:(fun acc d iter -> Map.set acc ~key:iter ~data:d))
+    let target_tn_exn = function
+      | Node tn -> tn
+      | Merge_buffer _ -> raise @@ Utils.User_error "Rev_sides cannot write to merge buffers"
     in
-    let concat_offset_for syms active =
-      let _, offset =
-        List.fold syms ~init:(0, None) ~f:(fun (cumul, found) s ->
-            let size =
-              match Map.find iter_sizes s with
-              | Some v -> v
-              | None ->
-                  raise
-                  @@ Utils.User_error
-                       ("concat_offset_for: iterator symbol " ^ Indexing.symbol_ident s
-                      ^ " absent from projection iter_sizes; a projection component was dropped")
-            in
-            if Indexing.equal_symbol s active then (cumul + size, Some cumul)
-            else (cumul + size, found))
-      in
-      Option.value ~default:0 offset
-    in
-    let basecase block_iters rev_iters =
-      let exception Empty_block in
-      let block_iters = Array.of_list_rev block_iters in
-      let concat_syms_opt =
-        match
-          Array.filter_map projections.project_lhs ~f:(function
-            | Indexing.Concat syms -> Some syms
-            | _ -> None)
-        with
-        | [| syms |] when List.length syms = Array.length lhses -> Some (Array.of_list syms)
-        | _ -> None
-      in
-      let subst_map =
-        let loop_iters = Array.of_list_rev rev_iters in
-        Array.map2_exn block_iters loop_iters ~f:(fun block_iter loop_iter ->
-            (block_iter, Indexing.Iterator loop_iter))
-        |> Array.to_list
-        |> Map.of_alist_exn (module Indexing.Symbol)
-      in
-      let subst_index = function
-        | (Indexing.Fixed_idx _ | Indexing.Sub_axis) as idx -> idx
-        | Iterator s
-          when Set.mem all_prod_iters s
-               && not (Array.mem ~equal:Indexing.equal_symbol block_iters s) ->
-            raise Empty_block
-        | Indexing.Iterator s as idx -> Option.value ~default:idx (Map.find subst_map s)
-        | Indexing.Affine { symbols; offset } ->
-            let symbols =
-              List.map symbols ~f:(fun (coeff, s) ->
-                  match Map.find subst_map s with
-                  | Some (Indexing.Iterator s') -> (coeff, s')
-                  | Some (Indexing.Affine _) ->
-                      failwith "Affine substitution in Affine index not supported"
-                  | Some (Indexing.Concat _) ->
-                      failwith "Concat substitution in Affine index not supported"
-                  | Some (Indexing.Fixed_idx _) | Some Indexing.Sub_axis | None -> (coeff, s))
-            in
-            Indexing.Affine { symbols; offset }
-        | Indexing.Concat syms -> (
-            (* For Rev_sides lowering: find the active component and resolve with offset *)
-            let active =
-              List.find_mapi syms ~f:(fun _i s ->
-                  if Array.mem ~equal:Indexing.equal_symbol block_iters s then
-                    match Map.find subst_map s with
-                    | Some (Indexing.Iterator s') ->
-                        let offset = concat_offset_for syms s in
-                        Some (s', offset)
-                    | _ -> None
-                  else None)
-            in
-            match active with
-            | Some (s', 0) -> Indexing.Iterator s'
-            | Some (s', offset) -> Indexing.Affine { symbols = [ (1, s') ]; offset }
-            | None ->
-                raise
-                @@ Utils.User_error
-                     "Concat index could not be resolved to an active component during Rev_sides \
-                      lowering")
-      in
-      let target_tn_exn = function
-        | Node tn -> tn
-        | Merge_buffer _ -> raise @@ Utils.User_error "Rev_sides cannot write to merge buffers"
-      in
-      try
-        let rhs_idcs : Indexing.axis_index array =
-          Array.map projections.project_lhs ~f:subst_index
-        in
-        let open Low_level in
-        (* gh-504 clamped windows: see [loop_accum]'s basecase. *)
-        let fresh_sizes =
-          Map.fold subst_map
-            ~init:(Map.empty (module Indexing.Symbol))
-            ~f:(fun ~key ~data acc ->
-              match (data, Map.find iter_sizes key) with
-              | Indexing.Iterator s', Some d -> Map.set acc ~key:s' ~data:d
-              | _ -> acc)
-        in
-        let lhs_conds = ref [] and rhs_conds = ref [] in
-        let rhs_ll = get ~clamp:(accum, fresh_sizes, rhs_conds) (Node lhs) rhs_idcs in
-        let targets =
-          Array.filter_mapi projections.project_rhs ~f:(fun i lhs_idcs ->
-              try
-                if not (is_allowed_by_concat ~concat_syms_opt ~block_iters i) then None
-                else
-                  let lhs_idcs = Array.map ~f:subst_index lhs_idcs in
-                  Some (i, lhses.(i), lhs_idcs)
-              with Empty_block -> None)
-        in
-        if Array.is_empty targets then raise Empty_block;
-        if Array.length targets > 1 then
-          raise
-          @@ Utils.User_error
-               "Ambiguous indices in concatenation: multiple blocks viable for same position";
-        let i, target_buf, lhs_idcs = targets.(0) in
-        let rhs2 = apply_op op [| rhs_ll |] in
-        let rhs2 =
-          match !rhs_conds with
-          | [] -> rhs2
-          | conds ->
-              let cond, _ = and_all conds in
-              apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
-        in
-        let target_tn = target_tn_exn target_buf in
-        let clamp = (accum, fresh_sizes, lhs_conds) in
-        let stmt =
-          if initialize_neutral && target_can_skip.(i) then set ~clamp target_tn lhs_idcs rhs2
-          else
-            set ~clamp target_tn lhs_idcs
-            @@ apply_op (Ops.Binop accum) [| get target_buf lhs_idcs; rhs2 |]
-        in
-        match !lhs_conds with
-        | [] -> stmt
-        | conds -> Low_level.If { cond = and_all conds; body = stmt }
-      with Empty_block -> Low_level.Noop
-    in
-    let rec for_loop block_iters rev_iters = function
-      | [] -> basecase block_iters rev_iters
-      | (ds, its) :: product ->
-          let index = Indexing.get_symbol () in
-          Low_level.unflat_lines
-          @@ List.map2_exn ds its ~f:(fun d iter ->
-              Low_level.For_loop
-                {
-                  index;
-                  from_ = 0;
-                  to_ = d - 1;
-                  body =
-                    extent_guard ~projections ~index ~iter
-                      (for_loop (iter :: block_iters) (index :: rev_iters) product);
-                  axis = Serial;
-                })
-    in
+    (* Same walker as [loop_accum], the roles swapped: the assignment's [lhs] is read at
+       [project_lhs] and the [lhses] are written at their [project_rhs]. *)
     let for_loops =
-      for_loop [] []
-        (Array.to_list @@ Array.zip_exn projections.product_space projections.product_iterators)
+      with_product_loops ~projections ~arity:(Array.length lhses) ~role:"Rev_sides"
+        ~f:(fun ~subst_index ~fresh_sizes ~is_allowed ->
+          let rhs_idcs : Indexing.axis_index array =
+            Array.map projections.project_lhs ~f:subst_index
+          in
+          let open Low_level in
+          let lhs_conds = ref [] and rhs_conds = ref [] in
+          let rhs_ll = get ~clamp:(accum, fresh_sizes, rhs_conds) (Node lhs) rhs_idcs in
+          let targets =
+            Array.filter_mapi projections.project_rhs ~f:(fun i lhs_idcs ->
+                try
+                  if not (is_allowed i) then None
+                  else
+                    let lhs_idcs = Array.map ~f:subst_index lhs_idcs in
+                    Some (i, lhses.(i), lhs_idcs)
+                with Empty_block -> None)
+          in
+          if Array.is_empty targets then raise Empty_block;
+          if Array.length targets > 1 then
+            raise
+            @@ Utils.User_error
+                 "Ambiguous indices in concatenation: multiple blocks viable for same position";
+          let i, target_buf, lhs_idcs = targets.(0) in
+          let rhs2 = apply_op op [| rhs_ll |] in
+          let rhs2 =
+            match !rhs_conds with
+            | [] -> rhs2
+            | conds ->
+                let cond, _ = and_all conds in
+                apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
+          in
+          let target_tn = target_tn_exn target_buf in
+          let clamp = (accum, fresh_sizes, lhs_conds) in
+          let stmt =
+            if initialize_neutral && target_can_skip.(i) then set ~clamp target_tn lhs_idcs rhs2
+            else
+              set ~clamp target_tn lhs_idcs
+              @@ apply_op (Ops.Binop accum) [| get target_buf lhs_idcs; rhs2 |]
+          in
+          match !lhs_conds with
+          | [] -> stmt
+          | conds -> Low_level.If { cond = and_all conds; body = stmt })
     in
     let neutral_value = Ops.neutral_elem accum in
     (* Establish the committed neutral element in the lhs margins (device buffers are allocated
@@ -875,33 +801,33 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
            final counter iteration stores only the remaining lanes of its 128-bit block. *)
         let total_elems = Tn.num_elems lhs in
         let rem = total_elems % full_length in
-        let basecase ~length rev_iters =
-          let subst_map =
-            let loop_iters = Array.of_list_rev rev_iters in
-            Array.map2_exn loop_iters projections.product_iterators ~f:(fun loop_iter prod_iter ->
-                let prod_iter =
-                  match prod_iter with
-                  | [ prod_iter ] -> prod_iter
-                  | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
-                in
-                (prod_iter, Indexing.Iterator loop_iter))
-            |> Array.to_list
-            |> Map.of_alist_exn (module Indexing.Symbol)
-          in
-          let subst_index = function
-            | Indexing.Concat _ ->
-                raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
-            | (Fixed_idx _ | Sub_axis) as idx -> idx
-            | Iterator s as idx -> Option.value ~default:idx (Map.find subst_map s)
-            | Affine { symbols; offset } ->
-                (* Substitute symbols in affine index *)
-                let subst_symbols =
-                  List.map symbols ~f:(fun (coeff, s) ->
-                      match Map.find subst_map s with
-                      | Some (Indexing.Iterator new_s) -> (coeff, new_s)
-                      | _ -> (coeff, s))
-                in
-                Indexing.Affine { symbols = subst_symbols; offset }
+        (* The third product-loop walker (gh-ocannl-764). It reuses [block_subst] -- so an index
+           form is substituted in ONE place for all three -- but keeps its own loop nest, and the
+           four ways it differs from [with_product_loops] are decisions, not drift:
+
+           1. The nest is SPLIT, not uniform: the counter axis's last iteration is peeled into its
+              own loop so the tail store writes only [rem] lanes. A shared walker would have to
+              take a per-component split policy to express that, which is the whole of what is
+              specific here.
+           2. [Concat] is REJECTED, not resolved ([`Reject]): [Set_from_vec] stores [length] lanes
+              at flat consecutive offsets from one base index, which a segment offset would make
+              straddle two segments. The non-singleton component is refused by [for_loop] below,
+              and this refuses a [Concat] index arriving by any other route.
+           3. [Empty_block] cannot fire here: every component is a singleton (2) and every level is
+              entered, so [block_iters] covers all product iterators. Going through the shared
+              policy anyway means an iterator that somehow escaped that would fail the lowering
+              rather than survive as a silently unsubstituted symbol.
+           4. No [extent_guard] and no gh-504 clamp: symbolic extents and padded-window clamping
+              reach the accumulation walkers only. Wiring either in here would be a behavior
+              change, not a dedup, so this refactor leaves them out. *)
+        let all_prod_iters =
+          Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
+        in
+        let iter_sizes = Indexing.iterator_sizes projections in
+        let basecase ~length block_iters rev_iters =
+          let subst_index, _fresh_sizes =
+            block_subst ~iter_sizes ~all_prod_iters ~on_concat:(`Reject "Set_vec_unop")
+              ~block_iters:(Array.of_list_rev block_iters) ~rev_iters
           in
           let lhs_idcs = Array.map projections.project_lhs ~f:subst_index in
           let rhs_idcs = Array.map projections.project_rhs.(0) ~f:subst_index in
@@ -941,9 +867,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> [])
             in
             let driving =
-              Array.filter_mapi projections.product_iterators ~f:(fun i prod_iter ->
-                  match prod_iter with
-                  | [ s ] when List.mem rhs_symbols s ~equal:Indexing.Symbol.equal -> Some i
+              Array.filter_mapi projections.components ~f:(fun i comp ->
+                  match comp with
+                  | [ (_, s) ] when List.mem rhs_symbols s ~equal:Indexing.Symbol.equal -> Some i
                   | _ -> None)
             in
             match Array.to_list driving with
@@ -951,8 +877,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 (* The peel below assumes the flat store offset is driven solely by the peeled
                    counter axis: every other product axis must be degenerate. *)
                 let others_product =
-                  Array.foldi projections.product_space ~init:1 ~f:(fun j acc d ->
-                      if j = i then acc else List.fold d ~init:acc ~f:( * ))
+                  Array.foldi projections.components ~init:1 ~f:(fun j acc comp ->
+                      if j = i then acc
+                      else List.fold comp ~init:acc ~f:(fun acc (d, _) -> acc * d))
                 in
                 if others_product <> 1 then
                   raise
@@ -971,9 +898,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                         identify the counter axis to peel"]
           end
         in
-        let rec for_loop ~tail rev_iters = function
-          | [] -> basecase ~length:(if tail then rem else full_length) rev_iters
-          | (i, [ d ]) :: product when i = peel_axis ->
+        let rec for_loop ~tail block_iters rev_iters = function
+          | [] -> basecase ~length:(if tail then rem else full_length) block_iters rev_iters
+          | (i, [ (d, iter) ]) :: product when i = peel_axis ->
               (* Peel the final counter iteration: interior stores stay full-width and guard-free,
                  the last store writes the [rem] remaining lanes. *)
               let make ~tail ~from_ ~to_ =
@@ -983,29 +910,29 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                     index;
                     from_;
                     to_;
-                    body = for_loop ~tail (index :: rev_iters) product;
+                    body = for_loop ~tail (iter :: block_iters) (index :: rev_iters) product;
                     axis = Serial;
                   }
               in
               let tail_loop = make ~tail:true ~from_:(d - 1) ~to_:(d - 1) in
               if d = 1 then tail_loop
               else Low_level.Seq (make ~tail:false ~from_:0 ~to_:(d - 2), tail_loop)
-          | (_, [ d ]) :: product ->
+          | (_, [ (d, iter) ]) :: product ->
               let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
                   index;
                   from_ = 0;
                   to_ = d - 1;
-                  body = for_loop ~tail (index :: rev_iters) product;
+                  body = for_loop ~tail (iter :: block_iters) (index :: rev_iters) product;
                   axis = Serial;
                 }
           | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
         in
         for_loop
           ~tail:(rem <> 0 && total_elems <= full_length)
-          []
-          (List.mapi ~f:(fun i d -> (i, d)) (Array.to_list projections.product_space))
+          [] []
+          (List.mapi ~f:(fun i comp -> (i, comp)) (Array.to_list projections.components))
     | Noop -> Low_level.Noop
     | Block_comment (s, c) -> Low_level.unflat_lines [ Comment s; loop c; Comment "end" ]
     | Seq (c1, c2) ->
@@ -1116,13 +1043,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     && Option.is_none (Tn.get_padding sliced)
     && Option.is_none (Tn.get_padding array)
   in
-  let rec mark_aliases (c : t) : unit =
-    match c with
-    | Noop -> ()
-    | Seq (c1, c2) ->
-        mark_aliases c1;
-        mark_aliases c2
-    | Block_comment (_, c) -> mark_aliases c
+  let mark_aliases (c : t) : unit =
+    iter_leaves c ~f:(function
     | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
         if slice_alias_eligible ~array ~sliced then (
           (* The view's write semantics (a write through [array] is a write to [sliced]'s sub-range,
@@ -1132,7 +1054,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
              materialization of slice parents. Provenance 27. *)
           Tn.update_memory_mode sliced On_device 27;
           Tn.set_alias_of array ~parent:sliced ~batch_idx)
-    | Fetch _ | Accum_op _ | Set_vec_unop _ -> ()
+    | Fetch _ | Accum_op _ | Set_vec_unop _ | Noop | Seq _ | Block_comment _ -> ())
   in
   mark_aliases code;
   loop code
@@ -1162,28 +1084,12 @@ let get_ident_within_code ?no_dots c =
              Set.add (Option.value ~default:Utils.no_ints old) tn.uid))
   in
   let tn = function Node tn -> tn | Merge_buffer tn -> tn in
-  let rec loop (c : t) =
-    match c with
-    | Noop -> ()
-    | Seq (c1, c2) ->
-        loop c1;
-        loop c2
-    | Block_comment (_, c) -> loop c
+  iter_leaves c ~f:(function
     | Accum_op { lhs; rhs; _ } ->
-        let rhses =
-          match rhs with
-          | Unop { rhs; _ } -> [ tn rhs ]
-          | Binop { rhs1; rhs2; _ } -> [ tn rhs1; tn rhs2 ]
-          | Ternop { rhs1; rhs2; rhs3; _ } -> [ tn rhs1; tn rhs2; tn rhs3 ]
-          | Block { rhses; _ } -> Array.to_list rhses |> List.map ~f:tn
-          | Rev_sides { lhses; _ } -> Array.to_list lhses |> List.map ~f:tn
-        in
-        List.iter ~f:visit (lhs :: rhses)
-    | Set_vec_unop { op = _; lhs; rhs; projections = _; projections_debug = _ } ->
-        List.iter ~f:visit [ lhs; tn rhs ]
-    | Fetch { array; fetch_op = _; dims = _ } -> visit array
-  in
-  loop c;
+        List.iter ~f:visit (lhs :: List.map (buffers_of_accum_rhs rhs) ~f:tn)
+    | Set_vec_unop { lhs; rhs; _ } -> List.iter ~f:visit [ lhs; tn rhs ]
+    | Fetch { array; _ } -> visit array
+    | Noop | Seq _ | Block_comment _ -> ());
   let repeating_nograd_idents =
     Hashtbl.filter nograd_idents ~f:(fun ids -> List.length (Set.to_list ids) > 1)
   in

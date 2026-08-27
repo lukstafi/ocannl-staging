@@ -269,7 +269,7 @@ let%op learning_rate = 0.01 in
 let update = Train.grad_update loss in
 let sgd = Train.sgd_update ~learning_rate loss in
 let ctx = Train.init_params ctx IDX.empty loss in
-let routine = Train.to_routine ctx IDX.empty 
+let ctx, routine = Train.to_routine ctx IDX.empty 
   (Asgns.sequence [update; sgd]) in
 
 (* Training loop - reuse compiled routine *)
@@ -361,10 +361,10 @@ let train_with_schedule get_batch model input_tensor target_tensor steps =
   let update = Train.grad_update loss in
   let sgd = Train.sgd_update ~learning_rate loss in
   let ctx = Train.init_params ctx bindings loss in
-  let routine = Train.to_routine ctx bindings 
+  (* Value access is context-mediated (gh-ocannl-333): read/write through the post-compile
+     context that [to_routine] returns (also available as [routine.Context.context]). *)
+  let ctx, routine = Train.to_routine ctx bindings 
     (Asgns.sequence [update; sgd]) in
-  (* Value access is context-mediated (gh-ocannl-333): read/write through the routine's context. *)
-  let ctx = routine.Context.context in
   
   (* Get reference to step counter *)
   let step_ref = IDX.find_exn routine.Context.bindings step_n in
@@ -429,7 +429,7 @@ let train_batched data labels batch_size epochs =
   let update = Train.grad_update batch_loss in
   let sgd = Train.sgd_update ~learning_rate batch_loss in
   let ctx = Train.init_params ctx bindings batch_loss in
-  let routine = Train.to_routine ctx bindings
+  let ctx, routine = Train.to_routine ctx bindings
     (Asgns.sequence [update; sgd]) in
   
   (* Get batch counter reference *)
@@ -487,7 +487,8 @@ let inference ctx model =
 - **`Train.sgd_update ~learning_rate loss`**: Returns SGD parameter update computation
 - **`Train.forward_once ctx tensor`**: Forward pass only (initializes params if needed)
 - **`Train.update_once ctx loss`**: Forward + backward pass (initializes params if needed)
-- **`Train.to_routine ctx bindings comp`**: Compiles computation for repeated execution
+- **`Train.to_routine ctx bindings comp`**: Compiles computation for repeated execution, returning
+  the post-compile context and the routine
 - **`Train.run ctx routine`**: Executes compiled routine
 - **`Asgns.sequence comps`**: Combines multiple computations into one
 
@@ -624,7 +625,7 @@ let update = Train.grad_update loss in           (* forward + backward *)
 let sgd = Train.sgd_update ~learning_rate loss in (* parameter updates *)
 
 (* Compile once *)
-let routine = Train.to_routine ctx bindings 
+let ctx, routine = Train.to_routine ctx bindings 
   (Asgns.sequence [update; sgd]) in
 
 (* Execute many times *)

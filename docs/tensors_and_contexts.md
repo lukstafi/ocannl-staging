@@ -339,10 +339,10 @@ let ctx2, routine_b = Context.compile ctx1 comp_b bindings in
 let ctx1, routine_a = Context.compile ctx0 comp_a bindings in
 let ctx2, routine_b = Context.compile ctx0 comp_b bindings in
 
-(* Via Train.to_routine: chains through the routine's stored context *)
-let routine_a = Train.to_routine ctx bindings comp_a in
-let routine_b = Train.to_routine routine_a.Context.context bindings comp_b in
-(* routine_b depends on routine_a — sequential via stored child context *)
+(* Via Train.to_routine: chains through the returned post-compile context *)
+let ctx_a, routine_a = Train.to_routine ctx bindings comp_a in
+let ctx_b, routine_b = Train.to_routine ctx_a bindings comp_b in
+(* routine_b depends on routine_a — sequential via the child context *)
 ```
 
 #### API
@@ -369,8 +369,8 @@ Re-running a routine that has already executed is allowed — its dependencies r
 
 ```ocaml
 (* Typical pattern: grad_update then sgd_update *)
-let grad_routine = Train.to_routine ctx bindings grad_comp in
-let sgd_routine = Train.to_routine grad_routine.Context.context bindings sgd_comp in
+let grad_ctx, grad_routine = Train.to_routine ctx bindings grad_comp in
+let _, sgd_routine = Train.to_routine grad_ctx bindings sgd_comp in
 
 (* grad has no deps (first in lineage), sgd depends on grad *)
 assert (Context.can_run ctx grad_routine);
@@ -439,7 +439,7 @@ let sgd = Train.sgd_update ~learning_rate loss in
 let ctx = Train.init_params ctx bindings loss in
 
 (* Compile training routine *)
-let routine = Train.to_routine ctx bindings
+let ctx, routine = Train.to_routine ctx bindings
   (Asgns.sequence [update; sgd]) in
 
 (* Training loop *)

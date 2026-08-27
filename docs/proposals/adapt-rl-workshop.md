@@ -79,11 +79,11 @@ with working OCANNL code showing the define-then-run pattern:
 let%op policy x = softmax ~spec:"a" () (mlp ~label:["policy"] ~hid_dims:[32; 16] () x) in
 (* Compile inference routine *)
 let%cd infer_step = policy_out.forward; { dice } =: uniform_at !@step_counter in
-let infer_routine = Train.to_routine ctx bindings infer_step in
+let _, infer_routine = Train.to_routine ctx bindings infer_step in
 (* Compile training routine *)
 let update = Train.grad_update policy_loss in
 let sgd = Train.sgd_update ~learning_rate policy_loss in
-let train_step = Train.to_routine ctx bindings (Asgns.sequence [update; sgd]) in
+let ctx, train_step = Train.to_routine ctx bindings (Asgns.sequence [update; sgd]) in
 ```
 
 **Exercise document** (`exercises-RL-OCANNL.md`): 5 exercises mapping to workshop stages:

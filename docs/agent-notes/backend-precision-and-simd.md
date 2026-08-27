@@ -510,8 +510,10 @@ files.
   legs pin auto's CURRENT resolution and say so. Pinned by: `accum_width.ml`'s universal f16 legs
   (scalar 2048+1×8 discriminates 2056 wide vs 2048 per-step; matmul parity vs once-narrowed wide
   reference under `Fp16_wide` on every backend — inputs exact in f32 so schedule reassociation
-  cannot break bitwise equality) and `sketch_family_tree.ml`'s seeding-gate section (mma seeds
-  present under default, withheld under wide-without-arm, restored with the arm). The reproducible
+  cannot break bitwise equality), `sketch_family_tree.ml`'s seeding-gate section (mma seeds
+  present under default, withheld under wide-without-arm, restored with the arm), and
+  `hardware_warp_shuffle.ml`'s `Fp16_wide` legs, which execute the path the policy newly makes
+  reachable: the f16 warp-shuffle rendering the residency gate refuses under `auto` (next bullet). The reproducible
   profile pins `fp16_arithmetic=auto` (the default, so the profile still changes no math); the
   performance profile keeps `true`. HIP's wide d-boundary conversion and hardware validation of
   the CUDA `(mma-f16)` arm are the open remainder.
@@ -541,7 +543,14 @@ files.
   `hardware_warp_shuffle.ml`'s bf16 legs — 32 lanes of `1 + (k mod 7)/128` separate the three
   candidate renderings as 32.75 / 32.5 / 32.25 (once-narrowed f32 tree, tree staged at bf16,
   per-step read-modify-write), and 128 lanes give 131 / 130 / 128 while also pinning the shared
-  slots' element type — plus its f16 leg and its bf16 RNG leg for the two refusals, and
+  slots' element type; its `Fp16_wide` twin legs — the f16 analogue `1 + (k mod 11)/1024`, giving
+  32.15625 / 32.125 / 32.09375 and 128.625 / 128.5 / 128.125 — execute the same rendering under
+  the wide policy on every backend, and are the legs that actually run the two-phase staging on
+  Metal (whose bf16 legs are skipped by design). The modulus rises from 7 to 11 because at f16's
+  finer grid a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value:
+  when transplanting a discrimination like this to another width, recheck it rather than assuming
+  the constants carry over. Plus the default-policy f16 leg and the bf16 RNG leg for the two
+  refusals, and
   `reduction_forms.ml`'s `retype-workgroup-reduce` member, whose availability now asks
   `expected_residency` instead of naming f32.
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
