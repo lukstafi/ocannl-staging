@@ -281,46 +281,37 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
     ?grad_scale ?update_gate p =
   if Option.is_none p.Tensor.diff then
     raise @@ Tensor.Session_error ("Train.sgd_one: not differentiable", Some p);
-  match update_gate with
-  | None ->
-      [%cd
-        ~~(p "param sgd step";
-           (match grad_unscale with
-           (* The binary form: a unary [p.grad =* unscale] would be a Pointwise_un, which does not
-              broadcast the scalar's closed rows against parameters with input axes. *)
-           | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
-           | None -> Asgns.empty_comp);
-           (* The [Some] arm's inline declaration of [sgd_delta] is hoisted above the match, so the
-              [None] arm references the same tensor. Gradients can only be read as direct operands
-              (not inside subexpressions), hence the scaled read is its own statement. *)
-           (match grad_scale with
-           | Some scale ->
-               { sgd_delta } =: p.grad * scale ~logic:".";
-               sgd_delta =+ !.weight_decay *. p
-           | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
-           if Float.(momentum > 0.0) then (
-             { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
-             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
-           p =- learning_rate * sgd_delta ~logic:".")]
-  | Some gate ->
-      [%cd
-        ~~(p "param sgd step";
-           (match grad_unscale with
-           | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
-           | None -> Asgns.empty_comp);
-           (match grad_scale with
-           | Some scale ->
-               { sgd_delta } =: p.grad * scale ~logic:".";
-               sgd_delta =+ !.weight_decay *. p
-           | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
-           if Float.(momentum > 0.0) then (
-             { sgd_momentum } =: where gate ((!.momentum *. sgd_momentum) + sgd_delta) sgd_momentum;
-             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
-           (* The final selection covers every path: without momentum it discards the possibly
-              non-finite delta; with momentum the buffer kept its old (finite) value above, and this
-              still zeroes the step so [p] is untouched. *)
-           sgd_delta =: where gate sgd_delta 0;
-           p =- learning_rate * sgd_delta ~logic:".")]
+  (* The [%cd] payload is written once and the [update_gate] arms differ only where the gating
+     actually changes the emitted assignment. Inline declarations ([{ sgd_delta }],
+     [{ sgd_momentum }]) are hoisted by the ppx above the enclosing [match]/[if], so an arm that
+     declares a tensor and an arm that only reads it name the same tensor. *)
+  [%cd
+    ~~(p "param sgd step";
+       (match grad_unscale with
+       (* The binary form: a unary [p.grad =* unscale] would be a Pointwise_un, which does not
+          broadcast the scalar's closed rows against parameters with input axes. *)
+       | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
+       | None -> Asgns.empty_comp);
+       (* Gradients can only be read as direct operands (not inside subexpressions), hence the
+          scaled read is its own statement. *)
+       (match grad_scale with
+       | Some scale ->
+           { sgd_delta } =: p.grad * scale ~logic:".";
+           sgd_delta =+ !.weight_decay *. p
+       | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
+       if Float.(momentum > 0.0) then (
+         (match update_gate with
+         | None -> { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta
+         | Some gate ->
+             sgd_momentum =: where gate ((!.momentum *. sgd_momentum) + sgd_delta) sgd_momentum);
+         if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
+       (* The final selection covers every path: without momentum it discards the possibly
+          non-finite delta; with momentum the buffer kept its old (finite) value above, and this
+          still zeroes the step so [p] is untouched. *)
+       (match update_gate with
+       | Some gate -> sgd_delta =: where gate sgd_delta 0
+       | None -> Asgns.empty_comp);
+       p =- learning_rate * sgd_delta ~logic:".")]
 
 (** Maps {!sgd_one} over the parameters [loss] trains ({!trainable_params}, or [?params]): a
     parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight decay
@@ -1355,6 +1346,38 @@ let fit_memory_budget ?budget ?max_candidates ?name ctx comp bindings =
       let ctx, plan = Context.plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings in
       (ctx, Some plan)
 
+(** Dumps [comp] as a [.cd] file in the build directory, for the [?output_cd_file] argument of
+    {!to_routine} and {!run_once}. [caller] names the calling function in the error raised when the
+    global setting [output_debug_files_in_build_directory] is false. *)
+let dump_cd_file ~caller bindings (comp : Asgns.comp) =
+  let name = Asgns.get_name_exn comp.Asgns.asgns in
+  if not Utils.settings.output_debug_files_in_build_directory then
+    raise
+    @@ Utils.User_error
+         (caller
+        ^ ": output_cd_file is true, but output_debug_files_in_build_directory is false");
+  let cd_source = Utils.output_to_build_file ~fname:(name ^ "-debug.cd") in
+  let static_indices = Idx.bound_symbols bindings in
+  match cd_source with
+  | None -> ()
+  | Some callback -> callback (Asgns.to_doc ~name ~static_indices () comp.Asgns.asgns)
+
+(** The gh-ocannl-498 rematerialization seam shared by {!to_routine} and {!run_once}: plan [comp]'s
+    inlining decision vector against the budget, compile from the planned context, and only then let
+    [budget_report] observe the plan.
+
+    The report fires AFTER the compile so it observes the plan that SHIPPED — a compile or link
+    failure must not have announced one. It also keeps a callback from reaching the compile it is
+    reporting on: the config gates the scoring depends on ([buffer_aliasing]) are re-read at each
+    compile, so a callback that flipped one would make the routine use a layout other than the one
+    just scored. *)
+let compile_within_budget ?budget ?max_candidates ?budget_report ctx comp bindings =
+  let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx comp bindings in
+  let budgeted = Option.is_some budget_plan in
+  let ctx, routine = compile_with_model_gate ~budgeted ctx comp bindings in
+  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
+  (ctx, routine)
+
 (** Compiles [comp] and returns the routine (the context is discarded). [budget], [max_candidates]
     and [budget_report] are the gh-ocannl-498 rematerialization seam, forwarded to
     {!fit_memory_budget}: with no [budget] and no [memory_budget] config key nothing is planned and
@@ -1362,33 +1385,14 @@ let fit_memory_budget ?budget ?max_candidates ?name ctx comp bindings =
 *)
 let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?max_candidates
     ?budget_report bindings comp =
-  if output_cd_file then (
-    let name = Asgns.get_name_exn comp.Asgns.asgns in
-    if not Utils.settings.output_debug_files_in_build_directory then
-      raise
-      @@ Utils.User_error
-           "Train.to_routine: output_cd_file is true, but output_debug_files_in_build_directory is \
-            false";
-    let cd_source = Utils.output_to_build_file ~fname:(name ^ "-debug.cd") in
-    let static_indices = Idx.bound_symbols bindings in
-    match cd_source with
-    | None -> ()
-    | Some callback -> callback (Asgns.to_doc ~name ~static_indices () comp.Asgns.asgns));
+  if output_cd_file then dump_cd_file ~caller:"Train.to_routine" bindings comp;
   (* Materialize the guessed output nodes so they persist across calls and are inspectable on demand
      via the context (gh-ocannl-333). *)
   Set.iter (snd @@ Asgns.collect_nodes_guess_output comp.Asgns.asgns) ~f:set_materialized;
   (* gh-ocannl-498: budget planning goes AFTER the output-materialization intent above (those nodes
      must not be flip candidates) and BEFORE the compile whose placements it steers. Off by default:
      with no budget this is the identity and the compile below is unchanged. *)
-  let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx comp bindings in
-  let budgeted = Option.is_some budget_plan in
-  let _ctx, routine = compile_with_model_gate ~budgeted ctx comp bindings in
-  (* AFTER the compile: [budget_report] observes the plan that SHIPPED, so a compile or link failure
-     must not have announced one. It also keeps a callback from reaching the compile it is reporting
-     on -- the config gates the scoring depends on ([buffer_aliasing]) are re-read at each compile,
-     so a callback that flipped one would make the routine use a layout other than the one just
-     scored. *)
-  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
+  let _ctx, routine = compile_within_budget ?budget ?max_candidates ?budget_report ctx comp bindings in
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -1442,28 +1446,13 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
   set_materialized t.Tensor.value;
   (* Compute the update early, to ensure the shape inference is done. *)
   let update = f t in
-  if output_cd_file then (
-    let name = Asgns.get_name_exn update.Asgns.asgns in
-    if not Utils.settings.output_debug_files_in_build_directory then
-      raise
-      @@ Utils.User_error
-           "Train.run_once: output_cd_file is true, but output_debug_files_in_build_directory is \
-            false";
-    let cd_source = Utils.output_to_build_file ~fname:(name ^ "-debug.cd") in
-    let static_indices = Idx.bound_symbols bindings in
-    match cd_source with
-    | None -> ()
-    | Some callback -> callback (Asgns.to_doc ~name ~static_indices () update.Asgns.asgns));
+  if output_cd_file then dump_cd_file ~caller:"Train.run_once" bindings update;
   let ctx =
     if skip_init || Set.is_empty t.params then ctx else init_params ?reinit_all ctx bindings t
   in
-  (* gh-ocannl-498: same seam as [to_routine] — plan the inlining decision vector against the
-     budget, then compile from the planned context. Identity when no budget is set. *)
-  let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx update bindings in
-  let budgeted = Option.is_some budget_plan in
-  let ctx, routine = compile_with_model_gate ~budgeted ctx update bindings in
-  (* After the compile, for the reasons given in [to_routine]. *)
-  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
+  let ctx, routine =
+    compile_within_budget ?budget ?max_candidates ?budget_report ctx update bindings
+  in
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)
