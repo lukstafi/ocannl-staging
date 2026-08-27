@@ -539,6 +539,27 @@ let keys = [ ("profile", "x") ]
 let guarded = map keys ~f:fst
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([], true) );
+    (* Everything the resolver follows it matches by NAME, which is sound only while the file has
+       not taken the name for something else -- the one direction a whitelist does not close by
+       itself, and a silent one. A source that rebinds a trusted name gets no resolution at all. *)
+    ( "a file that rebinds List resolves nothing",
+      {ocaml|module List = Other
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and one that rebinds fst does not project a table",
+      {ocaml|let fst _ = "profile"
+let keys = [ ("log_level", "0") ]
+let guarded = List.map keys ~f:fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* An `open` is not a rebinding: `Base.List.map` is `List.map`, and this repository opens Base
+       everywhere. *)
+    ( "an open of a library providing List is not a rebinding",
+      {ocaml|open Base
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
     ( "the binding does not escape the lambda it was established at",
       {ocaml|let guarded = [ "log_level" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))

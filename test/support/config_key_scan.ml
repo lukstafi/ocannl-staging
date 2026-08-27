@@ -420,6 +420,50 @@ let is_qualified ~container ~fn expr =
       | _ -> false)
   | None -> false
 
+(** The names the resolver reads as meaning what they usually mean: the containers whose combinators
+    it knows, and the values it projects a table with.
+
+    They are matched by name, which is sound only while the file has not taken the name for something
+    else. That residual is the one direction a whitelist does not close by itself — [List.map] MATCHED
+    is [List.map] believed — and it is silent, so it is checked rather than assumed: a source that
+    rebinds any of these gets no resolution at all, and every reach needing one is refused. An [open]
+    is not a rebinding ([Base.List.map] is [List.map]); a [module List = …] is.
+
+    Which restores the property the rest of this section rests on: everything the resolver follows is
+    named, and everything it cannot name refuses. *)
+let trusted_modules = [ "List"; "Array" ]
+
+let trusted_values = [ "fst"; "snd"; "@" ]
+
+let rebound_trusted_names structure =
+  let modules = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = Some name; _ }; _ }
+          when List.mem trusted_modules name ~equal:String.equal ->
+            modules := name :: !modules
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = Some name; _ }, _, _)
+          when List.mem trusted_modules name ~equal:String.equal ->
+            modules := name :: !modules
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure structure;
+  !modules
+  @ List.filter trusted_values ~f:(fun value ->
+      not (List.is_empty (shadow_ranges_of structure ~fn:value)))
+  |> List.dedup_and_sort ~compare:String.compare
+
 let is_iteration expr =
   match longident_of expr with
   | Some path -> (
@@ -535,7 +579,18 @@ let env_reader_reads_in_source content =
   let blessed = Hash_set.create (module Int) in
   let aliases, _opened, open_ranges = module_bindings_of structure ~wanted:utils_module in
   let shadows = shadow_ranges_of structure ~fn:env_reader in
-  let bindings = list_bindings_of structure in
+  (* Everything the resolver follows is matched by name, so a file that has taken one of those names
+     for something else gets no resolution: the reaches that needed it are refused instead, loudly,
+     with what was rebound named in the message. *)
+  let rebound = rebound_trusted_names structure in
+  let trustworthy = List.is_empty rebound in
+  let bindings = if trustworthy then list_bindings_of structure else [] in
+  let caveat =
+    if trustworthy then ""
+    else
+      Printf.sprintf " (this source rebinds %s, so nothing is resolved through those names)"
+        (String.concat ~sep:", " rebound)
+  in
   (* A BARE call is this function only where an `open Utils` is in scope and nothing of the file's
      own shadows the name there. Both halves are lexical, not file-wide: an `open` reaches its
      structure or its `let open … in` body, and a local `let read_env_var _ = None` takes the name
@@ -638,7 +693,8 @@ let env_reader_reads_in_source content =
         | Pexp_apply (f, args) -> (
             (* The iteration is recorded before the walk descends, so a reader call inside the
                lambda finds its parameter bound. *)
-            if is_iteration f then record_iteration ~before:expr.pexp_loc.loc_start.pos_cnum args;
+            if trustworthy && is_iteration f then
+              record_iteration ~before:expr.pexp_loc.loc_start.pos_cnum args;
             match longident_of f with
             | Some path when names_the_reader ~offset:f.pexp_loc.loc_start.pos_cnum path -> (
                 (* Blessed before the walk descends into [f], so the identifier arm below does not
@@ -662,8 +718,8 @@ let env_reader_reads_in_source content =
                         | Some resolved -> keys := resolved @ !keys
                         | None ->
                             unresolved :=
-                              Printf.sprintf "`%s.%s %s`" utils_module env_reader
-                                (describe argument)
+                              Printf.sprintf "`%s.%s %s`%s" utils_module env_reader
+                                (describe argument) caveat
                               :: !unresolved))
                 (* A partial application names no key here, and whatever supplies it is out of
                    reach. *)
