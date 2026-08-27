@@ -137,6 +137,104 @@ let tracing_gates_in_source content =
           | _ -> None)
       | _ -> None)
 
+(** {1 Configuration read straight from the environment (gh-ocannl-749)} *)
+
+(** The one function that reads a configuration key's environment variable and nothing else.
+    [Utils.get_global_arg] consults the commandline and the config file too, so a value it returns
+    can be pinned where the environment cannot reach it; this one cannot be outranked, which is what
+    makes a read through it an unconditional dependency on [OCANNL_<KEY>]. *)
+let env_reader = "read_env_var"
+
+type env_reader_reads = {
+  reader_keys : string list;
+      (** the keys the reader is called with as a string literal, sorted and deduplicated *)
+  reader_dynamic : bool;
+      (** whether some reach of the reader takes its key as a parameter, so that which keys it reads
+          cannot be decided from this source alone. A guard is the shape that does it — a list of
+          key names and a [List.iter … ~f:(fun arg_name -> … read_env_var arg_name …)] over it — and
+          the caller falls back to {!string_literals_in_source} for the candidates. *)
+}
+
+(** Which configuration keys [content] reads straight from the environment.
+
+    The receiver is matched by the LAST component of the path, like the settings predicates above,
+    so [Utils.read_env_var], a [U.read_env_var] alias and a bare [read_env_var] under an [open] all
+    count. Handing the function around as a value counts as a dynamic reach, for the same reason
+    handing a settings predicate around does: the keys go somewhere this scan cannot follow, and
+    over-reading is the safe direction of the two.
+
+    Parsed rather than grepped, for the reason the rest of this module is: this file's own doc
+    comments name the function, and the checks built on it quote its name in their diagnostics. *)
+let env_reader_reads_in_source content =
+  let keys = ref [] and dynamic = ref false in
+  let blessed = Hash_set.create (module Int) in
+  let names_the_reader path =
+    match List.last path with Some last -> String.equal last env_reader | None -> false
+  in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (f, args) -> (
+            match longident_of f with
+            | Some path when names_the_reader path -> (
+                (* Blessed before the walk descends into [f], so the identifier arm below does not
+                   read the function of a resolved call as one handed on as a value. *)
+                Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum;
+                match
+                  List.find args ~f:(fun (lbl, _) ->
+                      match lbl with Asttypes.Nolabel -> true | _ -> false)
+                with
+                | Some (_, argument) -> (
+                    match string_literal argument with
+                    | Some key -> keys := key :: !keys
+                    | None -> dynamic := true)
+                (* A partial application names no key here, and whatever supplies it is out of
+                   reach. *)
+                | None -> dynamic := true)
+            | _ -> ())
+        | Pexp_ident { txt; _ } when names_the_reader (flatten_longident txt) ->
+            if not (Hash_set.mem blessed expr.pexp_loc.loc_start.pos_cnum) then dynamic := true
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure (structure_of content);
+  {
+    reader_keys = List.dedup_and_sort (List.rev !keys) ~compare:String.compare;
+    reader_dynamic = !dynamic;
+  }
+
+(** Every string literal [content] holds, sorted and deduplicated.
+
+    The candidate set for a source whose reads are dynamic: the key a guard passes to the reader is
+    a literal SOMEWHERE in the file — in the list it iterates — even where no expression puts it
+    next to the call. Intersected by the caller with the configuration registry, which is what turns
+    a file of format strings and default values into the handful of keys it can read. Over-reading
+    is the safe direction: a declaration too many makes dune rerun a stanza it need not have, while
+    one too few is the stale run the rule exists to prevent. *)
+let string_literals_in_source content =
+  let found = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match string_literal expr with Some value -> found := value :: !found | None -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure (structure_of content);
+  List.dedup_and_sort !found ~compare:String.compare
+
+(** Whether [content] could possibly reach the reader: the function has to be NAMED for any spelling
+    of a call, an alias or an [open] to reach it, so the substring is a necessary condition and a
+    file without it is skipped unparsed. The same narrowing filter {!could_call_generated_init} is,
+    and only a filter — what decides is {!env_reader_reads_in_source}. *)
+let could_read_env_var content = String.is_substring content ~substring:env_reader
+
 (** {1 The artifact-freshness initializer (gh-ocannl-723)} *)
 
 (** The module that owns the freshness-checked reads of [build_files/], and the function of it that

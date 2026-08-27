@@ -1391,7 +1391,11 @@
  ; profile payload sets the backend key, so no precedence question here reaches one.
  (name config_profiles)
  (package neural_nets_lib)
- (deps ocannl_config config_profiles.expected)
+ ; The executable guards on an ambient `OCANNL_PROFILE`, which would abort it during module
+ ; initialization -- and a guard only RUNS when dune reruns the rule, which happens only for a
+ ; variable it declares (gh-ocannl-749). `env_var_deps` pairs the key the guard reads with this
+ ; declaration.
+ (deps ocannl_config config_profiles.expected (env_var OCANNL_PROFILE))
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 

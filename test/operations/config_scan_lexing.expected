@@ -76,3 +76,18 @@ ok: Generated.init -- both spellings in one file
 ok: could call -- names the module
 ok: could call -- names it only to alias it
 ok: could call -- does not name it at all
+ok: environment read -- a literal argument names its key
+ok: environment read -- the receiver is matched by its last component, so an alias counts
+ok: environment read -- and so does a bare call under an open
+ok: environment read -- prose naming the reader is not a read
+ok: environment read -- a string literal quoting a call is not a call
+ok: environment read -- a key taken from a list is a dynamic reach and names nothing at the call
+ok: environment read -- the reader handed on as a value is a dynamic reach
+ok: environment read -- a partial application names no key here
+ok: environment read -- a literal read and a guard in one file
+ok: environment read -- a longer name ending differently is not the reader
+ok: string literals -- literals from a list, a tuple and an argument
+ok: string literals -- a literal in a comment is not a literal
+ok: string literals -- escapes arrive decoded
+ok: could read the environment -- names the reader
+ok: could read the environment -- does not name it at all

@@ -11,3 +11,11 @@ not one this workspace builds. Nothing else differs between the three runs.
 an external command handed a file this workspace builds is a stanza the rule reaches, reported by name when it declares neither: true
 the same stanza, declaring its backend, passes with the raw-text floor naming it too: true
 the same command handed nothing of this workspace is a stanza neither reader sees: true
+
+The guard rule is put to a tree of one `(executable)` whose module reads a configuration key
+from a LIST it hands to `Utils.read_env_var`, run by a rule that declares `(env_var OCANNL_VIRTUALIZE_MAX_VISITS)`,
+pins it with `setenv`, or does neither. Nothing else differs between the three runs.
+
+the checker reports the key and exits 1 when the rule running the guard neither declares nor pins it: true
+the same tree with the declaration added passes and says nothing about it: true
+and so does the same tree pinning the variable with `setenv` instead: true

@@ -417,6 +417,18 @@ let artifact_config_key = "build_files_prefix"
 (* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
 let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 
+(* gh-ocannl-749: the variables a rule PINS with `(setenv NAME value …)`, at any depth of its
+   action. A pinned variable cannot arrive from the ambient environment, so a run under it does not
+   depend on what the developer exported and needs no `(env_var …)` to invalidate it -- the same
+   argument the guards' own comments make for a key pinned on the commandline, which outranks the
+   environment too. Recognised structurally, so that `config_var_spellings`' four nested `setenv`s
+   count individually. *)
+let rec setenv_names = function
+  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: rest) ->
+      name :: List.concat_map rest ~f:setenv_names
+  | Sexp.List l -> List.concat_map l ~f:setenv_names
+  | Sexp.Atom _ -> []
+
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -525,6 +537,7 @@ let main () =
   let tracked_keys = ref (Set.empty (module String)) in
   let gate_table = ref [] in
   let read_table = ref [] in
+  let guard_table = ref [] in
   (* Every `(env_var ...)` under a sexp, at any depth. *)
   let rec env_vars_in = function
     | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom name ] -> [ name ]
@@ -543,6 +556,7 @@ let main () =
       let dir = match Stdlib.Filename.dirname dune_file with "." -> "" | dir -> dir in
       let content = In_channel.read_all on_disk in
       let stanzas = Scan.stanzas content in
+      let pinned_vars = Set.of_list (module String) (List.concat_map stanzas ~f:setenv_names) in
       (* gh-ocannl-659: the exclusive or, over every stanza that runs an executable. *)
       let marked = Scan.marked_stanzas content in
       let attributed = ref [] in
@@ -1185,7 +1199,70 @@ let main () =
                                   declare it -- dune then reuses the previous result across a \
                                   change of the variable that decides what the run does"
                                  dir source read where)
-                          else read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
+                          else read_table := (where, read, dir ^ "/" ^ source) :: !read_table));
+              (* gh-ocannl-749: the same question, for the reads OCANNL's own environment reader
+                 makes. `Sys.getenv "NAME"` above says which variable it reads in the call itself;
+                 `Utils.read_env_var key` takes the key as a value, and the shape that matters takes
+                 it from a LIST -- an ambient-environment guard, refusing to run when a variable that
+                 would rewrite its golden is set. Three of them stand in this repository, and each
+                 was a hand-written list of keys standing in for its rule's `(env_var …)`
+                 declarations with nothing relating the two: the guard only RUNS when dune reruns the
+                 rule, which happens only for a variable the rule declares, so a key on the list and
+                 not in the deps is a key the guard never sees. gh-ocannl-628's hole, arrived at from
+                 the guard side.
+
+                 What is checked is the relationship, not the list: the keys are read out of the
+                 source and paired with the declarations of the stanza dune runs it under, exactly as
+                 gh-ocannl-723 pairs a `Generated.init` caller with `OCANNL_BUILD_FILES_PREFIX`.
+                 Where the reader's argument is a literal the answer is that key; where it comes from
+                 a list the source is asked for its string literals and they are intersected with the
+                 configuration registry -- over-reading, which is the safe direction here as it is
+                 for the initializer census: a declaration too many makes dune rerun a stanza it need
+                 not have, one too few is the stale run.
+
+                 A `(library)` is out of scope, for the reason a library calling the initializer is:
+                 `Utils` DEFINES this reader and passes it every key there is, and a requirement
+                 placed there would fall on every stanza that links the library, where nothing
+                 follows it. The reads that go stale are an executable's own.
+
+                 Only one direction. A declaration whose key no module names is not reported: the
+                 usual way a test depends on a key is through the library, with no literal anywhere
+                 in its source, so the converse would report the 213 stanzas that declare
+                 `OCANNL_BACKEND` while spelling `backend` nowhere. *)
+              if not (String.equal kind "library") then
+                List.iter sources ~f:(fun (source, content) ->
+                    if Sources.could_read_env_var content then
+                      let reads = Sources.env_reader_reads_in_source content in
+                      let candidates =
+                        if reads.Sources.reader_dynamic then
+                          reads.Sources.reader_keys @ Sources.string_literals_in_source content
+                        else reads.Sources.reader_keys
+                      in
+                      List.filter candidates ~f:(Set.mem Utils.known_config_keys)
+                      |> List.dedup_and_sort ~compare:String.compare
+                      |> List.iter ~f:(fun key ->
+                          let var = Utils.env_var_name key in
+                          let note =
+                            if List.mem declared_for_stanza var ~equal:String.equal then
+                              Some "declared"
+                            else if Set.mem pinned_vars var then Some "pinned by `setenv`"
+                            else None
+                          in
+                          match note with
+                          | Some note ->
+                              guard_table :=
+                                (where, var, Printf.sprintf "%s/%s, %s" dir source note)
+                                :: !guard_table
+                          | None ->
+                              fail
+                                (Printf.sprintf
+                                   "%s/%s reads the configuration key `%s` straight from the \
+                                    environment through `Utils.%s`, and %s does not declare \
+                                    `(env_var %s)` -- dune then serves the previous run's output \
+                                    across a change of it, so the guard that would have reported \
+                                    the variable never runs. Add the declaration where the run \
+                                    happens, or pin the variable with `(setenv %s …)`"
+                                   dir source key Sources.env_reader where var var)))
           | _ -> ()));
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
@@ -1211,6 +1288,19 @@ let main () =
     "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
   List.sort !read_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, read, source) -> printf "  %-30s %s (%s)\n" read where source);
+  printf
+    "\n\
+     Configuration keys a module reads straight from the environment through `Utils.%s`, and how\n\
+     the stanza that runs it answers for each (gh-ocannl-749). A key read this way cannot be \
+     outranked\n\
+     by a commandline flag or a config file, so the run depends on the variable unconditionally:\n\
+     either the stanza declares it, or its rules pin it with `setenv`.\n"
+    Sources.env_reader;
+  List.sort !guard_table ~compare:(fun (wa, a, sa) (wb, b, sb) ->
+      match String.compare wa wb with
+      | 0 -> ( match String.compare a b with 0 -> String.compare sa sb | c -> c)
+      | c -> c)
+  |> List.iter ~f:(fun (where, var, source) -> printf "  %-38s %s (%s)\n" var where source);
   let stale_gateless =
     Set.diff (Set.of_list (module String) (List.map gateless_dirs ~f:fst)) !gateless_used
   in
@@ -1684,9 +1774,133 @@ let floor_control () =
     invisible_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
+(* gh-ocannl-749's control, and why it is a third tree.
+
+   The rule is that a key a module reads straight from the environment is one the stanza running it
+   declares. Every guard in this repository now declares its keys -- which is what this change did --
+   so a control drawn from the corpus would pass whether the rule has teeth or has stopped deciding.
+   Put to a tree of its own it is the rule that is claimed about: the same source, once under a rule
+   that declares the key, once under one that does not, and once under one that pins the variable
+   with `setenv` instead.
+
+   The source is a GUARD, not a literal read: the key reaches the reader through a list, which is
+   the shape the hand-written lists took and the shape the earlier check could not see. One key is
+   a configuration key and one is not, so the tree also says that the candidate set is intersected
+   with the registry rather than taken whole -- a scan demanding `OCANNL_NOT_A_CONFIG_KEY` would
+   fail the legitimate run, and the declaration it asked for would then be reported by the sibling
+   check as naming no key OCANNL reads. *)
+
+let guard_key = "virtualize_max_visits"
+let guard_non_key = "not_a_config_key"
+
+let guard_probe =
+  Printf.sprintf
+    "let guarded = [ %S; %S ]\n\
+     let () =\n\
+    \  List.iter\n\
+    \    (fun arg_name ->\n\
+    \      match Utils.read_env_var arg_name with Some _ -> exit 1 | None -> ())\n\
+    \    guarded\n"
+    guard_key guard_non_key
+
+(* Three arms of one stanza pair, differing in how the rule answers for the variable and in nothing
+   else. The declared spelling is built from the key rather than written out, so the control cannot
+   drift from `Utils.env_var_name`. *)
+let guard_subject ~answer =
+  let deps =
+    match answer with
+    | `Declares -> Printf.sprintf "  (env_var %s)\n" (Utils.env_var_name guard_key)
+    | `Pins | `Neither -> ""
+  in
+  let action =
+    match answer with
+    | `Pins ->
+        Printf.sprintf "  (setenv %s 1\n   (run ./guard.exe))" (Utils.env_var_name guard_key)
+    | `Declares | `Neither -> "  (run ./guard.exe)"
+  in
+  Printf.sprintf
+    {dune|(executable
+ (name guard)
+ (modules guard)
+ (libraries arrayjit.utils))
+
+(rule
+ ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.
+ (target guard.actual)
+ (deps
+  ocannl_config
+%s  %%{dep:guard.exe})
+ (action
+  (with-stdout-to
+   %%{target}
+%s)))
+|dune}
+    deps action
+
+let guard_control () =
+  let exe =
+    let name = Stdlib.Sys.executable_name in
+    if Stdlib.Filename.is_relative name then Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
+    else name
+  in
+  let root = Stdlib.Filename.temp_dir "evd_guard" "" in
+  let context = control_context () in
+  List.iter context ~f:(fun (file, content) ->
+      write_file (Stdlib.Filename.concat root file) content);
+  write_file (Stdlib.Filename.concat root "t/guard.ml") guard_probe;
+  let paths = "t/dune" :: "t/guard.ml" :: List.map context ~f:fst in
+  let run ~answer =
+    write_file (Stdlib.Filename.concat root "t/dune") (guard_subject ~answer);
+    run_checker ~root ~exe ("." :: paths)
+  in
+  let report label (status, text) =
+    eprintf "the guard control's %s run %s. Its captured output:\n%s\n" label
+      (describe_status status) text
+  in
+  let exited n (status, _) = match status with Unix.WEXITED m -> m = n | _ -> false in
+  let undeclared = run ~answer:`Neither in
+  let declared = run ~answer:`Declares in
+  let pinned = run ~answer:`Pins in
+  (* A fragment of the failure and of nothing else. The report's own heading names the reader and
+     the key too, so a substring drawn from there would be found in every run (Codex's round-one
+     lesson on the sibling controls, met here on the first try). *)
+  let diagnostic = "so the guard that would have reported the variable never runs" in
+  let names_the_key text = String.is_substring text ~substring:(Utils.env_var_name guard_key) in
+  let names_the_non_key text =
+    String.is_substring text ~substring:(Utils.env_var_name guard_non_key)
+  in
+  let undeclared_ok =
+    exited 1 undeclared
+    && String.is_substring (snd undeclared) ~substring:diagnostic
+    && names_the_key (snd undeclared)
+    (* And the non-key is not asked for, in the very run that asks for everything it can. *)
+    && not (names_the_non_key (snd undeclared))
+  in
+  let declared_ok =
+    exited 0 declared && not (String.is_substring (snd declared) ~substring:diagnostic)
+  in
+  let pinned_ok = exited 0 pinned && not (String.is_substring (snd pinned) ~substring:diagnostic) in
+  if not undeclared_ok then report "undeclared" undeclared;
+  if not declared_ok then report "declared" declared;
+  if not pinned_ok then report "pinned" pinned;
+  printf
+    "\n\
+     The guard rule is put to a tree of one `(executable)` whose module reads a configuration key\n\
+     from a LIST it hands to `Utils.read_env_var`, run by a rule that declares `(env_var %s)`,\n\
+     pins it with `setenv`, or does neither. Nothing else differs between the three runs.\n\n"
+    (Utils.env_var_name guard_key);
+  Verdict.p
+    "the checker reports the key and exits 1 when the rule running the guard neither declares nor \
+     pins it"
+    undeclared_ok;
+  Verdict.p "the same tree with the declaration added passes and says nothing about it" declared_ok;
+  Verdict.p "and so does the same tree pinning the variable with `setenv` instead" pinned_ok;
+  try remove_tree root with Unix.Unix_error _ -> ()
+
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | _ :: [ "--control" ] ->
       control ();
-      floor_control ()
+      floor_control ();
+      guard_control ()
   | _ -> main ()

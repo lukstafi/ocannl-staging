@@ -356,6 +356,85 @@ let () = Generated.init ~backend_name|ocaml},
       [ "Test_utils.Generated.init"; "Generated.init" ] );
   ]
 
+(* gh-ocannl-749: which configuration keys a source reads STRAIGHT from the environment, and whether
+   it does so somewhere this scan cannot follow.
+
+   The shape that matters is a guard: a list of key names and an iteration handing each to
+   `Utils.read_env_var`. Its keys never sit next to the call, so a scan that reported only what the
+   call site spells would answer "none" for the very sources the rule is about -- and answering
+   "none" is what an unread guard looks like. The dynamic flag is the answer instead, and the
+   caller falls back to the file's string literals, intersected with the configuration registry.
+
+   Each case is the pair: the keys named literally, and whether some reach is dynamic. *)
+let env_reader_cases =
+  [
+    ("a literal argument names its key", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, ([ "profile" ], false));
+    ( "the receiver is matched by its last component, so an alias counts",
+      {ocaml|module U = Utils
+let x = U.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+    ( "and so does a bare call under an open",
+      {ocaml|open Utils
+let x = read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+    ( "prose naming the reader is not a read",
+      {ocaml|(* Utils.read_env_var "profile" decides *) let x = 1|ocaml},
+      ([], false) );
+    ( "a string literal quoting a call is not a call",
+      {ocaml|let message = "Utils.read_env_var \"profile\" is how a guard reads"|ocaml},
+      ([], false) );
+    (* The guard, which is the shape the rule exists for: the key arrives as a parameter, so the
+       call names nothing and the source is dynamic. *)
+    ( "a key taken from a list is a dynamic reach and names nothing at the call",
+      {ocaml|let guarded = [ "log_level"; "profile" ]
+let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
+      ([], true) );
+    (* Handing the function around as a value is the same loss one layer up: whatever calls it is
+       out of reach, so the source cannot be answered for either (the settings predicates above take
+       the same treatment, for the same reason). *)
+    ( "the reader handed on as a value is a dynamic reach",
+      {ocaml|let () = List.iter (fun k -> ignore (Utils.read_env_var k)) []
+let also = Utils.read_env_var|ocaml},
+      ([], true) );
+    ( "a partial application names no key here",
+      {ocaml|let f = Utils.read_env_var ~x:1|ocaml},
+      ([], true) );
+    (* Both at once: a file may resolve some of its reads and not others, and reporting the resolved
+       ones is no reason to stop saying that the rest are out of reach. *)
+    ( "a literal read and a guard in one file",
+      {ocaml|let () = ignore (Utils.read_env_var "profile")
+let guarded = [ "log_level" ]
+let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
+      ([ "profile" ], true) );
+    (* A different function of the same module is not the reader: `read_cmdline_or_env_var` consults
+       the commandline first, which an ambient variable cannot outrank, so it is not the
+       unconditional dependency this scan reports. *)
+    ( "a longer name ending differently is not the reader",
+      {ocaml|let x = Utils.read_cmdline_or_env_var "profile"|ocaml},
+      ([], false) );
+  ]
+
+(* The candidate set a dynamic source falls back on, and the filter that narrows it. Neither is a
+   census on its own -- the caller intersects with the configuration registry -- but a literal this
+   misses is a key a guard could read undeclared. *)
+let string_literal_cases =
+  [
+    ( "literals from a list, a tuple and an argument",
+      {ocaml|let keys = [ ("a", "1"); ("b", "2") ]
+let () = print_string "c"|ocaml},
+      [ "1"; "2"; "a"; "b"; "c" ] );
+    ( "a literal in a comment is not a literal",
+      {ocaml|(* "phantom" *) let x = "real"|ocaml},
+      [ "real" ] );
+    ("escapes arrive decoded", {ocaml|let x = "a\tb"|ocaml}, [ "a\tb" ]);
+  ]
+
+let could_read_cases =
+  [
+    ("names the reader", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, true);
+    ("does not name it at all", {ocaml|let x = Utils.get_global_arg ~arg_name:"profile"|ocaml}, false);
+  ]
+
 (* And the textual filter the census narrows with, which is only safe while naming the module is a
    NECESSARY condition for calling it: a file the filter drops is never parsed, so a call it hid
    would be invisible rather than reported. *)
@@ -448,4 +527,35 @@ let () =
   List.iter could_call_cases ~f:(fun (name, source, expected) ->
       let found = Scan.could_call_generated_init source in
       if Bool.equal found expected then printf "ok: could call -- %s\n" name
-      else fail "could call -- %s: expected %b, found %b" name expected found)
+      else fail "could call -- %s: expected %b, found %b" name expected found);
+  List.iter env_reader_cases ~f:(fun (name, source, (expected_keys, expected_dynamic)) ->
+      let found =
+        try Some (Scan.env_reader_reads_in_source source)
+        with _ ->
+          fail "environment read -- %s: the snippet does not parse" name;
+          None
+      in
+      Option.iter found ~f:(fun found ->
+          let keys = found.Scan.reader_keys and dynamic = found.Scan.reader_dynamic in
+          let expected_keys = List.sort ~compare:String.compare expected_keys in
+          if List.equal String.equal keys expected_keys && Bool.equal dynamic expected_dynamic then
+            printf "ok: environment read -- %s\n" name
+          else
+            fail "environment read -- %s: expected dynamic %b with keys [%s], found dynamic %b \
+                  with keys [%s]"
+              name expected_dynamic
+              (String.concat ~sep:"; " expected_keys)
+              dynamic
+              (String.concat ~sep:"; " keys)));
+  List.iter string_literal_cases ~f:(fun (name, source, expected) ->
+      let found = Scan.string_literals_in_source source in
+      let expected = List.sort ~compare:String.compare expected in
+      if List.equal String.equal found expected then printf "ok: string literals -- %s\n" name
+      else
+        fail "string literals -- %s: expected [%s], found [%s]" name
+          (String.concat ~sep:"; " expected)
+          (String.concat ~sep:"; " found));
+  List.iter could_read_cases ~f:(fun (name, source, expected) ->
+      let found = Scan.could_read_env_var source in
+      if Bool.equal found expected then printf "ok: could read the environment -- %s\n" name
+      else fail "could read the environment -- %s: expected %b, found %b" name expected found)
