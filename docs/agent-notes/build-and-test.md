@@ -441,7 +441,27 @@ that they earn a lookup rather than always-loaded space.
   library under `(inline_tests (deps …))`, and an `(executable)` has no `deps` field at all, so it is
   the rule that RUNS it that carries the declaration — the same placement as the `ocannl_config` dep
   and the backend marker, and checked as such (a declaration on a NEIGHBOUR of that rule reruns the
-  neighbour, so it does not count).
+  neighbour, so it does not count). One name of an `(executables (names a b) …)` is one program, and
+  attribution follows dune's main-module rule: `a` is built from module `a`, a module that is no
+  name's main module is linked into all of them, and `(public_names …)` pairs positionally — so
+  `b.exe`'s rule answers for `b` alone, and only a shared module puts the requirement on every runner
+  (gh-ocannl-747; combining them reported `a` undeclared over a rule linking neither its main module
+  nor its initializer).
+- **An ambient-environment GUARD needs its keys declared, or it never runs.** A test that refuses to
+  run when an OCANNL variable that would rewrite its golden is set — `startup_streams`,
+  `profile_precedence`, `config_profiles` — reads those keys through `Utils.read_env_var`, the one
+  reader no commandline flag or config file can outrank. But the guard only executes when dune reruns
+  the rule, and dune reruns only for a variable the rule DECLARES: a key on the guard's list with no
+  `(env_var OCANNL_<KEY>)` beside it is a key the guard never sees, and dune serves the previous
+  golden across a change of it. `env_var_deps` pairs the two (gh-ocannl-749) rather than trusting the
+  hand-written list: `Config_key_scan.env_reader_reads_in_source` resolves a literal argument to its
+  key and reports a key taken from a LIST as a dynamic reach, whereupon the candidates are the
+  source's string literals intersected with the configuration registry — over-reading, which is the
+  safe direction, since a declaration too many only reruns. A variable the rule pins with `(setenv …)`
+  is exempt, and pinning is the better option wherever it is available; a `(library)` is out of scope,
+  for the same reason a library calling `Generated.init` is. The negative control is a third synthetic
+  tree in `env_var_deps --control`, permanent rather than transient, since every guard in the tree now
+  declares and a corpus-drawn control would record the absence of the shape.
 - `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
   its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
   (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same
