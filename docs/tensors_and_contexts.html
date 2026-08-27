@@ -480,8 +480,8 @@ backend management, introduced in v0.6.1.</p>
 <span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.auto ()</span>
 <span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a><span class="co">(* Explicit backend selection *)</span></span>
-<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cuda ~device_id:<span class="dv">0</span> ()  <span class="co">(* NVIDIA GPU *)</span></span>
-<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.metal ~device_id:<span class="dv">0</span> () <span class="co">(* Apple Metal *)</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cuda ~ordinal:<span class="dv">0</span> ()  <span class="co">(* NVIDIA GPU *)</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.metal ~ordinal:<span class="dv">0</span> () <span class="co">(* Apple Metal *)</span></span>
 <span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cpu ~threads:<span class="dv">4</span> ()     <span class="co">(* Multi-threaded CPU *)</span></span></code></pre></div>
 <h3 id="compilation-and-execution">Compilation and Execution</h3>
 <div class="sourceCode" id="cb12"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* Compile a computation *)</span></span>

@@ -624,7 +624,7 @@ management and training workflows.</p>
 <span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.auto () <span class="kw">in</span></span>
 <span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a><span class="co">(* Or explicit backend selection *)</span></span>
-<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cuda ~device_id:<span class="dv">0</span> () <span class="kw">in</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cuda ~ordinal:<span class="dv">0</span> () <span class="kw">in</span></span>
 <span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.metal () <span class="kw">in</span></span>
 <span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.cpu ~threads:<span class="dv">4</span> () <span class="kw">in</span></span></code></pre></div>
 <h3 id="basic-training-patterns">Basic Training Patterns</h3>
