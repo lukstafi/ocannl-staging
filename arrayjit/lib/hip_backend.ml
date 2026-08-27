@@ -463,7 +463,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         memcpy ~dst_base ~dst_offset:loc.offset
 
   type code = {
-    traced_store : Low_level.traced_store;
     code : Hiprtc.compile_to_code_result;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
@@ -1579,7 +1578,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 #define NAN __builtin_nanf("")
 #endif|}
 
-  let%diagn2_sexp compile ~name bindings ({ Low_level.traced_store; _ } as lowered) =
+  let%diagn2_sexp compile ~name bindings (lowered : Low_level.optimized) =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
       let procs = [| lowered |]
     end))
@@ -1594,7 +1593,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ~builtins:Builtins_hip.builtins ~proc_doc
     in
     let code = hip_to_code ~name source in
-    { traced_store; code; kparams; bindings; name; launch }
+    { code; kparams; bindings; name; launch }
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct

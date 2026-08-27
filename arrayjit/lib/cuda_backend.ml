@@ -494,7 +494,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         memcpy ~dst_base ~dst_offset:loc.offset
 
   type code = {
-    traced_store : Low_level.traced_store;
     ptx : Nvrtc.compile_to_ptx_result;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
@@ -2048,7 +2047,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ^^ rparen ^^ semi)
   end
 
-  let%diagn2_sexp compile ~name bindings ({ Low_level.traced_store; _ } as lowered) =
+  let%diagn2_sexp compile ~name bindings (lowered : Low_level.optimized) =
     (* TODO: The following link seems to claim it's better to expand into loops than use memset.
        https://stackoverflow.com/questions/23712558/how-do-i-best-initialize-a-local-memory-array-to-0 *)
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
@@ -2082,7 +2081,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ~builtins:Builtins_cuda.builtins ~proc_doc
     in
     let ptx = cuda_to_ptx ~name source in
-    { traced_store; ptx; kparams; bindings; name; launch }
+    { ptx; kparams; bindings; name; launch }
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct

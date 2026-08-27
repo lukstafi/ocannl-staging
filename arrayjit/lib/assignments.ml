@@ -128,9 +128,6 @@ let fold_leaves (asgns : t) ~init ~f =
 (** {!fold_leaves} for a [f] that only has effects. *)
 let iter_leaves (asgns : t) ~f = fold_leaves asgns ~init:() ~f:(fun () leaf -> f leaf)
 
-let is_total ~initialize_neutral ~projections =
-  initialize_neutral && Affine.is_surjective projections
-
 let can_skip_accumulation ~projections =
   (* We can skip accumulation (use = instead of +=) only if the projection is injective *)
   Affine.is_injective projections
@@ -1058,18 +1055,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
   in
   mark_aliases code;
   loop code
-
-let flatten c =
-  let rec loop = function
-    | Noop -> []
-    | Seq (c1, c2) -> loop c1 @ loop c2
-    | Block_comment (s, c) -> Block_comment (s, Noop) :: loop c
-    | (Accum_op _ | Set_vec_unop _ | Fetch _) as c -> [ c ]
-  in
-  loop c
-
-let is_noop c =
-  List.for_all ~f:(function Noop | Block_comment (_, Noop) -> true | _ -> false) @@ flatten c
 
 let get_ident_within_code ?no_dots c =
   let ident_style = Tn.get_style ~arg_name:"cd_ident_style" ?no_dots () in

@@ -820,7 +820,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   [@@deriving sexp_of]
 
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
-  let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
 
   let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?prelowered bindings
       (comp : Assignments.comp) : code =

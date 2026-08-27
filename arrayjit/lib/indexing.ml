@@ -218,8 +218,6 @@ type projections = {
 (** All the information relevant for code generation. *)
 
 let iterated dim = dim > 1
-let opt_symbol d = if iterated d then Some (get_symbol ()) else None
-let opt_iterator = function None -> Fixed_idx 0 | Some sym -> Iterator sym
 
 (** The iterator symbols of each product component, in [components] order. *)
 let component_iterators (p : projections) : symbol list array =
@@ -312,45 +310,6 @@ let affine_injective ~symbol_range (project_lhs : axis_index array) : bool =
     if Set.length pinned' > Set.length pinned then fixpoint pinned' else pinned'
   in
   Set.equal (fixpoint (Set.empty (module Symbol))) all_syms
-
-(** Projections for a pointwise unary operator. Provide only one of [debug_info] or [derived_for].
-*)
-let identity_projections ?debug_info ?derived_for ~lhs_dims () =
-  let product_iterators_opt = Array.map lhs_dims ~f:opt_symbol in
-  let project_lhs = Array.map product_iterators_opt ~f:opt_iterator in
-  let components =
-    Array.filter_mapi lhs_dims ~f:(fun i d ->
-        Option.map product_iterators_opt.(i) ~f:(fun s -> [ (d, s) ]))
-  in
-  let debug_info =
-    match (debug_info, derived_for) with
-    | Some debug_info, _ ->
-        {
-          debug_info with
-          trace = ("indentity_projections", unique_debug_id ()) :: debug_info.trace;
-        }
-    | None, Some derived_for ->
-        {
-          spec = "";
-          derived_for = Sexp.Atom derived_for;
-          trace = [ ("indentity_projections", unique_debug_id ()) ];
-        }
-    | None, None ->
-        {
-          spec = "";
-          derived_for = Sexp.Atom "";
-          trace = [ ("indentity_projections", unique_debug_id ()) ];
-        }
-  in
-  {
-    components;
-    lhs_dims;
-    rhs_dims = [| lhs_dims |];
-    project_lhs;
-    project_rhs = [| project_lhs |];
-    extent_syms = [];
-    debug_info;
-  }
 
 (** The extents of the product-space components of [p]: one entry per component, in [components]
     order. A concatenation component's extent is the sum of its segment extents. Non-iterated

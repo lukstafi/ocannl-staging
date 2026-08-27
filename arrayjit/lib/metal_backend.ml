@@ -489,12 +489,10 @@ module Impl = struct
 
   (* --- Compilation and Linking --- *)
   type code = {
-    metal_source : string; (* Store source, compile during link if not already compiled *)
-    compiled_code : Me.Library.t option array; (* Store compiled code per device *)
+    metal_source : string; (* Store source, the library is built during link *)
     func_name : string;
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
-    traced_store : Low_level.traced_store;
     launch : Low_level.launch_dims;
   }
   [@@deriving sexp_of]
@@ -1231,16 +1229,7 @@ using namespace metal;|} in
       @@ Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:metal_includes
            ~builtins:Builtins_metal.builtins ~proc_doc
     in
-    {
-      metal_source = source;
-      compiled_code = Array.create ~len:(num_devs ()) None;
-      (* One slot per device *)
-      func_name = name;
-      kparams;
-      bindings;
-      traced_store = lowered.traced_store;
-      launch;
-    }
+    { metal_source = source; func_name = name; kparams; bindings; launch }
 
   let compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct

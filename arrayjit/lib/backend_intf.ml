@@ -660,7 +660,6 @@ module type Backend = sig
   type code [@@deriving sexp_of]
 
   val empty_optimize_ctx : unit -> Low_level.optimize_ctx
-  val get_optimize_ctx : code -> Low_level.optimize_ctx
 
   val compile :
     Low_level.optimize_ctx ->
