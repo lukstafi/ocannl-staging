@@ -1270,7 +1270,9 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_tensor_persistence)
- (libraries base ocannl sexplib stdio arrayjit.verdict)
+ ; `arrayjit.utils` for `Atomic_file.is_staging_file`: the teardown sweeps for staging artifacts
+ ; instead of naming the one temp file the writer used to leave.
+ (libraries base ocannl sexplib stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -3392,7 +3394,9 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules resource_fault_injection)
- (libraries base ocannl stdio arrayjit.verdict)
+ ; `arrayjit.utils` for `Atomic_file.is_staging_file`: the cache-store leg asks the publication
+ ; helper which files are staging artifacts instead of restating its naming scheme.
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -3898,3 +3902,15 @@
    %{dep:sweep_harness_driver.exe}
    %{dep:sweep_harness.sh}
    %{dep:../../tools/sweep.sh})))
+
+; The atomic-file publication helper under concurrent writers (gh-ocannl-780). Domains, fixed
+; iteration counts and a bounded spin: no wall-clock dependence, and no backend -- it publishes
+; byte strings into a scratch directory under the test's own cwd.
+
+(test
+ ; ocannl-backend: none -- links arrayjit.utils and races the filesystem helper; it compiles nothing.
+ (name atomic_file_race)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules atomic_file_race)
+ (libraries base stdio unix arrayjit.utils arrayjit.verdict))

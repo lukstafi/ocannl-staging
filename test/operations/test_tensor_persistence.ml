@@ -482,9 +482,18 @@ let () =
   let tn = List.hd_exn (Set.to_list reloaded) in
   Verdict.p "the file on disk holds what the save wrote"
     (Array.equal Float.equal (Context.get_values ctx tn) v2);
-  (* A save whose rename fails leaves its temp file behind, so clean up both. *)
-  List.iter
-    [ live_mapping_path; live_mapping_path ^ ".tmp" ]
+  (* [Persistence.save] publishes through [Atomic_file], which removes its own staging file on
+     every failing path, so only the checkpoint itself is left to clean up. Sweeping the directory
+     for staging artifacts is what proves that: it removes any this run abandoned, and the claim
+     below says there were none. *)
+  let dir = Stdlib.Filename.dirname live_mapping_path in
+  let abandoned =
+    Array.to_list (Stdlib.Sys.readdir dir) |> List.filter ~f:Utils.Atomic_file.is_staging_file
+  in
+  Verdict.p_empty "no checkpoint save left a staging file behind"
+    ~over:[ live_mapping_path ]
+    abandoned;
+  List.iter (live_mapping_path :: List.map abandoned ~f:(Stdlib.Filename.concat dir))
     ~f:(fun path -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
 
   Stdio.printf "=== All persistence tests completed ===\n"

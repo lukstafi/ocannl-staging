@@ -1889,6 +1889,10 @@ let%diagn_sexp log_trace_tree _logs =
 include Datatypes
 module Cpu_topology = Cpu_topology
 
+(* Re-exported rather than left as a bare sibling: [utils.ml] is the library's interface module, so
+   [Utils.Atomic_file] is the only spelling a dependant can reach it by. *)
+module Atomic_file = Atomic_file
+
 type build_file_channel = { f_path : string; oc : Stdlib.out_channel; finalize : unit -> unit }
 
 let open_build_file ~base_name ~extension : build_file_channel =

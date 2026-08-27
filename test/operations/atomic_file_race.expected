@@ -1,0 +1,34 @@
+the completeness test accepts a whole payload: true
+the completeness test rejects a truncated payload: true
+the completeness test rejects a payload cut on the lattice but mixed: true
+the completeness test rejects an empty file: true
+the blocked writer reaches its commit window: true
+a staged payload is invisible until it commits: true
+exactly the blocked writer's staging file is present: true
+a competing publish commits while another writer holds its staging file: true
+the competing publish did not disturb the blocked writer's staging file: true
+the released writer commits its own complete payload: true
+the blocked writer waited rather than timing out: true
+no staging file survives the interleaving: true
+every read under concurrent publication observes a complete payload: true
+no read under concurrent publication finds the path missing: true
+every concurrent writer committed every round: true
+the file left by the race is a complete payload: true
+the race leaves no staging file behind: true
+the race leaves only the published file: true
+a publish that fails in its commit window raises: true
+a failed publish leaves the previous payload: true
+a failed publish removes its own staging file: true
+a streamed publish commits its whole payload: true
+a streamed publish that raises mid-write raises: true
+a failed streamed publish leaves the previous payload: true
+a failed streamed publish removes its own staging file: true
+every planted staging file is recognized as one: true
+the bystander is not recognized as a staging file: true
+the sweep removes an abandoned staging file: true
+the sweep spares a staging file young enough to be in flight: true
+the sweep spares the published file: true
+the sweep spares an aged file that is not a staging artifact: true
+the published file still reads as it was written: true
+the once-per-process sweep does not run a second time: true
+the unconditional sweep still removes it: true

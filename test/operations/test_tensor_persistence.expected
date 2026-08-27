@@ -75,4 +75,5 @@ the mapping reads the checkpoint's values: true
 saving over a checkpoint with a live mapping succeeds: true
 the live mapping still reads the values it was taken from: true
 the file on disk holds what the save wrote: true
+no checkpoint save left a staging file behind: true
 === All persistence tests completed ===
