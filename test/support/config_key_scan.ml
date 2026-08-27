@@ -348,6 +348,22 @@ let module_references_in_source content ~paths =
     aliases := List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a name));
     if not (is_shadowed name) then shadowed := name :: !shadowed
   in
+  (* Binding by PATH, for the spellings that carry one rather than a module expression: a
+     signature's `open Ir` (Codex P2, round 16). *)
+  let bind_path alias components =
+    let bound = ref false in
+    List.iter qualifiers ~f:(fun qualifier ->
+        if names_qualifier qualifier components then (
+          bound := true;
+          match alias with
+          | Some alias ->
+              shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
+              aliases :=
+                (alias, qualifier, [])
+                :: List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a alias))
+          | None -> opened := (qualifier, []) :: !opened));
+    match alias with Some alias when not !bound -> shadow_name alias | _ -> ()
+  in
   let bind_module_expr alias module_expr =
     let rec unwrap module_expr =
       match module_expr.pmod_desc with
@@ -371,13 +387,19 @@ let module_references_in_source content ~paths =
       match (unwrap module_expr).pmod_desc with
       | Pmod_ident { txt; _ } -> (Option.to_list (flatten_module_path txt), [])
       | Pmod_structure items ->
+          (* IN ORDER: a definition overrides what an earlier include exported, and a LATER include
+             overrides the definitions before it (Codex P2, round 16). So an include resets the
+             override set to whatever it brings, and a definition adds to it. *)
           List.fold items ~init:([], []) ~f:(fun (paths, overridden) item ->
               match item.pstr_desc with
               | Pstr_include { pincl_mod = inner; _ } ->
                   let inner_paths, inner_overridden = exports inner in
-                  (paths @ inner_paths, overridden @ inner_overridden)
+                  (paths @ inner_paths, inner_overridden)
               | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
                   (paths, name :: overridden)
+              | Pstr_recmodule bindings ->
+                  ( paths,
+                    List.filter_map bindings ~f:(fun binding -> binding.pmb_name.txt) @ overridden )
               | _ -> (paths, overridden))
       | _ -> ([], [])
     in
@@ -390,7 +412,12 @@ let module_references_in_source content ~paths =
               match alias with
               | Some alias ->
                   shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
-                  aliases := (alias, qualifier, overridden) :: !aliases
+                  (* Replacing, not prepending: rebinding a name to another wrapper of the same
+                     qualifier would otherwise leave both meanings live, and `matches` takes the
+                     kinder of the two (Codex P2, round 16). *)
+                  aliases :=
+                    (alias, qualifier, overridden)
+                    :: List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a alias))
               | None -> opened := (qualifier, overridden) :: !opened)));
     (* Whatever else it was bound to, the NAME now denotes that instead. *)
     match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
@@ -434,6 +461,13 @@ let module_references_in_source content ~paths =
       method! structure items =
         let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
         List.iter items ~f:(fun item ->
+            (* A recursive group's names are in scope throughout it, so they bind BEFORE their own
+               bodies are walked (Codex P2, round 16). *)
+            (match item.pstr_desc with
+            | Pstr_recmodule bindings ->
+                List.iter bindings ~f:(fun binding ->
+                    bind_module_expr binding.pmb_name.txt binding.pmb_expr)
+            | _ -> ());
             self#structure_item item;
             match item.pstr_desc with
             | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
@@ -517,14 +551,21 @@ let module_references_in_source content ~paths =
       method! signature signature =
         let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
         List.iter signature ~f:(fun item ->
+            (* A recursive group's names are in scope throughout it, so they bind BEFORE their own
+               declarations are walked (Codex P2, round 16). *)
+            (match item.psig_desc with
+            | Psig_recmodule declarations ->
+                List.iter declarations ~f:(fun declaration ->
+                    Option.iter declaration.pmd_name.txt ~f:shadow_name)
+            | _ -> ());
             self#signature_item item;
             match item.psig_desc with
             | Psig_module { pmd_name = { txt = Some name; _ }; _ }
             | Psig_modsubst { pms_name = { txt = name; _ }; _ } ->
                 shadow_name name
-            | Psig_recmodule declarations ->
-                List.iter declarations ~f:(fun declaration ->
-                    Option.iter declaration.pmd_name.txt ~f:shadow_name)
+            (* A signature's `open` reaches the items after it exactly as a structure's does. *)
+            | Psig_open { popen_expr = { txt; _ }; _ } ->
+                Option.iter (flatten_module_path txt) ~f:(bind_path None)
             | _ -> ());
         aliases := saved_aliases;
         opened := saved_opened;

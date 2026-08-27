@@ -56,6 +56,10 @@ and goes on doing so when the structure defines something beside the include: tr
 a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature: true
 a wrapper that includes the qualifier and then redefines a leaf does not lend us that leaf: true
 `module Ir : X` inside a signature binds the name for the items after it, so a later `Ir.Alloc_census.t` is the signature's: true
+an include AFTER a definition supersedes it, so the wrapper's leaf is the qualifier's again: true
+an `open` inside a signature reaches the items after it, so `module AC = Alloc_census` there is a reference: true
+a recursive module taking the qualifier's name shadows it, in its own group and after it: true
+rebinding an alias replaces what it meant, so the earlier binding does not keep the later reference alive: true
 an executable run by a `(test)` stanza's custom action is aggregated through the `runtest-<name>` dune generates for that test: true
 two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
 an absolute path ending in the local executable's name is not the local executable: true

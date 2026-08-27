@@ -1545,11 +1545,21 @@ let main () =
                          dune_file name what)));
       (* What a stanza's own modules read, against what the stanza declares: the gates, read while
          PREPROCESSING them, and the ambient variables they read by name at RUN time. *)
-      List.iter stanzas ~f:(fun stanza ->
+      (* Per `(subdir …)` group, like every other reading in this file: a nested stanza's modules
+         live in that directory, and a top-level walk saw the `(subdir …)` wrapper instead of them
+         -- so a child module could read a tracing gate or an ambient variable undeclared (Codex P2,
+         round 16). *)
+      List.iter file_stanzas ~f:(fun (subdir, stanza) ->
+          let dir = Scan.in_subdir dir subdir in
           match (Scan.head stanza, Scan.field stanza "modules") with
           | Some kind, Some modules when List.mem module_stanzas kind ~equal:String.equal ->
               let name = match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>" in
-              let where = Printf.sprintf "%s, %s %s" dune_file kind name in
+              let where =
+                Printf.sprintf "%s%s, %s %s" dune_file
+                  (if String.is_empty subdir then ""
+                   else Printf.sprintf " in `(subdir %s …)`" subdir)
+                  kind name
+              in
               let env_vars_of field =
                 match Scan.field stanza field with
                 | None -> []
@@ -2449,6 +2459,10 @@ type family_probe_source =
   | Module_type_functor  (** the qualifier's name as a MODULE TYPE functor's parameter *)
   | Include_then_override  (** the qualifier included, and then one of its leaves redefined *)
   | Signature_module  (** the qualifier's name declared as a module INSIDE a signature *)
+  | Override_then_include  (** a definition, and then an include that supersedes it *)
+  | Signature_open  (** the qualifier opened inside a signature, then a leaf named unqualified *)
+  | Recursive_module  (** the qualifier's name taken by a recursive module *)
+  | Rebound_wrapper  (** an alias of the qualifier, rebound to a wrapper that overrides the leaf *)
   | Neither
 
 let family_probe = function
@@ -2509,6 +2523,20 @@ let family_probe = function
   | Signature_module ->
       (* A signature binds module names for the items after it. *)
       "module type S = sig\n  module Ir : X\n\n  val x : Ir.Alloc_census.t\nend\n"
+  | Override_then_include ->
+      (* The include comes LAST, so what `I.Alloc_census` names is the qualifier's (Codex P2, round
+         16). A member. *)
+      "module I = struct\n  module Alloc_census = Vendor.Alloc_census\n\n  include Ir\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Signature_open ->
+      (* A signature's open reaches the items after it, so `AC` is `Ir.Alloc_census`. A member. *)
+      "module type S = sig\n  open Ir\n\n  module AC = Alloc_census\nend\n"
+  | Recursive_module ->
+      (* The recursive group's name is in scope throughout it and after it. *)
+      "module rec Ir : sig\n  val x : int\nend = struct\n  let x = 0\nend\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n"
+  | Rebound_wrapper ->
+      (* The name first aliases the qualifier and is then rebound to a wrapper that overrides the
+         leaf: the second binding is what stands. *)
+      "module I = Ir\n\nmodule I = struct\n  include Ir\n\n  module Alloc_census = Vendor.Alloc_census\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2657,6 +2685,13 @@ let family_control () =
     run ~probe:Include_then_override ~metal:false ~lifecycle:true ~family:None ()
   in
   let signature_module = run ~probe:Signature_module ~metal:false ~lifecycle:true ~family:None () in
+  (* Two spellings that ARE references and were missed, and two that are not and were accepted. *)
+  let override_then_include =
+    run ~probe:Override_then_include ~metal:false ~lifecycle:true ~family:None ()
+  in
+  let signature_open = run ~probe:Signature_open ~metal:false ~lifecycle:true ~family:None () in
+  let recursive_module = run ~probe:Recursive_module ~metal:false ~lifecycle:true ~family:None () in
+  let rebound_wrapper = run ~probe:Rebound_wrapper ~metal:false ~lifecycle:true ~family:None () in
   (* And a `(test)` stanza as the runner of a lifecycle executable. *)
   let test_stanza_runner =
     run ~shape:Test_stanza_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
@@ -2745,6 +2780,10 @@ let family_control () =
   let module_type_functor_ok = listed_ok module_type_functor in
   let include_then_override_ok = listed_ok include_then_override in
   let signature_module_ok = listed_ok signature_module in
+  let override_then_include_ok = omitted_ok lifecycle_family.family_alias override_then_include in
+  let signature_open_ok = omitted_ok lifecycle_family.family_alias signature_open in
+  let recursive_module_ok = listed_ok recursive_module in
+  let rebound_wrapper_ok = listed_ok rebound_wrapper in
   let test_stanza_runner_ok = listed_ok test_stanza_runner in
   let sibling_defaults_ok = listed_ok sibling_defaults in
   let runner_absolute_ok = omitted_ok lifecycle_family.family_alias runner_absolute in
@@ -2797,6 +2836,10 @@ let family_control () =
   if not module_type_functor_ok then report "a module-type functor parameter" module_type_functor;
   if not include_then_override_ok then report "an overridden leaf" include_then_override;
   if not signature_module_ok then report "a module bound inside a signature" signature_module;
+  if not override_then_include_ok then report "an include after a definition" override_then_include;
+  if not signature_open_ok then report "an open inside a signature" signature_open;
+  if not recursive_module_ok then report "a recursive module of the qualifier's name" recursive_module;
+  if not rebound_wrapper_ok then report "an alias rebound to a wrapper" rebound_wrapper;
   if not test_stanza_runner_ok then report "a test stanza as the runner" test_stanza_runner;
   if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
   if not runner_absolute_ok then report "an absolute runner path" runner_absolute;
@@ -2936,6 +2979,20 @@ let family_control () =
     "`module Ir : X` inside a signature binds the name for the items after it, so a later \
      `Ir.Alloc_census.t` is the signature's"
     signature_module_ok;
+  Verdict.p
+    "an include AFTER a definition supersedes it, so the wrapper's leaf is the qualifier's again"
+    override_then_include_ok;
+  Verdict.p
+    "an `open` inside a signature reaches the items after it, so `module AC = Alloc_census` there \
+     is a reference"
+    signature_open_ok;
+  Verdict.p
+    "a recursive module taking the qualifier's name shadows it, in its own group and after it"
+    recursive_module_ok;
+  Verdict.p
+    "rebinding an alias replaces what it meant, so the earlier binding does not keep the later \
+     reference alive"
+    rebound_wrapper_ok;
   Verdict.p
     "an executable run by a `(test)` stanza's custom action is aggregated through the \
      `runtest-<name>` dune generates for that test"
