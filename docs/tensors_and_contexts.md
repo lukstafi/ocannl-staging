@@ -342,7 +342,7 @@ let ctx2, routine_b = Context.compile ctx0 comp_b bindings in
 (* Via Train.to_routine: chains through the returned post-compile context *)
 let ctx_a, routine_a = Train.to_routine ctx bindings comp_a in
 let ctx_b, routine_b = Train.to_routine ctx_a bindings comp_b in
-(* routine_b depends on routine_a — sequential via stored child context *)
+(* routine_b depends on routine_a — sequential via the child context *)
 ```
 
 #### API
