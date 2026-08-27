@@ -354,25 +354,23 @@ let module_references_in_source content ~paths =
       | Pmod_constraint (inner, _) -> unwrap inner
       | _ -> module_expr
     in
-    (* The paths a module expression re-exports WHOLE. A path names itself; and a structure whose
-       every item is an `include`/`open` re-exports what those name, so `module I = struct include Ir
-       end` binds `I` to the qualifier as surely as `module I = Ir` does (Codex P2, round 13). Only
-       that shape: a structure that also DEFINES something is a module of its own, and calling it
-       the qualifier would attribute its contents to us. *)
+    (* The paths a module expression re-exports. A path names itself; and an `include` inside a
+       structure re-exports what it names, so `module I = struct include Ir end` binds `I` to the
+       qualifier as surely as `module I = Ir` does (Codex P2, round 13) -- and goes on doing so when
+       the structure defines other things beside it, since an include exports its contents whatever
+       sits next to it (round 14).
+
+       `open` is NOT one of these. It changes what unqualified names mean INSIDE the structure and
+       exports nothing, so `module I = struct open Ir include Vendor end` re-exports Vendor and
+       reading the open as an export would attribute Vendor's `Alloc_census` to us (round 14). *)
     let rec exports module_expr =
       match (unwrap module_expr).pmod_desc with
       | Pmod_ident { txt; _ } -> Option.to_list (flatten_module_path txt)
       | Pmod_structure items ->
-          let reexports =
-            List.map items ~f:(fun item ->
-                match item.pstr_desc with
-                | Pstr_include { pincl_mod = inner; _ } | Pstr_open { popen_expr = inner; _ } ->
-                    Some (exports inner)
-                | _ -> None)
-          in
-          if List.for_all reexports ~f:Option.is_some then
-            List.concat_map reexports ~f:(fun r -> Option.value r ~default:[])
-          else []
+          List.concat_map items ~f:(fun item ->
+              match item.pstr_desc with
+              | Pstr_include { pincl_mod = inner; _ } -> exports inner
+              | _ -> [])
       | _ -> []
     in
     let names_any = ref false in
@@ -481,6 +479,25 @@ let module_references_in_source content ~paths =
             opened := saved_opened;
             shadowed := saved_shadowed
         | _ -> super#module_expr module_expr
+
+      (* And the module-type spelling of a functor, whose parameter shadows inside the result
+         signature exactly as a module functor's does (Codex P2, round 14). *)
+      method! module_type module_type =
+        match module_type.pmty_desc with
+        | Pmty_functor (parameter, result) ->
+            let saved_aliases = !aliases
+            and saved_opened = !opened
+            and saved_shadowed = !shadowed in
+            (match parameter with
+            | Named ({ txt = name; _ }, argument) ->
+                self#module_type argument;
+                Option.iter name ~f:shadow_name
+            | Unit -> ());
+            self#module_type result;
+            aliases := saved_aliases;
+            opened := saved_opened;
+            shadowed := saved_shadowed
+        | _ -> super#module_type module_type
 
       method! longident lid =
         (match flatten_module_path lid with

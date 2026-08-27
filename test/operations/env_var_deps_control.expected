@@ -51,6 +51,9 @@ nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module i
 `module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves from where it starts: true
 a functor parameter named `Ir` shadows the qualifier inside the functor's body: true
 `module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a reference to the instrumentation: true
+and goes on doing so when the structure defines something beside the include: true
+`open Ir` inside a wrapper that includes somebody else re-exports the somebody else, so its user is no member: true
+a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature: true
 two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
 an absolute path ending in the local executable's name is not the local executable: true
 a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true

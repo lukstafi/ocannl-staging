@@ -2423,6 +2423,9 @@ type family_probe_source =
   | Alias_nested  (** the qualifier aliased, and the alias then reached through another module *)
   | Functor_parameter  (** the qualifier's name introduced as a functor's parameter *)
   | Include_wrapper  (** the qualifier re-exported by a structure, then used through it *)
+  | Include_with_definition  (** the same wrapper, with an unrelated definition beside the include *)
+  | Open_not_export  (** the qualifier OPENED in a wrapper that includes somebody else *)
+  | Module_type_functor  (** the qualifier's name as a MODULE TYPE functor's parameter *)
   | Neither
 
 let family_probe = function
@@ -2466,6 +2469,16 @@ let family_probe = function
       (* A structure that only re-exports the qualifier IS the qualifier for this purpose (Codex
          P2, round 13). *)
       "module I = struct\n  include Ir\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Include_with_definition ->
+      (* An include exports its contents whatever sits next to it (Codex P2, round 14). *)
+      "module I = struct\n  include Ir\n\n  let helper = ()\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\nlet () = I.helper\n"
+  | Open_not_export ->
+      (* An `open` changes lookup inside the structure and exports nothing, so what `I` re-exports
+         is Vendor's (Codex P2, round 14). *)
+      "module I = struct\n  open Ir\n\n  include Vendor\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+  | Module_type_functor ->
+      (* The module-type spelling of a functor: the `Ir` in the result signature is the parameter. *)
+      "module type F = functor (Ir : S) -> sig\n  val x : Ir.Alloc_census.t\nend\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2598,6 +2611,16 @@ let family_control () =
   (* A structure that only re-exports the qualifier IS one, so its user is a member and the tree
      without a family stanza is the reported one. *)
   let include_wrapper = run ~probe:Include_wrapper ~metal:false ~lifecycle:true ~family:None () in
+  (* The same wrapper with a definition beside the include: still a re-export, still a member. *)
+  let include_with_definition =
+    run ~probe:Include_with_definition ~metal:false ~lifecycle:true ~family:None ()
+  in
+  (* An `open` in a wrapper that includes somebody else re-exports the somebody else. *)
+  let open_not_export = run ~probe:Open_not_export ~metal:false ~lifecycle:true ~family:None () in
+  (* And the module-type spelling of a functor parameter. *)
+  let module_type_functor =
+    run ~probe:Module_type_functor ~metal:false ~lifecycle:true ~family:None ()
+  in
   (* Two default-module tests, only one of whose mains reads the instrumentation: listing that one
      alias is complete. *)
   let sibling_defaults =
@@ -2675,6 +2698,11 @@ let family_control () =
   let alias_nested_ok = listed_ok alias_nested in
   let functor_parameter_ok = listed_ok functor_parameter in
   let include_wrapper_ok = omitted_ok lifecycle_family.family_alias include_wrapper in
+  let include_with_definition_ok =
+    omitted_ok lifecycle_family.family_alias include_with_definition
+  in
+  let open_not_export_ok = listed_ok open_not_export in
+  let module_type_functor_ok = listed_ok module_type_functor in
   let sibling_defaults_ok = listed_ok sibling_defaults in
   let runner_absolute_ok = omitted_ok lifecycle_family.family_alias runner_absolute in
   let gate_elsewhere_ok =
@@ -2720,6 +2748,10 @@ let family_control () =
   if not alias_nested_ok then report "the alias reached through another module" alias_nested;
   if not functor_parameter_ok then report "the qualifier's name as a functor parameter" functor_parameter;
   if not include_wrapper_ok then report "the qualifier re-exported by a structure" include_wrapper;
+  if not include_with_definition_ok then
+    report "a re-export beside a definition" include_with_definition;
+  if not open_not_export_ok then report "an open mistaken for a re-export" open_not_export;
+  if not module_type_functor_ok then report "a module-type functor parameter" module_type_functor;
   if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
   if not runner_absolute_ok then report "an absolute runner path" runner_absolute;
   if not gate_elsewhere_ok then report "a gate alias running another binary" gate_elsewhere;
@@ -2841,6 +2873,16 @@ let family_control () =
     "`module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a \
      reference to the instrumentation"
     include_wrapper_ok;
+  Verdict.p
+    "and goes on doing so when the structure defines something beside the include"
+    include_with_definition_ok;
+  Verdict.p
+    "`open Ir` inside a wrapper that includes somebody else re-exports the somebody else, so its \
+     user is no member"
+    open_not_export_ok;
+  Verdict.p
+    "a MODULE TYPE functor's parameter named `Ir` shadows the qualifier in its result signature"
+    module_type_functor_ok;
   Verdict.p
     "two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the \
      instrumentation is a member"
