@@ -579,30 +579,6 @@ let%track6_sexp lower_assignments optim_ctx ?name bindings asgns =
     Assignments.lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name
       (Indexing.bound_symbols bindings) asgns )
 
-let lower_batch_assignments optim_ctx ?names ?occupancy bindings asgns_l =
-  (* One fork for the whole batch: the batch is a single compilation unit, so its members share the
-     lineage state, but the batch as a whole stays hermetic w.r.t. sibling compiles. *)
-  let optim_ctx = Low_level.copy_optimize_ctx optim_ctx in
-  let names =
-    Option.value_or_thunk names ~default:(fun () ->
-        Array.map asgns_l ~f:(fun asgns -> Assignments.get_name_exn asgns))
-  in
-  let prefix_name = String.(strip ~drop:(equal_char '_') @@ common_prefix @@ Array.to_list names) in
-  let unoptim_ll_source = Utils.output_to_build_file ~fname:(prefix_name ^ "-unoptimized.ll") in
-  let ll_source = Utils.output_to_build_file ~fname:(prefix_name ^ ".ll") in
-  let cd_source = Utils.output_to_build_file ~fname:(prefix_name ^ ".cd") in
-  let bound = Indexing.bound_symbols bindings in
-  let occupancy = Option.value occupancy ~default:(fun ~name:_ ~src_n:_ -> true) in
-  Array.unzip
-  @@ Array.mapi names ~f:(fun src_n name ->
-      let asgns = asgns_l.(src_n) in
-      if occupancy ~name ~src_n then
-        ( Some name,
-          Some
-            (Assignments.lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name bound asgns)
-        )
-      else (None, None))
-
 let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_prior_context : unit
     =
   Set.iter from_prior_context ~f:(fun tn ->
@@ -614,29 +590,6 @@ let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_
            need not be present in a prior context. *)
         && not (Host_inits.mem tn)
       then raise @@ Utils.User_error ("The linked context lacks node " ^ Tnode.debug_name tn))
-
-let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
-    (comps : (Assignments.comp * Low_level.optimized) option array) : Tn.t_set =
-  (* Filtered per comp by its own reconciled traced store, like the single-compile path: the raw
-     assignments over-approximate what the residual schedule needs (gh-ocannl-611, round 3). *)
-  Array.filter_map comps ~f:(fun pair ->
-      Option.map pair ~f:(fun (comp, lowered) ->
-          let raw =
-            Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes
-            |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
-          in
-          match comp.Assignments.asgns with
-          | Assignments.Noop -> raw
-          | _ ->
-              let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
-              let reads, writes = Assignments.collect_nodes_guess_output comp.Assignments.asgns in
-              let mentioned = Set.union reads writes in
-              let demanded =
-                Set.filter inputs ~f:(fun tn ->
-                    (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
-              in
-              Set.union raw demanded))
-  |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
 module Add_device
@@ -787,21 +740,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   }
   [@@deriving sexp_of]
 
-  type nonrec code_batch = {
-    from_prior_context : Set.M(Tnode).t;
-    lowereds : Low_level.optimized option array;
-    code_batch : code_batch;
-    names : string option array;
-    expected_merge_nodes : Tnode.t option array;
-  }
-  [@@deriving sexp_of]
-
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
   let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
-
-  let get_optimize_ctx_batch (code_batch : code_batch) =
-    Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
-    |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx
 
   let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms ?prelowered
       bindings (comp : Assignments.comp) : code =
@@ -953,49 +893,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       proc;
       expected_merge_node = lowered.Low_level.merge_node;
       alias_spans;
-    }
-
-  let%debug3_sexp compile_batch optim_ctx ?names ?occupancy bindings
-      (comps : Assignments.comp array) : code_batch =
-    let names, lowereds =
-      lower_batch_assignments optim_ctx ?names ?occupancy bindings
-      @@ Array.map comps ~f:(fun c -> c.asgns)
-    in
-    let lowereds =
-      Array.map lowereds
-        ~f:
-          (Option.map
-             ~f:
-               (Schedule.maybe_default_schedule ~backend_name:Device.name
-                  ~limits:(Device.hardware_limits ())
-                  ~static_indices:(Indexing.bound_symbols bindings)))
-    in
-    Array.iter2_exn names lowereds ~f:(fun name lowered ->
-        Option.iter lowered ~f:(fun lowered ->
-            Schedule.check_hardware_limits_classified
-              ~name:(Option.value name ~default:"<unnamed>")
-              ~limits:(Device.hardware_limits ()) lowered));
-    let code_batch =
-      Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
-          compile_batch ~names bindings lowereds)
-    in
-    let batch_plc =
-      (Array.find_map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
-      |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx)
-        .placements
-    in
-    let from_prior_context =
-      from_prior_context_batch ~plc:batch_plc
-      @@ Array.mapi lowereds ~f:(fun i -> Option.map ~f:(fun l -> (comps.(i), l)))
-    in
-    {
-      from_prior_context;
-      names;
-      lowereds;
-      code_batch;
-      expected_merge_nodes =
-        Array.map lowereds ~f:(fun lowered ->
-            Option.(join @@ map lowered ~f:(fun optim -> optim.Low_level.merge_node)));
     }
 
   (* gh-ocannl-344 Phase B/C: allocate a context's delta -- the in-context tnodes not already
@@ -1333,68 +1230,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         in
         sync_routine
           { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
-
-  let%debug3_sexp link_batch context code_batch =
-    verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
-      ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
-    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's
-       delta is allocated before the backend linker runs, so a later member's allocation or the link
-       itself raising used to abandon every completed member's pools -- rooted, with no context to
-       reach them, since the member contexts are only derived in the fold below. [free_delta] is
-       applied per member and skips per-device constants exactly as the context [finalize] does, so
-       a partial batch gives back its working pools and leaves the shared constants alone. *)
-    let allocated = ref [] in
-    let unwind_batch () =
-      List.iter !allocated ~f:(fun cb -> try free_delta context cb with _ -> ())
-    in
-    let ctx_buffers, bindings, schedules =
-      match
-        let ctx_buffers =
-          Array.mapi code_batch.lowereds ~f:(fun i ->
-              Option.map ~f:(fun l ->
-                  let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
-                  (* Batch compiles are not liveness-planned in v1 (they do not go through the
-                     fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
-                  let cb = allocate_delta context ~name ~alias_spans:None l in
-                  allocated := cb :: !allocated;
-                  cb))
-        in
-        let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
-        (ctx_buffers, bindings, schedules)
-      with
-      | result -> result
-      | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          unwind_batch ();
-          Stdlib.Printexc.raise_with_backtrace exn backtrace
-    in
-    Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
-      | None -> (context, None)
-      | Some schedule ->
-          let ctx_buffers = Option.value_exn ctx_buffers.(i) in
-          let optimize_ctx = (Option.value_exn code_batch.lowereds.(i)).Low_level.optimize_ctx in
-          let expected_merge_node = code_batch.expected_merge_nodes.(i) in
-          (* Static merge-buffer verification at link time (gh-ocannl-288): check the node provided
-             by the fold-current context before deriving the consumer's child context. *)
-          check_merge_buffer_static ~merge_buffer_node:context.merge_buffer_node
-            ~code_node:expected_merge_node;
-          let context = make_child ~ctx_buffers ~optimize_ctx context in
-          let (inputs, outputs), merge_buffer_input =
-            Low_level.input_and_output_nodes @@ Option.value_exn code_batch.lowereds.(i)
-          in
-          (* gh-ocannl-489: same cross-routine read guard as in [link]. *)
-          Set.iter inputs ~f:(fun tn ->
-              Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
-                  if buffer_overlaps ctx_buffers tn loc then
-                    aliased_read_error ~what:"linking batch member, input" tn));
-          let schedule =
-            Task.prepend schedule ~work:(fun () ->
-                check_merge_buffer context.device ~code_node:expected_merge_node)
-          in
-          let r =
-            sync_routine { context; schedule; bindings; name; inputs; merge_buffer_input; outputs }
-          in
-          (context, Some r))
 end
 
 module Make_device_backend_from_lowered
