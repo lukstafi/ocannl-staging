@@ -32,4 +32,7 @@ the same library listed under its generated alias passes: true
 a member inside a `(subdir …)` group is aggregated by a family alias in that same group, which the recursive build from the root reaches: true
 a runner that runs another directory's executable of the same name does not aggregate this directory's member: true
 the same runner running this directory's executable does: true
+a runner naming the executable's `(public_name …)` aggregates it as much as one naming its .exe: true
+an executable declared in a `(subdir …)` group is aggregated by the top-level family stanza when the rule that runs it sits at the top level: true
+a marked rule whose only alias is the directory-wide `runtest` has no focused alias to offer, and a family listing `runtest` does not aggregate it: true
 a stanza neither derivation calls a member is asked for no family alias: true
