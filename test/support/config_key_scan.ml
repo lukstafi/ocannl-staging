@@ -274,9 +274,10 @@ let generated_init_calls_in_source content =
     source in the tree. *)
 let could_call_generated_init content = String.is_substring content ~substring:generated_module
 
-(** Which of [modules] the source actually REFERS TO, as module path components of a real
-    identifier — [Ir.Alloc_census.snapshot ()], [module AC = Ir.Alloc_census], a type
-    [Ir.Alloc_census.t] — deduplicated and in the order they first appear.
+(** Which of [paths] the source actually REFERS TO, deduplicated and in the order they first
+    appear. Each path is spelled in components — [[ "Ir"; "Alloc_census" ]] — and matches wherever
+    those components appear CONSECUTIVELY inside a real identifier's module path:
+    [Ir.Alloc_census.snapshot ()], [module AC = Ir.Alloc_census], a type [Ir.Alloc_census.t].
 
     Parsed rather than grepped, for the reason the rest of this module is parsed: a source that
     names the module in a doc comment, in a string literal, or inside a longer identifier is not
@@ -284,26 +285,44 @@ let could_call_generated_init content = String.is_substring content ~substring:g
     {!generated_init_calls_in_source} makes, and it applies with more force here, since what is
     derived from the answer is which focused aggregate a test belongs to (gh-ocannl-783).
 
+    Qualified rather than by bare name, and that is what the path is for: a local or third-party
+    module that happens to be called [Alloc_census] is not the instrumentation, and matching the
+    last component alone would put its user in a family it has nothing to do with. The qualifier
+    carries the provenance the AST does not — the parser resolves no paths — so the caller states
+    how much of it to insist on.
+
     Every longident in the structure is visited, so a reference in an expression, a type, a pattern
     or a module expression counts alike. What does not count is a module ALIASED to one of these
-    names elsewhere — the same over-reading direction {!receiver_is_generated} accepts, and not
-    worth a binder pass here: an alias is introduced by a binding that names the module, which this
-    already sees. *)
-let module_references_in_source content ~modules =
+    paths and then used under its alias — but the binding that introduces the alias names the path,
+    which this sees, so a file using the alias has already been counted. And a module bound to the
+    qualifier itself ([module Ir = Somewhere_else]) is read as if it were the real one: the same
+    over-reading direction {!receiver_is_generated} accepts, and the safe one here too. *)
+let module_references_in_source content ~paths =
   let structure = structure_of content in
   let found = ref [] in
+  let rec starts_with components path =
+    match (components, path) with
+    | _, [] -> true
+    | [], _ :: _ -> false
+    | c :: components, p :: path -> String.equal c p && starts_with components path
+  in
+  let rec contains components path =
+    starts_with components path
+    || match components with [] -> false | _ :: rest -> contains rest path
+  in
   let walk =
     object
       inherit Ast_traverse.iter as super
 
       method! longident lid =
         (match flatten_module_path lid with
-        | Some path ->
-            List.iter path ~f:(fun component ->
+        | Some components ->
+            List.iter paths ~f:(fun path ->
+                let spelling = String.concat ~sep:"." path in
                 if
-                  List.mem modules component ~equal:String.equal
-                  && not (List.mem !found component ~equal:String.equal)
-                then found := component :: !found)
+                  contains components path
+                  && not (List.mem !found spelling ~equal:String.equal)
+                then found := spelling :: !found)
         | None -> ());
         super#longident lid
     end

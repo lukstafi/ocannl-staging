@@ -298,19 +298,29 @@ let metal_family =
     family_floor = 3;
   }
 
-(* The library modules that exist to make resource lifetimes observable: a test that names one is
-   asking about allocation, free or context lifetime across a cleanup seam, which is what this
+(* The library modules that exist to make resource lifetimes observable: a test that refers to one
+   is asking about allocation, free or context lifetime across a cleanup seam, which is what this
    family collects. Derived from the instrumentation rather than from the test's name or directory,
    for the reason the whole arrangement is derived -- a probe added tomorrow is asked about the day
-   it lands. *)
-let lifecycle_modules = [ "Resource_fault_injection"; "Alloc_census" ]
+   it lands.
+
+   QUALIFIED, because a bare module name carries no provenance: a local or third-party
+   `Alloc_census` is not this one, and putting its user in the family would demand a focused alias
+   for a test that touches no instrumentation (Codex P2, round 5). `Ir` is how every test outside
+   the implementation reaches these -- `open Ocannl.Operation.DSL_modules` binds it -- and a test
+   that aliases the path (`module AC = Ir.Alloc_census`) names it in the binding, which is what the
+   derivation sees. *)
+let lifecycle_modules =
+  [ [ "Ir"; "Resource_fault_injection" ]; [ "Ir"; "Alloc_census" ] ]
+
+let lifecycle_module_names = List.map lifecycle_modules ~f:(String.concat ~sep:".")
 
 let lifecycle_family =
   {
     family_alias = "lifecycle";
     family_is =
       "has a module that reads the resource-lifecycle instrumentation ("
-      ^ String.concat ~sep:", " lifecycle_modules
+      ^ String.concat ~sep:", " lifecycle_module_names
       ^ "), so it answers for allocation, free or context lifetime across a cleanup seam";
     (* Two on 2026-08-27. One is the floor that matters -- the failure it guards against is the
        derivation finding NOTHING, and a floor equal to today's count would fail the day a probe is
@@ -653,10 +663,13 @@ let main () =
            and then PARSED, because a doc comment, a string literal or a longer identifier names it
            without reading it, and a family membership derived from a substring would demand a
            focused alias for a test that never touches the instrumentation (Codex P2, round 4). *)
-        if not (List.exists lifecycle_modules ~f:(fun m -> String.is_substring content ~substring:m))
+        if
+          not
+            (List.exists lifecycle_module_names ~f:(fun m ->
+                 String.is_substring content ~substring:m))
         then None
         else
-          match Sources.module_references_in_source content ~modules:lifecycle_modules with
+          match Sources.module_references_in_source content ~paths:lifecycle_modules with
           | [] -> None
           | _ :: _ -> Some (String.lowercase path)
           | exception exn ->
@@ -1076,18 +1089,27 @@ let main () =
         List.concat_map subdirs ~f:(fun subdir ->
             List.map (entry_points (stanzas_in subdir)) ~f:(fun alias -> (subdir, alias)))
       in
-      (* The lock (Codex P1 round 4): a gate in a file whose actions take it has to take it too. *)
-      if List.exists stanzas ~f:takes_training_lock then
-        List.iter stanzas ~f:(fun s ->
-            if is_gate s && not (takes_training_lock s) then
-              fail
-                (Printf.sprintf
-                   "%s serializes its actions on `%s` and its gate on `%s` does not take the lock \
-                    -- the one unlocked action in a file of locked ones is what the next training \
-                    test gets copied from; add `(locks %s)` to it"
-                   dune_file training_lock
-                   (String.concat ~sep:", " (aliases_of s))
-                   training_lock));
+      (* The lock (Codex P1 round 4): a gate in a directory whose actions take it has to take it
+         too. Per subdirectory group, like the gate check itself: `is_gate` is false of the outer
+         `(subdir …)` form, so a top-level reading finds neither the group's locked actions nor its
+         gate, and the group's unlocked gate is exactly the stanza the next training test gets
+         copied from (Codex P2, round 5). *)
+      List.iter subdirs ~f:(fun subdir ->
+          let here = stanzas_in subdir in
+          if List.exists here ~f:takes_training_lock then
+            List.iter here ~f:(fun s ->
+                if is_gate s && not (takes_training_lock s) then
+                  fail
+                    (Printf.sprintf
+                       "%s%s serializes its actions on `%s` and its gate on `%s` does not take the \
+                        lock -- the one unlocked action in a directory of locked ones is what the \
+                        next training test gets copied from; add `(locks %s)` to it"
+                       dune_file
+                       (if String.is_empty subdir then ""
+                        else Printf.sprintf ", in `(subdir %s …)`" subdir)
+                       training_lock
+                       (String.concat ~sep:", " (aliases_of s))
+                       training_lock)));
       List.iter entry_points ~f:(fun (subdir, alias) ->
           let where =
             if String.is_empty subdir then dune_file
@@ -2161,6 +2183,7 @@ type family_shape =
   | Subdir_exe_top_runner  (** the executable in a group, the rule that runs it at the top level *)
   | Runtest_only_rule  (** a marked rule whose only alias is the directory-wide `runtest` *)
   | Subdir_ungated  (** the member and its family alias in a group with no gate of its own *)
+  | Subdir_unlocked_gate  (** a group whose actions take the training lock and whose gate does not *)
 
 let family_marker ~metal =
   Printf.sprintf
@@ -2184,7 +2207,7 @@ let family_member_stanza ~shape ~metal =
         "(library\n%s (name probelib)\n (modules probe)\n (inline_tests\n  (deps \
          ocannl_config))\n (libraries base))\n"
         marker
-  | Subdir_member | Subdir_ungated ->
+  | Subdir_member | Subdir_ungated | Subdir_unlocked_gate ->
       (* Dune lets a `(subdir …)` group carry its own alias stanza, and the recursive `@<family>`
          build from the root reaches it. The family stanza therefore goes INSIDE the group here,
          which is the arrangement the check used to reject -- and the group needs an ambient gate of
@@ -2204,12 +2227,21 @@ let family_member_stanza ~shape ~metal =
       let gate_dep =
         match shape with Subdir_ungated -> "" | _ -> "(alias runtest-childgate) "
       in
+      (* The lock the training tests serialize on. Taken by the member and by nothing else in the
+         `Subdir_unlocked_gate` variant, which is the arrangement the repository's own rule forbids:
+         one unlocked action in a directory of locked ones. *)
+      let locks =
+        match shape with
+        | Subdir_unlocked_gate -> "  (locks ocannl_training_test)\n"
+        | _ -> ""
+      in
       Printf.sprintf
-        "(subdir\n child\n%s (test\n%s  (name probe)\n  (modules probe)\n  (deps ocannl_config)\n  \
-         (libraries base))\n (alias\n  (name %s)\n  (deps %s(alias runtest-probe))))\n"
+        "(subdir\n child\n%s (test\n%s  (name probe)\n  (modules probe)\n%s  (deps \
+         ocannl_config)\n  (libraries base))\n (alias\n  (name %s)\n  (deps %s(alias \
+         runtest-probe))))\n"
         gate
         (String.substr_replace_all marker ~pattern:" ; " ~with_:"  ; ")
-        metal_family.family_alias gate_dep
+        locks metal_family.family_alias gate_dep
   | Public_names_crossed ->
       (* Two installed executables behind one stanza, and a rule running the SECOND one's public
          name. Nothing here runs `probe`, so a family listing that rule aggregates `probe2` and
@@ -2261,7 +2293,7 @@ type family_listing = Every | First_only
 
 let family_listed_aliases ~shape ~listing =
   match (shape, listing) with
-  | (Subdir_member | Subdir_ungated), _ -> []
+  | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
       | Subdir_exe_top_runner ),
@@ -2291,10 +2323,15 @@ let family_subject ~shape ~metal ~family ~listing =
 type family_probe_source =
   | Reads  (** a real reference to the instrumentation *)
   | Mentions_only  (** the module named in a comment and a string literal, and nowhere else *)
+  | Same_named  (** a module of the same LAST name, reached through another qualifier *)
   | Neither
 
 let family_probe = function
   | Reads -> "let () = ignore (Ir.Alloc_census.snapshot ())\n"
+  | Same_named ->
+      (* Somebody else's `Alloc_census`, and a bare one: real references, to a module whose
+         provenance is not the instrumentation's (Codex P2, round 5). *)
+      "module Alloc_census = Foo.Alloc_census\nlet () = ignore (Foo.Alloc_census.snapshot ())\n"
   | Mentions_only ->
       (* The module NAMED where naming it reads nothing -- the shape a substring derivation calls a
          probe (Codex P2, round 4). Also as a longer identifier, since that is the third way a text
@@ -2391,6 +2428,14 @@ let family_control () =
   (* The group's own ambient gate: an alias defined inside `(subdir child …)` is `child`'s, and a
      gate at the top level does not reach it. *)
   let subdir_ungated = run ~shape:Subdir_ungated ~metal:true ~lifecycle:false ~family:None () in
+  (* Nor does a top-level reading see a group's training lock: `is_gate` is false of the `(subdir …)`
+     form, so the group's unlocked gate passed unseen. *)
+  let subdir_unlocked =
+    run ~shape:Subdir_unlocked_gate ~metal:true ~lifecycle:false ~family:None ()
+  in
+  (* And a module of the same last name reached through another qualifier: a real reference, to
+     something that is not the instrumentation. *)
+  let same_named = run ~probe:Same_named ~metal:false ~lifecycle:true ~family:None () in
   (* The negative control: neither derivation calls this stanza a member, so no family alias is
      asked for. A derivation that over-claimed would fail this correct tree. *)
   let no_member = run ~metal:false ~lifecycle:false ~family:None () in
@@ -2430,6 +2475,12 @@ let family_control () =
     && String.is_substring (snd subdir_ungated) ~substring:"no ambient gate reaches it"
     && String.is_substring (snd subdir_ungated) ~substring:"(subdir child"
   in
+  let subdir_unlocked_ok =
+    exited 1 subdir_unlocked
+    && String.is_substring (snd subdir_unlocked) ~substring:"does not take the lock"
+    && String.is_substring (snd subdir_unlocked) ~substring:"(subdir child"
+  in
+  let same_named_ok = listed_ok same_named in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2451,6 +2502,8 @@ let family_control () =
   if not crossed_public_ok then report "runner naming the other unit's public name" crossed_public;
   if not mention_only_ok then report "the instrumentation named but not read" mention_only;
   if not subdir_ungated_ok then report "family alias in a group with no gate" subdir_ungated;
+  if not subdir_unlocked_ok then report "locked group whose gate takes no lock" subdir_unlocked;
+  if not same_named_ok then report "a same-named module of another provenance" same_named;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2521,6 +2574,14 @@ let family_control () =
     "a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and \
      is reported without one"
     subdir_ungated_ok;
+  Verdict.p
+    "a `(subdir …)` group whose actions take the training lock and whose gate does not is reported \
+     there too"
+    subdir_unlocked_ok;
+  Verdict.p
+    "a module of the same last name reached through another qualifier is not the instrumentation, \
+     and its user is no member"
+    same_named_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 

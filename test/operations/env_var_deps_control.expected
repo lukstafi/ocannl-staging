@@ -38,4 +38,6 @@ a marked rule whose only alias is the directory-wide `runtest` has no focused al
 a public name belongs to its own executable, so a rule running the second unit's public name does not aggregate the first: true
 a source that names the instrumentation in a comment, a string and a longer identifier reads none of it, and is no member: true
 a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and is reported without one: true
+a `(subdir …)` group whose actions take the training lock and whose gate does not is reported there too: true
+a module of the same last name reached through another qualifier is not the instrumentation, and its user is no member: true
 a stanza neither derivation calls a member is asked for no family alias: true
