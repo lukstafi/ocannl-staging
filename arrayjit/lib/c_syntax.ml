@@ -357,8 +357,6 @@ module type C_syntax_config = sig
   (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
       shared and already known. *)
 
-  type buffer_ptr
-
   val main_kernel_prefix : string
   val kernel_prep_line : string
   val buffer_prefix : string
@@ -1441,16 +1439,11 @@ let cpp_keywords =
   ]
 
 module Pure_C_config (Input : sig
-  type buffer_ptr
-
   val procs : Low_level.optimized array
   val full_printf_support : bool
 end) =
 struct
   let procs = Input.procs
-
-  type nonrec buffer_ptr = Input.buffer_ptr
-
   let main_kernel_prefix = ""
   let kernel_prep_line = ""
   let buffer_prefix = ""

@@ -510,8 +510,6 @@ module Impl = struct
   end) =
   struct
     include C_syntax.Pure_C_config (struct
-      type nonrec buffer_ptr = buffer_ptr
-
       let procs = Input.procs
       let full_printf_support = false
     end)

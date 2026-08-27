@@ -935,8 +935,6 @@ module CC_syntax_config (Procs : sig
 end) =
 struct
   include C_syntax.Pure_C_config (struct
-    type nonrec buffer_ptr = buffer_ptr
-
     let procs = Procs.procs
 
     let full_printf_support =

@@ -59,8 +59,6 @@ let vec_loop ~axis tn =
 
 let compile_with_pure_config ~name optimized =
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
-    type buffer_ptr = unit Ctypes.ptr
-
     let procs = [| optimized |]
     let full_printf_support = true
   end))
@@ -83,8 +81,6 @@ let () =
   let optimized2 = make_optimized (vec_loop ~axis:LL.Vectorized out2) [ out2 ] in
   let module Fallback_syntax = Ir.C_syntax.C_syntax (struct
     include Ir.C_syntax.Pure_C_config (struct
-      type buffer_ptr = unit Ctypes.ptr
-
       let procs = [| optimized2 |]
       let full_printf_support = true
     end)
@@ -140,8 +136,6 @@ let () =
   let compile_with_vector_config ~name optimized =
     let module Syntax = Ir.C_syntax.C_syntax (struct
       include Ir.C_syntax.Pure_C_config (struct
-        type buffer_ptr = unit Ctypes.ptr
-
         let procs = [| optimized |]
         let full_printf_support = true
       end)
@@ -457,8 +451,6 @@ let () =
      written; what was checked, per row, is that the arm compiles under the target its guard names
      and renders exactly one fused instruction at [-ffp-contract=off]. --- *)
   let module Arms = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
-    type buffer_ptr = unit Ctypes.ptr
-
     let procs = [||]
     let full_printf_support = true
   end))
