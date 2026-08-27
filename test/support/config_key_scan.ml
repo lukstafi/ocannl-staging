@@ -350,13 +350,107 @@ let utils_module = "Utils"
 
 type env_reader_reads = {
   reader_keys : string list;
-      (** the keys the reader is called with as a string literal, sorted and deduplicated *)
-  reader_dynamic : bool;
-      (** whether some reach of the reader takes its key as a parameter, so that which keys it reads
-          cannot be decided from this source alone. A guard is the shape that does it — a list of
-          key names and a [List.iter … ~f:(fun arg_name -> … read_env_var arg_name …)] over it — and
-          the caller falls back to {!string_literals_in_source} for the candidates. *)
+      (** every key the reader is reached with, sorted and deduplicated: a string literal at the
+          call, and the elements of a list an iteration hands it one at a time *)
+  reader_unresolved : string list;
+      (** one line per reach whose key this scan could not resolve to a finite set of literals,
+          naming what it saw. A caller must treat a non-empty list as a refusal: the alternative is
+          a check that runs its loop over whatever keys happened to be resolvable and reports
+          success, which is a pass proving nothing (Codex P2, round 4 of PR #484). *)
 }
+
+(** {2 Resolving a list of keys}
+
+    A guard hands the reader its keys one at a time out of a list, so what the scan has to resolve is
+    the LIST — and resolving it is what lets the check refuse everything else. The alternative it
+    replaces was to take the source's string literals as candidates, which is a superset when the
+    list is written there and says nothing at all when it is not: one incidental literal naming a
+    real key made the reach look answered.
+
+    Small on purpose. These are the shapes the guards in this repository are written in, and an
+    expression outside them is not approximated — it is reported. *)
+
+type element = Str of string | Pair of string option * string option
+
+let element_of expr =
+  match string_literal expr with
+  | Some value -> Some (Str value)
+  | None -> (
+      match expr.pexp_desc with
+      | Pexp_tuple [ a; b ] -> Some (Pair (string_literal a, string_literal b))
+      | _ -> None)
+
+(* An OCaml list literal is a chain of `::` constructors ending in `[]`. *)
+let rec list_literal expr =
+  match expr.pexp_desc with
+  | Pexp_construct ({ txt = Lident "[]"; _ }, None) -> Some []
+  | Pexp_construct ({ txt = Lident "::"; _ }, Some { pexp_desc = Pexp_tuple [ head; tail ]; _ }) ->
+      Option.both (element_of head) (list_literal tail) |> Option.map ~f:(fun (h, t) -> h :: t)
+  | _ -> None
+
+let is_named name expr =
+  match longident_of expr with
+  | Some path -> ( match List.last path with Some last -> String.equal last name | None -> false)
+  | None -> false
+
+(** The elements of the list [expr] denotes, where this scan can say. [bindings] maps a top-level
+    name to the list it was bound to, which is how [let guarded = …] reaches its use. *)
+let rec resolve_elements ~bindings expr =
+  match list_literal expr with
+  | Some elements -> Some elements
+  | None -> (
+      match expr.pexp_desc with
+      | Pexp_ident { txt; _ } -> (
+          match List.last (flatten_longident txt) with
+          | Some name -> List.Assoc.find bindings name ~equal:String.equal
+          | None -> None)
+      (* `a @ b`, which is how a guard adds one key to a list it shares with something else. *)
+      | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+        when is_named "@" op ->
+          Option.both (resolve_elements ~bindings left) (resolve_elements ~bindings right)
+          |> Option.map ~f:(fun (l, r) -> l @ r)
+      (* `List.map keys ~f:fst`, which projects a table of key/default pairs onto its keys. *)
+      | Pexp_apply (f, args) when is_named "map" f ->
+          let picker =
+            List.find_map args ~f:(fun (_, arg) ->
+                if is_named "fst" arg then Some `Fst
+                else if is_named "snd" arg then Some `Snd
+                else None)
+          in
+          let source =
+            List.find_map args ~f:(fun (_, arg) -> resolve_elements ~bindings arg)
+          in
+          Option.both picker source
+          |> Option.map ~f:(fun (picker, elements) ->
+              List.map elements ~f:(function
+                | Str value -> Str value
+                | Pair (a, b) -> (
+                    match (picker, a, b) with
+                    | `Fst, Some value, _ | `Snd, _, Some value -> Str value
+                    | _ -> Pair (None, None))))
+      | _ -> None)
+
+(** The string keys of a resolved list, or [None] where any element is not one. *)
+let resolve_keys ~bindings expr =
+  match resolve_elements ~bindings expr with
+  | None -> None
+  | Some elements ->
+      List.fold_until elements ~init:[]
+        ~f:(fun acc element ->
+          match element with Str value -> Continue (value :: acc) | Pair _ -> Stop None)
+        ~finish:(fun acc -> Some (List.rev acc))
+
+(** Every top-level [let name = <list>] of the structure, for {!resolve_elements} to follow. Source
+    order, so a binding built from an earlier one resolves. *)
+let list_bindings_of structure =
+  List.fold structure ~init:[] ~f:(fun bindings item ->
+      match item.pstr_desc with
+      | Pstr_value (_, value_bindings) ->
+          List.fold value_bindings ~init:bindings ~f:(fun bindings binding ->
+              match (pattern_name binding.pvb_pat, resolve_elements ~bindings binding.pvb_expr) with
+              | Some name, Some elements -> (name, elements) :: bindings
+              | _ -> bindings)
+      | _ -> bindings)
 
 (** Which configuration keys [content] reads straight from the environment.
 
@@ -368,17 +462,24 @@ type env_reader_reads = {
     never consults fails a correct stanza out loud. {!module_bindings_of} is the same resolution the
     initializer census makes.
 
-    Handing the function around as a value counts as a dynamic reach, for the same reason handing a
-    settings predicate around does: the keys go somewhere this scan cannot follow.
+    Every reach is resolved to a finite set of keys or REPORTED in [reader_unresolved]. A literal at
+    the call names its key; a parameter names the keys of the list an iteration binds it from, which
+    is the guard shape; the reader handed straight to such an iteration names them too. Anything else
+    -- a list from another compilation unit, an element that is not a literal, an argument computed
+    at run time, the function handed on somewhere this scan cannot follow -- is a refusal and not an
+    approximation. The earlier fallback took the source's string literals as candidates, which is a
+    superset where the list is written in the file and says nothing where it is not: one incidental
+    literal naming a real key made an unresolved reach look answered (Codex P2, round 4 of PR #484).
 
     Parsed rather than grepped, for the reason the rest of this module is: this file's own doc
     comments name the function, and the checks built on it quote its name in their diagnostics. *)
 let env_reader_reads_in_source content =
   let structure = structure_of content in
-  let keys = ref [] and dynamic = ref false in
+  let keys = ref [] and unresolved = ref [] in
   let blessed = Hash_set.create (module Int) in
   let aliases, _opened, open_ranges = module_bindings_of structure ~wanted:utils_module in
   let shadows = shadow_ranges_of structure ~fn:env_reader in
+  let bindings = list_bindings_of structure in
   (* A BARE call is this function only where an `open Utils` is in scope and nothing of the file's
      own shadows the name there. Both halves are lexical, not file-wide: an `open` reaches its
      structure or its `let open … in` body, and a local `let read_env_var _ = None` takes the name
@@ -390,6 +491,65 @@ let env_reader_reads_in_source content =
         within open_ranges offset && not (within shadows offset)
     | _ -> names_function_of ~wanted:utils_module ~aliases ~opened:false ~fn:env_reader path
   in
+  (* Which parameters carry a resolved key, established at the ITERATION that binds them: a call
+     handing a lambda to a list this scan resolved gives that lambda's parameter those keys, over
+     the lambda's body and nowhere else. That is the whole of the guard shape -- `List.iter <list>
+     ~f:(fun arg_name -> … read_env_var arg_name …)`, in either argument order -- and resolving it
+     is what lets everything else be REFUSED rather than guessed at from the file's literals (Codex
+     P2, round 4 of PR #484). *)
+  let iterated = ref [] in
+  let describe expr =
+    match longident_of expr with
+    | Some path -> String.concat ~sep:"." path
+    | None -> (
+        match expr.pexp_desc with
+        | Pexp_apply (f, _) ->
+            Option.value_map (longident_of f) ~default:"an expression"
+              ~f:(fun path -> String.concat ~sep:"." path ^ " …")
+        | _ -> "an expression")
+  in
+  let lambda_body expr =
+    match expr.pexp_desc with
+    | Pexp_function ([ { pparam_desc = Pparam_val (Asttypes.Nolabel, None, pattern); _ } ], _, body)
+      -> (
+        match body with
+        | Pfunction_body body -> Option.both (pattern_name pattern) (Some body)
+        | _ -> None)
+    | _ -> None
+  in
+  let record_iteration args =
+    let resolved =
+      List.find_map args ~f:(fun (_, arg) ->
+          match arg.pexp_desc with
+          | Pexp_function _ -> None
+          | _ -> resolve_keys ~bindings arg)
+    in
+    match resolved with
+    | None -> ()
+    | Some resolved ->
+        List.iter args ~f:(fun (_, arg) ->
+            match lambda_body arg with
+            | Some (parameter, body) ->
+                iterated :=
+                  ( parameter,
+                    (body.pexp_loc.loc_start.pos_cnum, body.pexp_loc.loc_end.pos_cnum),
+                    resolved )
+                  :: !iterated
+            (* `List.iter ~f:Utils.read_env_var <list>` reaches the reader with every element of a
+               list this scan resolved, so it is answered too -- and it is the shape that would
+               otherwise be a bare identifier handed on, which is refused below. *)
+            | None ->
+                if
+                  Option.value_map (longident_of arg) ~default:false
+                    ~f:(names_the_reader ~offset:arg.pexp_loc.loc_start.pos_cnum)
+                then (
+                  Hash_set.add blessed arg.pexp_loc.loc_start.pos_cnum;
+                  keys := resolved @ !keys))
+  in
+  let key_of_parameter ~offset name =
+    List.find_map !iterated ~f:(fun (parameter, range, resolved) ->
+        if String.equal parameter name && within [ range ] offset then Some resolved else None)
+  in
   let iterator =
     object
       inherit Ast_traverse.iter as super
@@ -397,6 +557,11 @@ let env_reader_reads_in_source content =
       method! expression expr =
         (match expr.pexp_desc with
         | Pexp_apply (f, args) -> (
+            (* The iteration is recorded before the walk descends, so a reader call inside the
+               lambda finds its parameter bound. *)
+            (match longident_of f with
+            | Some _ -> record_iteration args
+            | None -> ());
             match longident_of f with
             | Some path when names_the_reader ~offset:f.pexp_loc.loc_start.pos_cnum path -> (
                 (* Blessed before the walk descends into [f], so the identifier arm below does not
@@ -409,45 +574,41 @@ let env_reader_reads_in_source content =
                 | Some (_, argument) -> (
                     match string_literal argument with
                     | Some key -> keys := key :: !keys
-                    | None -> dynamic := true)
+                    | None -> (
+                        let offset = argument.pexp_loc.loc_start.pos_cnum in
+                        match
+                          Option.bind (longident_of argument) ~f:(fun path ->
+                              match List.last path with
+                              | Some name -> key_of_parameter ~offset name
+                              | None -> None)
+                        with
+                        | Some resolved -> keys := resolved @ !keys
+                        | None ->
+                            unresolved :=
+                              Printf.sprintf "`%s.%s %s`" utils_module env_reader
+                                (describe argument)
+                              :: !unresolved))
                 (* A partial application names no key here, and whatever supplies it is out of
                    reach. *)
-                | None -> dynamic := true)
+                | None ->
+                    unresolved :=
+                      Printf.sprintf "`%s.%s` applied to no key" utils_module env_reader
+                      :: !unresolved)
             | _ -> ())
         | Pexp_ident { txt; _ }
           when names_the_reader ~offset:expr.pexp_loc.loc_start.pos_cnum (flatten_longident txt) ->
-            if not (Hash_set.mem blessed expr.pexp_loc.loc_start.pos_cnum) then dynamic := true
+            if not (Hash_set.mem blessed expr.pexp_loc.loc_start.pos_cnum) then
+              unresolved :=
+                Printf.sprintf "`%s.%s` handed on as a value" utils_module env_reader :: !unresolved
         | _ -> ());
         super#expression expr
     end
   in
   iterator#structure structure;
   {
-    reader_keys = List.dedup_and_sort (List.rev !keys) ~compare:String.compare;
-    reader_dynamic = !dynamic;
+    reader_keys = List.dedup_and_sort !keys ~compare:String.compare;
+    reader_unresolved = List.dedup_and_sort !unresolved ~compare:String.compare;
   }
-
-(** Every string literal [content] holds, sorted and deduplicated.
-
-    The candidate set for a source whose reads are dynamic: the key a guard passes to the reader is
-    a literal SOMEWHERE in the file — in the list it iterates — even where no expression puts it
-    next to the call. Intersected by the caller with the configuration registry, which is what turns
-    a file of format strings and default values into the handful of keys it can read. Over-reading
-    is the safe direction: a declaration too many makes dune rerun a stanza it need not have, while
-    one too few is the stale run the rule exists to prevent. *)
-let string_literals_in_source content =
-  let found = ref [] in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! expression expr =
-        (match string_literal expr with Some value -> found := value :: !found | None -> ());
-        super#expression expr
-    end
-  in
-  iterator#structure (structure_of content);
-  List.dedup_and_sort !found ~compare:String.compare
 
 (** Whether [content] could possibly reach the reader: the function has to be NAMED for any spelling
     of a call, an alias or an [open] to reach it, so the substring is a necessary condition and a

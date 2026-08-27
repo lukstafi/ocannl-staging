@@ -383,12 +383,12 @@ let x = read_env_var "profile"|ocaml},
     ( "a string literal quoting a call is not a call",
       {ocaml|let message = "Utils.read_env_var \"profile\" is how a guard reads"|ocaml},
       ([], false) );
-    (* The guard, which is the shape the rule exists for: the key arrives as a parameter, so the
-       call names nothing and the source is dynamic. *)
-    ( "a key taken from a list is a dynamic reach and names nothing at the call",
+    (* The guard, which is the shape the rule exists for: the key arrives as a parameter, and the
+       LIST it arrives from is what the scan resolves (see the key-list family below). *)
+    ( "a key taken from a resolvable list is the keys of that list",
       {ocaml|let guarded = [ "log_level"; "profile" ]
 let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
-      ([], true) );
+      ([ "log_level"; "profile" ], false) );
     (* Handing the function around as a value is the same loss one layer up: whatever calls it is
        out of reach, so the source cannot be answered for either (the settings predicates above take
        the same treatment, for the same reason). *)
@@ -399,13 +399,12 @@ let also = Utils.read_env_var|ocaml},
     ( "a partial application names no key here",
       {ocaml|let f = Utils.read_env_var ~x:1|ocaml},
       ([], true) );
-    (* Both at once: a file may resolve some of its reads and not others, and reporting the resolved
-       ones is no reason to stop saying that the rest are out of reach. *)
+    (* Both spellings in one file, since a guard commonly sits beside a direct read. *)
     ( "a literal read and a guard in one file",
       {ocaml|let () = ignore (Utils.read_env_var "profile")
 let guarded = [ "log_level" ]
 let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
-      ([ "profile" ], true) );
+      ([ "log_level"; "profile" ], false) );
     (* A different function of the same module is not the reader: `read_cmdline_or_env_var` consults
        the commandline first, which an ambient variable cannot outrank, so it is not the
        unconditional dependency this scan reports. *)
@@ -448,19 +447,55 @@ let x = Utils.read_env_var "profile"|ocaml},
       ([ "profile" ], false) );
   ]
 
-(* The candidate set a dynamic source falls back on, and the filter that narrows it. Neither is a
-   census on its own -- the caller intersects with the configuration registry -- but a literal this
-   misses is a key a guard could read undeclared. *)
-let string_literal_cases =
+(* The LIST a guard iterates, which is what the scan resolves so that everything else can be
+   refused. These are the shapes the guards in this repository are written in; an expression outside
+   them is reported, not approximated. The pair is the keys resolved and whether anything was left
+   unresolved. *)
+let key_list_cases =
   [
-    ( "literals from a list, a tuple and an argument",
-      {ocaml|let keys = [ ("a", "1"); ("b", "2") ]
-let () = print_string "c"|ocaml},
-      [ "1"; "2"; "a"; "b"; "c" ] );
-    ( "a literal in a comment is not a literal",
-      {ocaml|(* "phantom" *) let x = "real"|ocaml},
-      [ "real" ] );
-    ("escapes arrive decoded", {ocaml|let x = "a\tb"|ocaml}, [ "a\tb" ]);
+    ( "a list bound at top level and iterated",
+      {ocaml|let guarded = [ "log_level"; "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    ( "the stdlib argument order too",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter (fun k -> ignore (Utils.read_env_var k)) guarded|ocaml},
+      ([ "log_level" ], false) );
+    ( "a list written at the iteration",
+      {ocaml|let () = List.iter [ "log_level" ] ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "log_level" ], false) );
+    (* `List.map keys ~f:fst @ [ … ]` is how `profile_precedence` builds its guard list out of the
+       table it also prints. *)
+    ( "a projection of a table, appended to a literal",
+      {ocaml|let keys = [ ("autotune_rounds", "2"); ("tf32_matmuls", "false") ]
+let guarded = List.map keys ~f:fst @ [ "no_config_file" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "autotune_rounds"; "no_config_file"; "tf32_matmuls" ], false) );
+    ( "the reader handed straight to the iteration is answered as well",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:Utils.read_env_var|ocaml},
+      ([ "log_level" ], false) );
+    (* And the refusals. A list this scan cannot follow is REPORTED, not approximated from whatever
+       literals the file happens to contain -- an incidental `"profile"` elsewhere in the source
+       made an unresolved reach look answered (Codex P2, round 4 of PR #484). *)
+    ( "a list from another compilation unit is unresolved",
+      {ocaml|let () = List.iter Shared.guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "an incidental literal does not answer for an unresolved reach",
+      {ocaml|let label = "profile"
+let () = ignore (Utils.read_env_var Sys.argv.(1))|ocaml},
+      ([], true) );
+    ( "a list whose elements are not literals is unresolved",
+      {ocaml|let guarded = [ some_key; other_key ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* The parameter carries its keys over the lambda's BODY and nowhere else, so a same-named
+       variable elsewhere is not silently answered by it. *)
+    ( "the binding does not escape the lambda it was established at",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let elsewhere k = Utils.read_env_var k|ocaml},
+      ([ "log_level" ], true) );
   ]
 
 let could_read_cases =
@@ -570,7 +605,8 @@ let () =
           None
       in
       Option.iter found ~f:(fun found ->
-          let keys = found.Scan.reader_keys and dynamic = found.Scan.reader_dynamic in
+          let keys = found.Scan.reader_keys in
+          let dynamic = not (List.is_empty found.Scan.reader_unresolved) in
           let expected_keys = List.sort ~compare:String.compare expected_keys in
           if List.equal String.equal keys expected_keys && Bool.equal dynamic expected_dynamic then
             printf "ok: environment read -- %s\n" name
@@ -581,14 +617,21 @@ let () =
               (String.concat ~sep:"; " expected_keys)
               dynamic
               (String.concat ~sep:"; " keys)));
-  List.iter string_literal_cases ~f:(fun (name, source, expected) ->
-      let found = Scan.string_literals_in_source source in
-      let expected = List.sort ~compare:String.compare expected in
-      if List.equal String.equal found expected then printf "ok: string literals -- %s\n" name
+  List.iter key_list_cases ~f:(fun (name, source, (expected_keys, expected_unresolved)) ->
+      let found = Scan.env_reader_reads_in_source source in
+      let unresolved = not (List.is_empty found.Scan.reader_unresolved) in
+      let expected_keys = List.sort ~compare:String.compare expected_keys in
+      if
+        List.equal String.equal found.Scan.reader_keys expected_keys
+        && Bool.equal unresolved expected_unresolved
+      then printf "ok: key list -- %s\n" name
       else
-        fail "string literals -- %s: expected [%s], found [%s]" name
-          (String.concat ~sep:"; " expected)
-          (String.concat ~sep:"; " found));
+        fail "key list -- %s: expected unresolved %b with keys [%s], found unresolved %b with \
+              keys [%s]"
+          name expected_unresolved
+          (String.concat ~sep:"; " expected_keys)
+          unresolved
+          (String.concat ~sep:"; " found.Scan.reader_keys));
   List.iter could_read_cases ~f:(fun (name, source, expected) ->
       let found = Scan.could_read_env_var source in
       if Bool.equal found expected then printf "ok: could read the environment -- %s\n" name

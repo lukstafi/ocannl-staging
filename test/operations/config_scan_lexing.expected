@@ -81,7 +81,7 @@ ok: environment read -- the receiver is matched by its last component, so an ali
 ok: environment read -- and so does a bare call under an open
 ok: environment read -- prose naming the reader is not a read
 ok: environment read -- a string literal quoting a call is not a call
-ok: environment read -- a key taken from a list is a dynamic reach and names nothing at the call
+ok: environment read -- a key taken from a resolvable list is the keys of that list
 ok: environment read -- the reader handed on as a value is a dynamic reach
 ok: environment read -- a partial application names no key here
 ok: environment read -- a literal read and a guard in one file
@@ -92,8 +92,14 @@ ok: environment read -- an alias of an alias still reaches it
 ok: environment read -- a local binding shadows the opened name
 ok: environment read -- an expression-scoped open does not reach past its body
 ok: environment read -- a qualified call is the reader whatever the file binds locally
-ok: string literals -- literals from a list, a tuple and an argument
-ok: string literals -- a literal in a comment is not a literal
-ok: string literals -- escapes arrive decoded
+ok: key list -- a list bound at top level and iterated
+ok: key list -- the stdlib argument order too
+ok: key list -- a list written at the iteration
+ok: key list -- a projection of a table, appended to a literal
+ok: key list -- the reader handed straight to the iteration is answered as well
+ok: key list -- a list from another compilation unit is unresolved
+ok: key list -- an incidental literal does not answer for an unresolved reach
+ok: key list -- a list whose elements are not literals is unresolved
+ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader
 ok: could read the environment -- does not name it at all

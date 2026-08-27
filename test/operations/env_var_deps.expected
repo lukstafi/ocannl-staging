@@ -85,7 +85,6 @@ on its own deps.
   OCANNL_FP16_ARITHMETIC                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_MODEL_DEFAULT_SCHEDULE          test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_NO_CONFIG_FILE                  test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
-  OCANNL_PROFILE                         test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_TF32_MATMULS                    test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_TUNE_INLINE_FLIPS               test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
   OCANNL_VIRTUALIZE_MAX_VISITS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)

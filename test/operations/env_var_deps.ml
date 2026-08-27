@@ -1273,8 +1273,12 @@ let main () =
                             ( name,
                               Scan.program_modules stanza ~modules ~name,
                               name ^ ".exe",
-                              List.map runners ~f:(fun r ->
-                                  (Scan.field r "deps", Scan.env_vars_pinned_at_runs r)) ))
+                              (* The pins come with the runner, scoped to the runs of THIS program:
+                                 a `setenv` around a helper beside the subject pins nothing here, and
+                                 one around the subject is not undone by an unpinned helper (Codex
+                                 P1 round 1, P2 round 4). *)
+                              List.map runners ~f:(fun (r, pins) ->
+                                  (Scan.field r "deps", pins)) ))
                     | "library" ->
                         let inline = Option.value (Scan.field stanza "inline_tests") ~default:[] in
                         [
@@ -1297,46 +1301,30 @@ let main () =
                             ( source,
                               if Sources.could_read_env_var content then
                                 Sources.env_reader_reads_in_source content
-                              else { Sources.reader_keys = []; reader_dynamic = false } ))
+                              else { Sources.reader_keys = []; reader_unresolved = [] } ))
                       in
-                      let dynamic_sources =
-                        List.filter_map reads ~f:(fun (source, r) ->
-                            if r.Sources.reader_dynamic then Some source else None)
-                      in
-                      let literal_keys =
-                        List.concat_map reads ~f:(fun (_, r) -> r.Sources.reader_keys)
-                      in
-                      (* The candidates a dynamic reach falls back on, gathered over the PROGRAM's
-                         sources and not the one that calls the reader: a guard may keep its key list
-                         in a sibling module of the same executable, and asking the calling source
-                         alone answered "no keys" for it (Codex P2, round 1). *)
-                      let candidates =
-                        if List.is_empty dynamic_sources then literal_keys
-                        else
-                          literal_keys
-                          @ List.concat_map sources ~f:(fun (_, content) ->
-                              Sources.string_literals_in_source content)
-                      in
+                      (* Every reach is resolved to a finite set of keys or REPORTED. A reach the
+                         scan cannot follow used to fall back on the program's string literals,
+                         which is a superset where the key list is written in the program and says
+                         nothing where it is not -- so one incidental literal naming a real key made
+                         an unresolved reach look answered, and the check reported success having
+                         proven nothing about it (Codex P2, round 4). *)
+                      List.iter reads ~f:(fun (source, r) ->
+                          List.iter r.Sources.reader_unresolved ~f:(fun what ->
+                              fail
+                                (Printf.sprintf
+                                   "%s: %s/%s reaches the environment reader with a key this scan \
+                                    cannot resolve to a finite set -- %s. There is then nothing to \
+                                    hold the `(env_var …)` declarations against, and a check that \
+                                    carried on would report success having proven nothing. Iterate \
+                                    a list of string literals this program's modules define, or \
+                                    spell the key at the call"
+                                   where directory source what)));
                       let keys =
-                        List.filter candidates ~f:(Set.mem Utils.known_config_keys)
+                        List.concat_map reads ~f:(fun (_, r) -> r.Sources.reader_keys)
+                        |> List.filter ~f:(Set.mem Utils.known_config_keys)
                         |> List.dedup_and_sort ~compare:String.compare
                       in
-                      (* A dynamic reach whose keys resolve to NOTHING is the scan going blind, not a
-                         program that reads nothing: `List.iter Shared.keys ~f:Utils.read_env_var`
-                         puts the list in another compilation unit, and an empty candidate set then
-                         checks nothing while looking exactly like a clean verdict. It fails here
-                         instead (Codex P2, round 1) -- a loud refusal beats a vacuous pass. *)
-                      if (not (List.is_empty dynamic_sources)) && List.is_empty keys then
-                        fail
-                          (Printf.sprintf
-                             "%s: %s reaches `Utils.%s` with a key this scan cannot resolve, and no \
-                              module of this program names a configuration key as a string literal \
-                              -- so there is nothing to hold the `(env_var …)` declarations against \
-                              and the rule would pass vacuously. Keep the key list in a module of \
-                              this program, or spell the key at the call"
-                             where
-                             (String.concat ~sep:", " dynamic_sources)
-                             Sources.env_reader);
                       List.iter keys ~f:(fun key ->
                           let var = Utils.env_var_name key in
                           let answers (deps, pins) =
@@ -1950,6 +1938,13 @@ let guard_rule ~target ~declares ~pins =
        reading the rule's setenvs as a flat set would credit it (Codex P1, round 1). *)
     | `Elsewhere_in_the_action ->
         Printf.sprintf "  (progn\n   (setenv %s 1\n    (run ./other.exe))\n   (run ./guard.exe))"
+          (Utils.env_var_name guard_key)
+    (* The inverse: the guard IS pinned, and an unpinned run of a helper stands beside it. The pin
+       belongs to the guard's run, so an intersection taken over every command in the action --
+       which is what this check did first -- demanded a declaration the run cannot need (Codex P2,
+       round 4). *)
+    | `Around_the_run_beside_a_helper ->
+        Printf.sprintf "  (progn\n   (setenv %s 1\n    (run ./guard.exe))\n   (run ./other.exe))"
           (Utils.env_var_name guard_key))
 
 (* The arms. Everything but the one thing each is about is held fixed, so a difference in verdict is
@@ -1963,6 +1958,8 @@ let guard_subject ~arm =
   match arm with
   | `Declares | `Unresolvable -> executable named ^ one ~declares:true ~pins:`No
   | `Pins -> executable named ^ one ~declares:false ~pins:`Around_the_run
+  | `Pins_beside_a_helper ->
+      executable named ^ one ~declares:false ~pins:`Around_the_run_beside_a_helper
   | `Pins_elsewhere -> executable named ^ one ~declares:false ~pins:`Elsewhere_in_the_action
   | `Neither -> executable named ^ one ~declares:false ~pins:`No
   (* An `(executable)` reaching for dune's DEFAULT module set: the same tree with the `(modules …)`
@@ -2041,6 +2038,7 @@ let guard_control () =
   let declared = run `Declares in
   let pinned = run `Pins in
   let pinned_elsewhere = run `Pins_elsewhere in
+  let pinned_beside_helper = run `Pins_beside_a_helper in
   let implicit = run `Implicit_modules in
   let in_a_subdir = run `In_a_subdir ~at:"t/gen/guard.ml" in
   let inline_library = run `Inline_tests_library in
@@ -2068,6 +2066,7 @@ let guard_control () =
   let declared_ok = passes declared diagnostic in
   let pinned_ok = passes pinned diagnostic in
   let pinned_elsewhere_ok = reports pinned_elsewhere diagnostic in
+  let pinned_beside_helper_ok = passes pinned_beside_helper diagnostic in
   let implicit_ok = reports implicit diagnostic && names_the_key (snd implicit) in
   let in_a_subdir_ok = reports in_a_subdir diagnostic && names_the_key (snd in_a_subdir) in
   let inline_library_ok = reports inline_library diagnostic && names_the_key (snd inline_library) in
@@ -2084,6 +2083,7 @@ let guard_control () =
   if not pinned_ok then report "pinned" pinned;
   if not pinned_elsewhere_ok then report "pinned-elsewhere" pinned_elsewhere;
   if not implicit_ok then report "implicit-modules" implicit;
+  if not pinned_beside_helper_ok then report "pinned-beside-a-helper" pinned_beside_helper;
   if not in_a_subdir_ok then report "in-a-subdir" in_a_subdir;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
@@ -2107,6 +2107,9 @@ let guard_control () =
   Verdict.p
     "a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported"
     pinned_elsewhere_ok;
+  Verdict.p
+    "and an unpinned run of a HELPER beside a pinned guard does not un-pin it"
+    pinned_beside_helper_ok;
   Verdict.p
     "a stanza reaching for dune's default module set is judged too, not skipped for lack of a \
      `(modules …)` field"

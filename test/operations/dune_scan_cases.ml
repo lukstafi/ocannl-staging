@@ -1271,6 +1271,26 @@ let artifact_cases =
  (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))|dune},
       [],
       [ "executables a: stale declaration"; "executables b: stale declaration" ] );
+    (* Staleness is the RULE's question, not the program's. `b` needs nothing and has a dedicated
+       rule of its own that declares nothing; asking whether ALL of `b`'s runners were justified
+       reported the shared rule's declaration against `b` (Codex P2, round 4). Asked per runner, the
+       shared rule is justified by `a` and the dedicated one declares nothing to be stale. *)
+    ( "a program sharing one runner and having a bare one of its own is not stale",
+      {dune|(executables (names a b) (modules a b))
+(rule (alias shared) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))
+(rule (alias only-b) (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* A `chdir` moves which program a rule runs, so the identity is the resolved path and not the
+       written one: this rule runs `a`'s program, and `b`'s same-named local one is untouched by its
+       declaration (Codex P2, round 4). *)
+    ( "a chdir names the program in the directory it moves to",
+      {dune|(subdir b (executable (name probe) (modules probe))
+ (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+  (action (chdir ../a (run probe.exe)))))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
   ]
 
 (* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,
@@ -1323,6 +1343,15 @@ let artifact_default_modules_cases =
     ( ":standard is the same default written down",
       {dune|(test (name t) (modules :standard) (deps ocannl_config))|dune},
       [ "t" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* Dune's ordered-set language nests, and an explicit set may be a nested expression with a
+       subtraction inside it. Reading only the top-level atoms resolved `(modules (t helper \\
+       helper))` to NO modules, which unclaims every source of the stanza and takes it out of every
+       check phrased over its modules (Codex P2, round 4). *)
+    ( "a nested ordered set is still an explicit list",
+      {dune|(test (name t) (modules (t helper \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
       [ "t" ],
       [ "test t: undeclared (t)" ] );
     ( "a set difference over :standard is still the default set",
