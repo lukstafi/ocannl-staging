@@ -255,7 +255,8 @@ reduce to: build a comp as above, then call `Context.compile` — the door to ev
 `tensor/row.ml` (the solver); consumed via `arrayjit/lib/indexing.ml`.*
 
 While tensors were being constructed, each operation eagerly registered its shape constraints
-(`Shape.propagate_shapes`, called from `Tensor.op` and `Tensor.raw_binop`/`raw_unop`) and ran
+(`Shape.propagate_shapes`, called from `Tensor.make_projections`, which serves both `Tensor.op`
+and the `Tensor.raw_*` accumulations) and ran
 the cheap first solver stage. But nothing forced final answers: the `projections` field of
 every `Accum_op` is a `lazy` closing over that operation's `Shape.update_step`.
 

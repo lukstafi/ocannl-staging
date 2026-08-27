@@ -2,7 +2,7 @@
    one shared layer_norm output. The layer_norm chain is embedded in the forward code of its
    first-constructed consumer (q), while sibling subtree ids follow construction order -- which for
    `(f q + f k) + f v` is v, k, q (OCaml applications evaluate right-to-left). Before the
-   topological ordering of forward fragments in Tensor.raw, the id-ascending emission ran the k and
+   topological ordering of forward fragments in Tensor.op, the id-ascending emission ran the k and
    v matmuls before the layer_norm chain, so they read zeros: k and v printed all zeros. Correct
    output: k = 2*q and v = 3*q (the weights are scaled copies), with q nonzero. *)
 open Base

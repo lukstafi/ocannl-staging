@@ -191,106 +191,105 @@ let fetch_zeros array shape =
 
 let max_sublabel_length = ref 25
 
-let raw_binop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
-    ~(rhs1_is_grad : bool) ~(rhs1_is_merge : bool) ~(t2 : t) ~rhs2_is_grad ~rhs2_is_merge ~logic :
-    Asgns.t =
-  let shape = t.shape in
-  let shape_logic = Shape.Broadcast (logic, t1.shape, t2.shape) in
-  let neutral_elem = Some (Ir.Ops.neutral_elem accum) in
-  let local_shape_update =
+(** Registers a shape update step for an operation, propagates shapes eagerly, and packages the
+    resulting lazy projections. Returns the update step alongside them because {!op} must set its
+    [neutral_elem] {e after} the operation's assignments are built: the field is read only when the
+    [projections] thunk is forced (during lowering), so the late mutation is observed — an implicit
+    invariant this seam makes explicit. The [raw_*] accumulations know their neutral element
+    up-front and pass it here. *)
+let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
+  let update_step =
     Shape.
       { shape; logic = shape_logic; id = get_update_id (); unsafe_projections = None; neutral_elem }
   in
-  Shape.propagate_shapes local_shape_update;
-  let projections_debug = Shape.logic_to_spec shape_logic in
+  Shape.propagate_shapes update_step;
   let projections =
     {
-      projections_debug;
-      projections = lazy (Shape.get_projections local_shape_update);
-      product_shape = lazy (Shape.product_space_shape local_shape_update);
+      projections_debug = Shape.logic_to_spec update_step.logic;
+      projections = lazy (Shape.get_projections update_step);
+      product_shape = lazy (Shape.product_space_shape update_step);
     }
   in
+  (projections, update_step)
+
+(** The node an operand triple [(t, is_grad, is_merge)] denotes, as an assignment buffer. *)
+let buffer_of ~is_grad ~is_merge (t : t) : Asgns.buffer =
+  let tn = if is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
+  if is_merge then Asgns.Merge_buffer tn else Asgns.Node tn
+
+(** The shared body of {!raw_unop}, {!raw_binop} and {!raw_ternop}: they differ only in the
+    [shape_logic] constructor and in the [rhs] built out of their operand triples. *)
+let raw_accum ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~shape_logic
+    ~(rhs : Asgns.accum_rhs) : Asgns.t =
+  let projections, _ =
+    make_projections ~neutral_elem:(Ir.Ops.neutral_elem accum) ~shape:t.shape ~shape_logic ()
+  in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
-  let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
-  let rhs1 = if rhs1_is_merge then Asgns.Merge_buffer rhs1 else Node rhs1 in
-  let rhs2 = if rhs2_is_grad then (Option.value_exn ~here:[%here] t2.diff).grad else t2.value in
-  let rhs2 = if rhs2_is_merge then Asgns.Merge_buffer rhs2 else Node rhs2 in
   Asgns.Accum_op
     {
       initialize_neutral;
       accum;
       lhs;
-      rhs = Binop { op; rhs1; rhs2 };
+      rhs;
       projections = projections.projections;
       projections_debug = projections.projections_debug;
     }
+
+let raw_binop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
+    ~(rhs1_is_grad : bool) ~(rhs1_is_merge : bool) ~(t2 : t) ~rhs2_is_grad ~rhs2_is_merge ~logic :
+    Asgns.t =
+  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
+    ~shape_logic:(Shape.Broadcast (logic, t1.shape, t2.shape))
+    ~rhs:
+      (Binop
+         {
+           op;
+           rhs1 = buffer_of ~is_grad:rhs1_is_grad ~is_merge:rhs1_is_merge t1;
+           rhs2 = buffer_of ~is_grad:rhs2_is_grad ~is_merge:rhs2_is_merge t2;
+         })
 
 let raw_ternop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
     ~(rhs1_is_grad : bool) ~(rhs1_is_merge : bool) ~(t2 : t) ~rhs2_is_grad ~rhs2_is_merge ~(t3 : t)
     ~rhs3_is_grad ~rhs3_is_merge ~logic : Asgns.t =
-  let shape = t.shape in
-  let shape_logic = Shape.Broadcast_tern (logic, t1.shape, t2.shape, t3.shape) in
-  let neutral_elem = Some (Ir.Ops.neutral_elem accum) in
-  let local_shape_update =
-    Shape.
-      { shape; logic = shape_logic; id = get_update_id (); unsafe_projections = None; neutral_elem }
-  in
-  Shape.propagate_shapes local_shape_update;
-  let projections_debug = Shape.logic_to_spec shape_logic in
-  let projections =
-    {
-      projections_debug;
-      projections = lazy (Shape.get_projections local_shape_update);
-      product_shape = lazy (Shape.product_space_shape local_shape_update);
-    }
-  in
-  let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
-  let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
-  let rhs1 = if rhs1_is_merge then Asgns.Merge_buffer rhs1 else Node rhs1 in
-  let rhs2 = if rhs2_is_grad then (Option.value_exn ~here:[%here] t2.diff).grad else t2.value in
-  let rhs2 = if rhs2_is_merge then Asgns.Merge_buffer rhs2 else Node rhs2 in
-  let rhs3 = if rhs3_is_grad then (Option.value_exn ~here:[%here] t3.diff).grad else t3.value in
-  let rhs3 = if rhs3_is_merge then Asgns.Merge_buffer rhs3 else Node rhs3 in
-  Asgns.Accum_op
-    {
-      initialize_neutral;
-      accum;
-      lhs;
-      rhs = Ternop { op; rhs1; rhs2; rhs3 };
-      projections = projections.projections;
-      projections_debug = projections.projections_debug;
-    }
+  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
+    ~shape_logic:(Shape.Broadcast_tern (logic, t1.shape, t2.shape, t3.shape))
+    ~rhs:
+      (Ternop
+         {
+           op;
+           rhs1 = buffer_of ~is_grad:rhs1_is_grad ~is_merge:rhs1_is_merge t1;
+           rhs2 = buffer_of ~is_grad:rhs2_is_grad ~is_merge:rhs2_is_merge t2;
+           rhs3 = buffer_of ~is_grad:rhs3_is_grad ~is_merge:rhs3_is_merge t3;
+         })
 
 let raw_unop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
     ~(rhs_is_grad : bool) ~(rhs_is_merge : bool) ~logic =
-  let shape = t.shape in
-  let shape_logic = Shape.Transpose (logic, t1.shape) in
-  let neutral_elem = Some (Ir.Ops.neutral_elem accum) in
-  let local_shape_update =
-    Shape.
-      { shape; logic = shape_logic; id = get_update_id (); unsafe_projections = None; neutral_elem }
+  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
+    ~shape_logic:(Shape.Transpose (logic, t1.shape))
+    ~rhs:(Unop { op; rhs = buffer_of ~is_grad:rhs_is_grad ~is_merge:rhs_is_merge t1 })
+
+(** Kahn-style topological layering of code fragments (gh-461). Each item comes tagged with the
+    nodes it [needs] from its siblings and the nodes it [provides] to them; an item stays blocked
+    while any still-unemitted item provides something it needs, and the ready items are emitted as a
+    layer preserving their relative order. [on_cycle] is called with the remaining items when a
+    layer comes out empty; it is expected to raise, since a fragment-level dependency cycle would
+    need statement-level interleaving to schedule correctly, which is not supported: any
+    whole-fragment order would read some values before they are computed. *)
+let topo_layers (type a) (tagged : (a * tn_set * tn_set) list)
+    ~(on_cycle : (a * tn_set * tn_set) list -> a list) : a list =
+  let rec order acc remaining =
+    match remaining with
+    | [] -> List.concat @@ List.rev acc
+    | _ ->
+        let blocked_by (_, needs, _) =
+          List.exists remaining ~f:(fun (_, _, provides) ->
+              not (Set.is_empty (Set.inter needs provides)))
+        in
+        let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
+        if List.is_empty ready then on_cycle remaining
+        else order (List.map ready ~f:(fun (item, _, _) -> item) :: acc) blocked
   in
-  Shape.propagate_shapes local_shape_update;
-  let projections_debug = Shape.logic_to_spec shape_logic in
-  let projections =
-    {
-      projections_debug;
-      projections = lazy (Shape.get_projections local_shape_update);
-      product_shape = lazy (Shape.product_space_shape local_shape_update);
-    }
-  in
-  let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
-  let rhs = if rhs_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
-  let rhs = if rhs_is_merge then Asgns.Merge_buffer rhs else Node rhs in
-  Asgns.Accum_op
-    {
-      initialize_neutral;
-      accum;
-      lhs;
-      rhs = Unop { op; rhs };
-      projections = projections.projections;
-      projections_debug = projections.projections_debug;
-    }
+  order [] tagged
 
 type grad_spec = Require_grad | Prohibit_grad | If_needed [@@deriving sexp, equal, variants]
 
@@ -342,41 +341,28 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
               in
               (ti, requires, defines))
         in
-        let rec order acc remaining =
-          match remaining with
-          | [] -> List.concat @@ List.rev acc
-          | _ ->
-              let blocked_by (_, requires, _) =
-                List.exists remaining ~f:(fun (_, _, other_defines) ->
-                    not (Set.is_empty (Set.inter requires other_defines)))
+        let on_cycle remaining =
+          (* Restructure the program so that shared subexpressions are first consumed in a
+             consistent order across the conflicting operands. *)
+          List.iter remaining ~f:(fun (ti, requires, _) ->
+              let blockers =
+                List.concat_map remaining ~f:(fun (other, _, other_defines) ->
+                    Set.inter requires other_defines |> Set.to_list
+                    |> List.map ~f:(fun tn ->
+                        [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
               in
-              let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
-              if List.is_empty ready then (
-                (* A fragment-level dependency cycle would need statement-level interleaving to
-                   schedule correctly, which is not supported: any whole-fragment order would read
-                   some values before they are computed. Raise rather than risk silently wrong
-                   results; restructure the program so that shared subexpressions are first consumed
-                   in a consistent order across the conflicting operands. *)
-                List.iter remaining ~f:(fun (ti, requires, _) ->
-                    let blockers =
-                      List.concat_map remaining ~f:(fun (other, _, other_defines) ->
-                          Set.inter requires other_defines |> Set.to_list
-                          |> List.map ~f:(fun tn ->
-                              [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
-                    in
-                    Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
-                      (Tn.debug_name ti.value)
-                      (String.concat ~sep:", " blockers));
-                raise
-                @@ Session_error
-                     ( [%string
-                         "Tensor.raw: forward-code fragments of the operands of tensor \
-                          #%{session_state.next_id#Int} have a dependency cycle: each fragment \
-                          reads a node whose defining code is embedded in another"],
-                       Some ((fun (ti, _, _) -> ti) @@ List.hd_exn remaining) ))
-              else order (List.map ready ~f:(fun (ti, _, _) -> ti) :: acc) blocked
+              Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
+                (Tn.debug_name ti.value)
+                (String.concat ~sep:", " blockers));
+          raise
+          @@ Session_error
+               ( [%string
+                   "Tensor.op: forward-code fragments of the operands of tensor \
+                    #%{session_state.next_id#Int} have a dependency cycle: each fragment reads a \
+                    node whose defining code is embedded in another"],
+                 Some ((fun (ti, _, _) -> ti) @@ List.hd_exn remaining) )
         in
-        let sorted_roots = order [] tagged in
+        let sorted_roots = topo_layers tagged ~on_cycle in
         (* Splice the re-ordered roots back into the root positions, keeping non-roots put. *)
         let rec splice roots_left ts =
           match (ts, roots_left) with
@@ -482,26 +468,10 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         (Set.add used ti.value.id, { subtensor = ti; embedded }))
   in
   let params = Set.union_list (module T) @@ List.map ordered_ts ~f:(fun ti -> ti.params) in
-  (* Create a preliminary shape_update to get projections_debug and projections for op_asn. *)
-  let preliminary_shape_update =
-    Shape.
-      {
-        shape;
-        logic = shape_logic;
-        id = get_update_id ();
-        unsafe_projections = None;
-        neutral_elem = None;
-      }
-  in
-  Shape.propagate_shapes preliminary_shape_update;
-  let projections_debug = Shape.logic_to_spec preliminary_shape_update.logic in
-  let projections =
-    {
-      projections_debug;
-      projections = lazy (Shape.get_projections preliminary_shape_update);
-      product_shape = lazy (Shape.product_space_shape preliminary_shape_update);
-    }
-  in
+  (* Create a preliminary shape_update to get projections_debug and projections for op_asn. Its
+     [neutral_elem] is only known once [op_asn] has produced the assignments, and is set below --
+     see {!make_projections} for why the late mutation is observed. *)
+  let projections, preliminary_shape_update = make_projections ~shape ~shape_logic () in
   let t =
     { params; forward = Asgns.empty_comp; diff = None; value = v; top_down_prec; shape; children }
   in
@@ -586,32 +556,20 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
       | _ ->
           let tagged =
             List.map bcks ~f:(fun c ->
-                (c, Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes))
+                ( c,
+                  c.Asgns.embedded_nodes,
+                  Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes ))
           in
-          let rec order acc remaining =
-            match remaining with
-            | [] -> List.concat @@ List.rev acc
-            | _ ->
-                let blocked_by (c, _) =
-                  List.exists remaining ~f:(fun (_, other_writes) ->
-                      not (Set.is_empty (Set.inter c.Asgns.embedded_nodes other_writes)))
-                in
-                let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
-                if List.is_empty ready then
-                  (* A fragment-level dependency cycle would need statement-level interleaving to
-                     schedule correctly, which is not supported: any whole-fragment order would read
-                     some gradients before all their contributions are accumulated. Raise rather
-                     than risk silently wrong results. *)
-                  raise
-                  @@ Session_error
-                       ( [%string
-                           "Tensor.raw: backprop-code fragments of the operands of tensor \
-                            #%{id#Int} have a dependency cycle: each fragment accumulates into a \
-                            gradient whose backprop code is embedded in another"],
-                         Some t )
-                else order (List.map ready ~f:fst :: acc) blocked
+          let on_cycle _remaining =
+            raise
+            @@ Session_error
+                 ( [%string
+                     "Tensor.op: backprop-code fragments of the operands of tensor #%{id#Int} have \
+                      a dependency cycle: each fragment accumulates into a gradient whose backprop \
+                      code is embedded in another"],
+                   Some t )
           in
-          order [] tagged
+          topo_layers tagged ~on_cycle
     in
     let diff = Some { grad = g; zero_grads; backprop = Asgns.empty_comp } in
     let t = { t with diff } in
