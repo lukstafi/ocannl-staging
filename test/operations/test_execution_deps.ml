@@ -19,8 +19,8 @@ let test_raw_dependency () =
   Train.every_non_literal_materialized learning_rate;
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
+  let _, sgd_routine = Train.to_routine grad_ctx IDX.empty sgd in
   let grad_id = grad_routine.Context.routine_id in
   let sgd_deps = sgd_routine.Context.execution_deps in
   Verdict.p "sgd depends on grad" (Set.mem sgd_deps grad_id);
@@ -44,8 +44,8 @@ let test_disjoint () =
   let ctx = Train.init_params ctx IDX.empty loss_x in
   let ctx = Train.init_params ctx IDX.empty loss_y in
   (* Compile from same context — sibling branches, should be independent *)
-  let routine_x = Train.to_routine ctx IDX.empty grad_x in
-  let routine_y = Train.to_routine ctx IDX.empty grad_y in
+  let _, routine_x = Train.to_routine ctx IDX.empty grad_x in
+  let _, routine_y = Train.to_routine ctx IDX.empty grad_y in
   let x_id = routine_x.Context.routine_id in
   let y_id = routine_y.Context.routine_id in
   let x_deps = routine_x.Context.execution_deps in
@@ -73,8 +73,8 @@ let test_can_run () =
   let%op learning_rate = 0.1 in
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
+  let _, sgd_routine = Train.to_routine grad_ctx IDX.empty sgd in
   Verdict.p "can_run grad (before execution)" (Context.can_run ctx grad_routine);
   Verdict.p "cannot run sgd (before grad)" (not (Context.can_run ctx sgd_routine));
   let ctx' = Context.run ctx grad_routine in
@@ -94,8 +94,8 @@ let test_wrong_order_raises () =
   Train.every_non_literal_materialized learning_rate;
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_ctx, _grad_routine = Train.to_routine ctx IDX.empty grad in
+  let _, sgd_routine = Train.to_routine grad_ctx IDX.empty sgd in
   (* sgd depends on grad — running sgd first must fail *)
   try
     ignore (Context.run ctx sgd_routine);
@@ -116,8 +116,8 @@ let test_reexecution () =
   let%op learning_rate = 0.1 in
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
+  let _, sgd_routine = Train.to_routine grad_ctx IDX.empty sgd in
   let ctx' = Context.run ctx grad_routine in
   let ctx' = Context.run ctx' sgd_routine in
   let _ctx' = Context.run ctx' grad_routine in
@@ -138,8 +138,8 @@ let test_rollback_execution () =
   let%op learning_rate = 0.1 in
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
+  let _, sgd_routine = Train.to_routine grad_ctx IDX.empty sgd in
   let ctx' = Context.run ctx grad_routine in
   Verdict.p "can_run sgd (after grad)" (Context.can_run ctx' sgd_routine);
   Context.rollback_execution ctx' grad_routine.Context.routine_id;
@@ -161,7 +161,7 @@ let test_poisoned_lineage () =
   Train.every_non_literal_materialized l;
   let grad = Train.grad_update l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let routine = Train.to_routine ctx IDX.empty grad in
+  let _, routine = Train.to_routine ctx IDX.empty grad in
   let ctx = Context.run ctx routine in
   Context.poison_lineage ctx ~routine_name:routine.Context.name (Failure "synthetic device failure");
   let refuses what f =

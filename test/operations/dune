@@ -302,6 +302,24 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; sgd_variants drives Train.sgd_one across its option matrix -- momentum, nesterov, weight decay,
+; grad_scale and a gate that actually closes -- against a host simulation of the update rule. The
+; rest of the suite only ever runs sgd on its defaults. Seven compiles of four training steps each,
+; so it takes the shared training lock like memory_budget does: its process-local OpenMP pool must
+; not overlap another training test's.
+
+(test
+ (name sgd_variants)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules sgd_variants)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name test_default_init_std)
  (package neural_nets_lib)

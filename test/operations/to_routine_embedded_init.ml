@@ -16,8 +16,7 @@ let () =
   if Context.mem ctx constant.Tensor.value then
     failwith "embedded constant unexpectedly had a device buffer before compilation";
   let%op result = constant + 1.0 in
-  let routine = Train.to_routine ctx Train.IDX.empty (Train.forward result) in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty (Train.forward result) in
   if not (Context.mem ctx constant.Tensor.value) then
     failwith "embedded constant was not allocated in the linked routine context";
   let copied = Context.get_values ctx constant.Tensor.value in

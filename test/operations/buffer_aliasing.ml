@@ -190,8 +190,7 @@ let train_phase () =
   let update = Train.grad_update scalar_loss in
   let sgd = Train.sgd_update ~learning_rate:(TDSL.O.( !. ) 1e-6) scalar_loss in
   let ctx = Train.init_params ctx IDX.empty scalar_loss in
-  let routine = Train.to_routine ctx IDX.empty (Asgns.sequence [ update; sgd ]) in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx IDX.empty (Asgns.sequence [ update; sgd ]) in
   let open Operation.At in
   let losses = ref [] in
   for _ = 1 to 6 do

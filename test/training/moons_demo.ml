@@ -61,8 +61,7 @@ let train_once ~seed () : run_result =
   Train.set_materialized learning_rate.value;
   let sgd = Train.sgd_update ~learning_rate ~weight_decay scalar_loss in
   let ctx = Train.init_params ctx bindings scalar_loss in
-  let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = sgd_routine.Context.context in
+  let ctx, sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
   let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
   let final_loss = ref 0. in

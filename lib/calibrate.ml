@@ -52,8 +52,7 @@ let stream ?(elems = 1 lsl 26) ?repeats ctx =
         b =: 0.5;
         c =: 0]
   in
-  let routine = Train.to_routine ctx Idx.Empty init in
-  let init_ctx = routine.Context.context in
+  let init_ctx, routine = Train.to_routine ctx Idx.Empty init in
   Train.run init_ctx routine;
   let kernels =
     [

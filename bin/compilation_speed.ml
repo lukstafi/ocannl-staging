@@ -18,7 +18,7 @@ let benchmark_overhead _backend_name () =
 
   let update_f = Train.grad_update f in
   let ctx = Train.init_params ctx IDX.empty f in
-  let f_routine = Train.to_routine ctx IDX.empty update_f in
+  let _, f_routine = Train.to_routine ctx IDX.empty update_f in
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
 
   let xs = Array.init n_data ~f:Float.(fun i -> of_int i - (of_int n_data /. 2.)) in
@@ -30,7 +30,7 @@ let benchmark_overhead _backend_name () =
           ~~("update_x";
              x =: !.v)
         in
-        let assign_x = Train.to_routine f_routine.Context.context IDX.empty update_x in
+        let _, assign_x = Train.to_routine f_routine.Context.context IDX.empty update_x in
         Train.run ctx assign_x;
         Train.run ctx f_routine;
         (ctx, f).@[0])

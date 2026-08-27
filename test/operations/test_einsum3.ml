@@ -203,8 +203,7 @@ let () =
   let%cd fwd = { out } =:+ mul3 a b c ~logic:"ij;jk;km=>im" in
   Train.set_materialized out.value;
   let ctx = Train.init_params ctx Train.IDX.empty out in
-  let routine = Train.to_routine ctx Train.IDX.empty fwd in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty fwd in
   Train.run ctx routine;
   Stdio.printf "%%cd mul3 einsum (identity*swap*identity) = %s\n" (fmt_arr (get_vals ctx out));
   Stdio.printf "%%cd dispatch fix: OK\n"
