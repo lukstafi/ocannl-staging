@@ -9,10 +9,25 @@ let staging_infix = ".ocannl-stage."
    derived from its basename, and everything after the infix is the writer's identity. *)
 let max_component_bytes = 255
 
+(* Two 30-bit draws rendered as eight hex digits each. Named here rather than at [fresh_nonce]
+   because the recognizer below pins the same width: generation and recognition must agree, and a
+   recognizer looser than the generator is a licence to delete somebody else's file. *)
+let nonce_width = 16
+
 (* What the target may contribute. The rest is the infix, a pid, a counter and a nonce; 64 bytes
    covers a 64-bit pid printed in full. *)
 let stem_budget = max_component_bytes - 64
 let short_digest s = String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string s)) 8
+
+(* Truncation is by BYTES, because the limit is in bytes — but a cut in the middle of a multibyte
+   character produces a name that is not valid UTF-8, which Windows refuses to open even though the
+   target's own name was fine (Codex P2, round 4). So back off to a byte that does not continue a
+   sequence. A name that was not valid UTF-8 to begin with is not made worse: the cut lands where it
+   would have anyway, and the digest keeps the stem unique regardless. *)
+let utf8_prefix s at =
+  let continues i = Char.to_int s.[i] land 0xC0 = 0x80 in
+  let rec back k = if k <= 0 then 0 else if continues k then back (k - 1) else k in
+  String.prefix s (back (Int.min at (String.length s)))
 
 (* Bounded, and a function of the basename alone — which is what lets the recognizer below rebuild
    it from the target instead of storing it. A long checkpoint name used to fit only because the
@@ -24,7 +39,7 @@ let staging_stem basename =
     (* The digest is taken over the LOWERCASED name so that the stem stays caseless too: on a
        case-insensitive volume [Model.bin] and [model.bin] are one file, and a case-sensitive digest
        would give their stems different tails that no caseless comparison could reconcile. *)
-    String.prefix basename (stem_budget - 9) ^ "~" ^ short_digest (String.lowercase basename)
+    utf8_prefix basename (stem_budget - 9) ^ "~" ^ short_digest (String.lowercase basename)
 
 (* [<stem>] ^ [staging_infix] ^ [<pid>] ^ "." ^ [<counter>] ^ "." ^ [<nonce>]. Recognition is the
    whole shape rather than a search for the infix: `report.ocannl-stage.backup` is somebody's file,
@@ -33,8 +48,12 @@ let staging_stem basename =
    a caller asks about ONE published file rather than about a whole directory. *)
 let staging_stem_of name =
   let numeric part = (not (String.is_empty part)) && String.for_all part ~f:Char.is_digit in
-  let hex part =
-    (not (String.is_empty part))
+  (* The nonce is recognized at its GENERATED width, not as "some hexadecimal": a sweep that accepts
+     `report.ocannl-stage.1.2.a` deletes a file this module never wrote (Codex P2, round 4). Every
+     component of the shape is pinned as tightly as generation pins it — the pid and the counter are
+     variable-width numbers, the nonce is not. *)
+  let nonce part =
+    String.length part = nonce_width
     && String.for_all part ~f:(fun c -> Char.is_digit c || Char.between c ~low:'a' ~high:'f')
   in
   match List.last (String.substr_index_all name ~may_overlap:false ~pattern:staging_infix) with
@@ -45,7 +64,7 @@ let staging_stem_of name =
       if String.is_empty stem then None
       else (
         match String.split stamp ~on:'.' with
-        | [ pid; counter; nonce ] when numeric pid && numeric counter && hex nonce -> Some stem
+        | [ pid; counter; stamp ] when numeric pid && numeric counter && nonce stamp -> Some stem
         | _ -> None)
 
 let is_staging_file name = Option.is_some (staging_stem_of name)
@@ -76,7 +95,10 @@ let next_staging_id : int Atomic.t = Atomic.make 0
 
 let fresh_nonce () =
   let state = Stdlib.Random.State.make_self_init () in
-  Printf.sprintf "%08x%08x" (Stdlib.Random.State.bits state) (Stdlib.Random.State.bits state)
+  let draw () = Stdlib.Random.State.bits state land 0xFFFFFFF in
+  let nonce = Printf.sprintf "%08x%08x" (draw ()) (draw ()) in
+  assert (String.length nonce = nonce_width);
+  nonce
 
 let staging_path path =
   let name =
@@ -175,12 +197,25 @@ let sweep ~max_age_seconds ~dir ~selects =
   | exception _ -> ()
   | entries ->
       let now = Unix.time () in
+      let inactive_since path =
+        match (Unix.stat path).Unix.st_mtime with
+        | exception _ -> None
+        | mtime -> Some (now -. mtime)
+      in
       Array.iter entries ~f:(fun name ->
           if selects name then
             let path = Stdlib.Filename.concat dir name in
-            match (Unix.stat path).Unix.st_mtime with
-            | exception _ -> ()
-            | mtime -> if Float.(now -. mtime > max_age_seconds) then remove_quietly path)
+            match inactive_since path with
+            | Some age when Float.(age > max_age_seconds) ->
+                (* Read the clock again at the moment of removal. A writer's own writes advance the
+                   mtime, so this threshold is on INACTIVITY, not on age since creation — and a
+                   publication that resumed between the scan above and this line has just proved
+                   itself live. *)
+                if
+                  Option.value_map (inactive_since path) ~default:false ~f:(fun age ->
+                      Float.(age > max_age_seconds))
+                then remove_quietly path
+            | _ -> ())
 
 let cleanup_stale ?(max_age_seconds = default_max_age_seconds) dir =
   sweep ~max_age_seconds ~dir ~selects:is_staging_file

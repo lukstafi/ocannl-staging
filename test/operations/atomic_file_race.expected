@@ -25,6 +25,10 @@ the race leaves only the published file: true
 a target named to the filesystem's limit publishes: true
 every staging name fits one filesystem component: true
 a long target's staging file is recognized as that target's: true
+a multibyte target name publishes: true
+every staging name of a multibyte target is itself valid UTF-8: true
+a multibyte target's staging file fits one filesystem component: true
+a multibyte target's staging file is recognized as that target's: true
 a differently-cased spelling of the target claims its staging files: true
 every attempt stages exactly one file: true
 no two staging names repeat: true

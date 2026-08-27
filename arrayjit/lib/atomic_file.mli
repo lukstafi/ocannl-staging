@@ -122,6 +122,17 @@ val cleanup_stale : ?max_age_seconds:float -> string -> unit
     unreadable directory, a file that vanished under the sweep, or a file another user owns is
     skipped rather than reported. Files that are not staging artifacts are never touched.
 
+    The threshold is on INACTIVITY, not on age since creation: a writer's own writes advance the
+    staging file's mtime, so a publication that takes hours to stream is never mistaken for an
+    abandoned one, and the mtime is re-read at the moment of removal so a writer that resumed during
+    the sweep is spared. What remains outside that is a writer STALLED with no I/O for the whole
+    threshold — indistinguishable from a dead one by any portable signal, since a file lock is
+    released at the close that precedes the commit and pid probing is unavailable on Windows and
+    defeated by pid reuse. Its worst outcome is bounded by design: staging names are unique, so the
+    sweep can never reach another writer's attempt, and the stalled writer's own commit then fails
+    with [Sys_error] against an intact target — a publication that does not happen, never a torn or
+    lost file.
+
     The whole-directory scope suits a directory OCANNL owns — a schedule cache, the per-user probe
     cache. For one published file inside a directory it does not own, use {!cleanup_stale_for}. *)
 

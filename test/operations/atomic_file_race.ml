@@ -279,6 +279,22 @@ let () =
       String.length name <= 255);
   Verdict.p_all "a long target's staging file is recognized as that target's" !staged
     ~f:(AF.is_staging_file_for ~path:long_target);
+  (* A long name whose characters are multibyte: a byte-wise cut can land inside one, and the
+     malformed name that results is refused by Windows even though the target's own name is fine
+     (Codex P2, round 4). The 3-byte character makes the budget's cut fall mid-character. *)
+  let utf8_name = String.concat (List.init 90 ~f:(fun _ -> "\xe2\x98\x83")) ^ ".bin" in
+  let utf8_target = Stdlib.Filename.concat dir utf8_name in
+  let utf8_staged = ref [] in
+  AF.write_all ~path:utf8_target ~data:"payload"
+    ~before_commit:(fun () -> utf8_staged := staging_leftovers () @ !utf8_staged)
+    ();
+  Verdict.p "a multibyte target name publishes" (Stdlib.Sys.file_exists utf8_target);
+  Verdict.p_all "every staging name of a multibyte target is itself valid UTF-8" !utf8_staged
+    ~f:Stdlib.String.is_valid_utf_8;
+  Verdict.p_all "a multibyte target's staging file fits one filesystem component" !utf8_staged
+    ~f:(fun name -> String.length name <= 255);
+  Verdict.p_all "a multibyte target's staging file is recognized as that target's" !utf8_staged
+    ~f:(AF.is_staging_file_for ~path:utf8_target);
   (* Case: on Windows and on a default macOS volume these two spellings are one file. *)
   let shouting = Stdlib.Filename.concat dir (String.uppercase long_name) in
   Verdict.p_all "a differently-cased spelling of the target claims its staging files" !staged
@@ -413,6 +429,9 @@ let () =
       "report" ^ AF.staging_infix ^ "4242.0";
       "report" ^ AF.staging_infix ^ "host7.0." ^ nonce;
       "report" ^ AF.staging_infix ^ "4242.0.nonsense";
+      (* Hexadecimal, but not at the width this module generates. *)
+      "report" ^ AF.staging_infix ^ "1.2.a";
+      "report" ^ AF.staging_infix ^ "4242.0." ^ nonce ^ "0";
       AF.staging_infix ^ "4242.0." ^ nonce;
     ]
   in
