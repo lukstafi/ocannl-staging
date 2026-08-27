@@ -171,6 +171,20 @@ type axis_index =
           symbol. [Concat] indices are eliminated during lowering. *)
 [@@deriving compare, equal, sexp]
 
+(** Whether the value of [idx] depends on [s]: [s] is the axis's own iterator, appears as a term of
+    its affine combination, or is one of the iterators a [Concat] axis is formed from. A
+    [Fixed_idx]ed or [Sub_axis] axis mentions nothing. *)
+let axis_index_mentions_symbol (s : symbol) (idx : axis_index) : bool =
+  match idx with
+  | Iterator s' -> equal_symbol s s'
+  | Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s') -> equal_symbol s s')
+  | Concat syms -> List.exists syms ~f:(equal_symbol s)
+  | Fixed_idx _ | Sub_axis -> false
+
+(** {!axis_index_mentions_symbol} over a set of symbols: whether [idx] depends on any of [syms]. *)
+let axis_index_mentions_any (syms : symbol list) (idx : axis_index) : bool =
+  List.exists syms ~f:(fun s -> axis_index_mentions_symbol s idx)
+
 type str_osym_map = (string, symbol option, Base.String.comparator_witness) Base.Map.t
 
 let sexp_of_str_osym_map (map : str_osym_map) =

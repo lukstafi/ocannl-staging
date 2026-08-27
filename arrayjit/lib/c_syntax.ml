@@ -2092,29 +2092,15 @@ module C_syntax (B : C_syntax_config) = struct
     | Indexing.Affine { symbols; offset } -> (List.length symbols + if offset = 0 then 0 else 1) > 1
     | _ -> false
 
-  let pp_array_offset (idcs, dims) =
+  (* The row-major flat offset of an access: Horner over the axes, where [axis_doc i] renders the
+     [i]-th index. Axes whose index renders empty (a [Sub_axis] folded into its neighbour) drop out
+     of the sum while still contributing their stride. *)
+  let pp_offset_by ~axis_doc dims n =
     let open PPrint in
-    if Array.is_empty idcs then string "0"
-    else
-      let doc = ref (pp_axis_index idcs.(0)) in
-      for i = 1 to Array.length idcs - 1 do
-        let idx_doc = pp_axis_index idcs.(i) in
-        if PPrint.is_empty !doc then doc := idx_doc
-        else if PPrint.is_empty idx_doc then
-          doc := parens !doc ^^ string (" * " ^ Int.to_string dims.(i))
-        else doc := parens !doc ^^ string (" * " ^ Int.to_string dims.(i) ^ " + ") ^^ idx_doc
-      done;
-      !doc
-
-  (* gh-343: like [pp_array_offset] but at [dyn_axis] splices [dyn_idx_doc] (an integer expression
-     derived from a runtime value) instead of the static [axis_index]. Used for [Get_dynamic]. *)
-  let pp_array_offset_dyn (idcs, dims) ~dyn_axis ~dyn_idx_doc =
-    let open PPrint in
-    let axis_doc i = if i = dyn_axis then dyn_idx_doc else pp_axis_index idcs.(i) in
-    if Array.is_empty idcs then string "0"
+    if n = 0 then string "0"
     else begin
       let doc = ref (axis_doc 0) in
-      for i = 1 to Array.length idcs - 1 do
+      for i = 1 to n - 1 do
         let idx_doc = axis_doc i in
         if PPrint.is_empty !doc then doc := idx_doc
         else if PPrint.is_empty idx_doc then
@@ -2123,6 +2109,16 @@ module C_syntax (B : C_syntax_config) = struct
       done;
       !doc
     end
+
+  let pp_array_offset (idcs, dims) =
+    pp_offset_by ~axis_doc:(fun i -> pp_axis_index idcs.(i)) dims (Array.length idcs)
+
+  (* gh-343: like [pp_array_offset] but at [dyn_axis] splices [dyn_idx_doc] (an integer expression
+     derived from a runtime value) instead of the static [axis_index]. Used for [Get_dynamic]. *)
+  let pp_array_offset_dyn (idcs, dims) ~dyn_axis ~dyn_idx_doc =
+    pp_offset_by
+      ~axis_doc:(fun i -> if i = dyn_axis then dyn_idx_doc else pp_axis_index idcs.(i))
+      dims (Array.length idcs)
 
   let doc_to_string doc =
     let buf = Buffer.create 128 in
@@ -2937,13 +2933,7 @@ module C_syntax (B : C_syntax_config) = struct
       (not (Tn.Placements.is_virtual_force plc tn 431))
       && not (Tn.Placements.is_materialized_force plc tn 432)
     in
-    let mentions_comp (idx : Indexing.axis_index) =
-      match idx with
-      | Indexing.Iterator s -> Indexing.equal_symbol s sym
-      | Indexing.Affine { symbols; _ } ->
-          List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-    in
+    let mentions_comp = Indexing.axis_index_mentions_symbol sym in
     let loop_ident = Indexing.symbol_ident sym in
     let locals : grid_local_info Hashtbl.M(Int).t = Hashtbl.create (module Int) in
     let declared_scopes = Hash_set.create (module Int) in
@@ -3335,17 +3325,10 @@ module C_syntax (B : C_syntax_config) = struct
       let dims = Lazy.force tn.Tn.dims in
       let rank = Array.length dims in
       let default = if rank >= 1 then dims.(rank - 1) else 1 in
-      let mentions_sym s (idx : Indexing.axis_index) =
-        match idx with
-        | Indexing.Iterator s' -> Indexing.equal_symbol s s'
-        | Indexing.Affine { symbols; _ } ->
-            List.exists symbols ~f:(fun (_, s') -> Indexing.equal_symbol s s')
-        | _ -> false
-      in
       match row_sym with
       | None -> default
       | Some s -> (
-          match Array.findi idcs ~f:(fun _ idx -> mentions_sym s idx) with
+          match Array.findi idcs ~f:(fun _ idx -> Indexing.axis_index_mentions_symbol s idx) with
           | Some (p, _) ->
               let ld = ref 1 in
               for x = p + 1 to rank - 1 do
@@ -3694,14 +3677,7 @@ module C_syntax (B : C_syntax_config) = struct
         in
         (* --- Shared analysis for the explicit-SIMD ([Vectorized]) and warp-shuffle
            ([Workgroup_reduce]) renderings below. --- *)
-        let mentions_sym sym (idx : Indexing.axis_index) =
-          match idx with
-          | Indexing.Iterator s -> Indexing.equal_symbol s sym
-          | Indexing.Affine { symbols; _ } ->
-              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-        in
-        let mentions_comp = mentions_sym i in
+        let mentions_comp = Indexing.axis_index_mentions_symbol i in
         let nonempty_stmts body =
           List.filter (Low_level.flat_lines [ body ]) ~f:(function
             | Low_level.Noop | Comment _ -> false
@@ -3717,9 +3693,7 @@ module C_syntax (B : C_syntax_config) = struct
         let recognize_accumulation ?(free_of = [ i ]) stmts =
           match stmts with
           | [ Low_level.Set { tn; idcs; llsc; _ } ]
-            when not
-                   (Array.exists idcs ~f:(fun idx ->
-                        List.exists free_of ~f:(fun s -> mentions_sym s idx))) ->
+            when not (Array.exists idcs ~f:(Indexing.axis_index_mentions_any free_of)) ->
               Option.map (Low_level.accum_update_parts ~tn ~idcs llsc) ~f:(fun (op, contrib) ->
                   (tn, idcs, op, contrib))
           | _ -> None
@@ -4806,17 +4780,10 @@ module C_syntax (B : C_syntax_config) = struct
                reduction) — because no finer syntactic discriminator survived the observed cases:
                plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
                byte-alike statements in others compiled fine. *)
-            let mentions_sym s (idx : Indexing.axis_index) =
-              match idx with
-              | Indexing.Iterator s2 -> Indexing.equal_symbol s s2
-              | Indexing.Affine { symbols; _ } ->
-                  List.exists symbols ~f:(fun (_, s2) -> Indexing.equal_symbol s s2)
-              | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-            in
             let rmw_volatile =
               B.volatile_scalar_rmw
               && List.exists !serial_loop_stack ~f:(fun s ->
-                  not (Array.exists idcs ~f:(mentions_sym s)))
+                  not (Array.exists idcs ~f:(Indexing.axis_index_mentions_symbol s)))
               (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
                  a plain local array (not address-castable, and compiler-visible anyway). *)
               && Tn.Placements.is_materialized_force (placements ()) tn 433

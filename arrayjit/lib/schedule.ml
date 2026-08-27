@@ -4548,12 +4548,7 @@ let split_nests plc (llc : Low_level.t) : nest_info list * access list =
   in
   (nests, List.concat bare)
 
-let mentions_sym syms (idx : Indexing.axis_index) =
-  match idx with
-  | Indexing.Iterator s -> List.mem syms s ~equal:Indexing.equal_symbol
-  | Indexing.Affine { symbols; _ } ->
-      List.exists symbols ~f:(fun (_, s) -> List.mem syms s ~equal:Indexing.equal_symbol)
-  | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+let mentions_sym = Indexing.axis_index_mentions_any
 
 (* The affine-query view of an access's index map: a vectorized write's last (minor-axis run)
    component is the base of a run, and a dynamic access's [dyn_axis] component is a data-dependent
