@@ -202,8 +202,11 @@ let with_census f =
    or not the code path it is named for ran.
 
    Collected exactly where the decision is made, in [try_localize_serial_reduce], and only at sites
-   where localization is a live question ([Low_level.has_accumulation] of the level's body): a
-   non-accumulating loop was never a candidate, and censusing it would bury the reductions in noise.
+   where localization is a live question ([Low_level.has_accumulating_cell] of the level's body — a
+   [Set] reading the very cell it writes): a loop with no such recurrence was never a candidate, and
+   censusing it would bury the reductions in noise. Not [has_accumulation], which counts every
+   [Local_scope] conservatively and so records an ordinary virtualized computation inside a loop as
+   a declined reduction site.
    The refs are bracketed by {!with_peel_census}, which {!Context.compile} calls around every
    routine's codegen, so the summary is a field of the compiled routine rather than something a
    caller must remember to collect. *)
@@ -4544,7 +4547,7 @@ module C_syntax (B : C_syntax_config) = struct
           (* The peel census (gh-ocannl-733) records what this site DECIDED, not merely what it
              rendered. Only accumulating levels are censused: elsewhere localization was never a
              question, and the entries would drown the reductions. *)
-          let censusing = !peel_census_enabled && Low_level.has_accumulation body in
+          let censusing = !peel_census_enabled && Low_level.has_accumulating_cell body in
           let record site =
             if censusing then peel_census := (!current_kernel_name, site) :: !peel_census
           in

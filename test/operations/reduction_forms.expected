@@ -66,7 +66,7 @@ reduction: out[3] = sum of 64 terms, hand-built Low_level, 27 members
   21 mixed-guard-workgroup       [f32 bf16 f16] over mixed lane guard      the same guard with the output axis bound to a workgroup               -> localized scope
                                  codegen's peel takes one level, through a lane-private guard
   22 virtual-accumulator         [f32 bf16 f16] over virtual accumulator   a virtual accumulator inlined at its read site                         -> localized scope
-                                 the scope is minted upstream; codegen's peel localizes nothing
+                                 no cell recurrence at any level: the peel is never consulted
   23 where-guarded-update        [f32 bf16 f16] over Where-guarded scope   virtualization's Where-guarded update spelling                         -> localized scope
                                  the scope is minted upstream; codegen's peel localizes nothing
   24 decline-data-guard          [f32 bf16 f16] over data-dependent guard  a data-dependent guard (not a pure index guard)                        -> per-step read-modify-write

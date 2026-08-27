@@ -322,6 +322,16 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
     SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope local
     (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
+val has_accumulating_cell : t -> bool
+(** Whether the tree holds a SELF-RECURRENCE: some [Set] whose value reads the very cell it writes
+    (gh-ocannl-733). This is what makes the localizing peel a live question at a level, and it is
+    the predicate the peel census gates on. Narrower than {!has_accumulation} in two ways, both
+    deliberate: the recurrence is on the CELL rather than on the node, and a [Local_scope] counts
+    only when its body actually reads that cell — {!has_accumulation} must count every scope
+    conservatively, being the predicate that decides whether iteration independence may be asserted,
+    and censusing on it recorded every non-reduction virtualized scope as a declined reduction site.
+*)
+
 type peel_guard_verdict =
   | Guard_confined  (** [Affine.Confined_to_peel]: the guard mentions no enclosing loop symbol. *)
   | Guard_lane_private

@@ -642,7 +642,15 @@ type peel_claim =
           "localized", and the one this member is really about. *)
   | No_localization
       (** Nothing localized: the form is a decline (the per-step read-modify-write members) or a
-          rendering holding the accumulator elsewhere (the SIMD grid, the shuffle tree). *)
+          rendering holding the accumulator elsewhere (the SIMD grid, the shuffle tree). The census
+          must still hold a site — "nothing localized" is worth nothing where the peel was never
+          consulted. *)
+  | Never_a_site
+      (** The census holds NO site: at no level does this member accumulate into the cell it writes,
+          so localization was never a question. Virtualization's inlined accumulator is the case —
+          it owns its cell and opens from a zero-init rather than from a load of the node, which is
+          why nothing here is a self-recurrence through memory. Distinct from {!Minted_upstream},
+          where the peel was consulted at a real reduction site and refused. *)
 
 let guard_verdict_name = function
   | LL.Guard_confined -> "a confined guard"
@@ -663,6 +671,7 @@ let peel_claim_name = function
         | gs -> ", through " ^ String.concat ~sep:" then " (List.map gs ~f:guard_verdict_name))
   | Minted_upstream -> "the scope is minted upstream; codegen's peel localizes nothing"
   | No_localization -> "codegen's peel localizes nothing"
+  | Never_a_site -> "no cell recurrence at any level: the peel is never consulted"
 
 let is_ident_char c = Char.is_alphanum c || Char.equal c '_'
 
@@ -1243,8 +1252,11 @@ let members =
       ~reference:Mixed_baseline ~expect_axis:LL.Workgroup ~sched:(fun g ->
         [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
+    (* The one member with no peel site at all: virtualization gives the accumulator its own scope
+       and opens it from a zero-init, so nothing here reads the cell it writes and localization was
+       never a question (gh-ocannl-733). *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site" ~shape:Virtual_acc
-      ~peel:Minted_upstream ~reference:Owned_cell;
+      ~peel:Never_a_site ~reference:Owned_cell;
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
       ~shape:Where_scope ~peel:Minted_upstream ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
@@ -1506,7 +1518,8 @@ let () =
   Verdict.p_all "every member's peel claim is coherent with the form it claims" members ~f:(fun m ->
       match m.peel with
       | Peeled _ -> true
-      | Minted_upstream -> same_form m.expect Localized || same_form m.expect Partials_combine
+      | Minted_upstream | Never_a_site ->
+          same_form m.expect Localized || same_form m.expect Partials_combine
       | No_localization -> not (same_form m.expect Localized))
 
 (* The baselines: the plain nest with no schedule ops, and the runtime-extent-guarded nest with no
@@ -1809,11 +1822,17 @@ let () =
               | Minted_upstream | No_localization ->
                   (* Over the whole census, so an EMPTY one fails too: "nothing localized" says
                      nothing where the peel was never consulted, and every composition here reaches
-                     at least one accumulating serial site on both backend families. *)
+                     at least one self-recurrent serial site on both backend families. The member
+                     that does NOT is declared {!Never_a_site} and checked the other way. *)
                   if not (List.is_empty localized_sites) then
                     Stdio.eprintf "  %s: declared no localization, got [%s]\n" name
                       (verdicts localized_sites);
-                  Verdict.p_empty peel_claim ~over:peel.Cs.sites localized_sites);
+                  Verdict.p_empty peel_claim ~over:peel.Cs.sites localized_sites
+              | Never_a_site ->
+                  if not (List.is_empty peel.Cs.sites) then
+                    Stdio.eprintf "  %s: declared no peel site, got %s\n" name
+                      (Cs.peel_summary_string peel);
+                  p peel_claim (List.is_empty peel.Cs.sites));
               let want =
                 match m.reference with
                 | Baseline -> baseline prec_name
@@ -2000,7 +2019,8 @@ let () =
             Verdict.p_all peel_claim sites ~f:(Cs.equal_peel_verdict want)
         | Minted_upstream | No_localization ->
             Verdict.p_empty peel_claim ~over:peel.Cs.sites
-              (List.filter peel.Cs.sites ~f:(fun (_, s) -> Cs.is_localized_peel s)));
+              (List.filter peel.Cs.sites ~f:(fun (_, s) -> Cs.is_localized_peel s))
+        | Never_a_site -> p peel_claim (List.is_empty peel.Cs.sites));
         let ok = agrees got want in
         if not ok then
           Stdio.eprintf "  rf_mma_fallback_%s: got [%s] want [%s]\n" prec_name (show got)
