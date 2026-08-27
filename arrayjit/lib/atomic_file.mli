@@ -93,4 +93,7 @@ val cleanup_stale : ?max_age_seconds:float -> string -> unit
 
 val cleanup_stale_once : ?max_age_seconds:float -> string -> unit
 (** {!cleanup_stale} at most once per directory per process, for callers that would otherwise sweep
-    on every write. Thread-safe across domains. *)
+    on every write. Thread-safe across domains. A directory that does not exist yet is not recorded
+    as swept: a cache's reader reaches here before its first writer creates the directory, and
+    spending the process's one sweep on nothing would leave the first crash-stale file until the
+    next process. *)

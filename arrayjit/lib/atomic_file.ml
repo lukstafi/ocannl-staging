@@ -98,11 +98,16 @@ let swept : (string, unit) Hashtbl.t = Hashtbl.create (module String)
 let swept_mutex = Stdlib.Mutex.create ()
 
 let cleanup_stale_once ?max_age_seconds dir =
-  let first =
-    Stdlib.Mutex.lock swept_mutex;
-    let first = not (Hashtbl.mem swept dir) in
-    if first then Hashtbl.set swept ~key:dir ~data:();
-    Stdlib.Mutex.unlock swept_mutex;
-    first
-  in
-  if first then cleanup_stale ?max_age_seconds dir
+  (* A directory that does not exist yet has nothing to sweep and must not be RECORDED as swept: the
+     cache's [lookup] reaches here before the first [store] creates the directory, and marking it
+     then would spend the process's one sweep on nothing. *)
+  if not (Stdlib.Sys.file_exists dir) then ()
+  else
+    let first =
+      Stdlib.Mutex.lock swept_mutex;
+      let first = not (Hashtbl.mem swept dir) in
+      if first then Hashtbl.set swept ~key:dir ~data:();
+      Stdlib.Mutex.unlock swept_mutex;
+      first
+    in
+    if first then cleanup_stale ?max_age_seconds dir

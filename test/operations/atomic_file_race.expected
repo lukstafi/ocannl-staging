@@ -30,5 +30,6 @@ the sweep spares a staging file young enough to be in flight: true
 the sweep spares the published file: true
 the sweep spares an aged file that is not a staging artifact: true
 the published file still reads as it was written: true
+a directory that did not exist yet does not consume its one sweep: true
 the once-per-process sweep does not run a second time: true
 the unconditional sweep still removes it: true

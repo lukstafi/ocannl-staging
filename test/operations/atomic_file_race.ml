@@ -242,6 +242,22 @@ let () =
     (Stdlib.Sys.file_exists bystander);
   Verdict.p "the published file still reads as it was written"
     (Option.equal String.equal (read_published ()) (Some seed));
+  (* A cache's reader calls the once-per-process sweep before its first writer has created the
+     directory, so a missing directory must not consume the one sweep. *)
+  let absent = Stdlib.Filename.concat dir "not_created_yet" in
+  AF.cleanup_stale_once ~max_age_seconds:age_seconds absent;
+  AF.ensure_dir absent;
+  let planted_after_creation =
+    let path = Stdlib.Filename.concat absent ("late.bin" ^ AF.staging_infix ^ "4242.0") in
+    Stdio.Out_channel.write_all path ~data:"abandoned";
+    let stamp = Unix.time () -. 7200. in
+    Unix.utimes path stamp stamp;
+    path
+  in
+  AF.cleanup_stale_once ~max_age_seconds:age_seconds absent;
+  Verdict.p "a directory that did not exist yet does not consume its one sweep"
+    (not (Stdlib.Sys.file_exists planted_after_creation));
+  (try Stdlib.Sys.rmdir absent with _ -> ());
   (* The once-per-process form sweeps this directory exactly once, however many writers call it: a
      staging file abandoned after that first sweep survives until the next process. *)
   AF.cleanup_stale_once ~max_age_seconds:age_seconds dir;
