@@ -49,6 +49,9 @@ let same claim ~derived ~declared =
 let () =
   let derived = Emitter_frontier.derive (interfaces_in fixture_objs) in
   let module F = Emitter_frontier in
+  (* [renders_under_a_module_type] is declared in a named signature and exported as [Named], so it
+     has to arrive with an origin naming the MODULE -- the name a call site spells -- and not only
+     the signature it was declared in. *)
   same "the fixture's renderers are the frontier derived from it"
     ~derived:(names derived.F.emitters)
     ~declared:
@@ -58,6 +61,7 @@ let () =
         "renders_through_a_chain";
         "renders_through_an_alias";
         "renders_through_an_option";
+        "renders_under_a_module_type";
         "renders_without_an_annotation";
         "writes_into_a_buffer";
         "writes_into_an_aliased_buffer";
@@ -83,6 +87,17 @@ let () =
         "writes_into_a_buffer: ~buf";
         "writes_into_an_aliased_buffer: ~buf";
         "writes_into_an_unlabelled_buffer: argument 1";
+      ];
+  let origins_of name =
+    List.concat_map derived.F.emitters ~f:(fun e ->
+        if String.equal e.F.name name then e.F.origins else [])
+  in
+  same "a value exported under a module type is attributed to the module exporting it"
+    ~derived:(origins_of "renders_under_a_module_type")
+    ~declared:
+      [
+        "Emitter_fixture.Emitter_fixture_a.Named.renders_under_a_module_type";
+        "Emitter_fixture.Emitter_fixture_a.RENDERER.renders_under_a_module_type";
       ];
   let declared = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.declared) in
   let read = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.read) in

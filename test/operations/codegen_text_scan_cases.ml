@@ -419,6 +419,14 @@ let () =
   PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
   p "radix" (String.is_substring (Buffer.contents buf) ~substring:"-0.0")|ocaml},
       "+partial +rendered" );
+    ( "a buffer read through an alias of Buffer marks it partial just the same",
+      {ocaml|module LL = Ir.Low_level
+module B = Buffer
+let () =
+  let buf = B.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (B.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
     ( "a local name bound to something else is not an emitter",
       {ocaml|let write = Buffer.add_string
 let () =
@@ -480,6 +488,28 @@ let () =
       1 );
     (* The controls. Opening a module is ordinary OCaml; what is refused is opening one whose names
        this scan attributes, and then using one of THOSE names. *)
+    ( "an open governs its own scope, not the whole file",
+      {ocaml|let render_row row =
+  let open Ir.Low_level in
+  describe row
+let to_doc row = PPrint.string (render_row row)
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
+      0 );
+    ( "a structure-level open governs the items after it",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let () = p "before" (emit_count = 3)
+open CR
+let () = emit ~buf policy llc|ocaml},
+      1 );
+    ( "an open inside a nested module dies with it",
+      {ocaml|module Inner = struct
+  open Ir.Low_level
+  let () = p "inner" (describe llc <> "")
+end
+
+let to_doc row = PPrint.string (render_row row)
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
+      0 );
     ( "opening Utils without reading the artifact directory is fine",
       {ocaml|open Utils
 let () = p "tree" (Tree_map.is_empty (Tree_map.empty ()))|ocaml},

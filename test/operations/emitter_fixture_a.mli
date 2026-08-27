@@ -49,6 +49,14 @@ val writes_into_an_unlabelled_buffer : ir -> Buffer.t -> unit
 (** A destination with no label, which a call site can only address by position. The position counts
     the arguments that carry no label, so an optional one the caller omits does not move it. *)
 
+module type RENDERER = sig
+  val renders_under_a_module_type : ir -> PPrint.document
+  (** Declared in a named signature, and exported below under a module's own name -- which is the
+      name a call site spells and an [open] would bring into scope. *)
+end
+
+module Named : RENDERER
+
 val combines_documents : int -> PPrint.document
 (** [Doc_helpers.int]'s shape: a document out of a number. Given nothing of the library to render,
     so not on the frontier -- reported as a combinator instead of being dropped. *)

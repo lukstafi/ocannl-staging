@@ -17,6 +17,14 @@ let renders_through_a_chain code = PPrint.string code
 let writes_into_an_aliased_buffer ~buf code = Buffer.add_string buf code
 let describes_through_an_alias code = code
 let writes_into_an_unlabelled_buffer code buf = Buffer.add_string buf code
+module type RENDERER = sig
+  val renders_under_a_module_type : ir -> PPrint.document
+end
+
+module Named = struct
+  let renders_under_a_module_type code = PPrint.string code
+end
+
 let combines_documents lanes = PPrint.string (Int.to_string lanes)
 let joins_documents left right = PPrint.(left ^^ right)
 let consumes_documents _code = None

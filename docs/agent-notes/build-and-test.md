@@ -593,7 +593,9 @@ that they earn a lookup rather than always-loaded space.
     PPrint.document`), since an interface records the path a declaration spells rather than what it
     abbreviates. Those are keyed by the module path they are declared in, never by the bare name:
     `t` is declared in every module of every library, and a bare-name table made emitters of 400
-    values returning some `t` or other (Codex round 1 on #487).
+    values returning some `t` or other (Codex round 1 on #487). A named module type is resolved the
+    same way — `module M : S` exports S's values under `M`, which is the name a call site spells and
+    an `open` brings into scope, so the value is attributed to both.
   - The second condition is what keeps generic names out. `Indexing.Doc_helpers.int : int ->
     PPrint.document` renders no program, and since the scan matches an emitter by NAME behind any
     qualifier, admitting it made members of every test calling `Bench_args.int` or
@@ -630,7 +632,10 @@ that they earn a lookup rather than always-loaded space.
   haystack reads a `Buffer.contents` this scan never saw filled marks that file's itemisation
   **partial** rather than dropping the fragment silently — the file is listed, the fragment is
   unnamed, and the inventory says which.
-- **An `open` that hides a route is refused, not approximated.** Every route is attributed by the
+- **An `open` that hides a route is refused, not approximated — over its own scope.** A structure
+  open governs the items after it, `let open M in` its body, and a nested structure's opens die with
+  it. Judging the file's opens against the file's unqualified uses cross-products the two, and a
+  false refusal on valid code is a red build for everyone (Codex round 3 on #487). Every route is attributed by the
   qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
   like a local function of that name and drops the file out of the census. `Codegen_text_scan.
   rejections` fails the inventory on that spelling — for the artifact readers and for an emitter's

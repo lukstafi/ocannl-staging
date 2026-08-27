@@ -117,13 +117,15 @@ let no_aliases = { documents = Set.empty (module String); buffers = Set.empty (m
 let alias_keys ~scope path_name =
   if String.contains path_name '.' then [ path_name ]
   else
-    let enclosing =
-      String.split scope ~on:'.' |> List.filter ~f:(Fn.non String.is_empty)
+    let rec enclosing components acc =
+      let acc = String.concat ~sep:"." (components @ [ path_name ]) :: acc in
+      match List.drop_last components with
+      | Some ([] : string list) | None -> acc
+      | Some shorter -> enclosing shorter acc
     in
-    List.folding_map (List.rev enclosing) ~init:[] ~f:(fun outer component ->
-        let inner = component :: outer in
-        (inner, String.concat ~sep:"." (inner @ [ path_name ])))
-    |> List.rev
+    match String.split scope ~on:'.' |> List.filter ~f:(Fn.non String.is_empty) with
+    | [] -> [ path_name ]
+    | components -> List.rev (enclosing components [])
 
 (** The type every renderer in this tree produces. Matched on the path's shape rather than on one
     spelling of it: the same type prints as [PPrint.document] and as [PPrint.ToBuffer.document]
@@ -303,6 +305,14 @@ type tables = { renders : (string, emitter) Hashtbl.t; combines : (string, emitt
 (** The two buckets, filled once every interface has been read. *)
 
 type collected = {
+  mutable modtypes : (string * Types.module_type) list;
+      (** Every named module type, by its scope-qualified name. A module declared AS one of them
+          exports its values under the module's own name, so resolving these is what gives such a
+          value an origin a call site could spell. *)
+  mutable pending : (string * string * string) list;
+      (** Modules declared as a named module type -- [module M : S] -- as prefix, scope and the
+          module type's path. Resolved once every interface has been read, since [S] may be declared
+          in another one. *)
   mutable values : (string * string * string * Types.type_expr) list;
       (** Origin, scope, name and type of every exported value, in reading order. The scope is the
           module path the value is declared in, as the interfaces spell it
@@ -335,6 +345,9 @@ let rec walk_signature ~prefix ~scope ~into items =
             ~prefix:(prefix ^ Ident.name id ^ ".")
             ~scope:(scope ^ Ident.name id ^ ".") ~into md.Types.md_type
       | Types.Sig_modtype (id, md, _) ->
+          into.modtypes <-
+            (scope ^ Ident.name id, Option.value md.Types.mtd_type ~default:(Types.Mty_signature []))
+            :: into.modtypes;
           Option.iter md.Types.mtd_type
             ~f:
               (walk_module_type
@@ -347,9 +360,14 @@ and walk_module_type ~prefix ~scope ~into = function
   (* A functor's parameter is what the caller supplies; its BODY is what the application exports,
      and [C_syntax.C_syntax] -- where [compile_proc] lives -- is exactly such a body. *)
   | Types.Mty_functor (_, body) -> walk_module_type ~prefix ~scope ~into body
-  (* A named signature ([Mty_ident]) and an alias ([Mty_alias]) both point elsewhere; the elsewhere
-     is a module of the same library, walked in its own right. Open for the same reason the type
-     match above is: [Types.module_type] differs between the compilers this builds on. *)
+  (* [module M : S] exports S's values under M's OWN name, which is the name a call site spells and
+     an [open] brings into scope -- so the module type is walked again under this module's prefix
+     rather than only where it was declared (Codex round 3 on lukstafi/ocannl-staging#487). It may be
+     declared in an interface not yet read, so the resolution waits until they all are. *)
+  | Types.Mty_ident path -> into.pending <- (prefix, scope, Path.name path) :: into.pending
+  (* An alias points at a module of the library, walked in its own right; its values are on the
+     frontier under the name they are declared with. Open for the same reason the type match above
+     is: [Types.module_type] differs between the compilers this builds on. *)
   | _ -> ()
 
 (** The modules a wrapper interface aliases: [module C_syntax = Ir__C_syntax], one per module of the
@@ -410,7 +428,7 @@ let read_signature path = (Cmi_format.read_cmi path).Cmi_format.cmi_sign
     the whole installed directory is on disk, while an in-workspace build hands over the object
     directory. Whatever is still missing is reported, never assumed absent. *)
 let derive paths =
-  let into = { values = []; manifests = [] } in
+  let into = { modtypes = []; pending = []; values = []; manifests = [] } in
   let available =
     List.map paths ~f:(fun path -> (module_of_path path, path))
     |> Map.of_alist_reduce (module String) ~f:(fun first _ -> first)
@@ -460,8 +478,33 @@ let derive paths =
               (read_signature path));
         { library; declared; read = List.map read ~f:fst; missing })
   in
-  (* Every interface has been read before anything is classified: an abbreviation declared in one of
-     them decides whether a value in another produces a document. *)
+  (* Every interface has been read before anything is resolved or classified: a module type, like an
+     abbreviation, may be declared in one interface and used in another. Each round of resolution can
+     expose modules declared as a further module type, so it repeats until it stops finding any --
+     and never resolves the same module type under the same prefix twice, which is what makes a
+     signature that mentions itself terminate. *)
+  let resolved = Hash_set.create (module String) in
+  let rec resolve_pending () =
+    let pending = into.pending in
+    into.pending <- [];
+    let progressed =
+      List.fold pending ~init:false ~f:(fun progressed (prefix, scope, path_name) ->
+          let key = prefix ^ "|" ^ path_name in
+          if Hash_set.mem resolved key then progressed
+          else
+            match
+              List.find_map (alias_keys ~scope path_name) ~f:(fun candidate ->
+                  List.Assoc.find into.modtypes candidate ~equal:String.equal)
+            with
+            | None -> progressed
+            | Some module_type ->
+                Hash_set.add resolved key;
+                walk_module_type ~prefix ~scope ~into module_type;
+                true)
+    in
+    if progressed then resolve_pending ()
+  in
+  resolve_pending ();
   let aliases = transparent_aliases into.manifests in
   let buckets = { renders = Hashtbl.create (module String); combines = Hashtbl.create (module String) } in
   List.iter (List.rev into.values) ~f:(fun (origin, scope, name, val_type) ->

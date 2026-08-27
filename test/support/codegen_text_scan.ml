@@ -1109,42 +1109,78 @@ let unqualified_uses structure =
     Raises if [contents] does not parse. *)
 let rejections ~emitters ~path ~contents =
   let structure = structure_of contents in
-  let opened = opened_modules structure in
-  let used = unqualified_uses structure in
   let generated = module_aliases ~target:"Generated" structure in
   let utils = module_aliases ~target:direct_artifact_module structure in
   let resolve = module_alias_targets structure in
-  (* Which names each opened module would make unqualified: the artifact readers by their module,
-     the emitters by the module whose interface defines them. *)
-  let hidden =
-    List.concat_map opened ~f:(fun opened_name ->
-        let of_module names = List.map names ~f:(fun name -> (opened_name, name)) in
-        (if Hash_set.mem generated opened_name then
-           of_module [ "read"; "assert_emits"; "assert_omits" ]
-         else [])
-        @ (if Hash_set.mem utils opened_name then of_module direct_artifact_names else [])
-        @ List.filter_map emitters ~f:(fun emitter ->
-              (* Through the file's own module aliases, since [open CR] after [module CR =
-                 Ir.Low_level.Canonical_render] opens the emitter's module under a name no origin
-                 spells. *)
-              let opened_target = resolve opened_name in
-              let defined_in origin =
-                match List.rev (String.split origin ~on:'.') with
-                | _value :: enclosing :: _ -> String.equal enclosing opened_target
-                | _ -> false
-              in
-              if List.exists emitter.origins ~f:defined_in then
-                Some (opened_name, emitter.emitter_name)
-              else None))
+  (* Which names an open of [opened_name] would make unqualified: the artifact readers by their
+     module, the emitters by the module whose interface defines them -- through the file's own
+     module aliases, since [open CR] after [module CR = Ir.Low_level.Canonical_render] opens the
+     emitter's module under a name no origin spells. *)
+  let hidden_by opened_name =
+    let of_module names = List.map names ~f:(fun name -> (opened_name, name)) in
+    let opened_target = resolve opened_name in
+    (if Hash_set.mem generated opened_name then of_module [ "read"; "assert_emits"; "assert_omits" ]
+     else [])
+    @ (if Hash_set.mem utils opened_name then of_module direct_artifact_names else [])
+    @ List.filter_map emitters ~f:(fun emitter ->
+          let defined_in origin =
+            match List.rev (String.split origin ~on:'.') with
+            | _value :: enclosing :: _ -> String.equal enclosing opened_target
+            | _ -> false
+          in
+          if List.exists emitter.origins ~f:defined_in then Some (opened_name, emitter.emitter_name)
+          else None)
   in
-  List.filter hidden ~f:(fun (_, name) -> Set.mem used name)
-  |> List.dedup_and_sort ~compare:Poly.compare
-  |> List.map ~f:(fun (opened_name, name) ->
+  let opened_name declaration =
+    match declaration.popen_expr with
+    | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
+    | _ -> None
+  in
+  let extend hidden declaration =
+    match opened_name declaration with Some name -> hidden_by name @ hidden | None -> hidden
+  in
+  let found = ref [] in
+  (* Each open is judged over ITS OWN scope, which is what tells a file that hides a route from one
+     that merely opens a module somewhere. Comparing the file's opens against the file's unqualified
+     uses cross-products the two: a scoped [let open Ir.Low_level in ...] that calls nothing would
+     then refuse an unrelated local [to_doc] elsewhere in the file, and this check fails the
+     repository-wide inventory -- a false refusal is a red build on valid code (Codex round 3 on
+     lukstafi/ocannl-staging#487). A structure-level open governs the items after it, an
+     expression-level one its body, and a nested structure's opens die with it, which is the
+     language's own rule. *)
+  let walker =
+    object (self)
+      inherit [ (string * string) list ] Ast_traverse.map_with_context as super
+
+      method! structure hidden items =
+        ignore
+          (List.fold items ~init:hidden ~f:(fun hidden item ->
+               ignore (self#structure_item hidden item : structure_item);
+               match item.pstr_desc with
+               | Pstr_open declaration -> extend hidden declaration
+               | _ -> hidden));
+        items
+
+      method! expression hidden e =
+        (match e.pexp_desc with
+        | Pexp_open (declaration, body) ->
+            ignore (self#expression (extend hidden declaration) body : expression)
+        | Pexp_ident { txt = Longident.Lident name; _ } ->
+            List.iter hidden ~f:(fun (opened, hidden_name) ->
+                if String.equal name hidden_name then found := (opened, name) :: !found);
+            ignore (super#expression hidden e : expression)
+        | _ -> ignore (super#expression hidden e : expression));
+        e
+    end
+  in
+  ignore (walker#structure [] structure : structure);
+  List.dedup_and_sort !found ~compare:Poly.compare
+  |> List.map ~f:(fun (opened, name) ->
          Printf.sprintf
            "%s opens %s and then uses %s unqualified, which this scan attributes by its qualifier \
             -- so the call is invisible to it and the file can drop out of the inventory. Write \
             %s.%s (or an alias of it) instead."
-           path opened_name name opened_name name)
+           path opened name opened name)
 
 (** [classify_source ~emitters ~path ~contents] is [Some] when the file reads generated source at
     all.
@@ -1160,6 +1196,10 @@ let classify_source ~emitters ~path ~contents =
      routes are how a file stayed listed while the fragment it pins went missing. *)
   let bindings = bindings_in_structure structure in
   let aliases = emitter_aliases ~emitters structure in
+  (* [Buffer] under whatever name this file gave it, for the backstop below: [module B = Buffer]
+     then [B.contents buf] reads a buffer as surely as the bare spelling does. Resolved the way the
+     artifact readers are. *)
+  let buffers = module_aliases ~target:"Buffer" structure in
   let reads_generated = ref false in
   let reads_direct = ref false in
   let renders = ref false in
@@ -1232,11 +1272,7 @@ let classify_source ~emitters ~path ~contents =
 
           method! expression inner =
             (match longident_of inner with
-            | Some path
-              when path_ends path ~name:"contents"
-                   && Option.value_map (qualifier_of path) ~default:false
-                        ~f:(String.equal "Buffer") ->
-                found := true
+            | Some path when calls ~aliases:buffers path ~name:"contents" -> found := true
             | _ -> ());
             super#expression inner
         end
