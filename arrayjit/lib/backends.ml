@@ -162,6 +162,76 @@ let plan_alias_spans ~(name : string) ~(limits : hardware_limits) ~(lowered : Lo
                   (Tn.debug_name tn) lo hi);
           Some spans)
 
+(* {2 The shared layout head (gh-ocannl-767)}
+
+   [Raise_backend.compile] + [allocate_delta] on one side and [score_footprint] on the other must
+   lay a routine out IDENTICALLY -- the scorer is the allocator's cost model (gh-ocannl-498), so
+   scoring one layout and allocating another would let a plan report itself under budget while
+   linking asks for a larger pool. The pieces both pipelines run are shared here rather than agreed
+   on by comment: zero-sinking, the segment-store fold-back, the working/constants partition in
+   canonical order, the per-node plan items, and the per-pool cap. *)
+
+(* The per-pool ceiling: 4 GB for uint32 offsets unless [large_models] lifts it. *)
+let pool_cap () = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000
+
+(* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations toward
+   their first use so live spans start there instead of at an up-front zeroing block (which nests
+   the backprop gradient chain's intervals and defeats [plan_arena_offsets]). Reordering only --
+   values are unchanged; gated to keep the planner-off pipeline byte-identical. Runs before
+   scheduling, so segment cuts and cross-nest merges see the sunk order. *)
+let maybe_sink_zeros (lowered : Low_level.optimized) : Low_level.optimized =
+  if buffer_aliasing () then
+    { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
+  else lowered
+
+(* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen -- a
+   hoisted [Stage] registers its packed-constant tile in the segment's filtered store (its
+   placement lands in the shared lineage fork, but the allocator enumerates the traced store) -- so
+   fold segment-added entries back into [into]. Pre-existing keys are shared mutable records
+   (filtered slices alias them), so only genuinely new keys need adding. *)
+let fold_segment_stores ~(into : Low_level.traced_store) (segments : Low_level.optimized list) :
+    unit =
+  List.iter segments ~f:(fun seg ->
+      Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
+          if not (Hashtbl.mem into key) then Hashtbl.add_exn into ~key ~data))
+
+(* Partition a traced store's in-context nodes into the (working, constants) layout groups, each in
+   CANONICAL ([Tn.compare], i.e. uid) order -- the one order both the allocator and the scorer lay
+   out (gh-ocannl-498): the planners are order-sensitive (the arena's greedy coloring breaks
+   equal-size ties by input order, and bump packing's alignment padding and cap segmentation depend
+   on the running offset -- sizes 4 then 64 at alignment 32 occupy 96 bytes, reversed 68). Uid
+   order is deterministic and shared; pool ids are minted per segment before any placement, so
+   nothing else depends on enumeration order. [skip] excludes nodes the caller already holds (the
+   allocator's prior context); slice-alias views own no buffer and are excluded automatically
+   ([is_in_context_force] returns false for them, gh-ocannl-293 293a) -- their materialized parent
+   is laid out like any other node. *)
+let partition_layout_groups ~(plc : Tn.Placements.t) ?(skip = fun (_ : Tn.t) -> false)
+    (store : Low_level.traced_store) :
+    (Tn.t * Low_level.traced_array) list * (Tn.t * Low_level.traced_array) list =
+  let working = ref [] and constants = ref [] in
+  Hashtbl.iteri store ~f:(fun ~key ~data:node ->
+      if Tn.Placements.is_in_context_force plc key 43 && not (skip key) then
+        if node.Low_level.read_only || Tn.Placements.known_constant plc key then
+          constants := (key, node) :: !constants
+        else working := (key, node) :: !working);
+  let canonical l = List.sort !l ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
+  (canonical working, canonical constants)
+
+(* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so that
+   every node's buffer -- not only each pool's base -- is SIMD-aligned (gh-ocannl-164); ≤31 bytes
+   of padding per node. *)
+let layout_item (key : Tn.t) : int * int =
+  (size_in_bytes_of key, max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment)
+
+let layout_items group = List.map group ~f:(fun (key, _) -> layout_item key)
+
+(* The [plan_arena_offsets] input for a layout group under the given live [spans] (gh-ocannl-489):
+   liveness-disjoint same-precision nodes may overlap. *)
+let arena_items ~spans group =
+  List.map group ~f:(fun ((key : Tn.t), _) ->
+      let size, align = layout_item key in
+      (size, align, Ops.prec_string (Lazy.force key.Tn.storage_prec), Hashtbl.find spans key))
+
 type footprint = {
   fp_total : int;
   fp_working : int;
@@ -184,60 +254,35 @@ type footprint = {
    of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
    pool bases are page-rounded by the driver.
 
-   Enumeration is canonical ([Tn.compare], i.e. by uid) rather than [traced_store] order, so the
-   greedy arena coloring is reproducible across processes; [allocate_delta] uses store order to keep
-   pool ids stable and can therefore break size ties differently. *)
+   Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout
+   head above), so scorer/allocator agreement is structural rather than by comment. *)
 let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
     ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) : footprint =
-  let lowered =
-    if buffer_aliasing () then
-      { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
-    else lowered
-  in
+  let lowered = maybe_sink_zeros lowered in
   let segments = Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered in
   let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in
-  (* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen (a
-     hoisted [Stage] registers its packed-constant tile), and [allocate_delta] enumerates the store
-     it is handed -- so score the union, as the compile's own fold-back does. *)
+  (* Score the union store, as the compile's own fold-back does -- but on a copy: scoring must not
+     mutate the routine's own traced store. *)
   let store = Hashtbl.copy lowered.Low_level.traced_store in
-  List.iter segments ~f:(fun seg ->
-      Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
-          if not (Hashtbl.mem store key) then Hashtbl.add_exn store ~key ~data));
+  fold_segment_stores ~into:store segments;
   let plc = lowered.Low_level.optimize_ctx.placements in
-  let working = ref [] and constants = ref [] in
-  Hashtbl.iteri store ~f:(fun ~key ~data:node ->
-      if Tn.Placements.is_in_context_force plc key 47 then
-        if node.Low_level.read_only || Tn.Placements.known_constant plc key then
-          constants := key :: !constants
-        else working := key :: !working);
-  let canonical l = List.sort !l ~compare:Tn.compare in
-  let working = canonical working and constants = canonical constants in
-  let items group =
-    List.map group ~f:(fun key ->
-        ( size_in_bytes_of key,
-          max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
-  in
-  let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
+  let working, constants = partition_layout_groups ~plc store in
+  let cap = pool_cap () in
   let bump ~what group =
     let _, segment_sizes =
       plan_pool_segments ~cap ~what
-        ~debug_name:(fun i -> Tn.debug_name (List.nth_exn group i))
-        (items group)
+        ~debug_name:(fun i -> Tn.debug_name (fst (List.nth_exn group i)))
+        (layout_items group)
     in
     List.fold segment_sizes ~init:0 ~f:( + )
   in
   let fp_dedicated = bump ~what:"Backends.score_footprint" working in
   let fp_planned =
-    Option.value_map spans ~default:0 ~f:(fun spans -> List.count working ~f:(Hashtbl.mem spans))
+    Option.value_map spans ~default:0 ~f:(fun spans ->
+        List.count working ~f:(fun (key, _) -> Hashtbl.mem spans key))
   in
   let arena =
-    Option.bind spans ~f:(fun spans ->
-        plan_arena_offsets ~cap
-          (List.map2_exn working (items working) ~f:(fun key (size, align) ->
-               ( size,
-                 align,
-                 Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                 Hashtbl.find spans key ))))
+    Option.bind spans ~f:(fun spans -> plan_arena_offsets ~cap (arena_items ~spans working))
   in
   let fp_working = match arena with Some (_, total) -> total | None -> fp_dedicated in
   let fp_constants = bump ~what:"Backends.score_footprint" constants in
@@ -793,16 +838,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           ( Option.value_or_thunk name ~default:(fun () -> Assignments.get_name_exn comp.asgns),
             lowered )
     in
-    (* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations toward
-       their first use so live spans start there instead of at an up-front zeroing block (which
-       nests the backprop gradient chain's intervals and defeats [plan_arena_offsets]). Reordering
-       only -- values are unchanged; gated to keep the planner-off pipeline byte-identical. Before
-       scheduling: segment cuts and cross-nest merges see the sunk order. *)
-    let lowered =
-      if buffer_aliasing () then
-        { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
-      else lowered
-    in
+    let lowered = maybe_sink_zeros lowered in
     let limits = Device.hardware_limits () in
     let lowereds =
       Schedule_outcome.tag Schedule_outcome.Transform (fun () ->
@@ -862,16 +898,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           in
           (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O analysis
              need the union footprint, and each segment's [optimized] carries only its filtered
-             slice of the traced store. Schedule ops applied per segment can CREATE tnodes the
-             pre-fission store has never seen — a hoisted [Stage] registers its packed-constant tile
-             in the segment's filtered store (its placement lands in the shared lineage fork, but
-             [allocate_delta] enumerates the traced store) — so fold segment-added entries back in.
-             Pre-existing keys are shared mutable records (filtered slices alias them), so only
-             genuinely new keys need copying. *)
-          List.iter segments ~f:(fun seg ->
-              Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
-                  if not (Hashtbl.mem lowered.Low_level.traced_store key) then
-                    Hashtbl.add_exn lowered.Low_level.traced_store ~key ~data));
+             slice of the traced store -- so fold segment-added entries back in. *)
+          fold_segment_stores ~into:lowered.Low_level.traced_store segments;
           (Either.Second { batch; count = List.length segments }, lowered)
     in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
@@ -939,24 +967,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       ctx_buffers =
     let traced_store = lowered.Low_level.traced_store in
     let device = context.device in
-    let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
-    (* Pass 1: partition the delta, preserving [traced_store] iteration order. Slice-alias views own
-       no buffer and are excluded automatically: [is_in_context_force] returns false for them
-       (gh-ocannl-293 293a). Their parent is materialized and is allocated here (or already present
-       from a prior context) like any other node, since the alias's redirected reads/writes
-       reference the parent in the lowered code. *)
-    let working = ref [] and constants = ref [] in
-    Hashtbl.iteri traced_store ~f:(fun ~key ~data:node ->
-        if
-          Tnode.Placements.is_in_context_force lowered.Low_level.optimize_ctx.placements key 43
-          && not (Map.mem context.ctx_buffers key)
-        then
-          if
-            node.Low_level.read_only
-            || Tn.Placements.known_constant lowered.Low_level.optimize_ctx.placements key
-          then constants := (key, node) :: !constants
-          else working := (key, node) :: !working);
-    let working = List.rev !working and constants = List.rev !constants in
+    let cap = pool_cap () in
+    (* Pass 1: partition the delta into the canonical layout groups (the shared layout head),
+       excluding nodes the prior context already holds. *)
+    let working, constants =
+      partition_layout_groups ~plc:lowered.Low_level.optimize_ctx.placements
+        ~skip:(Map.mem context.ctx_buffers) traced_store
+    in
     let ctx_buffers = ref context.ctx_buffers in
     (* Pack a group of (key, node) into one or more pools, segmenting at the cap. [register] decides
        how the resulting [buffer_loc] is recorded (directly into [ctx_buffers] for working nodes, or
@@ -1013,35 +1030,16 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
-        (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
-           [score_footprint] scores. Both planners are order-sensitive -- the arena's greedy
-           coloring breaks equal-size ties by input order, and bump packing's alignment padding and
-           cap segmentation depend on the running offset (sizes 4 then 64 at alignment 32 occupy 96
-           bytes, reversed 68). Scoring one order and allocating another would let a plan report
-           itself under budget while linking asks for a larger pool. [traced_store] order was merely
-           a deterministic order; uid order is deterministic too, and shared with the scorer. Only
-           the layout input is reordered: pool ids are minted per segment before any placement, and
-           registration is order-independent. *)
-        let group = List.sort group ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
-        let items =
-          (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so
-             that every node's buffer — not only each pool's base — is SIMD-aligned (gh-ocannl-164);
-             ≤31 bytes of padding per node. *)
-          List.map group ~f:(fun (key, _) ->
-              ( size_in_bytes_of key,
-                max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
-        in
+        (* [group] arrives in canonical (uid) order from [partition_layout_groups] -- the order
+           [score_footprint] scores, which the order-sensitive planners must see identically
+           (gh-ocannl-498; the rationale lives on the shared layout head). Pool ids are minted per
+           segment before any placement, and registration is order-independent. *)
+        let items = layout_items group in
         (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
            group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
            to bump packing when the arena would exceed the per-pool cap. *)
         let arena_layout =
-          Option.bind arena ~f:(fun spans ->
-              plan_arena_offsets ~cap
-                (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                     ( size,
-                       align,
-                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                       Hashtbl.find spans key ))))
+          Option.bind arena ~f:(fun spans -> plan_arena_offsets ~cap (arena_items ~spans group))
         in
         match arena_layout with
         | Some (offsets, total) ->
