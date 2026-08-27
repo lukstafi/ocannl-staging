@@ -1,0 +1,5 @@
+the all-iterator offset is row-major at every point: true
+the mixed-constructor offset agrees with row-major arithmetic: true
+a concatenated axis is refused rather than mis-strided: true
+the offsets tensor is fully materialized: true
+every offsets cell holds its own flat position: true

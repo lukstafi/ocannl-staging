@@ -373,8 +373,15 @@ let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
   if not (List.is_empty !comps) then mismatch ();
   project
 
+(** The row-major flat offset of [projection] into an array of [dims], as one affine index.
+
+    [Concat] is rejected rather than approximated. Its segments partition the axis into disjoint
+    sub-ranges, so the axis's contribution is not a single stride times a single symbol and cannot
+    be written as one term of an affine sum -- the arm this replaces gave every segment symbol the
+    same stride, which is a different index map. The only caller is the [Range_over_offsets] fetch
+    in {!Assignments}, whose indices come from [Low_level.loop_over_dims] and are therefore
+    [Iterator]s and [Fixed_idx]es; [Concat] axes are in any case eliminated during lowering. *)
 let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
-  (* FIXME: handle concatenation *)
   Array.zip_exn dims projection
   |> Array.fold_right ~init:(1, [], 0) ~f:(fun (dim, idx) (stride, symbols, offset) ->
       match idx with
@@ -386,10 +393,11 @@ let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
           in
           (stride * dim, new_symbols @ symbols, offset + (affine_offset * stride))
       | Sub_axis -> (stride * dim, symbols, offset)
-      | Concat syms_list ->
-          (* For Concat, add all symbols with the current stride *)
-          let concat_symbols = List.map syms_list ~f:(fun sym -> (stride, sym)) in
-          (stride * dim, concat_symbols @ symbols, offset))
+      | Concat _ ->
+          raise
+          @@ Utils.User_error
+               "Indexing.reflect_projection: a concatenated axis has no single affine offset; \
+                Concat indices are eliminated during lowering and cannot reach this function")
   |> fun (_, symbols, offset) -> Affine { symbols; offset }
 
 type variable_ref = {

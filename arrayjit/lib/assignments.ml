@@ -248,7 +248,12 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
   in
   (* Apply left padding offsets to convert from semantic to buffer indices. Semantic indices can be
      negative (e.g., -1 for convolution padding), but buffer indices must be non-negative. Adding
-     left_padding converts semantic to buffer space. *)
+     left_padding converts semantic to buffer space.
+
+     A [Concat] axis cannot arrive here: the loop nest around this access iterates a concatenation's
+     segments one at a time, so what reaches an access index is the segment's own iterator. Shifting
+     the axis would have to shift every segment's loop bounds instead, which is not a rewrite of one
+     index -- hence the explicit refusal rather than a guess. *)
   let apply_padding_offset (tn : Tn.t) (idcs : Indexing.axis_index array) :
       Indexing.axis_index array =
     match Tn.get_padding tn with
@@ -265,7 +270,14 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 | Iterator s -> Affine { symbols = [ (1, s) ]; offset = left_pad }
                 | Affine { symbols; offset } -> Affine { symbols; offset = offset + left_pad }
                 | Sub_axis -> Sub_axis
-                | Concat _ -> assert false)
+                | Concat _ ->
+                    raise
+                    @@ Utils.User_error
+                         [%string
+                           "Assignments.to_low_level: a concatenated axis cannot carry a padding \
+                            shift (node %{Tn.debug_name tn}, axis %{i#Int}); the segments of a \
+                            concatenation are iterated one loop each, so an access index is always \
+                            a segment's own iterator"])
   in
   let is_padded tn = Option.is_some (Tn.get_padding tn) in
   (* gh-504 clamped windows: a padded ([=]-mode) max-family window spec registers no margin demand

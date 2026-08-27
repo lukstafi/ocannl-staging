@@ -1261,9 +1261,9 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
               | Some loc -> resolve loc
               | None ->
                   (* After gh-ocannl-333 there is no host array to fall back on: every in-context
-                     node must be present in [ctx_buffers] (allocated by [alloc_if_needed]). The
-                     [buffer_loc -> base] resolution is backend-private (the shared layer hands us
-                     locations, never pointers). *)
+                     node must be present in [ctx_buffers], put there by [Backends.allocate_delta]
+                     before this link. The [buffer_loc -> base] resolution is backend-private (the
+                     shared layer hands us locations, never pointers). *)
                   raise
                   @@ Utils.User_error
                        [%string
