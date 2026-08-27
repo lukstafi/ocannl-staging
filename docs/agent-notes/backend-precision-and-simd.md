@@ -757,15 +757,24 @@ files.
   opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
   (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
   scalar, 64 libm calls, 128 stack refs). Three traps in reasoning about it, each of which cost this
-  note a review round. **The condition is `__FMA__`, not the `x86-64-v3` level** — those come apart
-  on real parts, and prescribing the level as the fix is actively wrong: AMD Piledriver and
-  Steamroller (`-march=bdver2` / `bdver3`) define `__FMA__` and `__AVX__` but not `__AVX2__`, so
-  they take the fast path already, while `-march=x86-64-v3` would hand them AVX2 they cannot
-  execute. `x86-64` / `x86-64-v2` are just the common named targets without FMA. The remedy is any
-  spelling that gets `__FMA__` without demanding more of the CPU than it has — `-march=native`, a
-  CPU-specific `-march`, or `cc_backend_simd_flags=-mfma`, which `compiler_flags` appends after the
-  architecture flag and which alone (measured, on a baseline `-march=x86-64`) takes every call to
-  zero. **It is a property of the TARGET, not of which arm of the `#if` chain is taken**:
+  note a review round. **Do not name a feature macro as the condition. The condition is whether the
+  compiler can lower `fmaf` to SOME fused instruction the target has** — two successive proxies were
+  written here and both were wrong, each failing on a real part and each failing the same way, by
+  prescribing instructions a CPU cannot execute. `x86-64-v3` was wrong because AMD Piledriver and
+  Steamroller (`bdver2`/`bdver3`) carry FMA3 with AVX and no AVX2: already fast, and
+  `-march=x86-64-v3` would hand them AVX2 they fault on. `__FMA__` was then wrong because Bulldozer
+  (`bdver1`) has FMA4 ONLY — `__FMA4__` and `__XOP__` defined, `__FMA__` absent — and still compiles
+  the loop to four-operand `vfmaddps`/`vfmaddss` with zero calls, so it has no cliff either, while
+  the `-mfma` remedy that macro suggests selects FMA3 specifically and would SIGILL there. A
+  consequence worth keeping DISTINCT hides in that last case: `vec_fma_builtin`'s x86 rows really
+  are keyed on `defined(__FMA__)`, so an FMA4-only target skips the whole-vector arm and lands on
+  the per-lane `#else` — no libm calls, but precisely the arm gh-ocannl-614/621 measured as gcc's
+  spill-or-scalarize hazard. Escaping the libm cliff and taking the good arm are two different
+  questions, and this target answers them differently. Ask the compiler-and-target pair directly
+  rather than a macro: `<cc> -march=<t> -O2 -S` over a small `fmaf` loop, grep for `callq.*fmaf`.
+  (`-march=<t> -E -dM` prints which macros a target defines, which is an input to that question,
+  not the answer to it.) **It is a property of the TARGET, not of which arm of the `#if` chain is
+  taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
   LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
   so fine" is wrong. And **it is not reached only by exotic hardware**: `cc_backend_arch_flags=none`
@@ -775,9 +784,9 @@ files.
   modern host. No x86 hardware is needed to check any of this from an Apple Silicon box: Apple clang
   cross-targets x86_64, so `clang -arch x86_64 -march=<target> -O2 -S` over a four-line
   `__builtin_elementwise_fma` loop counts `callq _fmaf` directly — 4 per iteration at 4 lanes and 8
-  at 8 lanes under `x86-64` and `x86-64-v2`, zero (and `vfmadd`) under `x86-64-v3`, `bdver2` and
-  `x86-64 -mfma`, with the plain scalar `fmaf` loop going the same way; `-march=<t> -E -dM` prints
-  which feature macros each target actually defines. **Scope every claim here to the compiler that
+  at 8 lanes under `x86-64` and `x86-64-v2`, zero under `x86-64-v3`, `bdver2` and `x86-64 -mfma`
+  (`vfmadd*`) and under `bdver1` (`vfmaddps`/`vfmaddss`, the FMA4 forms), with the plain scalar
+  `fmaf` loop going the same way. **Scope every claim here to the compiler that
   produced it.** All of the above is clang. The one claim that does not survive the change of
   compiler is `cc_backend_fast_math`: clang expands the calls to `mulps`/`addps` under `-ffast-math`
   (verified at `-march=x86-64`), recovering the vectorization at two roundings, but gcc was reported

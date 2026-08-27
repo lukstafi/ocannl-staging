@@ -665,17 +665,24 @@
 # target has the instruction the compiler contracts all of those into it and no call survives.
 # Where it does not, each one stays a libm CALL, and an opaque call cannot be vectorized at any
 # width, so at -O3 the surrounding loop scalarizes too.
-# The condition is exactly whether the target defines `__FMA__` (on x86; on aarch64 it is
-# `__ARM_FEATURE_FMA`, which is baseline, so no ARM host is affected). That is NOT the same as the
-# `x86-64-v3` microarchitecture level, and the difference decides what fixes it: AMD Piledriver and
-# Steamroller (`-march=bdver2` / `bdver3`) have FMA3 with only AVX, no AVX2, and take the fast path
-# already, while `-march=x86-64-v3` on such a part would emit AVX2 instructions it cannot execute.
-# `x86-64` and `x86-64-v2` are simply the common named targets that lack FMA.
-# Measured with clang cross-targeting x86_64 (see the SIMD agent note for the recipe): an f32
-# accumulator loop is one `fmaf` call per lane per iteration at `-march=x86-64` and
-# `-march=x86-64-v2` (4 calls at 4 lanes, 8 at 8) and zero at `-march=x86-64-v3`, at `-march=bdver2`
-# and at plain `-march=x86-64 -mfma`; the scalar loop goes the same way.
-# You reach a no-FMA target by running on a pre-Haswell / pre-Piledriver x86 host, by pinning this
+# The condition is whether the compiler can lower those `fmaf` / `fma` calls to SOME fused
+# instruction the target has -- FMA3 or FMA4 on x86, `__ARM_FEATURE_FMA` on aarch64 (baseline
+# there, so no ARM host is affected). It is not any one feature macro, and still less the
+# `x86-64-v3` level: naming a proxy for it is how both of the wrong prescriptions this entry
+# previously carried got written. Three real families show the spread, all measured with clang
+# cross-targeting x86_64 (recipe in the SIMD agent note):
+#   `-march=x86-64` and `-march=x86-64-v2` -- no FMA at all: one `fmaf` call per lane per iteration
+#   (4 calls at 4 lanes, 8 at 8), and a call per iteration in the scalar loop. This is the cliff.
+#   `-march=bdver2` / `bdver3` (Piledriver, Steamroller) -- FMA3 with AVX but no AVX2: zero calls.
+#   `-march=bdver1` (Bulldozer) -- FMA4 ONLY, defining `__FMA4__` and `__XOP__` but not `__FMA__`:
+#   also zero calls, compiling to the four-operand `vfmaddps` / `vfmaddss`.
+# So `__FMA__` is not necessary (bdver1 lacks it and has no cliff), and the v3 level is not the
+# only way to get FMA3 (bdver2/bdver3 have it without AVX2). The diagnostic that answers the
+# question directly, for your compiler and target TOGETHER rather than through a macro proxy, is to
+# compile and look: `<cc> -march=<target> -O2 -S` over a small `fmaf` loop, then grep the assembly
+# for a call to `fmaf`.
+# You reach a no-FMA target by running on a pre-Haswell Intel or pre-Bulldozer AMD host, by pinning
+# this
 # key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to 0, so
 # only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain that
 # rejects the probed `-march=native`, in which case the probe falls back to no flag at all and the
@@ -688,11 +695,13 @@
 # approximate-numerics work (gh-ocannl-719). (The rewrite itself is not restricted to floating
 # point, and that is a separate question, not a rationale this note covers -- see the SIMD agent
 # note.)
-# What actually removes the calls is a target that has FMA, by any spelling that does not demand
-# more of the CPU than it has: "auto" on a host with FMA, `cc_backend_arch_flags=-march=native`, a
-# CPU-specific `-march`, or `cc_backend_simd_flags=-mfma` (appended after the architecture flag, so
-# it adds FMA without escalating the base target). `-march=x86-64-v3` also works, but only on a
-# part that really has AVX2.
+# What removes the calls is a target the CPU actually implements. Prefer the spellings that let
+# the compiler read the host rather than ones that assert a feature: "auto" (the default) on a host
+# whose CPU has FMA, `cc_backend_arch_flags=-march=native`, or the `-march` naming your exact CPU.
+# Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
+# than a slowdown -- `cc_backend_simd_flags=-mfma` (appended after the architecture flag, so it does
+# not escalate the base target) selects FMA3 specifically and would fault on an FMA4-only Bulldozer,
+# and `-march=x86-64-v3` brings AVX2 that no bdver part can execute.
 #cc_backend_arch_flags=auto
 
 # Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections
