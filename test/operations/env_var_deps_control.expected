@@ -14,8 +14,9 @@ the same command handed nothing of this workspace is a stanza neither reader see
 
 The focused-aggregate rule is put to a tree of one member stanza and a family alias that does
 or does not list it. Nothing else differs between the runs of a pair; the member takes each of
-the three shapes a member can take, and the last run is a stanza neither derivation calls a
-member.
+the shapes dune builds a member in -- a test, an executable with its runner, a plural stanza,
+an inline-test library, a `(subdir …)` group -- and the last run is a stanza neither
+derivation calls a member.
 
 a stanza whose backend marker names metal is reported, naming its family, when the metal-codegen alias does not reach it: true
 the same tree with the member listed in the family stanza passes: true
@@ -25,4 +26,10 @@ an executable whose RUNNER carries the metal marker is a member too, reported wh
 the same tree with the runner's own alias listed passes: true
 a plural stanza with only one of its two generated aliases listed is reported, naming the one still missing: true
 the same plural stanza with both listed passes: true
+the same one-alias listing is COMPLETE when only that main reads the instrumentation, so the lifecycle family is not asked for its neighbour: true
+an inline-test library carrying the metal marker is a member, reported when the family does not reach the alias dune generates for it: true
+the same library listed under its generated alias passes: true
+a member inside a `(subdir …)` group is aggregated by a family alias in that same group, which the recursive build from the root reaches: true
+a runner that runs another directory's executable of the same name does not aggregate this directory's member: true
+the same runner running this directory's executable does: true
 a stanza neither derivation calls a member is asked for no family alias: true
