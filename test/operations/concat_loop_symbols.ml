@@ -145,20 +145,32 @@ let () =
     write_syms
     ~f:(fun s -> List.length (nodes_indexed_by s) > 1);
 
-  (* Executed parity: the values, not just the shape of the nest. The loss is the sum of the
-     concatenation, so each input's gradient is all-ones -- a scatter that dropped or duplicated a
-     segment shows up immediately. Fresh tensors, because the inspections above already consumed
-     the forward and backprop code of the ones they lowered. *)
+  (* Executed parity: the values, not just the shape of the nest. The oracle has to DISCRIMINATE
+     the loop indices, which a plain sum-of-the-concatenation loss does not: its derivative is 1.0
+     everywhere, so a scatter that wrote the right cells for the wrong reason -- a swapped segment,
+     a dropped enclosing batch index, a duplicated store -- still lands all-ones gradients. So the
+     loss is weighted by a tensor of pairwise-distinct constants over BOTH the concatenated axis
+     and the batch axis: every gradient cell then has its own value, and the expected arrays below
+     fail under any permutation, duplication or omission of an index. Fresh tensors, because the
+     inspections above already consumed the forward and backprop code of the ones they lowered. *)
   let y1 =
-    Tensor.ndarray ~grad_spec:Tensor.Require_grad [| 1.0; 2.0; 3.0 |] ~batch_dims:[] ~input_dims:[]
-      ~output_dims:[ 3 ] ()
+    Tensor.ndarray ~grad_spec:Tensor.Require_grad
+      [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |]
+      ~batch_dims:[ 2 ] ~input_dims:[] ~output_dims:[ 3 ] ()
   in
   let y2 =
-    Tensor.ndarray ~grad_spec:Tensor.Require_grad [| 10.0; 20.0 |] ~batch_dims:[] ~input_dims:[]
-      ~output_dims:[ 2 ] ()
+    Tensor.ndarray ~grad_spec:Tensor.Require_grad [| 7.0; 8.0; 9.0; 10.0 |] ~batch_dims:[ 2 ]
+      ~input_dims:[] ~output_dims:[ 2 ] ()
   in
-  let%op cat2 = (y1, y2) ++^ "a; b => a^b" in
-  let%op loss2 = cat2 ++ "...|... => |->0" in
+  (* Distinct primes: no two subsets share a sum either, so even a gradient built by accumulating
+     the wrong cells is distinguishable from the right one. *)
+  let w =
+    Tensor.ndarray ~grad_spec:Tensor.Prohibit_grad
+      [| 2.0; 3.0; 5.0; 7.0; 11.0; 13.0; 17.0; 19.0; 23.0; 29.0 |]
+      ~batch_dims:[ 2 ] ~input_dims:[] ~output_dims:[ 5 ] ()
+  in
+  let%op cat2 = (y1, y2) ++^ "...|a; ...|b => ...|a^b" in
+  let%op loss2 = cat2 *. w ++ "...|... => |->0" in
   let ctx = Context.auto () in
   Train.set_materialized cat2.value;
   Train.set_materialized (Option.value_exn ~here:[%here] y1.diff).grad;
@@ -167,10 +179,16 @@ let () =
   let cat_v = Context.get_values ctx cat2.value in
   let g1 = Context.get_values ctx (Option.value_exn ~here:[%here] y1.diff).grad in
   let g2 = Context.get_values ctx (Option.value_exn ~here:[%here] y2.diff).grad in
-  p "concat forward values are the two segments in order"
-    (Array.equal Float.equal cat_v [| 1.0; 2.0; 3.0; 10.0; 20.0 |]);
-  p "first segment's gradient is all ones" (Array.equal Float.equal g1 [| 1.0; 1.0; 1.0 |]);
-  p "second segment's gradient is all ones" (Array.equal Float.equal g2 [| 1.0; 1.0 |]);
+  (* Row-major over (batch, concatenated axis): each batch row is the first segment then the
+     second, so a swapped segment or a lost batch index changes the array. *)
+  p "batched concat forward interleaves the segments within each batch row"
+    (Array.equal Float.equal cat_v [| 1.0; 2.0; 3.0; 7.0; 8.0; 4.0; 5.0; 6.0; 9.0; 10.0 |]);
+  (* d(sum(cat *. w))/d(y1) is w restricted to the first segment's cells, batch row by batch row --
+     and likewise for y2, from the second segment's. *)
+  p "first segment's gradient is its own weights, per batch row"
+    (Array.equal Float.equal g1 [| 2.0; 3.0; 5.0; 13.0; 17.0; 19.0 |]);
+  p "second segment's gradient is its own weights, per batch row"
+    (Array.equal Float.equal g2 [| 7.0; 11.0; 23.0; 29.0 |]);
 
   (* Descriptive, and deterministic: the widths come from the declared dimensions. *)
   printf "concat loop widths: fwd %s / bwd %s\n%!"

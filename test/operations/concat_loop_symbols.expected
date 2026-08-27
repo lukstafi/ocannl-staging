@@ -7,7 +7,7 @@ concat backward emits a loop of the second segment's width (2): true
 every concat backward loop binder is bound exactly once: true
 no concat backward binder is shadowed in the canonical render: true
 a batched concat gradient still indexes writes to several nodes by one symbol: true
-concat forward values are the two segments in order: true
-first segment's gradient is all ones: true
-second segment's gradient is all ones: true
+batched concat forward interleaves the segments within each batch row: true
+first segment's gradient is its own weights, per batch row: true
+second segment's gradient is its own weights, per batch row: true
 concat loop widths: fwd 2,3 / bwd 5,5,2,3
