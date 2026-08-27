@@ -29,15 +29,14 @@ let graph_drawing_recompile () =
   Train.every_non_literal_materialized f;
   let f_upd = Train.grad_update f in
   let ctx = Train.init_params ctx IDX.empty f in
-  let f_bprop = Train.to_routine ctx IDX.empty f_upd in
-  let ctx = f_bprop.Context.context in
+  let ctx, f_bprop = Train.to_routine ctx IDX.empty f_upd in
   Train.run ctx f_bprop;
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
   let xs = Array.init 10 ~f:Float.(fun i -> of_int i - 5.) in
   let ys =
     Array.map xs ~f:(fun v ->
         (* This is inefficient because it compiles the argument update inside the loop. *)
-        let assign_x =
+        let _, assign_x =
           Train.to_routine f_bprop.Context.context IDX.empty
             [%cd
               ~~("assign_x";
@@ -69,8 +68,7 @@ let graph_drawing_fetch () =
   Train.set_materialized x.value;
   Train.set_materialized (Option.value_exn ~here:[%here] x.diff).grad;
   let update = Train.grad_update fx in
-  let fx_routine = Train.to_routine ctx bindings update in
-  let ctx = fx_routine.Context.context in
+  let ctx, fx_routine = Train.to_routine ctx bindings update in
   let step_ref = IDX.find_exn fx_routine.Context.bindings step_sym in
   let ys, dys =
     Array.unzip
@@ -97,10 +95,8 @@ let simple_gradients_hosted () =
   Train.every_non_literal_materialized learning_rate;
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let _ctx = grad_routine.Context.context in
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
-  let ctx = sgd_routine.Context.context in
+  let ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
+  let ctx, sgd_routine = Train.to_routine ctx IDX.empty sgd in
   (* Note the initial state without running an init or forward pass can contain garbage. *)
   (* Train.printf_tree ~with_grad:true ~depth:9 l; *)
   (* Do not update the params: all values and gradients will be at initial points, which are
@@ -131,8 +127,7 @@ let simple_gradients_virtual () =
   let%op learning_rate = 0.1 in
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
-  let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let ctx = grad_routine.Context.context in
+  let ctx, grad_routine = Train.to_routine ctx IDX.empty grad in
   (* Note the state without running initialization can contain garbage. *)
   (* Train.printf_tree ~with_grad:true ~depth:9 l; *)
   (* Do not update the params: all values and gradients will be at initial points, which are
@@ -140,8 +135,7 @@ let simple_gradients_virtual () =
   let ctx = Context.run ctx grad_routine in
   Train.printf_tree ~with_grad:true ~depth:9 ctx l;
   (* Only now compile the SGD update. *)
-  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
-  let ctx = sgd_routine.Context.context in
+  let ctx, sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
   (* Now we update the params, but are not doing the forward and backward passes: only params values
      will change, compared to the above. Since virtual tensors are computed by-need, they will
      always be recomputed using the latest parameter state. *)
@@ -159,8 +153,7 @@ let two_d_neuron_hosted () =
   Train.every_non_literal_materialized v;
   let update = Train.grad_update v in
   let ctx = Train.init_params ctx IDX.empty v in
-  let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx IDX.empty update in
   Train.run ctx routine;
   Train.printf_tree ~with_grad:true ~depth:9 ctx v
 
@@ -170,8 +163,7 @@ let two_d_neuron_virtual () =
   let%op v = ({ w = [ (-3, 1) ] } * { x = [ 2; 0 ] }) + { b = [ 6.7 ] } in
   let update = Train.grad_update v in
   let ctx = Train.init_params ctx IDX.empty v in
-  let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx IDX.empty update in
   Train.run ctx routine;
   Train.printf_tree ~with_grad:true ~depth:9 ctx v
 

@@ -128,8 +128,7 @@ let () =
     { dice } =: uniform_at !@counter_n
   in
   Train.set_materialized infer_probs.value;
-  let infer_step = Train.to_routine sgd_step.Context.context bindings infer_step in
-  let ctx = infer_step.Context.context in
+  let ctx, infer_step = Train.to_routine sgd_step.Context.context bindings infer_step in
   let counter_ref = IDX.find_exn infer_step.Context.bindings counter_n in
   counter_ref := 0;
 

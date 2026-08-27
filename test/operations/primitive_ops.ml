@@ -25,8 +25,7 @@ let plot_unop ?(x_min = -5.) ?(x_max = 5.) ~f () =
   (* There actually are no params! Stress test the empty comp case. *)
   let ctx = Train.init_params ctx IDX.empty fx in
   let update = Train.grad_update fx in
-  let fx_routine = Train.to_routine ctx bindings update in
-  let ctx = fx_routine.Context.context in
+  let ctx, fx_routine = Train.to_routine ctx bindings update in
   let ctx = Context.run ctx fx_routine in
   let step_ref = IDX.find_exn fx_routine.Context.bindings step_sym in
   let ys, dys =

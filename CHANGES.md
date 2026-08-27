@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Changed
+
+- **`Train.to_routine` returns the post-compile context** (`Context.t * Context.routine`) instead of
+  discarding it (gh-ocannl-772), matching `Context.compile` and `Train.run_once`. The context was
+  never actually lost -- `routine.Context.context` carries the same value, which is why the 2026-06
+  review deferred this -- but the asymmetry made `train.ml` read as if `to_routine` and `run_once`
+  disagreed about who owns the post-compile context. All in-tree callers were adapted; out-of-tree
+  callers get a type error whose fix is `let _, routine = ...` or, better, chaining the returned
+  context into the next compile.
+
+- **`Train`'s duplicated blocks are shared** (gh-ocannl-772). `to_routine` and `run_once` carried
+  the same `output_cd_file` dump and the same memory-budget plan/compile/report triple verbatim;
+  these are now `dump_cd_file` and `compile_within_budget`, with the explanatory comments living
+  once at the helper. `sgd_one` no longer duplicates its whole `%cd` payload across the
+  `update_gate` arms -- the ppx hoists inline declarations above the enclosing `match`/`if`, so the
+  arms differ only where gating changes the emitted assignment.
+
 ## [1.0.1] -- 2026-08-26
 
 > Release note: theme — consolidation after 1.0: making a green result mean what it says. This is

@@ -43,7 +43,7 @@ let () =
   Train.set_materialized learning_rate.value;
   let sgd = Train.sgd_update ~learning_rate ~weight_decay scalar_loss in
   let ctx = Train.init_params ctx bindings scalar_loss in
-  let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
+  let _, sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
   (* Skipping over the training loop, not needed for the test. *)
   Train.run ctx sgd_routine;
 

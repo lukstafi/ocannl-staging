@@ -23,8 +23,7 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings total in
   let fwd_comp = Train.forward total in
-  let routine = Train.to_routine ctx bindings fwd_comp in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx bindings fwd_comp in
   let seq_ref = IDX.find_exn routine.Context.bindings seq in
   printf "y dims (buffer sized at the declared maximum): %s\n" (Ir.Tnode.dims_to_string y.value);
   let ctx =

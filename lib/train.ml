@@ -1354,8 +1354,7 @@ let dump_cd_file ~caller bindings (comp : Asgns.comp) =
   if not Utils.settings.output_debug_files_in_build_directory then
     raise
     @@ Utils.User_error
-         (caller
-        ^ ": output_cd_file is true, but output_debug_files_in_build_directory is false");
+         (caller ^ ": output_cd_file is true, but output_debug_files_in_build_directory is false");
   let cd_source = Utils.output_to_build_file ~fname:(name ^ "-debug.cd") in
   let static_indices = Idx.bound_symbols bindings in
   match cd_source with
@@ -1378,11 +1377,14 @@ let compile_within_budget ?budget ?max_candidates ?budget_report ctx comp bindin
   Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   (ctx, routine)
 
-(** Compiles [comp] and returns the routine (the context is discarded). [budget], [max_candidates]
-    and [budget_report] are the gh-ocannl-498 rematerialization seam, forwarded to
+(** Compiles [comp] and returns the post-compile context together with the routine. [budget],
+    [max_candidates] and [budget_report] are the gh-ocannl-498 rematerialization seam, forwarded to
     {!fit_memory_budget}: with no [budget] and no [memory_budget] config key nothing is planned and
     the compile is exactly what it was; [budget_report], if given, observes the plan that shipped.
-*)
+
+    The post-compile context is returned rather than discarded (gh-ocannl-772), matching
+    {!Context.compile} and {!run_once}: chain it into the next compile instead of reaching into
+    [routine.context] for the same value. A caller that only wants the routine can [snd] this. *)
 let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?max_candidates
     ?budget_report bindings comp =
   if output_cd_file then dump_cd_file ~caller:"Train.to_routine" bindings comp;
@@ -1392,9 +1394,7 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?
   (* gh-ocannl-498: budget planning goes AFTER the output-materialization intent above (those nodes
      must not be flip candidates) and BEFORE the compile whose placements it steers. Off by default:
      with no budget this is the identity and the compile below is unchanged. *)
-  let _ctx, routine = compile_within_budget ?budget ?max_candidates ?budget_report ctx comp bindings in
-  (* Return just the routine for backward compatibility - ctx is discarded here *)
-  routine
+  compile_within_budget ?budget ?max_candidates ?budget_report ctx comp bindings
 
 (** [init_params] initializes the parameters of [t], via running their forward code or copying from
     the host as appropriate. If [reinit_all] is true, all parameters are reinitialized, otherwise

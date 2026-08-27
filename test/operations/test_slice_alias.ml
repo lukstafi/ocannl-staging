@@ -91,8 +91,7 @@ let () =
   let%op out = bv *. 2 in
 
   let ctx = Context.auto () in
-  let routine = Train.to_routine ctx bindings (Train.forward out) in
-  let ctx = routine.Context.context in
+  let ctx, routine = Train.to_routine ctx bindings (Train.forward out) in
   let bref = IDX.find_exn routine.Context.bindings batch_n in
 
   (* --- AC1: the alias view owns no buffer; the parent does. --- *)
@@ -137,8 +136,7 @@ let () =
      this write routine redirects to the parent. We write row [batch_n=0] to 99 and observe it via
      the parent. --- *)
   let%cd writer = bv =: !.99.0 in
-  let wroutine = Train.to_routine ctx bindings writer in
-  let ctx = wroutine.Context.context in
+  let ctx, wroutine = Train.to_routine ctx bindings writer in
   let wref = IDX.find_exn wroutine.Context.bindings batch_n in
   wref := 0;
   Train.run ctx wroutine;
