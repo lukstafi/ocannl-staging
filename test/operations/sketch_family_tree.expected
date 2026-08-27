@@ -282,7 +282,11 @@ tree leaves = flat enumeration: true
  7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  9  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+== half-prec cpu seeds, wide policy + narrow_compute_f32 off, native fp16: 2 seeds ==
+ 0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
 the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the wide-accumulate arm: true
+the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates (accumulator residency diverges from compute): true
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --

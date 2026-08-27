@@ -966,15 +966,14 @@ struct
     Numerics.cpu_compute_prec ~native_fp16_arithmetic:(has_native_fp16_arithmetic ()) prec
 
   (* On CPU a reduction accumulator is an assignment intermediate like any other: it resides at the
-     compute precision (gh-ocannl-639). Restated next to the [compute_prec] override because the
-     pair binds at [include] time (see the signature's coupling note, gh-ocannl-663). The one
-     divergence is [Fp16_wide] (gh-ocannl-680), whose contract is f32 accumulator residency on
-     every backend unconditionally — [narrow_compute_f32 = false] included, where [compute_prec]
-     leaves half alone but the ACCUMULATOR still widens. *)
+     compute precision (gh-ocannl-639) — except under [Fp16_wide], whose contract is f32 f16
+     residency on every backend unconditionally, [narrow_compute_f32 = false] included
+     (gh-ocannl-680). Restated next to the [compute_prec] override because the pair binds at
+     [include] time (see the signature's coupling note, gh-ocannl-663); the resolution itself lives
+     in [Numerics.cpu_accum_prec] so autotune's seeding shares it verbatim, exactly as
+     [compute_prec] shares [cpu_compute_prec]. *)
   let accum_prec prec =
-    match prec with
-    | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
-    | _ -> compute_prec prec
+    Numerics.cpu_accum_prec ~native_fp16_arithmetic:(has_native_fp16_arithmetic ()) prec
 
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
      admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the lane

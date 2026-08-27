@@ -5189,6 +5189,23 @@ module C_syntax (B : C_syntax_config) = struct
           let a_store_prec = Lazy.force (fst a).Tn.storage_prec in
           let b_store_prec = Lazy.force (fst b).Tn.storage_prec in
           let prec = comp_prec d_store_prec in
+          (* The C-tile holds the accumulator at [prec] for the whole k extent, so the rendering
+             honors the accumulator-width contract only where that IS the residency. Under
+             [Fp16_wide] with [narrow_compute_f32 = false], [acc_prec] resolves an f16 destination
+             to f32 while [comp_prec] leaves it at half — rendering the tile would accumulate
+             narrowly while every serial rendering holds f32, resurrecting the schedule-dependent
+             width gh-ocannl-680 removes (Codex P1 round 1 on staging PR #477). Decline: the serial
+             fallback then localizes at [acc_prec]. The seeding pre-filter asks the same question
+             through [Numerics.cpu_accum_prec], so such a candidate is never timed under a
+             tensorized label either. *)
+          let* () =
+            no_test
+              ~reason:
+                (Printf.sprintf "accumulator residency %s diverges from compute precision %s"
+                   (Ops.prec_string (acc_prec d_store_prec))
+                   (Ops.prec_string prec))
+              (not (Ops.equal_prec (acc_prec d_store_prec) prec))
+          in
           let* () =
             no_test
               ~reason:

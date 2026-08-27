@@ -146,3 +146,16 @@ let cpu_compute_prec ~native_fp16_arithmetic (prec : Ops.prec) : Ops.prec =
       prec
   | _ when Ops.is_narrow_float prec && (get ()).narrow_compute_f32 -> Ops.single
   | _ -> prec
+
+(** The accumulator residency the CPU backends resolve a storage precision to: {!cpu_compute_prec},
+    except that {!Fp16_wide}'s contract — f32 f16-accumulators on every backend, unconditionally —
+    holds even where [narrow_compute_f32 = false] leaves the f16 {e compute} at storage width
+    (gh-ocannl-680). Like {!cpu_compute_prec} this is the single source of truth shared by
+    [Cc_backend.accum_prec] (emission) and autotune's sketch seeding: where the two diverge, a
+    C-tile rendering cannot honor the residency and both the emission
+    ([C_syntax.try_register_tile]) and the seeding pre-filter must decline (Codex P1 round 1 on
+    staging PR #477). *)
+let cpu_accum_prec ~native_fp16_arithmetic (prec : Ops.prec) : Ops.prec =
+  match prec with
+  | Ops.Half_prec _ when fp16_accum_wide () -> Ops.single
+  | _ -> cpu_compute_prec ~native_fp16_arithmetic prec

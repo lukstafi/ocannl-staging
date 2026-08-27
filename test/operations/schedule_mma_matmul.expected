@@ -14,6 +14,7 @@ half tensorized structure as expected: true
 Fp16_wide half tensorized matmul matches its serial twin bitwise: true
 Fp16_wide is value-neutral on f16-exact inputs (equals the default-policy serial result): true
 Fp16_wide half tensorized structure as expected: true
+Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile accumulator): true
 bf32 tensorized matmul matches the serial twin: true
 bf32 tensorized structure as expected: true
 bfu tensorized matmul matches the serial twin: true

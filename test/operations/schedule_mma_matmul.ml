@@ -457,14 +457,57 @@ let () =
      else if String.is_substring backend_name ~substring:"hip" then
        fallback && (not (has "rocwmma")) && has "== 0)"
      else if on_gpu then
-       (* CUDA: the f32-accumulate inline-PTX arm (sm_80+, which every CUDA box here clears). *)
-       intrinsics
-       && has "(mma-f16)"
-       && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-       && not (has "nvcuda::wmma")
+       (* CUDA: the f32-accumulate inline-PTX arm where the device advertises it (sm_80+); below
+          that floor the capability answers [mma_f16_wide_acc = false] and the deliberate rendering
+          is the recorded scalar fallback — derive the expectation from the advertised capability
+          rather than assuming the arm (Codex P1 round 1 on staging PR #477). *)
+       let wide_arm =
+         match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+         | Some m -> m.Ir.Backend_intf.mma_f16_wide_acc
+         | None -> false
+       in
+       if wide_arm then
+         intrinsics
+         && has "(mma-f16)"
+         && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+         && not (has "nvcuda::wmma")
+       else fallback && (not (has "nvcuda::wmma")) && has "== 0)"
      else has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
    in
    p "Fp16_wide half tensorized structure as expected" ok);
+
+  (* --- The wide contract survives [narrow_compute_f32 = false] on the CPU backends (Codex P1
+     round 1 on staging PR #477): compute stays half there, the accumulator residency is f32, and
+     the register-tiled C-tile — which accumulates at COMPUTE precision — cannot honor that, so it
+     must decline to the serial fallback (whose localized accumulator follows [accum_prec]) rather
+     than accumulate narrowly under a tensorized label. On a native-fp16 machine the new
+     residency-divergence decline is what fires; elsewhere the vector-capability decline already
+     covered it — either way, no register tiling and a recorded fallback. CPU-only: on the GPU
+     backends [narrow_compute_f32] does not touch f16 compute and the leg above already pins the
+     wide rendering. --- *)
+  (let claim_ncf32 =
+     "Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile \
+      accumulator)"
+   in
+   if on_gpu then skipped claim_ncf32
+   else begin
+     Numerics.set_policy
+       { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+     let%op mchn0 = mah * mbh in
+     Tn.update_prec mchn0.Tensor.value Ir.Ops.half;
+     let want_hn = compile_serial ~name:"mm_h_wide_nco_serial" mchn0 in
+     let%op mchn1 = mah * mbh in
+     Tn.update_prec mchn1.Tensor.value Ir.Ops.half;
+     let got_hn, census_hn = compile_mma_with_census ~name:"mm_h_wide_nco_mma" mchn1 in
+     Numerics.set_policy saved_policy;
+     let src = Generated.read "mm_h_wide_nco_mma" in
+     p claim_ncf32
+       ((not (List.is_empty census_hn))
+       && List.for_all census_hn
+            ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+       && (not (String.is_substring src ~substring:"Tile_mma register tiling"))
+       && Array.for_all2_exn got_hn want_hn ~f:Float.equal)
+   end);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
      CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]

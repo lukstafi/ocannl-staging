@@ -2230,6 +2230,13 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               | _ -> false)
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec)) cprec
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec)) cprec
+            (* The C-tile accumulates at the compute precision, so a divergent accumulator
+               residency ([Fp16_wide] + [narrow_compute_f32 = false] on an f16 destination) is an
+               emission decline — mirror it here or the candidate is timed under a tensorized
+               label (gh-ocannl-680; Codex P1 round 1 on staging PR #477). *)
+            && Ir.Ops.equal_prec
+                 (Ir.Numerics.cpu_accum_prec ~native_fp16_arithmetic:native_fp16 prec)
+                 cprec
           in
           (* The renderer fills the widest vector the out-channel extent allows, halving where it
              must ({!Ir.Backend_intf.simd_lanes_for}); seeding asks the same question, or it would
@@ -3098,7 +3105,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
            and the [C_syntax.mma_census]. *)
         let native_fp16 = limits.Ir.Backend_intf.native_fp16_arithmetic in
         let comp_prec p = Ir.Numerics.cpu_compute_prec ~native_fp16_arithmetic:native_fp16 p in
-        let prec = comp_prec (Lazy.force site.m_d.Ir.Tnode.storage_prec) in
+        let d_store_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+        let prec = comp_prec d_store_prec in
         let uniform_vec_capable =
           (match prec with
             | Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true
@@ -3106,6 +3114,13 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             | _ -> false)
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec)) prec
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec)) prec
+          (* The C-tile accumulates at the compute precision, so a divergent accumulator residency
+             ([Fp16_wide] + [narrow_compute_f32 = false] on an f16 destination) is an emission
+             decline — mirror it here or the candidate is timed under a tensorized label
+             (gh-ocannl-680; Codex P1 round 1 on staging PR #477). *)
+          && Ir.Ops.equal_prec
+               (Ir.Numerics.cpu_accum_prec ~native_fp16_arithmetic:native_fp16 d_store_prec)
+               prec
         in
         (* [lanes] is the widest the register file offers, which is what the decline messages quote;
            whether a given extent can be tiled is [lanes_fit], which lets the renderer's per-extent

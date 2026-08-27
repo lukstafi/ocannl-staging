@@ -382,11 +382,26 @@ let () =
     section "half-prec gpu, f16 tiles, wide policy, wide-accumulate arm" ~is_gpu:true ~is_cpu:false
       ~limits:(gpu_f16_limits ~wide_acc:true) opt_h
   in
+  (* The CPU register tiling has the same wide-policy divergence case: under [Fp16_wide] with
+     [narrow_compute_f32 = false] on a native-fp16 target, compute resolves half while the
+     accumulator residency ([Numerics.cpu_accum_prec]) is f32, so the C-tile cannot honor it and
+     seeding must omit the tensorized candidates — mirroring [C_syntax.try_register_tile]'s
+     residency-divergence decline (Codex P1 round 1 on staging PR #477). *)
+  Numerics.set_policy
+    { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+  let f16_cpu_wide_nco =
+    section "half-prec cpu seeds, wide policy + narrow_compute_f32 off, native fp16" ~is_gpu:false
+      ~is_cpu:true ~limits:cpu_native_fp16_limits opt_h
+  in
   Numerics.set_policy saved_policy;
   Verdict.p
     "the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the \
      wide-accumulate arm"
     (has_mma f16_default && (not (has_mma f16_wide_no_arm)) && has_mma f16_wide_arm);
+  Verdict.p
+    "the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates \
+     (accumulator residency diverges from compute)"
+    (not (has_mma f16_cpu_wide_nco));
   (* Transposed B (k on its minor axis): whole-triple and the hoisted-only Grid shape read B in
      place, which the register tiling statically declines; packing shapes normalize the layout. *)
   let tb =

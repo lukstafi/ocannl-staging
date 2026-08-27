@@ -266,6 +266,9 @@ let claim_f16_default =
 
 let claim_f16_wide = "Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056)"
 
+let claim_f16_wide_ncf32_off =
+  "Fp16_wide holds the f32 residency even under narrow_compute_f32=false (2048 + 1x8 gives 2056)"
+
 let claim_f16_wide_matmul =
   "under Fp16_wide the f16 naive matmul equals the once-narrowed wide-accumulation reference"
 
@@ -301,6 +304,14 @@ let () =
   Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
   p claim_f16_wide (Float.equal (f16_sum ~name:"aw_f16_wide" ~first_id:9760 ()) 2056.0);
   let got_wide16 = f16_matmul ~name:"aw_f16_naive_wide" () in
+  (* The wide contract is unconditional: [narrow_compute_f32 = false] leaves f16 COMPUTE at storage
+     width (per-operator rounding), but the ACCUMULATOR still resides in f32 and narrows once —
+     [Numerics.cpu_accum_prec] diverging from [cpu_compute_prec] here is also what makes the
+     register-tile renderings decline rather than accumulate narrowly (Codex P1 round 1 on staging
+     PR #477). *)
+  Numerics.set_policy
+    { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+  p claim_f16_wide_ncf32_off (Float.equal (f16_sum ~name:"aw_f16_wide_nco" ~first_id:9780 ()) 2056.0);
   Numerics.set_policy saved_policy;
   let wide_sums16 =
     Array.init (n16 * n16) ~f:(fun t ->
