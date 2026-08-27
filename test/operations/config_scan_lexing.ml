@@ -429,6 +429,23 @@ let x = read_env_var "profile"|ocaml},
 module V = U
 let x = V.read_env_var "profile"|ocaml},
       ([ "profile" ], false) );
+    (* And both halves are LEXICAL, not file-wide. An `open Utils` that a local binding shadows does
+       not make the shadowed call the library's -- which for a check that asks for a declaration is
+       the difference between a correct stanza passing and failing (Codex P2, round 3 of PR #484). *)
+    ( "a local binding shadows the opened name",
+      {ocaml|open Utils
+let read_env_var _ = None
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "an expression-scoped open does not reach past its body",
+      {ocaml|let a = let open Utils in read_env_var "log_level"
+let b = read_env_var "profile"|ocaml},
+      ([ "log_level" ], false) );
+    ( "a qualified call is the reader whatever the file binds locally",
+      {ocaml|open Utils
+let read_env_var _ = None
+let x = Utils.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
   ]
 
 (* The candidate set a dynamic source falls back on, and the filter that narrows it. Neither is a

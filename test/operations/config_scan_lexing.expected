@@ -89,6 +89,9 @@ ok: environment read -- a longer name ending differently is not the reader
 ok: environment read -- a function of the file's own that happens to share the name is not the reader
 ok: environment read -- nor is a bare call under an open of somebody else
 ok: environment read -- an alias of an alias still reaches it
+ok: environment read -- a local binding shadows the opened name
+ok: environment read -- an expression-scoped open does not reach past its body
+ok: environment read -- a qualified call is the reader whatever the file binds locally
 ok: string literals -- literals from a list, a tuple and an argument
 ok: string literals -- a literal in a comment is not a literal
 ok: string literals -- escapes arrive decoded

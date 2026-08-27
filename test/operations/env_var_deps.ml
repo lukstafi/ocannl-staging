@@ -732,7 +732,14 @@ let main () =
       (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
          what qualifies them -- not the repository-relative directory the modules are looked up
          in. *)
-      let all_group_stanzas = List.concat_map artifact_groups ~f:(fun (_, _, group) -> group) in
+      (* Each candidate runner with the SUBDIRECTORY it was found in: the path a rule writes is
+         relative to where the rule lives, so `(subdir a (rule … probe.exe))` and
+         `(subdir b (rule … probe.exe))` name different programs and only the pair says which
+         (gh-ocannl-747, Codex P2 round 3). *)
+      let all_group_runners =
+        List.concat_map artifact_groups ~f:(fun (subdir, _, group) ->
+            List.map group ~f:(fun stanza -> (subdir, stanza)))
+      in
       let subjects =
         List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
             let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
@@ -763,7 +770,7 @@ let main () =
                   else None)
             in
             List.map
-              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_stanzas
+              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_runners
                  group ~calls ~reads_prefix) ~f:(fun subject -> (here, subject)))
       in
       List.iter subjects ~f:(fun (here, subject) ->
@@ -1261,7 +1268,7 @@ let main () =
                     match kind with
                     | "executable" | "executables" ->
                         List.map
-                          (Scan.program_runners ~subdir ~runner_stanzas:all_group_stanzas group
+                          (Scan.program_runners ~subdir ~runner_stanzas:all_group_runners group
                              stanza) ~f:(fun (name, runners) ->
                             ( name,
                               Scan.program_modules stanza ~modules ~name,

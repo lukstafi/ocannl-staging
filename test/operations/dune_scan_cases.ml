@@ -1291,6 +1291,17 @@ let artifact_subdir_cases =
       "gen",
       [ "probe" ],
       [ "executable probe: undeclared (probe)" ] );
+    (* A rule's path is relative to where the RULE lives, so a same-named executable in a sibling
+       subdirectory is a different program. Comparing the written path against an unqualified
+       `probe.exe` made `b`'s rule a runner of `a`'s program, which let an unrun executable inherit a
+       declaration made elsewhere -- the shape the basename rule was already rejected for, one
+       directory over (Codex P2, round 3). *)
+    ( "a rule in a sibling subdirectory is not this program's runner",
+      {dune|(subdir a (executable (name probe) (modules probe)))
+(subdir b (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run probe.exe))))|dune},
+      "a",
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
   ]
 
 (* Dune's default module set, which a stanza reaches for by omitting `(modules …)` or by naming
@@ -1406,9 +1417,10 @@ let () =
       try
         (* The whole file is both the group and the runner population here; [env_var_deps] splits
            the two when a `(subdir …)` puts stanzas in different directories. *)
-        let stanzas = Scan.walk "" (Scan.stanzas source) ~f:(fun _ stanza -> [ stanza ]) in
+        let placed = Scan.walk "" (Scan.stanzas source) ~f:(fun sub stanza -> [ (sub, stanza) ]) in
+        let stanzas = List.map placed ~f:snd in
         List.map
-          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:stanzas stanzas ~calls
+          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:placed stanzas ~calls
              ~reads_prefix)
           ~f:render_artifact
       with exn ->

@@ -1702,27 +1702,44 @@ let public_names stanza =
 
    A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`, so
    the executable answers to both spellings (Codex P2, round 4). *)
-let program_identities ?(subdir = "") stanza ~index ~name =
-  let local = name ^ ".exe" in
-  (if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
-  @
+let program_public_name stanza ~index =
   match List.nth (public_names stanza) index with
-  | Some public when not (String.equal public "-") -> [ public ]
-  | _ -> []
+  | Some public when not (String.equal public "-") -> Some public
+  | _ -> None
 
 (** Each PROGRAM an [(executable)]/[(executables)] stanza declares, paired with the stanzas that run
     it. One name is one program: a rule running `b.exe` is not a runner of `a` (gh-ocannl-747).
 
-    [runner_stanzas] defaults to [stanzas] and is where a caller descending into a [(subdir …)]
-    passes the whole file, since a top-level rule may run a nested executable. *)
-let program_runners ?subdir ?runner_stanzas stanzas stanza =
-  let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
+    [runner_stanzas] pairs each candidate runner with the SUBDIRECTORY it was found in, and defaults
+    to [stanzas] in [subdir]. A caller descending into a [(subdir …)] passes the whole file, since a
+    top-level rule may run a nested executable — and it has to pass each rule's own subdirectory
+    along with it, because the path a rule writes is relative to where the rule lives. Resolving both
+    sides to a directory-qualified path is what tells `(subdir a (rule … probe.exe))` from
+    `(subdir b (rule … probe.exe))`: comparing the written path against an unqualified `probe.exe`
+    made each a runner of the other's program, so an unrun executable in [a] could inherit [b]'s
+    declaration (Codex P2, round 3 of PR #484). It is also what keeps `../support/probe.exe` a
+    different program from the local one, which is why the path is matched AS WRITTEN and not by
+    basename (Codex P2, round 2 of PR #457).
+
+    A public name is not a path and is compared as written: `%{bin:pkg.probe}` names the same program
+    from anywhere, which is what `classify_command` records it as (Codex P2, round 3 of PR #457). *)
+let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
+  let runner_stanzas =
+    match runner_stanzas with
+    | Some runners -> runners
+    | None -> List.map stanzas ~f:(fun s -> (subdir, s))
+  in
   let names = match names_of stanza with [] -> [ "<unnamed>" ] | names -> names in
   List.mapi names ~f:(fun index name ->
-      let wanted = program_identities ?subdir stanza ~index ~name in
+      let canonical = in_subdir subdir (name ^ ".exe") in
+      let public = program_public_name stanza ~index in
       ( name,
-        List.filter runner_stanzas ~f:(fun s ->
-            List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal)) ))
+        List.filter_map runner_stanzas ~f:(fun (runner_subdir, s) ->
+            let runs path =
+              String.equal (in_subdir runner_subdir path) canonical
+              || Option.value_map public ~default:false ~f:(String.equal path)
+            in
+            if List.exists (exes_run s) ~f:runs then Some s else None) ))
 
 (** Dune's own main-module rule (gh-ocannl-747): the executable named [a] is built from the module
     [a] of the stanza's module set, and every module that is no name's main module is linked into all
@@ -1864,7 +1881,10 @@ type artifact_subject = {
     declaration of its own is not a subject and is not reported. *)
 let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas stanzas ~calls
     ~reads_prefix =
-  let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
+  (* Each candidate runner with the subdirectory it was found in; see {!program_runners}. *)
+  let runner_stanzas =
+    Option.value runner_stanzas ~default:(List.map stanzas ~f:(fun s -> (subdir, s)))
+  in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
      executable, a command it could not place, a program under an unresolvable `chdir`. That is what
      decides whether the converse question below is this stanza's to answer: a stanza that runs an

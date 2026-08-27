@@ -139,6 +139,16 @@ let tracing_gates_in_source content =
 
 (** {1 Resolving a receiver} *)
 
+(** The simple name a pattern binds, where it has one. Best-effort by design: a pattern this does not
+    recognise yields no name, and every client of it treats a nameless binding as the answer that
+    costs least. *)
+let rec pattern_name pattern =
+  match pattern.ppat_desc with
+  | Ppat_var { txt; _ } -> Some txt
+  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> pattern_name inner
+  | _ -> None
+
+
 (* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
    where a functor application is a shape the language admits, and a scan that raised on one would
    refuse a file for containing an unrelated [module M = F (X)]. *)
@@ -161,16 +171,26 @@ let path_ends_in name txt =
 
     The aliases are collected in this pass and the call sites matched against them in a second — OCaml
     lets neither be used before it is bound, so two passes cost nothing and save the walk from
-    depending on that. An [open] is taken to reach the whole file rather than its own scope, which is
-    the over-reading direction and the safe one for a check that asks for a DECLARATION: one too many
-    makes dune rerun a stanza it need not have, one too few is the stale run.
+    depending on that.
+
+    Two answers about the [open]s, because the two clients want opposite defaults. [opened] says one
+    exists anywhere in the file, which is the over-reading direction and the safe one for the
+    initializer census: a caller too many makes dune rerun a stanza it need not have, one too few is
+    the stale run. [open_ranges] says WHERE each is in scope — an [open] at structure level reaching
+    to the end of the structure that holds it, a [let open … in body] reaching over the body — which
+    is what a client wanting the other direction needs (Codex P2, round 3 of PR #484).
 
     Shared by the two scans that match a call by its receiver — the initializer census below and the
     environment reader above — because a second copy of these rules is exactly the restatement this
     module exists to avoid. *)
 let module_bindings_of structure ~wanted =
   let aliases = ref [] and opened = ref false in
-  let bind_module_expr alias module_expr =
+  let open_ranges = ref [] in
+  (* The end of the structure currently being walked, which is how far a structure-level `open`
+     reaches. Kept as a stack, so an `open` inside a `module M = struct … end` scopes to that struct
+     and not to the file. *)
+  let structure_end = ref 0 in
+  let bind_module_expr ?(scope = fun () -> (0, Int.max_value)) alias module_expr =
     let names_it txt =
       path_ends_in wanted txt
       ||
@@ -195,34 +215,116 @@ let module_bindings_of structure ~wanted =
     in
     match (unwrap module_expr).pmod_desc with
     | Pmod_ident { txt; _ } when names_it txt -> (
-        match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
+        match alias with
+        | Some alias -> aliases := alias :: !aliases
+        | None ->
+            opened := true;
+            open_ranges := scope () :: !open_ranges)
     | _ -> ()
   in
   let binders =
     object
       inherit Ast_traverse.iter as super
 
+      method! structure items =
+        let saved = !structure_end in
+        (match List.last items with
+        | Some last -> structure_end := last.pstr_loc.loc_end.pos_cnum
+        | None -> ());
+        super#structure items;
+        structure_end := saved
+
       method! structure_item item =
         (match item.pstr_desc with
         | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
             bind_module_expr alias pmb_expr
-        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+        | Pstr_open { popen_expr; _ } ->
+            bind_module_expr ~scope:(fun () ->
+                (item.pstr_loc.loc_end.pos_cnum, !structure_end))
+              None popen_expr
         (* `include Test_utils.Generated` puts the contents in scope under no name of their own,
            which is the same situation an `open` leaves. *)
-        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+        | Pstr_include { pincl_mod; _ } ->
+            bind_module_expr ~scope:(fun () ->
+                (item.pstr_loc.loc_end.pos_cnum, !structure_end))
+              None pincl_mod
         | _ -> ());
         super#structure_item item
 
       method! expression expr =
         (match expr.pexp_desc with
         | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
-        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
+        | Pexp_open ({ popen_expr; _ }, body) ->
+            bind_module_expr
+              ~scope:(fun () ->
+                (body.pexp_loc.loc_start.pos_cnum, body.pexp_loc.loc_end.pos_cnum))
+              None popen_expr
         | _ -> ());
         super#expression expr
     end
   in
   binders#structure structure;
-  (!aliases, !opened)
+  (!aliases, !opened, List.rev !open_ranges)
+
+(** Whether an offset falls inside any of [ranges]. *)
+let within ranges offset = List.exists ranges ~f:(fun (start, stop) -> start <= offset && offset < stop)
+
+(** Where a binding of the simple name [fn] is in scope in [structure]: a [let fn = …] at structure
+    level reaching to the end of the structure that holds it, a [let fn = … in body] reaching over
+    the body, and a parameter called [fn] reaching over its function.
+
+    What it is for is shadowing. A file that both opens a module and defines its own [fn] spells the
+    bare name for its own, and a scan that read the [open] alone would attribute the call to the
+    module — which for a check that asks for an [(env_var …)] declaration means failing a correct
+    stanza over a variable the program never reads (Codex P2, round 3 of PR #484).
+
+    Best-effort in the direction that costs least: a pattern {!pattern_name} does not recognise
+    yields no range, and a call inside BOTH an open's scope and a shadow's is read as shadowed
+    whichever is inner. Both leave a bare call unattributed rather than wrongly attributed, which is
+    the safe direction for the client that asks. *)
+let shadow_ranges_of structure ~fn =
+  let ranges = ref [] in
+  let structure_end = ref 0 in
+  let binds bindings =
+    List.exists bindings ~f:(fun b ->
+        Option.value_map (pattern_name b.pvb_pat) ~default:false ~f:(String.equal fn))
+  in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure items =
+        let saved = !structure_end in
+        (match List.last items with
+        | Some last -> structure_end := last.pstr_loc.loc_end.pos_cnum
+        | None -> ());
+        super#structure items;
+        structure_end := saved
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_value (_, bindings) when binds bindings ->
+            ranges := (item.pstr_loc.loc_end.pos_cnum, !structure_end) :: !ranges
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_let (_, bindings, body) when binds bindings ->
+            ranges := (body.pexp_loc.loc_start.pos_cnum, body.pexp_loc.loc_end.pos_cnum) :: !ranges
+        | Pexp_function (params, _, _)
+          when List.exists params ~f:(fun p ->
+                   match p.pparam_desc with
+                   | Pparam_val (_, _, pattern) ->
+                       Option.value_map (pattern_name pattern) ~default:false ~f:(String.equal fn)
+                   | _ -> false) ->
+            ranges := (expr.pexp_loc.loc_start.pos_cnum, expr.pexp_loc.loc_end.pos_cnum) :: !ranges
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure structure;
+  List.rev !ranges
 
 (** Whether [path] names [fn] of the module [wanted], given that module's local bindings: written out
     or reached through an alias, or spelled bare under an [open]/[include] of it. *)
@@ -275,9 +377,18 @@ let env_reader_reads_in_source content =
   let structure = structure_of content in
   let keys = ref [] and dynamic = ref false in
   let blessed = Hash_set.create (module Int) in
-  let aliases, opened = module_bindings_of structure ~wanted:utils_module in
-  let names_the_reader path =
-    names_function_of ~wanted:utils_module ~aliases ~opened ~fn:env_reader path
+  let aliases, _opened, open_ranges = module_bindings_of structure ~wanted:utils_module in
+  let shadows = shadow_ranges_of structure ~fn:env_reader in
+  (* A BARE call is this function only where an `open Utils` is in scope and nothing of the file's
+     own shadows the name there. Both halves are lexical, not file-wide: an `open` reaches its
+     structure or its `let open … in` body, and a local `let read_env_var _ = None` takes the name
+     back over the body it binds (Codex P2, round 3 of PR #484). A qualified call is unaffected by
+     either -- `U.read_env_var` names the module whatever the file binds locally. *)
+  let names_the_reader ~offset path =
+    match List.rev path with
+    | last :: [] when String.equal last env_reader ->
+        within open_ranges offset && not (within shadows offset)
+    | _ -> names_function_of ~wanted:utils_module ~aliases ~opened:false ~fn:env_reader path
   in
   let iterator =
     object
@@ -287,7 +398,7 @@ let env_reader_reads_in_source content =
         (match expr.pexp_desc with
         | Pexp_apply (f, args) -> (
             match longident_of f with
-            | Some path when names_the_reader path -> (
+            | Some path when names_the_reader ~offset:f.pexp_loc.loc_start.pos_cnum path -> (
                 (* Blessed before the walk descends into [f], so the identifier arm below does not
                    read the function of a resolved call as one handed on as a value. *)
                 Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum;
@@ -303,7 +414,8 @@ let env_reader_reads_in_source content =
                    reach. *)
                 | None -> dynamic := true)
             | _ -> ())
-        | Pexp_ident { txt; _ } when names_the_reader (flatten_longident txt) ->
+        | Pexp_ident { txt; _ }
+          when names_the_reader ~offset:expr.pexp_loc.loc_start.pos_cnum (flatten_longident txt) ->
             if not (Hash_set.mem blessed expr.pexp_loc.loc_start.pos_cnum) then dynamic := true
         | _ -> ());
         super#expression expr
@@ -376,7 +488,7 @@ let generated_init = "init"
     the rule built on this exists to prevent. *)
 let generated_init_calls_in_source content =
   let structure = structure_of content in
-  let aliases, opened = module_bindings_of structure ~wanted:generated_module in
+  let aliases, opened, _open_ranges = module_bindings_of structure ~wanted:generated_module in
   let is_the_call path =
     names_function_of ~wanted:generated_module ~aliases ~opened ~fn:generated_init path
   in
@@ -466,13 +578,6 @@ type definition = { start : int; stop : int; name : string option; top_level : b
     [name] is best-effort and fails safe: a pattern this does not recognise yields no name, and a
     nameless function is refused rather than exempted. The module path is kept for the reader, as
     [top_level] is what an exemption may rely on. *)
-
-(* The simple name a pattern binds, where it has one. Best-effort by design: see above. *)
-let rec pattern_name pattern =
-  match pattern.ppat_desc with
-  | Ppat_var { txt; _ } -> Some txt
-  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> pattern_name inner
-  | _ -> None
 
 let definitions content =
   let ast = structure_of content in
