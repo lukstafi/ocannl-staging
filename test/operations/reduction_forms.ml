@@ -647,6 +647,12 @@ type peel_claim =
 let guard_verdict_name = function
   | LL.Guard_confined -> "a confined guard"
   | LL.Guard_lane_private -> "a lane-private guard"
+  | LL.Guard_lane_private_unresolved ->
+      (* Unreachable in a member's declaration: separation is decided at the base, so only a
+         REFUSING report leaves a lane-private guard unresolved, and no site that localized carries
+         one. Named rather than wildcarded, so a verdict added to the peel must be given a word
+         here. *)
+      "a lane-private guard the peel never settled"
 
 let peel_claim_name = function
   | Peeled { Cs.levels; guards } ->

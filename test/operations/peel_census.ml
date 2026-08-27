@@ -342,6 +342,101 @@ let () =
   Verdict.p_all "every peel site of the data-guarded nest refused" data.summary.Cs.sites
     ~f:(fun (_, site) -> not (Cs.is_localized_peel site))
 
+(* {1 The report a refusal carries}
+
+   The census only ever shows the guards of a site that LOCALIZED, but [~report] is public and a
+   consumer sees the refusing reports too. A [Lane_private_if_separated] guard is admitted only once
+   the base's cell has been shown to separate the enclosing symbols it mentions — a check that
+   happens at the base — so a report that refused before reaching one must not read as though the
+   guard had been admitted (Codex P2, round 1). Asked of [peel_accum_nest] directly, over the two
+   nests that differ ONLY in the accumulated cell: per-lane, so separation holds; shared, so it does
+   not. *)
+let () =
+  let src = Tn.create (Tn.Specified prec) ~id:733_900_001 ~label:[ "pcsrc" ]
+      ~unpadded_dims:(lazy [| 4 |])
+      ~padding:(lazy None)
+      ()
+  in
+  let lanes = Tn.create (Tn.Specified prec) ~id:733_900_002 ~label:[ "pclanes" ]
+      ~unpadded_dims:(lazy [| 4 |])
+      ~padding:(lazy None)
+      ()
+  in
+  let shared = Tn.create (Tn.Specified prec) ~id:733_900_003 ~label:[ "pcshared" ]
+      ~unpadded_dims:(lazy [| 1 |])
+      ~padding:(lazy None)
+      ()
+  in
+  let w = Idx.get_symbol () in
+  let report_of ~cell =
+    let k = Idx.get_symbol () in
+    let tn, idcs =
+      match cell with
+      | `Per_lane -> (lanes, [| Idx.Iterator w |])
+      | `Shared -> (shared, [| Idx.Fixed_idx 0 |])
+    in
+    let nest =
+      LL.For_loop
+        {
+          index = k;
+          from_ = 0;
+          to_ = 3;
+          axis = LL.Serial;
+          body =
+            LL.If
+              {
+                (* [w + k < 1]: mentions the peeled [k] and the enclosing [w], which is exactly the
+                   guard [Affine.peel_guard] admits conditionally. *)
+                cond =
+                  ( LL.Binop
+                      ( Ops.Cmplt,
+                        ( LL.Embed_index (Idx.Affine { symbols = [ (1, w); (1, k) ]; offset = 0 }),
+                          prec ),
+                        (LL.Constant 1.0, prec) ),
+                    prec );
+                body =
+                  LL.Set
+                    {
+                      tn;
+                      idcs;
+                      llsc =
+                        LL.Binop
+                          ( Ops.Add,
+                            (LL.Get (tn, idcs), prec),
+                            (LL.Get (src, [| Idx.Iterator k |]), prec) );
+                      debug = "";
+                    };
+              };
+        }
+    in
+    let report = ref None in
+    let peeled =
+      LL.peel_accum_nest
+        ~report:(fun r -> report := Some r)
+        ~loop_bounds:[ (w, (0, 3)) ] ~free_of:[] nest
+    in
+    (Option.is_some peeled, Option.value_exn !report)
+  in
+  let peeled_lane, lane_report = report_of ~cell:`Per_lane in
+  let peeled_shared, shared_report = report_of ~cell:`Shared in
+  Stdio.eprintf "per-lane: %s\nshared:   %s\n%!"
+    (Sexp.to_string (LL.sexp_of_peel_report lane_report))
+    (Sexp.to_string (LL.sexp_of_peel_report shared_report));
+  p "a lane-private guard over a per-lane cell peels, and the report admits the guard"
+    (peeled_lane
+    && Option.is_none lane_report.LL.refusal
+    && List.equal LL.equal_peel_guard_verdict lane_report.LL.guards [ LL.Guard_lane_private ]);
+  p "the same guard over a shared cell refuses, and the report leaves that guard unresolved"
+    ((not peeled_shared)
+    && Option.equal LL.equal_peel_refusal shared_report.LL.refusal (Some LL.Refused_cell_shared)
+    && List.equal LL.equal_peel_guard_verdict shared_report.LL.guards
+         [ LL.Guard_lane_private_unresolved ]);
+  Verdict.p_none "no refusing report claims an admitted lane-private guard"
+    [ shared_report ]
+    ~f:(fun r ->
+      Option.is_some r.LL.refusal
+      && List.mem r.LL.guards LL.Guard_lane_private ~equal:LL.equal_peel_guard_verdict)
+
 (* {1 The bracket's own discipline}
 
    [with_peel_census] is what makes the census a property of the compiled routine rather than of

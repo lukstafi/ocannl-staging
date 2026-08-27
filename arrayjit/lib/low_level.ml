@@ -5303,7 +5303,8 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
    purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
    form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
-type peel_guard_verdict = Guard_confined | Guard_lane_private [@@deriving sexp, equal, compare]
+type peel_guard_verdict = Guard_confined | Guard_lane_private | Guard_lane_private_unresolved
+[@@deriving sexp, equal, compare]
 
 type peel_refusal =
   | Refused_not_a_nest
@@ -5403,7 +5404,20 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free
      [guards] is accumulated innermost-first and reversed at the exit, so a reader sees the nest
      order. *)
   let rec peel ~free_of ~pending ~levels ~guards ~rebuild body =
-    let refuse refusal = (None, { levels; guards = List.rev guards; refusal = Some refusal }) in
+    (* A [Lane_private_if_separated] guard is only ADMITTED once the base's cell has been shown to
+       separate the enclosing symbols it mentions, and that check happens at the base — so on a
+       refusal the guard's own question was never settled, and reporting it as admitted beside a
+       refusal would make the report contradict itself (Codex P2, round 1). The descent carries the
+       optimistic tag and each exit resolves it: the base resolves it to admitted, every refusal to
+       {!Guard_lane_private_unresolved}. *)
+    let unresolved =
+      List.map ~f:(function
+        | Guard_lane_private -> Guard_lane_private_unresolved
+        | (Guard_confined | Guard_lane_private_unresolved) as g -> g)
+    in
+    let refuse refusal =
+      (None, { levels; guards = unresolved (List.rev guards); refusal = Some refusal })
+    in
     let reached result = (Some result, { levels; guards = List.rev guards; refusal = None }) in
     match strip (flat_lines [ body ]) with
     | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
@@ -5462,7 +5476,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free
           | _ when Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
               reached (tn, idcs, `Update llsc, debug, rebuild)
           | _ -> refuse Refused_not_a_nest)
-    | _ -> (None, { levels; guards = List.rev guards; refusal = Some Refused_not_a_nest })
+    | _ -> refuse Refused_not_a_nest
   in
   let result, rep = peel ~free_of ~pending:[] ~levels:0 ~guards:[] ~rebuild:(fun b -> b) body in
   Option.iter report ~f:(fun f -> f rep);

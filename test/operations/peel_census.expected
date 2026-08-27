@@ -17,6 +17,9 @@ the nest-fixed guard is refused as a guard whose truth is fixed for the nest: tr
 its enclosing level is refused because the accumulated cell varies: true
 the data-dependent guard localizes nowhere: true
 every peel site of the data-guarded nest refused: true
+a lane-private guard over a per-lane cell peels, and the report admits the guard: true
+the same guard over a shared cell refuses, and the report leaves that guard unresolved: true
+no refusing report claims an admitted lane-private guard: true
 an inner bracket summarizes only its own sites: true
 the enclosing bracket sees both, in emission order: true
 a completed bracket leaves the census global as it found it: true
