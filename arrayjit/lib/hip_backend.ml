@@ -1575,7 +1575,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 #define NAN __builtin_nanf("")
 #endif|}
 
-  let%diagn2_sexp compile ~name bindings (lowered : Low_level.optimized) =
+  let%diagn2_sexp compile ~name bindings lowered =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
       let procs = [| lowered.Low_level.llc |]
     end))
