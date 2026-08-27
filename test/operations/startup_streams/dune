@@ -70,12 +70,25 @@
 ; the test needs -- the golden is empty, and it is the whole assertion. The dep on ocannl_config
 ; is what config_dep_completeness asks of a rule that runs an executable; this rule disables the
 ; file rather than reading it, and depending on it anyway keeps the two claims independent.
+;
+; The env_var deps are the guard's keys, declared on EVERY rule that runs this executable and not on
+; the guarding one alone (gh-ocannl-749, Codex P1). This rule's claim is stream-level and does hold
+; under any of them -- but dune invalidates each rule on its own deps, so a check that let a
+; neighbour's declaration answer for this run could not tell that case apart from a rule that had
+; dropped a key. Three of the five are pinned on the commandline below besides, which the ambient
+; environment cannot outrank; the declaration costs a rerun and says so where the next author reads.
 
 (rule
  ; ocannl-backend: none -- startup_streams.exe links no backend; the claim is about which stream
  ; the startup banner and the unknown-key warning go to, neither of which names a backend.
  (target stdout_clean.actual)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
+  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var OCANNL_PROFILE))
  (action
   (with-stdout-to
    %{target}
@@ -133,7 +146,13 @@
  ; ocannl-backend: none -- startup_streams.exe links no backend; the claim is about which stream
  ; the startup banner and the unknown-key warning go to, neither of which names a backend.
  (target default_stderr.actual)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
+  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var OCANNL_PROFILE))
  (action
   (with-stdin-from
    %{dep:default_stderr.raw}

@@ -69,30 +69,31 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
 Ambient variables a module reads by name at run time, and the stanza that declares each:
   OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
 
-Configuration keys a module reads straight from the environment through `Utils.read_env_var`, and how
-the stanza that runs it answers for each (gh-ocannl-749). A key read this way cannot be outranked
-by a commandline flag or a config file, so the run depends on the variable unconditionally:
-either the stanza declares it, or its rules pin it with `setenv`.
-  OCANNL_PROFILE                         test/operations/dune, test config_profiles (test/operations/config_profiles.ml, declared)
-  OCANNL_AUTOTUNE_BEAM_WIDTH             test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_AUTOTUNE_ROUNDS                 test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_AUTOTUNE_SEARCH                 test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_CC_BACKEND_ARCH_FLAGS           test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_CC_BACKEND_FP_CONTRACT          test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_CC_BACKEND_SIMD_FLAGS           test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_CC_VECTOR_BYTES                 test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_FP16_ARITHMETIC                 test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_MODEL_DEFAULT_SCHEDULE          test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_NO_CONFIG_FILE                  test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_PROFILE                         test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, pinned by `setenv`)
-  OCANNL_TF32_MATMULS                    test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_TUNE_INLINE_FLIPS               test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_VIRTUALIZE_MAX_VISITS           test/operations/profiles/dune, executable profile_precedence (test/operations/profiles/profile_precedence.ml, declared)
-  OCANNL_LOG_CONFIG_SOURCING             test/operations/startup_streams/dune, executable startup_streams (test/operations/startup_streams/startup_streams.ml, declared)
-  OCANNL_LOG_LEVEL                       test/operations/startup_streams/dune, executable startup_streams (test/operations/startup_streams/startup_streams.ml, declared)
-  OCANNL_NO_CONFIG_FILE                  test/operations/startup_streams/dune, executable startup_streams (test/operations/startup_streams/startup_streams.ml, declared)
-  OCANNL_PROFILE                         test/operations/startup_streams/dune, executable startup_streams (test/operations/startup_streams/startup_streams.ml, declared)
-  OCANNL_SUPPRESS_WELCOME_MESSAGE        test/operations/startup_streams/dune, executable startup_streams (test/operations/startup_streams/startup_streams.ml, declared)
+Configuration keys a program reads straight from the environment through `Utils.read_env_var`, and how
+many runs of it answer for each (gh-ocannl-749). A key read this way cannot be outranked by
+a commandline flag or a config file, so every run depends on the variable unconditionally --
+and EVERY one of them declares it or pins it with `setenv`, since dune invalidates each rule
+on its own deps.
+  OCANNL_PROFILE                         test/operations/dune, test config_profiles (1 run of it)
+  OCANNL_AUTOTUNE_BEAM_WIDTH             test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_AUTOTUNE_ROUNDS                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_AUTOTUNE_SEARCH                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_ARCH_FLAGS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_FP_CONTRACT          test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_SIMD_FLAGS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_VECTOR_BYTES                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_FP16_ARITHMETIC                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_MODEL_DEFAULT_SCHEDULE          test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_NO_CONFIG_FILE                  test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_PROFILE                         test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_TF32_MATMULS                    test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_TUNE_INLINE_FLIPS               test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_VIRTUALIZE_MAX_VISITS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_LOG_CONFIG_SOURCING             test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_LOG_LEVEL                       test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_NO_CONFIG_FILE                  test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_PROFILE                         test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_SUPPRESS_WELCOME_MESSAGE        test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
 
 Ambient environment gates, by dune file and every alias whose build runs one:
   arrayjit/test/dune                       @runtest

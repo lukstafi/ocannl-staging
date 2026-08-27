@@ -1670,6 +1670,107 @@ let sentinel_occurrences content =
 
 let artifact_env_var = "OCANNL_BUILD_FILES_PREFIX"
 
+(** {2 Which rules run which program}
+
+    Shared by every check phrased as "the stanza dune runs this module under declares X": the
+    artifact one below, and the ambient-guard one in [env_var_deps] (gh-ocannl-749). Lifted out of
+    {!artifact_subjects} rather than copied, since a second copy of the identity rules is exactly
+    the restatement those checks exist to replace. *)
+
+(* The path AS WRITTEN, which is the executable's identity here for the reason {!program_path}
+   gives: `../support/probe.exe` and a local `probe.exe` are different programs, and reducing both
+   to a basename made a rule running the first count as the runner of the second -- crediting a
+   local executable with a declaration made elsewhere, and hiding that nothing runs it (Codex P2,
+   round 2 of PR #457). *)
+let exes_run stanza =
+  List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
+      match command with Runs path -> Some path | _ -> None)
+  |> List.dedup_and_sort ~compare:String.compare
+
+(** The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
+    POSITIONALLY with [(names a b)], which is what lets one name of an [(executables …)] be asked
+    about on its own (gh-ocannl-747); [-] is dune's placeholder for a name that is not installed. *)
+let public_names stanza =
+  match field stanza "public_names" with
+  | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
+  | None -> ( match field stanza "public_name" with Some [ Sexp.Atom p ] -> [ p ] | _ -> [])
+
+(* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and the
+   public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
+   `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and its
+   executable reported as though nothing ran it (Codex P2, round 3 of PR #457).
+
+   A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`, so
+   the executable answers to both spellings (Codex P2, round 4). *)
+let program_identities ?(subdir = "") stanza ~index ~name =
+  let local = name ^ ".exe" in
+  (if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
+  @
+  match List.nth (public_names stanza) index with
+  | Some public when not (String.equal public "-") -> [ public ]
+  | _ -> []
+
+(** Each PROGRAM an [(executable)]/[(executables)] stanza declares, paired with the stanzas that run
+    it. One name is one program: a rule running `b.exe` is not a runner of `a` (gh-ocannl-747).
+
+    [runner_stanzas] defaults to [stanzas] and is where a caller descending into a [(subdir …)]
+    passes the whole file, since a top-level rule may run a nested executable. *)
+let program_runners ?subdir ?runner_stanzas stanzas stanza =
+  let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
+  let names = match names_of stanza with [] -> [ "<unnamed>" ] | names -> names in
+  List.mapi names ~f:(fun index name ->
+      let wanted = program_identities ?subdir stanza ~index ~name in
+      ( name,
+        List.filter runner_stanzas ~f:(fun s ->
+            List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal)) ))
+
+(** Dune's own main-module rule (gh-ocannl-747): the executable named [a] is built from the module
+    [a] of the stanza's module set, and every module that is no name's main module is linked into all
+    of them. Matched case-insensitively, since a module name is the capitalized source basename and
+    the [(names …)] field spells the file's.
+
+    What it decides is attribution. Before it, an [(executables (names a b) (modules a b))] stanza
+    combined both programs into one subject, so a rule running EITHER counted as a runner of both:
+    with `a.ml` calling the initializer and only `b.exe`'s rule omitting the declaration, `a` was
+    reported undeclared over a rule that runs neither its main module nor its initializer. *)
+let main_module_of modules name =
+  List.find modules ~f:(fun m -> String.equal (String.lowercase m) (String.lowercase name))
+
+(** The modules of [stanza] that belong to the program called [name]: its own main module, plus every
+    module that is no name's main module and so is linked into all of them. *)
+let program_modules stanza ~modules ~name =
+  let mains = List.filter_map (names_of stanza) ~f:(main_module_of modules) in
+  Option.to_list (main_module_of modules name)
+  @ List.filter modules ~f:(fun m -> not (List.mem mains m ~equal:String.equal))
+
+(** The environment variables a stanza's action pins with [(setenv NAME value …)] at EVERY point
+    where it runs something.
+
+    A pinned variable cannot arrive from the ambient environment, so a run under one does not depend
+    on what the developer exported and needs no [(env_var …)] to invalidate it — the same argument a
+    key pinned on the commandline enjoys, which outranks the environment too.
+
+    Every run, and by SCOPE rather than by presence: [(setenv X v …)] pins only what it wraps, so a
+    rule whose [progn] pins one branch and runs the subject in another has not pinned the subject's
+    run (Codex P1, round 1 on PR #484). A stanza whose action runs nothing pins nothing, which is the
+    conservative answer — the caller then asks for the declaration. *)
+let env_vars_pinned_at_runs stanza =
+  let sites = ref [] in
+  let rec walk ~scope sexp =
+    match sexp with
+    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: _value :: body) ->
+        List.iter body ~f:(walk ~scope:(Set.add scope name))
+    | Sexp.List (Sexp.Atom ("run" | "run-with-exit-code") :: _) -> sites := scope :: !sites
+    | Sexp.List l -> List.iter l ~f:(walk ~scope)
+    | Sexp.Atom _ -> ()
+  in
+  (match field stanza "action" with
+  | Some args -> List.iter args ~f:(walk ~scope:(Set.empty (module String)))
+  | None -> ());
+  match !sites with
+  | [] -> Set.empty (module String)
+  | first :: rest -> List.fold rest ~init:first ~f:Set.inter
+
 (** The stanza heads that name their own modules, and so can be asked what those modules call. *)
 let module_bearing_heads = [ "test"; "tests"; "executable"; "executables"; "library" ]
 
@@ -1763,64 +1864,7 @@ type artifact_subject = {
     declaration of its own is not a subject and is not reported. *)
 let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas stanzas ~calls
     ~reads_prefix =
-  (* The path AS WRITTEN, which is the executable's identity here for the reason {!program_path}
-     gives: `../support/probe.exe` and a local `probe.exe` are different programs, and reducing both
-     to a basename made a rule running the first count as the runner of the second -- crediting a
-     local executable with a declaration made elsewhere, and hiding that nothing runs it (Codex P2,
-     round 2). *)
-  let exes_run stanza =
-    List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
-        match command with Runs path -> Some path | _ -> None)
-    |> List.dedup_and_sort ~compare:String.compare
-  in
-  (* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and
-     the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
-     `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and
-     its executable reported as though nothing ran it (Codex P2, round 3). *)
-  (* A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`,
-     so the executable answers to both spellings and the search for its runners covers the whole
-     file rather than its own group -- otherwise descending into the wrapper found both stanzas and
-     then discarded the relationship between them (Codex P2, round 4). *)
   let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
-  (* The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
-     POSITIONALLY with [(names a b)], which is what lets one name of an [(executables …)] be asked
-     about on its own (gh-ocannl-747); [-] is dune's placeholder for a name that is not installed. *)
-  let public_names stanza =
-    match field stanza "public_names" with
-    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
-    | None -> ( match field stanza "public_name" with Some [ Sexp.Atom p ] -> [ p ] | _ -> [])
-  in
-  let local_identities name =
-    let local = name ^ ".exe" in
-    if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ]
-  in
-  (* The spellings ONE name of the stanza answers to. Asked per name rather than per stanza: an
-     [(executables (names a b))] declares two programs, and a rule running `b.exe` is not a runner
-     of `a` -- it links neither `a`'s main module nor anything only `a` links. *)
-  let identities stanza ~index ~name =
-    local_identities name
-    @
-    match List.nth (public_names stanza) index with
-    | Some public when not (String.equal public "-") -> [ public ]
-    | _ -> []
-  in
-  let runners_of stanza ~index ~name =
-    let wanted = identities stanza ~index ~name in
-    List.filter runner_stanzas ~f:(fun s ->
-        List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
-  in
-  (* Dune's own main-module rule (gh-ocannl-747): the executable named [a] is built from the module
-     [a] of the stanza's module set, and every module that is no name's main module is linked into
-     all of them. Matched case-insensitively, since a module name is the capitalized source
-     basename and the [(names …)] field spells the file's.
-
-     What it decides is attribution. Before it, an [(executables (names a b) (modules a b))] stanza
-     combined both programs into one subject, so a rule running EITHER counted as a runner of both:
-     with `a.ml` calling the initializer and only `b.exe`'s rule omitting the declaration, `a` was
-     reported undeclared over a rule that runs neither its main module nor its initializer. *)
-  let main_module_of modules name =
-    List.find modules ~f:(fun m -> String.equal (String.lowercase m) (String.lowercase name))
-  in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
      executable, a command it could not place, a program under an unresolvable `chdir`. That is what
      decides whether the converse question below is this stanza's to answer: a stanza that runs an
@@ -1904,20 +1948,16 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                    every module no name claims, judged against the rules that run IT (gh-ocannl-747).
                    For the single-name shape -- everything in this repository -- that is the same
                    partition as before, the whole module set against every runner. *)
-                let names = match names_of stanza with [] -> [ "<unnamed>" ] | names -> names in
-                let mains = List.filter_map names ~f:(main_module_of modules) in
-                let shared =
-                  List.filter modules ~f:(fun m -> not (List.mem mains m ~equal:String.equal))
-                in
-                List.concat_mapi names ~f:(fun index name ->
-                    let own = Option.to_list (main_module_of modules name) @ shared in
+                List.concat_map (program_runners ~subdir ~runner_stanzas stanzas stanza)
+                  ~f:(fun (name, name_runners) ->
+                    let own = program_modules stanza ~modules ~name in
                     let callers = List.filter own ~f:calls in
                     let readers =
                       List.filter own ~f:(fun m -> (not (calls m)) && reads_prefix m)
                     in
                     let decide = decide ~as_name:name ~callers ~readers in
                     Option.to_list
-                      (match runners_of stanza ~index ~name with
+                      (match name_runners with
                       | [] ->
                           if List.is_empty callers && List.is_empty readers then None
                           else subject ~as_name:name ~callers ~readers Artifact_unrun "-"

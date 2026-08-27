@@ -13,9 +13,15 @@ the same stanza, declaring its backend, passes with the raw-text floor naming it
 the same command handed nothing of this workspace is a stanza neither reader sees: true
 
 The guard rule is put to a tree of one `(executable)` whose module reads a configuration key
-from a LIST it hands to `Utils.read_env_var`, run by a rule that declares `(env_var OCANNL_VIRTUALIZE_MAX_VISITS)`,
-pins it with `setenv`, or does neither. Nothing else differs between the three runs.
+from a LIST it hands to `Utils.read_env_var`. The arms differ in how the rules running it
+answer for `(env_var OCANNL_VIRTUALIZE_MAX_VISITS)`, in whether the stanza writes its `(modules …)` down, and in whether
+the key list is resolvable at all. Nothing else differs between the runs.
 
 the checker reports the key and exits 1 when the rule running the guard neither declares nor pins it: true
 the same tree with the declaration added passes and says nothing about it: true
 and so does the same tree pinning the variable with `setenv` instead: true
+a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported: true
+a stanza reaching for dune's default module set is judged too, not skipped for lack of a `(modules …)` field: true
+a second rule running the same executable answers for its own run: one declaring does not cover the other: true
+and the same pair with both declaring passes: true
+a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence: true
