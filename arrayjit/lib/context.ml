@@ -72,6 +72,7 @@ type routine = {
   routine_id : int;
   execution_deps : Set.M(Int).t;
   mma : Ir.C_syntax.mma_summary;
+  peel : Ir.C_syntax.peel_summary;
 }
 
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
@@ -154,7 +155,11 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
                codegen (gh-ocannl-626): whether a routine tensorized is a property of the compiled
                routine, not of whichever timing harness remembered to bracket the global. Fissioned
                segments compile inside this bracket, so their kernels land in the same summary. *)
-            let outcome, mma =
+            let (outcome, mma), peel =
+              (* And the reduction peel's own census (gh-ocannl-733), bracketed the same way and for
+                 the same reason: which decision produced a kernel is a property of the compiled
+                 routine, not of whichever test remembered to collect it. *)
+              Ir.C_syntax.with_peel_census @@ fun () ->
               Ir.C_syntax.with_census (fun () ->
                   Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
                     ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
@@ -168,13 +173,14 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
             match outcome with
             | Ok r ->
                 ( r.BI.context,
-                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs, mma) )
+                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs, mma, peel)
+                )
             | Error failure -> (bctx, Error failure));
       }
   in
   match backend_outcome with
   | Error failure -> Error failure
-  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma) ->
+  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma, peel) ->
       (* Allocate unique ID from shared ledger *)
       let id = ctx.ledger.next_id in
       ctx.ledger.next_id <- id + 1;
@@ -251,6 +257,7 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
           routine_id = id;
           execution_deps = deps;
           mma;
+          peel;
         }
       in
 

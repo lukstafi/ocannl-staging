@@ -190,6 +190,105 @@ let with_census f =
   restore ();
   (result, summarize_census renderings)
 
+(* {2 The peel census (gh-ocannl-733)}
+
+   The [Tile_mma] census answers "did this routine tensorize". This one answers the same kind of
+   question for the reduction peel — "which DECISION produced this kernel" — which the emitted form
+   cannot answer on its own: a nest whose accumulated cell is free of the enclosing index peels BOTH
+   levels under a [Confined_to_peel] guard, while one whose cell mentions it peels the inner level
+   only, under a [Lane_private_if_separated] guard admitted because the cell separates the lanes
+   (gh-ocannl-721). The two render the same localized kernel — one closing store, two node
+   subscripts, no foreign store — so a test classifying the emitted code passes over either, whether
+   or not the code path it is named for ran.
+
+   Collected exactly where the decision is made, in [try_localize_serial_reduce], and only at sites
+   where localization is a live question ([Low_level.has_accumulation] of the level's body): a
+   non-accumulating loop was never a candidate, and censusing it would bury the reductions in noise.
+   The refs are bracketed by {!with_peel_census}, which {!Context.compile} calls around every
+   routine's codegen, so the summary is a field of the compiled routine rather than something a
+   caller must remember to collect. *)
+
+type peel_skip =
+  | Skip_debug_logging
+      (** [debug_log_from_routines]: the per-step [Set] form is kept so the trace survives. *)
+  | Skip_dead_level  (** The level being rendered is dead ([to_ < from_]). *)
+  | Skip_accum_pinned
+      (** The peel reached a base whose update renders at storage precision (the rng carve-out,
+          gh-ocannl-517), so localizing it would change the draw rather than move it. *)
+[@@deriving sexp, equal, compare]
+
+type peel_site =
+  | Peel_localized of { levels : int; guards : Low_level.peel_guard_verdict list }
+      (** The site localized: [levels] loop levels were peeled, and each [If] among them earned the
+          verdict listed, outermost first. *)
+  | Peel_refused of Low_level.peel_refusal  (** [Low_level.peel_accum_nest] refused, with why. *)
+  | Peel_not_attempted of peel_skip  (** Codegen declined without asking the peel, or after it. *)
+[@@deriving sexp, equal, compare]
+
+let peel_census_enabled = ref false
+let peel_census : (string * peel_site) list ref = ref []
+
+let is_localized_peel = function
+  | Peel_localized _ -> true
+  | Peel_refused _ | Peel_not_attempted _ -> false
+
+type peel_summary = {
+  sites : (string * peel_site) list;
+      (** The census entries of one compile, in emission order (kernel name, site). Fissioned
+          segments of one routine contribute their kernels to the same summary. *)
+  localized : int;
+  declined : int;  (** Sites that did not localize, refused and not-attempted together. *)
+}
+[@@deriving sexp_of]
+(** What a compile's {!peel_census} says about the routine it produced (gh-ocannl-733). *)
+
+let summarize_peel_census sites =
+  let localized = List.count sites ~f:(fun (_, s) -> is_localized_peel s) in
+  { sites; localized; declined = List.length sites - localized }
+
+let empty_peel_summary = summarize_peel_census []
+
+(** The one-line peel census a report prints beside a routine (gh-ocannl-733): how many reduction
+    sites localized, and the distinct verdicts they earned. *)
+let peel_summary_string summary =
+  match summary.sites with
+  | [] -> "no reduction peel site"
+  | sites ->
+      let counted =
+        List.map
+          (List.dedup_and_sort (List.map sites ~f:snd) ~compare:compare_peel_site)
+          ~f:(fun s ->
+            Printf.sprintf "%s x%d"
+              (Sexp.to_string (sexp_of_peel_site s))
+              (List.count sites ~f:(fun (_, s') -> equal_peel_site s s')))
+      in
+      Printf.sprintf "%d localized, %d declined: %s" summary.localized summary.declined
+        (String.concat ~sep:", " counted)
+
+(** Run [f] with the {!peel_census} collecting, and return its result alongside the summary of what
+    the reduction peel decided during it (gh-ocannl-733). Nests additively and restores both refs,
+    exactly as {!with_census} does for the [Tile_mma] census — and for the same reason: an enclosing
+    collection must still see an inner compile's sites. *)
+let with_peel_census f =
+  let saved_enabled = !peel_census_enabled and saved_census = !peel_census in
+  peel_census_enabled := true;
+  peel_census := [];
+  let restore () =
+    let inner = !peel_census in
+    peel_census_enabled := saved_enabled;
+    peel_census := if saved_enabled then inner @ saved_census else saved_census
+  in
+  let result =
+    match f () with
+    | r -> r
+    | exception e ->
+        restore ();
+        raise e
+  in
+  let sites = List.rev !peel_census in
+  restore ();
+  (result, summarize_peel_census sites)
+
 type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
 (** The address space of a tile-MMA operand as the emission hooks see it. *)
 
@@ -4432,11 +4531,25 @@ module C_syntax (B : C_syntax_config) = struct
            volatile. Where the peel is blocked at an outer level, the device-memory RMW remains and
            the original pointer shadow still fires. *)
         let try_localize_serial_reduce () : PPrint.document option =
+          (* The peel census (gh-ocannl-733) records what this site DECIDED, not merely what it
+             rendered. Only accumulating levels are censused: elsewhere localization was never a
+             question, and the entries would drown the reductions. *)
+          let censusing = !peel_census_enabled && Low_level.has_accumulation body in
+          let record site =
+            if censusing then peel_census := (!current_kernel_name, site) :: !peel_census
+          in
           (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
              which covers the levels BELOW this one. This is the same refusal for the level being
              rendered, whose bounds the peel never sees (the caller re-wraps it via
              [rebuild_hook]). *)
-          if Utils.debug_log_from_routines () || to_ < from_ then None
+          if Utils.debug_log_from_routines () then begin
+            record (Peel_not_attempted Skip_debug_logging);
+            None
+          end
+          else if to_ < from_ then begin
+            record (Peel_not_attempted Skip_dead_level);
+            None
+          end
           else
             let localize (tn, idcs, base, debug, rebuild) =
               match base with
@@ -4505,10 +4618,37 @@ module C_syntax (B : C_syntax_config) = struct
                   | None -> false)
               | _ -> false
             in
-            Option.bind
-              (Low_level.peel_accum_nest ~extra_level:serialized_hardware
-                 ~loop_bounds:!current_loop_bounds ~free_of:[ i ] body)
-              ~f:localize
+            let report = ref None in
+            let peeled =
+              Low_level.peel_accum_nest ~extra_level:serialized_hardware
+                ~report:(fun r -> report := Some r)
+                ~loop_bounds:!current_loop_bounds ~free_of:[ i ] body
+            in
+            match peeled with
+            | None ->
+                record
+                  (match !report with
+                  | Some { Low_level.refusal = Some refusal; _ } -> Peel_refused refusal
+                  | _ ->
+                      (* [peel_accum_nest] reports exactly once, and a [None] result carries a
+                         refusal; this arm exists only so the census cannot invent a verdict. *)
+                      Peel_refused Low_level.Refused_not_a_nest);
+                None
+            | Some peeled -> (
+                match localize peeled with
+                | None ->
+                    (* The peel reached a base and the LOCALIZATION declined it: the storage-pinned
+                       accumulator. A census that recorded the peel's success here would credit the
+                       site with a rewrite the kernel does not contain. *)
+                    record (Peel_not_attempted Skip_accum_pinned);
+                    None
+                | Some doc ->
+                    record
+                      (match !report with
+                      | Some { Low_level.levels; guards; refusal = _ } ->
+                          Peel_localized { levels; guards }
+                      | None -> Peel_localized { levels = 0; guards = [] });
+                    Some doc)
         in
         let localize_or_serial () =
           match try_localize_serial_reduce () with Some doc -> doc | None -> serial_loop ()

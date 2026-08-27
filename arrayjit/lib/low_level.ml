@@ -5303,7 +5303,24 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
    purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
    form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
-let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body :
+type peel_guard_verdict = Guard_confined | Guard_lane_private [@@deriving sexp, equal, compare]
+
+type peel_refusal =
+  | Refused_not_a_nest
+  | Refused_dead_level
+  | Refused_guard_fixed of string
+  | Refused_cell_varies
+  | Refused_cell_shared
+[@@deriving sexp, equal, compare]
+
+type peel_report = {
+  levels : int;
+  guards : peel_guard_verdict list;
+  refusal : peel_refusal option;
+}
+[@@deriving sexp_of]
+
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free_of body :
     (Tn.t
     * Indexing.axis_index array
     * [ `Update of scalar_t | `Scope of scope_id * t list ]
@@ -5381,59 +5398,75 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body
      identifier the interface never declared. Refusing here covers every consumer at once: codegen's
      localization and [Schedule]'s [Unroll ~materialize:true] / [Partition] mints. The level then
      renders as the plain (access-free) dead loop it is. *)
-  let rec peel ~free_of ~pending ~rebuild body =
+  (* Every exit reports what it decided as well as whether it succeeded (gh-ocannl-733): the levels
+     peeled so far, the verdict of each guard peeled through, and the refusal where there is one.
+     [guards] is accumulated innermost-first and reversed at the exit, so a reader sees the nest
+     order. *)
+  let rec peel ~free_of ~pending ~levels ~guards ~rebuild body =
+    let refuse refusal = (None, { levels; guards = List.rev guards; refusal = Some refusal }) in
+    let reached result = (Some result, { levels; guards = List.rev guards; refusal = None }) in
     match strip (flat_lines [ body ]) with
-    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ]
-      when r.to_ >= r.from_ ->
+    | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
+      when (match axis with Serial | Unrolled | Vectorized -> true | _ -> extra_level index axis) ->
         (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
            [Set_local] update form and folds its chains into the scope local, so the whole nest
            keeps one accumulator residency even when an inner reduction axis is vectorized (autotune
            proposes Retype-[Vectorized] over reductions); where that rendering declines, the loop
-           renders serially over the scope local — same values either way. *)
-        peel ~free_of:(index :: free_of) ~pending
-          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
-          ibody
-    | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
-      when r.to_ >= r.from_ && extra_level index axis ->
-        (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
-           predicate accepting a hardware-annotated reduction loop its backend will serialize (no
+           renders serially over the scope local — same values either way.
+
+           Beyond those annotation-free kinds are the levels the CALLER vouches for: codegen passes
+           a predicate accepting a hardware-annotated reduction loop its backend will serialize (no
            hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
            whole-nest residency. The schedule mints pass nothing: wrapping a hardware-annotated loop
            in a scope at transform time would break the schedule on backends that do bind the
            hardware dimension. *)
-        peel ~free_of:(index :: free_of) ~pending
-          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
-          ibody
+        if r.to_ < r.from_ then refuse Refused_dead_level
+        else
+          peel ~free_of:(index :: free_of) ~pending ~levels:(levels + 1) ~guards
+            ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+            ibody
     | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc -> (
         let rebuild b = rebuild (If { cond = (gc, gp); body = b }) in
         match
           Affine.peel_guard ~loop_bound ~peeled:(peeled ~free_of) ~guard_syms:(guard_symbols gc)
         with
-        | Affine.Not_peelable _ -> None
-        | Affine.Confined_to_peel -> peel ~free_of ~pending ~rebuild gbody
+        | Affine.Not_peelable why -> refuse (Refused_guard_fixed why)
+        | Affine.Confined_to_peel ->
+            peel ~free_of ~pending ~levels ~guards:(Guard_confined :: guards) ~rebuild gbody
         | Affine.Lane_private_if_separated enclosing ->
-            peel ~free_of ~pending:(enclosing @ pending) ~rebuild gbody)
-    | [
-     Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug };
-    ]
-      when cell_invariant ~free_of idcs && cell_admits ~free_of ~pending tn idcs -> (
-        match strip (flat_lines [ sbody ]) with
-        | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
-          when Scope_id.equal id id' && Tn.equal tn tn'
-               && Array.length idcs = Array.length idcs'
-               && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
-               && (not (List.exists rest ~f:(code_touches_tn tn)))
-               && Option.is_some (scope_updates_reduce_op ~id (unflat_lines rest)) ->
-            Some (tn, idcs, `Scope (id, rest), debug, rebuild)
-        | _ -> None)
-    | [ Set { tn; idcs; llsc; debug } ]
-      when cell_invariant ~free_of idcs
-           && cell_admits ~free_of ~pending tn idcs
-           && Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
-        Some (tn, idcs, `Update llsc, debug, rebuild)
-    | _ -> None
+            peel ~free_of
+              ~pending:(enclosing @ pending)
+              ~levels
+              ~guards:(Guard_lane_private :: guards)
+              ~rebuild gbody)
+    | [ Set { tn; idcs; llsc; debug } ] ->
+        (* The cell checks are asked BEFORE the base's shape, and separately from each other, so
+           that the report distinguishes the three ways a base is refused: a cell varying across the
+           peeled levels, a cell shared by the lanes an admitted guard selects among, and a
+           statement that is not an accumulation at all. Which one it was is precisely what a form
+           claim cannot see (gh-ocannl-733). *)
+        if not (cell_invariant ~free_of idcs) then refuse Refused_cell_varies
+        else if not (cell_admits ~free_of ~pending tn idcs) then refuse Refused_cell_shared
+        else (
+          match llsc with
+          | Local_scope { id; body = sbody; orig_indices = _; mint = _ } -> (
+              match strip (flat_lines [ sbody ]) with
+              | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
+                when Scope_id.equal id id' && Tn.equal tn tn'
+                     && Array.length idcs = Array.length idcs'
+                     && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
+                     && (not (List.exists rest ~f:(code_touches_tn tn)))
+                     && Option.is_some (scope_updates_reduce_op ~id (unflat_lines rest)) ->
+                  reached (tn, idcs, `Scope (id, rest), debug, rebuild)
+              | _ -> refuse Refused_not_a_nest)
+          | _ when Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
+              reached (tn, idcs, `Update llsc, debug, rebuild)
+          | _ -> refuse Refused_not_a_nest)
+    | _ -> (None, { levels; guards = List.rev guards; refusal = Some Refused_not_a_nest })
   in
-  peel ~free_of ~pending:[] ~rebuild:(fun b -> b) body
+  let result, rep = peel ~free_of ~pending:[] ~levels:0 ~guards:[] ~rebuild:(fun b -> b) body in
+  Option.iter report ~f:(fun f -> f rep);
+  result
 
 (* gh-343: extract the per-iteration one-hot contribution from an accumulation [acc] in which the
    running total is recognized by [acc_is]. Handles the [Binop (Add, total, contribution)] form
