@@ -29,3 +29,4 @@ and the same library declaring it in `(inline_tests (deps …))` passes: true
 a second rule running the same executable answers for its own run: one declaring does not cover the other: true
 and the same pair with both declaring passes: true
 a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence: true
+a key spelled in upper case names the same variable, and is asked for under the same name: true

@@ -491,6 +491,19 @@ let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([], true) );
     (* The parameter carries its keys over the lambda's BODY and nowhere else, so a same-named
        variable elsewhere is not silently answered by it. *)
+    (* A name resolves to the binding VISIBLE at the use, not to the file's last one: taking the
+       latest read `let guarded = […] … let guarded = []` as the empty list and asked for no
+       declaration, while the guard really iterates the first (Codex P2, round 5 of PR #484). *)
+    ( "a later rebinding does not reach backwards",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let guarded = []|ocaml},
+      ([ "log_level" ], false) );
+    ( "and a use after the rebinding sees the new one",
+      {ocaml|let guarded = [ "log_level" ]
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
     ( "the binding does not escape the lambda it was established at",
       {ocaml|let guarded = [ "log_level" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))

@@ -393,21 +393,33 @@ let is_named name expr =
   | Some path -> ( match List.last path with Some last -> String.equal last name | None -> false)
   | None -> false
 
-(** The elements of the list [expr] denotes, where this scan can say. [bindings] maps a top-level
-    name to the list it was bound to, which is how [let guarded = …] reaches its use. *)
-let rec resolve_elements ~bindings expr =
+(** The elements of the list [expr] denotes, where this scan can say.
+
+    [bindings] carries each top-level name with the offset its binding ENDS at, and [before] is where
+    the use sits: the binding a name resolves to is the latest one that precedes the use, which is
+    what OCaml's sequential shadowing says it is. Taking the file-wide last binding instead read
+    [let guarded = […] … let guarded = []] as the empty list, so a guard that really iterates keys
+    was answered with none and its declarations went unasked for — the silent direction (Codex P2,
+    round 5 of PR #484). *)
+let rec resolve_elements ~bindings ~before expr =
   match list_literal expr with
   | Some elements -> Some elements
   | None -> (
       match expr.pexp_desc with
       | Pexp_ident { txt; _ } -> (
           match List.last (flatten_longident txt) with
-          | Some name -> List.Assoc.find bindings name ~equal:String.equal
+          | Some name ->
+              List.filter bindings ~f:(fun (bound, at, _) ->
+                  String.equal bound name && at <= before)
+              |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
+              |> Option.map ~f:(fun (_, _, elements) -> elements)
           | None -> None)
       (* `a @ b`, which is how a guard adds one key to a list it shares with something else. *)
       | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
         when is_named "@" op ->
-          Option.both (resolve_elements ~bindings left) (resolve_elements ~bindings right)
+          Option.both
+            (resolve_elements ~bindings ~before left)
+            (resolve_elements ~bindings ~before right)
           |> Option.map ~f:(fun (l, r) -> l @ r)
       (* `List.map keys ~f:fst`, which projects a table of key/default pairs onto its keys. *)
       | Pexp_apply (f, args) when is_named "map" f ->
@@ -418,7 +430,7 @@ let rec resolve_elements ~bindings expr =
                 else None)
           in
           let source =
-            List.find_map args ~f:(fun (_, arg) -> resolve_elements ~bindings arg)
+            List.find_map args ~f:(fun (_, arg) -> resolve_elements ~bindings ~before arg)
           in
           Option.both picker source
           |> Option.map ~f:(fun (picker, elements) ->
@@ -431,8 +443,8 @@ let rec resolve_elements ~bindings expr =
       | _ -> None)
 
 (** The string keys of a resolved list, or [None] where any element is not one. *)
-let resolve_keys ~bindings expr =
-  match resolve_elements ~bindings expr with
+let resolve_keys ~bindings ~before expr =
+  match resolve_elements ~bindings ~before expr with
   | None -> None
   | Some elements ->
       List.fold_until elements ~init:[]
@@ -440,15 +452,21 @@ let resolve_keys ~bindings expr =
           match element with Str value -> Continue (value :: acc) | Pair _ -> Stop None)
         ~finish:(fun acc -> Some (List.rev acc))
 
-(** Every top-level [let name = <list>] of the structure, for {!resolve_elements} to follow. Source
-    order, so a binding built from an earlier one resolves. *)
+(** Every top-level [let name = <list>] of the structure, each with the offset its binding ends at,
+    for {!resolve_elements} to pick the one visible at a use. Built in source order, so a binding
+    built out of an earlier one resolves and a REBINDING does not reach backwards. *)
 let list_bindings_of structure =
   List.fold structure ~init:[] ~f:(fun bindings item ->
       match item.pstr_desc with
       | Pstr_value (_, value_bindings) ->
+          let at = item.pstr_loc.loc_end.pos_cnum in
           List.fold value_bindings ~init:bindings ~f:(fun bindings binding ->
-              match (pattern_name binding.pvb_pat, resolve_elements ~bindings binding.pvb_expr) with
-              | Some name, Some elements -> (name, elements) :: bindings
+              match
+                ( pattern_name binding.pvb_pat,
+                  resolve_elements ~bindings ~before:binding.pvb_loc.loc_start.pos_cnum
+                    binding.pvb_expr )
+              with
+              | Some name, Some elements -> (name, at, elements) :: bindings
               | _ -> bindings)
       | _ -> bindings)
 
@@ -517,12 +535,12 @@ let env_reader_reads_in_source content =
         | _ -> None)
     | _ -> None
   in
-  let record_iteration args =
+  let record_iteration ~before args =
     let resolved =
       List.find_map args ~f:(fun (_, arg) ->
           match arg.pexp_desc with
           | Pexp_function _ -> None
-          | _ -> resolve_keys ~bindings arg)
+          | _ -> resolve_keys ~bindings ~before arg)
     in
     match resolved with
     | None -> ()
@@ -560,7 +578,7 @@ let env_reader_reads_in_source content =
             (* The iteration is recorded before the walk descends, so a reader call inside the
                lambda finds its parameter bound. *)
             (match longident_of f with
-            | Some _ -> record_iteration args
+            | Some _ -> record_iteration ~before:expr.pexp_loc.loc_start.pos_cnum args
             | None -> ());
             match longident_of f with
             | Some path when names_the_reader ~offset:f.pexp_loc.loc_start.pos_cnum path -> (

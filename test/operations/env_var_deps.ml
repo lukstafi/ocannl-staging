@@ -1320,8 +1320,15 @@ let main () =
                                     a list of string literals this program's modules define, or \
                                     spell the key at the call"
                                    where directory source what)));
+                      (* Normalized before the registry is consulted: `read_env_var` builds its
+                         variable through `Utils.env_var_name`, which UPPERCASES, so
+                         `read_env_var "PROFILE"` reads the same `OCANNL_PROFILE` as the lowercase
+                         spelling. A case-sensitive membership test dropped it as an unknown key and
+                         asked for no declaration -- a silent pass over a variable the guard does
+                         observe (Codex P2, round 5). *)
                       let keys =
                         List.concat_map reads ~f:(fun (_, r) -> r.Sources.reader_keys)
+                        |> List.map ~f:String.lowercase
                         |> List.filter ~f:(Set.mem Utils.known_config_keys)
                         |> List.dedup_and_sort ~compare:String.compare
                       in
@@ -1896,6 +1903,19 @@ let floor_control () =
 let guard_key = "virtualize_max_visits"
 let guard_non_key = "not_a_config_key"
 
+(* The same guard with its key SHOUTED. `read_env_var` uppercases to build the variable, so this
+   reads the very same `OCANNL_<KEY>`; a case-sensitive look-up against the registry dropped it as
+   an unknown key and asked for nothing (Codex P2, round 5). *)
+let shouting_probe =
+  Printf.sprintf
+    "let guarded = [ %S ]\n\
+     let () =\n\
+    \  List.iter\n\
+    \    (fun arg_name ->\n\
+    \      match Utils.read_env_var arg_name with Some _ -> exit 1 | None -> ())\n\
+    \    guarded\n"
+    (String.uppercase guard_key)
+
 let guard_probe =
   Printf.sprintf
     "let guarded = [ %S; %S ]\n\
@@ -2046,6 +2066,7 @@ let guard_control () =
   let second_bare = run `Second_runner_bare in
   let second_declares = run `Second_runner_declares in
   let unresolvable = run `Unresolvable ~probe:opaque_probe in
+  let shouted = run `Neither ~probe:shouting_probe in
   (* A fragment of the failure and of nothing else. The report's own heading names the reader and
      the key too, so a substring drawn from there would be found in every run (Codex's round-one
      lesson on the sibling controls, met here on the first try). *)
@@ -2078,6 +2099,7 @@ let guard_control () =
   in
   let second_declares_ok = passes second_declares diagnostic in
   let unresolvable_ok = reports unresolvable unresolved in
+  let shouted_ok = reports shouted diagnostic && names_the_key (snd shouted) in
   if not undeclared_ok then report "undeclared" undeclared;
   if not declared_ok then report "declared" declared;
   if not pinned_ok then report "pinned" pinned;
@@ -2091,6 +2113,7 @@ let guard_control () =
   if not second_bare_ok then report "second-runner-bare" second_bare;
   if not second_declares_ok then report "second-runner-declares" second_declares;
   if not unresolvable_ok then report "unresolvable" unresolvable;
+  if not shouted_ok then report "shouted-key" shouted;
   printf
     "\n\
      The guard rule is put to a tree of one `(executable)` whose module reads a configuration key\n\
@@ -2130,6 +2153,9 @@ let guard_control () =
   Verdict.p
     "a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence"
     unresolvable_ok;
+  Verdict.p
+    "a key spelled in upper case names the same variable, and is asked for under the same name"
+    shouted_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
 let () =
