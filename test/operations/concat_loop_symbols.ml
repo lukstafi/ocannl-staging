@@ -49,8 +49,26 @@ let render_binder_events (llc : LL.t) : (Idx.symbol * bool) list =
     llc;
   List.rev !events
 
-let occurrences syms s =
-  List.count syms ~f:(fun s' -> Idx.equal_symbol s' s)
+let occurrences syms s = List.count syms ~f:(fun s' -> Idx.equal_symbol s' s)
+
+(** The symbols each [Set] target is indexed by, as [(tnode id, symbol)] pairs. This is what
+    [Low_level.track_symbol] builds [reverse_node_map] from, so it says whether one loop symbol can
+    still own several tensor nodes -- the shape the virtualizer's shared-loop candidate list exists
+    for. *)
+let write_index_symbols (llc : LL.t) : (int * Idx.symbol) list =
+  let acc = ref [] in
+  let of_idx : Idx.axis_index -> Idx.symbol list = function
+    | Idx.Iterator s -> [ s ]
+    | Idx.Affine { symbols; _ } -> List.map symbols ~f:snd
+    | Idx.Concat syms -> syms
+    | Idx.Fixed_idx _ | Idx.Sub_axis -> []
+  in
+  Ll_test.walk llc ~on_stmt:(function
+    | LL.Set { tn; idcs; _ } ->
+        Array.iter idcs ~f:(fun idx ->
+            List.iter (of_idx idx) ~f:(fun s -> acc := (tn.Ir.Tnode.id, s) :: !acc))
+    | _ -> ());
+  !acc
 
 let () =
   Tensor.unsafe_reinitialize ();
@@ -99,6 +117,33 @@ let () =
   let grad_events = render_binder_events grad_llc in
   Verdict.p_none ~min:2 "no concat backward binder is shadowed in the canonical render" grad_events
     ~f:snd;
+
+  (* The segment loops no longer share a binder, but a symbol can still index writes to SEVERAL
+     tensor nodes -- an ENCLOSING product level's iterator appears in every segment's store. That
+     is the shape `Low_level.reverse_node_map` is list-valued for and the virtualizer's shared-loop
+     candidate list handles, so it is worth knowing it is still reachable from the DSL. A batched
+     concatenation's gradient is the witness: one batch axis outside the concat component. *)
+  let z1 =
+    Tensor.ndarray ~grad_spec:Tensor.Require_grad
+      [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |]
+      ~batch_dims:[ 2 ] ~input_dims:[] ~output_dims:[ 3 ] ()
+  in
+  let z2 =
+    Tensor.ndarray ~grad_spec:Tensor.Require_grad [| 7.0; 8.0; 9.0; 10.0 |] ~batch_dims:[ 2 ]
+      ~input_dims:[] ~output_dims:[ 2 ] ()
+  in
+  let%op zcat = (z1, z2) ++^ "...|a; ...|b => ...|a^b" in
+  let%op zloss = zcat ++ "...|... => |->0" in
+  let zgrad = Train.grad_update zloss in
+  let zwrites = write_index_symbols (Asgns.to_low_level zgrad.Asgns.asgns) in
+  let nodes_indexed_by s =
+    List.filter_map zwrites ~f:(fun (id, s') -> if Idx.equal_symbol s s' then Some id else None)
+    |> List.dedup_and_sort ~compare:Int.compare
+  in
+  let write_syms = List.map zwrites ~f:snd |> List.dedup_and_sort ~compare:Idx.compare_symbol in
+  Verdict.p_exists "a batched concat gradient still indexes writes to several nodes by one symbol"
+    write_syms
+    ~f:(fun s -> List.length (nodes_indexed_by s) > 1);
 
   (* Executed parity: the values, not just the shape of the nest. The loss is the sum of the
      concatenation, so each input's gradient is all-ones -- a scatter that dropped or duplicated a
