@@ -45,4 +45,5 @@ so is `module I = Ir` and then `I.Alloc_census.snapshot`: true
 an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference to the instrumentation: true
 `module Ir = Other` rebinds the qualifier, so a later `Ir.Alloc_census` is not the instrumentation: true
 a rule running a file that shares the executable's public name is not its runner, however alike the two strings are: true
+`open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so neither makes their file a member: true
 a stanza neither derivation calls a member is asked for no family alias: true

@@ -331,8 +331,13 @@ let module_references_in_source content ~paths =
      a later [Ir.Alloc_census] is Other's -- the same argument the qualified path makes about
      [Foo.Alloc_census], one component further left (Codex P2, round 8). *)
   let is_shadowed name = List.mem !shadowed name ~equal:String.equal in
+  (* What a BINDER's target has to be for the name it binds to denote the qualifier: the qualifier
+     itself, not a path that happens to contain it. `open Vendor.Ir` opens Vendor's `Ir`, and
+     reading it as ours would make every bare `Alloc_census` in the file a reference to the
+     instrumentation (Codex P2, round 9). A binding is a WIDE claim -- it decides what a whole scope
+     of unqualified names mean -- so it is the place to be exact. *)
   let names_qualifier qualifier components =
-    (contains components qualifier
+    (List.equal String.equal components qualifier
     && not (List.exists qualifier ~f:is_shadowed))
     ||
     match components with

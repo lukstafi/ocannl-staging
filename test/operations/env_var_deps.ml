@@ -2356,6 +2356,7 @@ type family_probe_source =
   | Qualifier_aliased  (** `module I = Ir`, then the module named through the alias *)
   | Scoped_open  (** the qualifier opened inside a nested module, and named OUTSIDE it *)
   | Qualifier_shadowed  (** the qualifier's NAME rebound to another module, then used *)
+  | Nested_qualifier  (** somebody else's module of the qualifier's name, opened and aliased *)
   | Neither
 
 let family_probe = function
@@ -2375,6 +2376,11 @@ let family_probe = function
       (* The qualifier's name rebound: what `Ir.Alloc_census` names after this is Other's (Codex
          P2, round 8). *)
       "module Ir = Other\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n"
+  | Nested_qualifier ->
+      (* `Vendor.Ir` is Vendor's, whatever it is called. Both spellings that would bind it: opened,
+         so a bare `Alloc_census` would be in scope, and aliased under the qualifier's own name
+         (Codex P2, round 9). *)
+      "module Ir = Vendor.Ir\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n\nmodule Also = struct\n  open Vendor.Ir\n\n  let () = ignore (Alloc_census.snapshot ())\nend\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2494,6 +2500,8 @@ let family_control () =
   let shadowed_qualifier =
     run ~probe:Qualifier_shadowed ~metal:false ~lifecycle:true ~family:None ()
   in
+  (* Somebody else's module of the qualifier's name, opened and aliased. *)
+  let nested_qualifier = run ~probe:Nested_qualifier ~metal:false ~lifecycle:true ~family:None () in
   (* A rule running a FILE that shares the executable's public name is not its runner. *)
   let public_by_path =
     run ~shape:Public_name_by_path ~metal:false ~lifecycle:true ~family:lifecycle ()
@@ -2548,6 +2556,7 @@ let family_control () =
   let scoped_open_ok = listed_ok scoped_open in
   let shadowed_qualifier_ok = listed_ok shadowed_qualifier in
   let public_by_path_ok = omitted_ok lifecycle_family.family_alias public_by_path in
+  let nested_qualifier_ok = listed_ok nested_qualifier in
   let no_member_ok = listed_ok no_member in
   if not metal_omitted_ok then report "metal, family stanza omitted" metal_omitted;
   if not metal_listed_ok then report "metal, family stanza listing it" metal_listed;
@@ -2576,6 +2585,7 @@ let family_control () =
   if not scoped_open_ok then report "the qualifier opened in another scope" scoped_open;
   if not shadowed_qualifier_ok then report "the qualifier's name rebound" shadowed_qualifier;
   if not public_by_path_ok then report "a file sharing the public name" public_by_path;
+  if not nested_qualifier_ok then report "another module named like the qualifier" nested_qualifier;
   if not no_member_ok then report "neither derivation's member" no_member;
   printf
     "\n\
@@ -2671,6 +2681,10 @@ let family_control () =
     "a rule running a file that shares the executable's public name is not its runner, however \
      alike the two strings are"
     public_by_path_ok;
+  Verdict.p
+    "`open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so \
+     neither makes their file a member"
+    nested_qualifier_ok;
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
