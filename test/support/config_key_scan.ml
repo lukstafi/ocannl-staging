@@ -528,12 +528,42 @@ let keys_in_files files =
   List.concat_map files ~f:(fun fname -> keys_in_source (Stdio.In_channel.read_all fname))
   |> Set.of_list (module String)
 
+(** The [Utils] predicates over the settings record that fold a [log_level] threshold into a field
+    read, each with the keys a call of it implies.
+
+    One table, because a predicate is two facts in two places and they must agree: the keys its call
+    contributes to the census ({!settings_keys_in_source}), and the name that must not be handed
+    around as a value where the census could not follow it ({!unqualified_settings_reads}). Written
+    twice, the drift that matters was silent — a third predicate added to the second list and not to
+    the first loses its keys from the census both consistency tests rest on, and a census that stops
+    seeing a key looks exactly like a key nobody reads (gh-ocannl-750). The other direction was
+    always loud, which is the asymmetry that let the two lists sit forty lines apart.
+
+    Each entry's key list is what the predicate reads: the threshold it hides, and the field it
+    gates. They are not derivable from the name — [with_runtime_debug] gates
+    [output_debug_files_in_build_directory] — so the table is the definition, and
+    [config_scan_lexing] pins each entry in both positions. *)
+let settings_predicates =
+  [
+    ("debug_log_from_routines", [ "log_level"; "debug_log_from_routines" ]);
+    ("with_runtime_debug", [ "log_level"; "output_debug_files_in_build_directory" ]);
+  ]
+
+(** The names alone, for the position that cares which identifiers are predicates rather than what
+    they read. *)
+let settings_predicate_names = List.map settings_predicates ~f:fst
+
+(** The keys a call of the predicate named by the last component of [path] implies, if it is one. *)
+let settings_predicate_keys path =
+  match List.last path with
+  | Some name -> List.Assoc.find settings_predicates name ~equal:String.equal
+  | None -> None
+
 (** The other spelling of a configuration read: a field of the startup-resolved [Utils.settings]
-    record, whose field names {e are} the config keys, and the two predicates over it that fold in
-    the [log_level > 1] threshold ([debug_log_from_routines], [with_runtime_debug]). A census built
-    from [arg_name] literals alone would miss every one of these — [large_models] is read as
-    [Utils.settings.large_models] in the codegen, so a future misclassification of it could pass
-    unchallenged (Codex P2 on PR #337).
+    record, whose field names {e are} the config keys, and the predicates over it that fold in the
+    [log_level > 1] threshold ({!settings_predicates}). A census built from [arg_name] literals alone
+    would miss every one of these — [large_models] is read as [Utils.settings.large_models] in the
+    codegen, so a future misclassification of it could pass unchallenged (Codex P2 on PR #337).
 
     A field {e read} and a predicate {e call}: naming either in prose is not a use of it. *)
 let settings_keys_in_source content =
@@ -561,13 +591,13 @@ let settings_keys_in_source content =
                 | Some field -> keys := field :: !keys
                 | None -> ())
             | _ -> ())
+        (* One arm over the table rather than an arm per predicate: the guard is the same question
+           every time -- does this path END in a predicate's name -- and asking it once is what
+           keeps the table the only place a predicate is named (gh-ocannl-750). *)
         | [%expr [%e? f] ()] -> (
-            match longident_of f with
-            | Some path when ends_with path [ "debug_log_from_routines" ] ->
-                keys := "log_level" :: "debug_log_from_routines" :: !keys
-            | Some path when ends_with path [ "with_runtime_debug" ] ->
-                keys := "log_level" :: "output_debug_files_in_build_directory" :: !keys
-            | _ -> ())
+            match Option.bind (longident_of f) ~f:settings_predicate_keys with
+            | Some implied -> keys := implied @ !keys
+            | None -> ())
         | _ -> ());
         super#expression expr
     end
@@ -607,8 +637,11 @@ let unqualified_settings_reads content =
   let blessed = Hash_set.create (module Int) in
   (* The predicates {!settings_keys_in_source} folds thresholds into are recognised as CALLS, so
      handing one around as a value loses its keys the same way handing the record around does (Codex
-     P2, round 20). Their one visible position is the function of an application. *)
-  let predicates = [ "debug_log_from_routines"; "with_runtime_debug" ] in
+     P2, round 20). Their one visible position is the function of an application.
+
+     The same table names them there, so a predicate cannot be added to one site and not the other
+     (gh-ocannl-750). *)
+  let predicates = settings_predicate_names in
   let ends_in names path =
     List.last path |> Option.value_map ~default:false ~f:(List.mem names ~equal:String.equal)
   in

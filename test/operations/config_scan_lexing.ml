@@ -259,6 +259,16 @@ let x = Utils.settings.large_models|ocaml},
       [] );
   ]
 
+(* A predicate is named in two places -- the census that folds its keys out of a CALL, and the check
+   that refuses it handed around as a VALUE -- and while those were two hand-written lists, a
+   predicate reaching only the second lost its keys from the census in silence (gh-ocannl-750). One
+   table names them now, so what is left to pin is that every entry of it is honoured at both
+   positions. Generated from the table for that reason: a restated copy would check that the copy
+   still says what it says, while a case per entry fails the moment a site stops consulting the
+   table. The keys an entry carries are anchored by the literal case above; here they come from the
+   table, since what is under test is the reach of the entries and not their contents. *)
+let predicate_position_cases = Scan.settings_predicates
+
 (* gh-ocannl-723: which sources call [Test_utils.Generated.init], the source side of the rule that
    requires OCANNL_BUILD_FILES_PREFIX of the stanza that runs them.
 
@@ -399,6 +409,30 @@ let () =
         fail "settings read -- %s: expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
           (String.concat ~sep:"; " found));
+  List.iter predicate_position_cases ~f:(fun (predicate, implied) ->
+      let call = Printf.sprintf "let x = Utils.%s ()" predicate in
+      let handed_on = Printf.sprintf "let f = Utils.%s" predicate in
+      let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source call) in
+      let expected = List.sort ~compare:String.compare implied in
+      if List.equal String.equal found expected then
+        printf "ok: predicate call contributes its keys -- %s\n" predicate
+      else
+        fail "predicate call -- %s: expected [%s], found [%s]" predicate
+          (String.concat ~sep:"; " expected)
+          (String.concat ~sep:"; " found);
+      (* The call is the position the census reads, so it is not a finding; the bare value is the
+         position it cannot follow, so it is. Both directions, because a predicate the second site
+         does not know is silently readable as a value, and one the first site blesses too eagerly
+         would let a genuinely escaping read through. *)
+      let at_call = List.length (Scan.unqualified_settings_reads call) in
+      if at_call = 0 then printf "ok: predicate call is not an escaping read -- %s\n" predicate
+      else fail "predicate call -- %s: expected no escaping read, found %d" predicate at_call;
+      let handed_on_count = List.length (Scan.unqualified_settings_reads handed_on) in
+      if handed_on_count = 1 then
+        printf "ok: predicate handed on as a value is an escaping read -- %s\n" predicate
+      else
+        fail "predicate handed on -- %s: expected 1 escaping read, found %d" predicate
+          handed_on_count);
   List.iter generated_init_cases ~f:(fun (name, source, expected) ->
       let found =
         try Scan.generated_init_calls_in_source source
