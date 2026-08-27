@@ -608,6 +608,10 @@ that they earn a lookup rather than always-loaded space.
     interface the run read. Both lists go to stderr. `emitter_frontier_cases` controls the rule on
     a fixture library whose `.mli` spells every shape and every near miss, and controls the
     tripwire by deriving from a wrapper alone in a directory of its own.
+  - `arrayjit.utils` is named twice over, and needs to be: it has a module of its own name, so
+    `utils.cmi` is that MODULE and dune's generated alias module — the one listing every member — is
+    `utils__.cmi`. Reading only the former discovers the members `utils.ml` happens to alias, and the
+    declared-versus-read tripwire goes on passing over the shorter list.
   - The rule asks for each library twice, and needs to: the object directory (`glob_files
     ../../arrayjit/lib/.ir.objs/byte/*.cmi`) is what exists in an ordinary build and what forces the
     interfaces to be built, while `%{lib:arrayjit.ir:ir.cmi}` is what resolves under `dune build -p

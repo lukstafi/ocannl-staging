@@ -435,6 +435,23 @@ let () =
   let source = Buffer.contents buf in
   p "radix" (String.is_substring source ~substring:"-0.0")|ocaml},
       "+partial +rendered" );
+    ( "an unattributed buffer reaching a helper marks it partial too",
+      {ocaml|module LL = Ir.Low_level
+let has src sub = String.is_substring src ~substring:sub
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  let source = Buffer.contents buf in
+  p "radix" (has source "-0.0")|ocaml},
+      "+partial +rendered" );
+    ( "a buffer aliased under a signature constraint is still a buffer",
+      {ocaml|module LL = Ir.Low_level
+module B = (Buffer : module type of Buffer)
+let () =
+  let buf = B.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  p "radix" (String.is_substring (B.contents buf) ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
     ( "a local name bound to something else is not an emitter",
       {ocaml|let write = Buffer.add_string
 let () =
@@ -502,6 +519,14 @@ let () =
     let procs = [| optimized |]
   end)) in
   let open Syntax in
+  let _kparams, doc, _launch = compile_proc ~name [] optimized in
+  doc_to_string doc|ocaml},
+      1 );
+    ( "opening a functor application directly hides the emitter as surely",
+      {ocaml|let compile optimized =
+  let open Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
+    let procs = [| optimized |]
+  end)) in
   let _kparams, doc, _launch = compile_proc ~name [] optimized in
   doc_to_string doc|ocaml},
       1 );

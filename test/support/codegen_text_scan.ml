@@ -342,10 +342,30 @@ let qualifier_of path =
     unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated], IS
     the target -- and a scan of one file cannot see it; a shared helper of that shape would have to
     be added to the seeds here. *)
+(** The name a module expression ultimately reaches, by its last component.
+
+    Four spellings, all of them the same module as far as any call site is concerned: the path
+    itself, a path under a signature constraint ([(Buffer : module type of Buffer)]), and a functor
+    APPLICATION, which names its functor -- [Ir.C_syntax.C_syntax (Cfg)] is the module whose values
+    the interfaces record under [C_syntax], and is how every backend and codegen test reaches
+    [compile_proc]. Reading only the bare path left each of the others attributing nothing, which
+    for an [open] means the call under it is neither refused nor recognised (Codex rounds 4 and 5 on
+    lukstafi/ocannl-staging#487). A [struct ... end] reaches no name and answers [None]. *)
+let rec module_source_name = function
+  | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
+  | { pmod_desc = Pmod_constraint (inner, _); _ } -> module_source_name inner
+  | { pmod_desc = Pmod_apply (functor_, _); _ } -> module_source_name functor_
+  | { pmod_desc = Pmod_apply_unit functor_; _ } -> module_source_name functor_
+  | _ -> None
+
 let module_aliases ~target structure =
   let aliases = Hash_set.of_list (module String) [ target ] in
-  let resolves path =
-    match List.last (flatten_longident path) with
+  (* Through the same spellings {!module_source_name} reads, so a constrained alias
+     ([module B = (Buffer : module type of Buffer)]) is the module it constrains -- otherwise the
+     backstop that reads [B.contents] does not fire, and a backstop that fails silently is worse
+     than none (Codex round 5). *)
+  let resolves module_expr =
+    match module_source_name module_expr with
     | Some last -> Hash_set.mem aliases last
     | None -> false
   in
@@ -355,21 +375,15 @@ let module_aliases ~target structure =
 
       method! structure_item item =
         (match item.pstr_desc with
-        | Pstr_module
-            {
-              pmb_name = { txt = Some alias; _ };
-              pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ };
-              _;
-            }
-          when resolves txt ->
+        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr; _ }
+          when resolves pmb_expr ->
             Hash_set.add aliases alias
         | _ -> ());
         super#structure_item item
 
       method! expression expr =
         (match expr.pexp_desc with
-        | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
-          when resolves txt ->
+        | Pexp_letmodule ({ txt = Some alias; _ }, module_expr, _) when resolves module_expr ->
             Hash_set.add aliases alias
         | _ -> ());
         super#expression expr
@@ -1005,36 +1019,6 @@ let render_pin = function
   | Interpolated rendered -> Some rendered
   | Computed -> None
 
-(** The modules a file opens, at structure level and in expression position alike, by the last
-    component of the path opened. A [struct ... end] or a functor application opens no name this
-    scan can follow, and none appears in the test tree. *)
-let opened_modules structure =
-  let found = ref [] in
-  let record = function
-    | { pmod_desc = Pmod_ident { txt; _ }; _ } -> (
-        match List.last (flatten_longident txt) with
-        | Some name -> found := name :: !found
-        | None -> ())
-    | _ -> ()
-  in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! structure_item item =
-        (match item.pstr_desc with Pstr_open declaration -> record declaration.popen_expr | _ -> ());
-        super#structure_item item
-
-      method! expression e =
-        (match e.pexp_desc with
-        | Pexp_open (declaration, _) -> record declaration.popen_expr
-        | _ -> ());
-        super#expression e
-    end
-  in
-  iterator#structure structure;
-  !found
-
 (** What each module alias in the file ultimately names, by last component: [module CR =
     Ir.Low_level.Canonical_render] answers [CR -> "Canonical_render"], and [module C = CR] answers
     the same for [C].
@@ -1047,20 +1031,8 @@ let opened_modules structure =
 let module_alias_targets structure =
   let targets = Hashtbl.create (module String) in
   let resolve name = Option.value (Hashtbl.find targets name) ~default:name in
-  (* A functor APPLICATION names its functor: [module Syntax = Ir.C_syntax.C_syntax (...)] makes
-     [Syntax] the module whose values the interfaces record under [C_syntax], so an [open Syntax] is
-     an open of that module under a name no origin spells. This is not a corner in this tree -- it is
-     how every backend and every codegen test reaches [compile_proc] (Codex round 4 on
-     lukstafi/ocannl-staging#487). *)
-  let rec named = function
-    | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
-    | { pmod_desc = Pmod_apply (functor_, _); _ } -> named functor_
-    | { pmod_desc = Pmod_apply_unit functor_; _ } -> named functor_
-    | { pmod_desc = Pmod_constraint (inner, _); _ } -> named inner
-    | _ -> None
-  in
   let record alias expr =
-    match named expr with
+    match module_source_name expr with
     | Some target -> Hashtbl.set targets ~key:alias ~data:(resolve target)
     | None -> ()
   in
@@ -1139,11 +1111,10 @@ let rejections ~emitters ~path ~contents =
           if List.exists emitter.origins ~f:defined_in then Some (opened_name, emitter.emitter_name)
           else None)
   in
-  let opened_name declaration =
-    match declaration.popen_expr with
-    | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
-    | _ -> None
-  in
+  (* Through {!module_source_name}, so that opening a functor application directly --
+     [let open Ir.C_syntax.C_syntax (Cfg) in compile_proc ...], with no intermediate module to
+     alias -- is the same open as one through a name. *)
+  let opened_name declaration = module_source_name declaration.popen_expr in
   let extend hidden declaration =
     match opened_name declaration with Some name -> hidden_by name @ hidden | None -> hidden
   in
@@ -1333,14 +1304,18 @@ let classify_source ~emitters ~path ~contents =
                       | None -> ()
                       | Some predicate -> (
                           let args = positional args in
+                          let source = Option.bind predicate.source_at ~f:(List.nth args) in
                           let source_ok =
                             match predicate.source_at with
                             | None -> true
-                            | Some j -> (
-                                match List.nth args j with
-                                | Some a -> mentions_tainted a
-                                | None -> false)
+                            | Some _ -> Option.value_map source ~default:false ~f:mentions_tainted
                           in
+                          (* The backstop belongs on this path as much as on a direct test: a helper
+                             is how a test reads a buffer one indirection further out, and a guard
+                             that fires only for the spelling written first is not one (Codex round
+                             5). *)
+                          if (not source_ok) && Option.value_map source ~default:false ~f:reads_a_buffer
+                          then unattributed := true;
                           match (source_ok, Option.bind predicate.text_at ~f:(List.nth args)) with
                           | true, Some text -> record text
                           | _ -> ()))

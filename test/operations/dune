@@ -1885,6 +1885,13 @@
 ;     are disabled and its libraries come from the switch instead. The member interfaces sit beside
 ;     that wrapper in the installed directory, and `Emitter_frontier` looks for them there.
 ;
+; Both of `arrayjit.utils`' wrapper interfaces are named, and that is not belt-and-braces: the
+; library has a module of its own name, so `utils.cmi` is that MODULE and dune's generated alias
+; module -- the one that lists every member -- is `utils__.cmi`. Reading only the former discovers
+; the members `utils.ml` happens to alias, which is the whole list today and need not stay so,
+; while the declared-versus-read tripwire goes on passing over the shorter list. In a workspace
+; build the object-directory glob hands over both; under `-p` only what is named here arrives.
+;
 ; Whether the hand-over was complete is not assumed either way: the wrapper interface declares the
 ; library's modules, and the test fails when one of them was not read. Nor can the copies be stale:
 ; this executable links `test_utils`, which links `arrayjit.ir` and `arrayjit.utils`, so dune has
@@ -1898,6 +1905,7 @@
   ocannl_config
   %{lib:arrayjit.ir:ir.cmi}
   %{lib:arrayjit.utils:utils.cmi}
+  %{lib:arrayjit.utils:utils__.cmi}
   (glob_files ../../arrayjit/lib/.ir.objs/byte/*.cmi)
   (glob_files ../../arrayjit/lib/.utils.objs/byte/*.cmi)
   (glob_files_rec ../../test/*.expected)
