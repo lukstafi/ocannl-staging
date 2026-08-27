@@ -40,7 +40,8 @@ let reset_dir () =
    two writers interleaved into one file has more than one character. *)
 let base_length = 997
 let length_step = 41
-let payload ~writer ~round = String.make (base_length + (length_step * round)) (Char.of_int_exn writer)
+let payload ~writer ~round =
+  String.make (base_length + (length_step * round)) (Char.of_int_exn writer)
 
 let is_well_formed data =
   (not (String.is_empty data))
@@ -73,9 +74,7 @@ let () =
   Verdict.p "the completeness test rejects a truncated payload"
     (not (is_well_formed (String.prefix good 512)));
   Verdict.p "the completeness test rejects a payload cut on the lattice but mixed"
-    (not
-       (is_well_formed
-          (String.prefix good base_length ^ String.make length_step 'b')));
+    (not (is_well_formed (String.prefix good base_length ^ String.make length_step 'b')));
   Verdict.p "the completeness test rejects an empty file" (not (is_well_formed ""))
 
 (* A staged-but-uncommitted writer is invisible, and it obstructs nobody: while one publish sits in
@@ -169,8 +168,8 @@ let () =
   Verdict.p "the file left by the race is a complete payload"
     (Option.value_map (read_published ()) ~default:false ~f:is_well_formed);
   Verdict.p "the race leaves no staging file behind" (List.is_empty (staging_leftovers ()));
-  Verdict.p "the race leaves only the published file" (List.equal String.equal (listing ())
-                                                         [ "published.bin" ])
+  Verdict.p "the race leaves only the published file"
+    (List.equal String.equal (listing ()) [ "published.bin" ])
 
 (* A writer that fails in its commit window leaves the previous entry and no artifact — for a
    payload held in memory and for one streamed through a channel alike. *)
