@@ -58,6 +58,7 @@ let () =
       [
         "renders_a_document";
         "renders_a_triple";
+        "renders_from_a_nested_module_type";
         "renders_through_a_chain";
         "renders_through_an_alias";
         "renders_through_an_option";
@@ -92,6 +93,14 @@ let () =
     List.concat_map derived.F.emitters ~f:(fun e ->
         if String.equal e.F.name name then e.F.origins else [])
   in
+  same "a module type reachable only through another one is resolved too"
+    ~derived:(origins_of "renders_from_a_nested_module_type")
+    ~declared:
+      [
+        "Emitter_fixture.Emitter_fixture_a.OUTER.NESTED.renders_from_a_nested_module_type";
+        "Emitter_fixture.Emitter_fixture_a.Outer.NESTED.renders_from_a_nested_module_type";
+        "Emitter_fixture.Emitter_fixture_a.Uses_nested.renders_from_a_nested_module_type";
+      ];
   same "a value exported under a module type is attributed to the module exporting it"
     ~derived:(origins_of "renders_under_a_module_type")
     ~declared:

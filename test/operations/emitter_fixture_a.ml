@@ -25,6 +25,22 @@ module Named = struct
   let renders_under_a_module_type code = PPrint.string code
 end
 
+module type OUTER = sig
+  module type NESTED = sig
+    val renders_from_a_nested_module_type : ir -> PPrint.document
+  end
+end
+
+module Outer = struct
+  module type NESTED = sig
+    val renders_from_a_nested_module_type : ir -> PPrint.document
+  end
+end
+
+module Uses_nested = struct
+  let renders_from_a_nested_module_type code = PPrint.string code
+end
+
 let combines_documents lanes = PPrint.string (Int.to_string lanes)
 let joins_documents left right = PPrint.(left ^^ right)
 let consumes_documents _code = None

@@ -57,6 +57,19 @@ end
 
 module Named : RENDERER
 
+module type OUTER = sig
+  module type NESTED = sig
+    val renders_from_a_nested_module_type : ir -> PPrint.document
+  end
+end
+
+module Outer : OUTER
+
+module Uses_nested : Outer.NESTED
+(** A module type that exists only once ANOTHER module has been resolved, and declared after the
+    module whose resolution exposes it -- so an entry that finds nothing on the first pass must
+    survive to the second. *)
+
 val combines_documents : int -> PPrint.document
 (** [Doc_helpers.int]'s shape: a document out of a number. Given nothing of the library to render,
     so not on the frontier -- reported as a combinator instead of being dropped. *)

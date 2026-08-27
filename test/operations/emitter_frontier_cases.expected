@@ -1,6 +1,8 @@
 the fixture's renderers are the frontier derived from it: true
 the fixture's document combinators are told apart from its renderers: true
 a buffer-writing emitter comes back with where its text lands: true
+a module type reachable only through another one is resolved too: true
+a value exported under a module type is attributed to the module exporting it: true
 every module the fixture's wrapper interface declares was read: true
 a hand-over that lost the member interfaces reports them as missing: true
 a hand-over that lost the member interfaces derives no frontier from them: true

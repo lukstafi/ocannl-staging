@@ -115,17 +115,21 @@ let no_aliases = { documents = Set.empty (module String); buffers = Set.empty (m
     reached that way is not expanded, which is the same limit -- and the same direction -- as the
     rest of this module's path reading. *)
 let alias_keys ~scope path_name =
-  if String.contains path_name '.' then [ path_name ]
-  else
-    let rec enclosing components acc =
-      let acc = String.concat ~sep:"." (components @ [ path_name ]) :: acc in
-      match List.drop_last components with
-      | Some ([] : string list) | None -> acc
-      | Some shorter -> enclosing shorter acc
-    in
+  let rec enclosing components acc =
+    let acc = String.concat ~sep:"." (components @ [ path_name ]) :: acc in
+    match List.drop_last components with
+    | Some ([] : string list) | None -> acc
+    | Some shorter -> enclosing shorter acc
+  in
+  let scoped =
     match String.split scope ~on:'.' |> List.filter ~f:(Fn.non String.is_empty) with
-    | [] -> [ path_name ]
+    | [] -> []
     | components -> List.rev (enclosing components [])
+  in
+  (* The enclosing scopes first, innermost outwards, then the path as it stands. A dotted path can
+     be either: [Ir__Low_level.rendered] starts at a module this scan reads, while [Outer.NESTED]
+     is relative to the interface it appears in, and only trying both places them both. *)
+  scoped @ [ path_name ]
 
 (** The type every renderer in this tree produces. Matched on the path's shape rather than on one
     spelling of it: the same type prints as [PPrint.document] and as [PPrint.ToBuffer.document]
@@ -487,22 +491,30 @@ let derive paths =
   let rec resolve_pending () =
     let pending = into.pending in
     into.pending <- [];
-    let progressed =
-      List.fold pending ~init:false ~f:(fun progressed (prefix, scope, path_name) ->
+    let unresolved, progressed =
+      List.fold pending ~init:([], false)
+        ~f:(fun (unresolved, progressed) ((prefix, scope, path_name) as entry) ->
           let key = prefix ^ "|" ^ path_name in
-          if Hash_set.mem resolved key then progressed
+          if Hash_set.mem resolved key then (unresolved, progressed)
           else
             match
               List.find_map (alias_keys ~scope path_name) ~f:(fun candidate ->
                   List.Assoc.find into.modtypes candidate ~equal:String.equal)
             with
-            | None -> progressed
+            (* Kept rather than dropped: a module type can be exposed by resolving ANOTHER pending
+               module ([module Outer : OUTER] declaring [NESTED], and [module M : Outer.NESTED]
+               reached first), so an entry that finds nothing this round may find it the next
+               (Codex round 4 on lukstafi/ocannl-staging#487). Requeued only when some other entry
+               made progress, since a round that resolved nothing will not resolve it either. *)
+            | None -> (entry :: unresolved, progressed)
             | Some module_type ->
                 Hash_set.add resolved key;
                 walk_module_type ~prefix ~scope ~into module_type;
-                true)
+                (unresolved, true))
     in
-    if progressed then resolve_pending ()
+    if progressed then (
+      into.pending <- unresolved @ into.pending;
+      resolve_pending ())
   in
   resolve_pending ();
   let aliases = transparent_aliases into.manifests in
