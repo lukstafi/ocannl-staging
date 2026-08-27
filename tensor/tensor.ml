@@ -28,7 +28,7 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 (* export OCANNL_LOG_LEVEL_TENSOR=9 to enable debugging into the log_files/ directory. *)
 [%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_TENSOR"]
 
-type diff = { grad : (Tn.t[@sexp.opaque]); zero_grads : Asgns.t; backprop : Asgns.comp }
+type diff = { grad : (Tn.t[@sexp.opaque]); zero_grads : Asgns.comp; backprop : Asgns.comp }
 [@@deriving sexp_of]
 
 module rec Self : sig
@@ -514,12 +514,17 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     let is_bck_root ti = Map.mem session_state.backprop_roots ti.value.id in
     let zero_grads =
       let zero_g ti =
-        Option.value_map ti.diff ~default:Asgns.Noop ~f:(fun diff -> diff.zero_grads)
+        Option.value_map ti.diff ~default:Asgns.empty_comp ~f:(fun diff -> diff.zero_grads)
       in
       let zeros =
-        List.map ordered_ts ~f:(fun ti -> if is_bck_root ti then zero_g ti else Asgns.Noop)
+        List.map ordered_ts ~f:(fun ti -> if is_bck_root ti then zero_g ti else Asgns.empty_comp)
       in
-      Asgns.sequential @@ zeros @ [ fetch_zeros g shape ]
+      (* The zeroed gradients are embedded: a routine built out of this code alone (as
+         {!Train.zero_params_grads} does) must be able to allocate them rather than require them of
+         a prior context. *)
+      Asgns.sequence
+      @@ zeros
+      @ [ { Asgns.asgns = fetch_zeros g shape; embedded_nodes = Set.singleton (module Tn) g } ]
     in
     let embedded_nodes = ref @@ Set.singleton (module Tn) g in
     (* The code needs to be included in the reverse order to which it was computed. This guarantees
@@ -811,7 +816,14 @@ let force_param_diff t =
       ~padding:(lazy (Shape.to_padding t.shape))
       ()
   in
-  let diff = { grad = g; zero_grads = fetch_zeros g t.shape; backprop = Asgns.empty_comp } in
+  let diff =
+    {
+      grad = g;
+      zero_grads =
+        { Asgns.asgns = fetch_zeros g t.shape; embedded_nodes = Set.singleton (module Tn) g };
+      backprop = Asgns.empty_comp;
+    }
+  in
   let t = { t with diff = Some diff } in
   session_state.backprop_roots <- Map.set session_state.backprop_roots ~key:t.value.id ~data:t;
   t

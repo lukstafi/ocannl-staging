@@ -20,7 +20,11 @@ type projections = {
 
 type diff = {
   grad : tn;
-  zero_grads : asgns;  (** Prepares for backpropagation. Beware of the "missing zero_grads" bug. *)
+  zero_grads : comp;
+      (** Prepares for backpropagation: zeroes this tensor's gradient and, transitively, the
+          gradients its backprop accumulates into. Beware of the "missing zero_grads" bug. The
+          gradients are its {!Ir.Assignments.field-embedded_nodes}, so it can be compiled as a
+          routine on its own (see {!Train.zero_params_grads}). *)
   backprop : comp;
       (** Backpropagates for the tensor and its descendants; which typically means adding partial
           gradients to the gradient tensor of the subtensors, then for sub-subtensors etc. *)

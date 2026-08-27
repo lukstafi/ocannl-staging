@@ -104,8 +104,8 @@ let params_for ~fn_name ?params loss =
                Some loss );
       ps
 
-(** Replaces the zeroing of the given gradient nodes with [Noop] inside a [zero_grads] code tree
-    (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.raw]'s [fetch_zeros]). Used by the
+(** Replaces the zeroing of the given gradient nodes with [Noop] inside a [zero_grads] computation
+    (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.fetch_zeros]). Used by the
     gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
     gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
     a same-routine reset) while the {e parameter} gradients accumulate across micro-steps.
@@ -117,7 +117,7 @@ let params_for ~fn_name ?params loss =
     nothing removed rather than let the drift through. Pass only the gradients backprop reaches — a
     parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in [loss.params]
     while its gradient is neither zeroed nor accumulated. *)
-let filter_out_grad_zeroing ~grads asgns =
+let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
   let removed = Hash_set.create (module Tn) in
   let rec loop = function
     | Asgns.Noop -> Asgns.Noop
@@ -128,13 +128,15 @@ let filter_out_grad_zeroing ~grads asgns =
         Asgns.Noop
     | (Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _) as t -> t
   in
-  let result = loop asgns in
+  let result = loop comp.asgns in
   let missing = Set.filter grads ~f:(fun g -> not (Hash_set.mem removed g)) in
   if not (Set.is_empty missing) then
     invalid_arg @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
     ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
     ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
-  result
+  (* The parameter gradients stay embedded: the surrounding {!grad_update} backprop accumulates
+     into them regardless, and they are materialized so they persist across micro-steps. *)
+  { comp with Asgns.asgns = result }
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
@@ -176,7 +178,7 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
         raise @@ Tensor.Session_error ("Train.grad_update: loss is not differentiable", Some loss)
     | Some diff -> (
         match accum_steps with
-        | None -> Asgns.to_comp diff.zero_grads
+        | None -> diff.zero_grads
         | Some _ ->
             (* Only the parameters the backprop reaches ({!trainable_params}): one detached behind
                {!Operation.stop_gradient} (a frozen backbone) is still in [loss.params], but its
@@ -188,7 +190,7 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
                 (trainable_params loss)
                 ~f:(fun p -> Option.map p.Tensor.diff ~f:(fun d -> d.Tensor.grad))
             in
-            Asgns.to_comp (filter_out_grad_zeroing ~grads diff.zero_grads))
+            filter_out_grad_zeroing ~grads diff.zero_grads)
   in
   let inv_accum = 1. /. Float.of_int (Option.value accum_steps ~default:1) in
   (* Note: the %cd syntax for [loss.grad] does not modify roots. *)
@@ -217,10 +219,7 @@ let zero_params_grads ?params loss =
   let one_param p =
     match p.Tensor.diff with
     | None -> raise @@ Tensor.Session_error ("Train.zero_params_grads: not differentiable", Some p)
-    | Some diff ->
-        (* The gradients are embedded nodes: this routine may be the first to touch them, so linking
-           it must be able to allocate them rather than require them of a prior context. *)
-        { Asgns.asgns = diff.zero_grads; embedded_nodes = Set.singleton (module Tn) diff.grad }
+    | Some diff -> diff.zero_grads
   in
   let comp =
     Set.to_list (params_for ~fn_name:"Train.zero_params_grads" ?params loss)

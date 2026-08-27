@@ -133,7 +133,7 @@ tensor records, alongside its `value : Tnode.t` and `shape : Shape.t`:
 
 - `forward : Assignments.comp` — the code that computes this tensor *and all subtensors it
   consumed*;
-- `diff : diff option`, where `diff` holds `grad : Tnode.t`, `zero_grads : Assignments.t`,
+- `diff : diff option`, where `diff` holds `grad : Tnode.t`, `zero_grads : Assignments.comp`,
   and `backprop : Assignments.comp`.
 
 Every operation — `+`, `*`, `relu`, einsum — funnels into the internal constructor

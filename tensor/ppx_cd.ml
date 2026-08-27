@@ -1416,7 +1416,7 @@ let translate ?ident_label (expr : expression) : result =
                       raise
                         (Invalid_argument
                            "ppx_ocannl %cd: .zero_grads requires a differentiable tensor")
-                  | Some diff -> Ir.Assignments.to_comp diff.zero_grads];
+                  | Some diff -> diff.zero_grads];
             }
         | _ ->
             {
