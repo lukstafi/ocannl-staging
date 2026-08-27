@@ -1244,7 +1244,12 @@ let main () =
       (* `(include_subdirs …)` is a STANZA, not a field of one: asking `Scan.field` for it searched
          the children of every other stanza and never fired, so the refusal this was supposed to be
          did not exist (Codex P2, round 11 -- my own round-10 fix, dead on arrival). *)
-      List.iter stanzas ~f:(fun stanza ->
+      (* Through `Scan.walk`, so a directive inside a `(subdir gen …)` is reached too: looping the
+         top-level forms let a nested one bypass the refusal entirely (Codex P2, round 13 -- the
+         second defect in this one refusal, the first being that it matched nothing at all). *)
+      List.iter
+        (Scan.walk "" stanzas ~f:(fun _subdir stanza -> [ stanza ]))
+        ~f:(fun stanza ->
           match stanza with
           | Sexp.List (Sexp.Atom "include_subdirs" :: args)
             when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
@@ -2158,6 +2163,11 @@ let guard_subject ~arm =
         \ (action\n\
         \  (progn)))\n"
         (Utils.env_var_name guard_key)
+  (* The same directive one level down, which the top-level loop did not reach. *)
+  | `Include_subdirs_nested ->
+      "(subdir gen\n (include_subdirs unqualified))\n\n"
+      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+          (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
   | `Include_subdirs ->
       "(include_subdirs unqualified)\n\n"
       ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
@@ -2241,6 +2251,7 @@ let guard_control () =
   let unknown_key_pinned = run `Unknown_key_pinned ~probe:unknown_key_probe in
   let self_running_pin = run `Self_running_pin in
   let include_subdirs = run `Include_subdirs in
+  let include_subdirs_nested = run `Include_subdirs_nested in
   let plain_library = run `Plain_library in
   let inline_library = run `Inline_tests_library in
   let inline_library_declares = run `Inline_tests_library_declares in
@@ -2282,6 +2293,9 @@ let guard_control () =
   let unknown_key_pinned_ok = passes unknown_key_pinned diagnostic in
   let self_running_pin_ok = passes self_running_pin diagnostic in
   let include_subdirs_ok = reports include_subdirs "include_subdirs unqualified" in
+  let include_subdirs_nested_ok =
+    reports include_subdirs_nested "include_subdirs unqualified"
+  in
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
   in
@@ -2313,6 +2327,8 @@ let guard_control () =
   if not unknown_key_pinned_ok then report "unknown-key-pinned" unknown_key_pinned;
   if not self_running_pin_ok then report "self-running-pin" self_running_pin;
   if not include_subdirs_ok then report "include-subdirs" include_subdirs;
+  if not include_subdirs_nested_ok then
+    report "include-subdirs-nested" include_subdirs_nested;
   if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
@@ -2364,6 +2380,8 @@ let guard_control () =
   Verdict.p
     "a dune file whose module sets this scan cannot place is refused, not approximated"
     include_subdirs_ok;
+  Verdict.p "and the same directive inside a `(subdir …)` does not slip past the refusal"
+    include_subdirs_nested_ok;
   Verdict.p
     "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
     plain_library_ok;

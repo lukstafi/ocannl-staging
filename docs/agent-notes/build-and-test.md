@@ -454,14 +454,30 @@ that they earn a lookup rather than always-loaded space.
   the rule, and dune reruns only for a variable the rule DECLARES: a key on the guard's list with no
   `(env_var OCANNL_<KEY>)` beside it is a key the guard never sees, and dune serves the previous
   golden across a change of it. `env_var_deps` pairs the two (gh-ocannl-749) rather than trusting the
-  hand-written list: `Config_key_scan.env_reader_reads_in_source` resolves a literal argument to its
-  key and reports a key taken from a LIST as a dynamic reach, whereupon the candidates are the
-  source's string literals intersected with the configuration registry — over-reading, which is the
-  safe direction, since a declaration too many only reruns. A variable the rule pins with `(setenv …)`
-  is exempt, and pinning is the better option wherever it is available; a `(library)` is out of scope,
-  for the same reason a library calling `Generated.init` is. The negative control is a third synthetic
-  tree in `env_var_deps --control`, permanent rather than transient, since every guard in the tree now
-  declares and a corpus-drawn control would record the absence of the shape.
+  hand-written list. `Config_key_scan.env_reader_reads_in_source` RESOLVES each reach or REFUSES it:
+  a string literal at the call names its key, and a key taken from a list names the elements of that
+  list, resolved through the shapes the guards here are written in — a top-level `let` of string
+  literals, `a @ b`, `List.map keys ~f:fst` over a table of pairs, iterated by a `List` combinator
+  the scan knows. Anything it cannot follow is reported per reach, not approximated: an earlier
+  version fell back on the source's string literals, which is a superset where the list is in the
+  file and says nothing where it is not, so one incidental literal made an unresolved reach look
+  answered. Every construct it follows is named, every name it trusts (`List`, `fst`, `snd`, `@`,
+  the standard roots) is checked for rebinding, and a file that rebinds one gets no resolution at
+  all. Keys are normalized before the registry is consulted and are asked for KNOWN OR NOT — the
+  reader builds `OCANNL_<KEY>` whatever the registry says — so a key OCANNL does not read must be
+  pinned rather than declared, the sibling check refusing a declaration that names none.
+  A variable a run pins with `(setenv …)` is exempt where the pin SCOPES over that run, and pinning
+  is the better option wherever it is available; every rule that runs the program must answer, since
+  dune invalidates each on its own deps. A `(library)` is refused outright, inline tests included:
+  it is linkable by executables that declare nothing, which is the argument `Artifact_in_library`
+  makes for the initializer. The negative control is a third synthetic tree in
+  `env_var_deps --control`, permanent rather than transient, since every guard in the tree declares
+  and a corpus-drawn control would record the absence of the shape.
+  What the resolver is FOR is worth knowing before extending it: catching a guard whose declarations
+  drifted from its key list, which it does exactly. It is deliberately not adversary-proof — a source
+  can always put its keys behind an abstraction — and the module header says so. If that trade stops
+  holding, the answer is a structural contract for how a guard spells its keys, matched rather than
+  inferred, not another name in its tables.
 - `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
   its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
   (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same
