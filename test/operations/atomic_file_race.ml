@@ -430,10 +430,13 @@ let () =
    the sweep must — by age, and only over this module's own artifacts. *)
 let age_seconds = 3600.
 
-(* A staging name a writer could have produced: the generated shape is stem, infix, pid, counter and
-   a hexadecimal nonce, and only names of that shape are the sweep's to delete. *)
+(* A staging name a writer could have produced: the generated shape is the stem, the infix, and then
+   three FIXED-WIDTH hex fields -- pid, counter, nonce. Only names of that shape are the sweep's to
+   delete, and only they are the ones `.gitignore` hides. *)
 let nonce = "00c0ffee00c0ffee"
-let staged_name ~target ~counter = target ^ AF.staging_infix ^ "4242." ^ Int.to_string counter ^ "." ^ nonce
+
+let staged_name ~target ~counter =
+  Printf.sprintf "%s%s%08x.%08x.%s" target AF.staging_infix 4242 counter nonce
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
@@ -459,10 +462,13 @@ let () =
       "report" ^ AF.staging_infix ^ "4242";
       "report" ^ AF.staging_infix ^ "4242.0";
       "report" ^ AF.staging_infix ^ "host7.0." ^ nonce;
-      "report" ^ AF.staging_infix ^ "4242.0.nonsense";
-      (* Hexadecimal, but not at the width this module generates. *)
+      "report" ^ AF.staging_infix ^ "00001092.00000000.nonsense0nonsense";
+      (* Hex, but not at the widths this module generates -- in the nonce and in the fields both. *)
       "report" ^ AF.staging_infix ^ "1.2.a";
-      "report" ^ AF.staging_infix ^ "4242.0." ^ nonce ^ "0";
+      "report" ^ AF.staging_infix ^ "00001092.00000000." ^ nonce ^ "0";
+      "report" ^ AF.staging_infix ^ "1092.0." ^ nonce;
+      (* The shape a `[0-9]*` glob would have swallowed: fields that start numeric and go on. *)
+      "report" ^ AF.staging_infix ^ "1abc.2bar." ^ nonce;
       AF.staging_infix ^ "4242.0." ^ nonce;
     ]
   in

@@ -22,6 +22,8 @@ ok: glob -- an escaped member excludes others
 ok: glob -- an unterminated class matches nothing, not a literal bracket
 ok: glob -- the staging-file rule matches a generated name
 ok: glob -- and spares a file merely carrying the infix
+ok: glob -- and spares fields that merely start numeric
+ok: glob -- and spares fields of the wrong width
 ok: built-in default -- the default a search falls back to
 ok: built-in default -- an empty default names no directory
 ok: built-in default -- another key's default is not this one's

@@ -64,11 +64,13 @@ build_files/
 # artifact sits beside whatever file was being published. The helper's own sweep removes them
 # once they are stale; this keeps one from reaching a commit in the meantime.
 #
-# Spelled to the GENERATED shape -- pid, counter, and a nonce of exactly 16 hex digits -- and not
-# as `*.ocannl-stage.*`, which would also hide a file somebody named `report.ocannl-stage.backup`
-# from `git status` and so from their own commit. The recognizer in atomic_file.ml is the same
-# shape; this is as close as a glob gets to it.
-*.ocannl-stage.[0-9]*.[0-9]*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+# Spelled to the GENERATED shape and nothing wider: `*.ocannl-stage.*` would also hide a file
+# somebody named `report.ocannl-stage.backup` from `git status` and so from their own commit, and
+# `[0-9]*` is no better -- git reads that as one digit followed by anything, so `1abc` matches too.
+# A glob has no way to say "one or more digits", so the staging name's fields are fixed-width hex
+# (8, 8, 16) precisely so this rule can be EXACT. It is the same shape atomic_file.ml recognizes,
+# character for character, and the pairing is pinned in test/operations/cache_dir_scan_cases.
+*.ocannl-stage.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
 # Test artifacts written to the working directory
 # (test/operations/test_safetensors.ml, test/training/tokenizer_roundtrip.ml).

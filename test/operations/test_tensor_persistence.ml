@@ -477,7 +477,10 @@ let () =
   (* A name the publication helper itself would have produced: stem, infix, pid, counter, nonce. The
      claim below is what keeps this test honest if that shape ever changes -- an unrecognized plant
      would otherwise make the sweep claim pass by sweeping nothing. *)
-  let staged_name target = target ^ Utils.Atomic_file.staging_infix ^ "4242.0.00c0ffee00c0ffee" in
+  let staged_name target =
+    Printf.sprintf "%s%s%08x.%08x.%s" target Utils.Atomic_file.staging_infix 4242 0
+      "00c0ffee00c0ffee"
+  in
   let abandoned = plant (staged_name (Stdlib.Filename.basename path)) in
   let other = plant (staged_name "someone_elses.safetensors") in
   Verdict.p "the planted staging name is recognized as this checkpoint's"

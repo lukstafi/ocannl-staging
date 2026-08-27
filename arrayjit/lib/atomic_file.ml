@@ -9,9 +9,14 @@ let staging_infix = ".ocannl-stage."
    derived from its basename, and everything after the infix is the writer's identity. *)
 let max_component_bytes = 255
 
-(* Two 30-bit draws rendered as eight hex digits each. Named here rather than at [fresh_nonce]
-   because the recognizer below pins the same width: generation and recognition must agree, and a
-   recognizer looser than the generator is a licence to delete somebody else's file. *)
+(* Everything after the infix is FIXED-WIDTH lowercase hex: the pid, the counter, the nonce. Named
+   here because three separate things have to describe the same set of names -- the generator, the
+   recognizer the destructive sweep consults, and the `.gitignore` rule, which is a glob and so can
+   only be exact over fixed widths. A variable-width field forces the glob to spell `[0-9]*`, which
+   git reads as "a digit then anything", and an ordinary file with a non-numeric field is hidden
+   from its author's own `git status` (Codex P2, round 6). A recognizer looser than the generator is
+   the same defect pointed the other way: a licence to delete somebody else's file. *)
+let field_width = 8
 let nonce_width = 16
 
 (* What the target may contribute. The rest is the infix, a pid, a counter and a nonce; 64 bytes
@@ -47,13 +52,10 @@ let staging_stem basename =
    (Codex P2, round 1). Returns the stem exactly when [name] is a staging name — which is also how
    a caller asks about ONE published file rather than about a whole directory. *)
 let staging_stem_of name =
-  let numeric part = (not (String.is_empty part)) && String.for_all part ~f:Char.is_digit in
-  (* The nonce is recognized at its GENERATED width, not as "some hexadecimal": a sweep that accepts
-     `report.ocannl-stage.1.2.a` deletes a file this module never wrote (Codex P2, round 4). Every
-     component of the shape is pinned as tightly as generation pins it — the pid and the counter are
-     variable-width numbers, the nonce is not. *)
-  let nonce part =
-    String.length part = nonce_width
+  (* Every component is recognized at its GENERATED width and alphabet, not as "some hexadecimal": a
+     sweep that accepts `report.ocannl-stage.1.2.a` deletes a file this module never wrote. *)
+  let hex_field width part =
+    String.length part = width
     && String.for_all part ~f:(fun c -> Char.is_digit c || Char.between c ~low:'a' ~high:'f')
   in
   match List.last (String.substr_index_all name ~may_overlap:false ~pattern:staging_infix) with
@@ -64,7 +66,10 @@ let staging_stem_of name =
       if String.is_empty stem then None
       else (
         match String.split stamp ~on:'.' with
-        | [ pid; counter; stamp ] when numeric pid && numeric counter && nonce stamp -> Some stem
+        | [ pid; counter; nonce ]
+          when hex_field field_width pid && hex_field field_width counter
+               && hex_field nonce_width nonce ->
+            Some stem
         | _ -> None)
 
 let is_staging_file name = Option.is_some (staging_stem_of name)
@@ -93,19 +98,28 @@ let rec ensure_dir dir =
    the file is CREATED EXCLUSIVELY: a name already taken is retried rather than opened. *)
 let next_staging_id : int Atomic.t = Atomic.make 0
 
+(* One 64-bit draw, so every value the recognizer accepts is one the generator can produce. Two
+   28-bit draws rendered as eight hex digits each left characters 1 and 9 of every nonce at zero,
+   which made the recognizer strictly looser than generation — and it is the recognizer that decides
+   what the sweep deletes (Codex P2, round 6). *)
 let fresh_nonce () =
   let state = Stdlib.Random.State.make_self_init () in
-  let draw () = Stdlib.Random.State.bits state land 0xFFFFFFF in
-  let nonce = Printf.sprintf "%08x%08x" (draw ()) (draw ()) in
+  let nonce = Printf.sprintf "%016Lx" (Stdlib.Random.State.bits64 state) in
   assert (String.length nonce = nonce_width);
   nonce
 
 let staging_path path =
+  (* Masked to the field's width rather than trusted to fit: a pid or a counter that overflowed it
+     would render wider and produce a name the recognizer -- and the ignore glob -- would not accept.
+     Wrapping costs nothing, since it is the nonce and the exclusive creation that carry uniqueness.
+  *)
+  let field value = Printf.sprintf "%0*x" field_width (value land 0xFFFFFFFF) in
   let name =
-    Printf.sprintf "%s%s%d.%d.%s"
+    Printf.sprintf "%s%s%s.%s.%s"
       (staging_stem (Stdlib.Filename.basename path))
-      staging_infix (Unix.getpid ())
-      (Atomic.fetch_and_add next_staging_id 1)
+      staging_infix
+      (field (Unix.getpid ()))
+      (field (Atomic.fetch_and_add next_staging_id 1))
       (fresh_nonce ())
   in
   Stdlib.Filename.concat (Stdlib.Filename.dirname path) name

@@ -43,17 +43,22 @@
 
 val staging_infix : string
 (** The infix marking a staging file: [<stem>.ocannl-stage.<pid>.<counter>.<nonce>], where the stem
-    is derived from the target's basename (see {!is_staging_file}). Distinctive rather than generic,
-    so a sweep can attribute leftovers and a [.gitignore] can name them. *)
+    is derived from the target's basename (see {!is_staging_file}) and the three fields that follow
+    are FIXED-WIDTH lowercase hex — eight digits, eight digits, sixteen digits. Distinctive rather
+    than generic, so a sweep can attribute leftovers; fixed-width so that a [.gitignore] glob, which
+    has no way to spell "one or more digits", can describe exactly this set and no ordinary file
+    besides. *)
 
 val is_staging_file : string -> bool
 (** Whether a file NAME (not necessarily a path) is one of this module's staging artifacts. The
     predicate to be checked against, rather than a second spelling of the naming scheme.
 
-    It recognizes the WHOLE generated name — a non-empty stem, the infix, then a numeric pid, a
-    numeric counter and a hexadecimal nonce — not merely the presence of the infix. The sweep
-    deletes what this accepts, so a file someone else named [report.ocannl-stage.backup] must not be
-    accepted.
+    It recognizes the WHOLE generated name — a non-empty stem, the infix, then the three fixed-width
+    hex fields — not merely the presence of the infix, and each field at exactly the width and
+    alphabet generation uses. The sweep deletes what this accepts, so a file someone else named
+    [report.ocannl-stage.backup] must not be accepted, and neither must one whose fields are hex of
+    some other width. Every value this accepts is one the generator can produce: the two are written
+    from the same widths, and the nonce is a full 64-bit draw rather than a masked one.
 
     The stem is the target's basename where that fits, and a truncation of it plus a digest of the
     whole where it does not: a staging name must stay inside the filesystem's per-component limit
