@@ -104,15 +104,24 @@ let rec spine ty =
 let rec mentions ~want ty =
   match Types.get_desc ty with
   | Types.Tconstr (path, args, _) -> want path || List.exists args ~f:(mentions ~want)
-  | Types.Ttuple parts -> List.exists parts ~f:(fun (_, a) -> mentions ~want a)
   | Types.Tlink t | Types.Tsubst (t, _) | Types.Tpoly (t, _) -> mentions ~want t
   | Types.Tarrow (_, a, b, _) -> mentions ~want a || mentions ~want b
-  (* Variables, objects, polymorphic variants, first-class modules and whatever the next compiler
-     adds. The match is open on purpose: [Types.type_desc] gains constructors between releases
-     (5.5 added one), and this repository builds on every OCaml from 5.3 up, so spelling the
-     remainder would fail to compile on some of them. Nothing in the tree renders a document
-     through those forms -- a renderer returns the document, a serializer takes the buffer. *)
-  | _ -> false
+  | _ -> children ~want ty
+
+(** Every immediate component of a type this module does not name a constructor for -- a tuple's
+    parts above all.
+
+    Descending generically rather than by pattern is what makes this compile on every OCaml the opam
+    files claim (5.3 up) while missing nothing: [Types.type_desc] moves between releases, and
+    [Ttuple] is the one that moved under this scan -- 5.4 gave its components optional labels, so a
+    pattern written for either compiler fails to build on the other. [Btype]'s iterator is the
+    compiler's own traversal and stays right through such a change; the alternative, a wildcard
+    answering [false], would have gone on compiling and quietly stopped seeing [compile_proc]'s
+    document, which arrives inside a tuple. *)
+and children ~want ty =
+  let found = ref false in
+  Btype.iter_type_expr (fun component -> if mentions ~want component then found := true) ty;
+  !found
 
 (** Whether the value's result HANDS BACK a document, as opposed to accepting one. Through tuples
     and type arguments -- [compile_proc]'s triple, [render_mma_fragment_scope]'s option -- but into
@@ -122,10 +131,15 @@ let rec mentions ~want ty =
 let rec produces_document ty =
   match Types.get_desc ty with
   | Types.Tconstr (path, args, _) -> is_document path || List.exists args ~f:produces_document
-  | Types.Ttuple parts -> List.exists parts ~f:(fun (_, a) -> produces_document a)
   | Types.Tlink t | Types.Tsubst (t, _) | Types.Tpoly (t, _) -> produces_document t
   | Types.Tarrow (_, _, cod, _) -> produces_document cod
-  | _ -> false
+  | _ ->
+      (* A tuple's components and anything else composite, through the compiler's own traversal --
+         see {!children}, whose reasoning this shares. The arrow is the one case that must NOT go
+         through it: what a result accepts is not what it produces. *)
+      let found = ref false in
+      Btype.iter_type_expr (fun component -> if produces_document component then found := true) ty;
+      !found
 
 let label_name = function
   | Asttypes.Nolabel -> ""
