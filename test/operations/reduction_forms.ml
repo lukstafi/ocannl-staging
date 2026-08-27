@@ -833,7 +833,7 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
              step [] opt sched);
         let result = Sched.apply ~static_indices sched opt in
         after := Some result.LL.llc;
-        result)
+        [ result ])
       (Lazy.force base_ctx) Ir.Assignments.empty_comp prog.bindings
   in
   prog.bind routine.Context.bindings;
@@ -1722,7 +1722,9 @@ let mma_run ~name ~out ~tensorize comp =
       Sched.apply [ ez; Sched.Retype { axis = zj; ty = LL.Workgroup }; tz ] opt
   in
   let ctx, routine =
-    Context.compile ~name ~lowered_transform:transform (Lazy.force base_ctx) comp Idx.Empty
+    Context.compile ~name
+      ~lowered_transform:(fun o -> [ transform o ])
+      (Lazy.force base_ctx) comp Idx.Empty
   in
   let ctx = Context.run ctx routine in
   (Context.get_values ctx out, routine.Context.mma)

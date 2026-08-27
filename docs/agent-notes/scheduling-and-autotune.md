@@ -401,7 +401,7 @@ files.
   at the default arm's cost, whereas materialize-all buys it by doubling the kernel count. If a
   reduced-precision cell reports `mma_candidates = 0`, look at the twins before the seeding rules.
 - Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
-  only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
+  only calls `Schedule.maybe_default_schedules` in the `None` arm), so **any** code that goes
   through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base
   compile is exactly that, which is why its baseline candidate binds no hardware dimension on GPU:
   the whole routine in one work-item. Such a dispatch is unbounded in cost and uninterruptible on a

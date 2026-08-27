@@ -73,7 +73,7 @@ let () =
   let serial_comp = named "mmr_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
-    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "reg_serial" (Context.get_values ctx_s mc0.Tensor.value) in
@@ -139,7 +139,7 @@ let () =
   let ctx_a = Context.auto () in
   if has_shared then (
     let ctx_a, routine_a =
-      Context.compile ~lowered_transform:transform ctx_a reg_comp Ir.Indexing.Empty
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a reg_comp Ir.Indexing.Empty
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_reg = Context.get_values ctx_a mc1.Tensor.value in
@@ -164,7 +164,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform ctx_a reg_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              ctx_a reg_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg

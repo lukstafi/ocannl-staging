@@ -51,7 +51,7 @@ let () =
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
     Context.compile
-      ~lowered_transform:(fun opt -> opt)
+      ~lowered_transform:(fun opt -> [ opt ])
       ctx_s
       (named "priv_naive" (Train.forward mc0))
       Ir.Indexing.Empty
@@ -77,7 +77,9 @@ let () =
   in
   let ctx_a = Context.auto () in
   let ctx_a, routine_a =
-    Context.compile ~lowered_transform:transform ctx_a
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx_a
       (named "priv_tuned" (Train.forward mc1))
       Ir.Indexing.Empty
   in

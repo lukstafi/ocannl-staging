@@ -113,7 +113,9 @@ let () =
     Tn.update_prec t.Tensor.value prec;
     let comp = named label (Train.forward t) in
     let ctx = make_ctx () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let ctx = Context.run ctx routine in
     let first = (Context.get_values ctx t.Tensor.value).(0) in
     (* [get_values] is deliberately outside the timed region: it converts the whole device buffer

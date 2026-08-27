@@ -42,7 +42,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun o ->
         opt_a := Some o;
-        o)
+        [ o ])
       ctx comp Ir.Indexing.Empty
   in
   p "A-arm lineage decides the intermediate virtual (not materialized)"

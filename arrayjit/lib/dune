@@ -205,6 +205,15 @@
  (modes best))
 
 (library
+ (name memory_budget)
+ (public_name arrayjit.memory_budget)
+ (libraries base stdio utils ir context)
+ (modules memory_budget)
+ (preprocess
+  (pps ppx_sexp_conv))
+ (modes best))
+
+(library
  (name autotune)
  (public_name arrayjit.autotune)
  (libraries base stdio unix mtime mtime.clock.os utils ir context)

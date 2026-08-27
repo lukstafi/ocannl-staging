@@ -701,6 +701,20 @@ that they earn a lookup rather than always-loaded space.
   the thing you are about to run (`dune build <dir>/<name>.exe`, or the test's alias / `.exe.output`
   rule) and check its mtime against the sources you edited. In the other direction, a plain
   `dune build` RUNS every cram-style test executable, so it must not overlap a GPU timing window.
+- A library whose name matches one of its own modules makes that module the library's INTERFACE:
+  `arrayjit.context` is `(library (name context) (modules ... backends context))`, so `Context` is
+  what the outside sees and `Backends`, `Schedulers`, `Cc_backend` are `Context__Backends` and
+  friends — unnameable. That is why `context.mli` carries `module Backends_deprecated = Backends`
+  and `module Cc_backend = Cc_backend`: re-exports are the only way an outside signature can name
+  `Backends.footprint`. It also settles where a new `Context`-consuming pass goes: NOT a module in
+  the `context` library, because `Context` would have to alias it to expose it and the alias is a
+  cycle — it gets its own library on top (`arrayjit.autotune`, `arrayjit.memory_budget`). Two
+  consequences when adding one. Its `.mli` reaches the hidden modules only through `Context`'s
+  re-exports, and `module Backends := Context.Backends_deprecated` (a local substitution in the
+  signature) keeps it readable without exporting the alias. And a test executable's module must not
+  share the new library's main module name, or it shadows the very library it tests — which is why
+  `test/operations/memory_budget` became `memory_budget_planner` when `Memory_budget` moved out of
+  `Context` (gh-ocannl-776).
 - Most `test/operations` stanzas preprocess with `(pps ppx_here ppx_ocannl)` and nothing else, so
   `[%equal: …]` / `[%compare: …]` are unavailable — spell the comparison out (`Option.equal
   Int.equal`) rather than extending the stanza for one line.

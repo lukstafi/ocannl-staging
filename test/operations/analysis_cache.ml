@@ -124,7 +124,7 @@ let phase2 () =
         Context.compile
           ~lowered_transform:(fun o ->
             captured := o.LL.flip_candidates;
-            o)
+            [ o ])
           ctx comp Idx.Empty)
   in
   p "sibling Context.compile shares the analysis" (Poly.equal (h2, m2) (`Hits 1, `Misses 0));

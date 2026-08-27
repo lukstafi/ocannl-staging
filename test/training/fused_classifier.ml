@@ -60,7 +60,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         stash := Some opt;
-        opt)
+        [ opt ])
       ctx update IDX.empty
   in
   let ctx = Context.run ctx routine in

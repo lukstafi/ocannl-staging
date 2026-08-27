@@ -64,14 +64,14 @@ type routine = private {
 
 (** {2 Context creation} *)
 
-val cuda : ?device_id:int -> unit -> t
-(** Create a CUDA context. *)
+val cuda : ?ordinal:int -> unit -> t
+(** Create a CUDA context on the backend's device [ordinal] (default 0). *)
 
-val hip : ?device_id:int -> unit -> t
-(** Create an AMD HIP (ROCm) context. *)
+val hip : ?ordinal:int -> unit -> t
+(** Create an AMD HIP (ROCm) context on the backend's device [ordinal] (default 0). *)
 
-val metal : ?device_id:int -> unit -> t
-(** Create a Metal context. *)
+val metal : ?ordinal:int -> unit -> t
+(** Create a Metal context on the backend's device [ordinal] (default 0). *)
 
 val cpu : ?threads:int -> unit -> t
 (** Create a CPU context. [threads] > 1 selects the [multidev_cc] backend (multiple worker-domain
@@ -93,8 +93,7 @@ val advances_to_next_backend : exn -> bool
 
 val compile :
   ?name:string ->
-  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
-  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   ?prelowered:Ir.Low_level.optimized ->
   t ->
   Ir.Assignments.comp ->
@@ -108,10 +107,11 @@ val compile :
     {!Ir.Assignments.get_name_exn}, which raises if the comp contains no block comment.
     [lowered_transform] rewrites the optimized lowered code before backend compilation — the seam
     for schedule transforms and for hand-annotating hardware axis types in tests
-    (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural seam for transforms
-    that split the routine into several kernels (fission): the returned segments run back-to-back on
-    the routine's stream with device-side events at the boundaries, like
-    {!Ir.Schedule.maybe_default_schedules}' segments. Pass at most one of the two.
+    (docs/proposals/axis-types-for-loops.md). It returns the routine's kernel segments, so a
+    whole-routine transform returns a singleton ([fun o -> [ f o ]]) and a transform that splits the
+    routine into several kernels (fission) returns one element per segment; the segments run
+    back-to-back on the routine's stream with device-side events at the boundaries, like
+    {!Ir.Schedule.maybe_default_schedules}' segments. It must return a non-empty list.
 
     [prelowered] (gh-ocannl-562) is a test seam: it replaces this compile's lowering of [comp] with
     the given optimized code, which then drives codegen AND the analysis layer (I/O classification,
@@ -123,8 +123,7 @@ val compile :
 
 val compile_outcome :
   ?name:string ->
-  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
-  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   ?prelowered:Ir.Low_level.optimized ->
   provenance:Ir.Schedule_outcome.provenance ->
   ?candidate:string ->
@@ -360,8 +359,10 @@ val is_initialized : t -> Ir.Tnode.t -> bool
 val backend_name : t -> string
 (** Get the name of the backend. *)
 
-val device_id : t -> int
-(** Get the device ID. *)
+val ordinal : t -> int
+(** The backend's device ordinal this context runs on -- what {!cuda}/{!hip}/{!metal} was given.
+    This is NOT {!Ir.Backend_intf.device.device_id}, which counts device instances process-globally
+    across all backends; two contexts on different backends share ordinal 0. *)
 
 val get_used_memory : t -> int
 (** (An upper bound of) the memory used for arrays on the context's device, in bytes. Device-wide:
@@ -431,106 +432,3 @@ val decide_inline : t -> Ir.Tnode.t list -> t
     {!decide_materialized} this spans the per-node inlining decision vector: [Inline] here,
     [Materialize] there, the default heuristics elsewhere. Hermetic like {!decide_materialized}: the
     argument context and its other descendants are unaffected. *)
-
-(** {2 Memory-budget planning (gh-ocannl-498)} *)
-
-type memory_budget =
-  | Bytes of int  (** Fit the routine's scored footprint under this many bytes. *)
-  | Minimize  (** Take every flip that relieves footprint, whatever the recompute cost. *)
-[@@deriving sexp_of]
-
-type budget_plan = {
-  bp_baseline : Backends_deprecated.footprint;  (** The default-policy placement vector's score. *)
-  bp_final : Backends_deprecated.footprint;  (** The score after the accepted flips. *)
-  bp_flips : (Ir.Tnode.t * int * int) list;
-      (** The accepted flips in acceptance order: the node demoted to recompute-at-use, the
-          {e marginal} bytes it relieved on top of the flips accepted before it, and its
-          recompute-cost bound. Flips committed as one joint group (see {!plan_memory_budget}) carry
-          [0] each except the one that closed the group, which carries the group's whole relief — so
-          the reliefs sum to exactly [bp_baseline - bp_final] either way. *)
-  bp_considered : int;  (** Inline candidates individually scored. *)
-  bp_dropped : int;  (** Inline candidates the [max_candidates] cut left unscored. *)
-  bp_within_budget : bool;
-      (** Whether [bp_final] meets the budget. Always [true] for {!Minimize}, which has no target to
-          miss. A [false] here is a planning outcome, not an error: the selector reports that the
-          decision vector cannot reach the budget rather than forcing illegal flips. *)
-}
-[@@deriving sexp_of]
-
-val compare_relief_ratio : int -> int -> int -> int -> int
-(** gh-ocannl-498: [compare_relief_ratio ra ca rb cb] compares the rationals [ra/ca] and [rb/cb]
-    exactly, as {!plan_memory_budget} ranks candidates by footprint relief per unit of recompute
-    cost. [ca] and [cb] must be positive; the numerators are byte counts and may be negative, since
-    inlining a node can cost footprint rather than free it. Never cross-multiplies (the products of
-    a byte count and a recompute cost can overflow) and never uses floats (the order must be
-    bit-reproducible). Exposed for unit testing the ordering, including the sign cases where a
-    continued-fraction descent over truncating division would otherwise invert it. *)
-
-val footprint :
-  ?name:string ->
-  t ->
-  Ir.Assignments.comp ->
-  Ir.Indexing.unit_bindings ->
-  Backends_deprecated.footprint
-(** The byte footprint {!compile} of this routine from this context would imply under the default
-    placement policy ({!Backends_deprecated.score_footprint}). Analyze-only and hermetic, exactly
-    like {!decision_surface}: lowering and optimization, no backend codegen, no linking, no effect
-    on the context. *)
-
-val plan_memory_budget :
-  ?name:string ->
-  ?max_candidates:int ->
-  budget:memory_budget ->
-  t ->
-  Ir.Assignments.comp ->
-  Ir.Indexing.unit_bindings ->
-  t * budget_plan
-(** gh-ocannl-498 rematerialization: choose which materialized intermediates to demote to
-    recompute-at-use so that the routine's scored footprint ({!footprint}) fits [budget], and return
-    a child context that decides them inline ({!decide_inline}) together with the plan.
-
-    A deterministic planning pass, not a timed search: recompute-vs-store under a budget is
-    decidable from the two cost sides — the recompute-cost bound each [`Inline] flip candidate
-    carries ({!Ir.Low_level.field-flip_candidates}) and the footprint relief scored against the
-    actual arena layout. Nothing is compiled, linked or executed; given the same code, config and
-    placements the pass always chooses the same flips.
-
-    The selection is greedy in two rounds. First every candidate is scored on its own against the
-    baseline layout — footprint relief is not a function of the node's own size, since a node whose
-    live span was already shared with another's frees no bytes by leaving. That solo relief only
-    {e ranks}: candidates are ordered by relief per unit of recompute cost (an exact rational
-    comparison, never a cross-multiplication that could overflow nor a float, so the order is
-    bit-reproducible), zero-relief ones last.
-
-    Round two accepts a prefix, re-scoring the {e cumulative} vector at each step, since inlining
-    one node moves the others' spans. A candidate that adds nothing on top of the accepted set is
-    not dropped but held {e speculatively}: relief is not additive in either direction, and two
-    nodes pinning the same arena peak each free nothing alone yet free the whole range together.
-    Each later candidate is then scored both with and without the held group, because a held flip
-    can be actively harmful rather than merely unpaid, and judging every later candidate only in its
-    company would let one bad hold mask a candidate that pays on its own. A group that beats the
-    candidate alone is load-bearing and commits with it; a group that loses is harmful and is
-    discarded, never reconsidered (this is a bounded planner, not a search over subsets); a group
-    that ties is merely neutral and keeps being held — committing it would pay recompute for zero
-    bytes, and discarding it would throw away a flip that may still be half of a later pair.
-    Speculatives never joined by a paying flip are discarded at the end, so recompute is never paid
-    for zero bytes. Acceptance stops as soon as the budget is met; {!Minimize} takes every flip that
-    helps.
-
-    [max_candidates] bounds the individually-scored candidates, keeping the cheapest-to-recompute
-    ones; the count left unscored is reported as [bp_dropped] and logged under config
-    [log_memory_budget], never silently dropped. It defaults to 32 for a {!Bytes} budget — which
-    stops as soon as it is met, so the cut is a cost guard — and to {e unbounded} for {!Minimize},
-    whose contract is every flip that still relieves footprint and whose config-only users
-    ([memory_budget=minimize]) cannot raise a cap. Passing it explicitly bounds either kind, at two
-    lowerings per candidate scored.
-
-    Only the [`Inline] direction is considered — the opposite of the [`Materialize] chain
-    {!Ir.Low_level.field-flip_candidates} feeds in [Train.tune_placements]. Legality and
-    observability are not this pass's to enforce and it does not try: {!decide_inline} records a
-    preference, the virtualizer's [check_and_store_virtual] settles legality, and a rejected
-    preference simply reproduces the materialized placement — which is why relief is scored from a
-    real lowering rather than assumed.
-
-    Raises {!Ir.Utils.User_error} when config [buffer_aliasing] is off: without the liveness planner
-    every node is always-live and the score has nothing to do with what the allocator would do. *)

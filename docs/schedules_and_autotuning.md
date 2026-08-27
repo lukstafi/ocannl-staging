@@ -169,7 +169,7 @@ what the autotuner's sketch seeds parameterize:
   segments — guard-free full-window interiors, specialized edges.
 - **Two-pass split reduction** (gh-ocannl-484): `Split_reduce` on the reduction loop, then the
   fission pipeline (`fission_scheduled` with the default presets, or
-  `Context.compile ~lowered_transforms`) — the partials edge cuts, pass 1 parallelizes over the
+  `Context.compile ~lowered_transform`) — the partials edge cuts, pass 1 parallelizes over the
   block loop (and any output loops), the combine parallelizes over the target's elements. Serves
   large single-axis reductions (losses, norms, softmax denominators), the embedding-backward
   scatter, and split-K GEMMs. The parity discipline: for a fixed schedule the parallel execution

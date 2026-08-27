@@ -39,7 +39,7 @@ let canonical_of_comp ctx comp =
     Context.compile
       ~lowered_transform:(fun opt ->
         canon := Some (SC.canonicalize ~static_indices:[] opt);
-        opt)
+        [ opt ])
       ctx comp Ir.Indexing.Empty
   in
   Option.value_exn ~here:[%here] !canon

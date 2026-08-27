@@ -60,7 +60,9 @@ let run ~materialize_h =
     opt
   in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx (Train.forward y) Ir.Indexing.Empty
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx (Train.forward y) Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   let yv = Context.get_values ctx y.Tensor.value in

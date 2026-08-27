@@ -306,7 +306,7 @@ data = data.to(device)
 let ctx = Context.auto () in
 
 (* Or explicit backend selection *)
-let ctx = Context.cuda ~device_id:0 () in
+let ctx = Context.cuda ~ordinal:0 () in
 let ctx = Context.metal () in
 let ctx = Context.cpu ~threads:4 () in
 ```

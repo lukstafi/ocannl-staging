@@ -129,7 +129,9 @@ let () =
   let ctx_a = Context.auto () in
   if has_barriers then (
     let ctx_a, routine_a =
-      Context.compile ~lowered_transform:transform ctx_a annot_comp Ir.Indexing.Empty
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        ctx_a annot_comp Ir.Indexing.Empty
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_s1 = Context.get_values ctx_a s1.Tensor.value in
@@ -146,7 +148,9 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform ctx_a annot_comp Ir.Indexing.Empty
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              ctx_a annot_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg

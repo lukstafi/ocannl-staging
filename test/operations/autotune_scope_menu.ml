@@ -84,7 +84,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun o ->
         captured := Some o;
-        o)
+        [ o ])
       ctx comp Idx.Empty
   in
   let ctx = Context.run ctx routine in
@@ -174,9 +174,11 @@ let () =
               let cctx, croutine =
                 Context.compile
                   ~lowered_transform:(fun o ->
-                    let canon = SC.canonicalize ~static_indices:[] ~with_placements:false o in
-                    let sched, _reg = SC.of_saved canon saved in
-                    Sched.apply sched o)
+                    [
+                      (let canon = SC.canonicalize ~static_indices:[] ~with_placements:false o in
+                       let sched, _reg = SC.of_saved canon saved in
+                       Sched.apply sched o);
+                    ])
                   cctx comp Idx.Empty
               in
               let cctx = Context.run cctx croutine in

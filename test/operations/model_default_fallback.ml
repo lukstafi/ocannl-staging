@@ -76,7 +76,7 @@ let () =
   let raised =
     try
       ignore
-        (Context.compile ~lowered_transforms:annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
+        (Context.compile ~lowered_transform:annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
           : Context.t * Context.routine);
       None
     with Invalid_argument msg -> Some msg
@@ -88,7 +88,7 @@ let () =
 
   let _c, _d, comp = pair "classified" in
   let classified =
-    Context.compile_outcome ~lowered_transforms:annotate_mixed
+    Context.compile_outcome ~lowered_transform:annotate_mixed
       ~provenance:Ir.Schedule_outcome.Candidate ~candidate:"bad-annotation" (Context.auto ()) comp
       Ir.Indexing.Empty
   in

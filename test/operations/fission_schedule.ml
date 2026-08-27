@@ -102,7 +102,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         stash := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) comp2 Ir.Indexing.Empty
   in
   let opt = Option.value_exn ~here:[%here] !stash in
@@ -408,7 +408,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           stash := Some opt;
-          opt)
+          [ opt ])
         (Context.auto ()) comp Ir.Indexing.Empty
     in
     Option.value_exn ~here:[%here] !stash

@@ -249,7 +249,7 @@ type footprint = {
 
    Scored over the routine's whole in-context node set, not a context's allocation delta, so the
    number depends only on the code and the placements -- the precondition for a deterministic budget
-   selector ([Context.plan_memory_budget]) whose choices do not drift with how much of the graph a
+   selector ([Memory_budget.fit]) whose choices do not drift with how much of the graph a
    particular context has already allocated. It is therefore a MODEL of the peak, not a prediction
    of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
    pool bases are page-rounded by the driver.
@@ -822,8 +822,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
   let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
 
-  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms ?prelowered
-      bindings (comp : Assignments.comp) : code =
+  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?prelowered bindings
+      (comp : Assignments.comp) : code =
     let (name : string), (lowered : Low_level.optimized) =
       match prelowered with
       | None -> lower_assignments optim_ctx ?name bindings comp.asgns
@@ -842,16 +842,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let limits = Device.hardware_limits () in
     let lowereds =
       Schedule_outcome.tag Schedule_outcome.Transform (fun () ->
-          match (lowered_transform, lowered_transforms) with
-          | Some _, Some _ ->
-              invalid_arg
-                "Backend.compile: pass at most one of lowered_transform, lowered_transforms"
-          | Some transform, None -> [ transform lowered ]
-          | None, Some transforms -> (
-              match transforms lowered with
-              | [] -> invalid_arg "Backend.compile: lowered_transforms returned an empty list"
+          match lowered_transform with
+          | Some transform -> (
+              (* The transform returns the routine's kernel segments: a singleton for a
+                 whole-routine schedule, one element per segment for a fissioning one. *)
+              match transform lowered with
+              | [] -> invalid_arg "Backend.compile: lowered_transform returned an empty list"
               | segments -> segments)
-          | None, None ->
+          | None ->
               (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
                  (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
                  pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may
@@ -1330,12 +1328,10 @@ let backend_name = function
   | Hip -> "hip"
   | Metal -> "metal"
 
-let backend_module : backend -> (module Backend) = function
-  | Cc -> (module Cc_b)
-  | Multidev_cc -> (module Multidev_cc_b)
-  | Cuda -> (module Cuda_b)
-  | Hip -> (module Hip_b)
-  | Metal -> (module Metal_b)
+type ('dev, 'runner, 'event) backend_module =
+  (module Backend with type dev = 'dev and type runner = 'runner and type event = 'event)
+(** A backend singleton's module at known type components -- the package type every generic
+    dispatcher below is written against. *)
 
 type wrapped_context =
   | Cc_ctx of Cc_b.context
@@ -1344,30 +1340,95 @@ type wrapped_context =
   | Hip_ctx of Hip_b.context
   | Metal_ctx of Metal_b.context
 
-let wrapped_backend = function
-  | Cc_ctx _ -> Cc
-  | Multidev_cc_ctx _ -> Multidev_cc
-  | Cuda_ctx _ -> Cuda
-  | Hip_ctx _ -> Hip
-  | Metal_ctx _ -> Metal
+type ('dev, 'runner, 'event) backend_impl = {
+  bi_backend : backend;
+  bi_module : ('dev, 'runner, 'event) backend_module;
+  bi_wrap : ('dev, 'runner, 'event) Backend_intf.context -> wrapped_context;
+}
+(** Everything a {!wrapped_context} constructor statically implies: which backend it is, its
+    singleton module at that constructor's type components, and the constructor itself (to rebuild
+    the wrapper around a derived context). One record per backend, so the correspondence
+    [Cc_ctx <-> Cc <-> Cc_b] is written once instead of once per dispatcher. *)
 
-let make_context ?(device_id = 0) backend =
-  let fresh (type dev runner event)
-      (module B : Backend with type dev = dev and type runner = runner and type event = event) =
-    let device = B.get_device ~ordinal:device_id in
-    B.make_context ~optimize_ctx:(B.empty_optimize_ctx ()) device
-  in
-  match backend with
-  | Cc -> Cc_ctx (fresh (module Cc_b))
-  | Multidev_cc -> Multidev_cc_ctx (fresh (module Multidev_cc_b))
-  | Cuda -> Cuda_ctx (fresh (module Cuda_b))
-  | Hip -> Hip_ctx (fresh (module Hip_b))
-  | Metal -> Metal_ctx (fresh (module Metal_b))
+type packed_impl = Packed_impl : ('dev, 'runner, 'event) backend_impl -> packed_impl
+
+(** A wrapped context with its type components recovered as locally abstract types. *)
+type unwrapped =
+  | Unwrapped :
+      ('dev, 'runner, 'event) backend_impl * ('dev, 'runner, 'event) Backend_intf.context
+      -> unwrapped
+
+(** Two wrapped contexts correlated: [Same_backend] recovers the type equality that lets a
+    same-backend transfer dispatch to the backend's [device_to_device]. *)
+type paired =
+  | Same_backend :
+      ('dev, 'runner, 'event) backend_impl
+      * ('dev, 'runner, 'event) Backend_intf.context
+      * ('dev, 'runner, 'event) Backend_intf.context
+      -> paired
+  | Cross_backend
+
+let cc_impl = { bi_backend = Cc; bi_module = (module Cc_b); bi_wrap = (fun c -> Cc_ctx c) }
+
+let multidev_cc_impl =
+  {
+    bi_backend = Multidev_cc;
+    bi_module = (module Multidev_cc_b);
+    bi_wrap = (fun c -> Multidev_cc_ctx c);
+  }
+
+let cuda_impl = { bi_backend = Cuda; bi_module = (module Cuda_b); bi_wrap = (fun c -> Cuda_ctx c) }
+let hip_impl = { bi_backend = Hip; bi_module = (module Hip_b); bi_wrap = (fun c -> Hip_ctx c) }
+
+let metal_impl =
+  { bi_backend = Metal; bi_module = (module Metal_b); bi_wrap = (fun c -> Metal_ctx c) }
+
+(* The matches over the closed disjunctions -- one per question anyone asks of them: which impl a
+   backend constructor names, which impl and context a wrapped context carries, and whether two
+   wrapped contexts carry the same one. Every dispatcher below goes through these, so a new backend
+   adds arms here and nowhere else. *)
+
+let impl_of_backend : backend -> packed_impl = function
+  | Cc -> Packed_impl cc_impl
+  | Multidev_cc -> Packed_impl multidev_cc_impl
+  | Cuda -> Packed_impl cuda_impl
+  | Hip -> Packed_impl hip_impl
+  | Metal -> Packed_impl metal_impl
+
+let unwrap : wrapped_context -> unwrapped = function
+  | Cc_ctx c -> Unwrapped (cc_impl, c)
+  | Multidev_cc_ctx c -> Unwrapped (multidev_cc_impl, c)
+  | Cuda_ctx c -> Unwrapped (cuda_impl, c)
+  | Hip_ctx c -> Unwrapped (hip_impl, c)
+  | Metal_ctx c -> Unwrapped (metal_impl, c)
+
+let pair_contexts (src : wrapped_context) (dst : wrapped_context) : paired =
+  match (src, dst) with
+  | Cc_ctx s, Cc_ctx d -> Same_backend (cc_impl, s, d)
+  | Multidev_cc_ctx s, Multidev_cc_ctx d -> Same_backend (multidev_cc_impl, s, d)
+  | Cuda_ctx s, Cuda_ctx d -> Same_backend (cuda_impl, s, d)
+  | Hip_ctx s, Hip_ctx d -> Same_backend (hip_impl, s, d)
+  | Metal_ctx s, Metal_ctx d -> Same_backend (metal_impl, s, d)
+  | (Cc_ctx _ | Multidev_cc_ctx _ | Cuda_ctx _ | Hip_ctx _ | Metal_ctx _), _ -> Cross_backend
+
+let backend_module (b : backend) : (module Backend) =
+  match impl_of_backend b with
+  | Packed_impl i ->
+      let (module B) = i.bi_module in
+      (module B)
+
+let wrapped_backend w = match unwrap w with Unwrapped (i, _) -> i.bi_backend
+
+let make_context ?(ordinal = 0) backend =
+  match impl_of_backend backend with
+  | Packed_impl i ->
+      let (module B) = i.bi_module in
+      i.bi_wrap (B.make_context ~optimize_ctx:(B.empty_optimize_ctx ()) (B.get_device ~ordinal))
 
 type 'a ctx_op = {
   f :
     'dev 'runner 'event.
-    (module Backend with type dev = 'dev and type runner = 'runner and type event = 'event) ->
+    ('dev, 'runner, 'event) backend_module ->
     ('dev, 'runner, 'event) Backend_intf.context ->
     ('dev, 'runner, 'event) Backend_intf.context * 'a;
 }
@@ -1375,36 +1436,16 @@ type 'a ctx_op = {
     {!with_backend} can rebuild the same {!wrapped_context} constructor around the result. *)
 
 let with_backend (w : wrapped_context) { f } =
-  match w with
-  | Cc_ctx c ->
-      let c, r = f (module Cc_b) c in
-      (Cc_ctx c, r)
-  | Multidev_cc_ctx c ->
-      let c, r = f (module Multidev_cc_b) c in
-      (Multidev_cc_ctx c, r)
-  | Cuda_ctx c ->
-      let c, r = f (module Cuda_b) c in
-      (Cuda_ctx c, r)
-  | Hip_ctx c ->
-      let c, r = f (module Hip_b) c in
-      (Hip_ctx c, r)
-  | Metal_ctx c ->
-      let c, r = f (module Metal_b) c in
-      (Metal_ctx c, r)
+  match unwrap w with
+  | Unwrapped (i, c) ->
+      let c, r = f i.bi_module c in
+      (i.bi_wrap c, r)
 
 type 'a ctx_query = {
   q :
     'dev 'runner 'event.
-    (module Backend with type dev = 'dev and type runner = 'runner and type event = 'event) ->
-    ('dev, 'runner, 'event) Backend_intf.context ->
-    'a;
+    ('dev, 'runner, 'event) backend_module -> ('dev, 'runner, 'event) Backend_intf.context -> 'a;
 }
 (** A read-only backend operation; like {!ctx_op} but leaves the context untouched. *)
 
-let query (w : wrapped_context) { q } =
-  match w with
-  | Cc_ctx c -> q (module Cc_b) c
-  | Multidev_cc_ctx c -> q (module Multidev_cc_b) c
-  | Cuda_ctx c -> q (module Cuda_b) c
-  | Hip_ctx c -> q (module Hip_b) c
-  | Metal_ctx c -> q (module Metal_b) c
+let query (w : wrapped_context) { q } = match unwrap w with Unwrapped (i, c) -> q i.bi_module c

@@ -2776,7 +2776,7 @@
 ; OpenMP pool must not overlap another training test's.
 
 (test
- (name memory_budget)
+ (name memory_budget_planner)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -2785,8 +2785,8 @@
   (env_var OCANNL_MEMORY_BUDGET)
   (env_var OCANNL_BUFFER_ALIASING)
   (env_var OCANNL_MODEL_DEFAULT_SCHEDULE))
- (modules memory_budget)
- (libraries base ocannl stdio unix arrayjit.verdict)
+ (modules memory_budget_planner)
+ (libraries base ocannl stdio unix arrayjit.memory_budget arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

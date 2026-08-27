@@ -55,7 +55,7 @@ val score_footprint :
 
     Scored over the routine's whole in-context node set rather than a context's allocation delta, so
     the number depends only on the code and the placements — the precondition for a deterministic
-    selector ({!Context.plan_memory_budget}). It is therefore a {e model} of the peak, not a
+    selector ([Memory_budget.fit]). It is therefore a {e model} of the peak, not a
     prediction of {!Context.get_used_memory}: the real allocator skips nodes a prior context already
     holds, and the driver page-rounds pool bases. Enumeration is canonical (by {!Ir.Tnode.uid}) so
     the greedy coloring is reproducible across processes. *)
@@ -139,7 +139,18 @@ val backend_module : backend -> (module Ir.Backend_intf.Backend)
 
     A closed disjunction over the implemented backends' context types: matching two values on the
     same constructor recovers type equality directly, which is what lets [Context.copy] fall onto
-    the backend-specific [device_to_device] when both contexts come from the same backend. *)
+    the backend-specific [device_to_device] when both contexts come from the same backend. Matching
+    it by hand is rarely necessary — {!unwrap}, {!pair_contexts}, {!query} and {!with_backend}
+    dispatch through the one match each direction needs. *)
+
+type ('dev, 'runner, 'event) backend_module =
+  (module Ir.Backend_intf.Backend
+     with type dev = 'dev
+      and type runner = 'runner
+      and type event = 'event)
+(** A backend singleton's module at known type components -- the package type the generic
+    dispatchers here are written against, and the annotation a [ctx_op]/[ctx_query] closure needs to
+    unpack its module argument. *)
 
 type wrapped_context =
   | Cc_ctx of Cc_b.context
@@ -148,19 +159,56 @@ type wrapped_context =
   | Hip_ctx of Hip_b.context
   | Metal_ctx of Metal_b.context
 
+type ('dev, 'runner, 'event) backend_impl = {
+  bi_backend : backend;
+  bi_module : ('dev, 'runner, 'event) backend_module;
+  bi_wrap : ('dev, 'runner, 'event) Ir.Backend_intf.context -> wrapped_context;
+}
+(** Everything a {!wrapped_context} constructor statically implies: which backend it is, its
+    singleton module at that constructor's type components, and the constructor itself (to rebuild
+    the wrapper around a derived context). One record per backend, so the correspondence
+    [Cc_ctx <-> Cc <-> Cc_b] is written once rather than once per dispatcher. *)
+
+type packed_impl = Packed_impl : ('dev, 'runner, 'event) backend_impl -> packed_impl
+
+(** A wrapped context with its type components recovered as locally abstract types. *)
+type unwrapped =
+  | Unwrapped :
+      ('dev, 'runner, 'event) backend_impl * ('dev, 'runner, 'event) Ir.Backend_intf.context
+      -> unwrapped
+
+(** Two wrapped contexts correlated: [Same_backend] recovers the type equality that lets a
+    same-backend transfer dispatch to the backend's [device_to_device], while [Cross_backend] is
+    every mismatched pair. *)
+type paired =
+  | Same_backend :
+      ('dev, 'runner, 'event) backend_impl
+      * ('dev, 'runner, 'event) Ir.Backend_intf.context
+      * ('dev, 'runner, 'event) Ir.Backend_intf.context
+      -> paired
+  | Cross_backend
+
+val impl_of_backend : backend -> packed_impl
+(** The {!backend_impl} the backend constructor implies. *)
+
+val unwrap : wrapped_context -> unwrapped
+(** The {!backend_impl} and backend context a wrapped context carries. *)
+
+val pair_contexts : wrapped_context -> wrapped_context -> paired
+(** Correlate two wrapped contexts, recovering their type equality when they come from the same
+    backend. [Context.copy] is the caller: a same-backend pair can dispatch to [device_to_device], a
+    cross-backend one must go through a host round-trip. *)
+
 val wrapped_backend : wrapped_context -> backend
 
-val make_context : ?device_id:int -> backend -> wrapped_context
-(** A fresh root context (empty [optimize_ctx]) on the backend's device [device_id] (default 0).
+val make_context : ?ordinal:int -> backend -> wrapped_context
+(** A fresh root context (empty [optimize_ctx]) on the backend's device [ordinal] (default 0).
     Raises when the backend's hardware or library is unavailable. *)
 
 type 'a ctx_op = {
   f :
     'dev 'runner 'event.
-    (module Ir.Backend_intf.Backend
-       with type dev = 'dev
-        and type runner = 'runner
-        and type event = 'event) ->
+    ('dev, 'runner, 'event) backend_module ->
     ('dev, 'runner, 'event) Ir.Backend_intf.context ->
     ('dev, 'runner, 'event) Ir.Backend_intf.context * 'a;
 }
@@ -172,12 +220,7 @@ val with_backend : wrapped_context -> 'a ctx_op -> wrapped_context * 'a
 type 'a ctx_query = {
   q :
     'dev 'runner 'event.
-    (module Ir.Backend_intf.Backend
-       with type dev = 'dev
-        and type runner = 'runner
-        and type event = 'event) ->
-    ('dev, 'runner, 'event) Ir.Backend_intf.context ->
-    'a;
+    ('dev, 'runner, 'event) backend_module -> ('dev, 'runner, 'event) Ir.Backend_intf.context -> 'a;
 }
 (** A read-only backend operation; like {!ctx_op} but leaves the context untouched. *)
 

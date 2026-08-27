@@ -4,16 +4,16 @@
 
    - [Schedule.fission_scheduled] (the exposed fission pipeline with caller-supplied per-segment
    schedules) splits the canonical two-nest chain with a forced-materialized intermediate into two
-   [`Normal] segments; compiling them through the plural [?lowered_transforms] seam executes
-   correctly. - A hand-crafted fissioned cache entry (per-segment schedules keyed by pre-schedule
-   segment digests) replays through [Autotune.tune]'s cache-hit path: the report says [fissioned],
-   and the values are correct — exercising [F_saved] rebinding of per-segment saved schedules. -
-   [Autotune.tune] on a fissionable computation searches whole-routine and fissioned candidates and
-   returns correct values; the second call hits the cache; its search reaches several candidates,
-   measuring the ones the backend can dispatch and accounting for the rest in the decline census
-   (gh-ocannl-543 — on GPU backends only the fissioned preset is measured). - The matmul sketch
-   generator detects a 32x32 matmul and seeds tile-size instantiations of the register-blocktiling
-   (GPU) / operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
+   [`Normal] segments; compiling them through the [?lowered_transform] seam executes correctly. - A
+   hand-crafted fissioned cache entry (per-segment schedules keyed by pre-schedule segment digests)
+   replays through [Autotune.tune]'s cache-hit path: the report says [fissioned], and the values are
+   correct — exercising [F_saved] rebinding of per-segment saved schedules. - [Autotune.tune] on a
+   fissionable computation searches whole-routine and fissioned candidates and returns correct
+   values; the second call hits the cache; its search reaches several candidates, measuring the ones
+   the backend can dispatch and accounting for the rest in the decline census (gh-ocannl-543 — on
+   GPU backends only the fissioned preset is measured). - The matmul sketch generator detects a
+   32x32 matmul and seeds tile-size instantiations of the register-blocktiling (GPU) /
+   operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
    cooperatively staged [Tensorize] on backends with an mma capability; whole-triple and Grid-split
    register-tiled [Tile_mma] on the C backends); the tuned routine matches the serial twin, and the
    schedules round-trip through the saved form when a sketch wins. - Per-fission-segment sketches
@@ -100,7 +100,7 @@ let () =
   let limits = Context.hardware_limits ctx in
   let ctx, routine =
     Context.compile
-      ~lowered_transforms:(fun opt ->
+      ~lowered_transform:(fun opt ->
         let preset o =
           if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits o
           else if is_cpu then Sched.default_cpu ~min_parallel:1 o
@@ -116,7 +116,7 @@ let () =
   let got_e = Context.get_values ctx e.Tensor.value in
   p "fission_scheduled splits the chain into two normal segments"
     (match !seg_kinds with [ `Normal; `Normal ] -> true | _ -> false);
-  p "fissioned segments through lowered_transforms compute correctly"
+  p "fissioned segments through lowered_transform compute correctly"
     (Array.for_all2_exn got_e expected_e ~f:approx);
 
   (* --- a hand-crafted fissioned cache entry replays through tune's cache-hit path --- *)
@@ -127,7 +127,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         base_capture := Some opt;
-        opt)
+        [ opt ])
       bctx chain_comp Ir.Indexing.Empty
   in
   let base_opt = Option.value_exn ~here:[%here] !base_capture in
@@ -136,7 +136,7 @@ let () =
   let fctx = Context.auto () in
   let _fctx, _fr =
     Context.compile
-      ~lowered_transforms:(fun opt ->
+      ~lowered_transform:(fun opt ->
         let preset o =
           if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits o
           else if is_cpu then Sched.default_cpu ~min_parallel:1 o
@@ -285,7 +285,7 @@ let () =
   let serial_comp = named "af_mm_serial" (Train.forward mc0) in
   let sctx = Context.auto () in
   let sctx, sroutine =
-    Context.compile ~lowered_transform:(fun opt -> opt) sctx serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) sctx serial_comp Ir.Indexing.Empty
   in
   let sctx = Context.run sctx sroutine in
   let got_serial = nonzero "af_mm_serial" (Context.get_values sctx mc0.Tensor.value) in
@@ -350,7 +350,7 @@ let () =
   let fs_serial_comp = named "af_fs_serial" (Train.forward qe0) in
   let qsctx = Context.auto () in
   let qsctx, qsroutine =
-    Context.compile ~lowered_transform:(fun opt -> opt) qsctx fs_serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) qsctx fs_serial_comp Ir.Indexing.Empty
   in
   let qsctx = Context.run qsctx qsroutine in
   let got_fs_serial = Context.get_values qsctx qe0.Tensor.value in
@@ -437,7 +437,7 @@ let () =
   let ms_serial_comp = named "af_ms_serial" (Train.forward qg5) in
   let msctx = Context.auto () in
   let msctx, msroutine =
-    Context.compile ~lowered_transform:(fun opt -> opt) msctx ms_serial_comp Ir.Indexing.Empty
+    Context.compile ~lowered_transform:(fun opt -> [ opt ]) msctx ms_serial_comp Ir.Indexing.Empty
   in
   let msctx = Context.run msctx msroutine in
   let got_ms_serial = Context.get_values msctx qg5.Tensor.value in

@@ -92,7 +92,7 @@ let run ~name ?schedule (out : Tensor.t) =
   in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx
       (named name (Train.forward out))
       Ir.Indexing.Empty
   in
@@ -344,7 +344,7 @@ let () =
         in
         let ctx = Context.auto () in
         let ctx, routine =
-          Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
+          Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
         in
         let ctx = Context.run ctx routine in
         Context.get_values ctx outw.Tensor.value
@@ -630,7 +630,9 @@ let () =
         match schedule with None -> opt | Some sched -> Sched.apply (sched opt) opt
       in
       let ctx = Context.auto () in
-      let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+      let ctx, routine =
+        Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+      in
       let ctx = Context.run ctx routine in
       Context.get_values ctx outw.Tensor.value
     in
@@ -960,7 +962,9 @@ let () =
         match schedule with None -> opt | Some sched -> Sched.apply (sched opt) opt
       in
       let ctx = Context.auto () in
-      let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+      let ctx, routine =
+        Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+      in
       let ctx = Context.run ctx routine in
       Context.get_values ctx outw.Tensor.value
     in

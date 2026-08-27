@@ -81,7 +81,9 @@ let census (llc : LL.t) : int * int * int = Ll_test.census llc
 let run_with name transform (t : Tensor.t) =
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named name (Train.forward t))
       Ir.Indexing.Empty
   in
@@ -192,7 +194,9 @@ let () =
     match
       try
         ignore
-          (Context.compile ~lowered_transform:transform (Context.auto ())
+          (Context.compile
+             ~lowered_transform:(fun o -> [ transform o ])
+             (Context.auto ())
              (named name (Train.forward t))
              Ir.Indexing.Empty
             : Context.t * Context.routine);

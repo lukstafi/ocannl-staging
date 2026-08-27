@@ -82,7 +82,9 @@ let run ~name ~transform ~prec ~label () =
   Tn.update_prec y.Tensor.value prec;
   let comp = named name (Train.forward y) in
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   let ctx = Context.run ctx routine in
   Context.get_values ctx y.Tensor.value
 
@@ -180,7 +182,7 @@ let () =
     Ir.Numerics.set_policy policy;
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:serial ctx
+      Context.compile ~lowered_transform:(fun o -> [ serial o ]) ctx
         (named "nsc_ovf" (Train.forward y))
         Ir.Indexing.Empty
     in
@@ -218,7 +220,7 @@ let () =
     Ir.Numerics.set_policy { base with narrow_compute_f32 = false; fp16_arithmetic = Fp16_auto };
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:serial ctx
+      Context.compile ~lowered_transform:(fun o -> [ serial o ]) ctx
         (named "nsc_half_fma" (Train.forward y))
         Ir.Indexing.Empty
     in

@@ -28,6 +28,25 @@
   `update_gate` arms -- the ppx hoists inline declarations above the enclosing `match`/`if`, so the
   arms differ only where gating changes the emitted assignment.
 
+- `?lowered_transform` and `?lowered_transforms` on `Context.compile` / `Context.compile_outcome` /
+  backend `compile` are unified into one list-returning `?lowered_transform :
+  Low_level.optimized -> Low_level.optimized list` (gh-ocannl-768). Their mutual exclusion was a
+  runtime `Invalid_argument` threaded through three layers; it is now impossible to express. A
+  whole-routine transform returns a singleton (`fun o -> [ f o ]`), a fissioning one returns one
+  element per kernel segment.
+- `Context.t`'s device field and the `?device_id` parameters of `Context.cuda`/`hip`/`metal` and
+  `Backends.make_context` are renamed to `ordinal` (gh-ocannl-776): the value IS the backend's
+  device ordinal, while `Backend_intf.device.device_id` is a process-global counter across all
+  backends, so the old name answered a different question than it asked on multi-backend runs. The
+  accessor is now `Context.ordinal`. No deprecated alias.
+- The gh-ocannl-498 memory-budget planner moves out of `Context` into its own
+  `arrayjit.memory_budget` library (gh-ocannl-776): `Context.plan_memory_budget` is
+  `Memory_budget.fit`, `Context.memory_budget` is `Memory_budget.t`, `Context.budget_plan` is
+  `Memory_budget.plan`, and `Context.footprint` / `Context.compare_relief_ratio` move across
+  unchanged. It is a deterministic planning pass over `Context`'s analyze-only surface, so it sat in
+  `context.mli` only by history. `test/operations/memory_budget` is renamed
+  `memory_budget_planner`, so that the test executable's module does not shadow the library's.
+
 ## [1.0.1] -- 2026-08-26
 
 > Release note: theme — consolidation after 1.0: making a green result mean what it says. This is

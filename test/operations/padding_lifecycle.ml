@@ -53,7 +53,9 @@ let compile_conv ?ctx tag x =
   let ctx = match ctx with Some ctx -> ctx | None -> Context.auto () in
   let ctx = Train.init_params ctx Ir.Indexing.Empty y in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named (tag ^ "_fwd") (Train.forward y))
       Ir.Indexing.Empty
   in

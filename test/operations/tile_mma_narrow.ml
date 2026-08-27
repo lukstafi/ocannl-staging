@@ -125,7 +125,9 @@ let run ~name ?schedule (out : Tensor.t) =
     match schedule with None -> opt | Some sched -> Sched.apply (sched opt) opt
   in
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+  in
   let ctx = Context.run ctx routine in
   Context.get_values ctx out.Tensor.value
 

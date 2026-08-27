@@ -71,7 +71,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         stash := Some opt;
-        opt)
+        [ opt ])
       ctx step_comp bindings
   in
   let opt = Option.value_exn ~here:[%here] !stash in

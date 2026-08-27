@@ -665,8 +665,7 @@ module type Backend = sig
   val compile :
     Low_level.optimize_ctx ->
     ?name:string ->
-    ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
-    ?lowered_transforms:(Low_level.optimized -> Low_level.optimized list) ->
+    ?lowered_transform:(Low_level.optimized -> Low_level.optimized list) ->
     ?prelowered:Low_level.optimized ->
     Indexing.unit_bindings ->
     Assignments.comp ->
@@ -675,12 +674,12 @@ module type Backend = sig
       {!Assignments.get_name_exn}. [lowered_transform] is applied to the optimized lowered code
       before backend compilation — the seam where schedule transforms (and hand-annotating tests)
       rewrite loops with hardware axis types, barriers and shared placements
-      (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural variant for
-      transforms that split the routine into several kernels (fission,
-      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and run
-      back-to-back on the routine's stream with a device-side event chained at each boundary,
-      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty list;
-      passing both transforms raises [Invalid_argument].
+      (docs/proposals/axis-types-for-loops.md). It returns the routine's KERNEL SEGMENTS: a
+      whole-routine transform returns a singleton ([fun o -> [ f o ]]), while a transform that
+      splits the routine into several kernels (fission, {!Schedule.fission_scheduled}) returns one
+      element per segment. The segments compile as one fissioned routine and run back-to-back on the
+      routine's stream with a device-side event chained at each boundary, exactly as
+      {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty list.
 
       [prelowered] (gh-ocannl-562, a test seam) replaces this compile's own lowering of [comp] with
       the given optimized code: it drives codegen, I/O classification, liveness planning and
@@ -691,8 +690,8 @@ module type Backend = sig
       against a prior context supplies a comp naming them. The record's [optimize_ctx] becomes the
       linked context's lineage state in place of the fork a real compile would make, so the caller
       owns its provenance. Everything downstream of lowering is unchanged, including the default
-      schedule annotator — pass [~lowered_transform:Fn.id] to keep hand-built code exactly as
-      written. *)
+      schedule annotator — pass [~lowered_transform:(fun o -> [ o ])] to keep hand-built code
+      exactly as written. *)
 
   include Backend_device_common
 

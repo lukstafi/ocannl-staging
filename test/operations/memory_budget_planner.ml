@@ -5,7 +5,7 @@
    Four layers:
 
    1. Calibration: the routine's scored footprint under the default policy (the baseline) and under
-   [Context.Minimize] (every flip that still relieves anything). Everything below is expressed
+   [Memory_budget.Minimize] (every flip that still relieves anything). Everything below is expressed
    relative to those two numbers, so the test states no byte constants and stays backend-stable —
    statement-granularity (CPU) and segment-granularity (GPU) liveness find different spans, hence
    different absolute footprints and different achievable relief.
@@ -70,8 +70,8 @@ let () =
     Unix.putenv "OCANNL_MEMORY_BUDGET" s;
     match Train.memory_budget_setting () with
     | None -> "none"
-    | Some Context.Minimize -> "minimize"
-    | Some (Context.Bytes n) -> Int.to_string n
+    | Some Memory_budget.Minimize -> "minimize"
+    | Some (Memory_budget.Bytes n) -> Int.to_string n
     | exception Utils.User_error _ -> "rejected"
   in
   p "budget parse: 0 is off" (String.equal (setting "0") "none");
@@ -113,11 +113,12 @@ let () =
     ]
   in
   p_all "ratio: agrees with exact division on signs, ties and magnitudes" cases
-    ~f:(fun (ra, ca, rb, cb) -> Context.compare_relief_ratio ra ca rb cb = oracle ra ca rb cb);
+    ~f:(fun (ra, ca, rb, cb) -> Memory_budget.compare_relief_ratio ra ca rb cb = oracle ra ca rb cb);
   (* The reason it is not a cross-multiplication: these products overflow, the ratios do not. *)
   let big = Int.max_value / 3 in
   p "ratio: survives operands whose cross-products would overflow"
-    (Context.compare_relief_ratio big 2 big 3 > 0 && Context.compare_relief_ratio big 3 big 2 < 0)
+    (Memory_budget.compare_relief_ratio big 2 big 3 > 0
+    && Memory_budget.compare_relief_ratio big 3 big 2 < 0)
 
 (* The subject: a 4-hidden-layer MLP whose whole training step is one routine. Depth matters — the
    backprop chain's activation gradients are what the liveness planner staggers and what the budget
@@ -179,7 +180,7 @@ let train_phase ?budget ~label () =
    [buffer_aliasing], so the failure is the one a user gets by setting a budget alone. *)
 let () =
   let ctx, comp, _loss, _mem0 = build () in
-  match Context.plan_memory_budget ~budget:(Context.Bytes 1024) ctx comp IDX.empty with
+  match Memory_budget.fit ~budget:(Memory_budget.Bytes 1024) ctx comp IDX.empty with
   | _ -> p "budget without buffer_aliasing raises" false
   | exception Utils.User_error msg ->
       p "budget without buffer_aliasing raises"
@@ -190,8 +191,8 @@ let () = Unix.putenv "OCANNL_BUFFER_ALIASING" "true"
 (* Layers 1 and 2: calibrate, then pin the selector's contract against the two calibrated ends. *)
 let baseline, minimum, mid =
   let ctx, comp, _loss, _mem0 = build () in
-  let base = Context.footprint ctx comp IDX.empty in
-  let _ctx, min_plan = Context.plan_memory_budget ~budget:Context.Minimize ctx comp IDX.empty in
+  let base = Memory_budget.footprint ctx comp IDX.empty in
+  let _ctx, min_plan = Memory_budget.fit ~budget:Memory_budget.Minimize ctx comp IDX.empty in
   let baseline = base.fp_total and minimum = min_plan.bp_final.fp_total in
   eprintf
     "calibration: baseline %d bytes, minimum %d bytes, %d flip(s), dedicated %d, planned %d\n%!"
@@ -213,11 +214,11 @@ let baseline, minimum, mid =
 
 let () =
   let ctx, comp, _loss, _mem0 = build () in
-  let plan budget = snd (Context.plan_memory_budget ~budget ctx comp IDX.empty) in
-  let at_baseline = plan (Context.Bytes baseline) in
+  let plan budget = snd (Memory_budget.fit ~budget ctx comp IDX.empty) in
+  let at_baseline = plan (Memory_budget.Bytes baseline) in
   p "budget at the baseline: no flips" (List.is_empty at_baseline.bp_flips);
   p "budget at the baseline: within budget" at_baseline.bp_within_budget;
-  let at_mid = plan (Context.Bytes mid) in
+  let at_mid = plan (Memory_budget.Bytes mid) in
   p "reachable budget: met" at_mid.bp_within_budget;
   (* The footprint assertion: the layout the plan reports is actually under the budget. *)
   p "reachable budget: the scored footprint is under it" (at_mid.bp_final.fp_total <= mid);
@@ -226,7 +227,7 @@ let () =
      to the minimum. *)
   p "reachable budget: stops at the budget rather than minimizing"
     (at_mid.bp_final.fp_total >= minimum);
-  let unreachable = plan (Context.Bytes 1) in
+  let unreachable = plan (Memory_budget.Bytes 1) in
   p "unreachable budget: reports NOT within budget" (not unreachable.bp_within_budget);
   p "unreachable budget: still relieves what it can" (unreachable.bp_final.fp_total = minimum);
   p "monotone: a tighter budget never scores larger"
@@ -234,7 +235,7 @@ let () =
     && at_mid.bp_final.fp_total <= at_baseline.bp_final.fp_total);
   (* Deterministic, not a search: the same inputs pick the same flips, in the same order, with the
      same reported relief. *)
-  let again = plan (Context.Bytes mid) in
+  let again = plan (Memory_budget.Bytes mid) in
   p "deterministic: replanning picks the same flips"
     (List.equal
        (fun (a, ra, ca) (b, rb, cb) -> Tn.equal a b && ra = rb && ca = cb)
@@ -244,7 +245,9 @@ let () =
 let () =
   let losses_off, mem_off, plan_off = train_phase ~label:"budget off" () in
   p "default-off: nothing is planned" (Option.is_none plan_off);
-  let losses_on, mem_on, plan_on = train_phase ~budget:(Context.Bytes mid) ~label:"budget on" () in
+  let losses_on, mem_on, plan_on =
+    train_phase ~budget:(Memory_budget.Bytes mid) ~label:"budget on" ()
+  in
   (match plan_on with
   | None -> p "budget on: a plan shipped" false
   | Some plan ->

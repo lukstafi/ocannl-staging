@@ -523,7 +523,9 @@ let () =
        appends to a list, so it perturbs neither what is compiled nor what is timed. Since
        gh-ocannl-626 it travels on the compiled routine, so this bench cannot forget to ask and
        cannot disagree with [narrow_gebp_bench] about what "tensorized" means. *)
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx, routine =
+      Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
+    in
     let mma = routine.Context.mma in
     (* Warmup (includes any lazy initialization and host transfers). *)
     let ctx = Context.run ctx routine in

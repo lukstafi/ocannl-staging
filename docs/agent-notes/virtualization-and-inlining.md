@@ -16,7 +16,8 @@ files.
   a hand-written `LL.t`, or `analyze_proc`+`specialize_proc` — and pass it as
   `Context.compile ?prelowered` with `~name` and `Ir.Assignments.empty_comp` (gh-ocannl-562).
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
-  add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
+  add `~lowered_transform:(fun o -> [ o ])` to keep the default schedule annotator off hand-built
+  code.
   See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
 - Do not re-derive that harness: `test/support/ll_test.ml` (library `ll_test`, links `ocannl`) holds
   the LL builders, ONE exhaustive `Low_level.t`/`scalar_t` traversal with the counters derived from

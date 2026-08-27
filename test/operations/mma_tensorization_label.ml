@@ -69,8 +69,9 @@ let compile_twice ~name ~transform comp =
   let bracketed_routine, bracketed =
     Cs.with_census (fun () ->
         let _ctx, routine =
-          Context.compile ~name ~lowered_transform:transform (Context.auto ()) comp
-            Ir.Indexing.Empty
+          Context.compile ~name
+            ~lowered_transform:(fun o -> [ transform o ])
+            (Context.auto ()) comp Ir.Indexing.Empty
         in
         routine)
   in

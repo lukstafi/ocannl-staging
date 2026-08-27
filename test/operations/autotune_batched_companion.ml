@@ -94,7 +94,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) comp Ir.Indexing.Empty
   in
   let opt = Option.value_exn !captured in
@@ -204,7 +204,9 @@ let () =
            in
            match
              let sctx, sroutine =
-               Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+               Context.compile
+                 ~lowered_transform:(fun o -> [ transform o ])
+                 (Context.auto ()) comp Ir.Indexing.Empty
              in
              let sctx = Context.run sctx sroutine in
              Context.get_values sctx y.Tensor.value
@@ -261,7 +263,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured2 := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) comp2 Ir.Indexing.Empty
   in
   let opt2 = Option.value_exn !captured2 in
@@ -331,7 +333,7 @@ let () =
     Context.compile
       ~lowered_transform:(fun opt ->
         captured := Some opt;
-        opt)
+        [ opt ])
       (Context.auto ()) comp Ir.Indexing.Empty
   in
   let opt = Option.value_exn !captured in
@@ -440,7 +442,7 @@ let () =
   p "lm: the finer fissioned form executes correctly"
     (match
        let ctx, routine =
-         Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_e Ir.Indexing.Empty
+         Context.compile ~lowered_transform:transforms (Context.auto ()) comp_e Ir.Indexing.Empty
        in
        let ctx = Context.run ctx routine in
        (Context.get_values ctx z_e.Tensor.value, Context.get_values ctx r_e.Tensor.value)
@@ -481,8 +483,7 @@ let () =
         in
         match
           let ctx, routine =
-            Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_s
-              Ir.Indexing.Empty
+            Context.compile ~lowered_transform:transforms (Context.auto ()) comp_s Ir.Indexing.Empty
           in
           let ctx = Context.run ctx routine in
           (Context.get_values ctx z_s.Tensor.value, Context.get_values ctx r_s.Tensor.value)

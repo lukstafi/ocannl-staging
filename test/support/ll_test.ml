@@ -364,7 +364,7 @@ let base_ctx = lazy (Context.auto ())
 let link ?ctx ~name (o : LL.optimized) =
   let ctx = match ctx with Some ctx -> ctx | None -> Lazy.force base_ctx in
   Context.compile ~name ~prelowered:o
-    ~lowered_transform:(fun x -> x)
+    ~lowered_transform:(fun x -> [ x ])
     ctx Ir.Assignments.empty_comp Idx.Empty
 
 (** [link_finalized ~placements ~name o] links through the real backend, then checks that every

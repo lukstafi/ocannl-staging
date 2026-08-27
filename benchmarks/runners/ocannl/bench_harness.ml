@@ -430,7 +430,7 @@ let capture_lowering ctx comp bindings =
     Context.compile_outcome
       ~lowered_transform:(fun opt ->
         stash := Some opt;
-        opt)
+        [ opt ])
       ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
   in
   (match (outcome, !stash) with
@@ -633,7 +633,7 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
          compiler bugs. *)
       match
         Context.compile_outcome
-          ~lowered_transform:(fun _ -> post)
+          ~lowered_transform:(fun _ -> [ post ])
           ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
       with
       | Error (Ir.Schedule_outcome.Fatal _ as failure) -> Ir.Schedule_outcome.raise_failure failure

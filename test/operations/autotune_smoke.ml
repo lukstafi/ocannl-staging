@@ -63,7 +63,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           captured := Some opt;
-          opt)
+          [ opt ])
         ctx comp Ir.Indexing.Empty
     in
     Option.value_exn ~here:[%here] !captured
@@ -88,7 +88,7 @@ let () =
       Context.compile
         ~lowered_transform:(fun opt ->
           captured := Some opt;
-          opt)
+          [ opt ])
         ctx mm_comp Ir.Indexing.Empty
     in
     Option.value_exn ~here:[%here] !captured
@@ -179,7 +179,7 @@ let () =
         let sched, _reg = SC.of_saved canon priv_saved in
         let opt' = Sched.apply sched opt in
         priv_replay_digest := SC.digest (SC.canonicalize opt');
-        opt')
+        [ opt' ])
       pctx mm_comp Ir.Indexing.Empty
   in
   let pctx = Context.run pctx proutine in
@@ -208,7 +208,7 @@ let () =
         let sched, _reg = SC.of_saved canon saved in
         let opt' = Sched.apply sched opt in
         replay_digest := SC.digest (SC.canonicalize opt');
-        opt')
+        [ opt' ])
       ctx comp Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in

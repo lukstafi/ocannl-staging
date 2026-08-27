@@ -278,8 +278,8 @@ The `Context` module provides a simplified interface for backend management, int
 let ctx = Context.auto ()
 
 (* Explicit backend selection *)
-let ctx = Context.cuda ~device_id:0 ()  (* NVIDIA GPU *)
-let ctx = Context.metal ~device_id:0 () (* Apple Metal *)
+let ctx = Context.cuda ~ordinal:0 ()  (* NVIDIA GPU *)
+let ctx = Context.metal ~ordinal:0 () (* Apple Metal *)
 let ctx = Context.cpu ~threads:4 ()     (* Multi-threaded CPU *)
 ```
 

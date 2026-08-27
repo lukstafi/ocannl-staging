@@ -647,7 +647,7 @@ let () =
                   arm pr ~label:(geom_label q) ~compile:(fun ~record ~name ~fatal_seen fwd ->
                       compiled ~fatal_seen
                         ~lowered_transform:(fun o ->
-                          record (Sched.apply (Autotune.sketch_schedule ~p:q o) o))
+                          [ record (Sched.apply (Autotune.sketch_schedule ~p:q o) o) ])
                         ~name (Context.auto ()) fwd)))
         in
         run_round ~label:g lives)

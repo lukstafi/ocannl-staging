@@ -9,8 +9,9 @@ module Cc_backend = Cc_backend
 
 (* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the backend
    singletons' context types (no existential): [Backends.query]/[Backends.with_backend] dispatch
-   generic operations, and [copy] pair-matches the constructors to recover type equality for
-   same-backend transfers. *)
+   generic operations, and [copy] correlates two of them ([Backends.pair_contexts]) to recover type
+   equality for same-backend transfers. Nothing here matches the constructors: each dispatcher goes
+   through the one match [Backends] keeps per direction. *)
 
 type compile_frontier = {
   last_writer : int Map.M(Tn).t;
@@ -51,7 +52,10 @@ let create_ledger () =
 
 type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
-  device_id : int;
+  ordinal : int;
+      (** The backend's device ordinal this context runs on -- what {!Backends.make_context} was
+          given. NOT {!Ir.Backend_intf.device.device_id}, which is a process-global counter across
+          all backends. *)
   initialized_nodes : Set.M(Tn).t;
   frontier : (compile_frontier[@sexp.opaque]);
   ledger : (execution_ledger[@sexp.opaque]);
@@ -59,6 +63,12 @@ type t = {
 [@@deriving sexp_of]
 
 let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
+
+(* The context's backend as a first-class module, for the queries that read nothing FROM the
+   context: [classify_failure], [static_properties] and [hardware_limits] are backend-level
+   functions, so they need no type-recovering dispatch over the wrapped context. *)
+let backend_module ctx : (module BI.Backend) =
+  Backends.backend_module (Backends.wrapped_backend ctx.wrapped)
 
 type task_handle = Ir.Task.t
 
@@ -77,31 +87,26 @@ type routine = {
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
 
 (** Create a context from a backend name *)
-let create_from_backend_name ~device_id backend_name =
+let create_from_backend_name ~ordinal backend_name =
   let backend = Backends.get_backend ~backend_name () in
   {
-    wrapped = Backends.make_context ~device_id backend;
-    device_id;
+    wrapped = Backends.make_context ~ordinal backend;
+    ordinal;
     initialized_nodes = Set.empty (module Tn);
     frontier = empty_frontier;
     ledger = create_ledger ();
   }
 
-let cuda ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "cuda"
-
-let hip ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "hip"
-
-let metal ?device_id () =
-  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "metal"
+let cuda ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "cuda"
+let hip ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "hip"
+let metal ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "metal"
 
 let cpu ?threads () =
   (* Kernel-level CPU parallelism is automatic on both cc backends (pool-rendered Grid loops, see
      [automatic_cpu_schedule]); [threads] > 1 selects the multidev_cc debugging backend, which
      exposes multiple worker-domain devices. *)
   let backend_name = match threads with None | Some 1 -> "cc" | Some _ -> "multidev_cc" in
-  create_from_backend_name ~device_id:0 backend_name
+  create_from_backend_name ~ordinal:0 backend_name
 
 (* gh-ocannl-536 landing step 5: backend selection is not candidate compilation, so it does not use
    the compile-phase policy — but it used to catch everything, which turned a broken driver, an
@@ -123,7 +128,7 @@ let auto () =
               ("Context.auto: no backend available; tried "
               ^ String.concat ~sep:", " (List.rev unavailable))
         | name :: rest -> (
-            match create_from_backend_name ~device_id:0 name with
+            match create_from_backend_name ~ordinal:0 name with
             | ctx -> ctx
             | exception exn when advances_to_next_backend exn ->
                 try_backends (Exn.to_string exn :: unavailable) rest)
@@ -133,23 +138,16 @@ let auto () =
       (* Use the configured backend. An unknown name already raises a message naming it
          ([Backends.get_backend]); an unusable one keeps its own failure rather than being relabeled
          as a spelling mistake. *)
-      create_from_backend_name ~device_id:0 backend_name
+      create_from_backend_name ~ordinal:0 backend_name
 
-let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~provenance ?candidate
-    ctx comp bindings =
+let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate ctx comp bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
      (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
   let wrapped, backend_outcome =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* The [Tile_mma] rendering census is collected HERE, once, around this routine's
                codegen (gh-ocannl-626): whether a routine tensorized is a property of the compiled
                routine, not of whichever timing harness remembered to bracket the global. Fissioned
@@ -159,8 +157,8 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
                   Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
                     ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
                       let code =
-                        Backend.compile ?name ?lowered_transform ?lowered_transforms ?prelowered
-                          bctx.BI.optimize_ctx bindings comp
+                        Backend.compile ?name ?lowered_transform ?prelowered bctx.BI.optimize_ctx
+                          bindings comp
                       in
                       Ir.Schedule_outcome.tag Ir.Schedule_outcome.Backend_link (fun () ->
                           Backend.link bctx code)))
@@ -256,9 +254,9 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
 
       Ok (updated_ctx, routine)
 
-let compile ?name ?lowered_transform ?lowered_transforms ?prelowered ctx comp bindings =
+let compile ?name ?lowered_transform ?prelowered ctx comp bindings =
   match
-    compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered
+    compile_outcome ?name ?lowered_transform ?prelowered
       ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
   with
   | Ok result -> result
@@ -274,17 +272,8 @@ let compile ?name ?lowered_transform ?lowered_transforms ?prelowered ctx comp bi
    simply never consulted for a launch failure, and every such failure is fatal by phase default. *)
 let failure_classifier ctx :
     Ir.Schedule_outcome.phase -> exn -> Ir.Schedule_outcome.classified_cause option =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.classify_failure);
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.classify_failure
 
 let poisoned_failure ctx =
   Option.map ctx.ledger.poisoned ~f:(fun (name, exn) ->
@@ -388,40 +377,17 @@ let sync ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backend.await c.BI.device);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backend.await c.BI.device);
     }
 
 let static_properties ctx =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.static_properties ());
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.static_properties ()
 
 let hardware_limits ctx =
-  Backends.query ctx.wrapped
-    {
-      q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          _c
-        -> Backend.hardware_limits ());
-    }
+  let (module Backend) = backend_module ctx in
+  Backend.hardware_limits ()
 
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
@@ -523,13 +489,7 @@ let to_host ctx (tn : Tn.t) : Nd.t =
     Backends.query ctx.wrapped
       {
         q =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            c
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
             Backend.await c.BI.device;
             if Backend.to_host c node nd then (
               Backend.await c.BI.device;
@@ -605,13 +565,7 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            c
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
             (* Await pending device work BEFORE the upload, mirroring [to_host]: backends with
                host-visible (Shared) buffers implement [from_host] as a direct CPU memcpy, which
                already-queued kernels writing [tn] (e.g. a just-scheduled parameter initialization)
@@ -627,9 +581,9 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
-    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality and
-    the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it falls
-    back to a host round-trip. *)
+    from the same backend, {!Backends.pair_contexts} recovers type equality and the copy dispatches
+    to the backend's [device_to_device] transfer machinery; otherwise it falls back to a host
+    round-trip. *)
 let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
   (* Both lineages, and BEFORE dispatch: the same-backend path runs the transfer schedule directly
      rather than through [to_host], so checking only the host round-trip would let a poisoned source
@@ -650,13 +604,10 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
              (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
                 (Tn.debug_name tn) what)
   in
-  let same (type dev runner event)
-      (module Backend : BI.Backend
-        with type dev = dev
-         and type runner = runner
-         and type event = event)
-      ~(rewrap : (dev, runner, event) BI.context -> Backends.wrapped_context)
-      (sctx : (dev, runner, event) BI.context) (dctx : (dev, runner, event) BI.context) =
+  let same (type d r e) (impl : (d, r, e) Backends.backend_impl) (sctx : (d, r, e) BI.context)
+      (dctx : (d, r, e) BI.context) =
+    let (module Backend) = impl.Backends.bi_module in
+    let rewrap = impl.Backends.bi_wrap in
     match Backend.device_to_device tn ~into_merge_buffer ~dst:dctx ~src:sctx with
     | Some r -> (
         (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the device
@@ -679,20 +630,9 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
           (* The source and destination buffers are physically the same: nothing to transfer. *)
           mark_initialized dst (Set.singleton (module Tn) tn)
   in
-  match (src.wrapped, dst.wrapped) with
-  | Backends.Cc_ctx s, Backends.Cc_ctx d ->
-      same (module Backends.Cc_b) ~rewrap:(fun c -> Backends.Cc_ctx c) s d
-  | Backends.Multidev_cc_ctx s, Backends.Multidev_cc_ctx d ->
-      same (module Backends.Multidev_cc_b) ~rewrap:(fun c -> Backends.Multidev_cc_ctx c) s d
-  | Backends.Cuda_ctx s, Backends.Cuda_ctx d ->
-      same (module Backends.Cuda_b) ~rewrap:(fun c -> Backends.Cuda_ctx c) s d
-  | Backends.Hip_ctx s, Backends.Hip_ctx d ->
-      same (module Backends.Hip_b) ~rewrap:(fun c -> Backends.Hip_ctx c) s d
-  | Backends.Metal_ctx s, Backends.Metal_ctx d ->
-      same (module Backends.Metal_b) ~rewrap:(fun c -> Backends.Metal_ctx c) s d
-  | ( ( Backends.Cc_ctx _ | Backends.Multidev_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Hip_ctx _
-      | Backends.Metal_ctx _ ),
-      _ ) ->
+  match Backends.pair_contexts src.wrapped dst.wrapped with
+  | Backends.Same_backend (impl, s, d) -> same impl s d
+  | Backends.Cross_backend ->
       host_roundtrip
         (Printf.sprintf "cross-backend transfer (%s to %s)" (backend_name src) (backend_name dst))
 
@@ -736,32 +676,22 @@ let points_2d ?from_axis ~xdim ~ydim ctx (tn : Tn.t) =
   Nd.retrieve_2d_points ?from_axis ?padding ~xdim ~ydim nd
 
 let is_initialized ctx node = Set.mem ctx.initialized_nodes node
-let device_id ctx = ctx.device_id
+let ordinal ctx = ctx.ordinal
 
 let get_used_memory ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backend.get_used_memory c.BI.device);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backend.get_used_memory c.BI.device);
     }
 
 let release ctx =
   Backends.query ctx.wrapped
     {
       q =
-        (fun (type dev runner event)
-          (module Backend : BI.Backend
-            with type dev = dev
-             and type runner = runner
-             and type event = event)
-          c
-        -> Backends.finalize (module Backend) c);
+        (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+          Backends.finalize (module Backend) c);
     }
 
 (* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
@@ -789,13 +719,7 @@ let decide_materialized ctx tns =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* Fork the lineage state exactly like a compile would, then record the decisions in the
                fork: the argument context and its other descendants are unaffected. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
@@ -810,13 +734,7 @@ let decide_inline ctx tns =
     Backends.with_backend ctx.wrapped
       {
         f =
-          (fun (type dev runner event)
-            (module Backend : BI.Backend
-              with type dev = dev
-               and type runner = runner
-               and type event = event)
-            bctx
-          ->
+          (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) bctx ->
             (* Fork like [decide_materialized]; the preference is recorded rather than a placement
                decided, because inlining legality is settled only during optimization
                ([check_and_store_virtual]) — a preferred node the virtualizer rejects still
@@ -832,272 +750,3 @@ let decide_inline ctx tns =
       }
   in
   { ctx with wrapped }
-
-(* {2 gh-ocannl-498: budget-driven recompute-vs-store} *)
-
-type memory_budget = Bytes of int | Minimize [@@deriving sexp_of]
-
-type budget_plan = {
-  bp_baseline : Backends.footprint;
-  bp_final : Backends.footprint;
-  bp_flips : (Tn.t * int * int) list;
-  bp_considered : int;
-  bp_dropped : int;
-  bp_within_budget : bool;
-}
-[@@deriving sexp_of]
-
-(* gh-ocannl-498: compare the rationals [ra/ca] and [rb/cb] EXACTLY, for ranking candidates by
-   footprint relief per unit of recompute cost. [ca] and [cb] must be positive; the numerators are
-   byte counts and may be negative, since inlining a node can lengthen other nodes' spans and cost
-   footprint rather than free it.
-
-   Cross-multiplying would be the obvious comparison and is wrong: both factors are legitimately
-   large (bytes against reduction extent x read multiplicity), so the products can wrap and silently
-   invert the order. The Euclidean/continued-fraction descent uses only division and remainder, so
-   it cannot overflow, and stays bit-reproducible unlike a float ratio -- but it assumes
-   NON-NEGATIVE numerators: OCaml's division truncates toward zero, so a negative numerator inverts
-   the very comparison the descent is making ([-1/10] would rank above [1/10], and [0/1] above
-   [-1/5]). The sign is therefore settled first, and two negatives are compared by reversed
-   magnitude. *)
-let compare_relief_ratio ra ca rb cb =
-  let rec nonneg ra ca rb cb =
-    (* Both numerators non-negative here; denominators positive. *)
-    let qa = ra / ca and qb = rb / cb in
-    if qa <> qb then Int.compare qa qb
-    else
-      let ma = ra - (qa * ca) and mb = rb - (qb * cb) in
-      if ma = 0 then if mb = 0 then 0 else -1
-      else if mb = 0 then 1
-      else (* both fractional parts nonzero: compare ca/ma with cb/mb, inverted. *)
-        nonneg cb mb ca ma
-  in
-  match (ra >= 0, rb >= 0) with
-  | true, true -> nonneg ra ca rb cb
-  | true, false -> 1
-  | false, true -> -1
-  (* Both negative: |ra|/ca vs |rb|/cb with the order reversed. *)
-  | false, false -> nonneg (-rb) cb (-ra) ca
-
-let log_memory_budget () = Utils.get_global_flag ~default:false ~arg_name:"log_memory_budget"
-
-(* One hermetic analysis of [comp] from [ctx]'s lineage with [inline] additionally preferred inline:
-   the footprint the resulting placement vector implies, plus the decision surface it reports.
-   [Backends.lower_assignments] forks the lineage state, so nothing here reaches [ctx] -- and the
-   gh-560 analysis cache makes every call after the first one a specialization replay. *)
-let analyze_footprint ?name ~(inline : Tn.t list) ctx comp bindings :
-    Backends.footprint * Ir.Low_level.flip_candidate list =
-  let optim_ctx = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx) } in
-  let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
-  List.iter inline ~f:(Hash_set.add optim_ctx.Ir.Low_level.inline_preferences);
-  let _name, (lowered : Ir.Low_level.optimized) =
-    Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
-  in
-  ( Backends.score_footprint ~backend_name:(backend_name ctx) ~limits:(hardware_limits ctx)
-      ~static_indices:(Idx.bound_symbols bindings) lowered,
-    lowered.Ir.Low_level.flip_candidates )
-
-let footprint ?name ctx comp bindings = fst (analyze_footprint ?name ~inline:[] ctx comp bindings)
-
-let plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings =
-  (* [Minimize] promises every flip that still relieves footprint, so it must not silently stop at a
-     default cut -- and a config-only user (memory_budget=minimize) has no way to raise one. It
-     therefore defaults to unbounded, paying two lowerings per candidate; a caller who wants that
-     bounded passes [max_candidates] explicitly, which applies to both budget kinds. A byte budget
-     stops as soon as it is met, so its default cut is a cost guard, not a semantic one. *)
-  let max_candidates =
-    match (max_candidates, budget) with
-    | Some n, _ -> n
-    | None, Minimize -> Int.max_value
-    | None, Bytes _ -> 32
-  in
-  if not (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing") then
-    raise
-    @@ Utils.User_error
-         "Context.plan_memory_budget: a memory budget needs the liveness memory planner (config \
-          buffer_aliasing=true) -- without it every node is always-live, the footprint score \
-          degenerates to bump packing, and the relief of demoting an intermediate is unrelated to \
-          what the allocator would do"
-  else begin
-    let logf fmt =
-      Stdlib.Printf.ksprintf
-        (fun s -> if log_memory_budget () then Stdio.eprintf "memory budget: %s\n%!" s)
-        fmt
-    in
-    let score inline = fst (analyze_footprint ?name ~inline ctx comp bindings) in
-    let bp_baseline, surface = analyze_footprint ?name ~inline:[] ctx comp bindings in
-    (* The acceptance-stopping predicate: [Minimize] is never satisfied, so it keeps taking flips
-       that still help. [within] is the reported outcome, where a target-less [Minimize] trivially
-       holds -- there is no budget for it to miss. *)
-    let met (fp : Backends.footprint) =
-      match budget with Minimize -> false | Bytes b -> fp.Backends.fp_total <= b
-    in
-    let within (fp : Backends.footprint) =
-      match budget with Minimize -> true | Bytes b -> fp.Backends.fp_total <= b
-    in
-    let done_ () =
-      {
-        bp_baseline;
-        bp_final = bp_baseline;
-        bp_flips = [];
-        bp_considered = 0;
-        bp_dropped = 0;
-        bp_within_budget = within bp_baseline;
-      }
-    in
-    if met bp_baseline then (
-      logf "baseline %d bytes is already within budget; no flips" bp_baseline.Backends.fp_total;
-      (ctx, done_ ()))
-    else
-      (* Only the [`Inline] direction: demoting a materialized intermediate to recompute-at-use is
-         what relieves footprint. Ranked CHEAPEST-recompute-first for the pre-filter (the surface's
-         own order is most-expensive-first, which the [Materialize]-direction search wants), so a
-         [max_candidates] cut keeps the flips a budget would most want to pay for. *)
-      let all =
-        List.fold surface ~init:[] ~f:(fun acc fc ->
-            match fc.Ir.Low_level.fc_flip with
-            | `Materialize -> acc
-            | `Inline ->
-                if List.exists acc ~f:(fun c -> Tn.equal c.Ir.Low_level.fc_tn fc.Ir.Low_level.fc_tn)
-                then acc
-                else fc :: acc)
-        |> List.sort ~compare:(fun a b ->
-            match Int.compare a.Ir.Low_level.fc_recompute_cost b.Ir.Low_level.fc_recompute_cost with
-            | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn
-            | c -> c)
-      in
-      let considered = List.take all max_candidates in
-      let bp_dropped = List.length all - List.length considered in
-      if bp_dropped > 0 then
-        logf "%d of %d inline candidates dropped by max_candidates=%d (cheapest recompute kept)"
-          bp_dropped (List.length all) max_candidates;
-      (* Round 1: each candidate's relief against the ACTUAL baseline layout. A node whose span was
-         already shared relieves nothing on its own (the gh-ocannl-558 lesson in reverse: relief is
-         not a function of the node's own size). Solo relief only RANKS here -- a zero-relief
-         candidate is kept, at the back, because relief is not additive in either direction: two
-         nodes pinning the same arena peak each free nothing alone and the whole range together, so
-         dropping them outright would report an otherwise reachable budget unreachable. Round 2
-         picks those up jointly. *)
-      let scored =
-        List.map considered ~f:(fun fc ->
-            let fp = score [ fc.Ir.Low_level.fc_tn ] in
-            let relief = bp_baseline.Backends.fp_total - fp.Backends.fp_total in
-            logf "candidate %s: recompute cost %d, solo relief %d bytes"
-              (Tn.debug_name fc.Ir.Low_level.fc_tn)
-              fc.Ir.Low_level.fc_recompute_cost relief;
-            (fc, relief))
-      in
-      let ranked =
-        List.sort scored ~compare:(fun (a, ra) (b, rb) ->
-            let ca = max 1 a.Ir.Low_level.fc_recompute_cost
-            and cb = max 1 b.Ir.Low_level.fc_recompute_cost in
-            (* Descending by ratio, so [b] against [a]. *)
-            match compare_relief_ratio rb cb ra ca with
-            | 0 -> (
-                match Int.compare rb ra with
-                | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn
-                | c -> c)
-            | c -> c)
-      in
-      (* Round 2: accept a prefix, re-scoring the CUMULATIVE vector each time. Inlining one node
-         moves the others' live spans, so a candidate's solo relief is not what it is worth here. A
-         candidate that adds nothing is held SPECULATIVELY rather than dropped: if a later one then
-         relieves bytes on top of it, the whole speculative group is committed together (the
-         two-nodes-at-one-peak case).
-
-         Every candidate is therefore scored BOTH ways, with and without the held group, and the
-         three outcomes are treated differently. Held flips are not merely unpaid, they can be
-         actively HARMFUL — a flip whose marginal was negative moved someone's span the wrong way —
-         and judging every later candidate only in their company would let one bad hold mask a
-         candidate that pays on its own, losing it and, with it, a reachable budget.
-
-         - joint strictly better: the group is load-bearing, so commit it with the candidate. -
-         joint strictly worse: the group is harmful here, so commit the candidate alone and DISCARD
-         the group (no group is reconsidered once discarded — this is a bounded planner, not a
-         search over subsets). - equal: the group is merely neutral. Commit the candidate alone but
-         KEEP holding it: committing it would pay recompute for zero bytes, and discarding it would
-         throw away a flip that may still be half of a later pair. Dropping neutral holds eagerly
-         measurably costs relief (on test/operations/memory_budget's step, 1196164 -> 1228932
-         bytes).
-
-         Speculatives never joined by a paying flip are discarded at the end, so no recompute is
-         ever paid for zero bytes. The relief of a joint commit is reported on the flip that closed
-         it, and the sum over [bp_flips] is exactly [bp_baseline - bp_final]. *)
-      let accepted = ref [] and flips = ref [] and cur = ref bp_baseline in
-      (* Held (node, recompute cost) pairs, most recently held first. *)
-      let speculative = ref [] in
-      let names l = String.concat ~sep:", " (List.map l ~f:(fun (tn, _) -> Tn.debug_name tn)) in
-      List.iter ranked ~f:(fun (fc, solo) ->
-          if not (met !cur) then begin
-            let tn = fc.Ir.Low_level.fc_tn and cost = fc.Ir.Low_level.fc_recompute_cost in
-            let held = !speculative in
-            let cand_alone = tn :: !accepted in
-            let fp_alone = score cand_alone in
-            let cand_joint, fp_joint =
-              if List.is_empty held then (cand_alone, fp_alone)
-              else
-                let c = (tn :: List.map held ~f:fst) @ !accepted in
-                (c, score c)
-            in
-            let verdict =
-              match compare_int fp_joint.Backends.fp_total fp_alone.Backends.fp_total with
-              | c when c < 0 -> `Load_bearing
-              | 0 -> `Neutral
-              | _ -> `Harmful
-            in
-            let cand = match verdict with `Load_bearing -> cand_joint | _ -> cand_alone in
-            let fp = match verdict with `Load_bearing -> fp_joint | _ -> fp_alone in
-            let marginal = !cur.Backends.fp_total - fp.Backends.fp_total in
-            if marginal > 0 then (
-              logf "accept %s: %d bytes (solo %d), cost %d%s, footprint now %d" (Tn.debug_name tn)
-                marginal solo cost
-                (match (verdict, held) with
-                | _, [] -> ""
-                | `Load_bearing, _ -> Printf.sprintf " jointly with %s" (names held)
-                | `Neutral, _ -> Printf.sprintf " alone, still holding %s" (names held)
-                | `Harmful, _ -> Printf.sprintf " alone, dropping harmful held %s" (names held))
-                fp.Backends.fp_total;
-              (* [flips] is reverse-chronological until the final [List.rev]. A joint commit's held
-                 flips carry 0 and the group's relief lands on the flip that made it pay. *)
-              flips :=
-                (tn, marginal, cost)
-                ::
-                (match verdict with
-                | `Load_bearing -> List.map held ~f:(fun (h, c) -> (h, 0, c))
-                | `Neutral | `Harmful -> [])
-                @ !flips;
-              accepted := cand;
-              (* A neutral group stays held: committing it would pay recompute for zero bytes, and
-                 dropping it would discard a flip that may still be half of a later pair. *)
-              (speculative := match verdict with `Neutral -> held | _ -> []);
-              cur := fp)
-            else (
-              logf "hold %s: no marginal relief yet (solo was %d); speculative" (Tn.debug_name tn)
-                solo;
-              speculative := (tn, cost) :: !speculative)
-          end);
-      (match !speculative with
-      | [] -> ()
-      | held ->
-          logf "dropping %d speculative flip(s) that never paid: %s" (List.length held) (names held));
-      let bp_final = !cur in
-      let bp_within_budget = within bp_final in
-      (match budget with
-      | Minimize ->
-          logf "minimized: %d -> %d bytes with %d flip(s)" bp_baseline.Backends.fp_total
-            bp_final.Backends.fp_total (List.length !flips)
-      | Bytes b ->
-          logf "budget %d bytes: %d -> %d bytes with %d flip(s), %s" b bp_baseline.Backends.fp_total
-            bp_final.Backends.fp_total (List.length !flips)
-            (if bp_within_budget then "within budget" else "STILL OVER BUDGET"));
-      let ctx = if List.is_empty !accepted then ctx else decide_inline ctx !accepted in
-      ( ctx,
-        {
-          bp_baseline;
-          bp_final;
-          bp_flips = List.rev !flips;
-          bp_considered = List.length considered;
-          bp_dropped;
-          bp_within_budget;
-        } )
-  end
