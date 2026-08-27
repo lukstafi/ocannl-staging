@@ -1047,8 +1047,20 @@ let opened_modules structure =
 let module_alias_targets structure =
   let targets = Hashtbl.create (module String) in
   let resolve name = Option.value (Hashtbl.find targets name) ~default:name in
-  let record alias path =
-    match List.last (flatten_longident path) with
+  (* A functor APPLICATION names its functor: [module Syntax = Ir.C_syntax.C_syntax (...)] makes
+     [Syntax] the module whose values the interfaces record under [C_syntax], so an [open Syntax] is
+     an open of that module under a name no origin spells. This is not a corner in this tree -- it is
+     how every backend and every codegen test reaches [compile_proc] (Codex round 4 on
+     lukstafi/ocannl-staging#487). *)
+  let rec named = function
+    | { pmod_desc = Pmod_ident { txt; _ }; _ } -> List.last (flatten_longident txt)
+    | { pmod_desc = Pmod_apply (functor_, _); _ } -> named functor_
+    | { pmod_desc = Pmod_apply_unit functor_; _ } -> named functor_
+    | { pmod_desc = Pmod_constraint (inner, _); _ } -> named inner
+    | _ -> None
+  in
+  let record alias expr =
+    match named expr with
     | Some target -> Hashtbl.set targets ~key:alias ~data:(resolve target)
     | None -> ()
   in
@@ -1058,17 +1070,13 @@ let module_alias_targets structure =
 
       method! structure_item item =
         (match item.pstr_desc with
-        | Pstr_module
-            { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
-          ->
-            record alias txt
+        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr; _ } -> record alias pmb_expr
         | _ -> ());
         super#structure_item item
 
       method! expression expr =
         (match expr.pexp_desc with
-        | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _) ->
-            record alias txt
+        | Pexp_letmodule ({ txt = Some alias; _ }, module_expr, _) -> record alias module_expr
         | _ -> ());
         super#expression expr
     end
@@ -1264,7 +1272,7 @@ let classify_source ~emitters ~path ~contents =
        gh-ocannl-748 took. So a text test whose haystack reads a buffer this scan did not see filled
        marks the itemisation partial: the file is still listed, the fragment is still unnamed, and
        the inventory SAYS so. *)
-    let reads_a_buffer e =
+    let reads_a_buffer_inline e =
       let found = ref false in
       let iterator =
         object
@@ -1279,6 +1287,30 @@ let classify_source ~emitters ~path ~contents =
       in
       iterator#expression e;
       !found
+    in
+    (* And through the bindings the read travels along, to a fixed point, exactly as taint does: a
+       test that writes [let source = Buffer.contents buf] and asserts on [source] later is the same
+       situation one binding removed, and the backstop has to see it or it is a backstop only for
+       the shape someone happened to write first. Nothing here is subtracted from taint -- a name the
+       taint walk reached is recorded as a pin before this is consulted. *)
+    let buffer_derived =
+      let derived = ref (Set.empty (module String)) in
+      let changed = ref true in
+      while !changed do
+        changed := false;
+        List.iter bindings ~f:(fun { names; params = _; body } ->
+            if not (List.for_all names ~f:(Set.mem !derived)) then
+              if
+                reads_a_buffer_inline body
+                || List.exists (idents_in body) ~f:(fun i -> Set.mem !derived i)
+              then (
+                derived := List.fold names ~init:!derived ~f:Set.add;
+                changed := true))
+      done;
+      !derived
+    in
+    let reads_a_buffer e =
+      reads_a_buffer_inline e || List.exists (idents_in e) ~f:(fun i -> Set.mem buffer_derived i)
     in
     let unattributed = ref false in
     let iterator =

@@ -427,6 +427,14 @@ let () =
   PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
   p "radix" (String.is_substring (B.contents buf) ~substring:"-0.0")|ocaml},
       "+partial +rendered" );
+    ( "an unattributed buffer read travels along bindings like taint does",
+      {ocaml|module LL = Ir.Low_level
+let () =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.9 100 buf (LL.to_doc () llc);
+  let source = Buffer.contents buf in
+  p "radix" (String.is_substring source ~substring:"-0.0")|ocaml},
+      "+partial +rendered" );
     ( "a local name bound to something else is not an emitter",
       {ocaml|let write = Buffer.add_string
 let () =
@@ -488,6 +496,15 @@ let () =
       1 );
     (* The controls. Opening a module is ordinary OCaml; what is refused is opening one whose names
        this scan attributes, and then using one of THOSE names. *)
+    ( "opening a module a FUNCTOR produced hides the emitter too",
+      {ocaml|let compile optimized =
+  let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
+    let procs = [| optimized |]
+  end)) in
+  let open Syntax in
+  let _kparams, doc, _launch = compile_proc ~name [] optimized in
+  doc_to_string doc|ocaml},
+      1 );
     ( "an open governs its own scope, not the whole file",
       {ocaml|let render_row row =
   let open Ir.Low_level in

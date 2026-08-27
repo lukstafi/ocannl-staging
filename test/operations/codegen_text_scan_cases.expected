@@ -63,6 +63,7 @@ ok: source -- a wrapper around an emitter carries its caller's buffer
 ok: source -- a wrapper whose buffer parameter carries no label is addressed by position
 ok: source -- a buffer this scan did not see filled marks the itemisation partial
 ok: source -- a buffer read through an alias of Buffer marks it partial just the same
+ok: source -- an unattributed buffer read travels along bindings like taint does
 ok: source -- a local name bound to something else is not an emitter
 ok: source -- a buffer nobody wrote generated text into carries nothing
 ok: source -- a test that reads no generated source is not a member
@@ -72,6 +73,7 @@ ok: rejection -- opening an ALIAS of the reader hides them just the same
 ok: rejection -- opening the emitter's module hides the render
 ok: rejection -- an open in expression position is an open
 ok: rejection -- opening an ALIAS of the emitter's module hides it under a name no origin spells
+ok: rejection -- opening a module a FUNCTOR produced hides the emitter too
 ok: rejection -- an open governs its own scope, not the whole file
 ok: rejection -- a structure-level open governs the items after it
 ok: rejection -- an open inside a nested module dies with it

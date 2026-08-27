@@ -622,14 +622,17 @@ that they earn a lookup rather than always-loaded space.
   qualifier; `Codegen_text_scan.emitter_aliases` adds the value alias (`let write = CR.emit`) and
   the wrapper (`let write ~buf p llc = CR.emit ~buf p llc`, whose own parameter is where the
   caller's buffer arrives — by label, or by position among the unlabelled arguments); and
-  `module_alias_targets` resolves an `open` of an aliased emitter module, which the rejection below
-  would otherwise miss. Membership, taint, the buffer destinations and the pin walk all go through
+  `module_alias_targets` resolves an `open` of an aliased emitter module — including one a FUNCTOR
+  produced (`module Syntax = Ir.C_syntax.C_syntax (…)`, which is how every backend and every codegen
+  test reaches `compile_proc`), by taking the functor's own name — which the rejection below would
+  otherwise miss. Membership, taint, the buffer destinations and the pin walk all go through
   the one resolver: rules that know different routes are how a file stays listed while its pin
   disappears.
 - **What no file-local rule can follow now says so.** A buffer is where generated text lands with no
   name to carry it, and the ways to fill one do not end (a wrapper reaching its parameter through a
   local binding, PPrint's own `ToBuffer` renderers, a buffer in a record). So a substring test whose
-  haystack reads a `Buffer.contents` this scan never saw filled marks that file's itemisation
+  haystack reads a `Buffer.contents` this scan never saw filled — directly, or through the bindings
+  the read travels along, by the same fixed point taint uses — marks that file's itemisation
   **partial** rather than dropping the fragment silently — the file is listed, the fragment is
   unnamed, and the inventory says which.
 - **An `open` that hides a route is refused, not approximated — over its own scope.** A structure
