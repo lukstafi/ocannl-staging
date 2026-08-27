@@ -83,7 +83,11 @@ runs:
           url=${spec%%#*}
           ref=${spec#*#}
           [ "$ref" != "$spec" ] || ref=HEAD
-          sha=$(git ls-remote "$url" "$ref" | cut -f1 | head -1)
+          # `awk` rather than `cut | head`: an annotated tag answers on two lines
+          # (the tag and its peeled commit), and a `head` that leaves early can
+          # hand its upstream a SIGPIPE, which `pipefail` would then read as a
+          # failed resolution. awk consumes the whole answer and prints one line.
+          sha=$(git ls-remote "$url" "$ref" | awk 'NR==1{print $1}')
           # An empty sha would silently collapse the key onto whatever it hashed
           # to last time, serving a cache built from different sources.
           [ -n "$sha" ] || { echo "could not resolve $ref of $url" >&2; exit 1; }

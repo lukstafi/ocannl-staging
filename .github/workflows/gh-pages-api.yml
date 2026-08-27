@@ -51,8 +51,8 @@ jobs:
       # not saving cache"), so whatever root was captured the day the entry was
       # first written was served back until the 7-day read eviction retired it --
       # freshness as a function of the calendar rather than of the dependencies,
-      # which is what made #698's runs fail in two different steps on one tree
-      # (gh-ocannl-732). Keyed on the opam files and the resolved pin revisions
+      # which is what made gh-ocannl-698's runs fail in two different steps on
+      # one tree (gh-ocannl-732). Keyed on the opam files and the resolved pin revisions
       # it moves when they do, and `restore-keys` keeps the miss warm: the
       # previous root is restored, this run refreshes it, and the post step
       # writes it back under the new key.
