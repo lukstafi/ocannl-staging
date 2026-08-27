@@ -149,7 +149,13 @@ files.
   hands back its own `__CUDA_ARCH__`, and that value is printed in the header AND carried in every
   claim's label ("… via the hardware cvt (__CUDA_ARCH__ = 1200)"). That matters below sm_89, where
   `--arch=device` asks honestly for the device's own architecture and still gets the software
-  conversion: the run says so rather than reading as a hardware check (Codex P2, round 4).
+  conversion: the run says so rather than reading as a hardware check (Codex P2, round 4). For the
+  same reason **the device's capability is not the kernel's compile target on CUDA and must not be
+  labelled as one**: under `--arch=backend` a compute-12.0 box compiles for 7.5, so the run header
+  derives `target` from the kernel's own `__CUDA_ARCH__` and reports the device's capability
+  separately, as `device capability`. HIP is the case where the two coincide — hiprtc given no
+  `--offload-arch` compiles for the current default device — and that is stated where it is relied
+  on rather than left as an assumption (gh-ocannl-758).
 - The soak's NON-finite disagreements are permanent, and it prints them rather than hiding them.
   `±inf` narrows to 0x7B/0xFB under CUDA (saturating) where our codec keeps 0x7C/0xFC: 2 inputs in
   each sweep. A NaN f32 narrows to 0x7F whatever its sign, so 8388607 of the 16777214 NaN patterns
