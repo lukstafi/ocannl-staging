@@ -55,9 +55,56 @@ report() { # report RC LABEL [DETAIL]
   fi
   return 0
 }
+skipped=0
+skip() { # skip LABEL REASON -- a leg this system cannot decide, not a failure
+  skipped=$((skipped + 1))
+  printf 'SKIP  %s\n      %s\n' "$1" "$2"
+  return 0
+}
+
+# The harness needs the two facts about a process that `group_alive` needs, read
+# INDEPENDENTLY of it: its state and its process group. Neither is available the
+# same way everywhere -- a Git Bash/MSYS `ps` takes no `-o` at all, which the
+# Windows CI job depends on and which would otherwise leave every state probe
+# here reading "gone". So: /proc where it answers (MSYS has one), `ps` where it
+# does not, and the prerequisite check below refuses to let a leg run on a
+# system where neither does -- an unreadable state must skip a leg, never pass
+# or fail one (Codex review round 1, P2).
+pstate() { # <pid> -> its one-letter state, empty where this system will not say
+  local line
+  if [ -r "/proc/$1/stat" ]; then
+    read -r line <"/proc/$1/stat" 2>/dev/null || return 0
+    line=${line##*) }               # comm may itself hold ") "
+    # shellcheck disable=SC2086
+    set -- $line                    # `state ppid pgrp ...`
+    printf '%s' "${1:-}"
+    return 0
+  fi
+  ps -o state= -p "$1" 2>/dev/null | tr -d ' ' | cut -c1
+}
+ppgid() { # <pid> -> its process group, empty where this system will not say
+  local line
+  if [ -r "/proc/$1/stat" ]; then
+    read -r line <"/proc/$1/stat" 2>/dev/null || return 0
+    line=${line##*) }
+    # shellcheck disable=SC2086
+    set -- $line
+    printf '%s' "${3:-}"
+    return 0
+  fi
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
+}
+# Probed against a process known to be alive and to have a group -- this one.
+# An empty answer here means the reader is absent, which is a different fact
+# from a process being gone, and the two are indistinguishable at a leg.
+have_state=1; [ -n "$(pstate $$)" ] || have_state=0
+have_pgid=1;  [ -n "$(ppgid $$)" ]  || have_pgid=0
 
 echo "testing $SRC"
 printf '  digest %s\n' "$( (cksum <"$SRC") 2>/dev/null || echo '?')"
+printf '  state reader: %s; pgid reader: %s\n' \
+  "$([ "$have_state" = 1 ] && echo present || echo ABSENT)" \
+  "$([ "$have_pgid" = 1 ] && echo present || echo ABSENT)"
 
 # Checked, not assumed: nothing here uses `set -e`, so a `mktemp` that fails
 # would leave TMP empty and `rm -rf "$TMP"` would be handed the ROOT.
@@ -128,39 +175,45 @@ fi
 # Leg 2: a live group reads alive
 # ---------------------------------------------------------------------------
 # `set -m` puts the child in a process group of its own, so its pid IS a pgid
-# holding exactly one live process -- the shape all three call sites signal.
-set -m
-sleep 30 >/dev/null 2>&1 </dev/null &
-livepid=$!
-set +m
-lpgid="$(ps -o pgid= -p "$livepid" 2>/dev/null | tr -d ' ')"
-if [ "$lpgid" != "$livepid" ]; then
-  report 1 "a group holding a running process reads as alive" \
-    "the child did not lead its own group (pgid '${lpgid:-gone}' vs pid $livepid)"
-elif ! kill -0 -- "-$livepid" 2>/dev/null; then
-  report 1 "a group holding a running process reads as alive" \
-    "the group is not even signal-reachable; the leg tested nothing"
-elif group_alive "$livepid"; then
-  report 0 "a group holding a running process reads as alive"
+# holding exactly one live process -- the shape all four call sites signal.
+# That the child really leads its own group has to be CHECKED (a shell whose
+# setpgrp does not take would otherwise have this leg quietly testing the
+# harness's own group), so both legs need the pgid reader.
+live_label="a group holding a running process reads as alive"
+empty_label="a group with no members left reads as dead"
+if [ "$have_pgid" = 0 ]; then
+  skip "$live_label" "no way to read a process's group on this system"
+  skip "$empty_label" "no way to read a process's group on this system"
 else
-  report 1 "a group holding a running process reads as alive" \
-    "group_alive said dead for a group with a live sleep in it"
-fi
+  set -m
+  sleep 30 >/dev/null 2>&1 </dev/null &
+  livepid=$!
+  set +m
+  lpgid="$(ppgid "$livepid")"
+  if [ "$lpgid" != "$livepid" ]; then
+    report 1 "$live_label" \
+      "the child did not lead its own group (pgid '${lpgid:-gone}' vs pid $livepid)"
+  elif ! kill -0 -- "-$livepid" 2>/dev/null; then
+    report 1 "$live_label" "the group is not even signal-reachable; the leg tested nothing"
+  elif group_alive "$livepid"; then
+    report 0 "$live_label"
+  else
+    report 1 "$live_label" "group_alive said dead for a group with a live sleep in it"
+  fi
 
-# ---------------------------------------------------------------------------
-# Leg 3: an empty group reads dead
-# ---------------------------------------------------------------------------
-kill -KILL -- "-$livepid" 2>/dev/null
-wait "$livepid" 2>/dev/null   # reaped here, so the group really is empty
-livepid=""
-if kill -0 -- "-$lpgid" 2>/dev/null; then
-  report 1 "a group with no members left reads as dead" \
-    "pgid $lpgid is still signal-reachable after the kill and reap"
-elif group_alive "$lpgid"; then
-  report 1 "a group with no members left reads as dead" \
-    "group_alive said alive for an empty group"
-else
-  report 0 "a group with no members left reads as dead"
+  # -------------------------------------------------------------------------
+  # Leg 3: an empty group reads dead
+  # -------------------------------------------------------------------------
+  kill -KILL -- "-$livepid" 2>/dev/null
+  wait "$livepid" 2>/dev/null   # reaped here, so the group really is empty
+  livepid=""
+  if kill -0 -- "-$lpgid" 2>/dev/null; then
+    report 1 "$empty_label" "pgid $lpgid is still signal-reachable after the kill and reap"
+  elif group_alive "$lpgid"; then
+    report 1 "$empty_label" "group_alive said alive for an empty group"
+  else
+    report 0 "$empty_label"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -177,6 +230,21 @@ fi
 # group of ITS OWN (so the group holds the zombie and nothing else), then STOPs
 # itself before the child exits: a stopped shell runs no SIGCHLD handler, so it
 # cannot reap, and the child stays a zombie for as long as the leg needs.
+#
+# All of that needs a state reader, and needs it INDEPENDENT of the function
+# under test: without one, "is it a zombie yet" reads the same as "it is gone",
+# the leg would sit out its whole retry budget and then judge `group_alive` on a
+# premise it never established -- and the cleanup assertion at the end would
+# read an empty state as "reaped" and pass on a system that cannot see the
+# corpse at all. So the whole leg, zombie maker included, is skipped there.
+zlabel="a group holding nothing but a zombie reads as dead"
+clabel="the state reader alone rejects a zombie-only group (signal probe forced to say alive)"
+rlabel="the zombie leg reaps its own zombie, leaving no process-table entry"
+if [ "$have_state" = 0 ]; then
+  skip "$zlabel" "no way to read a process's state on this system"
+  skip "$clabel" "no way to read a process's state on this system"
+  skip "$rlabel" "the zombie leg did not run, so it left nothing to reap"
+else
 zpidfile="$TMP/zombie.pid"; rm -f "$zpidfile"
 bash -c 'set -m
          sleep 0.5 >/dev/null 2>&1 </dev/null &
@@ -190,18 +258,16 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   [ -s "$zpidfile" ] && zpid="$(cat "$zpidfile")" && break
   sleep 0.1
 done
-# Wait for real zombiehood rather than guessing at it, and read the state with
-# `ps -p`, independently of the `group_alive` under test.
+# Wait for real zombiehood rather than guessing at it, through `pstate`, which
+# is this harness's own reader and shares no code with `group_alive`.
 zstate=""
 if [ -n "$zpid" ]; then
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-    zstate="$(ps -o state= -p "$zpid" 2>/dev/null | tr -d ' ')"
+    zstate="$(pstate "$zpid")"
     case "$zstate" in Z*) break ;; esac
     sleep 0.1
   done
 fi
-zlabel="a group holding nothing but a zombie reads as dead"
-clabel="the state reader alone rejects a zombie-only group (signal probe forced to say alive)"
 if [ -z "$zpid" ]; then
   report 1 "$zlabel" "could not start the zombie maker"
   report 1 "$clabel" "could not start the zombie maker"
@@ -260,16 +326,16 @@ zparent=""
 zleft=""
 if [ -n "$zpid" ]; then
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    zleft="$(ps -o state= -p "$zpid" 2>/dev/null | tr -d ' ')"
+    zleft="$(pstate "$zpid")"
     [ -z "$zleft" ] && break
     sleep 0.1
   done
 fi
 if [ -z "$zleft" ]; then
-  report 0 "the zombie leg reaps its own zombie, leaving no process-table entry"
+  report 0 "$rlabel"
 else
-  report 1 "the zombie leg reaps its own zombie, leaving no process-table entry" \
-    "pid $zpid is still present as '$zleft'"
+  report 1 "$rlabel" "pid $zpid is still present as '$zleft'"
+fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -290,9 +356,11 @@ else
 fi
 
 echo
+# The skip count is printed on every run, not only when it is nonzero: "all legs
+# passed" over a run that decided three of them is the reading to prevent.
 if [ "$failures" -eq 0 ]; then
-  echo "all legs passed"
+  echo "all legs passed ($skipped skipped)"
 else
-  echo "$failures leg(s) failed"
+  echo "$failures leg(s) failed ($skipped skipped)"
 fi
 exit $(( failures > 0 ? 1 : 0 ))

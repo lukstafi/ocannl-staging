@@ -485,6 +485,14 @@ group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 # it can turn a phantom alive into dead and never the reverse, whatever the
 # state reader sees (a group of another uid, say, which `ps -A` lists and no
 # kill of ours could reach).
+#
+# It remains a CENSUS, and a census is a SNAPSHOT: the glob (or the `ps`) is
+# taken at one instant, so a child forked while it is being read is not in it,
+# while a leader that exited into a zombie during that instant is. Both callers
+# are therefore written so that this answer can shorten a reap or reword a
+# report but never SKIP one -- the signals go out on reachability alone. A wrong
+# answer then costs a less graceful shutdown, never a survivor left mutating
+# _build behind a released worktree lock (Codex review round 1, P1).
 group_alive() { # <pgid>; exits 0 iff some member is not a zombie
   local pgid=$1 f line states found
   # Same rule as proc_alive: 0 and negatives are kill specials (caller's own
@@ -821,15 +829,23 @@ case $sub in
       # the lock. The group is recorded (only when it is truly its own, see
       # the supervisor comment), so reap any survivors first.
       if group_verified "$run_dir" &&
-         pgid=$(cat "$run_dir/pgid") && group_alive "$pgid"; then
-        kill -TERM -- "-$pgid" 2>/dev/null
-        sleep 2
+         pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
+        # Reachability is the entry condition and the KILL below is
+        # unconditional: this reap is what stands between a surviving dune and
+        # a released worktree lock, and a census that missed a just-forked
+        # child must never be able to call it off. group_alive decides only
+        # whether the TERM's grace is worth sitting out -- a group holding
+        # nothing but unreaped corpses (see there) would otherwise cost this
+        # path two seconds every time, and getting THAT wrong costs only a
+        # less graceful shutdown.
+        if group_alive "$pgid"; then
+          kill -TERM -- "-$pgid" 2>/dev/null
+          sleep 2
+        fi
         # Revalidate before escalating: TERM usually empties the group within
         # the grace, and a numeric pgid could be recycled during it -- KILL
-        # only a group whose recorded leader identity still matches and that
-        # still holds something running (a group emptied by the TERM can be
-        # left holding unreaped corpses, which pass group_verified).
-        group_verified "$run_dir" && group_alive "$pgid" &&
+        # only a group whose recorded leader identity still matches.
+        group_verified "$run_dir" &&
           kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
@@ -1204,7 +1220,7 @@ case $sub in
       # worktree's history.
       echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
     elif group_verified "$run_dir" &&
-         pg=$(cat "$run_dir/pgid") && group_alive "$pg"; then
+         pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
       # SIGKILL can remove wrapper and supervisor around a dune that survives
       # in its own recorded group -- still holding the worktree lock, beyond
       # its cap. Identity is the group LEADER's recorded start token (the
@@ -1214,13 +1230,41 @@ case $sub in
       # conservative side: clean that up by hand. TERM gets a bounded grace,
       # then a revalidated KILL -- an orphan that ignores TERM has lost its
       # cap and would otherwise hold the worktree lock indefinitely.
-      kill -TERM -- "-$pg" 2>/dev/null
-      sleep 2
-      if group_verified "$run_dir" && group_alive "$pg"; then
-        kill -KILL -- "-$pg" 2>/dev/null
-        echo "orphaned process group $pg ignored TERM; escalated to KILL"
+      #
+      # Reachability, not liveness, opens this branch, and every signal below
+      # is sent on it alone: a census is a snapshot, so a child forked while it
+      # was taken is missing from it, and letting that veto the reap would
+      # leave the child holding the lock with nothing left to reap it.
+      # group_alive decides what to REPORT, which is where the phantom lived
+      # (gh-ocannl-742): a group of unreaped corpses announced as a runaway
+      # dune ignoring TERM.
+      if group_alive "$pg"; then
+        kill -TERM -- "-$pg" 2>/dev/null
+        sleep 2
+        if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
+          # Read the state BEFORE the KILL -- the KILL is what makes the answer
+          # stale -- but send the KILL either way.
+          if group_alive "$pg"; then still=running; else still=corpses; fi
+          kill -KILL -- "-$pg" 2>/dev/null
+          if [ "$still" = running ]; then
+            echo "orphaned process group $pg ignored TERM; escalated to KILL"
+          else
+            # Not "cleared": only the parent that forked them can reap
+            # corpses, and here there is no parent left to do it.
+            echo "orphaned process group $pg stopped on TERM; only unreaped" \
+                 "exited processes remain in it"
+          fi
+        else
+          echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+        fi
       else
-        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+        # Verified, reachable, and nothing in it running: corpses under a
+        # reaper that will not reap them. The KILL still goes out (it costs
+        # nothing against corpses and covers a fork that raced the census);
+        # what changes is that the operator is told what is actually there.
+        kill -KILL -- "-$pg" 2>/dev/null
+        echo "process group $pg holds only unreaped exited processes;" \
+             "nothing of the run was still running"
       fi
     elif wrapper_alive "$run_dir"; then
       # The run is MANAGED right now: either just launched (supervisor pid

@@ -380,7 +380,13 @@ that they earn a lookup rather than always-loaded space.
   one (fork-free, through the shell's `read`), `ps -A -o pgid=,stat=` on the BSDs and macOS,
   degrading to the bare signal only where neither answers; the signal probe stays FIRST as a
   necessary condition, which makes the predicate a strict narrowing of the `kill -0` it replaced —
-  it can turn a phantom alive into dead and never the reverse. Whether the bare probe over-reports
+  it can turn a phantom alive into dead and never the reverse. A state read is still a CENSUS, and a
+  census is a SNAPSHOT — a child forked while the glob is being read is not in it, and a leader that
+  exited into a zombie during it is — so both callers let that answer shorten a reap or reword a
+  report but never SKIP one: every signal goes out on reachability alone, and liveness decides only
+  whether the TERM grace is worth sitting out and which sentence the operator reads. A census
+  allowed to veto cleanup buys the phantom back as a survivor mutating `_build` behind a released
+  worktree lock, which is the worse of the two failures. Whether the bare probe over-reports at all
   is a property of the kernel, so a local pass proves less than it looks: Linux (and every container
   on it) counts the zombie and says alive, while Darwin's `killpg` already answers `ESRCH` once a
   group holds only corpses, and under a PID 1 that does not reap the zombie is PERMANENT, so a retry
@@ -389,7 +395,11 @@ that they earn a lookup rather than always-loaded space.
   spawns, STOPs and kills processes): it extracts `group_alive` from the working-tree script and
   builds a group holding nothing but a zombie, asserting both the claim and, by shadowing `kill` so
   the signal probe is forced to answer alive, the portable control that the state reader alone
-  rejects that group on a kernel like the one where this was reproduced.
+  rejects that group on a kernel like the one where this was reproduced. It reads states and groups
+  through its OWN `/proc`-then-`ps` readers, probed against a known-live process before use: a Git
+  Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
+  rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
+  cleanup assertion pass vacuously.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
