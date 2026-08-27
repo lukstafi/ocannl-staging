@@ -219,11 +219,12 @@ let init () =
       state := Some st;
       st
 
-(* ["device"] and ["target"] are the two entries fp8_soak.ml looks up by name -- the gcn arch is the
-   target here, and it is also what selects the header's conversion path. *)
+(* ["device"] is the one entry fp8_soak.ml looks up by name. ["gcn arch"] is the other one it reads:
+   hiprtc given no [--offload-arch] compiles for the current default device, so this is also the
+   architecture the kernels were built for, which is what selects the header's conversion path. *)
 let device_report () =
   let st = init () in
-  [ ("device", st.attrs.name); ("target", st.attrs.gcn_arch_name) ]
+  [ ("device", st.attrs.name); ("gcn arch", st.attrs.gcn_arch_name) ]
 
 let compile_options () = (init ()).options
 

@@ -169,15 +169,17 @@ let init () =
       state := Some st;
       st
 
-(* ["device"] and ["target"] are the two entries fp8_soak.ml looks up by name; the rest is printed
-   in the run header in order. *)
+(* ["device"] is the one entry fp8_soak.ml looks up by name; the rest is printed in the run header
+   in order, under labels saying what they are facts about. The device's capability is NOT the
+   architecture the kernel compiled for -- under [--arch=backend] this marker-free source gets
+   nvrtc's default target instead -- so that one is derived in fp8_soak.ml from the compiled
+   kernel's own [__CUDA_ARCH__]. *)
 let device_report () =
   let st = init () in
   [
     ("device", st.attrs.name);
-    ( "target",
-      Printf.sprintf "compute capability %d.%d" st.attrs.compute_capability_major
-        st.attrs.compute_capability_minor );
+    ( "device capability",
+      Printf.sprintf "%d.%d" st.attrs.compute_capability_major st.attrs.compute_capability_minor );
     ("multiprocessors", Int.to_string st.attrs.multiprocessor_count);
   ]
 

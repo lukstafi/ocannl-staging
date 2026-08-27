@@ -101,10 +101,14 @@ module type ARM = sig
       the setting and ignores it. *)
 
   val device_report : unit -> (string * string) list
-  (** What the vendor's device query says about this box, as pairs the run header formats. Two keys
-      are looked up by name and must be present: ["device"], the accelerator's own name, and
-      ["target"], the architecture the kernels were compiled for as the vendor names it ("compute
-      capability 12.0", "gfx1151"); further pairs are printed in order. *)
+  (** What the vendor's device query says about this box, as pairs the run header formats. One key
+      is looked up by name and must be present: ["device"], the accelerator's own name; further
+      pairs are printed in order, under labels that say what they are FACTS ABOUT. A device
+      capability is not the architecture the kernel compiled for — under [--arch=backend] a
+      marker-free source gets nvrtc's default target, measured at [__CUDA_ARCH__ = 750] on a
+      compute-12.0 device — so that architecture is the vendor record's [target], derived from what
+      the compiled kernel reports, and never a device-query field wearing the name (Codex P2 round 1
+      on PR #490). *)
 
   val compile_options : unit -> string list
   (** What the vendor's runtime compiler was given, so a run record says what it compiled. These
@@ -143,9 +147,17 @@ type vendor = {
           is emitted instead. An arm is never asked for a spelling outside this list. *)
   spelling_label : spelling -> string;
       (** How the swept narrowing is written in an emitted kernel, for the claim labels. *)
+  target : report:(string * string) list -> macros:(string * int) list -> string;
+      (** The architecture the kernels were COMPILED FOR, as this vendor names it — which is not the
+          same question as what the device is capable of, and the two answer differently exactly
+          where the run record matters: under [--arch=backend] a marker-free source passes no
+          [--gpu-architecture] and gets nvrtc's default target, measured at [__CUDA_ARCH__ = 750] on
+          a compute-12.0 device. So CUDA derives this from the compiled kernel's own macro, while
+          HIP takes the device's gcn arch — there hiprtc compiles for the current default device
+          when given no [--offload-arch], so the device's architecture IS the compile target. *)
   macro_facts : macros:(string * int) list -> (string * string) list;
       (** Header facts that only the compiled kernel's macro readings can answer. *)
-  conversion_path : report:(string * string) list -> macros:(string * int) list -> string;
+  conversion_path : target:string -> macros:(string * int) list -> string;
       (** Which conversion the vendor kernel actually got, as the COMPILED KERNEL reports it rather
           than as the options we passed imply — CUDA's [cuda_fp8.hpp] is the hardware instruction at
           [__CUDA_ARCH__ >= 890] and its own software emulation below, so a device whose capability
@@ -188,9 +200,18 @@ let cuda_vendor =
       (* Unreachable through [spellings], and named rather than [assert false] so that a future
          guard on this platform fails to compile here instead of mislabelling a sweep. *)
       | `Guarded -> "no guarded spelling on CUDA");
+    (* From the compiled kernel, never from the device: [--arch=backend] asks [Cuda_backend] for
+       this marker-free source's options, which include no [--gpu-architecture] at all, so nvrtc's
+       default target applies and a compute-12.0 box compiles for 7.5. The device's own capability
+       is reported too, under a label that says that is what it is. *)
+    target =
+      (fun ~report:_ ~macros ->
+        match macro macros cuda_arch_macro with
+        | 0 -> Printf.sprintf "unknown (%s undefined)" cuda_arch_macro
+        | arch -> Printf.sprintf "compute capability %d.%d" (arch / 100) (arch / 10 % 10));
     macro_facts = (fun ~macros:_ -> []);
     conversion_path =
-      (fun ~report:_ ~macros ->
+      (fun ~target:_ ~macros ->
         let arch = macro macros cuda_arch_macro in
         if arch >= fp8_hardware_arch then
           Printf.sprintf "hardware cvt (%s = %d)" cuda_arch_macro arch
@@ -230,11 +251,13 @@ let hip_vendor =
           ( "fp8 interpretation",
             match macro macros hip_ocp_macro with 1 -> "OCP" | 0 -> "FNUZ only" | _ -> "unknown" );
         ]);
+    (* hiprtc given no [--offload-arch] compiles for the current default device, so the device's own
+       gcn arch IS what the kernels were built for -- unlike CUDA, where the two can differ. *)
+    target = (fun ~report ~macros:_ -> field report "gcn arch");
     conversion_path =
-      (fun ~report ~macros ->
+      (fun ~target ~macros ->
         (* The gcn arch travels with the answer because it is what SELECTS the side, but the value
            reported is the macro the kernel compiled with, not a name matched against a list here. *)
-        let target = field report "target" in
         match macro macros hip_fast_path_macro with
         | 1 -> Printf.sprintf "hardware cvt (%s = 1 on %s)" hip_fast_path_macro target
         | 0 ->
@@ -259,8 +282,11 @@ let probe v (module A : ARM) =
     | Error e ->
         Error (Printf.sprintf "%s is linked, but %s initialization failed: %s" v.library v.runtime e)
 
-let conversion_path v (module A : ARM) =
-  v.conversion_path ~report:(A.device_report ()) ~macros:(A.kernel_macros ())
+let target v (module A : ARM) = v.target ~report:(A.device_report ()) ~macros:(A.kernel_macros ())
+
+let conversion_path v arm =
+  let (module A : ARM) = arm in
+  v.conversion_path ~target:(target v arm) ~macros:(A.kernel_macros ())
 
 (* The compiler options are part of the answer, not decoration: on CUDA which [--gpu-architecture]
    the kernel was built for decides whether the cast became a hardware conversion or the header's
@@ -268,11 +294,18 @@ let conversion_path v (module A : ARM) =
    re-derived later. *)
 let describe v (module A : ARM) =
   let report = A.device_report () in
+  let macros = A.kernel_macros () in
+  let target = v.target ~report ~macros in
   let facts =
-    List.filter_map report ~f:(fun (k, x) ->
-        if String.equal k "device" then None else Some (Printf.sprintf "%s: %s" k x))
-    @ List.map (v.macro_facts ~macros:(A.kernel_macros ())) ~f:(fun (k, x) ->
-          Printf.sprintf "%s: %s" k x)
+    (* The compile target leads, because it is what the rest of the run is relative to; then the
+       arm's own device facts under their own labels, then what only the macros can say. A device
+       fact the target already states verbatim is not repeated -- on HIP the gcn arch IS the compile
+       target, on CUDA the device's capability and the target are two different numbers. *)
+    (("target", target)
+     :: List.filter report ~f:(fun (k, x) ->
+            (not (String.equal k "device")) && not (String.equal x target)))
+    @ v.macro_facts ~macros
+    |> List.map ~f:(fun (k, x) -> Printf.sprintf "%s: %s" k x)
   in
   Printf.sprintf "%s (%s); %s options: %s" (field report "device")
     (String.concat ~sep:", " facts)
