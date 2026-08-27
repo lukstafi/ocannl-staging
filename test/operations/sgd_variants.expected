@@ -1,0 +1,14 @@
+plain: matches the host oracle: PASS
+plain: the step moved the parameter: true
+weight decay: matches the host oracle: PASS
+weight decay: the step moved the parameter: true
+momentum: matches the host oracle: PASS
+momentum: the step moved the parameter: true
+momentum + nesterov + weight decay: matches the host oracle: PASS
+momentum + nesterov + weight decay: the step moved the parameter: true
+grad scale + momentum: matches the host oracle: PASS
+grad scale + momentum: the step moved the parameter: true
+gate open throughout: matches the host oracle: PASS
+gate open throughout: the step moved the parameter: true
+gate closed mid-run, with momentum: matches the host oracle: PASS
+gate closed mid-run, with momentum: the step moved the parameter: true

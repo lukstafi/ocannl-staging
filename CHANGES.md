@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- **`Train.sgd_update ~momentum` works** (gh-ocannl-772). The momentum buffer is optimizer state --
+  read before it is written, carrying its value into the next invocation of the routine -- but it
+  was left undetermined and so became a virtualization candidate, and lowering a node whose defining
+  computation is in a previous invocation fails outright: any `~momentum:x` with `x > 0` died with
+  `Stale optimize_ctx: No computations found for #N: sgd_momentum_...`, on every backend. `sgd_one`
+  now materializes the buffer. Nothing had noticed because nothing in the suite ran sgd off its
+  defaults; `test/operations/sgd_variants` now drives momentum, nesterov, weight decay, `grad_scale`
+  and a gate that actually closes against a host simulation of the update rule.
+
 ### Changed
 
 - **`Train.to_routine` returns the post-compile context** (`Context.t * Context.routine`) instead of

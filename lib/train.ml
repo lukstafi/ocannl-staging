@@ -312,6 +312,18 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
        | Some gate -> sgd_delta =: where gate sgd_delta 0
        | None -> Asgns.empty_comp);
        p =- learning_rate * sgd_delta ~logic:".")]
+  |> fun comp ->
+  (* The momentum buffer is optimizer state: it is read before it is written, and the value it
+     carries into the next step is the whole point of it. Left undetermined it is a virtualization
+     candidate, and inlining a node whose defining computation is in a PREVIOUS invocation of the
+     routine has no meaning -- lowering fails outright ("No computations found for
+     #N: sgd_momentum_..."), which is why [~momentum] was unusable until gh-ocannl-772 covered it.
+     The label's head is the inline declaration's identifier, so this names exactly the node the
+     [%cd] payload above declared. *)
+  if Float.(momentum > 0.0) then
+    Set.iter comp.Asgns.embedded_nodes ~f:(fun tn ->
+        match tn.Tn.label with "sgd_momentum" :: _ -> set_materialized tn | _ -> ());
+  comp
 
 (** Maps {!sgd_one} over the parameters [loss] trains ({!trainable_params}, or [?params]): a
     parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight decay
