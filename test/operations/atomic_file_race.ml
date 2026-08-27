@@ -228,18 +228,50 @@ let () =
   let stale = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.0") ~age:7200. in
   let fresh = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.1") ~age:0. in
   let bystander = plant_staging ~name:"unrelated.bin" ~age:7200. in
+  (* Names carrying the infix that this module did NOT generate. The sweep deletes what the
+     predicate accepts, so each of these is a file somebody else owns (Codex P2, round 1): a
+     descriptive suffix instead of the counter, a missing counter, a non-numeric pid, and a staging
+     name with no target in front of it. *)
+  let impostors =
+    [
+      "report" ^ AF.staging_infix ^ "backup";
+      "report" ^ AF.staging_infix ^ "4242";
+      "report" ^ AF.staging_infix ^ "host7.0";
+      AF.staging_infix ^ "4242.0";
+    ]
+  in
+  let planted_impostors = List.map impostors ~f:(fun name -> plant_staging ~name ~age:7200.) in
   Verdict.p_all "every planted staging file is recognized as one"
     [ stale; fresh ]
     ~f:(fun path -> AF.is_staging_file (Stdlib.Filename.basename path));
   Verdict.p "the bystander is not recognized as a staging file"
     (not (AF.is_staging_file (Stdlib.Filename.basename bystander)));
+  Verdict.p_none "no name that merely contains the infix is recognized as a staging file" impostors
+    ~f:AF.is_staging_file;
+  (* The narrow scope: whose staging file it is, not merely that it is one. *)
+  Verdict.p_all "the published file's own staging files are recognized as its"
+    [ stale; fresh ]
+    ~f:(fun path -> AF.is_staging_file_for ~path:target (Stdlib.Filename.basename path));
+  let other_target = plant_staging ~name:("other.bin" ^ AF.staging_infix ^ "4242.9") ~age:7200. in
+  Verdict.p "another target's staging file is not recognized as this one's"
+    (not (AF.is_staging_file_for ~path:target (Stdlib.Filename.basename other_target)));
+  AF.cleanup_stale_for ~max_age_seconds:age_seconds target;
+  Verdict.p "the narrow sweep removes this target's abandoned staging file"
+    (not (Stdlib.Sys.file_exists stale));
+  Verdict.p "the narrow sweep spares another target's staging file"
+    (Stdlib.Sys.file_exists other_target);
+  let stale = plant_staging ~name:("published.bin" ^ AF.staging_infix ^ "4242.0") ~age:7200. in
   AF.cleanup_stale ~max_age_seconds:age_seconds dir;
   Verdict.p "the sweep removes an abandoned staging file" (not (Stdlib.Sys.file_exists stale));
+  Verdict.p "the sweep removes another target's abandoned staging file too"
+    (not (Stdlib.Sys.file_exists other_target));
   Verdict.p "the sweep spares a staging file young enough to be in flight"
     (Stdlib.Sys.file_exists fresh);
   Verdict.p "the sweep spares the published file" (Stdlib.Sys.file_exists target);
   Verdict.p "the sweep spares an aged file that is not a staging artifact"
     (Stdlib.Sys.file_exists bystander);
+  Verdict.p_all "the sweep spares every aged file that merely contains the infix" planted_impostors
+    ~f:Stdlib.Sys.file_exists;
   Verdict.p "the published file still reads as it was written"
     (Option.equal String.equal (read_published ()) (Some seed));
   (* A cache's reader calls the once-per-process sweep before its first writer has created the

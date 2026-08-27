@@ -374,6 +374,11 @@ let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
         (offset + byte_length, entry_with_offset :: acc))
   in
   let entries_with_offsets = List.rev entries_with_offsets in
+  (* A save killed between streaming and commit cannot run its own cleanup, and what it abandons is
+     the size of the model. The next save of that checkpoint is the event that reclaims it — but
+     only over ITS OWN staging files: a checkpoint sits among the user's other files, where another
+     process's publication is none of this call's business. *)
+  Utils.Atomic_file.cleanup_stale_for path;
   (* Stream into a staging sibling, then rename over [path]. [Atomic_file] owns the whole dance:
      the staging name is unique per writer, so two processes checkpointing the same path no longer
      stream into one file, and the staging artifact is removed on every failing path — including a

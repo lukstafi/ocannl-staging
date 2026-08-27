@@ -73,6 +73,8 @@ Caught a payload-past-end-of-file failure: true
 the reloaded payload is mapped, whatever the platform default: true
 the mapping reads the checkpoint's values: true
 saving over a checkpoint with a live mapping succeeds: true
+a save reclaims this checkpoint's abandoned staging file: true
+a save leaves another checkpoint's staging file alone: true
 the live mapping still reads the values it was taken from: true
 the file on disk holds what the save wrote: true
 no checkpoint save left a staging file behind: true

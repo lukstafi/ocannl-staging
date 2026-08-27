@@ -43,7 +43,17 @@ val staging_infix : string
 
 val is_staging_file : string -> bool
 (** Whether a file NAME (not necessarily a path) is one of this module's staging artifacts. The
-    predicate tests to be checked against, rather than a second spelling of the naming scheme. *)
+    predicate to be checked against, rather than a second spelling of the naming scheme.
+
+    It recognizes the WHOLE generated name — a non-empty target, the infix, then a numeric pid and
+    counter — not merely the presence of the infix. The sweep deletes what this accepts, so a file
+    someone else named [report.ocannl-stage.backup] must not be accepted (Codex P2, round 1). *)
+
+val is_staging_file_for : path:string -> string -> bool
+(** {!is_staging_file} narrowed to the staging artifacts of ONE published file: whether the NAME is
+    a staging file whose target is [path]'s basename. For a directory OCANNL shares with unrelated
+    content — a checkpoint next to the user's other files — where another publication's artifact is
+    neither this caller's to judge nor to delete. *)
 
 val ensure_dir : string -> unit
 (** Creates the directory and its missing parents, tolerating concurrent creators. A no-op for
@@ -89,7 +99,17 @@ val cleanup_stale : ?max_age_seconds:float -> string -> unit
 (** [cleanup_stale dir] removes the staging files in [dir] whose modification time is older than
     [?max_age_seconds] (default {!default_max_age_seconds}). Everything is best-effort: an
     unreadable directory, a file that vanished under the sweep, or a file another user owns is
-    skipped rather than reported. Files that are not staging artifacts are never touched. *)
+    skipped rather than reported. Files that are not staging artifacts are never touched.
+
+    The whole-directory scope suits a directory OCANNL owns — a schedule cache, the per-user probe
+    cache. For one published file inside a directory it does not own, use {!cleanup_stale_for}. *)
+
+val cleanup_stale_for : ?max_age_seconds:float -> string -> unit
+(** [cleanup_stale_for path] is {!cleanup_stale} over [path]'s directory, narrowed to the staging
+    artifacts of [path] itself. This is what a writer publishing into a directory of somebody
+    else's files calls before publishing: a checkpoint killed between streaming and commit leaves a
+    staging file the size of the model, and the next save of that same checkpoint is the event that
+    can reclaim it (Codex P2, round 1). *)
 
 val cleanup_stale_once : ?max_age_seconds:float -> string -> unit
 (** {!cleanup_stale} at most once per directory per process, for callers that would otherwise sweep

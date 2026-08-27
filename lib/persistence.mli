@@ -25,7 +25,9 @@ val save :
     staging artifact, and -- because the rename replaces the directory entry rather than the inode
     -- mappings taken by an earlier {!load} of the same path keep seeing the data they were mapped
     from. The staging name is unique per writer, so two processes checkpointing the same path do not
-    stream into one file.
+    stream into one file. A save also reclaims the staging files of THIS checkpoint left by an
+    earlier save that was killed mid-stream — nothing else would, and an abandoned one is the size
+    of the model.
 
     [?alignment] (default 32, GGUF's [general.alignment] default) is the boundary payload offsets
     are rounded up to. It buys SIMD-friendly data pointers; mapping works at any alignment. *)

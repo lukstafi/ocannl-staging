@@ -25,10 +25,17 @@ a failed streamed publish leaves the previous payload: true
 a failed streamed publish removes its own staging file: true
 every planted staging file is recognized as one: true
 the bystander is not recognized as a staging file: true
+no name that merely contains the infix is recognized as a staging file: true
+the published file's own staging files are recognized as its: true
+another target's staging file is not recognized as this one's: true
+the narrow sweep removes this target's abandoned staging file: true
+the narrow sweep spares another target's staging file: true
 the sweep removes an abandoned staging file: true
+the sweep removes another target's abandoned staging file too: true
 the sweep spares a staging file young enough to be in flight: true
 the sweep spares the published file: true
 the sweep spares an aged file that is not a staging artifact: true
+the sweep spares every aged file that merely contains the infix: true
 the published file still reads as it was written: true
 a directory that did not exist yet does not consume its one sweep: true
 the once-per-process sweep does not run a second time: true

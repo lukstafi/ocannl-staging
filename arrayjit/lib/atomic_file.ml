@@ -1,7 +1,30 @@
 open Base
 
 let staging_infix = ".ocannl-stage."
-let is_staging_file name = String.is_substring name ~substring:staging_infix
+
+(* The sweep DELETES what this recognizes, so recognition is the whole generated name and not a
+   search for the infix: `report.ocannl-stage.backup` is somebody's file, and answering "staging" on
+   it would make the sweep destructive over names it was never promised. A staging name is
+   [<target-basename>] ^ [staging_infix] ^ [<pid>] ^ "." ^ [<counter>], both numeric, and this
+   returns the target's basename exactly when [name] is one — which is also how a caller asks about
+   ONE published file rather than about a whole directory. *)
+let staging_target name =
+  let numeric part = (not (String.is_empty part)) && String.for_all part ~f:Char.is_digit in
+  match List.last (String.substr_index_all name ~may_overlap:false ~pattern:staging_infix) with
+  | None -> None
+  | Some at ->
+      let target = String.prefix name at in
+      let stamp = String.drop_prefix name (at + String.length staging_infix) in
+      if String.is_empty target then None
+      else (
+        match String.split stamp ~on:'.' with
+        | [ pid; counter ] when numeric pid && numeric counter -> Some target
+        | _ -> None)
+
+let is_staging_file name = Option.is_some (staging_target name)
+
+let is_staging_file_for ~path name =
+  Option.exists (staging_target name) ~f:(String.equal (Stdlib.Filename.basename path))
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()
@@ -82,17 +105,28 @@ let with_channel ?before_commit ?(binary = true) ~path ~f () =
 
 let default_max_age_seconds = 3600.
 
-let cleanup_stale ?(max_age_seconds = default_max_age_seconds) dir =
+(* One sweep, two scopes. Which names it considers is the caller's only choice: everything else --
+   the age gate, the best-effort handling, the refusal to look at anything that is not a staging
+   name -- is the same question however wide the scope. *)
+let sweep ~max_age_seconds ~dir ~selects =
   match Stdlib.Sys.readdir dir with
   | exception _ -> ()
   | entries ->
       let now = Unix.time () in
       Array.iter entries ~f:(fun name ->
-          if is_staging_file name then
+          if selects name then
             let path = Stdlib.Filename.concat dir name in
             match (Unix.stat path).Unix.st_mtime with
             | exception _ -> ()
             | mtime -> if Float.(now -. mtime > max_age_seconds) then remove_quietly path)
+
+let cleanup_stale ?(max_age_seconds = default_max_age_seconds) dir =
+  sweep ~max_age_seconds ~dir ~selects:is_staging_file
+
+let cleanup_stale_for ?(max_age_seconds = default_max_age_seconds) path =
+  sweep ~max_age_seconds
+    ~dir:(Stdlib.Filename.dirname path)
+    ~selects:(is_staging_file_for ~path)
 
 let swept : (string, unit) Hashtbl.t = Hashtbl.create (module String)
 let swept_mutex = Stdlib.Mutex.create ()

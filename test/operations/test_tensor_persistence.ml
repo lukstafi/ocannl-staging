@@ -462,6 +462,22 @@ let () =
   let mapping = Lazy.force (Option.value_exn (Ir.Host_inits.find tn)) in
   Verdict.p "the mapping reads the checkpoint's values"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1);
+  (* A save killed between streaming and its commit leaves a staging file the size of the model, and
+     no cleanup of its own can run. Stand one in, aged past the sweep's threshold, and let the save
+     below be the event that reclaims it (Codex P2, round 1). A second one, belonging to a different
+     checkpoint in the same directory, is what makes the scope claim: this save is not licensed to
+     delete another publication's artifact. *)
+  let plant name =
+    let planted = Stdlib.Filename.concat (Stdlib.Filename.dirname path) name in
+    Stdio.Out_channel.write_all planted ~data:"abandoned checkpoint";
+    let stamp = Unix.time () -. (2. *. Utils.Atomic_file.default_max_age_seconds) in
+    Unix.utimes planted stamp stamp;
+    planted
+  in
+  let abandoned =
+    plant (Stdlib.Filename.basename path ^ Utils.Atomic_file.staging_infix ^ "4242.0")
+  in
+  let other = plant ("someone_elses.safetensors" ^ Utils.Atomic_file.staging_infix ^ "4242.0") in
   (* Save different values over the same path. [set_values] goes through a fresh host buffer, so it
      does not disturb the mapping. *)
   let ctx = Context.set_values ctx tn v2 in
@@ -470,6 +486,10 @@ let () =
         Persistence.save ~ctx ~appending:false loaded path)
   in
   Verdict.p "saving over a checkpoint with a live mapping succeeds" saved;
+  Verdict.p "a save reclaims this checkpoint's abandoned staging file"
+    (not (Stdlib.Sys.file_exists abandoned));
+  Verdict.p "a save leaves another checkpoint's staging file alone" (Stdlib.Sys.file_exists other);
+  (try Stdlib.Sys.remove other with _ -> ());
   Verdict.p "the live mapping still reads the values it was taken from"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1)
 
@@ -488,12 +508,10 @@ let () =
      system temp directory, where another process's in-flight publication is none of this test's
      business — neither to fail on nor to delete. *)
   let dir = Stdlib.Filename.dirname live_mapping_path in
-  let ours name =
-    Utils.Atomic_file.is_staging_file name
-    && String.is_prefix name
-         ~prefix:(Stdlib.Filename.basename live_mapping_path ^ Utils.Atomic_file.staging_infix)
+  let abandoned =
+    Array.to_list (Stdlib.Sys.readdir dir)
+    |> List.filter ~f:(Utils.Atomic_file.is_staging_file_for ~path:live_mapping_path)
   in
-  let abandoned = Array.to_list (Stdlib.Sys.readdir dir) |> List.filter ~f:ours in
   Verdict.p_empty "no checkpoint save left a staging file behind" ~over:[ live_mapping_path ]
     abandoned;
   List.iter
