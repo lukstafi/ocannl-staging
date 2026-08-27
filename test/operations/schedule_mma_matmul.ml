@@ -428,21 +428,55 @@ let () =
      shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not
      render while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the
      CPU register tiling renders as under the default policy (its accumulator is f32 either way).
-     The same f16-exact inputs as above, so the result is exact at ANY accumulation width and
-     parity is bitwise, across the policies included. --- *)
+
+     The inputs are WIDTH-SENSITIVE, unlike [mah]/[mbh] above (Codex P1 round 3 on staging PR
+     #477: f16-exact inputs cannot tell a wide arm that accidentally accumulates narrow from a
+     correct one). Cells are f16-exact (multiples of 1/8, magnitudes below 4), products are
+     multiples of 1/64 with mean ~2.4, so the 32-term k-sums drift past 64 — where f16's spacing
+     (1/16 and coarser) can no longer represent them and per-step f16 narrowing visibly diverges —
+     while every product and partial sum stays exact in f32 (multiples of 1/64, magnitude below
+     2^8), so ANY accumulation association gives the identical f32 value: the comparison against
+     the host-side once-narrowed wide reference is bitwise for the serial rendering, the PTX arm's
+     whole-k f32 registers, and the recorded fallbacks alike, and a half-resident accumulator in
+     any of them fails it. --- *)
+  let fwa = Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375 in
+  let fwb = Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0.5 ~stride:0.625 in
+  let mwa = NTDSL.init ~l:"mwa" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:fwa () in
+  let mwb = NTDSL.init ~l:"mwb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:fwb () in
+  let wide_ref_hw =
+    (* The f64 chain reproduces the kernel's f32 arithmetic exactly (see the header note), and
+       minting a half tensor from it narrows once through the library's own conversion. *)
+    let sums =
+      Array.init (n * n) ~f:(fun t ->
+          let i = t / n and j = t % n in
+          let acc = ref 0.0 in
+          for k = 0 to n - 1 do
+            acc := !acc +. (fwa [| i; k |] *. fwb [| k; j |])
+          done;
+          !acc)
+    in
+    let mref =
+      NTDSL.init ~l:"mwref" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
+        ~f:(fun idcs -> sums.((idcs.(0) * n) + idcs.(1)))
+        ()
+    in
+    compile_serial ~name:"mm_h_wide_ref" mref
+  in
   let saved_policy = Numerics.get () in
   Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
-  let%op mchw0 = mah * mbh in
+  let%op mchw0 = mwa * mwb in
   Tn.update_prec mchw0.Tensor.value Ir.Ops.half;
   let want_hw = compile_serial ~name:"mm_h_wide_serial" mchw0 in
-  let%op mchw1 = mah * mbh in
+  let%op mchw1 = mwa * mwb in
   Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
   let got_hw, census_hw = compile_mma_with_census ~name:"mm_h_wide_mma" mchw1 in
   Numerics.set_policy saved_policy;
-  p "Fp16_wide half tensorized matmul matches its serial twin bitwise"
-    (Array.for_all2_exn got_hw want_hw ~f:Float.equal);
-  p "Fp16_wide is value-neutral on f16-exact inputs (equals the default-policy serial result)"
-    (Array.for_all2_exn want_hw got_h_serial ~f:Float.equal);
+  p "Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise"
+    (Array.for_all2_exn want_hw wide_ref_hw ~f:Float.equal);
+  p
+    "Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not \
+     the schedule, sets the width)"
+    (Array.for_all2_exn got_hw wide_ref_hw ~f:Float.equal);
   (let src = Generated.read "mm_h_wide_mma" in
    let has s = String.is_substring src ~substring:s in
    let intrinsics =
@@ -493,20 +527,20 @@ let () =
    else begin
      Numerics.set_policy
        { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
-     let%op mchn0 = mah * mbh in
-     Tn.update_prec mchn0.Tensor.value Ir.Ops.half;
-     let want_hn = compile_serial ~name:"mm_h_wide_nco_serial" mchn0 in
-     let%op mchn1 = mah * mbh in
+     let%op mchn1 = mwa * mwb in
      Tn.update_prec mchn1.Tensor.value Ir.Ops.half;
      let got_hn, census_hn = compile_mma_with_census ~name:"mm_h_wide_nco_mma" mchn1 in
      Numerics.set_policy saved_policy;
      let src = Generated.read "mm_h_wide_nco_mma" in
+     (* Compared against the independent wide reference, on the width-sensitive inputs: the
+        fallback's localized accumulator staying half — not merely differing from a serial twin
+        rendered the same way — is what this must catch (Codex P1 round 3 on PR #477). *)
      p claim_ncf32
        ((not (List.is_empty census_hn))
        && List.for_all census_hn
             ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
        && (not (String.is_substring src ~substring:"Tile_mma register tiling"))
-       && Array.for_all2_exn got_hn want_hn ~f:Float.equal)
+       && Array.for_all2_exn got_hn wide_ref_hw ~f:Float.equal)
    end);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
