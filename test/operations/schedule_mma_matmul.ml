@@ -423,6 +423,49 @@ let () =
    in
    p "half tensorized structure as expected" ok);
 
+  (* --- Fp16_wide (gh-ocannl-680): the uniform-f16 combination under the wide policy. CUDA sm_80+
+     routes it to the f32-accumulate inline-PTX m16n8k16 arm (the bf16 uniform arm's body over the
+     shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not
+     render while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the
+     CPU register tiling renders as under the default policy (its accumulator is f32 either way).
+     The same f16-exact inputs as above, so the result is exact at ANY accumulation width and
+     parity is bitwise, across the policies included. --- *)
+  let saved_policy = Numerics.get () in
+  Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+  let%op mchw0 = mah * mbh in
+  Tn.update_prec mchw0.Tensor.value Ir.Ops.half;
+  let want_hw = compile_serial ~name:"mm_h_wide_serial" mchw0 in
+  let%op mchw1 = mah * mbh in
+  Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
+  let got_hw, census_hw = compile_mma_with_census ~name:"mm_h_wide_mma" mchw1 in
+  Numerics.set_policy saved_policy;
+  p "Fp16_wide half tensorized matmul matches its serial twin bitwise"
+    (Array.for_all2_exn got_hw want_hw ~f:Float.equal);
+  p "Fp16_wide is value-neutral on f16-exact inputs (equals the default-policy serial result)"
+    (Array.for_all2_exn want_hw got_h_serial ~f:Float.equal);
+  (let src = Generated.read "mm_h_wide_mma" in
+   let has s = String.is_substring src ~substring:s in
+   let intrinsics =
+     List.exists census_hw ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+   in
+   let fallback =
+     (not (List.is_empty census_hw))
+     && List.for_all census_hw ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+   in
+   let ok =
+     if on_metal then fallback && (not (has "simdgroup_half8x8")) && has "== 0)"
+     else if String.is_substring backend_name ~substring:"hip" then
+       fallback && (not (has "rocwmma")) && has "== 0)"
+     else if on_gpu then
+       (* CUDA: the f32-accumulate inline-PTX arm (sm_80+, which every CUDA box here clears). *)
+       intrinsics
+       && has "(mma-f16)"
+       && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+       && not (has "nvcuda::wmma")
+     else has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
+   in
+   p "Fp16_wide half tensorized structure as expected" ok);
+
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
      CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]
      operands against a [float] accumulator only), so bf16 x bf16 -> f32 takes the wmma template
