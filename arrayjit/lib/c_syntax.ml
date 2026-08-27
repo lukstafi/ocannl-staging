@@ -217,10 +217,20 @@ type peel_skip =
           gh-ocannl-517), so localizing it would change the draw rather than move it. *)
 [@@deriving sexp, equal, compare]
 
+type peel_verdict = {
+  levels : int;
+      (** Loop levels the localized scope spans: the level being rendered, plus those
+          {!Low_level.peel_accum_nest} took below it. One for a reduction localized at its own
+          level; two where the accumulated cell let the peel swallow the enclosing level too. *)
+  guards : Low_level.peel_guard_verdict list;
+      (** The verdict of each [If] among them, outermost first. *)
+}
+[@@deriving sexp, equal, compare]
+(** What a localizing site DECIDED (gh-ocannl-733). A named record rather than an inline one so a
+    consumer can hold one: comparing the verdicts of two compiles is the whole use. *)
+
 type peel_site =
-  | Peel_localized of { levels : int; guards : Low_level.peel_guard_verdict list }
-      (** The site localized: [levels] loop levels were peeled, and each [If] among them earned the
-          verdict listed, outermost first. *)
+  | Peel_localized of peel_verdict  (** The site localized, deciding this. *)
   | Peel_refused of Low_level.peel_refusal  (** [Low_level.peel_accum_nest] refused, with why. *)
   | Peel_not_attempted of peel_skip  (** Codegen declined without asking the peel, or after it. *)
 [@@deriving sexp, equal, compare]
@@ -4538,6 +4548,16 @@ module C_syntax (B : C_syntax_config) = struct
           let record site =
             if censusing then peel_census := (!current_kernel_name, site) :: !peel_census
           in
+          (* The localized rendering re-renders the peeled levels INSIDE the scope it just minted,
+             and those re-visits refuse (the base is a [Set_local] by then) — censusing them would
+             report refusals for levels that localized. Collection is suspended for the recursive
+             render, and nothing genuine hides behind that: the peel descends single-statement
+             levels down to the accumulation base, so the scope body holds no other site. *)
+          let without_census f =
+            let saved = !peel_census_enabled in
+            peel_census_enabled := false;
+            Exn.protect ~f ~finally:(fun () -> peel_census_enabled := saved)
+          in
           (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
              which covers the levels BELOW this one. This is the same refusal for the level being
              rendered, whose bounds the peel never sees (the caller re-wraps it via
@@ -4588,21 +4608,22 @@ module C_syntax (B : C_syntax_config) = struct
                         rebuild_hook (rebuild update_code) )
                   in
                   Some
-                    (pp_ll ~log_set_locals ~in_loop
-                       (Low_level.Set
-                          {
-                            tn;
-                            idcs;
-                            llsc =
-                              Local_scope
-                                {
-                                  id;
-                                  body = scope_body;
-                                  orig_indices = idcs;
-                                  mint = Schedule_minted;
-                                };
-                            debug;
-                          }))
+                    (without_census (fun () ->
+                         pp_ll ~log_set_locals ~in_loop
+                           (Low_level.Set
+                              {
+                                tn;
+                                idcs;
+                                llsc =
+                                  Local_scope
+                                    {
+                                      id;
+                                      body = scope_body;
+                                      orig_indices = idcs;
+                                      mint = Schedule_minted;
+                                    };
+                                debug;
+                              })))
             in
             (* A hardware-annotated reduction loop this backend serializes (no hardware index for
                its slot) is a serial level like any other — without this, retyping an INNER
@@ -4646,8 +4667,10 @@ module C_syntax (B : C_syntax_config) = struct
                     record
                       (match !report with
                       | Some { Low_level.levels; guards; refusal = _ } ->
-                          Peel_localized { levels; guards }
-                      | None -> Peel_localized { levels = 0; guards = [] });
+                          (* [+ 1]: the peel is asked of this level's BODY, so the scope spans one
+                             more level than it reports — the one being rendered here. *)
+                          Peel_localized { levels = levels + 1; guards }
+                      | None -> Peel_localized { levels = 1; guards = [] });
                     Some doc)
         in
         let localize_or_serial () =
