@@ -104,6 +104,9 @@ ok: key list -- an incidental literal does not answer for an unresolved reach
 ok: key list -- a list whose elements are not literals is unresolved
 ok: key list -- a later rebinding does not reach backwards
 ok: key list -- and a use after the rebinding sees the new one
+ok: key list -- a parameter rebound inside the callback is not the iterated one
+ok: key list -- and an inner iteration binds its own
+ok: key list -- a local map does not project a table
 ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader
 ok: could read the environment -- does not name it at all

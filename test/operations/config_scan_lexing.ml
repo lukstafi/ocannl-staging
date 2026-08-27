@@ -519,6 +519,26 @@ let guarded = []|ocaml},
 let guarded = [ "profile" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
       ([ "profile" ], false) );
+    (* A parameter REBOUND inside the callback is not the iterated one: answering it with the
+       iterated list certifies a program that can read any key at all (Codex P2, round 7 of PR
+       #484). *)
+    ( "a parameter rebound inside the callback is not the iterated one",
+      {ocaml|let () = List.iter [ "profile" ] ~f:(fun k -> let k = Sys.argv.(1) in ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and an inner iteration binds its own",
+      {ocaml|let () =
+  List.iter [ "profile" ] ~f:(fun k ->
+      ignore (Utils.read_env_var k);
+      List.iter [ "log_level" ] ~f:(fun k -> ignore (Utils.read_env_var k)))|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    (* The projection is `List.map` and not any callee whose basename is `map`: a local one that
+       ignores its argument had its input projected as though it were the standard function. *)
+    ( "a local map does not project a table",
+      {ocaml|let map _ ~f:_ = [ "virtualize_max_visits" ]
+let keys = [ ("profile", "x") ]
+let guarded = map keys ~f:fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
     ( "the binding does not escape the lambda it was established at",
       {ocaml|let guarded = [ "log_level" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))

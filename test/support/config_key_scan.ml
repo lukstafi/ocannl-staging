@@ -408,6 +408,18 @@ let iteration_combinators =
     ("Array", [ "iter"; "map"; "concat_map"; "filter_map"; "iteri"; "for_all"; "exists" ]);
   ]
 
+(** Whether [expr] names [fn] of [container] — [List.map] and not any callee whose basename is
+    [map]. Every construct {!resolve_elements} follows is named this way, and anything it cannot name
+    refuses: a local [map] that ignores its argument otherwise had its input projected as though it
+    were the standard one (Codex P2, round 7 of PR #484). *)
+let is_qualified ~container ~fn expr =
+  match longident_of expr with
+  | Some path -> (
+      match List.rev path with
+      | last :: owner :: _ -> String.equal last fn && String.equal owner container
+      | _ -> false)
+  | None -> false
+
 let is_iteration expr =
   match longident_of expr with
   | Some path -> (
@@ -448,7 +460,7 @@ let rec resolve_elements ~bindings ~before expr =
             (resolve_elements ~bindings ~before right)
           |> Option.map ~f:(fun (l, r) -> l @ r)
       (* `List.map keys ~f:fst`, which projects a table of key/default pairs onto its keys. *)
-      | Pexp_apply (f, args) when is_named "map" f ->
+      | Pexp_apply (f, args) when is_qualified ~container:"List" ~fn:"map" f ->
           let picker =
             List.find_map args ~f:(fun (_, arg) ->
                 if is_named "fst" arg then Some `Fst
@@ -590,9 +602,32 @@ let env_reader_reads_in_source content =
                   Hash_set.add blessed arg.pexp_loc.loc_start.pos_cnum;
                   keys := resolved @ !keys))
   in
+  (* Shadow ranges per name, memoized: the traversal is the same one the receiver resolution makes,
+     asked of a different identifier. *)
+  let parameter_shadows = Hashtbl.create (module String) in
+  let shadows_of name =
+    Hashtbl.find_or_add parameter_shadows name ~default:(fun () ->
+        shadow_ranges_of structure ~fn:name)
+  in
+  (* The keys an iteration binds a parameter to, at a use INSIDE the callback and not merely
+     somewhere its range covers: `~f:(fun k -> let k = Sys.argv.(1) in … read_env_var k …)` rebinds
+     the name, and answering it with the iterated list certifies a program that can read any key at
+     all (Codex P2, round 7 of PR #484).
+
+     The innermost containing iteration decides, and a shadow counts only where it OPENS inside that
+     iteration's body -- which is what excludes the establishing lambda's own parameter, whose
+     binding range necessarily starts before the body it binds over. *)
   let key_of_parameter ~offset name =
-    List.find_map !iterated ~f:(fun (parameter, range, resolved) ->
-        if String.equal parameter name && within [ range ] offset then Some resolved else None)
+    List.filter !iterated ~f:(fun (parameter, range, _) ->
+        String.equal parameter name && within [ range ] offset)
+    |> List.min_elt ~compare:(fun (_, (a_start, a_stop), _) (_, (b_start, b_stop), _) ->
+        Int.compare (a_stop - a_start) (b_stop - b_start))
+    |> Option.bind ~f:(fun (_, (body_start, _), resolved) ->
+        let rebound =
+          List.exists (shadows_of name) ~f:(fun (start, stop) ->
+              start >= body_start && start <= offset && offset < stop)
+        in
+        if rebound then None else Some resolved)
   in
   let iterator =
     object

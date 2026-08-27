@@ -1241,11 +1241,12 @@ let main () =
               let kind =
                 match Scan.head stanza with
                 | Some (("test" | "tests" | "executable" | "executables") as kind) -> Some kind
-                (* A library with inline tests is RUN by dune, under `(inline_tests (deps …))`, so a
-                   module of it reading the environment goes stale the same way (Codex P2, round 2).
-                   A plain `(library)` is judged too, but differently: it is not run, so there is no
-                   `deps` field that could answer for it, and the reads are REPORTED (Codex P2, round
-                   6). *)
+                (* EVERY library, and always as a refusal. An `(inline_tests (deps …))` declaration
+                   invalidates the inline-test runner alone -- the library stays linkable, and a
+                   standalone test that links it reuses its output across a change of the variable
+                   the library module reads (Codex P2, round 7). So the inline-test case is not a
+                   licence either, and the rule is the one `Artifact_in_library` already states: a
+                   read that goes stale belongs to an executable's own modules. *)
                 | Some "library" -> Some "library"
                 | _ -> None
               in
@@ -1286,20 +1287,10 @@ let main () =
                                  P1 round 1, P2 round 4). *)
                               List.map runners ~f:(fun (r, pins) ->
                                   (Scan.field r "deps", pins)) ))
-                    | "library" -> (
-                        match Scan.field stanza "inline_tests" with
-                        | Some inline ->
-                            [
-                              ( named (),
-                                modules,
-                                "its inline tests",
-                                [ (Scan.field_in inline "deps", no_pins) ] );
-                            ]
-                        (* A plain library runs under nothing of its own. Its reads are reported
-                           below, against an EMPTY runner list -- which is the same shape as an
-                           executable nothing runs, and says the same thing: there is no `deps` field
-                           in reach that a change of the variable could invalidate. *)
-                        | None -> [ (named (), modules, "whatever links it", []) ])
+                    (* Against an EMPTY runner list, which is the same shape an executable nothing
+                       runs gets and says the same thing: there is no `deps` field in reach that a
+                       change of the variable could invalidate for every process that links it. *)
+                    | "library" -> [ (named (), modules, "whatever links it", []) ]
                     | _ -> [ (named (), modules, "it", [ (Scan.field stanza "deps", no_pins) ]) ]
                   in
                   List.iter programs ~f:(fun (name, own_modules, program, runners) ->
@@ -1364,11 +1355,13 @@ let main () =
                               fail
                                 (Printf.sprintf
                                    "%s reads the configuration key `%s` straight from the \
-                                    environment, from a library module -- a library runs under \
-                                    nothing of its own, so the requirement would fall on every \
-                                    stanza that links it, where nothing follows it. Move the read \
-                                    into the executable's own modules, or give the library inline \
-                                    tests and declare `(env_var %s)` there"
+                                    environment, from a library module -- every executable that \
+                                    links the library reads it, so the requirement would fall on \
+                                    every stanza that links it, where nothing follows it. An \
+                                    `(inline_tests (deps …))` declaration is not a licence either: \
+                                    it invalidates the inline-test runner alone, and leaves the \
+                                    other linkers stale. Move the read into the executable's own \
+                                    modules, where `(env_var %s)` can answer for it"
                                    where key var)
                           | [], _ ->
                               fail
@@ -2039,6 +2032,9 @@ let guard_subject ~arm =
       \ (modules guard)\n\
       \ (libraries arrayjit.utils)\n\
       \ (inline_tests))\n"
+  (* An `(inline_tests (deps …))` declaration is not a licence: it invalidates the inline runner
+     alone, while the library stays linkable by executables that declare nothing (Codex P2, round
+     7). *)
   | `Inline_tests_library_declares ->
       Printf.sprintf
         "(library\n\
@@ -2128,8 +2124,13 @@ let guard_control () =
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
   in
-  let inline_library_ok = reports inline_library diagnostic && names_the_key (snd inline_library) in
-  let inline_library_declares_ok = passes inline_library_declares diagnostic in
+  let inline_library_ok =
+    reports inline_library "from a library module" && names_the_key (snd inline_library)
+  in
+  let inline_library_declares_ok =
+    reports inline_library_declares "from a library module"
+    && names_the_key (snd inline_library_declares)
+  in
   (* The count is what says the SECOND runner is what failed: one of the two, not both, and not the
      stanza as a whole. *)
   let second_bare_ok =
@@ -2182,10 +2183,11 @@ let guard_control () =
   Verdict.p
     "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
     plain_library_ok;
-  Verdict.p
-    "a library with inline tests is run by dune, so its modules are asked the same question"
+  Verdict.p "a library with inline tests is refused the same way, being linkable all the same"
     inline_library_ok;
-  Verdict.p "and the same library declaring it in `(inline_tests (deps …))` passes"
+  Verdict.p
+    "and declaring the variable in `(inline_tests (deps …))` is no licence: that invalidates the \
+     inline runner alone"
     inline_library_declares_ok;
   Verdict.p
     "a second rule running the same executable answers for its own run: one declaring does not \
