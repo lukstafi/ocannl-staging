@@ -1301,7 +1301,16 @@ let main () =
                      `ocannl_config` dep, and it is too loose here: with six rules running
                      `profile_precedence.exe`, one of them dropping a key still passed (Codex P1,
                      round 1). *)
-                  let no_pins = Set.empty (module String) in
+                  (* A stanza dune runs ITSELF may still pin: `(test … (action (setenv OCANNL_X ""
+                     (run %{test}))))` fixes the value for every run of it, so demanding a
+                     declaration besides would be asking for a dependency the run cannot have (Codex
+                     P2, round 12). Derived from the stanza's own action, the same way an
+                     executable's runners are. *)
+                  let own_pins stanza =
+                    match List.map (Scan.runs_of ~subdir stanza) ~f:(fun (_, _, pins) -> pins) with
+                    | [] -> Set.empty (module String)
+                    | first :: rest -> List.fold rest ~init:first ~f:Set.inter
+                  in
                   let programs =
                     match kind with
                     | "executable" | "executables" ->
@@ -1321,7 +1330,9 @@ let main () =
                        runs gets and says the same thing: there is no `deps` field in reach that a
                        change of the variable could invalidate for every process that links it. *)
                     | "library" -> [ (named (), modules, "whatever links it", []) ]
-                    | _ -> [ (named (), modules, "it", [ (Scan.field stanza "deps", no_pins) ]) ]
+                    | _ ->
+                        [ (named (), modules, "it", [ (Scan.field stanza "deps", own_pins stanza) ])
+                        ]
                   in
                   List.iter programs ~f:(fun (name, own_modules, program, runners) ->
                       let where =
@@ -2127,6 +2138,26 @@ let guard_subject ~arm =
   | `Unknown_key_pinned ->
       executable named
       ^ guard_rule ~target:"guard.actual" ~declares:false ~pins:`Around_the_run_unknown
+  (* A `(test)` dune runs itself, with an action that PINS the variable: the run cannot observe the
+     ambient one, so no declaration answers for it (Codex P2, round 12). *)
+  | `Self_running_pin ->
+      Printf.sprintf
+        "(test\n\
+        \ ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
+        \ (name guard)\n\
+        \ (modules guard)\n\
+        \ (deps ocannl_config)\n\
+        \ (libraries arrayjit.utils)\n\
+        \ (action\n\
+        \  (setenv %s 1\n\
+        \   (run %%{test}))))\n\
+         \n\
+         (rule\n\
+        \ (alias runtest)\n\
+        \ (deps ocannl_config (universe))\n\
+        \ (action\n\
+        \  (progn)))\n"
+        (Utils.env_var_name guard_key)
   | `Include_subdirs ->
       "(include_subdirs unqualified)\n\n"
       ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
@@ -2208,6 +2239,7 @@ let guard_control () =
   let utils_lookalike = run `Utils_lookalike ~at:"t/utils.ml" in
   let unknown_key = run `Unknown_key ~probe:unknown_key_probe in
   let unknown_key_pinned = run `Unknown_key_pinned ~probe:unknown_key_probe in
+  let self_running_pin = run `Self_running_pin in
   let include_subdirs = run `Include_subdirs in
   let plain_library = run `Plain_library in
   let inline_library = run `Inline_tests_library in
@@ -2248,6 +2280,7 @@ let guard_control () =
     && String.is_substring (snd unknown_key) ~substring:(Utils.env_var_name guard_non_key)
   in
   let unknown_key_pinned_ok = passes unknown_key_pinned diagnostic in
+  let self_running_pin_ok = passes self_running_pin diagnostic in
   let include_subdirs_ok = reports include_subdirs "include_subdirs unqualified" in
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
@@ -2278,6 +2311,7 @@ let guard_control () =
   if not utils_lookalike_ok then report "utils-lookalike" utils_lookalike;
   if not unknown_key_ok then report "unknown-key" unknown_key;
   if not unknown_key_pinned_ok then report "unknown-key-pinned" unknown_key_pinned;
+  if not self_running_pin_ok then report "self-running-pin" self_running_pin;
   if not include_subdirs_ok then report "include-subdirs" include_subdirs;
   if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
@@ -2324,6 +2358,9 @@ let guard_control () =
     "a key the registry does not know is still asked for, and is reported as undeclarable"
     unknown_key_ok;
   Verdict.p "and pinning it is the way to answer for one" unknown_key_pinned_ok;
+  Verdict.p
+    "a stanza dune runs itself pins through its own action, and is not asked to declare besides"
+    self_running_pin_ok;
   Verdict.p
     "a dune file whose module sets this scan cannot place is refused, not approximated"
     include_subdirs_ok;

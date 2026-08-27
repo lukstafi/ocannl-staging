@@ -427,11 +427,13 @@ let is_named name expr =
     establishes nothing, so the reader's parameter stays unbound and the reach is refused. *)
 let iteration_combinators =
   [
-    (* `iteri` is deliberately absent: its callback takes the index AND the element, a shape
-       {!lambda_body} does not read, so advertising it refused guards that use it (Codex P2, round
-       9). Fewer names trusted is the direction this table moves in. *)
+    (* `List` only, and `iteri` deliberately absent. Both omissions are the same rule: this table
+       must advertise nothing {!resolve_elements} and {!lambda_body} cannot actually read, or a guard
+       written to it is refused though correct. `iteri`'s callback takes the index AND the element
+       (Codex P2, round 9); `Array`'s literals are `Pexp_array`, which the element resolver does not
+       read (Codex P2, round 12). Fewer names trusted is the direction this table moves in, and an
+       entry earns its place by being resolvable end to end. *)
     ("List", [ "iter"; "map"; "concat_map"; "filter_map"; "for_all"; "exists" ]);
-    ("Array", [ "iter"; "map"; "concat_map"; "filter_map"; "for_all"; "exists" ]);
   ]
 
 (** Whether [expr] names [fn] of [container] — [List.map] and not any callee whose basename is
@@ -479,7 +481,7 @@ let is_standard_value name expr =
 (* The approved ROOTS are trusted names as much as the containers are: `module Base = Shared` leaves
    `Base.List.iter` a whitelisted path whose meaning has changed underneath it (Codex P2, round 9 of
    PR #484). *)
-let trusted_modules = [ "List"; "Array" ] @ standard_roots
+let trusted_modules = [ "List" ] @ standard_roots
 
 let trusted_values = [ "fst"; "snd"; "@" ]
 
@@ -603,29 +605,24 @@ let list_bindings_of structure =
           List.fold value_bindings ~init:bindings ~f:(fun bindings binding ->
               match pattern_name binding.pvb_pat with
               | None -> bindings
-              | Some name ->
-                  (* A binding this scan cannot resolve is recorded as a TOMBSTONE rather than
-                     skipped: skipping it let a later use reach back to an earlier, resolvable
-                     binding of the same name and answer with a list that no longer holds (Codex P2,
-                     round 11). Only a list-shaped expression is recorded at all, so an unrelated
-                     `let guarded = 3` does not bury a list binding. *)
+              | Some name -> (
                   let resolved =
                     resolve_elements ~bindings ~before:binding.pvb_loc.loc_start.pos_cnum
                       binding.pvb_expr
                   in
-                  (* List-SHAPED, not list-resolved: a `[ … ]` whose elements this scan cannot read
-                     is exactly the rebinding a tombstone has to record, so the shape is judged by
-                     the constructor rather than by whether the contents came out. An application is
-                     included for the `a @ b` and `List.map …` spellings, which are how a list is
-                     built here. *)
-                  let list_shaped =
-                    Option.is_some resolved
-                    ||
-                    match binding.pvb_expr.pexp_desc with
-                    | Pexp_construct ({ txt = Lident ("::" | "[]"); _ }, _) | Pexp_apply _ -> true
-                    | _ -> false
-                  in
-                  if list_shaped then (name, at, resolved) :: bindings else bindings)
+                  match resolved with
+                  | Some _ -> (name, at, resolved) :: bindings
+                  | None ->
+                      (* A later binding of a name that WAS a key list is a TOMBSTONE, whatever
+                         expression it is. Inferring "list-shaped" from the AST form was the same
+                         defect one level down: `if enabled then [ … ] else []` is neither a list
+                         constructor nor an application, so it slipped past and a use after it
+                         reached back to the obsolete list (Codex P2, round 12 of PR #484). The name
+                         having once denoted a key list is the only condition that matters, and it
+                         needs no vocabulary of expression shapes to test. *)
+                      if List.exists bindings ~f:(fun (bound, _, _) -> String.equal bound name) then
+                        (name, at, None) :: bindings
+                      else bindings))
       | _ -> bindings)
 
 (** Which configuration keys [content] reads straight from the environment.

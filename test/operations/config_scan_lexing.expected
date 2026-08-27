@@ -117,6 +117,8 @@ ok: key list -- a qualified concatenation operator is not the standard one
 ok: key list -- an open of a library providing List is not a rebinding
 ok: key list -- an unresolvable rebinding is not reached past
 ok: key list -- and a use BEFORE it still sees the resolvable one
+ok: key list -- a conditional rebinding is tombstoned too
+ok: key list -- and a name that never denoted a list is not tombstoned by an unrelated binding
 ok: key list -- the binding does not escape the lambda it was established at
 ok: could read the environment -- names the reader
 ok: could read the environment -- does not name it at all

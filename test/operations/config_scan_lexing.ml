@@ -601,6 +601,19 @@ let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
 let guarded = [ Sys.argv.(1) ]|ocaml},
       ([ "profile" ], false) );
+    (* A tombstone is recorded for ANY later binding of a name that once denoted a key list --
+       inferring "list-shaped" from the AST form let this one past, being neither a constructor nor
+       an application (Codex P2, round 12 of PR #484). *)
+    ( "a conditional rebinding is tombstoned too",
+      {ocaml|let guarded = [ "profile" ]
+let guarded = if enabled then [ "virtualize_max_visits" ] else []
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and a name that never denoted a list is not tombstoned by an unrelated binding",
+      {ocaml|let guarded = [ "profile" ]
+let other = 3
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
     ( "the binding does not escape the lambda it was established at",
       {ocaml|let guarded = [ "log_level" ]
 let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
