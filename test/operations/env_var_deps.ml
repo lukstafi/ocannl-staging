@@ -360,14 +360,20 @@ type member_unit = {
    (run ./probe.exe))` runs `other/probe.exe`, and a comparison that dropped either the cwd or the
    command's own directory would credit the LOCAL `probe` with it (Codex P2, rounds 1 and 2). *)
 let normalize_path path =
-  String.split path ~on:'/'
-  |> List.fold ~init:[] ~f:(fun acc component ->
-      match component with
-      | "" | "." -> acc
-      | ".." -> (
-          match acc with above :: rest when not (String.equal above "..") -> rest | _ -> ".." :: acc)
-      | component -> component :: acc)
-  |> List.rev |> String.concat ~sep:"/"
+  (* An absolute path keeps its root: `/probe.exe` is not this directory's `probe.exe`, and dropping
+     the leading empty component made the two one identity (Codex P2, round 13). *)
+  let root = if String.is_prefix path ~prefix:"/" then "/" else "" in
+  root
+  ^ (String.split path ~on:'/'
+    |> List.fold ~init:[] ~f:(fun acc component ->
+        match component with
+        | "" | "." -> acc
+        | ".." -> (
+            match acc with
+            | above :: rest when not (String.equal above "..") -> rest
+            | _ -> ".." :: acc)
+        | component -> component :: acc)
+    |> List.rev |> String.concat ~sep:"/")
 
 (* An executable's identities: the file dune builds, and the public name it installs under. A
    companion rule may run either -- `%{dep:probe.exe}` or `%{bin:pkg.probe}`, which
@@ -1236,12 +1242,18 @@ let main () =
                 Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
               else None)
         in
+        (* Every main module this directory's stanzas name OTHER than this unit's own. Dune gives
+           each named test and executable its own main and shares the rest, so a stanza that omits
+           `(modules …)` does not build its neighbour's main -- and reading it as if it did made one
+           main's use of the instrumentation a claim about every default-module stanza beside it
+           (Codex P2, rounds 2 and 13). *)
         let siblings =
           match unit_name with
           | None -> []
           | Some name ->
-              List.filter (Scan.names_of unit_stanza) ~f:(fun other ->
-                  not (String.equal other name))
+              List.concat_map (stanzas_in unit_subdir) ~f:(fun stanza ->
+                  if has_family_modules stanza then Scan.names_of stanza else [])
+              |> List.filter ~f:(fun other -> not (String.equal other name))
               |> List.map ~f:String.lowercase
         in
         Scan.modules_of ~directory_modules (stanzas_in unit_subdir) unit_stanza
@@ -2223,6 +2235,8 @@ type family_shape =
       (** a group with a `(test (name probe))` and a hand-written rule on `runtest-probe` *)
   | Gate_elsewhere
       (** the rule on `runtest-gate` runs ANOTHER directory's `gate.exe`, so it is no gate *)
+  | Sibling_defaults  (** two stanzas that omit `(modules …)`, each with its own main *)
+  | Runner_absolute  (** a rule running an ABSOLUTE path that ends in the local executable's name *)
 
 let family_marker ~metal =
   Printf.sprintf
@@ -2300,6 +2314,20 @@ let family_member_stanza ~shape ~metal =
          probe probe2)\n (libraries base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config \
          (alias runtest-gate))\n (action\n  (run %%{bin:pkg.probe2})))\n"
         marker
+  | Sibling_defaults ->
+      (* Two tests, neither naming its modules: dune gives each its own main and shares the rest, so
+         only the one whose main reads the instrumentation is a member. *)
+      Printf.sprintf
+        "(test\n%s (name probe)\n (deps ocannl_config)\n (libraries base))\n\n(test\n%s (name \
+         probe2)\n (deps ocannl_config)\n (libraries base))\n"
+        marker marker
+  | Runner_absolute ->
+      (* The same basename, reached by an absolute path: `/probe.exe` is the system's, not ours. *)
+      Printf.sprintf
+        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(rule\n%s (alias \
+         probe_run)\n (deps ocannl_config (alias runtest-gate))\n (action\n  (run \
+         /probe.exe)))\n"
+        marker
   | Public_name_by_path ->
       (* The same public name, run as a path: `(run ./pkg.probe)` names a file in this directory,
          not the installed program, and `classify_command` reports both as the same string. *)
@@ -2352,6 +2380,8 @@ let family_listed_aliases ~shape ~listing =
   match (shape, listing) with
   | (Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision), _ -> []
   | Runtest_only_rule, _ -> [ "runtest" ]
+  | Sibling_defaults, _ -> [ "runtest-probe" ]
+  | Runner_absolute, _ -> [ "probe_run" ]
   | Gate_elsewhere, _ -> [ "runtest-probe" ]
   | ( ( Exe_with_runner | Runner_elsewhere | Public_name_runner | Public_names_crossed
       | Public_name_by_path | Subdir_exe_top_runner ),
@@ -2392,6 +2422,7 @@ type family_probe_source =
   | Leaf_shadowed  (** the qualifier opened, and then the LEAF rebound to another module *)
   | Alias_nested  (** the qualifier aliased, and the alias then reached through another module *)
   | Functor_parameter  (** the qualifier's name introduced as a functor's parameter *)
+  | Include_wrapper  (** the qualifier re-exported by a structure, then used through it *)
   | Neither
 
 let family_probe = function
@@ -2431,6 +2462,10 @@ let family_probe = function
   | Functor_parameter ->
       (* The qualifier's NAME as a functor parameter: inside the body it is the parameter. *)
       "module M (Ir : S) = struct\n  let () = ignore (Ir.Alloc_census.snapshot ())\nend\n"
+  | Include_wrapper ->
+      (* A structure that only re-exports the qualifier IS the qualifier for this purpose (Codex
+         P2, round 13). *)
+      "module I = struct\n  include Ir\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
   | Scoped_open ->
       (* The open is real and so is the reference, and they are in different scopes: what
          `Alloc_census` names outside `Elsewhere` is somebody else's module (Codex P2, round 7). *)
@@ -2560,6 +2595,18 @@ let family_control () =
   let functor_parameter =
     run ~probe:Functor_parameter ~metal:false ~lifecycle:true ~family:None ()
   in
+  (* A structure that only re-exports the qualifier IS one, so its user is a member and the tree
+     without a family stanza is the reported one. *)
+  let include_wrapper = run ~probe:Include_wrapper ~metal:false ~lifecycle:true ~family:None () in
+  (* Two default-module tests, only one of whose mains reads the instrumentation: listing that one
+     alias is complete. *)
+  let sibling_defaults =
+    run ~shape:Sibling_defaults ~metal:false ~lifecycle:true ~family:lifecycle ()
+  in
+  (* And an absolute path that ends in the local executable's name. *)
+  let runner_absolute =
+    run ~shape:Runner_absolute ~metal:false ~lifecycle:true ~family:lifecycle ()
+  in
   (* And a rule on the gate's generated alias that runs another directory's binary: not the gate,
      so the collision is not the deliberate one. *)
   let gate_elsewhere = run ~shape:Gate_elsewhere ~metal:true ~lifecycle:false ~family:metal () in
@@ -2627,6 +2674,9 @@ let family_control () =
   let leaf_shadowed_ok = listed_ok leaf_shadowed in
   let alias_nested_ok = listed_ok alias_nested in
   let functor_parameter_ok = listed_ok functor_parameter in
+  let include_wrapper_ok = omitted_ok lifecycle_family.family_alias include_wrapper in
+  let sibling_defaults_ok = listed_ok sibling_defaults in
+  let runner_absolute_ok = omitted_ok lifecycle_family.family_alias runner_absolute in
   let gate_elsewhere_ok =
     exited 1 gate_elsewhere
     && String.is_substring (snd gate_elsewhere) ~substring:"the alias dune generates"
@@ -2669,6 +2719,9 @@ let family_control () =
   if not leaf_shadowed_ok then report "the opened module's leaf rebound" leaf_shadowed;
   if not alias_nested_ok then report "the alias reached through another module" alias_nested;
   if not functor_parameter_ok then report "the qualifier's name as a functor parameter" functor_parameter;
+  if not include_wrapper_ok then report "the qualifier re-exported by a structure" include_wrapper;
+  if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
+  if not runner_absolute_ok then report "an absolute runner path" runner_absolute;
   if not gate_elsewhere_ok then report "a gate alias running another binary" gate_elsewhere;
   if not subdir_collision_ok then report "an alias collision inside a group" subdir_collision;
   if not no_member_ok then report "neither derivation's member" no_member;
@@ -2784,6 +2837,17 @@ let family_control () =
   Verdict.p
     "a functor parameter named `Ir` shadows the qualifier inside the functor's body"
     functor_parameter_ok;
+  Verdict.p
+    "`module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a \
+     reference to the instrumentation"
+    include_wrapper_ok;
+  Verdict.p
+    "two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the \
+     instrumentation is a member"
+    sibling_defaults_ok;
+  Verdict.p
+    "an absolute path ending in the local executable's name is not the local executable"
+    runner_absolute_ok;
   Verdict.p
     "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
      deliberate gate collision, and is reported"

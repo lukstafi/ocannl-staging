@@ -50,6 +50,9 @@ nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module i
 `open Ir` and then `module Alloc_census = Foo.Alloc_census` rebinds the leaf, so what follows is not the instrumentation: true
 `module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves from where it starts: true
 a functor parameter named `Ir` shadows the qualifier inside the functor's body: true
+`module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a reference to the instrumentation: true
+two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the instrumentation is a member: true
+an absolute path ending in the local executable's name is not the local executable: true
 a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true
 a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is reported there too: true
 a stanza neither derivation calls a member is asked for no family alias: true

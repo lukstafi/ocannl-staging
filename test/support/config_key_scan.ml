@@ -354,21 +354,37 @@ let module_references_in_source content ~paths =
       | Pmod_constraint (inner, _) -> unwrap inner
       | _ -> module_expr
     in
+    (* The paths a module expression re-exports WHOLE. A path names itself; and a structure whose
+       every item is an `include`/`open` re-exports what those name, so `module I = struct include Ir
+       end` binds `I` to the qualifier as surely as `module I = Ir` does (Codex P2, round 13). Only
+       that shape: a structure that also DEFINES something is a module of its own, and calling it
+       the qualifier would attribute its contents to us. *)
+    let rec exports module_expr =
+      match (unwrap module_expr).pmod_desc with
+      | Pmod_ident { txt; _ } -> Option.to_list (flatten_module_path txt)
+      | Pmod_structure items ->
+          let reexports =
+            List.map items ~f:(fun item ->
+                match item.pstr_desc with
+                | Pstr_include { pincl_mod = inner; _ } | Pstr_open { popen_expr = inner; _ } ->
+                    Some (exports inner)
+                | _ -> None)
+          in
+          if List.for_all reexports ~f:Option.is_some then
+            List.concat_map reexports ~f:(fun r -> Option.value r ~default:[])
+          else []
+      | _ -> []
+    in
     let names_any = ref false in
-    (match (unwrap module_expr).pmod_desc with
-    | Pmod_ident { txt; _ } -> (
-        match flatten_module_path txt with
-        | None -> ()
-        | Some components ->
-            List.iter qualifiers ~f:(fun qualifier ->
-                if names_qualifier qualifier components then (
-                  names_any := true;
-                  match alias with
-                  | Some alias ->
-                      shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
-                      aliases := (alias, qualifier) :: !aliases
-                  | None -> opened := qualifier :: !opened)))
-    | _ -> ());
+    List.iter (exports module_expr) ~f:(fun components ->
+        List.iter qualifiers ~f:(fun qualifier ->
+            if names_qualifier qualifier components then (
+              names_any := true;
+              match alias with
+              | Some alias ->
+                  shadowed := List.filter !shadowed ~f:(Fn.non (String.equal alias));
+                  aliases := (alias, qualifier) :: !aliases
+              | None -> opened := qualifier :: !opened)));
     (* Whatever else it was bound to, the NAME now denotes that instead. *)
     match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
   in
