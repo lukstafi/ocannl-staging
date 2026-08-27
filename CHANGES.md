@@ -54,9 +54,9 @@
   platform's name, C type, narrowing spellings and labels, the probe and header wording, and the
   thresholds that say what a reported kernel macro means, while an arm is left with its kernel
   source, its compile/load/launch/copy calls, and data extractors. The `.missing` stubs mirror no
-  vendor knowledge at all. Each arm also records where it last really compiled — box, date, commit —
-  which the run header prints beside the arm's source path, so the next editor knows whether they
-  are editing blind.
+  vendor knowledge at all. Each arm also records where it last really compiled — box, date, and the
+  PR whose evidence says so — which the run header prints beside the arm's source path, so the next
+  editor knows whether they are editing blind.
 
 ## [1.0.1] -- 2026-08-26
 

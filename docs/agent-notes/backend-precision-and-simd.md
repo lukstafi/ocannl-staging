@@ -188,9 +188,11 @@ files.
   stubs mirror no vendor knowledge at all (`built = false` is what the selection reads; nothing else
   in a stub is reachable, because an unbuilt arm is refused before it is asked anything). The same
   shape applies to any future `select`-gated file.
-- **Each arm records where it last really compiled** — `last_compiled`: box, date, commit — and the
-  run header prints it beside the arm's source path, so an editor on another box knows whether they
-  are editing blind and a sweep's output is also the record that the file still compiles somewhere.
+- **Each arm records where it last really compiled** — `last_compiled`: box, date, and the PR whose
+  evidence says so, a PR rather than a sha because the commit a session verifies does not survive
+  the rebase before merge — and the run header prints it beside the arm's source path, so an editor
+  on another box knows whether they are editing blind and a sweep's output is also the record that
+  the file still compiles somewhere.
   Update it when you compile the arm on a box that has its vendor library, which is also the moment
   to run the sweep: `opam exec -- dune build tools/fp8_soak.exe` then
   `./_build/default/tools/fp8_soak.exe --sweep=f32` (add `--spelling=both` on HIP) takes about ten

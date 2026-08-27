@@ -70,9 +70,11 @@ type arch_policy = [ `Device | `Backend ]
    is driven. *)
 module type ARM = sig
   val last_compiled : string
-  (** Where and when this arm's source was last really compiled: the box, the date, and the commit.
-      Printed in the run header, and updated by whoever compiles it on a box that has the vendor
-      library — it is what tells the next editor whether they are editing blind. *)
+  (** Where and when this arm's source was last really compiled: the box, the date, and where the
+      evidence lives — the PR that carried it rather than a commit, since the sha a session verifies
+      does not survive the rebase before merge. Printed in the run header, and updated by whoever
+      compiles it on a box that has the vendor library: it is what tells the next editor whether
+      they are editing blind. *)
 
   val built : bool
   (** [false] in the [.missing] stub that the `select` picks where the vendor's jit library is
