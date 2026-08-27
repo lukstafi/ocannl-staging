@@ -1441,6 +1441,14 @@ let cpp_keywords =
     "xor_eq";
   ]
 
+(** {!C_syntax_config.full_printf_support} for a dialect whose [printf] does support [%g] — every
+    backend except Metal, whose MSL [printf] does not. Such a backend still gives the scaled-integer
+    rendering up when asked for backend uniformity, so that its routine logs read the same as
+    Metal's: the setting is what decides, and it is read here once rather than restated per backend.
+*)
+let printf_support_unless_uniform () =
+  not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+
 module Pure_C_config (Input : sig
   val procs : Low_level.t array
   val full_printf_support : bool

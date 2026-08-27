@@ -1524,6 +1524,18 @@ let enable_runtime_debug () =
   settings.output_debug_files_in_build_directory <- true;
   set_log_level @@ max 2 settings.log_level
 
+(** A fresh non-negative integer per call, wrapping to 0 on overflow. Backends use it to tell one
+    run of a kernel from the next: cc names each dynamically loaded library by it (there can be only
+    one library of a given name in a process), and the GPU backends prefix a launch's routine logs
+    with it. Process-wide rather than per backend, so that ids never collide across the backends a
+    process links. *)
+let get_global_run_id =
+  let next_id = ref 0 in
+  fun () ->
+    Int.incr next_id;
+    if !next_id < 0 then next_id := 0;
+    !next_id
+
 let rec union_find ~equal map ~key ~rank =
   match Map.find map key with
   | None -> (key, rank)

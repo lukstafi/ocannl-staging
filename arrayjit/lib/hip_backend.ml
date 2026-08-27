@@ -485,8 +485,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     include C_syntax.Pure_C_config (struct
       let procs = Input.procs
 
-      let full_printf_support =
-        not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+      let full_printf_support = C_syntax.printf_support_unless_uniform ()
     end)
 
     let ident_blacklist =
@@ -1620,13 +1619,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let kparams_and_names = Array.map kparams_and_docs ~f:fst in
     { code; kparams_and_names; bindings }
 
-  let get_global_run_id =
-    let next_id = ref 0 in
-    fun () ->
-      Int.incr next_id;
-      if !next_id < 0 then next_id := 0;
-      !next_id
-
   (* {2 Post-link scratch validation (gh-ocannl-533)}
 
      A kernel's private (scratch) segment is sized by the compiler and budgeted by the runtime only
@@ -1730,7 +1722,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        closure; region views ([Tensor_at]) are non-owning and must not outlive the slab base. *)
     let ctx_bases = Map.map ctx_buffers ~f:(Slab.resolve_pool device) in
     let%diagn3_sexp work () : unit =
-      let log_id = get_global_run_id () in
+      let log_id = Utils.get_global_run_id () in
       let log_id_prefix = Int.to_string log_id ^ ": " in
       [%log_result
         "Launching",
@@ -1760,9 +1752,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               Indexing.validate_bound_value ~width64:Utils.settings.large_models s !i;
               S.Int !i
           | _name, (Kparam_pool_slab _ | Kparam_pool_slots _) ->
-              (* The HIP backend uses per-tnode pointer params ([`Per_param] codegen); only the
-                 Metal backend emits the pooled slab / slot parameters. *)
-              invalid_arg "Hip_backend.link: unexpected pooled kparam (HIP uses per-tnode pointers)")
+              Backend_intf.unexpected_pooled_kparam ~backend:"Hip_backend")
       in
       set_ctx @@ ctx_of prior_context;
       [%log "launching the kernel"];
