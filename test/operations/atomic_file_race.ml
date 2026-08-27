@@ -187,12 +187,14 @@ let () =
     done
   done;
   let refusals = Array.create ~len:writers 0 in
-  (* Each observation carries the number of publications completed when it was taken, which is how
-     a reader proves it read while writers were running rather than before or after them. *)
-  let observations = Array.create ~len:readers [] in
+  (* Each observation carries the number of publications completed when it was taken, which is how a
+     reader reports where in the run it read. *)
+  let no_reads = ((None, 0), []) in
+  let observations = Array.create ~len:readers no_reads in
   let committed = Atomic.make 0 in
-  let readers_started = Atomic.make 0 in
+  let readers_read = Atomic.make 0 in
   let writers_finished = Atomic.make 0 in
+  let half_written = Atomic.make false in
   let writers_met = Array.create ~len:writers false in
   let readers_met = Array.create ~len:readers false in
   let publish_round i writer round =
@@ -202,14 +204,34 @@ let () =
      with _ -> refusals.(i) <- refusals.(i) + 1);
     ()
   in
+  (* The gate. One writer stops HALFWAY THROUGH ITS PAYLOAD -- not between two publications -- and
+     every reader takes a read before it continues. Pausing between publications was not enough
+     (Codex P2, round 5): on one core the readers could take every read while the writers waited,
+     so nothing was read during a mutation and a truncate-in-place implementation would have passed.
+     Stopped here, the bytes of a partial payload exist on disk; an implementation that wrote them
+     into the target would be caught by the exact-set claim below, on any number of cores. *)
+  let publish_gated i writer round =
+    let whole = payload ~writer ~round in
+    let half = String.length whole / 2 in
+    (try
+       AF.with_channel ~path:target () ~f:(fun oc ->
+           Stdlib.output_string oc (String.prefix whole half);
+           Stdlib.flush oc;
+           Atomic.set half_written true;
+           writers_met.(i) <- await (fun () -> Atomic.get readers_read >= readers);
+           Stdlib.output_string oc (String.drop_prefix whole half));
+       Atomic.incr committed
+     with _ -> refusals.(i) <- refusals.(i) + 1);
+    ()
+  in
   let writer_domains =
     Array.init writers ~f:(fun i ->
         Domain.spawn (fun () ->
             let writer = Char.to_int 'a' + i in
-            publish_round i writer 0;
-            (* The rendezvous: no writer runs ahead until every reader has taken a read against a
-               file that is already being republished. *)
-            writers_met.(i) <- await (fun () -> Atomic.get readers_started >= readers);
+            if i = 0 then publish_gated i writer 0
+            else (
+              publish_round i writer 0;
+              writers_met.(i) <- await (fun () -> Atomic.get readers_read >= readers));
             for round = 1 to rounds - 1 do
               publish_round i writer round
             done;
@@ -218,9 +240,11 @@ let () =
   let reader_domains =
     Array.init readers ~f:(fun i ->
         Domain.spawn (fun () ->
-            readers_met.(i) <- await (fun () -> Atomic.get committed >= 1);
+            readers_met.(i) <- await (fun () -> Atomic.get half_written);
+            (* Taken with a payload half-written on disk. *)
             let seen = ref [ (read_published (), Atomic.get committed) ] in
-            Atomic.incr readers_started;
+            let during_write = List.hd_exn !seen in
+            Atomic.incr readers_read;
             let rec loop n =
               if n >= max_reads then ()
               else if n >= reads_per_reader && Atomic.get writers_finished >= writers then ()
@@ -229,21 +253,28 @@ let () =
                 loop (n + 1))
             in
             loop 1;
-            observations.(i) <- !seen))
+            (* One last read after the loop's exit condition held, so the final observation is taken
+               with every writer finished: that is what makes "kept reading until the writers were
+               done" a fact about this reader rather than about the loop's shape. *)
+            seen := (read_published (), Atomic.get committed) :: !seen;
+            observations.(i) <- (during_write, !seen)))
   in
   Array.iter writer_domains ~f:Domain.join;
   Array.iter reader_domains ~f:Domain.join;
   let per_reader = Array.to_list observations in
-  let seen = List.concat per_reader in
+  let seen = List.concat_map per_reader ~f:snd in
   Verdict.p_all ~min:writers "every writer met the readers at the rendezvous"
     (Array.to_list writers_met) ~f:Fn.id;
-  Verdict.p_all ~min:readers "every reader saw publication start" (Array.to_list readers_met)
-    ~f:Fn.id;
-  (* The overlap claim. A reader that ran entirely before or entirely after the writers would have
-     every observation at 0 or at [total_publications], and could pass every claim below while
-     publication truncated the target in place. *)
-  Verdict.p_all ~min:readers "every reader read while publication was still in progress" per_reader
-    ~f:(fun obs -> List.exists obs ~f:(fun (_, at) -> at > 0 && at < total_publications));
+  Verdict.p_all ~min:readers "every reader saw a payload go half-written"
+    (Array.to_list readers_met) ~f:Fn.id;
+  (* The overlap claim, and the one that makes this leg independent of how many cores run it: the
+     read below was taken while a writer sat inside its payload with half of it already on disk. *)
+  Verdict.p_all ~min:readers "every reader's gated read saw a whole payload while one was half-written"
+    per_reader
+    ~f:(fun ((data, _), _) -> Option.value_map data ~default:false ~f:(Hash_set.mem published));
+  Verdict.p_all ~min:readers "every reader kept reading until the writers were done" per_reader
+    ~f:(fun (_, obs) ->
+      List.exists obs ~f:(fun (_, at) -> at = total_publications));
   Verdict.p_all ~min:(readers * reads_per_reader)
     "every read under concurrent publication observes a payload some writer published" seen
     ~f:(function

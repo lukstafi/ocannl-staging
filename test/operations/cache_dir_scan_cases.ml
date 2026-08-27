@@ -103,6 +103,38 @@ let default_cases =
       [] );
   ]
 
+(* The ignore matcher's own reading of a gitignore pattern, on the forms the repository's rules use
+   and on the ones next to them. Every expectation here is what `git check-ignore` answers, run
+   against a scratch repository carrying exactly these patterns -- not what the matcher happens to
+   do, which is the whole point: a matcher that has drifted from git reports a directory ignored
+   that is not, or unreadable that is.
+
+   The character-class arms arrived with gh-ocannl-780, whose staging-file rule is spelled to the
+   generated shape (a nonce of exactly sixteen hex digits) so that it cannot also hide a file
+   someone named `report.ocannl-stage.backup`. The last arm is the reading that measurement
+   CORRECTED: an unterminated `[` is not a literal bracket, and a pattern carrying one matches
+   nothing at all. *)
+let glob_cases =
+  [
+    ("a range class", "a.[0-9a-f]", "a.a", true);
+    ("a range class rejects outside its range", "a.[0-9a-f]", "a.g", false);
+    ("a negated class", "b.[!0-9]", "b.a", true);
+    ("a negated class rejects its members", "b.[!0-9]", "b.5", false);
+    ("a bracket first in a class is a member", "c.[]a]", "c.]", true);
+    ("the rest of that class still applies", "c.[]a]", "c.a", true);
+    ("an escape inside a class", "e.[\\-]", "e.-", true);
+    ("an escaped member excludes others", "e.[\\-]", "e.x", false);
+    ("an unterminated class matches nothing, not a literal bracket", "d.[abc", "d.[abc", false);
+    ( "the staging-file rule matches a generated name",
+      "*.ocannl-stage.[0-9]*.[0-9]*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]",
+      "model.bin.ocannl-stage.4242.0.00c0ffee00c0ffee",
+      true );
+    ( "and spares a file merely carrying the infix",
+      "*.ocannl-stage.[0-9]*.[0-9]*.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]",
+      "report.ocannl-stage.backup",
+      false );
+  ]
+
 let render uses = String.concat ~sep:"; " uses
 
 let () =
@@ -117,6 +149,10 @@ let () =
       in
       if List.equal String.equal found expected then printf "ok: use -- %s\n" name
       else fail "use -- %s: expected [%s], found [%s]" name (render expected) (render found));
+  List.iter glob_cases ~f:(fun (name, pattern, candidate, expected) ->
+      let found = Scan.glob_matches pattern candidate in
+      if Bool.equal found expected then printf "ok: glob -- %s\n" name
+      else fail "glob -- %s: `%s` against %s expected %b, found %b" name pattern candidate expected found);
   List.iter default_cases ~f:(fun (name, source, expected) ->
       let found = (Scan.read source).Scan.builtin_defaults in
       if List.equal String.equal found expected then printf "ok: built-in default -- %s\n" name

@@ -13,8 +13,9 @@ the released writer commits its own complete payload: true
 the blocked writer waited rather than timing out: true
 no staging file survives the interleaving: true
 every writer met the readers at the rendezvous: true
-every reader saw publication start: true
-every reader read while publication was still in progress: true
+every reader saw a payload go half-written: true
+every reader's gated read saw a whole payload while one was half-written: true
+every reader kept reading until the writers were done: true
 every read under concurrent publication observes a payload some writer published: true
 no read under concurrent publication finds the path missing: true
 every concurrent writer committed every round: true
