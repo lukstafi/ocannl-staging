@@ -506,7 +506,7 @@ module Impl = struct
   [@@deriving sexp_of]
 
   module C_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
@@ -1211,7 +1211,7 @@ module Impl = struct
 
   let compile ~name bindings lowered =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,
@@ -1231,7 +1231,7 @@ using namespace metal;|} in
 
   let compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,

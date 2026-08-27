@@ -479,7 +479,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   [@@deriving sexp_of]
 
   module Hip_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
@@ -1578,7 +1578,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let%diagn2_sexp compile ~name bindings (lowered : Low_level.optimized) =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -1595,7 +1595,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Hip_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in

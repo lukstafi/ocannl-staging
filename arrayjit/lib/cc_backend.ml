@@ -931,7 +931,7 @@ let%track7_sexp c_compile_and_load ~f_path =
   result
 
 module CC_syntax_config (Procs : sig
-  val procs : Low_level.optimized array
+  val procs : Low_level.t array
 end) =
 struct
   include C_syntax.Pure_C_config (struct
@@ -1181,7 +1181,7 @@ let compilation_copy ~name (build_file : Utils.build_file_channel) filtered_code
 
 let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized) : procedure =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
-    let procs = [| lowered |]
+    let procs = [| lowered.Low_level.llc |]
   end))
   in
   (* gh-ocannl-686: normalize the user-supplied routine name into a legal C identifier ONCE, here,
@@ -1208,7 +1208,7 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
 let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized array) :
     procedure array =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
-    let procs = lowereds
+    let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
   end))
   in
   (* gh-ocannl-686: as in [compile] — mangle before anything derives a file name or a symbol. *)

@@ -35,7 +35,7 @@ let make_optimized llc =
 let pp llc =
   let optimized = make_optimized llc in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
-    let procs = [| optimized |]
+    let procs = [| optimized.LL.llc |]
     let full_printf_support = true
   end))
   in

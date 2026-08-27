@@ -59,7 +59,7 @@ let vec_loop ~axis tn =
 
 let compile_with_pure_config ~name optimized =
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
-    let procs = [| optimized |]
+    let procs = [| optimized.LL.llc |]
     let full_printf_support = true
   end))
   in
@@ -81,7 +81,7 @@ let () =
   let optimized2 = make_optimized (vec_loop ~axis:LL.Vectorized out2) [ out2 ] in
   let module Fallback_syntax = Ir.C_syntax.C_syntax (struct
     include Ir.C_syntax.Pure_C_config (struct
-      let procs = [| optimized2 |]
+      let procs = [| optimized2.LL.llc |]
       let full_printf_support = true
     end)
 
@@ -136,7 +136,7 @@ let () =
   let compile_with_vector_config ~name optimized =
     let module Syntax = Ir.C_syntax.C_syntax (struct
       include Ir.C_syntax.Pure_C_config (struct
-        let procs = [| optimized |]
+        let procs = [| optimized.LL.llc |]
         let full_printf_support = true
       end)
 

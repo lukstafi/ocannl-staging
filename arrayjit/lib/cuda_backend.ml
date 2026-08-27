@@ -510,7 +510,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   [@@deriving sexp_of]
 
   module Cuda_syntax_config (Input : sig
-    val procs : Low_level.optimized array
+    val procs : Low_level.t array
   end) =
   struct
     include C_syntax.Pure_C_config (struct
@@ -2049,7 +2049,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* TODO: The following link seems to claim it's better to expand into loops than use memset.
        https://stackoverflow.com/questions/23712558/how-do-i-best-initialize-a-local-memory-array-to-0 *)
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
-      let procs = [| lowered |]
+      let procs = [| lowered.Low_level.llc |]
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
@@ -2083,7 +2083,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
-      let procs = lowereds
+      let procs = Array.map lowereds ~f:(fun l -> l.Low_level.llc)
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in

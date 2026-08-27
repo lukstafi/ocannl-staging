@@ -353,9 +353,12 @@ type async_copy_syntax = {
     {!C_syntax_config.async_copy}). *)
 
 module type C_syntax_config = sig
-  val procs : Low_level.optimized array
-  (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
-      shared and already known. *)
+  val procs : Low_level.t array
+  (** The low-level procedures this functor application will render: one per kernel of the
+      compilation unit (a singleton for a plain compile, one entry per routine for a batch). The
+      functor reads them for whole-unit analyses -- the identifier census, the scope-local verdicts
+      -- while each kernel's own rendering goes through {!compile_proc}, which takes the full
+      {!Low_level.optimized} record. *)
 
   val main_kernel_prefix : string
   val kernel_prep_line : string
@@ -1439,7 +1442,7 @@ let cpp_keywords =
   ]
 
 module Pure_C_config (Input : sig
-  val procs : Low_level.optimized array
+  val procs : Low_level.t array
   val full_printf_support : bool
 end) =
 struct
@@ -1605,7 +1608,7 @@ module C_syntax (B : C_syntax_config) = struct
 
   let get_ident =
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
-    @@ Array.map B.procs ~f:(fun l -> l.llc)
+    @@ B.procs
 
   (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
      standard-library functions and types the preludes' unconditional includes declare. The extra
@@ -1826,7 +1829,7 @@ module C_syntax (B : C_syntax_config) = struct
         ->
           ()
     in
-    Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
+    Array.iter B.procs ~f:scan;
     acc
 
   (* Scope locals that are reduction ACCUMULATORS (gh-ocannl-663): every [Set_local] to the scope is
@@ -1922,7 +1925,7 @@ module C_syntax (B : C_syntax_config) = struct
         ->
           ()
     in
-    Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
+    Array.iter B.procs ~f:scan;
     let acc = Hash_set.create (module Int) in
     Hashtbl.iteri verdicts ~f:(fun ~key ~data ->
         match data with `Accum _ -> Hash_set.add acc key | `Bad -> ());
