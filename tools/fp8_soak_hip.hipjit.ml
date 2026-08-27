@@ -2,19 +2,23 @@
    sweep against [__hip_fp8_e5m2], plus the one thing the CUDA arm has no counterpart for — a second
    pair of kernels calling the GUARDED helpers the HIP backend actually emits.
 
-   Two spellings, because on ROCm they are not the same conversion:
+   Like the CUDA arm, this file holds the kernel source and the calls into hipjit and nothing else:
+   which spellings this platform has, what they are called in a claim, and what the reported macros
+   MEAN all live in fp8_soak.ml ([ARM] and [hip_vendor]), because THIS FILE IS COMPILED ONLY ON A
+   ROCm BOX and every edit to it is made blind everywhere else (gh-ocannl-758).
+
+   The two spellings are not the same conversion on ROCm:
 
    - [`Raw] is [(__hip_fp8_e5m2)x], the platform's own cast. It is BROKEN for tiny magnitudes
    (gh-ocannl-647): an out-of-range shift in [hip/amd_detail/amd_hip_fp8.h]'s [cast_to_f8] returns
    values as large as 2^-14 where every other implementation returns a signed zero. Sweeping it is
-   what localizes the defect to an exponent window, and a count of 0 here is the trigger to remove
+   what localizes the defect to an exponent window, and a count of 0 there is the trigger to remove
    the guard (https://github.com/ROCm/rocm-systems/issues/10591). - [`Guarded] is
    [ocannl_single_to_fp8_uniform] / [ocannl_double_to_fp8_uniform] from {!Builtins_hip} — the source
    text, fetched from the backend rather than transcribed, exactly as the host side of this soak is
    the shipped [builtins.c] object code reached by [extern]. This is what an OCANNL HIP kernel
    narrows with, unconditionally since gh-ocannl-647, so it is what "does our codec still agree with
-   what our kernels produce" really asks here. It is the default, and the pass/fail gate: 0
-   disagreements expected on every ROCm.
+   what our kernels produce" really asks here.
 
    Compiled WITHOUT [-ffast-math], which the backend does pass: fast math is about arithmetic and
    this program does none — the conversion is the whole kernel. The guard's own [fabsf]/[copysignf]
@@ -23,8 +27,11 @@
 open Base
 module H = Hip
 
-let name = "hip"
-let vendor_type = "__hip_fp8_e5m2"
+(* Update this whenever you compile this file on a box that has hipjit -- the run header prints it,
+   and it is what tells the next editor whether they are editing blind (gh-ocannl-758). *)
+let last_compiled = "on minix-amd-wsl (Radeon 8060S / gfx1151, hipjit), 2026-08-27, commit 0000000"
+
+let built = true
 
 type bytes_buf =
   (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
@@ -42,19 +49,16 @@ let source () =
   ^ {|
 
 /* Which side of amd_hip_fp8.h's compile-time split the conversions above were built on, asked of
-   the COMPILED KERNEL rather than inferred from the device name we happen to know. The header
-   defines HIP_FP8_CVT_FAST_PATH to 1 on gfx942/950/1200/1201/1250 under device compilation and to 0
-   everywhere else; at 1 the cast is a hardware instruction, at 0 it is the header's own software
-   [cast_to_f8] -- which is where gh-ocannl-647's defect lives. A sweep that silently took the fast
-   path would report the bug fixed, so the answer goes into every claim's label (the same lesson the
-   CUDA arm learned about __CUDA_ARCH__ >= 890, PR #463 round 4). HIP_FP8_TYPE_OCP rides along
-   because it selects which fp8 INTERPRETATION the type has; e5m2 is the OCP one. */
+   the COMPILED KERNEL rather than inferred from the device name we happen to know. What the values
+   mean is fp8_soak.ml's business (its [hip_vendor] record); this kernel only reports them, and 2 is
+   "the header did not define it". HIP_FP8_TYPE_OCP rides along because it selects which fp8
+   INTERPRETATION the type has; e5m2 is the OCP one. */
 extern "C" __global__ void ocannl_report_fp8_path(unsigned int *out) {
 #if defined(HIP_FP8_CVT_FAST_PATH)
   out[0] = (unsigned int)HIP_FP8_CVT_FAST_PATH;
   out[1] = (unsigned int)HIP_FP8_TYPE_OCP;
 #else
-  out[0] = 2u; /* the header did not define it: not a split this build knows about */
+  out[0] = 2u;
   out[1] = 2u;
 #endif
 }
@@ -150,31 +154,19 @@ type state = {
    ARCHITECTURE MACRO (__gfx942__ and four others), not off a numeric threshold an option could be
    dialled below the device's own capability the way [--gpu-architecture=compute_XX] can be on CUDA.
    hiprtc compiles for the current default device, so [`Device] and [`Backend] are the same
-   compilation, and which side of the split it landed on is REPORTED by {!conversion_path} rather
-   than chosen here. *)
-type arch_policy = [ `Device | `Backend ]
-
-let set_arch_policy (_ : arch_policy) = ()
-
-(* The raw cast and the guarded helpers are different conversions on ROCm, so the sweep has to say
-   which one it swept. [`Guarded] first: it is what OCANNL emits, hence the default. *)
-let spellings () = [ `Guarded; `Raw ]
-
-let spelling_label = function
-  | `Raw -> "(__hip_fp8_e5m2)x"
-  | `Guarded -> "ocannl_{single,double}_to_fp8_uniform"
+   compilation, and which side of the split it landed on is REPORTED by [kernel_macros] rather than
+   chosen here. *)
+let set_arch_policy (_ : [ `Device | `Backend ]) = ()
 
 let state = ref None
 
-(* Whether this box has an AMD device, not merely whether hipjit is linked. See the CUDA arm. *)
-let probe () =
+let device_count () : (int, string) Result.t =
   match
     H.init ();
     H.Device.get_count ()
   with
-  | 0 -> Error "hipjit is linked, but the HIP runtime reports no device"
-  | _ -> Ok ()
-  | exception e -> Error ("hipjit is linked, but HIP initialization failed: " ^ Exn.to_string e)
+  | n -> Ok n
+  | exception e -> Error (Exn.to_string e)
 
 let init () =
   match !state with
@@ -227,18 +219,18 @@ let init () =
       state := Some st;
       st
 
-(* Which fp8 INTERPRETATIONS the header enabled for this target: e5m2 is the OCP one, and a build
-   where only FNUZ is available would be narrowing to a different format entirely. Reported rather
-   than assumed, for the same reason the fast-path macro is. *)
-let interpretation () =
+(* ["device"] and ["target"] are the two entries fp8_soak.ml looks up by name -- the gcn arch is the
+   target here, and it is also what selects the header's conversion path. *)
+let device_report () =
   let st = init () in
-  match st.ocp with 1 -> "OCP" | 0 -> "FNUZ only" | _ -> "unknown"
+  [ ("device", st.attrs.name); ("target", st.attrs.gcn_arch_name) ]
 
-let describe () =
+let compile_options () = (init ()).options
+
+(* Keyed by the macros' own C spellings, which is how fp8_soak.ml looks them up. *)
+let kernel_macros () =
   let st = init () in
-  Printf.sprintf "%s (%s, fp8 interpretation %s); hiprtc options: %s" st.attrs.name
-    st.attrs.gcn_arch_name (interpretation ())
-    (if List.is_empty st.options then "(none)" else String.concat ~sep:" " st.options)
+  [ ("HIP_FP8_CVT_FAST_PATH", st.fast_path); ("HIP_FP8_TYPE_OCP", st.ocp) ]
 
 let device_buffer st bytes =
   match st.buffer with
@@ -249,21 +241,6 @@ let device_buffer st bytes =
       st.buffer <- Some (ptr, bytes);
       ptr
 
-(* [amd_hip_fp8.h]: `#if (defined(__gfx942__) || __gfx1200__ || __gfx1201__ || __gfx950__ ||
-   __gfx1250__) && __HIP_DEVICE_COMPILE__` sets HIP_FP8_CVT_FAST_PATH to 1, and every conversion
-   entry point below branches on it; at 0 the header's own software [cast_to_f8] runs, which is the
-   function gh-ocannl-647 is about. The gcn arch travels with the answer because it is what SELECTS
-   the side, but the value reported is the macro the kernel compiled with, not a name matched
-   against a list here. *)
-let conversion_path () =
-  let st = init () in
-  match st.fast_path with
-  | 1 -> Printf.sprintf "hardware cvt (HIP_FP8_CVT_FAST_PATH = 1 on %s)" st.attrs.gcn_arch_name
-  | 0 ->
-      Printf.sprintf "header software cast_to_f8 (HIP_FP8_CVT_FAST_PATH = 0 on %s)"
-        st.attrs.gcn_arch_name
-  | _ -> Printf.sprintf "unknown (HIP_FP8_CVT_FAST_PATH undefined, on %s)" st.attrs.gcn_arch_name
-
 let block_dim = 256
 let grid_dim = 4096
 
@@ -273,7 +250,7 @@ let fetch st ptr (out : bytes_buf) count =
     ~src:ptr st.stream;
   H.Stream.synchronize st.stream
 
-let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
+let narrow_f32 ~(spelling : [ `Raw | `Guarded ]) ~base ~count (out : bytes_buf) =
   let st = init () in
   let ptr = device_buffer st count in
   H.Stream.launch_kernel
@@ -286,7 +263,7 @@ let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
     ];
   fetch st ptr out count
 
-let narrow_f64 ~spelling ~base ~count ~lows (out : bytes_buf) =
+let narrow_f64 ~(spelling : [ `Raw | `Guarded ]) ~base ~count ~lows (out : bytes_buf) =
   let st = init () in
   let bytes = 4 * count in
   let ptr = device_buffer st bytes in
