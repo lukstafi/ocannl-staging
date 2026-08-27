@@ -137,6 +137,104 @@ let tracing_gates_in_source content =
           | _ -> None)
       | _ -> None)
 
+(** {1 Resolving a receiver} *)
+
+(* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
+   where a functor application is a shape the language admits, and a scan that raised on one would
+   refuse a file for containing an unrelated [module M = F (X)]. *)
+let flatten_module_path txt = try Some (flatten_longident txt) with _ -> None
+
+let path_ends_in name txt =
+  match flatten_module_path txt with
+  | Some path -> ( match List.last path with Some m -> String.equal m name | None -> false)
+  | None -> false
+
+(** Every local name under which the module called [wanted] is reachable in [structure], and whether
+    its contents were put in scope unqualified by an [open] or an [include].
+
+    Every way a module's contents can be given a local name, in BOTH the structure and the expression
+    grammar. OCaml spells each of binding, opening and including twice — [module G = M] against
+    [let module G = M in …], [open M] against [let open M in …], [include M] against nothing — and a
+    pass that knew only the structure spellings would read [let open Test_utils.Generated in init …]
+    as a call to somebody else's [init] (Codex P2, round 1 of PR #457). Which is the shape a scan
+    must not get wrong quietly.
+
+    The aliases are collected in this pass and the call sites matched against them in a second — OCaml
+    lets neither be used before it is bound, so two passes cost nothing and save the walk from
+    depending on that. An [open] is taken to reach the whole file rather than its own scope, which is
+    the over-reading direction and the safe one for a check that asks for a DECLARATION: one too many
+    makes dune rerun a stanza it need not have, one too few is the stale run.
+
+    Shared by the two scans that match a call by its receiver — the initializer census below and the
+    environment reader above — because a second copy of these rules is exactly the restatement this
+    module exists to avoid. *)
+let module_bindings_of structure ~wanted =
+  let aliases = ref [] and opened = ref false in
+  let bind_module_expr alias module_expr =
+    let names_it txt =
+      path_ends_in wanted txt
+      ||
+      (* An alias of an alias: `module H = G` where `G` was bound to the module. The binders run in
+         source order and OCaml lets neither be used before it is bound, so consulting what is
+         already recorded is all a chain needs (Codex P2, round 2). *)
+      match flatten_module_path txt with
+      | Some path -> (
+          match List.last path with
+          | Some m -> List.mem !aliases m ~equal:String.equal
+          | None -> false)
+      | None -> false
+    in
+    (* A signature constraint wraps the path without changing which module it names, so `module G :
+       module type of Test_utils.Generated = Test_utils.Generated` binds `G` as surely as the bare
+       form does. Unwrapped recursively rather than one level: nesting them is legal and a scan that
+       stopped at one would be the same defect one layer down (Codex P2, round 4). *)
+    let rec unwrap module_expr =
+      match module_expr.pmod_desc with
+      | Pmod_constraint (inner, _) -> unwrap inner
+      | _ -> module_expr
+    in
+    match (unwrap module_expr).pmod_desc with
+    | Pmod_ident { txt; _ } when names_it txt -> (
+        match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
+    | _ -> ()
+  in
+  let binders =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
+            bind_module_expr alias pmb_expr
+        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+        (* `include Test_utils.Generated` puts the contents in scope under no name of their own,
+           which is the same situation an `open` leaves. *)
+        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
+        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  binders#structure structure;
+  (!aliases, !opened)
+
+(** Whether [path] names [fn] of the module [wanted], given that module's local bindings: written out
+    or reached through an alias, or spelled bare under an [open]/[include] of it. *)
+let names_function_of ~wanted ~aliases ~opened ~fn path =
+  match List.rev path with
+  | last :: receivers when String.equal last fn -> (
+      match receivers with
+      | [] -> opened
+      | receiver :: _ ->
+          String.equal receiver wanted || List.mem aliases receiver ~equal:String.equal)
+  | _ -> false
+
 (** {1 Configuration read straight from the environment (gh-ocannl-749)} *)
 
 (** The one function that reads a configuration key's environment variable and nothing else.
@@ -144,6 +242,9 @@ let tracing_gates_in_source content =
     can be pinned where the environment cannot reach it; this one cannot be outranked, which is what
     makes a read through it an unconditional dependency on [OCANNL_<KEY>]. *)
 let env_reader = "read_env_var"
+
+(** The module that owns it. *)
+let utils_module = "Utils"
 
 type env_reader_reads = {
   reader_keys : string list;
@@ -157,19 +258,26 @@ type env_reader_reads = {
 
 (** Which configuration keys [content] reads straight from the environment.
 
-    The receiver is matched by the LAST component of the path, like the settings predicates above,
-    so [Utils.read_env_var], a [U.read_env_var] alias and a bare [read_env_var] under an [open] all
-    count. Handing the function around as a value counts as a dynamic reach, for the same reason
-    handing a settings predicate around does: the keys go somewhere this scan cannot follow, and
-    over-reading is the safe direction of the two.
+    The RECEIVER is resolved, not assumed from the basename: [Utils.read_env_var] written out, a
+    [U.read_env_var] alias, and a bare [read_env_var] under an [open Utils] all count, while a
+    [let read_env_var _ = None] of the file's own is not this function and does not (Codex P2, round
+    2 of PR #484). Over-reading is normally the safe direction for these scans, but not here: what
+    this one asks for is an [(env_var …)] declaration, and demanding one for a variable the module
+    never consults fails a correct stanza out loud. {!module_bindings_of} is the same resolution the
+    initializer census makes.
+
+    Handing the function around as a value counts as a dynamic reach, for the same reason handing a
+    settings predicate around does: the keys go somewhere this scan cannot follow.
 
     Parsed rather than grepped, for the reason the rest of this module is: this file's own doc
     comments name the function, and the checks built on it quote its name in their diagnostics. *)
 let env_reader_reads_in_source content =
+  let structure = structure_of content in
   let keys = ref [] and dynamic = ref false in
   let blessed = Hash_set.create (module Int) in
+  let aliases, opened = module_bindings_of structure ~wanted:utils_module in
   let names_the_reader path =
-    match List.last path with Some last -> String.equal last env_reader | None -> false
+    names_function_of ~wanted:utils_module ~aliases ~opened ~fn:env_reader path
   in
   let iterator =
     object
@@ -201,7 +309,7 @@ let env_reader_reads_in_source content =
         super#expression expr
     end
   in
-  iterator#structure (structure_of content);
+  iterator#structure structure;
   {
     reader_keys = List.dedup_and_sort (List.rev !keys) ~compare:String.compare;
     reader_dynamic = !dynamic;
@@ -243,17 +351,6 @@ let generated_module = "Generated"
 
 let generated_init = "init"
 
-(* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
-   where a functor application is a shape the language admits, and a scan that raised on one would
-   refuse a file for containing an unrelated [module M = F (X)]. *)
-let flatten_module_path txt = try Some (flatten_longident txt) with _ -> None
-
-let receiver_is_generated txt =
-  match flatten_module_path txt with
-  | Some path -> (
-      match List.last path with Some m -> String.equal m generated_module | None -> false)
-  | None -> false
-
 (** Every spelling of a [Test_utils.Generated.init] call in [content], deduplicated and in the order
     they first appear; empty when the source does not call it.
 
@@ -279,74 +376,9 @@ let receiver_is_generated txt =
     the rule built on this exists to prevent. *)
 let generated_init_calls_in_source content =
   let structure = structure_of content in
-  let aliases = ref [] and opened = ref false in
-  (* Every way the module's contents can be given a local name, in BOTH the structure and the
-     expression grammar. OCaml spells each of binding, opening and including twice -- `module G = M`
-     against `let module G = M in …`, `open M` against `let open M in …`, `include M` against
-     nothing -- and a pass that knew only the structure spellings would read `let open
-     Test_utils.Generated in init ~backend_name` as a call to somebody else's `init` (Codex P2,
-     round 1). Which is the shape a scan must not get wrong quietly: an unrecognised caller is a
-     stanza the rule stops applying to, and looks exactly like a stanza with nothing to declare. *)
-  let bind_module_expr alias module_expr =
-    let names_it txt =
-      receiver_is_generated txt
-      ||
-      (* An alias of an alias: `module H = G` where `G` was bound to the module. The binders run in
-         source order and OCaml lets neither be used before it is bound, so consulting what is
-         already recorded is all a chain needs (Codex P2, round 2). *)
-      match flatten_module_path txt with
-      | Some path -> (
-          match List.last path with
-          | Some m -> List.mem !aliases m ~equal:String.equal
-          | None -> false)
-      | None -> false
-    in
-    (* A signature constraint wraps the path without changing which module it names, so `module G :
-       module type of Test_utils.Generated = Test_utils.Generated` binds `G` as surely as the bare
-       form does. Unwrapped recursively rather than one level: nesting them is legal and a scan that
-       stopped at one would be the same defect one layer down (Codex P2, round 4). *)
-    let rec unwrap module_expr =
-      match module_expr.pmod_desc with
-      | Pmod_constraint (inner, _) -> unwrap inner
-      | _ -> module_expr
-    in
-    match (unwrap module_expr).pmod_desc with
-    | Pmod_ident { txt; _ } when names_it txt -> (
-        match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
-    | _ -> ()
-  in
-  let binders =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! structure_item item =
-        (match item.pstr_desc with
-        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
-            bind_module_expr alias pmb_expr
-        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
-        (* `include Test_utils.Generated` puts `init` in scope under no name of its own, which is
-           the same situation an `open` leaves. *)
-        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
-        | _ -> ());
-        super#structure_item item
-
-      method! expression expr =
-        (match expr.pexp_desc with
-        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
-        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
-        | _ -> ());
-        super#expression expr
-    end
-  in
-  binders#structure structure;
-  let names_the_module receiver =
-    String.equal receiver generated_module || List.mem !aliases receiver ~equal:String.equal
-  in
+  let aliases, opened = module_bindings_of structure ~wanted:generated_module in
   let is_the_call path =
-    match List.rev path with
-    | last :: receivers when String.equal last generated_init -> (
-        match receivers with [] -> !opened | receiver :: _ -> names_the_module receiver)
-    | _ -> false
+    names_function_of ~wanted:generated_module ~aliases ~opened ~fn:generated_init path
   in
   let found = ref [] in
   let calls =

@@ -86,6 +86,9 @@ ok: environment read -- the reader handed on as a value is a dynamic reach
 ok: environment read -- a partial application names no key here
 ok: environment read -- a literal read and a guard in one file
 ok: environment read -- a longer name ending differently is not the reader
+ok: environment read -- a function of the file's own that happens to share the name is not the reader
+ok: environment read -- nor is a bare call under an open of somebody else
+ok: environment read -- an alias of an alias still reaches it
 ok: string literals -- literals from a list, a tuple and an argument
 ok: string literals -- a literal in a comment is not a literal
 ok: string literals -- escapes arrive decoded

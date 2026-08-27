@@ -1948,19 +1948,37 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                    every module no name claims, judged against the rules that run IT (gh-ocannl-747).
                    For the single-name shape -- everything in this repository -- that is the same
                    partition as before, the whole module set against every runner. *)
-                List.concat_map (program_runners ~subdir ~runner_stanzas stanzas stanza)
-                  ~f:(fun (name, name_runners) ->
-                    let own = program_modules stanza ~modules ~name in
-                    let callers = List.filter own ~f:calls in
-                    let readers =
-                      List.filter own ~f:(fun m -> (not (calls m)) && reads_prefix m)
-                    in
+                let programs =
+                  List.map (program_runners ~subdir ~runner_stanzas stanzas stanza)
+                    ~f:(fun (name, name_runners) ->
+                      let own = program_modules stanza ~modules ~name in
+                      let callers = List.filter own ~f:calls in
+                      let readers =
+                        List.filter own ~f:(fun m -> (not (calls m)) && reads_prefix m)
+                      in
+                      (name, name_runners, callers, readers))
+                in
+                (* One RULE may run two names of the same stanza, and the declaration then belongs to
+                   the rule: if `a` reads the key and the shared rule declares, `b` is not carrying a
+                   stale declaration -- the rule's run of `a` is what justifies it. Judged over the
+                   stanza's programs before any of them is decided, so the answer does not depend on
+                   which name is reached first (Codex P2, round 2 of PR #484). *)
+                let justified =
+                  List.concat_map programs ~f:(fun (_, runners, callers, readers) ->
+                      if List.is_empty callers && List.is_empty readers then [] else runners)
+                in
+                List.concat_map programs ~f:(fun (name, name_runners, callers, readers) ->
                     let decide = decide ~as_name:name ~callers ~readers in
                     Option.to_list
                       (match name_runners with
                       | [] ->
                           if List.is_empty callers && List.is_empty readers then None
                           else subject ~as_name:name ~callers ~readers Artifact_unrun "-"
+                      | runners
+                        when List.is_empty callers && List.is_empty readers
+                             && List.for_all runners ~f:(fun r ->
+                                 List.mem justified r ~equal:Sexp.equal) ->
+                          None
                       | runners ->
                           let declared =
                             List.map runners ~f:(fun r -> declares (field r "deps"))

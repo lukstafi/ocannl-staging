@@ -1255,6 +1255,22 @@ let artifact_cases =
 (rule (deps ocannl_config) (action (run %{bin:pkg.b})))|dune},
       [ "a" ],
       [ "executables a: unrun (a)" ] );
+    (* One RULE running two names of the stanza: the declaration belongs to the rule, and the rule's
+       run of `a` is what justifies it -- so `b`, which needs nothing, is not carrying a stale
+       declaration. Judging each program independently reported one (Codex P2, round 2). *)
+    ( "a shared runner's declaration is justified by whichever program needs it",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* And a shared rule declaring it for NO program it runs is stale, as it was. *)
+    ( "a shared runner declaring it for neither program is stale",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))|dune},
+      [],
+      [ "executables a: stale declaration"; "executables b: stale declaration" ] );
   ]
 
 (* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,

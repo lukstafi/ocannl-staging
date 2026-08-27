@@ -22,6 +22,9 @@ the same tree with the declaration added passes and says nothing about it: true
 and so does the same tree pinning the variable with `setenv` instead: true
 a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported: true
 a stanza reaching for dune's default module set is judged too, not skipped for lack of a `(modules …)` field: true
+a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules: true
+a library with inline tests is run by dune, so its modules are asked the same question: true
+and the same library declaring it in `(inline_tests (deps …))` passes: true
 a second rule running the same executable answers for its own run: one declaring does not cover the other: true
 and the same pair with both declaring passes: true
 a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence: true

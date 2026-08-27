@@ -412,6 +412,23 @@ let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarde
     ( "a longer name ending differently is not the reader",
       {ocaml|let x = Utils.read_cmdline_or_env_var "profile"|ocaml},
       ([], false) );
+    (* The RECEIVER decides, not the basename. Over-reading is the safe direction for most of the
+       scans in this file, and it is the wrong one here: what the rule built on this asks for is an
+       `(env_var …)` declaration, so a function of the file's own read as `Utils.read_env_var` would
+       fail a correct stanza out loud (Codex P2, round 2 of PR #484). *)
+    ( "a function of the file's own that happens to share the name is not the reader",
+      {ocaml|let read_env_var _ = None
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "nor is a bare call under an open of somebody else",
+      {ocaml|open Elsewhere
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "an alias of an alias still reaches it",
+      {ocaml|module U = Utils
+module V = U
+let x = V.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
   ]
 
 (* The candidate set a dynamic source falls back on, and the filter that narrows it. Neither is a
