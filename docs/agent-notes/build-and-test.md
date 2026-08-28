@@ -403,6 +403,44 @@ that they earn a lookup rather than always-loaded space.
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
   cleanup assertion pass vacuously.
+  The same harness drives `stop` itself, since the predicate exists to keep three sentences apart:
+  a FORGED run directory (`cmd`, `cap`, `wt`, `log`, `pgid`, `gtoken`, and deliberately no
+  `pid`/`wpid`/`exit`, so the surviving-group branch is the one reached), pointed at by `last` under
+  a private `OCANNL_TOOL_TEST_RUNS` so the ambient run history is never touched, with the pointer's
+  worktree key EXTRACTED from the shipping script rather than guessed. Against it: a group whose
+  leader ignores TERM — reported as ignoring it, and the escalation separately checked to have
+  actually killed the WHOLE group, since announcing a KILL it did not send would leave the worktree
+  lock held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The
+  two legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly
+  one, and each is matched against stop's whole output rather than a substring of it: three legs
+  keeping three sentences apart all pass a containment test against a stop that prints two at once.
+  Every fixture group holds TWO processes for the same reason — with only its leader in it, the
+  incorrect leader-only `kill -KILL "$pg"` passes for a group kill while real dune children would
+  survive it. And the leader is recorded for cleanup BETWEEN the fork and the checks, not after
+  them: job control has just put that child out of reach of a signal aimed at the harness, so an
+  interrupt in that window otherwise leaves the group running past the run (all three: Codex round
+  1 on staging#505, each reproduced against a mutated copy before being fixed). The sentence is
+  matched against stop's STDOUT alone, with stderr kept and shown only on failure: a diagnostic on
+  stderr is not part of the answer, and merging the two made a passing `stop` fail an exact match.
+  The fixture's second member — a GRANDchild, so nothing holds it as a zombie — is killed only
+  under its recorded start token, the same gate the shipping script applies to any pid it did not
+  itself fork, since `stop` having already killed it frees its pid for recycling before the EXIT
+  trap runs.
+- **`cmd 2>/dev/null` does not silence a failed REDIRECTION.** The shell reports that before the
+  command's own stderr redirection applies, so `read -r line <"$f" 2>/dev/null` prints
+  `/proc/NNN/stat: No such file or directory` whenever the entry vanishes mid-scan — routine, not
+  exceptional, for a glob over every process on the box, and for any reader asked about a pid that
+  is supposed to be gone. `{ read -r line <"$f"; } 2>/dev/null` is the spelling that suppresses it.
+  All four `/proc`-reading shell tools here (`tools/test-run.sh`, `scripts/setup-ocaml-env.sh` and
+  both hand-run harnesses) use the grouped form; the plain one leaked the message into a caller
+  that captured stderr.
+  The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
+  leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
+  itself a running member — in the field it is reached by the census losing a race with a leader
+  that exits between the two probes. That leg therefore FORCES the predicate, the way the zombie leg
+  forces the signal probe: a copy of the shipping script with `return 1` inserted as `group_alive`'s
+  first statement, asserted to be that one line and nothing else, so what is under test is the
+  sentence rather than the predicate legs 2-5 own.
 - **Promote through `tools/promote.sh` during a merge, on every platform.** Promotion writes the
   WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
   add` is committed with its PRE-promotion content, and nothing local objects — every later `dune

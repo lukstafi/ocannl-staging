@@ -502,7 +502,12 @@ group_alive() { # <pgid>; exits 0 iff some member is not a zombie
   if [ -r /proc/self/stat ]; then
     found=0
     for f in /proc/[0-9]*/stat; do
-      read -r line <"$f" 2>/dev/null || continue
+      # Grouped, not `read ... 2>/dev/null`: a redirection that fails is
+      # reported by the SHELL, before the command's own stderr redirection
+      # applies, so the plain spelling prints `/proc/NNN/stat: No such file or
+      # directory` every time an entry vanishes mid-scan -- which for a glob of
+      # every process on the box is routine, not exceptional.
+      { read -r line <"$f"; } 2>/dev/null || continue
       # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
       line=${line##*) }
       # shellcheck disable=SC2086
