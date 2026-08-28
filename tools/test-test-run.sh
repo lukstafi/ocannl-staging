@@ -32,7 +32,8 @@
 #   5. a pgid that is not a positive decimal integer is refused -- 0 and
 #      negatives are kill specials (caller's own group, broadcast).
 #   6. `stop` on a group whose leader IGNORES TERM says so and escalates --
-#      and the escalation really kills the group.
+#      and the escalation kills the whole group. Every fixture group holds two
+#      processes, or a leader-only kill would pass for a group kill.
 #   7. `stop` on a group whose leader exits on TERM says the TERM went out and
 #      asks for a re-run, rather than claiming the group ignored it.
 #   8. `stop` on a reachable group that holds no running member says exactly
@@ -123,6 +124,7 @@ printf '  state reader: %s; pgid reader: %s\n' \
 zparent=""   # leg 4's self-stopping zombie maker; cleanup must resume it
 livepid=""   # leg 2's live group leader
 leader=""    # the stop legs' current group leader
+member=""    # and the second process it put in that group
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-run-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
@@ -158,6 +160,10 @@ cleanup() {
     kill -KILL "$leader" 2>/dev/null
     wait "$leader" 2>/dev/null
   fi
+  # The group's second member is not this shell's child, so it is named
+  # directly as well: a group kill that failed is exactly the case where it
+  # would otherwise be left behind.
+  if [ -n "${member:-}" ]; then kill -KILL "$member" 2>/dev/null; fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
   elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
@@ -168,7 +174,14 @@ cleanup() {
 trap cleanup EXIT
 # Without these, a TERM or a Ctrl-C kills the shell outright and the EXIT trap
 # never runs -- which is how an interrupted run could leave a stopped zombie
-# maker behind. Exiting from the handler is what gets EXIT to fire.
+# maker behind, or a fixture process group outlive the harness that forked it.
+# Exiting from the handler is what gets EXIT to fire.
+#
+# The INT arm covers the way this is actually interrupted, a Ctrl-C at a
+# terminal. It is inert when the harness is itself a BACKGROUND job of a
+# non-interactive shell -- such a child inherits SIGINT ignored, and a signal
+# ignored on entry cannot be re-trapped -- so a scripted test of the cleanup
+# path has to signal TERM to see anything happen.
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -407,7 +420,7 @@ fi
 # branch is the one reached by a run whose supervisor and wrapper are both gone
 # while its process group is not.
 l_ignored="stop: a group whose leader ignores TERM is reported as ignoring it"
-l_killed="stop: that escalation really kills the group"
+l_killed="stop: that escalation kills the whole group, not just its leader"
 l_took="stop: a group whose leader takes the TERM is reported as TERMed, not as ignoring it"
 l_corpses="stop: a reachable group with nothing running is reported as holding only corpses"
 
@@ -452,9 +465,9 @@ mk_fixture() { # <tag> <pgid> <pointer key>; 0 iff the run is reachable as `last
   return 0
 }
 
-start_leader() { # <marker> <bash -c body>; sets $leader to a group of its own
+start_leader() { # <marker> <bash -c body>; sets $leader (and its $member)
   local m=$1 body=$2 p g i
-  leader=""
+  leader=""; member=""
   rm -f "$m"
   # `set -m` puts the child in its own process group -- the shape stop signals,
   # and the only shape it is safe to hand a group kill.
@@ -462,42 +475,68 @@ start_leader() { # <marker> <bash -c body>; sets $leader to a group of its own
   bash -c "$body" _ "$m" >/dev/null 2>&1 </dev/null &
   p=$!
   set +m
-  # The body writes the marker AFTER installing its TERM disposition, so this
-  # wait is what makes the leg's premise true rather than merely likely.
+  # Recorded BEFORE the checks below rather than after them: job control has
+  # just put this child out of reach of any signal aimed at the harness, so an
+  # INT arriving in the window between the fork and the recording would leave
+  # the EXIT cleanup with nothing to kill and the fixture group running past
+  # the run (Codex round 1, P2). Recording early is safe in the case the checks
+  # are about to reject: a group kill aimed at a pid that never led a group
+  # names a group that does not exist.
+  leader=$p
+  # The body writes the marker -- carrying the pid of the SECOND member it put
+  # in the group -- after installing its TERM disposition, so this wait is what
+  # makes the leg's premise true rather than merely likely.
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     [ -s "$m" ] && break
     sleep 0.1
   done
   g="$(ppgid "$p")"
-  if [ ! -s "$m" ] || [ "$g" != "$p" ]; then
-    kill -KILL "$p" 2>/dev/null
-    wait "$p" 2>/dev/null
+  member="$(tr -dc '0-9' <"$m" 2>/dev/null)"
+  # The second member is checked into the group, not assumed into it: a fixture
+  # whose extra process ended up somewhere else would leave leg 6 judging the
+  # escalation on the leader alone again, which is the hole it exists to close.
+  if [ ! -s "$m" ] || [ "$g" != "$p" ] || [ -z "$member" ] ||
+     [ "$(ppgid "$member")" != "$p" ]; then
+    end_leader
     return 1
   fi
-  leader=$p
   return 0
 }
-end_leader() { # whatever the leg concluded, the group goes
-  [ -n "${leader:-}" ] || return 0
-  kill -KILL -- "-$leader" 2>/dev/null
-  kill -KILL "$leader" 2>/dev/null
-  wait "$leader" 2>/dev/null
-  leader=""
+end_leader() { # whatever the leg concluded, the whole fixture group goes
+  if [ -n "${leader:-}" ]; then
+    kill -KILL -- "-$leader" 2>/dev/null
+    kill -KILL "$leader" 2>/dev/null
+  fi
+  # Named separately as well as reached through the group: this is the
+  # harness's backstop for the very defect leg 6 now tests for, an escalation
+  # that reached only the leader.
+  if [ -n "${member:-}" ]; then kill -KILL "$member" 2>/dev/null; fi
+  if [ -n "${leader:-}" ]; then wait "$leader" 2>/dev/null; fi
+  leader=""; member=""
   return 0
 }
-# A leader that IGNORES TERM: the disposition survives the exec, so the group
-# holds one ordinary `sleep` that no TERM can remove. A leader that TAKES it is
-# the same thing without the trap.
-body_ignores='trap "" TERM; echo ready >"$1"; exec sleep 600'
-body_takes='echo ready >"$1"; exec sleep 600'
-stop_out=""; stop_rc=""; stop_pg=""; stop_err=""
+# Each fixture group holds TWO processes, because a group holding only its
+# leader cannot tell a group kill from a leader kill: with one member, the
+# incorrect `kill -KILL "$pg"` passes every leg here while real dune children
+# would survive it (Codex round 1, P2). The member is a plain background
+# `sleep` the leader forks before exec'ing its own, so it is in the group and
+# inherits the leader's TERM disposition -- SIG_IGN survives both fork and
+# exec, so an IGNORING fixture is TERM-proof as a whole, and a TAKING one dies
+# as a whole. The marker doubles as the member's pid, so the harness can track
+# a process that is not its own child.
+body_ignores='trap "" TERM; sleep 600 & echo $! >"$1"; exec sleep 600'
+body_takes='sleep 600 & echo $! >"$1"; exec sleep 600'
+stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""
 stop_probe() { # <tag> <leader body> <script> <pointer key>
-  stop_out=""; stop_rc=""; stop_pg=""; stop_err=""
+  stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""
   if ! start_leader "$TMP/$1.marker" "$2"; then
-    stop_err="could not start a group leader for the '$1' fixture"
+    stop_err="could not start a two-process group leader for the '$1' fixture"
     return 1
   fi
+  # Kept past end_leader, which clears the live handles: the escalation claim
+  # is about processes that are supposed to be gone by the time it is asked.
   stop_pg=$leader
+  stop_member=$member
   if ! mk_fixture "$1" "$stop_pg" "$4"; then
     stop_err="could not build the '$1' fixture run directory under $STOP_RUNS"
     return 1
@@ -506,13 +545,17 @@ stop_probe() { # <tag> <leader body> <script> <pointer key>
   stop_rc=$?
   return 0
 }
-said() { # <label>; report on stop having printed <the rest>
-  local label=$1
-  shift
-  case $stop_out in
-    *"$*"*) report 0 "$label" ;;
-    *) report 1 "$label" "expected \"$*\"; stop (exit ${stop_rc:-?}) said: ${stop_out:-<nothing>}" ;;
-  esac
+said() { # <label> <the whole line stop must have printed>
+  # The WHOLE output, not a substring of it, and a clean exit with it: these
+  # three legs exist to keep the three sentences apart, and a containment test
+  # would pass all three for a stop that printed two of them at once (Codex
+  # round 1, P2).
+  if [ "${stop_rc:-1}" = 0 ] && [ "$stop_out" = "$2" ]; then
+    report 0 "$1"
+  else
+    report 1 "$1" \
+      "expected exactly \"$2\"; stop (exit ${stop_rc:-?}) said: ${stop_out:-<nothing>}"
+  fi
 }
 
 if [ -n "$stop_skip" ]; then
@@ -534,15 +577,21 @@ else
     if [ "$have_state" = 0 ]; then
       skip "$l_killed" "no way to read a process's state on this system"
     else
-      k_gone=""
+      # Both members, so a KILL that reached only the leader fails here.
+      k_left=""
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        case "$(pstate "$stop_pg")" in '' | Z*) k_gone=1; break ;; esac
+        k_left=""
+        for k_pid in $stop_pg $stop_member; do
+          case "$(pstate "$k_pid")" in '' | Z*) ;; *) k_left="$k_left $k_pid" ;; esac
+        done
+        [ -z "$k_left" ] && break
         sleep 0.1
       done
-      if [ -n "$k_gone" ]; then
+      if [ -z "$k_left" ]; then
         report 0 "$l_killed"
       else
-        report 1 "$l_killed" "pid $stop_pg was still running two seconds after the escalation"
+        report 1 "$l_killed" \
+          "still running two seconds after the escalation:$k_left (group $stop_pg)"
       fi
     fi
   else

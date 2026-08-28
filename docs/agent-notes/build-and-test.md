@@ -409,9 +409,17 @@ that they earn a lookup rather than always-loaded space.
   a private `OCANNL_TOOL_TEST_RUNS` so the ambient run history is never touched, with the pointer's
   worktree key EXTRACTED from the shipping script rather than guessed. Against it: a group whose
   leader ignores TERM — reported as ignoring it, and the escalation separately checked to have
-  actually killed the group, since announcing a KILL it did not send would leave the worktree lock
-  held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The two
-  legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly one.
+  actually killed the WHOLE group, since announcing a KILL it did not send would leave the worktree
+  lock held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The
+  two legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly
+  one, and each is matched against stop's whole output rather than a substring of it: three legs
+  keeping three sentences apart all pass a containment test against a stop that prints two at once.
+  Every fixture group holds TWO processes for the same reason — with only its leader in it, the
+  incorrect leader-only `kill -KILL "$pg"` passes for a group kill while real dune children would
+  survive it. And the leader is recorded for cleanup BETWEEN the fork and the checks, not after
+  them: job control has just put that child out of reach of a signal aimed at the harness, so an
+  interrupt in that window otherwise leaves the group running past the run (all three: Codex round
+  1 on staging#505, each reproduced against a mutated copy before being fixed).
   The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
   leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
   itself a running member — in the field it is reached by the census losing a race with a leader
