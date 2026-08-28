@@ -775,13 +775,18 @@ files.
   taking the good arm are two different questions, and it is gcc + bdver1 specifically that answers
   them differently. (The bdver family is not uniform on the AVX2 half either: Excavator, `bdver4`,
   has AVX2 and FMA3 both — it is bdver1 through bdver3 that cannot execute AVX2.) Ask the
-  compiler-and-target pair directly rather than a macro: `<cc> -march=<t> -O<n> -S` over a small
-  `fmaf` loop, then `grep -E 'call.*fmaf'`, at the `-O` the backend itself uses
-  (`cc_backend_optimization_level`, default 3) — gcc is reported to keep the calls at `-O0` even on
-  an FMA-capable target, where clang measurably does not. Match the call LOOSELY — gcc on ELF
-  spells it `call fmaf@PLT`, clang on Mach-O `callq _fmaf`, and a pattern pinned to one reports zero
-  on the other, so an FMA-less target reads as clean; that is the same dialect trap that cost
-  `Asm_census` 72 rows of silent absence in gh-ocannl-650, one bullet up. (`-march=<t> -E -dM` prints
+  compiler-and-target pair directly rather than a macro, and **do not hand-build the flags to ask
+  it**: `compiler_flags` composes `-O` (`cc_backend_optimization_level`), `arch_flags`, the resolved
+  `simd_flags`, `-ffast-math`, `-ffp-contract=` and `-fopenmp`, so a probe omitting any of them
+  answers about a different compilation — an explicit `cc_backend_simd_flags=-mfma` makes a bare
+  `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
+  erase calls the probe still shows. `log_level=3` logs the exact invocation the backend runs (as
+  `"command"`); rerun that with `-S` and grep its assembly. Then `grep -E 'call.*fmaf'`, matching
+  LOOSELY — gcc on ELF spells it `call fmaf@PLT`, clang on Mach-O `callq _fmaf`, and a pattern
+  pinned to one reports zero on the other, so an FMA-less target reads as clean; that is the same
+  dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650, one bullet up. gcc
+  is also reported to keep the calls at `-O0` even on an FMA-capable target, where clang measurably
+  does not, so a low `-O` is untrustworthy here rather than evidence. (`-march=<t> -E -dM` prints
   which macros a target defines: an input to the question, not the answer to it.) **It is a property
   of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
