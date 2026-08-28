@@ -381,12 +381,13 @@ rtc_context_cmd() {
   if [ -n "$alias_name" ]; then
     # Labelled, because the got/want vectors below are the option POLICY that the
     # GPU-free builder test prints under sentinel inputs -- not the command line of
-    # the compile that just failed.
-    printf 'echo "rtc option policy, from the GPU-free builder test %s."; ' "${alias_name#@}"
-    printf 'echo "The include directory and --gpu-architecture in it are TEST SENTINELS: on"; '
-    printf 'echo "this box those two slots come from the discovery input above and from the"; '
-    printf 'echo "arch markers in the failing kernel source. A compile that FAILED to compile"; '
-    printf 'echo "already carries its own effective vector in this log, appended by the backend."; '
+    # the compile that just failed. Three lines, not a paragraph: `fingerprint`
+    # carries this block under a line bound, and prose that crowded the vectors out
+    # of it would cost more than it explains.
+    printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
+    printf 'echo "--gpu-architecture below are TEST SENTINELS, not this box\x27s: those come from the"; '
+    printf 'echo "discovery input above and the failing kernel arch markers. A compile that FAILED to"; '
+    printf 'echo "compile carries its own effective vector in this log, appended by the backend."; '
     printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
   fi
   printf 'echo "=== end rtc-context ==="; true'
