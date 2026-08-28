@@ -89,8 +89,11 @@ let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
     their shape; an empty one prints a DISTINCT [<claim> (empty): false], so a reader sees why the
     line failed without opening the source.
 
-    The collections are lists; an array reaches them through [Array.to_list], which is free at test
-    scale and keeps this library's surface to the four entry points below.
+    The single-collection combinators take lists; an array reaches them through [Array.to_list],
+    which is free at test scale and keeps this library's surface small. The PAIRWISE one, {!p_all2},
+    is the exception and takes arrays — the executed-parity genre it serves reads both sides out of
+    [Context.get_values], and it has to compare their LENGTHS, which is the one question a list
+    cannot answer without walking it.
 
     [?min] raises the floor for a site that knows one — ["every one of the four curated tiles …"] is
     a different claim from ["every tile …"], and a menu that silently shrank to one member should
@@ -112,16 +115,50 @@ let short_fail name detail =
    The default floor asks [is_empty] rather than [length], so the common path stays O(1) over a
    collection that can be a whole tensor readback; the length is computed only to report a
    failure. *)
-let quantified ?(min = 1) name xs holds =
-  if if min <= 1 then not (List.is_empty xs) else List.length xs >= min then p name (holds ())
+let with_population ?(min = 1) name ~is_empty ~length holds =
+  if if min <= 1 then not (is_empty ()) else length () >= min then p name (holds ())
   else
-    let length = List.length xs in
+    let length = length () in
     short_fail name (if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min)
+
+let quantified ?min name xs holds =
+  with_population ?min name
+    ~is_empty:(fun () -> List.is_empty xs)
+    ~length:(fun () -> List.length xs)
+    holds
 
 (** [p_all name xs ~f] claims that every element of [xs] satisfies [f], and that there is an element
     — the guarded form of [p name (List.for_all xs ~f)]. Reach for it wherever the claim reads
     ["every …"]. *)
 let p_all ?min name xs ~f = quantified ?min name xs (fun () -> List.for_all xs ~f)
+
+(** [p_all2 name got want ~f] claims that [got] and [want] agree cell for cell under [f], that they
+    have the same length, and that there is a cell — the guarded form of
+    [p name (Array.for_all2_exn got want ~f)], and the executed-parity genre's entry point
+    (gh-ocannl-746). Reach for it wherever a claim compares a readback against a reference.
+
+    Emptiness is not far-fetched here, which is why the guard matters more than it looks. Both sides
+    usually come from [Context.get_values], and a node that stopped being materialized, a reference
+    run whose own setup collapsed, or a readback of a virtualized node answers with NOTHING ON BOTH
+    SIDES AT ONCE — the reference does not discriminate, because it went through the same path.
+    [Array.for_all2_exn [||] [||]] is [true], so the line that reports the strongest kind of check
+    CLAUDE.md asks for is byte-identical to one a real readback passed.
+
+    A LENGTH MISMATCH is reported as a failed claim, [<claim> (length 12 vs 16): false], rather than
+    as the [Invalid_argument] [Array.for_all2_exn] raises: an exception fails the run too, but it
+    fails it without a claim line and without naming which claim, and the mismatch is a finding
+    about the run (one side was reshaped, or one readback was truncated) that deserves to be read
+    off the transcript. Reported before emptiness, so a one-sided empty says which side it was.
+
+    [?min] bounds the COMMON length, as in {!p_all}. *)
+let p_all2 ?min name got want ~f =
+  let n_got = Array.length got and n_want = Array.length want in
+  if n_got <> n_want then short_fail name (Printf.sprintf "length %d vs %d" n_got n_want)
+  else
+    with_population ?min name
+      ~is_empty:(fun () -> n_got = 0)
+      ~length:(fun () -> n_got)
+      (fun () -> Array.for_all2_exn got want ~f)
 
 (** [p_none name xs ~f] claims that no element of [xs] satisfies [f], and that there is an element —
     the guarded form of [p name (not (List.exists xs ~f))] and of
