@@ -1030,9 +1030,11 @@ files.
     `-O3 -ffast-math` does reassociate, and `-fno-associative-math` restores it. nvrtc 13.3's parser
     *does* know `--fassociative-math` — a bare opt-in flag, with no negative spelling and no entry in
     NVIDIA's nvrtc option reference — which is why `Compiler_options.nvrtc`'s test claims MEMBERSHIP
-    (that vector never contains it) where HIP's claims ordering. Re-run the probe after a toolkit
-    upgrade before suspecting anything else; the option vector is now printed beside a failing GPU
-    sweep unit (`tools/sweep.sh`'s `rtc_context_cmd`) and appended to a failed nvrtc compile's log.
+    (that vector never contains it) where HIP's claims ordering. The probe is
+    `tools/nvrtc_reassoc_probe.c` (standalone C, build line in its header) — re-run it after a
+    toolkit upgrade before suspecting anything else; the option vector is now printed beside a
+    failing GPU sweep unit (`tools/sweep.sh`'s `rtc_context_cmd`) and appended to a failed nvrtc
+    compile's log.
   - **Metal is the remaining unguarded one.** MSL defaults fast math on, `metal_backend.ml` passes no
     reassociation guard, and — unlike CUDA — nobody has run the probe against it, so "it passes
     today" is all that is known. Its MSL options are also still assembled inline in

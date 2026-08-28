@@ -58,7 +58,8 @@ let nvrtc_reassociation_opt_in = "--fassociative-math"
    does not reassociate, nothing in its documented option list could re-guard it if a future nvrtc
    started to, and the one lever that names reassociation is an undocumented opt-in this list must
    never contain. A [reduction_forms] red on CUDA after a toolkit upgrade should re-run that probe
-   before anything else. *)
+   before anything else: it is tools/nvrtc_reassoc_probe.c, which links nvrtc and the CUDA driver
+   directly and carries its own build line. *)
 let nvrtc ~cuda_include_options ~arch_options ~with_device_debug =
   cuda_include_options @ arch_options @ [ "--use_fast_math" ]
   @ if with_device_debug then [ "--device-debug" ] else []
