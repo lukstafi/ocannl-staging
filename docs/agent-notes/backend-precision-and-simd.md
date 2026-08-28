@@ -1032,9 +1032,12 @@ files.
     NVIDIA's nvrtc option reference — which is why `Compiler_options.nvrtc`'s test claims MEMBERSHIP
     (that vector never contains it) where HIP's claims ordering. The probe is
     `tools/nvrtc_reassoc_probe.c` (standalone C, build line in its header) — re-run it after a
-    toolkit upgrade before suspecting anything else; the option vector is now printed beside a
-    failing GPU sweep unit (`tools/sweep.sh`'s `rtc_context_cmd`) and appended to a failed nvrtc
-    compile's log.
+    toolkit upgrade before suspecting anything else, and read its EXIT STATUS: 0 only if every
+    variant the verdict rests on compiled and returned the sequential value. The failing nvrtc
+    compile's own effective vector is appended to its log by the backend, and a red GPU sweep unit
+    carries an `rtc-context` block (`tools/sweep.sh`'s `rtc_context_cmd`) with the box's toolkit and
+    driver versions, the include-slot discovery input, and the builder's option POLICY from the
+    GPU-free test — whose include and arch slots are test sentinels, not that box's values.
   - **Metal is the remaining unguarded one.** MSL defaults fast math on, `metal_backend.ml` passes no
     reassociation guard, and — unlike CUDA — nobody has run the probe against it, so "it passes
     today" is all that is known. Its MSL options are also still assembled inline in

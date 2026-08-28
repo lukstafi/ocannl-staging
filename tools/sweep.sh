@@ -330,6 +330,20 @@ test_cmd() {
 # and print got/want vectors on stderr; a copy in shell would be a second source
 # of truth that no test compares against the first. `--force` because the alias is
 # certainly cached by the run that just failed.
+#
+# What those tests print is the option POLICY, and the block says so rather than
+# letting a reader take it for the failing compile's own command line (Codex P2 on
+# PR #510). The builders take two slots the tests fill with sentinels -- the
+# discovered CUDA/ROCm include directory, and the source-dependent architecture
+# target -- so `-I/cuda/include` and `--gpu-architecture=compute_80` in the output
+# below are fixture values, and a fingerprint that presented them as this box's
+# would misattribute. The three things worth having beside a red unit survive that
+# honestly: which flags the builder ALWAYS emits, which it NEVER emits (the
+# reassociation opt-in, the membership claim gh-ocannl-784 rests on), and whether
+# the debug variant was in play. The per-slot inputs are printed as what they are,
+# environment readings from the owning box; the actual vector of a compile that
+# FAILED to compile is already in the unit's log, appended to nvrtc's/hiprtc's
+# message by the backend.
 rtc_context_cmd() {
   local backend=$1 alias_name=
   case $backend in
@@ -342,10 +356,16 @@ rtc_context_cmd() {
       printf 'command -v nvcc >/dev/null 2>&1 && nvcc --version 2>&1 | tail -2; '
       printf 'command -v nvidia-smi >/dev/null 2>&1 && '
       printf 'nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>&1; '
+      # The include slot's input, read from this box rather than inferred: the
+      # builder's own fallback is documented in `cuda_include_options`, and
+      # re-deriving it in shell is exactly the second source of truth this block
+      # avoids elsewhere.
+      printf 'echo "discovery input: CUDA_PATH=${CUDA_PATH:-(unset)}"; '
       ;;
     hip)
       printf 'command -v hipcc >/dev/null 2>&1 && hipcc --version 2>&1 | head -6; '
       printf 'command -v rocminfo >/dev/null 2>&1 && rocminfo 2>&1 | grep -m2 -E "gfx|Runtime Version"; '
+      printf 'echo "discovery input: ROCM_PATH=${ROCM_PATH:-(unset)} HIP_PATH=${HIP_PATH:-(unset)}"; '
       ;;
     metal)
       printf 'command -v sw_vers >/dev/null 2>&1 && sw_vers 2>&1; '
@@ -359,6 +379,14 @@ rtc_context_cmd() {
       ;;
   esac
   if [ -n "$alias_name" ]; then
+    # Labelled, because the got/want vectors below are the option POLICY that the
+    # GPU-free builder test prints under sentinel inputs -- not the command line of
+    # the compile that just failed.
+    printf 'echo "rtc option policy, from the GPU-free builder test %s."; ' "${alias_name#@}"
+    printf 'echo "The include directory and --gpu-architecture in it are TEST SENTINELS: on"; '
+    printf 'echo "this box those two slots come from the discovery input above and from the"; '
+    printf 'echo "arch markers in the failing kernel source. A compile that FAILED to compile"; '
+    printf 'echo "already carries its own effective vector in this log, appended by the backend."; '
     printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
   fi
   printf 'echo "=== end rtc-context ==="; true'
