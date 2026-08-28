@@ -506,7 +506,10 @@ def _raise_deferred():
     signum, _deferred_signal = _deferred_signal, None
     if signum == signal.SIGINT:
         raise KeyboardInterrupt
-    raise SystemExit(f"orchestrate: terminated by signal {signum}; killed the running cell")
+    raise SystemExit(
+        f"orchestrate: terminated by signal {signum}; the subprocess it was running, and its "
+        "process group, were killed first"
+    )
 
 
 @contextlib.contextmanager
@@ -526,13 +529,13 @@ def _deferring_cancellation():
 def _cancellable():
     """The one hole in the deferral: the wait that a cancellation is actually FOR.
 
-    Chasing the gaps one at a time is how three rounds of this review went — the spawn, then the
-    kill, then the probe, then the two assignments between them. The genre is simpler than its
-    instances: from the moment a cell exists until its group is dead, a cancellation must not
-    unwind anything, and the ONLY point where raising immediately is right is while the sweep sits
-    in `communicate` waiting for the cell. So `run_cell` defers across its whole body and opens
-    this one hole, rather than protecting each stretch that someone notices (gh-ocannl-760
-    review).
+    Chasing the gaps one at a time is how four rounds of this review went — the spawn, then the
+    kill, then the probe, then the assignments between them, then the same list again for the
+    sweep's own subprocesses. The genre is simpler than its instances: from the moment a child
+    exists until its group is dead, a cancellation must not unwind anything, and the ONLY point
+    where raising immediately is right is while the sweep sits in `communicate` waiting for it. So
+    `run_cell` and `run_supporting` each defer across their whole body and open this one hole,
+    rather than protecting each stretch that someone notices (gh-ocannl-760 review).
     """
     global _defer_depth
     held, _defer_depth = _defer_depth, 0
