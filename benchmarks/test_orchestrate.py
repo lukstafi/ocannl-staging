@@ -1436,6 +1436,35 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIn("SURVIVED SIGKILL", note)
         self.assertIn("cache quarantined", note)
 
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_supporting_build_is_killed_with_its_own_children(self):
+        # The sweep's own subprocesses -- the build, the device probes -- get the same discipline
+        # as a cell: `subprocess.run` kills its direct child on an exception but knows nothing of
+        # that child's children, and `dune build` forks compilers (gh-ocannl-760 review).
+        pidfile = self.dir / "build_worker.pid"
+        build = self.python(
+            "import subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 1.5)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+        with self.assertRaises(KeyboardInterrupt):
+            orchestrate.run_supporting(build, capture_output=True)
+
+        worker = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived the cancelled build")
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session

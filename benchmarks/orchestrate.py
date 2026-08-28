@@ -451,7 +451,10 @@ def install_termination_handler():
             # that block raises it once the cell is bound and its group is dead.
             _deferred_signal = signum
             return
-        raise SystemExit(f"orchestrate: terminated by signal {signum}; killed the running cell")
+        # No cell is running here — a deferred one is delivered by `_raise_deferred`, which says
+        # so — but a supporting subprocess may be, and `run_supporting` kills its group on the way
+        # out. Hence the plainer sentence: this path has no cell to claim it killed.
+        raise SystemExit(f"orchestrate: terminated by signal {signum}")
 
     def interrupt(signum, _frame):
         global _deferred_signal
@@ -536,6 +539,34 @@ def _cancellable():
         yield
     finally:
         _defer_depth = held
+
+
+def run_supporting(cmd, cwd=None, capture_output=False, check=False, timeout=None):
+    """A subprocess the sweep runs for ITSELF — a build, a device probe — in its own group.
+
+    Same discipline as a cell, for the same reason: `dune build` forks compilers, the probes
+    import frameworks that spawn helpers, and a cancellation arriving here would otherwise leave
+    them running while the sweep exits (gh-ocannl-760 review). `subprocess.run` kills its direct
+    child on an exception but knows nothing of that child's own children; the group does.
+
+    Returns the `CompletedProcess` that `subprocess.run` would have.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=capture_output,
+        **_own_group_kwargs(),
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        kill_cell_group(proc)
+        raise
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_incomplete=None):
@@ -1435,7 +1466,7 @@ def main():
     if args.gpu == "hip" and gpu_torch and "pytorch" in args.only:
         # "cuda" only reaches the AMD GPU when torch is a ROCm/HIP build (a stock CPU or
         # CUDA wheel isn't); probe the bench venv and fall back to the CPU-only column.
-        probe = subprocess.run(
+        probe = run_supporting(
             [str(VENV_PY), "-c", "import sys, torch; sys.exit(0 if torch.version.hip else 1)"],
             capture_output=True,
         )
@@ -1464,7 +1495,7 @@ def main():
         targets = sorted(
             {f"benchmarks/runners/ocannl/bench_{m}.exe" for m in models.values()}
         )
-        subprocess.run(["dune", "build", "--root", ".", *targets], cwd=ROOT, check=True)
+        run_supporting(["dune", "build", "--root", ".", *targets], cwd=ROOT, check=True)
 
     results = []
     failures = []
