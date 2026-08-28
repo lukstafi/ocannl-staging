@@ -766,14 +766,19 @@ files.
   (`bdver1`) has FMA4 ONLY — `__FMA4__` and `__XOP__` defined, `__FMA__` absent — and still compiles
   the loop to four-operand `vfmaddps`/`vfmaddss` with zero calls, so it has no cliff either, while
   the `-mfma` remedy that macro suggests selects FMA3 specifically and would SIGILL there. A
-  consequence worth keeping DISTINCT hides in that last case: `vec_fma_builtin`'s x86 rows really
-  are keyed on `defined(__FMA__)`, so an FMA4-only target skips the whole-vector arm and lands on
-  the per-lane `#else` — no libm calls, but precisely the arm gh-ocannl-614/621 measured as gcc's
-  spill-or-scalarize hazard. Escaping the libm cliff and taking the good arm are two different
-  questions, and this target answers them differently. (The bdver family is not uniform on the AVX2
-  half either: Excavator, `bdver4`, has AVX2 and FMA3 both — it is bdver1 through bdver3 that cannot
-  execute AVX2.) Ask the compiler-and-target pair directly rather than a macro: `<cc> -march=<t> -O2
-  -S` over a small `fmaf` loop, then `grep -E 'call.*fmaf'`. Match the call LOOSELY — gcc on ELF
+  consequence worth keeping DISTINCT hides in that last case, and it is COMPILER-CONDITIONAL:
+  `vec_fma_builtin`'s x86 rows are keyed on `defined(__FMA__)`, so on a compiler WITHOUT
+  `__builtin_elementwise_fma` — gcc — an FMA4-only target matches no builtin row and lands on the
+  per-lane `#else`: no libm calls, but precisely the arm gh-ocannl-614/621 measured as gcc's
+  spill-or-scalarize hazard. Under clang none of that applies, since `OCANNL_HAS_ELEMENTWISE_FMA` is
+  1 and the first arm wins before any `__FMA__` guard is consulted. Escaping the libm cliff and
+  taking the good arm are two different questions, and it is gcc + bdver1 specifically that answers
+  them differently. (The bdver family is not uniform on the AVX2 half either: Excavator, `bdver4`,
+  has AVX2 and FMA3 both — it is bdver1 through bdver3 that cannot execute AVX2.) Ask the
+  compiler-and-target pair directly rather than a macro: `<cc> -march=<t> -O<n> -S` over a small
+  `fmaf` loop, then `grep -E 'call.*fmaf'`, at the `-O` the backend itself uses
+  (`cc_backend_optimization_level`, default 3) — gcc is reported to keep the calls at `-O0` even on
+  an FMA-capable target, where clang measurably does not. Match the call LOOSELY — gcc on ELF
   spells it `call fmaf@PLT`, clang on Mach-O `callq _fmaf`, and a pattern pinned to one reports zero
   on the other, so an FMA-less target reads as clean; that is the same dialect trap that cost
   `Asm_census` 72 rows of silent absence in gh-ocannl-650, one bullet up. (`-march=<t> -E -dM` prints
@@ -781,7 +786,10 @@ files.
   of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
   LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
-  so fine" is wrong. And **it is not reached only by exotic hardware**: `cc_backend_arch_flags=none`
+  so fine" is wrong. And **it is not reached only by exotic hardware**, nor by anything as tidy as a
+  date cutoff — Intel's low-power line (Silvermont, Goldmont, Tremont) and AMD Jaguar (`btver2`)
+  define neither `__FMA__` nor `__FMA4__` and reach it under a successful `-march=native`, long
+  after Haswell and Bulldozer. On the configuration side: `cc_backend_arch_flags=none`
   (the `reproducible` profile's pin — which also sets `cc_vector_bytes=0`, so only the serial calls
   remain there), an explicitly pinned FMA-less `-march`, or a toolchain that rejects the probed
   `-march=native` (`arch_flags` then falls back to no flag at all) each select such a target on a

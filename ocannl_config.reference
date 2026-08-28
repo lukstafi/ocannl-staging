@@ -679,11 +679,22 @@
 # So `__FMA__` is not necessary (bdver1 lacks it and has no cliff), and the v3 level is not the
 # only way to get FMA3 (bdver2/bdver3 have it without AVX2). The diagnostic that answers the
 # question directly, for your compiler and target TOGETHER rather than through a macro proxy, is to
-# compile and look: `<cc> -march=<target> -O2 -S` over a small `fmaf` loop, then
-# `grep -E 'call.*fmaf'` over the assembly. Match the call loosely: gcc on ELF spells it
+# compile and look: `<cc> -march=<target> -O<n> -S` over a small `fmaf` loop, then
+# `grep -E 'call.*fmaf'` over the assembly. Two things to keep faithful to the real build, each of
+# which can otherwise return a clean answer over a kernel that still calls libm. Use the `-O<n>` the
+# backend will use -- it compiles with `-O` at cc_backend_optimization_level (default 3), and a
+# probe at a different level is not answering about your kernels; gcc has been reported to keep
+# `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, though clang measurably does not
+# (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`), so treat a low level as
+# untrustworthy for this rather than as evidence. And match the call loosely: gcc on ELF spells it
 # `call fmaf@PLT` while clang on Mach-O spells it `callq _fmaf`, so a pattern pinned to either one
 # reports zero on the other and an FMA-less target then reads as clean.
-# You reach a no-FMA target by running on a pre-Haswell Intel or pre-Bulldozer AMD host, by pinning
+# You reach a no-FMA target on ANY CPU that lacks a fused multiply-add, which is not a clean date
+# cutoff. Big-core x86 got FMA3 at Haswell and AMD got FMA4 at Bulldozer, but the low-power lines
+# shipped without either for years afterwards: Intel Silvermont, Goldmont and Tremont, and AMD
+# Jaguar (`btver2`), define neither `__FMA__` nor `__FMA4__` and hit this under a perfectly
+# successful `-march=native`. Treat generations as examples, never as a boundary.
+# You also reach it by pinning
 # this key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to
 # 0, so only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain
 # that rejects the probed `-march=native`, in which case the probe falls back to no flag at all and
