@@ -348,7 +348,7 @@ let () =
   (* gh-ocannl-680: the wide-f16 seeding gate. A GPU capability advertising the uniform-f16 triple
      seeds mma candidates under the default policy; under [Fp16_wide] those seeds are withheld
      exactly where the capability lacks the f32-accumulate uniform-f16 arm ([mma_f16_wide_acc] —
-     Metal, and HIP pending its d-boundary conversion) and kept where it has one (CUDA sm_80+). The
+     Metal, structurally) and kept where it has one (CUDA sm_80+; HIP since gh-ocannl-789). The
      mixed [(f16, f16, f32)] triple is advertised too, standing in for the f32-storage destinations
      the gate must NOT touch — the gate keys on the DESTINATION's storage precision, which for
      [opt_h] is f16. *)

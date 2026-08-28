@@ -408,8 +408,11 @@ let () =
    let ok =
      if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
      else if String.is_substring backend_name ~substring:"hip" then
-       (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. *)
-       has "rocwmma::mma_sync" && not (has "== 0)")
+       (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. Under the
+          DEFAULT policy the accumulator fragment is itself f16, so no [d]-boundary conversion is
+          emitted — the complement of the [Fp16_wide] leg below, which is what keeps the two arms
+          from being told apart only by a claim that would pass on either (gh-ocannl-789). *)
+       has "rocwmma::mma_sync" && (not (has "__mma_dstage")) && not (has "== 0)")
      else if on_gpu then
        (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
        has "nvcuda::wmma" || has "== 0)"
@@ -487,7 +490,16 @@ let () =
    let ok =
      if on_metal then fallback && (not (has "simdgroup_half8x8")) && has "== 0)"
      else if String.is_substring backend_name ~substring:"hip" then
-       fallback && (not (has "rocwmma")) && has "== 0)"
+       (* HIP: the rocWMMA uniform-f16 arm swapped to an f32 accumulator fragment over the same
+          f16 STORAGE destination, converting elementwise at the [d] boundary (gh-ocannl-789).
+          Both halves are pinned, because either alone would also match the f16-accumulate arm this
+          replaces: that one declares [accumulator, 16, 16, 16, rocwmma::float16_t] throughout and
+          has no staging fragment, so the [float] accumulator declaration AND [__mma_dstage] are
+          what say the accumulation is wide. The default-policy leg above asserts the complement. *)
+       intrinsics
+       && has "rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>"
+       && has "__mma_dstage"
+       && not (has "== 0)")
      else if on_gpu then
        (* CUDA: the f32-accumulate inline-PTX arm where the device advertises it (sm_80+); below
           that floor the capability answers [mma_f16_wide_acc = false] and the deliberate rendering
