@@ -1,8 +1,10 @@
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 import unittest.mock
@@ -881,6 +883,148 @@ class FixtureDigestTest(unittest.TestCase):
         # fixtures/<spec name>.safetensors, and every spec's `name` is its file stem.
         for spec in (HERE / "workloads").glob("*.json"):
             self.assertEqual(json.loads(spec.read_text())["name"], spec.stem, spec.name)
+
+
+class CellTimeoutTest(unittest.TestCase):
+    """gh-ocannl-760: a cell that stops making progress costs the cell, not the sweep."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_cell(self, *args, **kwargs):
+        """run_cell with the cell's own output kept out of the test's."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            result, note = orchestrate.run_cell(*args, **kwargs)
+        return result, note, out.getvalue()
+
+    def python(self, source, *argv):
+        return [sys.executable, "-c", source, *map(str, argv)]
+
+    def alive(self, pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def wait_gone(self, pid, deadline_s=15.0):
+        end = time.monotonic() + deadline_s
+        while time.monotonic() < end and self.alive(pid):
+            time.sleep(0.05)
+        return not self.alive(pid)
+
+    def test_a_finished_cell_is_unaffected_by_the_cap(self):
+        # The cap must be invisible to every cell that runs: same result line, no note.
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+
+        result, note, _ = self.run_cell("finished", cell, timeout=60)
+
+        self.assertIsNone(note)
+        self.assertEqual(result["workload"], "w")
+
+    def test_a_cell_over_the_cap_is_a_runner_failure_naming_the_cap(self):
+        result, note, log = self.run_cell(
+            "wedged", self.python("import time; time.sleep(300)"), timeout=1.0
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("TIMED OUT after 1s", note)
+        self.assertIn("--cell-timeout", note)
+        self.assertIn("wedged", log)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_the_kill_takes_the_whole_process_group(self):
+        # The failure mode this exists for: tinygrad's beam search wedges with a pool of workers
+        # alive, and those workers hold the cell's stdout pipe open. Kill the direct child alone
+        # and the sweep then blocks reading a pipe nobody will ever close -- the hang moves, it
+        # does not go away. So the assertion is both halves: the grandchild dies, and the call
+        # returns promptly rather than waiting on the inherited pipe.
+        pidfile = self.dir / "grandchild.pid"
+        cell = self.python(
+            "import subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        t0 = time.monotonic()
+        result, note, _ = self.run_cell("wedged with workers", cell, timeout=2.0)
+        elapsed = time.monotonic() - t0
+
+        self.assertIsNone(result)
+        self.assertIn("process group", note)
+        self.assertLess(elapsed, 2.0 + orchestrate.CELL_KILL_GRACE_S + 10)
+        grandchild = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(grandchild), f"pid {grandchild} survived the cap")
+
+    def test_a_killed_beam_cell_quarantines_the_cache_it_was_writing(self):
+        # The contaminated-cache consequence recorded on the issue's HIP leg: the search writes
+        # its winners into one sqlite file as it goes, so a kill leaves a partial cache that the
+        # next run neither replays nor searches past -- while `searched` reports one of the two.
+        db = self.dir / "cache.db"
+        for path in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+            path.write_bytes(b"half a beam search")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+
+        self.assertFalse(db.exists())
+        moved = sorted(p.name for p in self.dir.glob("cache.db*.wedged-*"))
+        self.assertEqual(len(moved), 3, moved)
+        self.assertIn("quarantined", note)
+        self.assertIn("searched", note)
+
+    def test_declining_the_quarantine_still_names_the_risk(self):
+        db = self.dir / "cache.db"
+        db.write_bytes(b"half a beam search")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)}, enabled=False)
+
+        self.assertTrue(db.exists())
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("--no-cache-quarantine", note)
+
+    def test_a_cache_that_was_never_written_is_not_invented(self):
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(self.dir / "absent.db")})
+
+        self.assertIn("nothing to quarantine", note)
+
+    def test_the_ocannl_note_describes_that_cache_rather_than_tinygrads(self):
+        # The two caches differ where it matters: OCANNL commits entries atomically, so the
+        # honest statement is about the retry's provenance, not about a torn file.
+        note = orchestrate.ocannl_cache_note()
+
+        self.assertIn("autotune_cache", note)
+        self.assertIn("REPLAY", note)
+
+    def test_a_failed_cell_is_named_in_the_report(self):
+        # A failure is invisible in every table above it -- an unrun cell and a wedged one read
+        # identically once the report outlives the run log.
+        out = Path(tempfile.mkdtemp())
+        failures = [("mlp_small tinygrad/CUDA/beam", "TIMED OUT after 1800s; quarantined ...")]
+        cells = [cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])]
+        orchestrate.parity_check(cells)
+
+        orchestrate.report(cells, out, (), failures)
+
+        text = (out / "report.md").read_text()
+        self.assertIn("Runner failures", text)
+        self.assertIn("mlp_small tinygrad/CUDA/beam", text)
+        self.assertIn("TIMED OUT", text)
+
+    def test_a_run_with_no_failures_says_nothing_about_them(self):
+        out = Path(tempfile.mkdtemp())
+        cells = [cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])]
+        orchestrate.parity_check(cells)
+
+        orchestrate.report(cells, out)
+
+        self.assertNotIn("Runner failures", (out / "report.md").read_text())
 
 
 if __name__ == "__main__":
