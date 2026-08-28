@@ -390,6 +390,50 @@ DUNE
   fi
 fi
 
+# ---------------------------------------------------------------- leg 7
+# The guard learns what to stage from `dune promotion list`. If that call
+# fails, `promoted` is empty for a reason that is NOT "nothing to promote", and
+# staying quiet would reinstate the trap while looking like a clean run. Fault
+# injection, since nothing about a repository makes `list` fail on its own: a
+# `dune` earlier on PATH that refuses `promotion list` and delegates the rest,
+# so `apply` still promotes and only the guard's input is lost.
+repo="$(scenario listfails)"
+if [ -z "$repo" ] || ! resolve_and_test "$repo"; then
+  report 1 "leg 7 setup: conflicted scenario with a pending promotion"
+else
+  mkdir -p "$repo/shim"
+  cat >"$repo/shim/dune" <<SHIM
+#!/usr/bin/env bash
+if [ "\${1:-}" = promotion ] && [ "\${2:-}" = list ]; then
+  echo "shim: refusing promotion list" >&2
+  exit 1
+fi
+exec "$(command -v dune)" "\$@"
+SHIM
+  chmod +x "$repo/shim/dune"
+  out="$( (cd "$repo" && PATH="$repo/shim:$PATH" tools/promote.sh) 2>&1)"
+  rc=$?
+  worktree="$(cat "$repo/foo.expected" 2>/dev/null)"
+  built="$(cat "$repo/_build/default/foo.output" 2>/dev/null)"
+  # The promotion must still have happened -- a guard that cannot read its
+  # input must not take the promotion down with it.
+  if [ "$worktree" = "$built" ] && [ -n "$built" ] && [ "$rc" -eq 0 ]; then
+    report 0 "leg 7  a failed \`promotion list\` still promotes, and exits 0"
+  else
+    report 1 "leg 7  a failed \`promotion list\` still promotes, and exits 0" \
+      "rc=$rc worktree='$worktree' built='$built'; said: $out"
+  fi
+  case "$out" in
+    *WARNING*"staged NOTHING"*)
+      report 0 "leg 7b it says it staged nothing, rather than passing quietly"
+      ;;
+    *)
+      report 1 "leg 7b it says it staged nothing, rather than passing quietly" \
+        "said: $out"
+      ;;
+  esac
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all legs passed"

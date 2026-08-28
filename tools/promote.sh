@@ -39,9 +39,14 @@ fi
 # merge the extra dune invocation is skipped entirely. `list` filters its
 # arguments exactly as `apply` does, prints one root-relative path per line on
 # stdout, and sends "Nothing to promote for X." to stderr.
+#
+# A `list` that FAILS is kept apart from one that finds nothing: both leave
+# `promoted` empty, but the first means the guard is about to do nothing while
+# believing it did its job -- silently reinstating the trap. Say so instead.
 promoted=""
+listed=1
 if [ "$merging" -eq 1 ]; then
-  promoted="$(dune promotion list --root . "$@" 2>/dev/null || true)"
+  promoted="$(dune promotion list --root . "$@" 2>/dev/null)" || listed=0
 fi
 
 dune promotion apply --root . "$@"
@@ -66,6 +71,15 @@ git diff --name-only -z -- '*.expected' 'test/ppx/*_expected.ml' \
     done
 
 [ "$merging" -eq 1 ] || exit 0
+
+if [ "$listed" -eq 0 ]; then
+  printf '\npromote.sh: WARNING -- mid-merge, but `dune promotion list` failed, so\n' >&2
+  printf 'this script does not know what it just promoted and has staged NOTHING.\n' >&2
+  printf 'A merge commit takes the index, not the working tree, so stage the\n' >&2
+  printf 'promoted goldens yourself or they are dropped from the commit and fail\n' >&2
+  printf 'in CI only. `git status` will show them as modified.\n' >&2
+  exit 0
+fi
 
 # Mid-merge: stage what was promoted, so the commit carries it.
 #
