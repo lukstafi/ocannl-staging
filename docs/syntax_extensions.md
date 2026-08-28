@@ -383,6 +383,12 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
     p =- learning_rate *. sgd_delta]
 ```
 
+Because the scope of an inline declaration is the whole extension point, `%cd` **hoists inline declarations above an enclosing `match` or `if`**: the `Pexp_match` arm (via `handle_cases`) and the `if ... then ... else` arm of `tensor/ppx_cd.ml` both collect their branches' bindings with `reduce_vbss` and lift them out of the branch. So an arm that declares `{ x }` and an arm that only reads `x` name the same tensor, and branches need not be duplicated just to share one.
+
+The declaration may appear in only **one** arm, though: a second `{ x }` for the same name is rejected with `ppx_ocannl %cd: duplicate inline declaration of no-gradient tensor x` (`tensor/ppx_cd.ml:162`). Declare the tensor in whichever arm reads most naturally -- typically the one whose right-hand side carries the best label information -- and refer to it by bare name in the others.
+
+`Train.sgd_one` in `lib/train.ml` is the worked example: its `%cd` payload is written once, with `{ sgd_delta }` and `{ sgd_momentum }` each declared in a single arm of the `grad_scale` / `update_gate` matches and read by name everywhere else, so the arms differ only where the gating actually changes the emitted assignment. (The momentum block was duplicated across the gate branches until gh-ocannl-772, on the mistaken assumption that hoisting past a `match` did not work.)
+
 Inline declarations can also be used outside of assignments for creating non-differentiable tensors, to mimic the behavior of `%op` but without the burden of initialization that a parameter would introduce:
 
 ```ocaml
