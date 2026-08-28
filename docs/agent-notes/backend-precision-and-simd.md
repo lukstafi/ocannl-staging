@@ -780,22 +780,22 @@ files.
   `simd_flags`, `-ffast-math`, `-ffp-contract=` and `-fopenmp`, so a probe omitting any of them
   answers about a different compilation — an explicit `cc_backend_simd_flags=-mfma` makes a bare
   `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
-  erase calls the probe still shows. To read the exact invocation rather than rebuild it, note that
-  the `[%log3 "command", cmdline]` in `cc_backend` is a PREPROCESSING-time gate: it needs a rebuild
-  under `OCANNL_LOG_LEVEL_CC_BACKEND=3` (plus runtime `log_level=3`), and on a normally built or
-  installed package the call is stripped and the runtime level alone yields nothing — the same
-  runtime-vs-preprocessing confusion this repo already paid for in gh-ocannl-628, recorded at the
-  top of `arrayjit/lib/dune`. And when rerunning that command with `-S`, replace its
-  `-o <library path>`: unchanged, it writes assembly over the `.so`/`.dll` the command was building,
-  possibly one the running process still has mapped. Then `grep -E 'call.*fmaf?\b'` — match both
-  NAMES and both dialects. Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax`
-  emits `fma(` for `Double_prec`), and gcc on ELF spells it `call fma@PLT` where clang on Mach-O
-  spells it `callq _fmaf`; an `fmaf`-only pattern finds none of a double kernel's calls (measured:
-  0 of 5), which is the same dialect trap that cost `Asm_census` 72 rows of silent absence in
-  gh-ocannl-650, one bullet up. gcc is also reported to keep the calls at `-O0` even on an
-  FMA-capable target, where clang measurably does not, so a low `-O` is untrustworthy here rather
-  than evidence. (`-march=<t> -E -dM` prints
-  which macros a target defines: an input to the question, not the answer to it.) **It is a property
+  erase calls the probe still shows (measured, f32 × 4 lanes at `-march=x86-64 -O3`: 4 calls, and 0
+  once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
+  flag set with `-S`, then `grep -E 'call.*fmaf?\b'` — match both NAMES and both dialects.
+  Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
+  `Double_prec`), and gcc on ELF spells it `call fma@PLT` where clang on Mach-O spells it
+  `callq _fmaf`; an `fmaf`-only pattern finds none of a double kernel's calls — measured 0 of 5,
+  against 5 of 5 for `fmaf?\b`, on the same `-march=x86-64` object whose calls are `callq _fma`.
+  That is the same dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650,
+  one bullet up. gcc is also reported to keep the calls at `-O0` even on an FMA-capable target,
+  where clang measurably does not, so a low `-O` is untrustworthy here rather than evidence.
+  (`-march=<t> -E -dM` prints which macros a target defines: an input to the question, not the
+  answer to it.) **Everything in this bullet that is called measured was executed on arm64 macOS
+  with Apple clang cross-targeting x86_64**; the two gcc behaviors (calls kept at `-O0`,
+  `-ffast-math` not expanding them) are from review on gh-ocannl-753 and have no GNU gcc here to
+  check against. Reading the backend's own logged compile command was tried as a way to skip the
+  flag reconstruction and does NOT work — see the next bullet. **It is a property
   of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
   LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
@@ -830,6 +830,24 @@ files.
   `test/operations/cc_march_census` is where it shows: its "no FMA accumulator loop calls libm where
   the ISA has a fused multiply-add" claim excludes the FMA-less rows by design, so widening that
   claim is the test-side move.
+- **`OCANNL_LOG_LEVEL_CC_BACKEND` does not build at 1 or 3, and its logs are not greppable text**
+  (found while trying to document a diagnostic that reads the backend's own compile command;
+  gh-ocannl-753, unfiled). `cc_backend.ml` logs its exact compiler invocation as
+  `[%log3 "command", cmdline]`, which looks like the ideal way to answer "what flags did my kernel
+  actually compile with" — it is not, on three counts, each of which was run here rather than
+  reasoned about. The gate is a PREPROCESSING one
+  (`[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_CC_BACKEND"]`, declared as a
+  `preprocessor_deps` `env_var` in `arrayjit/lib/dune`), so a runtime `log_level` alone leaves the
+  call stripped — the same runtime-vs-preprocessing confusion recorded at the top of that dune file
+  from gh-ocannl-628. Rebuilding under it then FAILS at low values: `=1` and `=3` both die on
+  warning 27 (`unused-var-strict`) for `base_name`, `cmdline` and `rc` in `cc_backend.ml` — `name`
+  too at `=1` — which are warnings-as-errors here. `=9` builds clean, and 9 is the value the file's
+  own header comment names, so the low values look simply untested. Even at `=9` the payoff is not
+  a greppable command: the logs land in `log_files/<exe>/debug.db` + `debug_meta.db`, ppx_minidebug's
+  binary database needing its rendering client, and a run with `debug_backend=text` produced no
+  `.log` file at all in the attempt made here. Two takeaways: do not document "read the logged
+  compile command" as a user-facing diagnostic (reconstruct the flag composition instead, as the
+  bullet above now does), and the `=1`/`=3` build break is a real defect nobody has filed.
 - **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
   that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
   docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no

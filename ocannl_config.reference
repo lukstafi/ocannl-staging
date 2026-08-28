@@ -684,14 +684,8 @@
 # cc_backend_optimization_level (default 3), then cc_backend_arch_flags, then the resolved
 # cc_backend_simd_flags, then `-ffast-math`, `-ffp-contract=`, `-fopenmp`, in that order. An
 # explicit `cc_backend_simd_flags=-mfma` makes a bare `-march=x86-64` probe report calls your
-# kernels do not have; cc_backend_fast_math can remove calls the probe still shows.
-# To read the exact invocation instead of reconstructing it, REBUILD with
-# `OCANNL_LOG_LEVEL_CC_BACKEND=3` and run with log_level=3: the command is logged through
-# `[%log3 "command", ...]`, which is a PREPROCESSING-time gate, so on a normally built or installed
-# package that call is compiled out and the runtime log_level alone will not produce it. When you
-# rerun that command with `-S`, also replace its `-o <library path>` with a fresh `.s` path --
-# unchanged, `-S` writes assembly text over the shared library the command was building, which may
-# be one your application still has loaded.
+# kernels do not have; cc_backend_fast_math can remove calls the probe still shows. Compile a small
+# `fmaf` loop of your own with that flag set and `-S`, into an `.s` path of your choosing.
 # Then `grep -E 'call.*fmaf?\b'`. Match BOTH names and both dialects: double-precision kernels call
 # `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
 # spells the call `call fma@PLT` while clang on Mach-O spells it `callq _fmaf`. A pattern pinned to
@@ -700,6 +694,13 @@
 # reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang
 # measurably does not (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`), so a probe
 # at a low `-O` is untrustworthy for this question rather than evidence either way.
+# Provenance of everything above: the target rows, the flag-composition effects and the grep pattern
+# were executed on arm64 macOS with Apple clang cross-targeting x86_64 (`clang -arch x86_64`). The
+# two gcc behaviors named -- calls retained at `-O0`, and `-ffast-math` NOT expanding them -- come
+# from code review on gh-ocannl-753 and were not reproducible here, which has no GNU gcc; they are
+# flagged in place. For an in-tree check that runs on whatever toolchain you have,
+# `test/operations/cc_march_census` compiles the emitted kernel across `-march` targets and censuses
+# the accumulator loops, holding the line that no FMA loop calls libm where the ISA has an FMA.
 # You reach a no-FMA target on ANY CPU that lacks a fused multiply-add, which is not a clean date
 # cutoff. Big-core x86 got FMA3 at Haswell and AMD got FMA4 at Bulldozer, but the low-power lines
 # shipped without either for years afterwards: Intel Silvermont, Goldmont and Tremont, and AMD
