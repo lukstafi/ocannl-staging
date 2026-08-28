@@ -146,17 +146,29 @@ let () =
   else Verdict.skipped ~backend:(backend ()) claim;
   (* Per launch, not per batch. A reading that forgot to divide by the depth would be about [depth]
      times the mean cost of a launch in that call -- up to 200x -- which the upper factor of 3
-     refuses. The low side exists only to keep the claim two-sided (a reading divided by the depth
-     twice would be up to 200x too SMALL), and it must absorb what the upper side never faces: [ms]
-     is a min over up to 64 batches while [mean] is the whole call's average, and on a busy runner
-     the average sits severalfold above the minimum (4.3x observed on CI, gh-ocannl-851) -- so the
-     low envelope is 16, an order of magnitude inside the 200x error it refuses. *)
+     refuses. The low side refuses the mirror error, a reading divided by the depth twice, which
+     sits at about [mean / depth] -- so its divisor must stay BELOW the depth while absorbing what
+     the upper side never faces: [ms] is a min over up to 64 batches, [mean] the whole call's
+     average, and on a busy runner the average sits severalfold above the minimum (4.3x observed
+     on CI, gh-ocannl-851). The two needs meet by scaling the divisor with the depth this machine
+     calibrates to: at the cap (microsecond launches, the jitter-dominated regime) the envelope is
+     16, and at small depths -- millisecond launches, batches of tens of milliseconds, the jitter
+     amortized -- it shrinks to stay a factor of 4 under the depth, a margin that covers the gap
+     between the policy's answer for [iso.ms] (a min over 64 runs) and the instrument's own
+     calibration estimate (a min over 3). Isolated timing has depth 1 and no division to get
+     wrong, so its low side is two-sidedness alone, at 16. At depth <= 3 a double division is a
+     <= 3x under-read, inside the noise floor and out of this instrument's reach -- as it already
+     was under the pre-widening factor of 3. *)
   let mean r = r.wall_ms /. Float.of_int (max 1 r.dispatches) in
-  let per_launch r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / 16.) in
-  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch iso)
+  let per_launch ~low_div r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / low_div) in
+  let que_low_div =
+    Float.(max 3. (min 16. (of_int (Autotune.queued_batch_depth ~est_ms:iso.ms) / 4.)))
+  in
+  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch ~low_div:16. iso)
     ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" iso.ms (mean iso));
-  Verdict.pass_fail "queued reading is a per-launch time" (per_launch que)
-    ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" que.ms (mean que));
+  Verdict.pass_fail "queued reading is a per-launch time" (per_launch ~low_div:que_low_div que)
+    ~detail:(fun () ->
+      Printf.sprintf "%.6f ms vs mean %.6f ms (low divisor %.0f)" que.ms (mean que) que_low_div);
   (* Amortizing a round trip can only remove time, so a queued reading above the isolated one is the
      instrument reporting the wrong quantity, not a slow machine. The factor absorbs the noise a
      min-of-N leaves; the point of the claim is the direction. *)
