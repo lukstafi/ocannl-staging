@@ -965,6 +965,36 @@ class FixtureDigestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_digest.read_digests(digests)
 
+    def test_two_files_cannot_be_recorded_under_one_fixture_name(self):
+        # `read_digests` refuses one (name, origin) twice; recording must not manufacture the same
+        # ambiguity from the other side. Two boxes' copies of one workload passed to one command
+        # (`box-a/mlp_small.safetensors`, `box-b/mlp_small.safetensors`) had the later replace the
+        # earlier, and the replacement was ANNOUNCED as a changed workload -- a regeneration that
+        # never happened, with the first box's bytes gone from the file.
+        (self.dir / "box-a").mkdir()
+        (self.dir / "box-b").mkdir()
+        a = self.fixture("box-a/mlp_small.safetensors", b"box-a bytes")
+        b = self.fixture("box-b/mlp_small.safetensors", b"box-b bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [a, b], "rog-nv")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
+    def test_repeating_one_fixture_path_is_not_an_ambiguity(self):
+        # The control: the guard refuses two files claiming one name, not one file named twice --
+        # which says nothing contradictory and records exactly what it always did.
+        fx = self.fixture("mlp_small.safetensors", b"one box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        fixture_digest.record(digests, [fx, fx], "rog-nv")
+
+        self.assertEqual(
+            [(e.origin, e.sha256) for e in fixture_digest.read_digests(digests)[fx.name]],
+            [("rog-nv", fixture_digest.sha256_file(fx))],
+        )
+
     def test_an_origin_with_whitespace_is_refused(self):
         # The format is whitespace-split, so an origin containing a space would write a line that
         # reads back as a different (or malformed) entry.
@@ -973,6 +1003,26 @@ class FixtureDigestTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             fixture_digest.record(digests, [fx], "rog nv")
+
+    def test_an_origin_that_reads_as_two_origins_is_refused(self):
+        # Agreeing boxes are serialized into ONE comma-joined `fixture_origin` field, carried by
+        # every result row and report section. A box named `minix,rocm` would publish a field
+        # byte-identical to the one two boxes named `minix` and `rocm` produce by agreeing, and no
+        # consumer of a published row could tell one box from two. The control is that exact
+        # string, arrived at honestly.
+        fx = self.fixture("lenet.safetensors", b"same bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "minix,rocm")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+        agreed = self.dir / "agreed.txt"
+        fixture_digest.record(agreed, [fx], "minix")
+        fixture_digest.record(agreed, [fx], "rocm")
+        self.assertEqual(
+            fixture_digest.status(fx, fixture_digest.read_digests(agreed))[3], "minix,rocm"
+        )
 
     def test_the_checked_in_file_parses_and_names_live_workloads(self):
         # A digest for a workload spec that no longer exists is stale: it pins bytes no current
@@ -1083,6 +1133,65 @@ class FixtureDigestTest(unittest.TestCase):
 
         entries = fixture_digest.read_digests(digests)
         self.assertEqual(entries[other], [fixture_digest.Entry("deadbeef", 17, "minix")])
+
+    def test_a_migration_does_not_split_one_box_across_two_origin_names(self):
+        # The migration writes two facts -- whose the old rows were, and whose the bytes on disk
+        # are -- and resolved them from two independent sources: `--adopt-legacy rog-nv` on a host
+        # that calls itself `rog-nv-wsl` attributed the rows to rog-nv and recorded the fixtures
+        # as rog-nv-wsl. One box then wears two origin names, which reads downstream as two boxes
+        # agreeing -- or, for a fixture whose legacy entry was just adopted, as the box having
+        # diverged from itself, with `divergent_origins` telling it to coordinate with itself.
+        fx = self.fixture("mlp_small.safetensors", b"this box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + f"deadbeef  17  {fx.name}\n")
+        before = digests.read_text()
+
+        with unittest.mock.patch.object(
+            fixture_digest.platform, "node", return_value="rog-nv-wsl"
+        ):
+            with self.assertRaises(ValueError) as refused:
+                fixture_digest._main(
+                    ["--record", str(fx), "--adopt-legacy", "rog-nv", "--digests", str(digests)]
+                )
+
+        self.assertIn("--origin", str(refused.exception))
+        self.assertEqual(digests.read_text(), before, "refused before the file is rewritten")
+
+    def test_the_migration_still_defaults_where_the_two_names_agree(self):
+        # First control: on the box the rows are being adopted as, the advertised command still
+        # needs no --origin. The refusal above must not have made the ordinary migration harder.
+        fx = self.fixture("mlp_small.safetensors", b"this box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + f"deadbeef  17  {fx.name}\n")
+
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value="rog-nv"):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = fixture_digest._main(
+                    ["--record", str(fx), "--adopt-legacy", "rog-nv", "--digests", str(digests)]
+                )
+
+        self.assertEqual(code, 0)
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries[fx.name]], ["rog-nv"])
+
+    def test_one_box_may_still_migrate_another_boxs_legacy_rows(self):
+        # Second control: two origins in one file ARE right when both were stated -- rog-nv
+        # attributing rows it knows were minix's while recording its own bytes as its own. The
+        # rule is about an origin nobody typed, not about a file naming two boxes.
+        fx = self.fixture("lenet.safetensors", b"rog-nv bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  cifar_conv.safetensors\n")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = fixture_digest._main(
+                ["--record", str(fx), "--origin", "rog-nv", "--adopt-legacy", "minix",
+                 "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries["cifar_conv.safetensors"]], ["minix"])
+        self.assertEqual([e.origin for e in entries[fx.name]], ["rog-nv"])
 
     def test_the_legacy_refusal_names_a_command_that_runs_from_the_repo_root(self):
         # The canonical sweep command runs from the repository root, where a bare

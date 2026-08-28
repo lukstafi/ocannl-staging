@@ -115,13 +115,24 @@ def cli_command():
 
 
 def check_origin(origin):
-    """Origins are whitespace-free (the format is whitespace-split) and non-empty."""
-    if not origin or origin.split() != [origin]:
-        raise ValueError(f"origin must be a single non-empty word without whitespace, got {origin!r}")
+    """Origins are non-empty, whitespace-free and comma-free.
+
+    Whitespace because the digest file is whitespace-split, so a spaced origin writes a line that
+    reads back as a different (or malformed) entry. Commas because AGREEING origins serialize as
+    `a,b` into the single `fixture_origin` field every result row and report section carries
+    (`status`): an origin literally named `minix,rocm` produces a field byte-identical to the one
+    two boxes named `minix` and `rocm` recording the same bytes produce, so no consumer of a
+    published row can tell one box from two. An origin has to name exactly one box.
+    """
+    if not origin or origin.split() != [origin] or "," in origin:
+        raise ValueError(
+            "origin must be a single non-empty word without whitespace or commas (a comma is how "
+            f"the origins of agreeing boxes are joined, so it cannot be inside one), got {origin!r}"
+        )
     return origin
 
 
-def resolve_origin(origin):
+def resolve_origin(origin, adopting=None):
     """The ONE place a missing origin becomes this host's -- and the only one that may.
 
     Every caller routes through here rather than writing `origin or this_origin()`, because that
@@ -130,6 +141,14 @@ def resolve_origin(origin):
     fixture to the wrong box and persists it, which is the exact error this file exists to
     prevent -- so absence defaults, emptiness is refused, and a host that cannot name itself is
     refused rather than sharing a placeholder with every other nameless box.
+
+    `adopting` is the box a `--adopt-legacy` migration attributes the old rows to. A DEFAULTED
+    origin must agree with it: the migration names one box, so resolving the two facts it writes
+    ("whose were the old rows", "whose are the bytes on disk") from two independent sources can
+    split one box across two origin names -- `--adopt-legacy rog-nv` on a host that calls itself
+    `rog-nv-wsl` writes both names, which reads downstream as two boxes agreeing, or, for a
+    fixture whose legacy entry it adopted, as the box having diverged from itself. Stating both
+    explicitly is still allowed, and is how one box migrates ANOTHER box's legacy rows.
     """
     if origin is None:
         origin = this_origin()
@@ -139,6 +158,14 @@ def resolve_origin(origin):
                 "whose bytes these are; pass --origin <box> explicitly. Recording them under a "
                 "shared placeholder would let the next nameless box overwrite this entry under "
                 "that same name, which is the provenance loss this file exists to prevent"
+            )
+        if adopting is not None and origin != adopting:
+            raise ValueError(
+                f"the legacy rows are being adopted as {adopting!r}, but this host names itself "
+                f"{origin!r}, so the fixtures on disk would be recorded under a second origin: "
+                "one box wearing two names is indistinguishable here from two boxes. Say which "
+                f"you mean: --origin {adopting} if {adopting!r} is this box under the name the "
+                f"reports use, or --origin {origin} if you are migrating another box's rows"
             )
     return check_origin(origin)
 
@@ -212,6 +239,31 @@ def write_digests(path, entries):
     Path(path).write_text(HEADER + body)
 
 
+def one_path_per_name(fixtures):
+    """`fixtures` as paths, refusing two different files that would be recorded under one name.
+
+    Entries are keyed by `(name, origin)`, and `read_digests` refuses that pair appearing twice
+    because one box has one set of bytes per fixture -- so recording must not manufacture from the
+    other side the very ambiguity reading rejects. Two paths with one basename
+    (`box-a/mlp_small.safetensors` and `box-b/mlp_small.safetensors`) are two boxes' copies of one
+    workload: recorded in one command under one origin, the later would replace the earlier, and
+    the replacement would be ANNOUNCED as a changed workload -- a regeneration event that never
+    happened, with the other box's bytes gone from the file. Repeating one path is not ambiguous,
+    so it is kept.
+    """
+    seen = {}
+    for fixture in fixtures:
+        fixture = Path(fixture)
+        first = seen.setdefault(fixture.name, fixture)
+        if first.resolve() != fixture.resolve():
+            raise ValueError(
+                f"{first} and {fixture} would both be recorded as {fixture.name!r} for one origin, "
+                "and this file has one set of bytes per (fixture, box), so it could not say which; "
+                "record them under their own origins, in their own commands"
+            )
+    return list(seen.values())
+
+
 def record(path, fixtures, origin=None, legacy_origin=None):
     """Record `fixtures` (paths) as `origin`'s bytes in the digest file at `path`.
 
@@ -223,7 +275,8 @@ def record(path, fixtures, origin=None, legacy_origin=None):
     origin had not recorded. The caller says so out loud: a silently rewritten digest is the
     failure this file exists to prevent, and a regeneration is where it would happen.
     """
-    origin = resolve_origin(origin)
+    origin = resolve_origin(origin, adopting=legacy_origin)
+    fixtures = one_path_per_name(fixtures)
     entries = read_digests(path, legacy_origin=legacy_origin)
     changes = []
     for fixture in fixtures:
@@ -325,7 +378,9 @@ def _main(argv=None):
         default=None,
         help="with --record: attribute any pre-gh-ocannl-759 unattributed (three-field) lines to "
         "BOX, which you are asserting they belong to. One-shot migration; without it such a line "
-        "is an error, since nothing can infer whose bytes it recorded.",
+        "is an error, since nothing can infer whose bytes it recorded. The fixtures on disk are "
+        "recorded under --origin, which defaults to this host only when this host names itself "
+        "BOX -- otherwise say both, so one box does not end up under two origin names.",
     )
     ap.add_argument("--digests", type=Path, default=None, help=f"path to {DIGEST_FILE}")
     ap.add_argument("--fixture-dir", type=Path, default=here / "fixtures")
@@ -355,7 +410,7 @@ def _main(argv=None):
                 bad += 1
         return 1 if bad else 0
 
-    origin = resolve_origin(args.origin)
+    origin = resolve_origin(args.origin, adopting=args.adopt_legacy)
     changes = record(digests, fixtures, origin, legacy_origin=args.adopt_legacy)
     print(f"recorded {len(fixtures)} fixture(s) in {digests} as origin {origin!r}")
     for name, org, was, now in changes:
