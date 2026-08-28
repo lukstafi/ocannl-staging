@@ -2589,10 +2589,18 @@ module C_syntax (B : C_syntax_config) = struct
      Which is why these are builtins and not the obvious [dst = a * b + dst]: that reaches gcc as
      one vector operation too, and allocates perfectly, but it is only MAYBE contracted into an FMA
      — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two roundings,
-     verified against these builtins), and then the vector body would round differently from the
-     scalar peel and the serial fallback it promises to equal bit for bit. Every builtin here is
-     fused by definition, so the promise holds under every flag; each was checked to render exactly
-     one fused instruction at [-ffp-contract=off], computing [a * b + dst]. The masked forms are
+     verified against these builtins), and then each accumulator UPDATE in the vector body would
+     round twice where the scalar peel and the serial fallback round once. Be precise about which
+     promise that breaks: it is not whole-result bit equality, which never held for a reduction
+     anyway. Vector accumulation reassociates -- [vec_acc_grid_fold] folds the register grid into
+     one accumulator and [vec_acc_lane_fold] then chains that vector's lanes into a scalar, so the
+     lanes accumulate independently and are combined at the end, a different summation order from
+     the serial fallback's (which is why the [reproducible] profile pins [cc_vector_bytes=0]). What
+     the three paths do promise each other is the rounding of each individual UPDATE: an FMA rounds
+     once, and all three spell that same single-rounded operation, so they differ by summation order
+     alone and not by the semantics of each step. Every builtin here is fused by definition, so that
+     per-update promise holds under every flag; each was checked to render exactly one fused
+     instruction at [-ffp-contract=off], computing [a * b + dst]. The masked forms are
      spelled the way gcc's own [<immintrin.h>] spells them: with an all-ones mask and
      [_MM_FROUND_CUR_DIRECTION] (= 4, i.e. obey MXCSR rather than an embedded rounding mode) these
      calls are character for character what [_mm512_fmadd_ps], [_mm512_fmadd_pd], [_mm_fmadd_ph],
