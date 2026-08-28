@@ -165,6 +165,7 @@ let () =
       backend = Context.backend_name bctx;
       numerics = SC.numerics_tag ();
       codegen = Some (SC.codegen_tag ~limits:blimits ());
+      objective = Some (SC.objective_tag ());
       source_digest = SC.digest base_canon;
       saved = [];
       segments = Some !segments_assoc;

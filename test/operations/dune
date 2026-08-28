@@ -2483,6 +2483,17 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; A one-element counting routine that runs on whatever backend is selected, plus two pure legs, so
+; the stanza declares the variable rather than naming a backend.
+(test
+ (name autotune_timing_modes)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules autotune_timing_modes)
+ (libraries base ocannl stdio mtime.clock.os arrayjit.verdict ll_test))
+
 (test
  (name autotune_fission_sketch)
  (package neural_nets_lib)

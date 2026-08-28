@@ -50,6 +50,7 @@ let cache_entry backend best_ms : SC.entry =
     backend;
     numerics = SC.numerics_tag ();
     codegen = None;
+    objective = None;
     source_digest = "gh571-source";
     saved = [];
     segments = None;

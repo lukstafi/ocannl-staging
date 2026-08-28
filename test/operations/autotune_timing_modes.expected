@@ -1,0 +1,25 @@
+== queued batch depth ==
+every calibration estimate gets the depth the policy owes it: true
+no calibration estimate ever yields a depth below 1: true
+no calibration estimate ever yields a depth above the cap: true
+
+== autotune_timing spelling ==
+"queued" selects the queued objective: true
+"isolated" selects the isolated objective: true
+the spelling is case- and space-insensitive: true
+a misspelling is refused rather than defaulted: true
+
+== the instrument's two modes ==
+both modes returned a positive finite per-launch time: true
+isolated timing dispatched one launch per timed run, warmup included: true
+queued timing dispatched more launches than isolated timing did: true
+isolated reading is a per-launch time: PASS
+queued reading is a per-launch time: PASS
+queued timing does not read above isolated timing: PASS
+queued timing's wall cost is bounded by the budget, not by the batch depth: PASS
+
+== the objective in the cache key ==
+the cache key is stable within one objective: true
+the cache key separates the two timing objectives: true
+an omitted objective keys as the configured one: true
+the key's objective spelling round-trips through the mode: true

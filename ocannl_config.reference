@@ -386,8 +386,41 @@
 # time by less than 1%.
 #autotune_rounds=2
 
-# Timed runs per tuning candidate (after one warmup run); the minimum is kept.
+# Timed runs per tuning candidate (after one warmup run); the minimum is kept. Under
+# autotune_timing=queued each such run is a whole batch of dispatches, so this is a floor on
+# batches rather than on launches.
 #autotune_repeats=3
+
+# What a tuning candidate's time is a measurement OF (gh-ocannl-755).
+#   queued   -- the default. A calibrated number of launches is dispatched back to back with a
+#               single host synchronization and the wall time is divided by the count, so the
+#               submit/sync round trip is amortized and the number is what the kernel sustains
+#               inside a stream that already has work in it. That is what a training step
+#               presents: it queues every kernel of a layer and synchronizes at the end, so no
+#               kernel in it pays a round trip of its own. The batch depth is calibrated per
+#               candidate to about 10 ms of wall time, capped at 200 launches and floored at 1 --
+#               a routine slower than that target is measured exactly as "isolated" measures it.
+#   isolated -- one launch followed by a host synchronization: the latency of a lone dispatch,
+#               kernel plus one round trip. What every schedule crowned before gh-ocannl-755 was
+#               ranked by, and the right objective for a workload that really does dispatch one
+#               kernel and wait for it.
+# The two are different objectives and they do not crown the same candidate. On gfx1151 the round
+# trip is ~50-60 us while the fastest candidates at the gpt2_mini out-projection shape run in
+# 60-70 us, so "isolated" reads about 2x the steady-state cost there -- and the offset varies from
+# candidate to candidate with the block count and the per-launch queue work, which is what lets two
+# candidates 10% apart in steady state swap places. A best_ms measured under "isolated" is
+# therefore not a throughput number and must not be compared against a batched per-kernel figure.
+# Both modes sit under the same wall-time ceiling -- the ~25 ms top-up below accumulates wall time
+# in both -- but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
+# finishes isolated timing in a few milliseconds and queued timing at the budget, so a search over
+# sub-millisecond kernels spends a few extra milliseconds per candidate, which is immaterial beside
+# the compile each candidate already costs.
+# The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
+# transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry
+# crowned under one objective is not the answer to a search asking the other, and the times it
+# stores are readings of a different quantity. Changing this setting therefore re-tunes rather than
+# replaying, which is the point.
+#autotune_timing=queued
 
 # Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the
 # optimized code, the backend name, a digest of the numerics policy (tf32_matmuls,

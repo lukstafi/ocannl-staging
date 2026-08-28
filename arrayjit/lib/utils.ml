@@ -146,6 +146,7 @@ let known_config_keys =
       "autotune_beam_width";
       "autotune_rounds";
       "autotune_repeats";
+      "autotune_timing";
       "autotune_cache_dir";
       "autotune_split_reduce_max_sites";
       "autotune_log";
@@ -319,6 +320,18 @@ let config_key_classification : (config_key_class * string * string list) list =
         "model_peak_memory_bandwidth";
         "strict_failure_classification";
       ] );
+    ( Keyed "timing",
+      "it picks the OBJECTIVE a candidate is timed against -- the latency of a lone dispatch, or \
+       what the kernel sustains under queue depth -- and the two crown different candidates, \
+       measured (gh-ocannl-755). Not Search_shaping, which is where it started and where the \
+       neighbouring autotune_* knobs correctly sit: those change how carefully the SAME quantity is \
+       measured, so either process's winner answers the other's question, whereas an entry crowned \
+       under isolated timing is the answer to a question a queued search did not ask -- and its \
+       stored best_ms, baseline_ms and mma_best_ms are readings of a different quantity, which a \
+       replay copies into the reading process's report under that process's label. Left unkeyed, a \
+       warm cache would also defeat the new default outright, replaying isolated-crowned winners \
+       forever (Codex P1 on PR #512)",
+      [ "autotune_timing" ] );
     ( Search_shaping,
       "it makes the tuner try alternative inlining decisions; each alternative is a different \
        program and keys on its own digest",

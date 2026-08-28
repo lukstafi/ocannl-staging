@@ -555,3 +555,33 @@ files.
   pipelines stage into stack scratch, so the same argument would let them pad, but they keep the
   gate — which is what still renders the gh-ocannl-683 k-extent label, and where
   `schedule_contraction_nest` reads it off.
+- **What the tuner's numbers are a measurement OF is a config choice, and the two objectives do not
+  crown the same candidate** (gh-ocannl-755). `Autotune.time_routine` takes a `timing_mode`, from
+  config `autotune_timing`: `isolated` is the historical one launch plus one host sync — a lone
+  dispatch's latency — and `queued` (the default since gh-755) dispatches a calibrated batch back
+  to back, syncs once and divides, which is what a kernel sustains inside a stream that already has
+  work in it, i.e. what a training step presents to every kernel of a layer. Measured at the
+  gpt2_mini out-projection shapes on gfx1151, over the ten seeded blocktile geometries, four
+  interleaved runs (`bin/projection_shape_bench.exe 200 8 d {fwd,rev} seeds`, whose closing table is
+  this comparison): the isolated crown differed from the independently measured batched crown in
+  2 of 8 site-runs and the queued crown in 0 of 8; discordant candidate pairs against the batched
+  ranking were 17/220 isolated against 5/220 queued. The mechanism is that the round trip is ~50-60
+  us while the fastest candidates run in 60-70 us, and the offset is NOT a constant — within one
+  run it spans 39-86 us across candidates, which is larger than the 5-8 us separating the top two.
+  Two consequences. A `best_ms` is only comparable to another taken under the same setting, and
+  under `isolated` it is not a throughput number at all (the gh-ocannl-728 arc compared one to a
+  batched harness figure and the agreement was a coincidence of two instrument errors). And the
+  batch depth is the thing to check when a queued search behaves like an isolated one:
+  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch, caps at 200 and floors at 1, so a
+  routine slower than 10 ms per launch is measured identically in both modes by construction —
+  `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
+  counts its own launches, that the reading is per launch rather than per batch.
+  **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
+  `Keyed "timing"`), which is the one place this differs from its `autotune_*` neighbours: those
+  change how carefully the SAME quantity is measured, so either process's winner answers the
+  other's question, whereas an isolated-crowned entry answers a question a queued search did not
+  ask — and, left unkeyed, a warm cache would replay isolated winners forever and defeat the
+  default outright. Practical consequences: changing `autotune_timing` re-tunes rather than
+  replaying, pre-gh-755 entries are never replayed, and a `Cache_replay` report's times are
+  therefore known to be this call's objective, which is what lets `Autotune.report.timing` (and the
+  benchmark JSON's `timing` field) be filled in on a replay at all.

@@ -1,6 +1,6 @@
 Sources scanned: arrayjit/lib, benchmarks/runners/ocannl, bin, lib, tensor, tools
-Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool
-Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 29
+Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool, timing
+Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 30
 
 aggregate -- picks the values other keys take; each of those carries its own classification
   no_config_file
@@ -85,6 +85,9 @@ search-shaping -- it steers the search: how wide, how long, what is proposed, wh
   model_peak_memory_bandwidth
   strict_failure_classification
 
+keyed: timing -- it picks the OBJECTIVE a candidate is timed against -- the latency of a lone dispatch, or what the kernel sustains under queue depth -- and the two crown different candidates, measured (gh-ocannl-755). Not Search_shaping, which is where it started and where the neighbouring autotune_* knobs correctly sit: those change how carefully the SAME quantity is measured, so either process's winner answers the other's question, whereas an entry crowned under isolated timing is the answer to a question a queued search did not ask -- and its stored best_ms, baseline_ms and mma_best_ms are readings of a different quantity, which a replay copies into the reading process's report under that process's label. Left unkeyed, a warm cache would also defeat the new default outright, replaying isolated-crowned winners forever (Codex P1 on PR #512)
+  autotune_timing [read at codegen]
+
 search-shaping -- it makes the tuner try alternative inlining decisions; each alternative is a different program and keys on its own digest
   tune_flip_ordering
   tune_flip_profit_margin
@@ -158,4 +161,4 @@ execution-neutral -- memoization of toolchain probes: it changes how long resolv
   cc_backend_probe_cache [read at codegen]
 
 every scanned root meets its source-count floor: true
-OK: 113 config keys classified against 5 cache-key components.
+OK: 114 config keys classified against 6 cache-key components.

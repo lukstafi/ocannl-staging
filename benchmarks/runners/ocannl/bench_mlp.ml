@@ -198,12 +198,15 @@ let () =
       Stdlib.Printf.eprintf
         "%s: state=%s timed=%d failed=%d declines=[%s] terminal=%s rounds=%d sketch=%d \
          mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
-         baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b tensorization=%s \
+         timing=%s baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b \
+         tensorization=%s \
          mma_statements=%d mma_scalar_fallbacks=%d mma_best_ms=%s\n\
          %!"
         tag (Autotune.outcome_name r.outcome) r.candidates_timed r.candidates_failed declines
         terminal r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned
-        r.bound_pruned r.fissioned r.baseline_ms
+        r.bound_pruned r.fissioned
+        (Option.value_map r.timing ~default:"none" ~f:Autotune.timing_string)
+        r.baseline_ms
         (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
         r.best_ms
         (if String.is_empty r.best_label then "none" else r.best_label)

@@ -168,6 +168,7 @@ let () =
       backend;
       numerics = SC.numerics_tag ();
       codegen = Some (SC.codegen_tag ~limits ());
+      objective = Some (SC.objective_tag ());
       source_digest = SC.digest canon;
       saved = [];
       segments = None;

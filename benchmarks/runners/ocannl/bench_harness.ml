@@ -312,6 +312,14 @@ let searched t = t.searches > 0
     whose evidence this object exists to preserve, so they must not be the runs whose result line
     fails to parse.
 
+    Every time here is a reading of the tuner's configured {!Autotune.timing_mode}, and nothing in
+    the line records which one (gh-ocannl-755). Under the default [queued] they are per-launch
+    steady-state times and comparable with the step timings beside them; under [autotune_timing=
+    isolated] each carries one host submit/sync round trip, which on a sub-100-us kernel is tens of
+    percent to 2x, varying per candidate. So a [best_ms] is only comparable across result lines
+    taken under the same setting, and never against [step_ms] or [queued_step_ms] unless it was
+    queued.
+
     An arm that terminated on a failure carries [terminal_failure] and is {e never} the shipped one,
     whatever its pre-failure [best_ms] says (gh-ocannl-550): the search raised, so no routine was
     compiled from it — [Train.tune_placements] ranks it at [infinity] and this attribution follows
@@ -353,7 +361,9 @@ let tune_json t =
         in
         Bench_json.tune_arm ~name
           ~state:(Autotune.outcome_name r.Autotune.outcome)
-          ~searched ~cache_hit ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
+          ~searched ~cache_hit
+          ~timing:(Option.map r.Autotune.timing ~f:Autotune.timing_string)
+          ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
           ~tensorized:r.Autotune.best_tensorized
           ~tensorization:
             (Option.map r.Autotune.best_tensorization ~f:Ir.C_syntax.tensorization_name)

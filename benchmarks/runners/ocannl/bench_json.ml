@@ -41,6 +41,14 @@ let string s =
     and how its best timed tensorized candidate compared (gh-ocannl-546). [best_ms] and
     [mma_best_ms] are [infinity] when the arm timed nothing at all, which {!num} renders [null].
 
+    [timing] is the {!Autotune.timing_mode} every millisecond on this line was measured under
+    (gh-ocannl-755) — ["queued"] or ["isolated"], and [null] only for an arm whose report carried no
+    resolved objective. It is here because [best_ms], [baseline_ms] and [mma_best_ms] mean different
+    quantities under the two, differing by tens of percent to 2x and not by a constant, so an
+    artifact that omitted it could not be compared with another after the process exited. Taken from
+    the arm's own report rather than read from configuration at emit time, which a caller's explicit
+    [?timing] need not agree with.
+
     [state] names what the arm did about searching — the {!Autotune.outcome_name} of its outcome
     (gh-ocannl-677), one of ["searched"], ["search-died"], ["cache-replay"], ["search-disabled"],
     ["pre-search-failure"]. [searched] and [cache_hit] are that same fact projected onto the two
@@ -57,11 +65,14 @@ let string s =
     with [tensorized: true] and a [tensorization] other than ["tensorized"] measured scalar code
     under a tensorized label; [orchestrate.py] marks that cell rather than letting the number stand.
 *)
-let tune_arm ~name ~state ~searched ~cache_hit ~best_ms ~best_label ~tensorized ~tensorization
-    ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms ~terminal_failure =
+let tune_arm ~name ~state ~searched ~cache_hit ~timing ~best_ms ~best_label ~tensorized
+    ~tensorization ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms
+    ~terminal_failure =
   Printf.sprintf
-    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-    (string name) (string state) searched cache_hit (num best_ms) (string best_label) tensorized
+    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"timing":%s,"best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
+    (string name) (string state) searched cache_hit
+    (Option.value_map timing ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
+    (num best_ms) (string best_label) tensorized
     (Option.value_map tensorization ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
     mma_statements mma_scalar_fallbacks mma_seeded mma_timed (num mma_best_ms)
     (Option.value_map terminal_failure ~default:"null" ~f:(fun detail ->
