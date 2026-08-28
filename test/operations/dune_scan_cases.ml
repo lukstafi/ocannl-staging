@@ -1196,6 +1196,14 @@ let artifact_cases =
 (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{bin:pkg.probe})))|dune},
       [ "probe" ],
       [ "executable probe: declared (probe)" ] );
+    (* A public name is a NAME and a path is a PATH: classification strips a leading `./`, so a rule
+       running a local file spelled like the public name was read as its runner (Codex P2, round
+       10). *)
+    ( "a local path spelled like the public name is not a runner of it",
+      {dune|(executable (name probe) (public_name pkg.probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ./pkg.probe)))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
     ( "an executable nothing in the file runs has no deps field to answer for it",
       {dune|(executable (name probe) (modules probe))|dune},
       [ "probe" ],
@@ -1219,6 +1227,78 @@ let artifact_cases =
       {dune|(library (name l) (modules l) (libraries base))|dune},
       [],
       [] );
+    (* gh-ocannl-747: an `(executables …)` declares one program per name, and dune builds each from
+       its OWN main module -- `a` from `a.ml`. Combining them into one subject made a rule running
+       either count as a runner of both, so `b.exe`'s missing declaration was reported against `a`,
+       whose main module and initializer `b` does not link. Attribution follows dune's rule now: one
+       subject per name, its main module plus whatever no name claims. *)
+    ( "one of two executables in a stanza calls the initializer",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:a.exe})))
+(rule (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* The other name, with the declarations swapped: what is reported is the program whose module
+       calls, and it is reported over ITS runner. *)
+    ( "and the same stanza with the declaration on the wrong rule",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps ocannl_config) (action (run %{dep:a.exe})))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: undeclared (a)"; "executables b: stale declaration" ] );
+    (* A module that is no name's main module is linked into every program of the stanza, so it is
+       every name's caller and every runner has to declare -- the combining behaviour, kept where it
+       is the right answer. *)
+    ( "a shared module's call belongs to both programs",
+      {dune|(executables (names a b) (modules a b helper))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:a.exe})))
+(rule (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "helper" ],
+      [ "executables a: declared (helper)"; "executables b: undeclared (helper)" ] );
+    (* And `(public_names …)` pairs positionally with `(names …)`, so a runner naming one program's
+       public name is that program's runner and not the other's. `-` is dune's placeholder for a
+       name that is not installed. *)
+    ( "a public name answers for its own program only",
+      {dune|(executables (names a b) (public_names - pkg.b) (modules a b))
+(rule (deps ocannl_config) (action (run %{bin:pkg.b})))|dune},
+      [ "a" ],
+      [ "executables a: unrun (a)" ] );
+    (* One RULE running two names of the stanza: the declaration belongs to the rule, and the rule's
+       run of `a` is what justifies it -- so `b`, which needs nothing, is not carrying a stale
+       declaration. Judging each program independently reported one (Codex P2, round 2). *)
+    ( "a shared runner's declaration is justified by whichever program needs it",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* And a shared rule declaring it for NO program it runs is stale, as it was. *)
+    ( "a shared runner declaring it for neither program is stale",
+      {dune|(executables (names a b) (modules a b))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))|dune},
+      [],
+      [ "executables a: stale declaration"; "executables b: stale declaration" ] );
+    (* Staleness is the RULE's question, not the program's. `b` needs nothing and has a dedicated
+       rule of its own that declares nothing; asking whether ALL of `b`'s runners were justified
+       reported the shared rule's declaration against `b` (Codex P2, round 4). Asked per runner, the
+       shared rule is justified by `a` and the dedicated one declares nothing to be stale. *)
+    ( "a program sharing one runner and having a bare one of its own is not stale",
+      {dune|(executables (names a b) (modules a b))
+(rule (alias shared) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (progn (run %{dep:a.exe}) (run %{dep:b.exe}))))
+(rule (alias only-b) (deps ocannl_config) (action (run %{dep:b.exe})))|dune},
+      [ "a" ],
+      [ "executables a: declared (a)" ] );
+    (* A `chdir` moves which program a rule runs, so the identity is the resolved path and not the
+       written one: this rule runs `a`'s program, and `b`'s same-named local one is untouched by its
+       declaration (Codex P2, round 4). *)
+    ( "a chdir names the program in the directory it moves to",
+      {dune|(subdir b (executable (name probe) (modules probe))
+ (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+  (action (chdir ../a (run probe.exe)))))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
   ]
 
 (* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,
@@ -1239,6 +1319,17 @@ let artifact_subdir_cases =
       "gen",
       [ "probe" ],
       [ "executable probe: undeclared (probe)" ] );
+    (* A rule's path is relative to where the RULE lives, so a same-named executable in a sibling
+       subdirectory is a different program. Comparing the written path against an unqualified
+       `probe.exe` made `b`'s rule a runner of `a`'s program, which let an unrun executable inherit a
+       declaration made elsewhere -- the shape the basename rule was already rejected for, one
+       directory over (Codex P2, round 3). *)
+    ( "a rule in a sibling subdirectory is not this program's runner",
+      {dune|(subdir a (executable (name probe) (modules probe)))
+(subdir b (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run probe.exe))))|dune},
+      "a",
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
   ]
 
 (* Dune's default module set, which a stanza reaches for by omitting `(modules …)` or by naming
@@ -1262,6 +1353,38 @@ let artifact_default_modules_cases =
       [ "t" ],
       [ "t" ],
       [ "test t: undeclared (t)" ] );
+    (* Dune's ordered-set language nests, and an explicit set may be a nested expression with a
+       subtraction inside it. Reading only the top-level atoms resolved `(modules (t helper \\
+       helper))` to NO modules, which unclaims every source of the stanza and takes it out of every
+       check phrased over its modules (Codex P2, round 4). *)
+    ( "a nested ordered set is still an explicit list",
+      {dune|(test (name t) (modules (t helper \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* Grouping is semantics: `\\` is a difference between what stands to its left and right INSIDE
+       the parentheses that hold it, so a nested difference does not reach the terms beside it.
+       Flattening the field subtracted `guard` as well, which unclaims its source silently (Codex P2,
+       round 6). *)
+    ( "a nested difference does not subtract the terms beside it",
+      {dune|(test (name t) (modules (:standard \ helper) guard) (deps ocannl_config))|dune},
+      [ "t"; "helper"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
+    (* An outer term re-adds what a nested difference removed: dune links both, and keeping the
+       exclusion to subtract at the end dropped `guard` (Codex P2, round 8). *)
+    ( "an outer term cancels a nested exclusion",
+      {dune|(test (name t) (modules (t guard \ guard) guard) (deps ocannl_config))|dune},
+      [ "t"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
+    (* An empty nested difference is an empty SET, not a subtraction: its exclusion must not escape
+       into the `:standard` beside it (Codex P2, round 9). *)
+    ( "an empty nested difference takes nothing out of :standard",
+      {dune|(test (name t) (modules :standard (guard \ guard)) (deps ocannl_config))|dune},
+      [ "t"; "guard" ],
+      [ "guard" ],
+      [ "test t: undeclared (guard)" ] );
     ( "a set difference over :standard is still the default set",
       {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
       [ "t"; "helper" ],
@@ -1354,9 +1477,10 @@ let () =
       try
         (* The whole file is both the group and the runner population here; [env_var_deps] splits
            the two when a `(subdir …)` puts stanzas in different directories. *)
-        let stanzas = Scan.walk "" (Scan.stanzas source) ~f:(fun _ stanza -> [ stanza ]) in
+        let placed = Scan.walk "" (Scan.stanzas source) ~f:(fun sub stanza -> [ (sub, stanza) ]) in
+        let stanzas = List.map placed ~f:snd in
         List.map
-          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:stanzas stanzas ~calls
+          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:placed stanzas ~calls
              ~reads_prefix)
           ~f:render_artifact
       with exn ->

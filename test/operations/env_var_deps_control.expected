@@ -12,6 +12,33 @@ an external command handed a file this workspace builds is a stanza the rule rea
 the same stanza, declaring its backend, passes with the raw-text floor naming it too: true
 the same command handed nothing of this workspace is a stanza neither reader sees: true
 
+The guard rule is put to a tree of one `(executable)` whose module reads a configuration key
+from a LIST it hands to `Utils.read_env_var`. The arms differ in how the rules running it
+answer for `(env_var OCANNL_VIRTUALIZE_MAX_VISITS)`, in whether the stanza writes its `(modules …)` down, and in whether
+the key list is resolvable at all. Nothing else differs between the runs.
+
+the checker reports the key and exits 1 when the rule running the guard neither declares nor pins it: true
+the same tree with the declaration added passes and says nothing about it: true
+and so does the same tree pinning the variable with `setenv` instead: true
+a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported: true
+and an unpinned run of a HELPER beside a pinned guard does not un-pin it: true
+a stanza reaching for dune's default module set is judged too, not skipped for lack of a `(modules …)` field: true
+a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules: true
+a module the stanza names and this check was handed no source for is reported, not read as one that makes no reads: true
+a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt: true
+a key the registry does not know is still asked for, and is reported as undeclarable: true
+and pinning it is the way to answer for one: true
+a stanza dune runs itself pins through its own action, and is not asked to declare besides: true
+a dune file whose module sets this scan cannot place is refused, not approximated: true
+and the same directive inside a `(subdir …)` does not slip past the refusal: true
+a guard in a plain library is reported, there being no `deps` field in reach to declare it: true
+a library with inline tests is refused the same way, being linkable all the same: true
+and declaring the variable in `(inline_tests (deps …))` is no licence: that invalidates the inline runner alone: true
+a second rule running the same executable answers for its own run: one declaring does not cover the other: true
+and the same pair with both declaring passes: true
+a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence: true
+a key spelled in upper case names the same variable, and is asked for under the same name: true
+
 The focused-aggregate rule is put to a tree of one member stanza and a family alias that does
 or does not list it. Nothing else differs between the runs of a pair; the member takes each of
 the shapes dune builds a member in -- a test, an executable with its runner, a plural stanza,

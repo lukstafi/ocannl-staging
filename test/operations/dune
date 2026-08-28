@@ -1433,7 +1433,11 @@
  ; profile payload sets the backend key, so no precedence question here reaches one.
  (name config_profiles)
  (package neural_nets_lib)
- (deps ocannl_config config_profiles.expected)
+ ; The executable guards on an ambient `OCANNL_PROFILE`, which would abort it during module
+ ; initialization -- and a guard only RUNS when dune reruns the rule, which happens only for a
+ ; variable it declares (gh-ocannl-749). `env_var_deps` pairs the key the guard reads with this
+ ; declaration.
+ (deps ocannl_config config_profiles.expected (env_var OCANNL_PROFILE))
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 
@@ -1576,7 +1580,13 @@
   (env_var ocannl_backedn)
   (env_var OCANNL_BACKEDN)
   (env_var OCANNL_TOOL_SWEEP_STATE)
-  (env_var OCANNL_LOG_LEVEL_ROW))
+  (env_var OCANNL_LOG_LEVEL_ROW)
+  ; The synthetic keys the executable looks up by name (gh-ocannl-749). It reads them through
+  ; `Utils.read_env_var`, which no commandline flag outranks, and an ambient one draws the
+  ; unknown-key warning onto the very stream this target captures -- so the run depends on them
+  ; whether or not this rule sets them.
+  (env_var OCANNL_DEMO_KEY)
+  (env_var OCANNL_DASHED_ONLY_KEY))
  (action
   ; The environment half of the same claim (gh-ocannl-629): a name that is no key, and the two
   ; reserved namespaces whose silence is the other half of the policy -- the tooling's and
@@ -1634,7 +1644,11 @@
  (target config_var_fatal_spelling.actual)
  (deps
   ocannl_config
-  (env_var ocannl-log_level))
+  (env_var ocannl-log_level)
+  ; As above: the executable reads these two by name, and an ambient one writes to the stream this
+  ; target captures (gh-ocannl-749).
+  (env_var OCANNL_DEMO_KEY)
+  (env_var OCANNL_DASHED_ONLY_KEY))
  (action
   (setenv
    ocannl-log_level

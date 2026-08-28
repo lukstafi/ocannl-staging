@@ -100,6 +100,12 @@ let exempt_declarations =
     ( "test/operations/dune:OCANNL_BACKEDN",
       "the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than \
        read, so both write to the stream the golden holds" );
+    ( "test/operations/dune:OCANNL_DEMO_KEY",
+      "a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot be \
+       declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one drawing \
+       the unknown-key warning onto the stream those goldens capture" );
+    ( "test/operations/dune:OCANNL_DASHED_ONLY_KEY",
+      "the same fixture's second synthetic key, tracked for the same reason" );
     ( "test/operations/dune:ocannl-log_level",
       "the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that \
        gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning" );
@@ -642,6 +648,15 @@ let artifact_config_key = "build_files_prefix"
 (* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
 let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 
+(* The module that DEFINES the environment reader, and so names every configuration key there is
+   while passing them to it. Every other library module reaching the reader is reported
+   (gh-ocannl-749, Codex P2 round 6): a guard in a plain library is run by whatever links it, which
+   puts the declaration on every such stanza -- a relationship nothing follows, and the same argument
+   `Artifact_in_library` makes for the initializer. Named rather than derived, being one file with
+   one reason -- and by its repository PATH, since a basename match would extend the exemption to any
+   `utils.ml` a test directory adds, silently skipping its reads (Codex P2, round 8). *)
+let env_reader_home = "arrayjit/lib/utils.ml"
+
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -785,6 +800,7 @@ let main () =
   let tracked_keys = ref (Set.empty (module String)) in
   let gate_table = ref [] in
   let read_table = ref [] in
+  let guard_table = ref [] in
   (* Every `(env_var ...)` under a sexp, at any depth. *)
   let rec env_vars_in = function
     | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom name ] -> [ name ]
@@ -991,7 +1007,14 @@ let main () =
       (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
          what qualifies them -- not the repository-relative directory the modules are looked up
          in. *)
-      let all_group_stanzas = List.concat_map artifact_groups ~f:(fun (_, _, group) -> group) in
+      (* Each candidate runner with the SUBDIRECTORY it was found in: the path a rule writes is
+         relative to where the rule lives, so `(subdir a (rule … probe.exe))` and
+         `(subdir b (rule … probe.exe))` name different programs and only the pair says which
+         (gh-ocannl-747, Codex P2 round 3). *)
+      let all_group_runners =
+        List.concat_map artifact_groups ~f:(fun (subdir, _, group) ->
+            List.map group ~f:(fun stanza -> (subdir, stanza)))
+      in
       let subjects =
         List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
             let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
@@ -1022,7 +1045,7 @@ let main () =
                   else None)
             in
             List.map
-              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_stanzas
+              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_runners
                  group ~calls ~reads_prefix) ~f:(fun subject -> (here, subject)))
       in
       List.iter subjects ~f:(fun (here, subject) ->
@@ -1637,7 +1660,286 @@ let main () =
                                   change of the variable that decides what the run does"
                                  dir source read where)
                           else read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
-          | _ -> ()));
+          | _ -> ());
+      (* gh-ocannl-749: the same question, for the reads OCANNL's own environment reader makes.
+         `Sys.getenv "NAME"` above says which variable it reads in the call itself;
+         `Utils.read_env_var key` takes the key as a value, and the shape that matters takes it from
+         a LIST -- an ambient-environment guard, refusing to run when a variable that would rewrite
+         its golden is set. Three of them stand in this repository, and each was a hand-written list
+         of keys standing in for its rule's `(env_var …)` declarations with nothing relating the two:
+         the guard only RUNS when dune reruns the rule, which happens only for a variable the rule
+         declares, so a key on the list and not in the deps is a key the guard never sees.
+         gh-ocannl-628's hole, arrived at from the guard side.
+
+         What is checked is the relationship, not the list: the keys are read out of the source and
+         paired with the declarations of the rules dune runs it under, exactly as gh-ocannl-723 pairs
+         a `Generated.init` caller with `OCANNL_BUILD_FILES_PREFIX` -- and through the same
+         machinery, so the two cannot drift on who runs what.
+
+         A pass of its own rather than a clause of the gate walk above, because the question is per
+         PROGRAM and not per stanza, and because a stanza reaching for dune's default module set
+         never entered that walk at all: it is guarded on `(modules …)` being written down, so a
+         `(test (name guard))` whose implicit `guard.ml` reads the environment was accepted in
+         silence (Codex P2, round 1). `Scan.modules_of` resolves the default set the way the artifact
+         scan does.
+
+         Over the SUBDIRECTORY groups the artifact check built, and not the top-level stanzas: a
+         `(subdir gen …)` applies its stanzas to another directory, so a nested program's modules
+         live there and its runners may sit at either level -- and a walk that saw only the top level
+         read the wrapper as a stanza with no modules and skipped its body (Codex P2, round 2). *)
+      (* `(include_subdirs unqualified)` puts a descendant directory's modules into a stanza's
+         module set, which the per-directory census below does not model -- and the module would then
+         be claimed by nobody, taking its environment reads out of the check silently (Codex P2,
+         round 10). Refused rather than approximated: a scan that cannot place a file's modules
+         should say so, which is the same answer it gives an unresolvable key. *)
+      (* `(include_subdirs …)` is a STANZA, not a field of one: asking `Scan.field` for it searched
+         the children of every other stanza and never fired, so the refusal this was supposed to be
+         did not exist (Codex P2, round 11 -- my own round-10 fix, dead on arrival). *)
+      (* Through `Scan.walk`, so a directive inside a `(subdir gen …)` is reached too: looping the
+         top-level forms let a nested one bypass the refusal entirely (Codex P2, round 13 -- the
+         second defect in this one refusal, the first being that it matched nothing at all). *)
+      List.iter
+        (Scan.walk "" stanzas ~f:(fun _subdir stanza -> [ stanza ]))
+        ~f:(fun stanza ->
+          match stanza with
+          | Sexp.List (Sexp.Atom "include_subdirs" :: args)
+            when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
+              fail
+                (Printf.sprintf
+                   "%s declares `(include_subdirs %s)`, which puts a descendant directory's modules \
+                    into its stanzas' module sets -- this check derives a stanza's modules from its \
+                    own directory, so it cannot say which modules those stanzas own, nor which \
+                    environment reads go with them. Teach it the mode, or keep the guard's modules \
+                    beside their dune file"
+                   dune_file
+                   (String.concat ~sep:" " (List.concat_map args ~f:Scan.atoms)))
+          | _ -> ());
+      List.iter artifact_groups ~f:(fun (subdir, here, group) ->
+          let directory = if String.is_empty here then "." else here in
+          let directory_modules =
+            List.filter_map source_files ~f:(fun (path, _) ->
+                if String.equal (Stdlib.Filename.dirname path) directory then
+                  Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
+                else None)
+          in
+          List.iter group ~f:(fun stanza ->
+              let kind =
+                match Scan.head stanza with
+                | Some (("test" | "tests" | "executable" | "executables") as kind) -> Some kind
+                (* EVERY library, and always as a refusal. An `(inline_tests (deps …))` declaration
+                   invalidates the inline-test runner alone -- the library stays linkable, and a
+                   standalone test that links it reuses its output across a change of the variable
+                   the library module reads (Codex P2, round 7). So the inline-test case is not a
+                   licence either, and the rule is the one `Artifact_in_library` already states: a
+                   read that goes stale belongs to an executable's own modules. *)
+                | Some "library" -> Some "library"
+                | _ -> None
+              in
+              match kind with
+              | None -> ()
+              | Some kind ->
+                  let modules = Scan.modules_of ~directory_modules group stanza in
+                  let source_of_module module_name =
+                    Option.map (source_of ~dir:here module_name) ~f:(fun on_disk ->
+                        (module_name ^ ".ml", In_channel.read_all on_disk))
+                  in
+                  let path_of source = Scan.in_subdir here source in
+                  let named () =
+                    match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>"
+                  in
+                  (* Where the declaration has to sit is dune's semantics, not one rule: a `(test)`
+                     runs under its own `(deps …)` and an inline-test library under
+                     `(inline_tests (deps …))`, while an `(executable)` has no `deps` field at all,
+                     so every rule that RUNS it carries the declaration -- and EVERY one, since dune
+                     invalidates each rule on its own deps and the undeclared one would serve its
+                     previous result whatever its neighbours say. Reading the whole file's
+                     declarations instead was the latitude `config_dep_completeness` gives the
+                     `ocannl_config` dep, and it is too loose here: with six rules running
+                     `profile_precedence.exe`, one of them dropping a key still passed (Codex P1,
+                     round 1). *)
+                  (* A stanza dune runs ITSELF may still pin: `(test … (action (setenv OCANNL_X ""
+                     (run %{test}))))` fixes the value for every run of it, so demanding a
+                     declaration besides would be asking for a dependency the run cannot have (Codex
+                     P2, round 12). Derived from the stanza's own action, the same way an
+                     executable's runners are. *)
+                  let own_pins stanza =
+                    match List.map (Scan.runs_of ~subdir stanza) ~f:(fun (_, pins) -> pins) with
+                    | [] -> Set.empty (module String)
+                    | first :: rest -> List.fold rest ~init:first ~f:Set.inter
+                  in
+                  let programs =
+                    match kind with
+                    | "executable" | "executables" ->
+                        List.map
+                          (Scan.program_runners ~subdir ~runner_stanzas:all_group_runners group
+                             stanza) ~f:(fun (name, runners) ->
+                            ( name,
+                              Scan.program_modules stanza ~modules ~name,
+                              name ^ ".exe",
+                              (* The pins come with the runner, scoped to the runs of THIS program:
+                                 a `setenv` around a helper beside the subject pins nothing here, and
+                                 one around the subject is not undone by an unpinned helper (Codex
+                                 P1 round 1, P2 round 4). *)
+                              List.map runners ~f:(fun (r, pins) ->
+                                  (Scan.field r "deps", pins)) ))
+                    (* Against an EMPTY runner list, which is the same shape an executable nothing
+                       runs gets and says the same thing: there is no `deps` field in reach that a
+                       change of the variable could invalidate for every process that links it. *)
+                    | "library" -> [ (named (), modules, "whatever links it", []) ]
+                    | _ ->
+                        [ (named (), modules, "it", [ (Scan.field stanza "deps", own_pins stanza) ])
+                        ]
+                  in
+                  List.iter programs ~f:(fun (name, own_modules, program, runners) ->
+                      let where =
+                        Printf.sprintf "%s%s, %s %s" dune_file
+                          (if String.is_empty subdir then "" else " (subdir " ^ subdir ^ ")")
+                          kind name
+                      in
+                      (* A module the scan was handed no source for is one it cannot answer for, and
+                         reading it as a module with no reads is the silent direction: a new source
+                         root added without extending this rule's globs would take its guards out of
+                         the check without anything saying so (Codex P2, round 8). It is reported,
+                         except where the directory itself was never scanned -- that boundary is
+                         stated in the golden and reported by the gate half above. *)
+                      (* A module dune is TOLD has no implementation is not a missing input: an
+                         `.mli` performs no run-time read, so there is nothing for this check to
+                         look at (Codex P2, round 9). *)
+                      let without_implementation =
+                        List.concat_map
+                          [ "modules_without_implementation"; "virtual_modules" ]
+                          ~f:(fun field ->
+                            match Scan.field stanza field with
+                            | Some args ->
+                                List.filter_map args ~f:(function
+                                  | Sexp.Atom m -> Some (String.lowercase m)
+                                  | _ -> None)
+                            | None -> [])
+                      in
+                      List.iter own_modules ~f:(fun module_name ->
+                          if
+                            Option.is_none (source_of_module module_name)
+                            && (not
+                                  (List.mem without_implementation (String.lowercase module_name)
+                                     ~equal:String.equal))
+                            && Set.mem scanned_dirs directory
+                          then
+                            fail
+                              (Printf.sprintf
+                                 "%s names the module `%s`, and this check was handed no `%s.ml` \
+                                  from %s to read -- a module it cannot see is one whose \
+                                  environment reads it cannot check, which looks exactly like a \
+                                  module that makes none. Add the directory to the rule's globs, or \
+                                  name the generated source among them"
+                                 where module_name (String.lowercase module_name) directory));
+                      let sources =
+                        List.filter_map own_modules ~f:source_of_module
+                        |> List.filter ~f:(fun (source, _) ->
+                            not (String.equal (path_of source) env_reader_home))
+                      in
+                      let reads =
+                        List.map sources ~f:(fun (source, content) ->
+                            ( source,
+                              if Sources.could_read_env_var content then
+                                Sources.env_reader_reads_in_source content
+                              else { Sources.reader_keys = []; reader_unresolved = [] } ))
+                      in
+                      (* Every reach is resolved to a finite set of keys or REPORTED. A reach the
+                         scan cannot follow used to fall back on the program's string literals,
+                         which is a superset where the key list is written in the program and says
+                         nothing where it is not -- so one incidental literal naming a real key made
+                         an unresolved reach look answered, and the check reported success having
+                         proven nothing about it (Codex P2, round 4). *)
+                      List.iter reads ~f:(fun (source, r) ->
+                          List.iter r.Sources.reader_unresolved ~f:(fun what ->
+                              fail
+                                (Printf.sprintf
+                                   "%s: %s/%s reaches the environment reader with a key this scan \
+                                    cannot resolve to a finite set -- %s. There is then nothing to \
+                                    hold the `(env_var …)` declarations against, and a check that \
+                                    carried on would report success having proven nothing. Iterate \
+                                    a list of string literals this program's modules define, or \
+                                    spell the key at the call"
+                                   where directory source what)));
+                      (* Normalized before the registry is consulted: `read_env_var` builds its
+                         variable through `Utils.env_var_name`, which UPPERCASES, so
+                         `read_env_var "PROFILE"` reads the same `OCANNL_PROFILE` as the lowercase
+                         spelling. A case-sensitive membership test dropped it as an unknown key and
+                         asked for no declaration -- a silent pass over a variable the guard does
+                         observe (Codex P2, round 5).
+
+                         Every resolved key is asked for, KNOWN OR NOT: the reader builds and
+                         consults `OCANNL_<KEY>` whatever the registry says, so a misspelled key is
+                         still a variable the run depends on, and filtering it out recorded neither
+                         a requirement nor a refusal (Codex P2, round 11). An unknown one cannot be
+                         declared -- the sibling check refuses a declaration naming no key OCANNL
+                         reads -- so a pin is the way to satisfy it, which is what the synthetic
+                         keys in `config_var_spellings` already do. *)
+                      let keys =
+                        List.concat_map reads ~f:(fun (_, r) -> r.Sources.reader_keys)
+                        |> List.map ~f:String.lowercase
+                        |> List.dedup_and_sort ~compare:String.compare
+                      in
+                      List.iter keys ~f:(fun key ->
+                          let var = Utils.env_var_name key in
+                          let answers (deps, pins) =
+                            Scan.declares_env_var deps var
+                            (* A variable the rule pins with `(setenv …)` cannot arrive from the
+                               ambient environment, so that run does not depend on it. By SCOPE, and
+                               at every run the action makes: a `progn` pinning one branch has not
+                               pinned another. *)
+                            || Set.mem pins var
+                          in
+                          match (runners, List.filter runners ~f:(fun r -> not (answers r))) with
+                          | [], _ when String.equal kind "library" ->
+                              fail
+                                (Printf.sprintf
+                                   "%s reads the configuration key `%s` straight from the \
+                                    environment, from a library module -- every executable that \
+                                    links the library reads it, so the requirement would fall on \
+                                    every stanza that links it, where nothing follows it. An \
+                                    `(inline_tests (deps …))` declaration is not a licence either: \
+                                    it invalidates the inline-test runner alone, and leaves the \
+                                    other linkers stale. Move the read into the executable's own \
+                                    modules, where `(env_var %s)` can answer for it"
+                                   where key var)
+                          | [], _ ->
+                              fail
+                                (Printf.sprintf
+                                   "%s reads the configuration key `%s` straight from the \
+                                    environment, and no stanza in this file runs %s -- an \
+                                    `(executable)` has no `deps` field, so the `(env_var %s)` \
+                                    declaration goes on the rule that RUNS it, and this scan can \
+                                    find none"
+                                   where key program var)
+                          | _, [] ->
+                              guard_table :=
+                                ( where,
+                                  var,
+                                  Printf.sprintf "%d run%s of %s" (List.length runners)
+                                    (if List.length runners = 1 then "" else "s")
+                                    program )
+                                :: !guard_table
+                          | _, missing ->
+                              fail
+                                (Printf.sprintf
+                                   "%s reads the configuration key `%s` straight from the \
+                                    environment through `Utils.%s`, and %d of the %d run%s of %s \
+                                    neither declares `(env_var %s)` nor pins the variable -- dune \
+                                    then serves that run's previous output across a change of it, \
+                                    so the guard that would have reported the variable never runs. \
+                                    Add the declaration to every rule that runs %s, or pin the \
+                                    variable there with `(setenv %s …)`%s"
+                                   where key Sources.env_reader (List.length missing)
+                                   (List.length runners)
+                                   (if List.length runners = 1 then "" else "s")
+                                   program var program var
+                                   (if Set.mem Utils.known_config_keys key then ""
+                                    else
+                                      Printf.sprintf
+                                        ". `%s` is no configuration key OCANNL reads, so it cannot \
+                                         be declared -- pin it, or fix the spelling"
+                                        key)))))));
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
   in
@@ -1662,6 +1964,19 @@ let main () =
     "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
   List.sort !read_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, read, source) -> printf "  %-30s %s (%s)\n" read where source);
+  printf
+    "\n\
+     Configuration keys a program reads straight from the environment through `Utils.%s`, and how\n\
+     many runs of it answer for each (gh-ocannl-749). A key read this way cannot be outranked by\n\
+     a commandline flag or a config file, so every run depends on the variable unconditionally --\n\
+     and EVERY one of them declares it or pins it with `setenv`, since dune invalidates each rule\n\
+     on its own deps.\n"
+    Sources.env_reader;
+  List.sort !guard_table ~compare:(fun (wa, a, sa) (wb, b, sb) ->
+      match String.compare wa wb with
+      | 0 -> ( match String.compare a b with 0 -> String.compare sa sb | c -> c)
+      | c -> c)
+  |> List.iter ~f:(fun (where, var, source) -> printf "  %-38s %s (%s)\n" var where source);
   let stale_gateless =
     Set.diff (Set.of_list (module String) (List.map gateless_dirs ~f:fst)) !gateless_used
   in
@@ -2577,9 +2892,15 @@ let family_control () =
   (* The plural shape's second module. Written once and always present: which stanza CLAIMS it is
      what differs between the shapes, and an unclaimed source is not itself a finding here. *)
   write_file (Stdlib.Filename.concat root "t/probe2.ml") "let () = ()\n";
+  (* The remaining shapes' own modules. A stanza names its modules, and a module this scan is handed
+     no source for is a finding of its own (gh-ocannl-749) -- so a fixture tree that declares one
+     without providing it fails for a reason that has nothing to do with the family relationship.
+     Inert, present always, and claimed only by the shape that names them. *)
+  write_file (Stdlib.Filename.concat root "t/harness.ml") "let () = ()\n";
+  write_file (Stdlib.Filename.concat root "t/child/childgate.ml") "let () = ()\n";
   let paths =
     "t/dune" :: "t/gate.ml" :: "t/probe.ml" :: "t/probe2.ml" :: "t/child/probe.ml"
-    :: List.map context ~f:fst
+    :: "t/harness.ml" :: "t/child/childgate.ml" :: List.map context ~f:fst
   in
   let run ?(shape = Single_test) ?(listing = Every) ?probe ~metal ~lifecycle ~family () =
     let probe = match probe with Some probe -> probe | None -> if lifecycle then Reads else Neither in
@@ -3051,10 +3372,416 @@ let family_control () =
   Verdict.p "a stanza neither derivation calls a member is asked for no family alias" no_member_ok;
   try remove_tree root with Unix.Unix_error _ -> ()
 
+(* gh-ocannl-749's control, and why it is a third tree.
+
+   The rule is that a key a module reads straight from the environment is one the stanza running it
+   declares. Every guard in this repository now declares its keys -- which is what this change did --
+   so a control drawn from the corpus would pass whether the rule has teeth or has stopped deciding.
+   Put to a tree of its own it is the rule that is claimed about: the same source, once under a rule
+   that declares the key, once under one that does not, and once under one that pins the variable
+   with `setenv` instead.
+
+   The source is a GUARD, not a literal read: the key reaches the reader through a list, which is
+   the shape the hand-written lists took and the shape the earlier check could not see. One key is
+   a configuration key and one is not, so the tree also says that the candidate set is intersected
+   with the registry rather than taken whole -- a scan demanding `OCANNL_NOT_A_CONFIG_KEY` would
+   fail the legitimate run, and the declaration it asked for would then be reported by the sibling
+   check as naming no key OCANNL reads. *)
+
+let guard_key = "virtualize_max_visits"
+let guard_non_key = "not_a_config_key"
+
+(* The same guard with its key SHOUTED. `read_env_var` uppercases to build the variable, so this
+   reads the very same `OCANNL_<KEY>`; a case-sensitive look-up against the registry dropped it as
+   an unknown key and asked for nothing (Codex P2, round 5). *)
+let shouting_probe =
+  Printf.sprintf
+    "let guarded = [ %S ]\n\
+     let () =\n\
+    \  List.iter\n\
+    \    (fun arg_name ->\n\
+    \      match Utils.read_env_var arg_name with Some _ -> exit 1 | None -> ())\n\
+    \    guarded\n"
+    (String.uppercase guard_key)
+
+let guard_of key =
+  Printf.sprintf
+    "let guarded = [ %S ]\n\
+     let () =\n\
+    \  List.iter\n\
+    \    (fun arg_name ->\n\
+    \      match Utils.read_env_var arg_name with Some _ -> exit 1 | None -> ())\n\
+    \    guarded\n"
+    key
+
+let guard_probe = guard_of guard_key
+
+(* A guard on a key the registry does not know. The reader builds and consults `OCANNL_<KEY>`
+   whatever the registry says, so the run depends on it -- and it cannot be DECLARED, the sibling
+   check refusing a declaration naming no key OCANNL reads, so a pin is the only way to answer for
+   it (Codex P2, round 11 of PR #484). *)
+let unknown_key_probe = guard_of guard_non_key
+
+(* A dynamic reach whose key list is in ANOTHER compilation unit -- the reviewer's own example. The
+   source names no configuration key at all, so the candidate fallback resolves to nothing and the
+   check would have run its loop over an empty list, passing while checking nothing. *)
+let opaque_probe = "let () = List.iter (fun k -> ignore (Utils.read_env_var k)) Shared.guarded\n"
+
+(* One rule running the guard, answering for the variable in one of the three ways a rule can. The
+   declared spelling is built from the key rather than written out, so the control cannot drift from
+   `Utils.env_var_name`. *)
+let guard_rule ~target ~declares ~pins =
+  Printf.sprintf
+    {dune|(rule
+ ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.
+ (target %s)
+ (deps
+  ocannl_config
+%s  %%{dep:guard.exe})
+ (action
+  (with-stdout-to
+   %%{target}
+%s)))
+|dune}
+    target
+    (if declares then Printf.sprintf "  (env_var %s)\n" (Utils.env_var_name guard_key) else "")
+    (match pins with
+    | `No -> "  (run ./guard.exe)"
+    | `Around_the_run ->
+        Printf.sprintf "  (setenv %s 1\n   (run ./guard.exe))" (Utils.env_var_name guard_key)
+    | `Around_the_run_unknown ->
+        Printf.sprintf "  (setenv %s 1\n   (run ./guard.exe))" (Utils.env_var_name guard_non_key)
+    (* The pin on a SIBLING branch of the same action: `setenv` scopes over what it wraps, so this
+       rule's run of the guard is as exposed to the ambient variable as an unpinned one. A check
+       reading the rule's setenvs as a flat set would credit it (Codex P1, round 1). *)
+    | `Elsewhere_in_the_action ->
+        Printf.sprintf "  (progn\n   (setenv %s 1\n    (run ./other.exe))\n   (run ./guard.exe))"
+          (Utils.env_var_name guard_key)
+    (* The inverse: the guard IS pinned, and an unpinned run of a helper stands beside it. The pin
+       belongs to the guard's run, so an intersection taken over every command in the action --
+       which is what this check did first -- demanded a declaration the run cannot need (Codex P2,
+       round 4). *)
+    | `Around_the_run_beside_a_helper ->
+        Printf.sprintf "  (progn\n   (setenv %s 1\n    (run ./guard.exe))\n   (run ./other.exe))"
+          (Utils.env_var_name guard_key))
+
+(* The arms. Everything but the one thing each is about is held fixed, so a difference in verdict is
+   that thing's and nothing else's. *)
+let guard_subject ~arm =
+  let executable modules =
+    Printf.sprintf "(executable\n (name guard)\n%s (libraries arrayjit.utils))\n\n" modules
+  in
+  let named = " (modules guard)\n" in
+  let one ~declares ~pins = guard_rule ~target:"guard.actual" ~declares ~pins in
+  match arm with
+  | `Declares | `Unresolvable -> executable named ^ one ~declares:true ~pins:`No
+  | `Pins -> executable named ^ one ~declares:false ~pins:`Around_the_run
+  | `Pins_beside_a_helper ->
+      executable named ^ one ~declares:false ~pins:`Around_the_run_beside_a_helper
+  | `Pins_elsewhere -> executable named ^ one ~declares:false ~pins:`Elsewhere_in_the_action
+  | `Neither -> executable named ^ one ~declares:false ~pins:`No
+  (* An `(executable)` reaching for dune's DEFAULT module set: the same tree with the `(modules …)`
+     field left off, which is the common shape and the one the check skipped entirely while it was
+     a clause of a walk guarded on that field being written down (Codex P2, round 1). *)
+  | `Implicit_modules -> executable "" ^ one ~declares:false ~pins:`No
+  (* A module the stanza NAMES and the scan was handed no source for. Reading it as a module with no
+     reads is the silent direction (Codex P2, round 8). *)
+  | `Module_without_source ->
+      Printf.sprintf "(executable\n (name guard)\n (modules guard helper)\n (libraries arrayjit.utils))\n\n%s"
+        (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
+  (* A test directory's own `utils.ml`: the exemption belongs to the module that DEFINES the reader,
+     at its repository path, and a basename match would extend it to this one (Codex P2, round 8). *)
+  | `Utils_lookalike ->
+      Printf.sprintf "(executable\n (name guard)\n (modules guard utils)\n (libraries arrayjit.utils))\n\n%s"
+        (guard_rule ~target:"guard.actual" ~declares:false ~pins:`No)
+  (* The same program one directory down. A `(subdir …)` applies its stanzas to another directory,
+     so the modules live there and the runner may sit at either level -- and a walk over the
+     top-level forms alone read the wrapper as a stanza with no modules (Codex P2, round 2). *)
+  | `In_a_subdir ->
+      Printf.sprintf "(subdir gen\n %s)\n\n%s"
+        (String.strip (executable " (modules guard)\n"))
+        (String.substr_replace_all
+           (guard_rule ~target:"guard.actual" ~declares:false ~pins:`No)
+           ~pattern:"guard.exe" ~with_:"gen/guard.exe")
+  (* A `(library)` with inline tests is RUN by dune, under `(inline_tests (deps …))`, so a module of
+     it reading the environment goes stale the same way an executable's does. A plain `(library)` is
+     out of scope, `Utils` being where the reader lives. *)
+  (* And a PLAIN library, run by nothing of its own: the requirement would fall on every stanza that
+     links it, so the read is reported rather than attributed (Codex P2, round 6). *)
+  (* The mode this scan refuses to model. It shipped dead once -- matched as a FIELD of a stanza
+     rather than as a stanza -- so it has an arm of its own now: a refusal with no control is a
+     refusal nobody has seen happen (Codex P2, round 11). *)
+  (* The unknown-key guard, once answered for and once not. *)
+  | `Unknown_key -> executable named ^ one ~declares:false ~pins:`No
+  | `Unknown_key_pinned ->
+      executable named
+      ^ guard_rule ~target:"guard.actual" ~declares:false ~pins:`Around_the_run_unknown
+  (* A `(test)` dune runs itself, with an action that PINS the variable: the run cannot observe the
+     ambient one, so no declaration answers for it (Codex P2, round 12). *)
+  | `Self_running_pin ->
+      Printf.sprintf
+        "(test\n\
+        \ ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
+        \ (name guard)\n\
+        \ (modules guard)\n\
+        \ (deps ocannl_config)\n\
+        \ (libraries arrayjit.utils)\n\
+        \ (action\n\
+        \  (setenv %s 1\n\
+        \   (run %%{test}))))\n\
+         \n\
+         (rule\n\
+        \ (alias runtest)\n\
+        \ (deps ocannl_config (universe))\n\
+        \ (action\n\
+        \  (progn)))\n"
+        (Utils.env_var_name guard_key)
+  (* The same directive one level down, which the top-level loop did not reach. *)
+  | `Include_subdirs_nested ->
+      "(subdir gen\n (include_subdirs unqualified))\n\n"
+      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+          (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
+  | `Include_subdirs ->
+      "(include_subdirs unqualified)\n\n"
+      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+          (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
+  | `Plain_library ->
+      "(library\n\
+      \ (name guard)\n\
+      \ (modules guard)\n\
+      \ (libraries arrayjit.utils))\n"
+  | `Inline_tests_library ->
+      "(library\n\
+       ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
+      \ (name guard)\n\
+      \ (modules guard)\n\
+      \ (libraries arrayjit.utils)\n\
+      \ (inline_tests))\n"
+  (* An `(inline_tests (deps …))` declaration is not a licence: it invalidates the inline runner
+     alone, while the library stays linkable by executables that declare nothing (Codex P2, round
+     7). *)
+  | `Inline_tests_library_declares ->
+      Printf.sprintf
+        "(library\n\
+         ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
+        \ (name guard)\n\
+        \ (modules guard)\n\
+        \ (libraries arrayjit.utils)\n\
+        \ (inline_tests\n\
+        \  (deps\n\
+        \   (env_var %s))))\n"
+        (Utils.env_var_name guard_key)
+  (* TWO rules running the same executable. Dune invalidates each on its own deps, so one of them
+     declaring says nothing about the other's run -- the file-wide latitude this check started with
+     accepted exactly this tree (Codex P1, round 1). *)
+  | `Second_runner_bare ->
+      executable named ^ one ~declares:true ~pins:`No ^ "\n"
+      ^ guard_rule ~target:"guard2.actual" ~declares:false ~pins:`No
+  | `Second_runner_declares ->
+      executable named ^ one ~declares:true ~pins:`No ^ "\n"
+      ^ guard_rule ~target:"guard2.actual" ~declares:true ~pins:`No
+
+let guard_control () =
+  let exe =
+    let name = Stdlib.Sys.executable_name in
+    if Stdlib.Filename.is_relative name then Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
+    else name
+  in
+  let root = Stdlib.Filename.temp_dir "evd_guard" "" in
+  let context = control_context () in
+  List.iter context ~f:(fun (file, content) ->
+      write_file (Stdlib.Filename.concat root file) content);
+  let paths =
+    "t/dune" :: "t/guard.ml" :: "t/gen/guard.ml" :: "t/utils.ml" :: List.map context ~f:fst
+  in
+  (* The probe goes where the stanza's modules live, which for the subdir arm is one level down. Both
+     places are handed to the checker on every run, and the arm that is not using one writes an inert
+     source there, so the argument list -- and hence which globs the checker believes it was given --
+     is the same in every arm. *)
+  let run ?(probe = guard_probe) ?(at = "t/guard.ml") arm =
+    List.iter [ "t/guard.ml"; "t/gen/guard.ml"; "t/utils.ml" ] ~f:(fun path ->
+        write_file
+          (Stdlib.Filename.concat root path)
+          (if String.equal path at then probe else "let () = ()\n"));
+    write_file (Stdlib.Filename.concat root "t/dune") (guard_subject ~arm);
+    run_checker ~root ~exe ("." :: paths)
+  in
+  let report label (status, text) =
+    eprintf "the guard control's %s run %s. Its captured output:\n%s\n" label
+      (describe_status status) text
+  in
+  let exited n (status, _) = match status with Unix.WEXITED m -> m = n | _ -> false in
+  let undeclared = run `Neither in
+  let declared = run `Declares in
+  let pinned = run `Pins in
+  let pinned_elsewhere = run `Pins_elsewhere in
+  let pinned_beside_helper = run `Pins_beside_a_helper in
+  let implicit = run `Implicit_modules in
+  let in_a_subdir = run `In_a_subdir ~at:"t/gen/guard.ml" in
+  let module_without_source = run `Module_without_source in
+  let utils_lookalike = run `Utils_lookalike ~at:"t/utils.ml" in
+  let unknown_key = run `Unknown_key ~probe:unknown_key_probe in
+  let unknown_key_pinned = run `Unknown_key_pinned ~probe:unknown_key_probe in
+  let self_running_pin = run `Self_running_pin in
+  let include_subdirs = run `Include_subdirs in
+  let include_subdirs_nested = run `Include_subdirs_nested in
+  let plain_library = run `Plain_library in
+  let inline_library = run `Inline_tests_library in
+  let inline_library_declares = run `Inline_tests_library_declares in
+  let second_bare = run `Second_runner_bare in
+  let second_declares = run `Second_runner_declares in
+  let unresolvable = run `Unresolvable ~probe:opaque_probe in
+  let shouted = run `Neither ~probe:shouting_probe in
+  (* A fragment of the failure and of nothing else. The report's own heading names the reader and
+     the key too, so a substring drawn from there would be found in every run (Codex's round-one
+     lesson on the sibling controls, met here on the first try). *)
+  let diagnostic = "so the guard that would have reported the variable never runs" in
+  let unresolved = "with a key this scan cannot resolve" in
+  let says text substring = String.is_substring text ~substring in
+  let names_the_key text = says text (Utils.env_var_name guard_key) in
+  let reports (result : Unix.process_status * string) fragment =
+    exited 1 result && says (snd result) fragment
+  in
+  let passes result fragment = exited 0 result && not (says (snd result) fragment) in
+  let undeclared_ok =
+    reports undeclared diagnostic
+    && names_the_key (snd undeclared)
+  in
+  let declared_ok = passes declared diagnostic in
+  let pinned_ok = passes pinned diagnostic in
+  let pinned_elsewhere_ok = reports pinned_elsewhere diagnostic in
+  let pinned_beside_helper_ok = passes pinned_beside_helper diagnostic in
+  let implicit_ok = reports implicit diagnostic && names_the_key (snd implicit) in
+  let in_a_subdir_ok = reports in_a_subdir diagnostic && names_the_key (snd in_a_subdir) in
+  let module_without_source_ok =
+    reports module_without_source "handed no `helper.ml`"
+  in
+  let utils_lookalike_ok =
+    reports utils_lookalike diagnostic && names_the_key (snd utils_lookalike)
+  in
+  let unknown_key_ok =
+    reports unknown_key "no configuration key OCANNL reads"
+    && String.is_substring (snd unknown_key) ~substring:(Utils.env_var_name guard_non_key)
+  in
+  let unknown_key_pinned_ok = passes unknown_key_pinned diagnostic in
+  let self_running_pin_ok = passes self_running_pin diagnostic in
+  let include_subdirs_ok = reports include_subdirs "include_subdirs unqualified" in
+  let include_subdirs_nested_ok =
+    reports include_subdirs_nested "include_subdirs unqualified"
+  in
+  let plain_library_ok =
+    reports plain_library "from a library module" && names_the_key (snd plain_library)
+  in
+  let inline_library_ok =
+    reports inline_library "from a library module" && names_the_key (snd inline_library)
+  in
+  let inline_library_declares_ok =
+    reports inline_library_declares "from a library module"
+    && names_the_key (snd inline_library_declares)
+  in
+  (* The count is what says the SECOND runner is what failed: one of the two, not both, and not the
+     stanza as a whole. *)
+  let second_bare_ok =
+    reports second_bare diagnostic && says (snd second_bare) "1 of the 2 runs of guard.exe"
+  in
+  let second_declares_ok = passes second_declares diagnostic in
+  let unresolvable_ok = reports unresolvable unresolved in
+  let shouted_ok = reports shouted diagnostic && names_the_key (snd shouted) in
+  if not undeclared_ok then report "undeclared" undeclared;
+  if not declared_ok then report "declared" declared;
+  if not pinned_ok then report "pinned" pinned;
+  if not pinned_elsewhere_ok then report "pinned-elsewhere" pinned_elsewhere;
+  if not implicit_ok then report "implicit-modules" implicit;
+  if not pinned_beside_helper_ok then report "pinned-beside-a-helper" pinned_beside_helper;
+  if not in_a_subdir_ok then report "in-a-subdir" in_a_subdir;
+  if not module_without_source_ok then report "module-without-source" module_without_source;
+  if not utils_lookalike_ok then report "utils-lookalike" utils_lookalike;
+  if not unknown_key_ok then report "unknown-key" unknown_key;
+  if not unknown_key_pinned_ok then report "unknown-key-pinned" unknown_key_pinned;
+  if not self_running_pin_ok then report "self-running-pin" self_running_pin;
+  if not include_subdirs_ok then report "include-subdirs" include_subdirs;
+  if not include_subdirs_nested_ok then
+    report "include-subdirs-nested" include_subdirs_nested;
+  if not plain_library_ok then report "plain-library" plain_library;
+  if not inline_library_ok then report "inline-tests-library" inline_library;
+  if not inline_library_declares_ok then
+    report "inline-tests-library-declares" inline_library_declares;
+  if not second_bare_ok then report "second-runner-bare" second_bare;
+  if not second_declares_ok then report "second-runner-declares" second_declares;
+  if not unresolvable_ok then report "unresolvable" unresolvable;
+  if not shouted_ok then report "shouted-key" shouted;
+  printf
+    "\n\
+     The guard rule is put to a tree of one `(executable)` whose module reads a configuration key\n\
+     from a LIST it hands to `Utils.read_env_var`. The arms differ in how the rules running it\n\
+     answer for `(env_var %s)`, in whether the stanza writes its `(modules …)` down, and in whether\n\
+     the key list is resolvable at all. Nothing else differs between the runs.\n\n"
+    (Utils.env_var_name guard_key);
+  Verdict.p
+    "the checker reports the key and exits 1 when the rule running the guard neither declares nor \
+     pins it"
+    undeclared_ok;
+  Verdict.p "the same tree with the declaration added passes and says nothing about it" declared_ok;
+  Verdict.p "and so does the same tree pinning the variable with `setenv` instead" pinned_ok;
+  Verdict.p
+    "a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported"
+    pinned_elsewhere_ok;
+  Verdict.p
+    "and an unpinned run of a HELPER beside a pinned guard does not un-pin it"
+    pinned_beside_helper_ok;
+  Verdict.p
+    "a stanza reaching for dune's default module set is judged too, not skipped for lack of a \
+     `(modules …)` field"
+    implicit_ok;
+  Verdict.p
+    "a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules"
+    in_a_subdir_ok;
+  Verdict.p
+    "a module the stanza names and this check was handed no source for is reported, not read as one \
+     that makes no reads"
+    module_without_source_ok;
+  Verdict.p
+    "a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt"
+    utils_lookalike_ok;
+  Verdict.p
+    "a key the registry does not know is still asked for, and is reported as undeclarable"
+    unknown_key_ok;
+  Verdict.p "and pinning it is the way to answer for one" unknown_key_pinned_ok;
+  Verdict.p
+    "a stanza dune runs itself pins through its own action, and is not asked to declare besides"
+    self_running_pin_ok;
+  Verdict.p
+    "a dune file whose module sets this scan cannot place is refused, not approximated"
+    include_subdirs_ok;
+  Verdict.p "and the same directive inside a `(subdir …)` does not slip past the refusal"
+    include_subdirs_nested_ok;
+  Verdict.p
+    "a guard in a plain library is reported, there being no `deps` field in reach to declare it"
+    plain_library_ok;
+  Verdict.p "a library with inline tests is refused the same way, being linkable all the same"
+    inline_library_ok;
+  Verdict.p
+    "and declaring the variable in `(inline_tests (deps …))` is no licence: that invalidates the \
+     inline runner alone"
+    inline_library_declares_ok;
+  Verdict.p
+    "a second rule running the same executable answers for its own run: one declaring does not \
+     cover the other"
+    second_bare_ok;
+  Verdict.p "and the same pair with both declaring passes" second_declares_ok;
+  Verdict.p
+    "a dynamic reach whose keys resolve to nothing is refused rather than passed over in silence"
+    unresolvable_ok;
+  Verdict.p
+    "a key spelled in upper case names the same variable, and is asked for under the same name"
+    shouted_ok;
+  try remove_tree root with Unix.Unix_error _ -> ()
+
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | _ :: [ "--control" ] ->
       control ();
       floor_control ();
+      guard_control ();
       family_control ()
   | _ -> main ()

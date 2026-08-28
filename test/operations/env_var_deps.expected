@@ -18,11 +18,15 @@ Directories whose sources this scan reads:
   tools
 
 Configuration keys tracked as ambient dependencies, in the one spelling OCANNL reads:
+  autotune_beam_width
+  autotune_rounds
+  autotune_search
   backend
   buffer_aliasing
   build_files_prefix
   cc_backend_arch_flags
   cc_backend_compiler_command
+  cc_backend_fp_contract
   cc_backend_simd_flags
   cc_fp16_arithmetic
   cc_vector_bytes
@@ -37,6 +41,8 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   no_config_file
   profile
   suppress_welcome_message
+  tf32_matmuls
+  tune_inline_flips
   virtualize_max_visits
 
 Per-module tracing gates, and the library whose preprocessor_deps declares each:
@@ -62,6 +68,33 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
 
 Ambient variables a module reads by name at run time, and the stanza that declares each:
   OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
+
+Configuration keys a program reads straight from the environment through `Utils.read_env_var`, and how
+many runs of it answer for each (gh-ocannl-749). A key read this way cannot be outranked by
+a commandline flag or a config file, so every run depends on the variable unconditionally --
+and EVERY one of them declares it or pins it with `setenv`, since dune invalidates each rule
+on its own deps.
+  OCANNL_DASHED_ONLY_KEY                 test/operations/dune, executable config_var_spellings (3 runs of config_var_spellings.exe)
+  OCANNL_DEMO_KEY                        test/operations/dune, executable config_var_spellings (3 runs of config_var_spellings.exe)
+  OCANNL_PROFILE                         test/operations/dune, test config_profiles (1 run of it)
+  OCANNL_AUTOTUNE_BEAM_WIDTH             test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_AUTOTUNE_ROUNDS                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_AUTOTUNE_SEARCH                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_ARCH_FLAGS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_FP_CONTRACT          test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_BACKEND_SIMD_FLAGS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_CC_VECTOR_BYTES                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_FP16_ARITHMETIC                 test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_MODEL_DEFAULT_SCHEDULE          test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_NO_CONFIG_FILE                  test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_TF32_MATMULS                    test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_TUNE_INLINE_FLIPS               test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_VIRTUALIZE_MAX_VISITS           test/operations/profiles/dune, executable profile_precedence (6 runs of profile_precedence.exe)
+  OCANNL_LOG_CONFIG_SOURCING             test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_LOG_LEVEL                       test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_NO_CONFIG_FILE                  test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_PROFILE                         test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
+  OCANNL_SUPPRESS_WELCOME_MESSAGE        test/operations/startup_streams/dune, executable startup_streams (3 runs of startup_streams.exe)
 
 Ambient environment gates, by dune file and every alias whose build runs one:
   arrayjit/test/dune                       @lifecycle
@@ -149,6 +182,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
   test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale
   test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
+  test/operations/dune:OCANNL_DEMO_KEY -- a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot be declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one drawing the unknown-key warning onto the stream those goldens capture
+  test/operations/dune:OCANNL_DASHED_ONLY_KEY -- the same fixture's second synthetic key, tracked for the same reason
   test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
 Artifact-directory declarations, by dune file. A stanza whose modules call

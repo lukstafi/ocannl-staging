@@ -259,6 +259,16 @@ let x = Utils.settings.large_models|ocaml},
       [] );
   ]
 
+(* A predicate is named in two places -- the census that folds its keys out of a CALL, and the check
+   that refuses it handed around as a VALUE -- and while those were two hand-written lists, a
+   predicate reaching only the second lost its keys from the census in silence (gh-ocannl-750). One
+   table names them now, so what is left to pin is that every entry of it is honoured at both
+   positions. Generated from the table for that reason: a restated copy would check that the copy
+   still says what it says, while a case per entry fails the moment a site stops consulting the
+   table. The keys an entry carries are anchored by the literal case above; here they come from the
+   table, since what is under test is the reach of the entries and not their contents. *)
+let predicate_position_cases = Scan.settings_predicates
+
 (* gh-ocannl-723: which sources call [Test_utils.Generated.init], the source side of the rule that
    requires OCANNL_BUILD_FILES_PREFIX of the stanza that runs them.
 
@@ -346,6 +356,277 @@ let () = Generated.init ~backend_name|ocaml},
       [ "Test_utils.Generated.init"; "Generated.init" ] );
   ]
 
+(* gh-ocannl-749: which configuration keys a source reads STRAIGHT from the environment, and whether
+   it does so somewhere this scan cannot follow.
+
+   The shape that matters is a guard: a list of key names and an iteration handing each to
+   `Utils.read_env_var`. Its keys never sit next to the call, so a scan that reported only what the
+   call site spells would answer "none" for the very sources the rule is about -- and answering
+   "none" is what an unread guard looks like. The dynamic flag is the answer instead, and the
+   caller falls back to the file's string literals, intersected with the configuration registry.
+
+   Each case is the pair: the keys named literally, and whether some reach is dynamic. *)
+let env_reader_cases =
+  [
+    ("a literal argument names its key", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, ([ "profile" ], false));
+    ( "the receiver is matched by its last component, so an alias counts",
+      {ocaml|module U = Utils
+let x = U.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+    ( "and so does a bare call under an open",
+      {ocaml|open Utils
+let x = read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+    ( "prose naming the reader is not a read",
+      {ocaml|(* Utils.read_env_var "profile" decides *) let x = 1|ocaml},
+      ([], false) );
+    ( "a string literal quoting a call is not a call",
+      {ocaml|let message = "Utils.read_env_var \"profile\" is how a guard reads"|ocaml},
+      ([], false) );
+    (* The guard, which is the shape the rule exists for: the key arrives as a parameter, and the
+       LIST it arrives from is what the scan resolves (see the key-list family below). *)
+    ( "a key taken from a resolvable list is the keys of that list",
+      {ocaml|let guarded = [ "log_level"; "profile" ]
+let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    (* Handing the function around as a value is the same loss one layer up: whatever calls it is
+       out of reach, so the source cannot be answered for either (the settings predicates above take
+       the same treatment, for the same reason). *)
+    ( "the reader handed on as a value is a dynamic reach",
+      {ocaml|let () = List.iter (fun k -> ignore (Utils.read_env_var k)) []
+let also = Utils.read_env_var|ocaml},
+      ([], true) );
+    ( "a partial application names no key here",
+      {ocaml|let f = Utils.read_env_var ~x:1|ocaml},
+      ([], true) );
+    (* Both spellings in one file, since a guard commonly sits beside a direct read. *)
+    ( "a literal read and a guard in one file",
+      {ocaml|let () = ignore (Utils.read_env_var "profile")
+let guarded = [ "log_level" ]
+let () = List.iter (fun arg_name -> ignore (Utils.read_env_var arg_name)) guarded|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    (* A different function of the same module is not the reader: `read_cmdline_or_env_var` consults
+       the commandline first, which an ambient variable cannot outrank, so it is not the
+       unconditional dependency this scan reports. *)
+    ( "a longer name ending differently is not the reader",
+      {ocaml|let x = Utils.read_cmdline_or_env_var "profile"|ocaml},
+      ([], false) );
+    (* The RECEIVER decides, not the basename. Over-reading is the safe direction for most of the
+       scans in this file, and it is the wrong one here: what the rule built on this asks for is an
+       `(env_var …)` declaration, so a function of the file's own read as `Utils.read_env_var` would
+       fail a correct stanza out loud (Codex P2, round 2 of PR #484). *)
+    ( "a function of the file's own that happens to share the name is not the reader",
+      {ocaml|let read_env_var _ = None
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "nor is a bare call under an open of somebody else",
+      {ocaml|open Elsewhere
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "an alias of an alias still reaches it",
+      {ocaml|module U = Utils
+module V = U
+let x = V.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+    (* And both halves are LEXICAL, not file-wide. An `open Utils` that a local binding shadows does
+       not make the shadowed call the library's -- which for a check that asks for a declaration is
+       the difference between a correct stanza passing and failing (Codex P2, round 3 of PR #484). *)
+    ( "a local binding shadows the opened name",
+      {ocaml|open Utils
+let read_env_var _ = None
+let x = read_env_var "profile"|ocaml},
+      ([], false) );
+    ( "an expression-scoped open does not reach past its body",
+      {ocaml|let a = let open Utils in read_env_var "log_level"
+let b = read_env_var "profile"|ocaml},
+      ([ "log_level" ], false) );
+    ( "a qualified call is the reader whatever the file binds locally",
+      {ocaml|open Utils
+let read_env_var _ = None
+let x = Utils.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
+  ]
+
+(* The LIST a guard iterates, which is what the scan resolves so that everything else can be
+   refused. These are the shapes the guards in this repository are written in; an expression outside
+   them is reported, not approximated. The pair is the keys resolved and whether anything was left
+   unresolved. *)
+let key_list_cases =
+  [
+    ( "a list bound at top level and iterated",
+      {ocaml|let guarded = [ "log_level"; "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    ( "the stdlib argument order too",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter (fun k -> ignore (Utils.read_env_var k)) guarded|ocaml},
+      ([ "log_level" ], false) );
+    ( "a list written at the iteration",
+      {ocaml|let () = List.iter [ "log_level" ] ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "log_level" ], false) );
+    (* `List.map keys ~f:fst @ [ … ]` is how `profile_precedence` builds its guard list out of the
+       table it also prints. *)
+    ( "a projection of a table, appended to a literal",
+      {ocaml|let keys = [ ("autotune_rounds", "2"); ("tf32_matmuls", "false") ]
+let guarded = List.map keys ~f:fst @ [ "no_config_file" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "autotune_rounds"; "no_config_file"; "tf32_matmuls" ], false) );
+    ( "the reader handed straight to the iteration is answered as well",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:Utils.read_env_var|ocaml},
+      ([ "log_level" ], false) );
+    (* And the refusals. A list this scan cannot follow is REPORTED, not approximated from whatever
+       literals the file happens to contain -- an incidental `"profile"` elsewhere in the source
+       made an unresolved reach look answered (Codex P2, round 4 of PR #484). *)
+    ( "a list from another compilation unit is unresolved",
+      {ocaml|let () = List.iter Shared.guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* And it stays unresolved when a LOCAL binding shares its basename: resolving `Shared.guarded`
+       through a local `guarded` would answer with the wrong keys and swallow the refusal that
+       reports it (Codex P2, round 6 of PR #484). *)
+    ( "a qualified list does not resolve through a local binding of the same name",
+      {ocaml|let guarded = [ "profile" ]
+let () = List.iter Shared.guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* Only the combinators whose argument semantics this scan knows establish an iteration. A
+       wrapper carrying a decoy list otherwise supplied the keys, blessing the reader with a list it
+       is never handed (Codex P2, round 6). *)
+    ( "an unknown higher-order call establishes nothing, decoy list or not",
+      {ocaml|let guarded = [ "log_level" ]
+let decoy = [ "profile" ]
+let () = apply decoy guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "an incidental literal does not answer for an unresolved reach",
+      {ocaml|let label = "profile"
+let () = ignore (Utils.read_env_var Sys.argv.(1))|ocaml},
+      ([], true) );
+    ( "a list whose elements are not literals is unresolved",
+      {ocaml|let guarded = [ some_key; other_key ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* The parameter carries its keys over the lambda's BODY and nowhere else, so a same-named
+       variable elsewhere is not silently answered by it. *)
+    (* A name resolves to the binding VISIBLE at the use, not to the file's last one: taking the
+       latest read `let guarded = […] … let guarded = []` as the empty list and asked for no
+       declaration, while the guard really iterates the first (Codex P2, round 5 of PR #484). *)
+    ( "a later rebinding does not reach backwards",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let guarded = []|ocaml},
+      ([ "log_level" ], false) );
+    ( "and a use after the rebinding sees the new one",
+      {ocaml|let guarded = [ "log_level" ]
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
+    (* A parameter REBOUND inside the callback is not the iterated one: answering it with the
+       iterated list certifies a program that can read any key at all (Codex P2, round 7 of PR
+       #484). *)
+    ( "a parameter rebound inside the callback is not the iterated one",
+      {ocaml|let () = List.iter [ "profile" ] ~f:(fun k -> let k = Sys.argv.(1) in ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and an inner iteration binds its own",
+      {ocaml|let () =
+  List.iter [ "profile" ] ~f:(fun k ->
+      ignore (Utils.read_env_var k);
+      List.iter [ "log_level" ] ~f:(fun k -> ignore (Utils.read_env_var k)))|ocaml},
+      ([ "log_level"; "profile" ], false) );
+    (* The projection is `List.map` and not any callee whose basename is `map`: a local one that
+       ignores its argument had its input projected as though it were the standard function. *)
+    ( "a local map does not project a table",
+      {ocaml|let map _ ~f:_ = [ "virtualize_max_visits" ]
+let keys = [ ("profile", "x") ]
+let guarded = map keys ~f:fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* Everything the resolver follows it matches by NAME, which is sound only while the file has
+       not taken the name for something else -- the one direction a whitelist does not close by
+       itself, and a silent one. A source that rebinds a trusted name gets no resolution at all. *)
+    ( "a file that rebinds List resolves nothing",
+      {ocaml|module List = Other
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and one that rebinds fst does not project a table",
+      {ocaml|let fst _ = "profile"
+let keys = [ ("log_level", "0") ]
+let guarded = List.map keys ~f:fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* An `open` is not a rebinding: `Base.List.map` is `List.map`, and this repository opens Base
+       everywhere. *)
+    (* A nested module ending in `List` is not the standard one: a custom iterator may call the
+       callback with keys the list does not hold (Codex P2, round 8 of PR #484). *)
+    ( "a nested Other.List.iter is not the standard combinator",
+      {ocaml|let guarded = [ "profile" ]
+let () = Other.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "but a standard root in front of it is",
+      {ocaml|let guarded = [ "profile" ]
+let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
+    (* The map callee being right does not make its argument right: `~f:Other.fst` may return the
+       other column (Codex P2, round 9 of PR #484). *)
+    ( "a qualified projector that is not the standard fst does not project",
+      {ocaml|let keys = [ ("profile", "virtualize_max_visits") ]
+let guarded = List.map keys ~f:Other.fst
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    (* Rebinding an approved ROOT leaves the whitelisted path intact and changes what it means. *)
+    ( "a rebound standard root is a rebound trusted name",
+      {ocaml|module Base = Shared
+let guarded = [ "profile" ]
+let () = Base.List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "a qualified concatenation operator is not the standard one",
+      {ocaml|let left = [ "profile" ]
+let right = [ "log_level" ]
+let guarded = Shared.( @ ) left right
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "an open of a library providing List is not a rebinding",
+      {ocaml|open Base
+let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
+    (* A rebinding this scan cannot resolve is a TOMBSTONE, not an absence: reaching past it to the
+       earlier list answers with keys that no longer hold (Codex P2, round 11 of PR #484). *)
+    ( "an unresolvable rebinding is not reached past",
+      {ocaml|let guarded = [ "profile" ]
+let guarded = [ Sys.argv.(1) ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and a use BEFORE it still sees the resolvable one",
+      {ocaml|let guarded = [ "profile" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let guarded = [ Sys.argv.(1) ]|ocaml},
+      ([ "profile" ], false) );
+    (* A tombstone is recorded for ANY later binding of a name that once denoted a key list --
+       inferring "list-shaped" from the AST form let this one past, being neither a constructor nor
+       an application (Codex P2, round 12 of PR #484). *)
+    ( "a conditional rebinding is tombstoned too",
+      {ocaml|let guarded = [ "profile" ]
+let guarded = if enabled then [ "virtualize_max_visits" ] else []
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([], true) );
+    ( "and a name that never denoted a list is not tombstoned by an unrelated binding",
+      {ocaml|let guarded = [ "profile" ]
+let other = 3
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))|ocaml},
+      ([ "profile" ], false) );
+    ( "the binding does not escape the lambda it was established at",
+      {ocaml|let guarded = [ "log_level" ]
+let () = List.iter guarded ~f:(fun k -> ignore (Utils.read_env_var k))
+let elsewhere k = Utils.read_env_var k|ocaml},
+      ([ "log_level" ], true) );
+  ]
+
+let could_read_cases =
+  [
+    ("names the reader", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, true);
+    ("does not name it at all", {ocaml|let x = Utils.get_global_arg ~arg_name:"profile"|ocaml}, false);
+  ]
+
 (* And the textual filter the census narrows with, which is only safe while naming the module is a
    NECESSARY condition for calling it: a file the filter drops is never parsed, so a call it hid
    would be invisible rather than reported. *)
@@ -399,6 +680,30 @@ let () =
         fail "settings read -- %s: expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
           (String.concat ~sep:"; " found));
+  List.iter predicate_position_cases ~f:(fun (predicate, implied) ->
+      let call = Printf.sprintf "let x = Utils.%s ()" predicate in
+      let handed_on = Printf.sprintf "let f = Utils.%s" predicate in
+      let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source call) in
+      let expected = List.sort ~compare:String.compare implied in
+      if List.equal String.equal found expected then
+        printf "ok: predicate call contributes its keys -- %s\n" predicate
+      else
+        fail "predicate call -- %s: expected [%s], found [%s]" predicate
+          (String.concat ~sep:"; " expected)
+          (String.concat ~sep:"; " found);
+      (* The call is the position the census reads, so it is not a finding; the bare value is the
+         position it cannot follow, so it is. Both directions, because a predicate the second site
+         does not know is silently readable as a value, and one the first site blesses too eagerly
+         would let a genuinely escaping read through. *)
+      let at_call = List.length (Scan.unqualified_settings_reads call) in
+      if at_call = 0 then printf "ok: predicate call is not an escaping read -- %s\n" predicate
+      else fail "predicate call -- %s: expected no escaping read, found %d" predicate at_call;
+      let handed_on_count = List.length (Scan.unqualified_settings_reads handed_on) in
+      if handed_on_count = 1 then
+        printf "ok: predicate handed on as a value is an escaping read -- %s\n" predicate
+      else
+        fail "predicate handed on -- %s: expected 1 escaping read, found %d" predicate
+          handed_on_count);
   List.iter generated_init_cases ~f:(fun (name, source, expected) ->
       let found =
         try Scan.generated_init_calls_in_source source
@@ -414,4 +719,43 @@ let () =
   List.iter could_call_cases ~f:(fun (name, source, expected) ->
       let found = Scan.could_call_generated_init source in
       if Bool.equal found expected then printf "ok: could call -- %s\n" name
-      else fail "could call -- %s: expected %b, found %b" name expected found)
+      else fail "could call -- %s: expected %b, found %b" name expected found);
+  List.iter env_reader_cases ~f:(fun (name, source, (expected_keys, expected_dynamic)) ->
+      let found =
+        try Some (Scan.env_reader_reads_in_source source)
+        with _ ->
+          fail "environment read -- %s: the snippet does not parse" name;
+          None
+      in
+      Option.iter found ~f:(fun found ->
+          let keys = found.Scan.reader_keys in
+          let dynamic = not (List.is_empty found.Scan.reader_unresolved) in
+          let expected_keys = List.sort ~compare:String.compare expected_keys in
+          if List.equal String.equal keys expected_keys && Bool.equal dynamic expected_dynamic then
+            printf "ok: environment read -- %s\n" name
+          else
+            fail "environment read -- %s: expected dynamic %b with keys [%s], found dynamic %b \
+                  with keys [%s]"
+              name expected_dynamic
+              (String.concat ~sep:"; " expected_keys)
+              dynamic
+              (String.concat ~sep:"; " keys)));
+  List.iter key_list_cases ~f:(fun (name, source, (expected_keys, expected_unresolved)) ->
+      let found = Scan.env_reader_reads_in_source source in
+      let unresolved = not (List.is_empty found.Scan.reader_unresolved) in
+      let expected_keys = List.sort ~compare:String.compare expected_keys in
+      if
+        List.equal String.equal found.Scan.reader_keys expected_keys
+        && Bool.equal unresolved expected_unresolved
+      then printf "ok: key list -- %s\n" name
+      else
+        fail "key list -- %s: expected unresolved %b with keys [%s], found unresolved %b with \
+              keys [%s]"
+          name expected_unresolved
+          (String.concat ~sep:"; " expected_keys)
+          unresolved
+          (String.concat ~sep:"; " found.Scan.reader_keys));
+  List.iter could_read_cases ~f:(fun (name, source, expected) ->
+      let found = Scan.could_read_env_var source in
+      if Bool.equal found expected then printf "ok: could read the environment -- %s\n" name
+      else fail "could read the environment -- %s: expected %b, found %b" name expected found)

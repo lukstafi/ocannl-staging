@@ -28,8 +28,9 @@ open Stdio
    settings are read during [Utils]'s initialization) but detecting it is enough: a rule that exits
    nonzero writes no golden, so a mystifying diff becomes a named failure. The dune rule declares
    the same keys as env_var dependencies, which is what gets this guard RUN when one of them
-   changes. Only the stderr rule guards; the stdout rule's claim is stream-level and holds under any
-   of these.
+   changes -- and [test/operations/env_var_deps] pairs THIS list with those declarations rather than
+   leaving the two to agree by hand (gh-ocannl-749). Only the stderr rule guards; the stdout rule's
+   claim is stream-level and holds under any of these.
 
    The startup-cleanup keys are not here: they are pinned on the rule's commandline, which no
    environment variable can outrank -- the honest option wherever it is available, a guard being
