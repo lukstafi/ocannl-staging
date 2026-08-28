@@ -21,7 +21,7 @@
    [Cc_backend]'s vector width binds at module initialization and the numerics policy is a global,
    so one process emits under one setting. The driver therefore re-executes ITSELF once per (vector
    width, fp16 policy) pair, and each child writes the kernel it emitted into a directory the driver
-   hands it. Three settings are forced on every child besides those two:
+   hands it. Four settings are forced on every child besides those two:
 
    - [OCANNL_BACKEND=cc], because this is a check about the cc backend's C emission and nothing
    else. The stanza therefore pins its backend rather than declaring [OCANNL_BACKEND], and the
@@ -33,7 +33,9 @@
    (precision, lane count) row of {!C_syntax.vec_fma_builtin}'s table is reachable this way. -
    [OCANNL_FP16_ARITHMETIC], the one setting that VARIES between children, because it is what
    decides whether fp16 computes in fp16 (the builtin rows) or in f32 (the bridge pair) -- see the
-   fixture header below.
+   fixture header below. - [OCANNL_NARROW_COMPUTE_F32=true], because the narrow-storage rows are
+   that path and nothing else; the reason it is pinned rather than declared is argued at the
+   forcing site.
 
    {1 What the claims are, and what they are not}
 
@@ -490,6 +492,13 @@ let child_env ~width ~fp16 ~dir =
       ("OCANNL_CC_VECTOR_BYTES", Int.to_string width);
       ("OCANNL_CC_FP16_ARITHMETIC", "native");
       ("OCANNL_FP16_ARITHMETIC", fp16);
+      (* The narrow-storage rows ARE the [narrow_compute_f32] path (gh-ocannl-517): with it off,
+         bf16 and fp8 compute at their storage precision, no [vec_bridge] arm is reached and the
+         register tiling can decline outright -- and every claim below would then hold over a
+         fixture that no longer exercises what it names. Pinned rather than declared on the stanza:
+         a value the children are given cannot be changed out from under them by the ambient
+         environment or by a config file an ancestor directory grows. *)
+      ("OCANNL_NARROW_COMPUTE_F32", "true");
       ("CC_MARCH_CENSUS_EMIT", dir);
     ]
   in
@@ -800,9 +809,24 @@ let () =
       (* The (fp16, f32) bridge pair and the native-fp16 builtin rows live in different children, so
          a child that silently emitted the other one's loop set would leave one of the two groups in
          no source at all -- and every claim below would still pass, over the surviving group.
- *)
-      Verdict.p_all "every fp16 numerics setting emitted a kernel" fp16_settings
-        ~f:(fun (tag, _) -> List.exists emitted ~f:(fun e -> String.equal e.fp16 tag));
+
+         Asked of what each child RESOLVED, not of the tag the driver asked for: the tag is this
+         process's own string and a kernel is tagged with it whatever the child did, so a numerics
+         regression that made the [true] child compute fp16 in f32 as well would leave both tags
+         present and the AVX512-FP16 / ARMv8.2-FP16 builtin rows in no source at all. The child
+         records each loop's resolved compute precision in the manifest (it asks
+         {!Ir.Numerics.cpu_compute_prec}, the same resolution the emission used), so the two
+         policies are told apart by the only thing that distinguishes them: what a half-storage
+         loop computes in. *)
+      let half_rows_computing_in p =
+        List.filter emitted ~f:(fun e ->
+            List.exists e.loops ~f:(fun l -> String.equal l.store half && String.equal l.comp p))
+      in
+      Verdict.p_all "every fp16 numerics setting emitted a kernel"
+        [ ("native", half); ("wide", Ir.Ops.prec_string Ir.Ops.single) ]
+        ~f:(fun (tag, p) ->
+          let kernels = half_rows_computing_in p in
+          List.exists kernels ~f:(fun e -> String.equal e.fp16 tag) && List.length kernels = List.length widths);
       (* {2 That the narrow-storage rows are really narrow}
 
          Every claim below this point is about how well gcc rendered a loop, and a loop that stopped
@@ -1008,15 +1032,31 @@ let () =
         List.filter rows ~f:(fun r -> isa_has ~caps:r.caps ~loop:r.loop ~width:r.width)
       in
       let served_named = List.filter served ~f:(fun r -> r.caps.named) in
+      (* {b Which rows a claim about the COMBINE can be held over.} An fp8 reduction's censused loop
+         is not its combine: {!C_syntax.vec_bridge} has no vector codec for fp8 and converts lane by
+         lane through a fixed-trip inner loop, which mentions the same source array as the fold
+         around it and is the SMALLER span, so the census -- innermost loop carrying the anchor --
+         selects the codec. That is the right reading for what the fp8 rows are here to pin (does
+         the codec compile under every [-march]), and it is the wrong population for a claim about
+         libm calls in the accumulator update: such a call sits in the fold OUTSIDE the selected
+         span, so the row would pass the claim without being able to fail it. Excluded rather than
+         left in as a member that is true by construction; the [Tile_mma] rows stay, their censused
+         loop being the k-loop itself. Covering an fp8 combine needs a second anchor naming the
+         update rather than the array, which is not a substring any one loop of the group owns. *)
+      let censuses_the_combine r =
+        match r.loop.kind with
+        | Tile -> true
+        | Reduce -> not (String.equal r.loop.store (Ir.Ops.prec_string Ir.Ops.fp8))
+      in
       (* The gh-ocannl-649 claim proper. Unconditional across the matrix, unlike the two below:
          [Max]/[Min] have a whole-vector spelling on every target here at every width -- an emulated
          wide vector still compiles to packed compares and selects, just more of them -- so a libm
          call in one of these loops is a defect wherever it appears. *)
       claim_none "no Max/Min accumulator loop calls libm"
-        (List.filter rows ~f:(fun r -> not (is_fma_row r)))
+        (List.filter rows ~f:(fun r -> (not (is_fma_row r)) && censuses_the_combine r))
         ~f:libm;
       claim_none "no FMA accumulator loop calls libm where the ISA has a fused multiply-add"
-        (List.filter served ~f:is_fma_row)
+        (List.filter served ~f:(fun r -> is_fma_row r && censuses_the_combine r))
         ~f:libm;
       let scalarization_claim =
         "no accumulator loop is scalarized where a named target's ISA has the operation"
@@ -1046,9 +1086,7 @@ let () =
          shape, not a regression -- what the fp8 rows pin is that the codec compiles under every
          [-march] and calls no libm, not how the arithmetic around it vectorized. *)
       let whole_vector_rendering r =
-        match r.loop.kind with
-        | Tile -> false
-        | Reduce -> not (String.equal r.loop.store (Ir.Ops.prec_string Ir.Ops.fp8))
+        match r.loop.kind with Tile -> false | Reduce -> censuses_the_combine r
       in
       (* On a host whose compiler accepts none of the named [-march] targets -- Apple clang on Apple
          Silicon, which is CI's macos-latest -- only the [native] column survives, and this claim's
