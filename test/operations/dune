@@ -214,25 +214,6 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-(subdir
- config
- (rule
-  (target ocannl_backend.txt)
-  (package neural_nets_lib)
-  (deps
-   ocannl_config
-   (env_var OCANNL_BACKEND))
-  (action
-   (run %{dep:ocannl_read_config.exe} "--read=backend")))
- (rule
-  (target ocannl_backend_extension.txt)
-  (package neural_nets_lib)
-  (deps
-   ocannl_config
-   (env_var OCANNL_BACKEND))
-  (action
-   (run %{dep:ocannl_read_config.exe} "--read=backend_extension"))))
-
 (rule
  (target "backend-0-0.log.actual")
  (package neural_nets_lib)
@@ -255,7 +236,7 @@
     "--normalize-eol"
     " = 0x[0-9a-fA-F]+"
     " = 0xNNNN"
-    "log_files/micrograd_demo_logging/%{read:config/ocannl_backend.txt}-0-0.log"
+    "log_files/micrograd_demo_logging/%{read:../config/ocannl_backend.txt}-0-0.log"
     "%{target}")
    (run
     %{dep:../../tools/minised.exe}
@@ -277,7 +258,7 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff
-   "micrograd_demo_logging-%{read:config/ocannl_backend.txt}-0-0.log.expected"
+   "micrograd_demo_logging-%{read:../config/ocannl_backend.txt}-0-0.log.expected"
    "backend-0-0.log.actual")))
 
 (test
@@ -610,7 +591,7 @@
  (targets top_down_prec-unoptimized.ll.actual top_down_prec.extension.actual)
  (package neural_nets_lib)
  (deps
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action
@@ -627,7 +608,7 @@
     (run
      %{dep:../../tools/minised.exe}
      "--normalize-eol-only"
-     build_files/top_down_prec/d_fwd.%{read:config/ocannl_backend_extension.txt}
+     build_files/top_down_prec/d_fwd.%{read:../config/ocannl_backend_extension.txt}
      top_down_prec.extension.actual)))))
 
 (rule
@@ -636,7 +617,7 @@
   zero_out_local_decl.extension.actual)
  (package neural_nets_lib)
  (deps
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action
@@ -653,7 +634,7 @@
     (run
      %{dep:../../tools/minised.exe}
      "--normalize-eol-only"
-     build_files/zero_out_local_decl/out_fwd.%{read:config/ocannl_backend_extension.txt}
+     build_files/zero_out_local_decl/out_fwd.%{read:../config/ocannl_backend_extension.txt}
      zero_out_local_decl.extension.actual)))))
 
 (rule
@@ -662,7 +643,7 @@
   test_where_precision.extension.actual)
  (package neural_nets_lib)
  (deps
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action
@@ -679,7 +660,7 @@
     (run
      %{dep:../../tools/minised.exe}
      "--normalize-eol-only"
-     build_files/test_where_precision/where_fwd.%{read:config/ocannl_backend_extension.txt}
+     build_files/test_where_precision/where_fwd.%{read:../config/ocannl_backend_extension.txt}
      test_where_precision.extension.actual)))))
 
 (rule
@@ -707,11 +688,11 @@
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
   (diff
-   "top_down_prec.%{read:config/ocannl_backend_extension.txt}.expected"
+   "top_down_prec.%{read:../config/ocannl_backend_extension.txt}.expected"
    "top_down_prec.extension.actual")))
 
 (rule
@@ -729,11 +710,11 @@
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
   (diff
-   "zero_out_local_decl.%{read:config/ocannl_backend_extension.txt}.expected"
+   "zero_out_local_decl.%{read:../config/ocannl_backend_extension.txt}.expected"
    "zero_out_local_decl.extension.actual")))
 
 (rule
@@ -751,11 +732,11 @@
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
-  config/ocannl_backend_extension.txt
+  ../config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
   (diff
-   "test_where_precision.%{read:config/ocannl_backend_extension.txt}.expected"
+   "test_where_precision.%{read:../config/ocannl_backend_extension.txt}.expected"
    "test_where_precision.extension.actual")))
 
 (test

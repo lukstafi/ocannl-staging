@@ -78,20 +78,6 @@
  (deps
   (alias runtest-transformer_names)))
 
-; The resolved backend name, for the per-backend goldens below (the gh-ocannl-700 shape, as in
-; `test/operations/micrograd_demo_logging-<backend>-0-0.log.expected`). Reads the same configuration
-; the run itself will read -- config file, environment, command line -- and normalizes the
-; deprecated aliases, so `OCANNL_BACKEND=multicore_cc` names the `multidev_cc` golden.
-
-(rule
- (target ocannl_backend.txt)
- (package neural_nets_lib)
- (deps
-  ocannl_config
-  (env_var OCANNL_BACKEND))
- (action
-  (run %{bin:ocannl_read_config} "--read=backend")))
-
 ; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
 ; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
 ; @test/training/slow-mlp_names` -- without rebuilding the whole `@slow` suite; this stanza is what
@@ -344,6 +330,12 @@
 ; previously shared golden verbatim, which is the content they were passing against in the daily
 ; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/runtest-transformer_names`
 ; and `dune promote`.
+;
+; `../config/ocannl_backend.txt` is the resolved backend name, built by the shared rule in
+; `test/config/dune`: it reads the same configuration this run will -- config file, environment,
+; command line -- and normalizes the deprecated aliases, so `OCANNL_BACKEND=multicore_cc` names the
+; `multidev_cc` golden. A directory adopting a per-backend golden reads that path and copies
+; nothing -- which is why the rule lives there rather than beside each consumer.
 
 (executable
  (name transformer_names)
@@ -358,7 +350,7 @@
  (locks ocannl_training_test)
  (deps
   (alias runtest-env_spelling_gate)
-  "transformer_names-%{read:ocannl_backend.txt}.expected"
+  "transformer_names-%{read:../config/ocannl_backend.txt}.expected"
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps transformer_names.actual from becoming a build target, so plain `dune build`
@@ -371,7 +363,7 @@
      transformer_names.actual
      (run %{dep:transformer_names.exe}))
     (diff
-     "transformer_names-%{read:ocannl_backend.txt}.expected"
+     "transformer_names-%{read:../config/ocannl_backend.txt}.expected"
      transformer_names.actual)))))
 
 ; tokenizer_roundtrip is a fast integration test for the dataprep BPE tokenizer -> tensor bridge

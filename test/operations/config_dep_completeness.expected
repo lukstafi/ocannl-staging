@@ -12,9 +12,9 @@ bin/dune: nothing that runs a test executable
 dune: nothing that runs a test executable
 lib/dune: nothing that runs a test executable
 tensor/dune: nothing that runs a test executable
+test/config/dune: exe-running rules
 test/einsum/dune: tests, inline-test libraries, exe-running rules
 test/gpt2/dune: tests, exe-running rules
-test/operations/config/dune: nothing that runs a test executable
 test/operations/dune: tests, inline-test libraries, exe-running rules
 test/operations/profiles/dune: tests, exe-running rules
 test/operations/startup_streams/dune: tests, exe-running rules
