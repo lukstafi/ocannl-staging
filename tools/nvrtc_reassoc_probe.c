@@ -12,7 +12,11 @@
  *   LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib /tmp/nvrtc_reassoc_probe
  *
  * (Drop the WSL library path off WSL.)  Re-run it after a CUDA toolkit upgrade,
- * BEFORE suspecting anything else about a `reduction_forms` red on CUDA.
+ * BEFORE suspecting anything else about a `reduction_forms` red on CUDA.  Its
+ * EXIT STATUS is that re-validation's answer: 0 only if every variant the recorded
+ * verdict rests on compiled, executed, and returned the strictly-sequential value;
+ * 1 if one of them was rejected by the new toolkit or reassociated.  Rejection of a
+ * guard candidate or of the undocumented opt-in is an answer, not a failure.
  *
  * How it decides.  A 128-element float sum whose strictly-sequential IEEE value
  * is exactly 1.0f -- each 3e-8f addend falls below half an ulp of 1.0f, so every
@@ -126,14 +130,34 @@ static int count_substr(const char *hay, const char *needle) {
   return n;
 }
 
-static int run_case(const char *label, const char **opts, int nopts) {
+/* Required variants (`required` = 1) are the ones whose measurement IS the recorded
+ * verdict: they have to compile, and they have to return the strictly-sequential
+ * value.  A rejection or a reassociation there is a finding, and it has to reach
+ * the exit status -- the documented workflow is "re-run this after a toolkit
+ * upgrade", and a probe that prints REJECTED and exits 0 reads as a green
+ * re-validation while having executed no kernel at all (Codex P2 on PR #510).
+ *
+ * The guard candidates and the `--fassociative-math` opt-in probes are `required`
+ * = 0: for them a rejection is one of the answers being asked for (a future nvrtc
+ * that no longer knows the undocumented opt-in only makes the membership claim
+ * more comfortable), and a reassociation under an explicit opt-in is the flag
+ * doing what its name says. */
+static int failures = 0;
+
+static int run_case(const char *label, const char **opts, int nopts, int required) {
   char *ptx = 0, *log = 0;
+  int reassociated = 0;
   int st = compile(opts, nopts, &ptx, &log);
   printf("== %s\n   options:", label);
   for (int i = 0; i < nopts; i++) printf(" %s", opts[i]);
   printf("\n");
   if (st == 1) {
     printf("   REJECTED by nvrtc: %s\n", log[0] ? log : "(empty log)");
+    if (required) {
+      printf("   PROBE FAILURE: this variant is expected to compile -- nothing was measured "
+             "for it.\n");
+      failures++;
+    }
     free(log);
     return 0;
   }
@@ -159,6 +183,7 @@ static int run_case(const char *label, const char **opts, int nopts) {
     CHECK(cuCtxSynchronize());
     float got = -1.f;
     CHECK(cuMemcpyDtoH(&got, d_out, sizeof(float)));
+    if (got != 0.f) reassociated++;
     printf("   %-10s -> %.9g %s\n", "cancel", (double)got,
            got == 0.f ? "strict ((a+b)-a == 0)" : "REASSOCIATED ((a+b)-a == b)");
   }
@@ -176,12 +201,18 @@ static int run_case(const char *label, const char **opts, int nopts) {
     CHECK(cuMemcpyDtoH(&got, d_out, sizeof(float)));
     unsigned int bits;
     memcpy(&bits, &got, sizeof(bits));
+    if (got != 1.0f) reassociated++;
     printf("   %-10s -> %.9g (0x%08x) %s\n", names[k], (double)got, bits,
            got == 1.0f ? "sequential-order (no reassociation)" : "REASSOCIATED");
   }
   CHECK(cuModuleUnload(mod));
   free(ptx);
   free(log);
+  if (required && reassociated) {
+    printf("   PROBE FAILURE: %d of 4 kernels reassociated under a variant recorded as "
+           "reassociation-free.\n", reassociated);
+    failures++;
+  }
   return 0;
 }
 
@@ -228,36 +259,36 @@ int main(void) {
 
   {
     const char *o[] = { arch };
-    if (run_case("baseline (arch only)", o, 1)) return 2;
+    if (run_case("baseline (arch only)", o, 1, 1)) return 2;
   }
   {
     const char *o[] = { arch, "--use_fast_math" };
-    if (run_case("OCANNL today: --use_fast_math", o, 2)) return 2;
+    if (run_case("OCANNL today: --use_fast_math", o, 2, 1)) return 2;
   }
   {
     const char *o[] = { arch, "--use_fast_math", "--extra-device-vectorization" };
-    if (run_case("--use_fast_math + --extra-device-vectorization", o, 3)) return 2;
+    if (run_case("--use_fast_math + --extra-device-vectorization", o, 3, 1)) return 2;
   }
   {
     const char *o[] = { arch, "--use_fast_math", "--dopt=on", "--ptxas-options=-O3" };
-    if (run_case("--use_fast_math + max opt", o, 4)) return 2;
+    if (run_case("--use_fast_math + max opt", o, 4, 1)) return 2;
   }
   {
     const char *o[] = { arch, "--use_fast_math", "--fmad=false" };
-    if (run_case("--use_fast_math + --fmad=false", o, 3)) return 2;
+    if (run_case("--use_fast_math + --fmad=false", o, 3, 1)) return 2;
   }
 
   {
     const char *o[] = { arch, "--fassociative-math" };
-    if (run_case("opt-in: --fassociative-math alone", o, 2)) return 2;
+    if (run_case("opt-in: --fassociative-math alone", o, 2, 0)) return 2;
   }
   {
     const char *o[] = { arch, "--use_fast_math", "--fassociative-math" };
-    if (run_case("opt-in: --use_fast_math + --fassociative-math", o, 3)) return 2;
+    if (run_case("opt-in: --use_fast_math + --fassociative-math", o, 3, 0)) return 2;
   }
   {
     const char *o[] = { arch, "--fassociative-math", "--extra-device-vectorization" };
-    if (run_case("opt-in: --fassociative-math + vectorization", o, 3)) return 2;
+    if (run_case("opt-in: --fassociative-math + vectorization", o, 3, 0)) return 2;
   }
   /* Not "does it help" but "is it even a word": which of the guards a clang user
      would reach for does nvrtc accept? */
@@ -271,7 +302,20 @@ int main(void) {
     const char *o[] = { arch, "--use_fast_math", guards[i] };
     char label[128];
     snprintf(label, sizeof(label), "guard candidate %s", guards[i]);
-    if (run_case(label, o, 3)) return 2;
+    if (run_case(label, o, 3, 0)) return 2;
   }
+
+  /* The exit status IS the re-validation answer, so it has to be readable without
+     the transcript: 0 only when every required variant was compiled, executed, and
+     returned the strictly-sequential value. */
+  if (failures) {
+    printf("\nVERDICT: FAILED -- %d required variant(s) were rejected or reassociated. The\n"
+           "boundary recorded in arrayjit/lib/compiler_options.ml does not hold on this\n"
+           "toolkit; a reduction_forms red on CUDA is explained by this, not by OCANNL.\n",
+           failures);
+    return 1;
+  }
+  printf("\nVERDICT: nvrtc fast math does not reassociate on this toolkit -- every required\n"
+         "variant compiled, executed, and returned the bit-exact sequential value.\n");
   return 0;
 }
