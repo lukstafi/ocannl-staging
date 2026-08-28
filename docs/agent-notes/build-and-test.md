@@ -762,14 +762,21 @@ that they earn a lookup rather than always-loaded space.
     they construct empty.
 - **A `(test)` stanza can only diff the one `<name>.expected` beside it**, so a test whose output
   legitimately differs per backend converts to an `(executable)` plus a diff rule that reads the
-  resolved backend name — `(rule (target ocannl_backend.txt) … (run %{bin:ocannl_read_config}
-  "--read=backend"))`, whose reader normalizes the deprecated aliases so `multicore_cc` finds the
-  `multidev_cc` golden — and diffs `<name>-%{read:ocannl_backend.txt}.expected`. That is the
-  gh-ocannl-700 shape (`micrograd_demo_logging-<backend>-0-0.log.expected`), and gh-ocannl-787 gave
-  it to `test/training/transformer_names`, whose sampled names are exact by construction per
+  resolved backend name and diffs `<name>-%{read:../config/ocannl_backend.txt}.expected`. That is
+  the gh-ocannl-700 shape (`micrograd_demo_logging-<backend>-0-0.log.expected`), and gh-ocannl-787
+  gave it to `test/training/transformer_names`, whose sampled names are exact by construction per
   SCHEDULER: `Multidev` differs from `Sync` in execution order and device split, so the training
-  trajectory and the sampling RNG state diverge and no promotion serves both. Two mechanics come
-  with the conversion. `%{read:…}` works in a rule's `deps` as well as its action, which matters
+  trajectory and the sampling RNG state diverge and no promotion serves both. Three mechanics come
+  with the conversion. The resolved name is NOT produced per directory: `test/config/dune` — the
+  directory every test directory already copies `ocannl_config` and `env_spelling_gate.ml` from —
+  holds the `ocannl_read_config` executable and one rule per resolved file, `ocannl_backend.txt`
+  and `ocannl_backend_extension.txt` (the latter naming the emitted-code suffix an artifact carries,
+  which is what `test/operations`' `top_down_prec`/`zero_out_local_decl`/`test_where_precision`
+  rules read). A directory adopting a per-backend golden writes `%{read:../config/…}` and copies
+  nothing; the reader normalizes the deprecated aliases so `multicore_cc` finds the `multidev_cc`
+  golden, and one resolution serves the whole suite because every directory copies the same
+  `ocannl_config` and shares the environment and command line. `%{read:…}` works in a rule's `deps`
+  as well as its action, which matters
   because the action must be wrapped in `(no-infer …)` — otherwise `with-stdout-to <name>.actual`
   registers a target and plain `dune build` (@all) runs the training that the `(test)` stanza only
   ran under `runtest` — and `no-infer` also drops the dependency `diff` would have inferred on its

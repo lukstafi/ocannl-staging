@@ -9,7 +9,6 @@ Directories whose sources this scan reads:
   test/einsum
   test/gpt2
   test/operations
-  test/operations/config
   test/operations/profiles
   test/operations/startup_streams
   test/ppx
@@ -209,9 +208,9 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
   dune: nothing that runs a test executable
   lib/dune: nothing that runs a test executable
   tensor/dune: nothing that runs a test executable
+  test/config/dune: declares OCANNL_BACKEND
   test/einsum/dune: declares OCANNL_BACKEND; markers: none
   test/gpt2/dune: declares OCANNL_BACKEND; markers: none
-  test/operations/config/dune: nothing that runs a test executable
   test/operations/dune: declares OCANNL_BACKEND; markers: cc, cuda, metal, none
   test/operations/profiles/dune: markers: none
   test/operations/startup_streams/dune: markers: none

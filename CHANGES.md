@@ -13,6 +13,16 @@
 
 ### Changed
 
+- **The test-suite configuration reader lives in `test/config`, and resolves the backend once for
+  the whole suite.** `ocannl_read_config` — the executable a dune rule runs to learn which backend a
+  test run will pick — sat in `test/operations/config`, and gh-ocannl-787's per-backend
+  `transformer_names` goldens needed a near-copy of its rule in `test/training/dune`. Both the
+  executable and the rules now sit in `test/config`, beside the `ocannl_config` and
+  `env_spelling_gate.ml` that every test directory already shares, producing `ocannl_backend.txt`
+  and `ocannl_backend_extension.txt` once. A directory adopting a per-backend golden writes
+  `%{read:../config/ocannl_backend.txt}` and copies nothing. One resolution serves every directory
+  because they all copy the same `ocannl_config` and share the environment and command line.
+
 - **Metal's accumulation workaround is renamed, censused and measured** (gh-ocannl-782). The
   backend capability `volatile_scalar_rmw` is now `volatile_serial_accumulation`: since
   gh-ocannl-731 it covers both spellings of a serial reduction (the device-memory read-modify-write

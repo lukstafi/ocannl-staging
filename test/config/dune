@@ -1,0 +1,48 @@
+; The shared test-configuration directory: the `ocannl_config` every test directory copies, the
+; ambient `env_spelling_gate.ml` source they each build a gate from, and the resolved-configuration
+; files a per-backend golden names, produced HERE rather than once per consuming directory.
+;
+; The `ocannl_read_config` executable resolves a configuration key exactly the way a test run will:
+; the config file beside it, the environment, the command line. It lives here because it had two
+; consumers in different directories (`test/operations`' emitted-code extension and gh-ocannl-787's
+; `test/training/transformer_names` goldens) and was about to be copied for a third. Its
+; `(public_name)` is what makes `%{bin:ocannl_read_config}` resolve from anywhere in the workspace.
+
+(executable
+ (name ocannl_read_config)
+ (package neural_nets_lib)
+ (public_name ocannl_read_config)
+ (modules ocannl_read_config)
+ (libraries base arrayjit.utils))
+
+; The resolved backend name and the extension its backend emits code under, as files any directory
+; can read: `"<name>-%{read:../config/ocannl_backend.txt}.expected"` names a per-backend golden and
+; `%{read:../config/ocannl_backend_extension.txt}` names an emitted-code artifact, with nothing to
+; copy and no second rule to keep in step. Dune builds a target rule on demand, so a directory that
+; reads neither file runs neither rule.
+;
+; One resolution for the whole suite is not an approximation: every test directory copies THIS
+; directory's `ocannl_config`, and the environment and command line are the same world for all of
+; them, so a per-directory rule could only ever produce the same answer.
+;
+; `(env_var OCANNL_BACKEND)` is what makes `OCANNL_BACKEND=cuda dune build @…` re-resolve rather
+; than serve the previous backend's answer -- and it is what `test/operations/env_var_deps` requires
+; of a stanza that runs an executable whose behaviour the variable selects.
+
+(rule
+ (target ocannl_backend.txt)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (run %{bin:ocannl_read_config} "--read=backend")))
+
+(rule
+ (target ocannl_backend_extension.txt)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (run %{bin:ocannl_read_config} "--read=backend_extension")))

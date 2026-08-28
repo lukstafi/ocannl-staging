@@ -95,7 +95,7 @@ likely-already-satisfied rather than a fresh goal.
 Tests do not hard-code a backend; they read the `OCANNL_BACKEND` env var. In
 `test/operations/dune`, `test/einsum/dune`, and `test/training/dune` every rule
 declares `(env_var OCANNL_BACKEND)` and resolves the backend name via
-`test/operations/config/ocannl_read_config.ml` (`--read=backend`, which calls
+`test/config/ocannl_read_config.ml` (`--read=backend`, which calls
 `Utils.get_global_arg ~arg_name:"backend"`). Running the CUDA suite means
 `OCANNL_BACKEND=cuda dune runtest`; the default (env unset) is the host C
 backend, which mac-studio CI already runs green.
