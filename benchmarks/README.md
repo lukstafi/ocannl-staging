@@ -303,7 +303,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   changes (the acceptance instrument for the gh-500 blocking decision). On `bench_gpt_diag` the
   same instrument attributes the transformer blocks: it is what showed gpt2_mini's step to be
   concentrated in the per-layer FFN projections and the lm_head rather than spread evenly, despite
-  every segment sharing identical launch geometry (gh-ocannl-531).
+  every segment sharing identical launch geometry (gh-ocannl-531). Each segment line carries two
+  censuses of what produced its kernel: `mma:` (did it tensorize, or render the scalar fallback) and
+  `vol:` (how many of its serial accumulations the Metal compiler-bug workaround pinned to memory,
+  gh-ocannl-782 — on the shapes where the accumulator is the critical path that is worth up to 3.8x,
+  so a surprising segment time is read together with this).
   `BENCH_SR_SITES=1` (`bench_conv_diag`) prints what `Autotune.split_reduce_sites` proposes on the
   same graph — the gh-ocannl-484 task-3 seeding can only reach the accumulations listed there, so
   it is the companion to the census above when asking why a seeded split-reduce family did or did

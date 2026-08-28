@@ -17,3 +17,10 @@ row reduction: the census names the accumulator the kernel declares: true
 row reduction: the declaration's volatility is the one the census reports: true
 row reduction: the accumulator is volatile exactly when the backend requests it: true
 row reduction: no volatile pointer shadow, by the census and by the text: true
+an inner bracket summarizes only its own sites: true
+the enclosing bracket sees both, in emission order: true
+an inner bracket reports the capability of the compile it bracketed: true
+the enclosing bracket keeps its own capability across the nested one: true
+the counts classify what was collected: true
+a completed bracket leaves the census global as it found it: true
+collection is off outside every bracket: true

@@ -222,3 +222,46 @@ let () =
   in
   check_localized r_total "res_total" "scalar reduction";
   check_localized r_per_col "res_per_col" "row reduction"
+
+(* {1 The volatility census's own bracket}
+
+   [with_volatility_census] is what makes the census a property of the compiled routine rather than
+   of whichever caller remembered to collect it (gh-ocannl-782), so its nesting and restoration are
+   pinned directly — with hand-written entries, so these claims do not depend on what any backend
+   renders. [requested] is part of the state it restores: a nested compile on a backend that asks
+   for the workaround must not leave an enclosing collection claiming the flag of the inner one. *)
+let () =
+  let module Cs = Ir.C_syntax in
+  let entries_equal =
+    List.equal (fun (n1, s1) (n2, s2) ->
+        String.equal n1 n2 && Cs.equal_volatility_site s1 s2)
+  in
+  let outer = Cs.Volatile_accumulator "v1_outer" and inner = Cs.Plain_accumulator "v2_inner" in
+  let inner_summary, outer_summary =
+    Cs.with_volatility_census (fun () ->
+        Cs.volatility_census := ("outer_kernel", outer) :: !Cs.volatility_census;
+        Cs.volatility_requested := true;
+        let (), inner_summary =
+          Cs.with_volatility_census (fun () ->
+              Cs.volatility_census := ("inner_kernel", inner) :: !Cs.volatility_census)
+        in
+        inner_summary)
+  in
+  Verdict.p "an inner bracket summarizes only its own sites"
+    (entries_equal inner_summary.Cs.entries [ ("inner_kernel", inner) ]);
+  (* Additively, not shadowing: an enclosing collection still sees what an inner compile censused,
+     or wrapping the compile path in the bracket would silently empty every outer one. *)
+  Verdict.p "the enclosing bracket sees both, in emission order"
+    (entries_equal outer_summary.Cs.entries
+       [ ("outer_kernel", outer); ("inner_kernel", inner) ]);
+  Verdict.p "an inner bracket reports the capability of the compile it bracketed"
+    (not inner_summary.Cs.requested);
+  Verdict.p "the enclosing bracket keeps its own capability across the nested one"
+    outer_summary.Cs.requested;
+  Verdict.p "the counts classify what was collected"
+    (outer_summary.Cs.volatile_accumulators = 1
+    && outer_summary.Cs.plain_accumulators = 1
+    && outer_summary.Cs.rmw_shadows = 0);
+  Verdict.p "a completed bracket leaves the census global as it found it"
+    (List.is_empty !Cs.volatility_census);
+  Verdict.p "collection is off outside every bracket" (not !Cs.volatility_census_enabled)
