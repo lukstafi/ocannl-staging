@@ -20,6 +20,13 @@ let benchmark_overhead _backend_name () =
   let ctx = Train.init_params ctx IDX.empty f in
   let _, f_routine = Train.to_routine ctx IDX.empty update_f in
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
+  (* [printf_tree] renders straight to stdout, and the loop below compiles 20 fresh routines before
+     anything else is printed. Unflushed, that tree waits for process exit and the run looks like it
+     produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the end.
+     Note that the loop itself is currently broken — [Context.run] refuses [update_x] for
+     unexecuted dependencies (gh-ocannl-831) — so this tree is in practice the only output the tool
+     produces, which is the more reason for it to reach the reader. *)
+  Bench_out.flush ();
 
   let xs = Array.init n_data ~f:Float.(fun i -> of_int i - (of_int n_data /. 2.)) in
   let open Operation.At in
@@ -55,6 +62,7 @@ let benchmark_overhead _backend_name () =
   in
   PrintBox_text.output Stdio.stdout plot_box;
   Stdio.print_endline "\n";
+  Bench_out.flush ();
   result
 
 let benchmarks =
@@ -66,4 +74,5 @@ let benchmarks =
 
 let () =
   List.map benchmarks ~f:(fun bench -> bench ())
-  |> PrintBox_utils.table |> PrintBox_text.output Stdio.stdout
+  |> PrintBox_utils.table |> PrintBox_text.output Stdio.stdout;
+  Bench_out.flush ()

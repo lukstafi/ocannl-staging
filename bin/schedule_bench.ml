@@ -27,9 +27,13 @@
    against milliseconds for every scheduled variant, and queueing a second one behind it costs far
    more than that ratio predicts (gh-ocannl-828), so the default 20 repeats put the run past ten
    minutes with nothing to show for it. That is what the fifth argument is for — pass a small count,
-   or 0 to skip the leg entirely (speedups then print as nan). Output is flushed per line and every
-   leg slow enough to be worth waiting for announces itself and its estimate BEFORE it runs, so a
-   run in progress is distinguishable from a hang.
+   or 0 to skip the naive TIMING (speedups then print as nan). It does not skip the computation
+   outright: the oracle every variant is compared against is then materialized by one untimed run,
+   compiled without a [lowered_transform] so that the backend's default schedule applies, which is
+   why 0 costs milliseconds on the GPU backends and the naive leg costs seconds. Output is flushed
+   per line and every leg slow enough to be worth waiting for — that reference run included —
+   announces itself BEFORE it runs and reports what it cost, so a run in progress is
+   distinguishable from a hang.
 
    Each scheduled variant needs its own [Sched.split] factors to divide the extents they split (i
    over m, j over n, k over k), and every one of them needs a non-degenerate nest to address; a
@@ -502,12 +506,26 @@ let () =
   let reference = ref None in
   let disagreements = ref 0 in
   let unscheduled_output () =
+    (* Announced like any other work that can make the reader wait: this runs only when the naive
+       leg was skipped, and a run that has just been told the leg is skipped should not then sit
+       through an unexplained kernel. It is compiled WITHOUT a [lowered_transform], so unlike the
+       naive leg it is not the 1x1 launch — the backend's own default schedule applies, which on the
+       GPU backends is the difference between milliseconds and the naive leg's seconds — but that is
+       a fact about this backend, not a promise, so the elapsed time is reported whenever it crosses
+       the same floor a slow warmup does. *)
+    p "%-10s materializing the comparison oracle — one untimed run of the unscheduled computation\n"
+      "reference";
+    let start = Time_now.nanoseconds_since_unix_epoch () in
     let%op mc = ma * mb in
     let comp = named "mm_reference" (Train.forward mc) in
     let ctx = Context.auto () in
     let ctx, routine = Context.compile ctx comp Ir.Indexing.Empty in
     let ctx = Context.run ctx routine in
-    Context.get_values ctx mc.Tensor.value
+    let values = Context.get_values ctx mc.Tensor.value in
+    let stop = Time_now.nanoseconds_since_unix_epoch () in
+    let secs = Float.of_int63 Int63.(stop - start) /. 1e9 in
+    if Float.(secs >= 0.5) then p "%-10s %.1f s\n" "reference" secs;
+    values
   in
   let reference_output () =
     match !reference with
@@ -545,22 +563,34 @@ let () =
        is what makes the leg unscheduled, so it cannot drift from which leg is the slow one. *)
     if Option.is_none schedule then
       p "%-10s 1x1 launch over m*n*k = %d — one thread, 1 warmup + %d timed run(s); cap with the \
-         5th argument (0 skips the leg)\n" variant (m * n * k) repeats;
+         5th argument (0 skips the timing)\n" variant (m * n * k) repeats;
     (* Warmup (includes any lazy initialization and host transfers). Timed, so that a leg whose cost
        only shows up at run time can still announce it before the timed loop multiplies it. *)
     let warm_start = Time_now.nanoseconds_since_unix_epoch () in
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
     let warm_stop = Time_now.nanoseconds_since_unix_epoch () in
+    (* A second read with nothing queued behind it has no kernel to wait for, so it times the
+       device-to-host transfer alone. The timed loop below queues [repeats] runs and reads back
+       ONCE, so multiplying the whole warmup would multiply a cost that is paid once — on a fast
+       kernel with a large output that is the whole estimate, and the announcement would be wrong by
+       a factor of [repeats]. Outside the timed region, and one extra transfer of an output the
+       backend has already computed. *)
+    let _ = Context.get_values ctx mc.Tensor.value in
+    let read_stop = Time_now.nanoseconds_since_unix_epoch () in
     let warmup = Float.of_int63 Int63.(warm_stop - warm_start) /. 1e9 in
+    let readback = Float.of_int63 Int63.(read_stop - warm_stop) /. 1e9 in
     (* Half a second of warmup already means [repeats] half-seconds of silence ahead, which is long
        enough to want an estimate for; the naive leg's warmup at m = n = k = 256 lands just under a
        second, so a one-second floor would have stayed quiet on the very shape this reports. A fast
        variant stays a single line, so the table is unchanged wherever there was nothing to wait
-       for. *)
+       for. The per-run figure still carries whatever lazy initialization the first run paid, which
+       the timed loop does not repeat either, so the estimate is an upper bound — [Float.max 0.]
+       because a readback that jitters above its own warmup would otherwise flip its sign. *)
     if Float.(warmup >= 0.5) then
-      p "%-10s warmup %.1f s — timing %d run(s), about %.0f s\n" variant warmup repeats
-        (warmup *. Float.of_int repeats);
+      p "%-10s warmup %.1f s (readback %.1f s) — timing %d run(s), about %.0f s\n" variant warmup
+        readback repeats
+        ((Float.of_int repeats *. Float.max 0. (warmup -. readback)) +. readback);
     let start = Time_now.nanoseconds_since_unix_epoch () in
     let ctx =
       Stdlib.Array.fold_left
