@@ -209,7 +209,13 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   a group kill: those workers hold the cell's stdout pipe, so killing the direct child alone
   would move the hang into the sweep's own read — and the cell is recorded as a runner failure,
   in the run log and in the report's **Runner failures** section. Raise the cap for a box whose
-  legitimate cells run longer; the failure names it either way.
+  legitimate cells run longer; the failure names it either way. The kill escalates on the *group*
+  still having members rather than on the cell's pipe closing, so a descendant that ignores
+  SIGTERM without holding stdout is still reached; if one somehow outlives SIGKILL — it would have
+  to be stuck in a driver ioctl — the failure says so, because every later cell of that run was
+  then measured against it. A SIGTERM to the sweep itself (a job cancellation, a scheduler's time
+  limit) and a Ctrl-C both take the running cell's group with them: the cell is in its own session
+  precisely so the sweep's signals do *not* reach it by default.
 
   A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
   complete result nor searches from scratch, while `searched` reports one of the two, so a retry
