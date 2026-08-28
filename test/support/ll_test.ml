@@ -147,13 +147,16 @@ let scatter ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) llsc : LL.t =
 
 (** [scatter_add ~tn ~idcs ~dyn_axis ~dyn_value addend] is the accumulating form
     [tn[.., dyn_value, ..] += addend] — the shape [rewrite_one_hot_reductions] actually mints for the
-    embedding-table gradient. The read-back is an explicit {!gather} of the written cell, at the
+    embedding-table gradient. The read-back is an explicit {!gather} of the written cell at the
     node's storage precision, which is what makes the accumulation visible to read-tracking and to
-    [has_accumulation]. *)
-let scatter_add ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) addend : LL.t =
-  let prec = Lazy.force tn.Tn.storage_prec in
+    [has_accumulation]; [addend] carries its OWN precision, as the matched gradient argument does
+    there — a mixed-precision accumulation (an [f32] gradient into a [bf16] table) is a shape worth
+    building, and relabelling the addend with the target's precision would build different IR from
+    the one the pipeline mints. *)
+let scatter_add ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) (addend : LL.scalar_arg) : LL.t =
+  let value_prec = Lazy.force tn.Tn.storage_prec in
   scatter ~tn ~idcs ~dyn_axis ~dyn_value
-    (LL.Binop (Ops.Add, (gather ~tn ~idcs ~dyn_axis ~dyn_value, prec), (addend, prec)))
+    (LL.Binop (Ops.Add, (gather ~tn ~idcs ~dyn_axis ~dyn_value, value_prec), addend))
 
 (** {1 Scalar builders} *)
 
