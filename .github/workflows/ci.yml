@@ -274,11 +274,18 @@ jobs:
       if: steps.opam-cache.outputs.cache-hit != 'true'
       shell: bash
       run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
-    - run: opam exec -- dune build
+    # One walk, not `dune build` then `dune runtest`: as two commands, the
+    # `(test)` stanzas and inline-test runners only start after every file
+    # target -- including the golden-rule test executions `@default` carries --
+    # has finished, so the serialized `ocannl_training_test` chain runs against
+    # an otherwise idle runner. One invocation lets dune schedule that chain
+    # concurrently with the rest of the build, overlapping the two phases. A
+    # failure still names its rule, so nothing is lost in attribution.
+    #
     # One backend only: test/config pins `backend=cc` and nothing here sets
     # OCANNL_BACKEND. multidev_cc needs no hardware and COULD run on these
     # runners, but a second runtest leg under OCANNL_BACKEND=multidev_cc
-    # would roughly double the ubuntu job's ~28min test time on a queue that
+    # would roughly double the ubuntu job's test time on a queue that
     # is often hours deep, so the decision (gh-ocannl-756) is to gate it with
     # the DAILY local sweep instead: tools/sweep.sh runs a full
     # `OCANNL_BACKEND=multidev_cc dune runtest` unit every day and the sweep
@@ -286,7 +293,7 @@ jobs:
     # gating ever becomes worth the latency, prefer a leg scoped to the
     # directories that keep multidev goldens (`grep -rl multidev_cc
     # test/*/dune`) over a full second suite.
-    - run: opam exec -- dune runtest
+    - run: opam exec -- dune build @default @runtest
     # `tools/test-run.sh` carries branches that ONLY execute under MSYS: it
     # sources `tools/opam-env.sh` unconditionally and fatally (a dune on PATH
     # does not imply rewritten cygwin paths there), routes dune through
