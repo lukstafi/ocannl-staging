@@ -22,11 +22,20 @@
 
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] [naive_repeats] (defaults 256,
    20, n, n, repeats; the output is m x n, the reduction depth k — deep-K gradient-GEMM geometries
-   are m,n << k). Each scheduled variant needs its own [Sched.split] factors to divide the extents
-   they split (i over m, j over n, k over k), and every one of them needs a non-degenerate nest to
-   address; a variant whose requirement fails is skipped by name with the reason. Two are exempt
-   from the divisibility half — [parallel] on the GPU backends and [tensorize] on the C ones, which
-   put nothing downstream of the split that a remainder guard would break — so an arbitrary
+   are m,n << k). [naive_repeats] defaults to [repeats], which makes the naive leg the whole wall
+   clock as soon as the size grows: at m = n = k = 512 on an M4 Max one 1x1-launch run is ~10 s
+   against milliseconds for every scheduled variant, and queueing a second one behind it costs far
+   more than that ratio predicts (gh-ocannl-828), so the default 20 repeats put the run past ten
+   minutes with nothing to show for it. That is what the fifth argument is for — pass a small count,
+   or 0 to skip the leg entirely (speedups then print as nan). Output is flushed per line and every
+   leg slow enough to be worth waiting for announces itself and its estimate BEFORE it runs, so a
+   run in progress is distinguishable from a hang.
+
+   Each scheduled variant needs its own [Sched.split] factors to divide the extents they split (i
+   over m, j over n, k over k), and every one of them needs a non-degenerate nest to address; a
+   variant whose requirement fails is skipped by name with the reason. Two are exempt from the
+   divisibility half — [parallel] on the GPU backends and [tensorize] on the C ones, which put
+   nothing downstream of the split that a remainder guard would break — so an arbitrary
    (non-degenerate) extent still gets a scheduled measurement on either branch, and the naive kernel
    runs at any size whatsoever. Each line carries a position-weighted checksum of the whole output,
    which is what makes a remainder-region error visible, and every variant carrying a [Tile_mma]
@@ -529,9 +538,29 @@ let () =
       Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
     in
     let mma = routine.Context.mma in
-    (* Warmup (includes any lazy initialization and host transfers). *)
+    (* The unscheduled leg is the 1x1 launch: one GPU thread walking the whole m x n x k nest, which
+       is seconds per run by n = 512 and minutes beyond it. Say so BEFORE the first kernel rather
+       than after the last, and say how to cap it — a reader who does not know that the fifth
+       positional exists cannot tell a long naive leg from a hang. Keyed on [schedule = None], which
+       is what makes the leg unscheduled, so it cannot drift from which leg is the slow one. *)
+    if Option.is_none schedule then
+      p "%-10s 1x1 launch over m*n*k = %d — one thread, 1 warmup + %d timed run(s); cap with the \
+         5th argument (0 skips the leg)\n" variant (m * n * k) repeats;
+    (* Warmup (includes any lazy initialization and host transfers). Timed, so that a leg whose cost
+       only shows up at run time can still announce it before the timed loop multiplies it. *)
+    let warm_start = Time_now.nanoseconds_since_unix_epoch () in
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
+    let warm_stop = Time_now.nanoseconds_since_unix_epoch () in
+    let warmup = Float.of_int63 Int63.(warm_stop - warm_start) /. 1e9 in
+    (* Half a second of warmup already means [repeats] half-seconds of silence ahead, which is long
+       enough to want an estimate for; the naive leg's warmup at m = n = k = 256 lands just under a
+       second, so a one-second floor would have stayed quiet on the very shape this reports. A fast
+       variant stays a single line, so the table is unchanged wherever there was nothing to wait
+       for. *)
+    if Float.(warmup >= 0.5) then
+      p "%-10s warmup %.1f s — timing %d run(s), about %.0f s\n" variant warmup repeats
+        (warmup *. Float.of_int repeats);
     let start = Time_now.nanoseconds_since_unix_epoch () in
     let ctx =
       Stdlib.Array.fold_left
@@ -618,7 +647,8 @@ let () =
         List.iter reasons ~f:(fun reason -> p "             %s\n" reason);
         Float.nan
   in
-  p "matmul m=%d n=%d k=%d, %d repeats, backend from config/OCANNL_BACKEND\n" m n k repeats;
+  p "matmul m=%d n=%d k=%d, %d repeats (naive: %d), backend from config/OCANNL_BACKEND\n" m n k
+    repeats naive_repeats;
   let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
   (* HIP belongs here too: the backend renders workgroup-shared placement exactly as CUDA and Metal
      do, so the shared/staged/tensorized variants — including the gh-ocannl-487 [mma_pd1]/[mma_pd2]
