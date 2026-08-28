@@ -1476,6 +1476,16 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertEqual(orchestrate.cell_timeout_arg("0"), 0.0)  # 0 is "no cap", not "cap of 0"
         self.assertEqual(orchestrate.cell_timeout_arg("1800"), 1800.0)
 
+    def test_a_negative_pool_size_is_refused_too(self):
+        # `-1` is not "unset" and not "default": tinygrad builds a pool for any truthy PARALLEL
+        # and hands the value to `multiprocessing.Pool`, which refuses a negative count -- so
+        # every beam cell of the sweep would die inside the runner.
+        for bad in ("-1", "-8"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                orchestrate.beam_parallel_arg(bad)
+        self.assertEqual(orchestrate.beam_parallel_arg("0"), 0)  # 0 is no pool at all
+        self.assertEqual(orchestrate.beam_parallel_arg("4"), 4)
+
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_survivor_holding_the_pipe_does_not_swallow_the_cells_output(self):
         # A member that outlives SIGKILL still owns the captured stdout, so every `communicate`

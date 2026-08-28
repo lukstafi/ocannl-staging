@@ -1233,6 +1233,22 @@ def failure_line(failure):
     return f"{label} ({note})" if note else label
 
 
+def beam_parallel_arg(text):
+    """`--beam-parallel` as a worker count: zero (no pool) or more, never negative.
+
+    tinygrad builds its pool for any truthy PARALLEL and passes the value straight to
+    `multiprocessing.Pool`, which refuses a negative process count — so `-1` does not mean
+    "unset" or "default", it means every beam cell of the sweep dies on a `ValueError` from
+    inside the runner (gh-ocannl-760 review).
+    """
+    workers = int(text)
+    if workers < 0:
+        raise argparse.ArgumentTypeError(
+            f"--beam-parallel must be 0 (no pool) or more (got {text!r})"
+        )
+    return workers
+
+
 def cell_timeout_arg(text):
     """`--cell-timeout` as a number of seconds: finite and not negative, or an argparse error.
 
@@ -1441,7 +1457,7 @@ def main():
     )
     ap.add_argument(
         "--beam-parallel",
-        type=int,
+        type=beam_parallel_arg,
         default=None,
         metavar="N",
         help="run the tinygrad beam cells with PARALLEL=N — tinygrad's own knob for the "
