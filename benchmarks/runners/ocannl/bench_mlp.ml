@@ -205,7 +205,7 @@ let () =
         tag (Autotune.outcome_name r.outcome) r.candidates_timed r.candidates_failed declines
         terminal r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned
         r.bound_pruned r.fissioned
-        (Option.value_map r.timing ~default:"none" ~f:Autotune.timing_string)
+        (Autotune.timing_string r.timing)
         r.baseline_ms
         (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
         r.best_ms

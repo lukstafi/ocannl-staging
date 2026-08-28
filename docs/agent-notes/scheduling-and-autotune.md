@@ -584,4 +584,9 @@ files.
   default outright. Practical consequences: changing `autotune_timing` re-tunes rather than
   replaying, pre-gh-755 entries are never replayed, and a `Cache_replay` report's times are
   therefore known to be this call's objective, which is what lets `Autotune.report.timing` (and the
-  benchmark JSON's `timing` field) be filled in on a replay at all.
+  benchmark JSON's `timing` field) be filled in on a replay at all. That field is not an option and
+  the JSON's spelling is never `null`: `tune` resolves the objective from `?timing` or the config
+  before it constructs anything, so a report with no objective is not a state it can be in. The
+  template every report starts from, `Autotune.no_search_report`, therefore takes `~timing` — it is
+  a function of the objective rather than a constant, which is the only reason the field can be
+  plain (the option it briefly had existed solely to let that constant exist).

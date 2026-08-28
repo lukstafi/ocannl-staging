@@ -42,7 +42,7 @@ let string s =
     [mma_best_ms] are [infinity] when the arm timed nothing at all, which {!num} renders [null].
 
     [timing] is the {!Autotune.timing_mode} every millisecond on this line was measured under
-    (gh-ocannl-755) — ["queued"] or ["isolated"], and [null] only for an arm whose report carried no
+    (gh-ocannl-755) — ["queued"] or ["isolated"], always one of the two: every report carries a
     resolved objective. It is here because [best_ms], [baseline_ms] and [mma_best_ms] mean different
     quantities under the two, differing by tens of percent to 2x and not by a constant, so an
     artifact that omitted it could not be compared with another after the process exited. Taken from
@@ -69,10 +69,9 @@ let tune_arm ~name ~state ~searched ~cache_hit ~timing ~best_ms ~best_label ~ten
     ~tensorization ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms
     ~terminal_failure =
   Printf.sprintf
-    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"timing":%s,"best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-    (string name) (string state) searched cache_hit
-    (Option.value_map timing ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
-    (num best_ms) (string best_label) tensorized
+    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"timing":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
+    (string name) (string state) searched cache_hit (string timing) (num best_ms)
+    (string best_label) tensorized
     (Option.value_map tensorization ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
     mma_statements mma_scalar_fallbacks mma_seeded mma_timed (num mma_best_ms)
     (Option.value_map terminal_failure ~default:"null" ~f:(fun detail ->

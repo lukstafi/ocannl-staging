@@ -22,10 +22,12 @@ open Base
 module V = Verdict
 
 (* A completed search that timed [mma_timed] tensorized candidates, the best of them at
-   [mma_best_ms], with the search's overall best at [best_ms]. *)
+   [mma_best_ms], with the search's overall best at [best_ms]. The objective is the default one and
+   nothing here depends on it: profitability is a RATIO of two times from one search, so it is the
+   one quantity that reads the same under either (see [Autotune.report.timing]). *)
 let searched ~best_ms ~mma_timed ~mma_best_ms =
   {
-    Autotune.no_search_report with
+    (Autotune.no_search_report ~timing:Autotune.Queued) with
     Autotune.best_ms;
     mma_timed;
     mma_best_ms;
@@ -110,7 +112,7 @@ let () =
      rank its decision surface one way cold and the other way warm. *)
   let replayed ~best_ms ~mma_best_ms =
     {
-      Autotune.no_search_report with
+      (Autotune.no_search_report ~timing:Autotune.Queued) with
       Autotune.outcome = Autotune.Cache_replay;
       best_ms;
       mma_best_ms;
@@ -167,7 +169,9 @@ let () =
   V.p "and its losing measurement voids the prior"
     (match resolves beam_only with `Cost -> true | `Enablement -> false);
   V.p "a report that never searched measures nothing"
-    (match Autotune.family_profit_of_reports [ Autotune.no_search_report ] with
+    (match
+       Autotune.family_profit_of_reports [ Autotune.no_search_report ~timing:Autotune.Queued ]
+     with
     | Autotune.Unmeasured -> true
     | _ -> false);
   (* Over several arms the most favourable evidence wins: the arms search different placements, and

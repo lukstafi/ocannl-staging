@@ -205,7 +205,7 @@ let () =
 (* === The report-level negative control === *)
 
 let () =
-  let r = Autotune.no_search_report in
+  let r = Autotune.no_search_report ~timing:Autotune.Queued in
   (* A call that searched nothing consulted no census. [None] is a distinct value from
      [Not_requested] precisely so this cannot be defaulted into a finding. *)
   p "a report with no crowned candidate carries no tensorization label"

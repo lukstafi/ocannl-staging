@@ -120,7 +120,12 @@ let () =
      placement A/B arms' own reports, here synthesized from gh-514's metal cell (best 7.5 ms, best
      tensorized 92 ms) and its hip cell (the arm's winner IS tensorized). *)
   let arm ~best_ms ~mma_timed ~mma_best_ms =
-    { Autotune.no_search_report with Autotune.best_ms; mma_timed; mma_best_ms }
+    {
+      (Autotune.no_search_report ~timing:Autotune.Queued) with
+      Autotune.best_ms;
+      mma_timed;
+      mma_best_ms;
+    }
   in
   let losing =
     Autotune.family_profit_of_reports [ arm ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:92.0 ]
