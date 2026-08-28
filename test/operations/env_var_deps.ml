@@ -34,7 +34,7 @@
    of the hole it was written to prevent. And per EVERY alias a build can start from, not a fixed
    list of two: each slow rule sits on its own `slow-<name>` alias, so that one slow test can be
    rerun after a change without the ~30 minutes the whole `@slow` suite takes, and
-   `ocannl_backend=cuda dune build @test/training/slow-mlp_names` is the same entry point with the
+   `ocannl_backend=cuda dune build @test/training/slow-cifar_conv` is the same entry point with the
    same hole. A gate "reaches" an alias when building the alias builds the gate: the gate's own
    alias, a rule whose `deps` name it (which runs the gate BEFORE the rule, so a rejected spelling
    fails before the slow run rather than beside it), or an `(alias (name …) (deps …))` stanza
@@ -228,7 +228,7 @@ let aliases_reached_from stanzas alias =
    member the list omits is one `dune build @<suite>` skips, silently. Three suites are built this
    way. `slow` is the one gh-ocannl-667 introduced. `train` carries the training integration runs
    -- toy problems by intent, but serialized on the training lock, so on their own entry point (a
-   daily-sweep unit, runnable as a CI shard) rather than in `runtest` where they set every full
+   macOS CI shard, a daily-sweep unit) rather than in `runtest` where they set every full
    run's wall-clock tail. `runtest` is the same arrangement for the golden-diff rules (gh-ocannl-726):
    dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries only,
    so an `(executable)` plus a `(rule)` that diffs has to be given one -- and it has to be given it
