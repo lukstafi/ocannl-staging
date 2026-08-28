@@ -42,6 +42,7 @@ tools/format-sweep.sh parses: true
 tools/opam-env.sh parses: true
 tools/promote.sh parses: true
 tools/sweep.sh parses: true
+tools/test-promote.sh parses: true
 tools/test-run.sh parses: true
 tools/test-test-run.sh parses: true
 the scan reached at least the 12 shell scripts this repository is known to have: true

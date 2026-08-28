@@ -403,6 +403,28 @@ that they earn a lookup rather than always-loaded space.
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
   cleanup assertion pass vacuously.
+- **Promote through `tools/promote.sh` during a merge, on every platform.** Promotion writes the
+  WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
+  add` is committed with its PRE-promotion content, and nothing local objects — every later `dune
+  runtest` reads the working tree and passes — while CI builds the committed tree and fails on the
+  golden diff. It cost ~90 minutes on staging PR #487, and it is invisible by construction: the
+  usual conflict drill (resolve, `git add`, run the suite, promote what moved) puts the promotion
+  on the wrong side of the `add` every time, and `git status` shows the file staged, which is what
+  you were checking for. `promote.sh` closes it: mid-merge it takes `dune promotion list` BEFORE
+  applying (afterwards nothing pending is left to name), then stages exactly what it promoted and
+  says so. A promoted golden still UNMERGED is deliberately NOT staged and is warned about with the
+  `git add` that would accept it — staging one records a conflict resolution, which is the caller's
+  call and not the script's. Outside a merge nothing runs, not even the extra `dune` invocation.
+  The merge is detected with `git rev-parse --verify MERGE_HEAD`, never by testing `.git/MERGE_HEAD`
+  as a path: in a linked worktree `.git` is a FILE and `MERGE_HEAD` lives in the per-worktree gitdir.
+  `tools/test-promote.sh` is the hand-run harness — on no dune alias, since every leg runs `dune` on
+  a throwaway project and a dune nested inside `dune runtest` brings its own lock, its own `_build`
+  and the outer run's `DUNE_*`. It copies the working-tree script into each scratch repository,
+  which is also what aims it: `promote.sh` resolves its repository as `dirname $0/..`, so where the
+  copy sits is the repository it acts on. Its leg 1 is the negative control that the trap
+  reproduces at all (a bare `dune promotion apply` in the same scenario commits the stale golden) —
+  without it, leg 2 would pass if `git commit` merely picked up the working tree, and the guard
+  would be untested. Measured: legs 2, 5 and 6 all fail against the pre-guard script.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
@@ -568,7 +590,8 @@ that they earn a lookup rather than always-loaded space.
   all back to the parent (the script reports `FAIL` for a `dune-workspace` in any ancestor, which
   it cannot override from below).
   With it in place, `--root .` and `dune promotion apply` are no longer needed from a worktree;
-  `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
+  `tools/promote.sh` remains the Windows path, for the CRLF stripping, and the path for ANY platform
+  mid-merge, for the staging guard above. Worktrees placed outside the
   repo need none of this, but see no `ocannl_config` on their ancestor path.
   The same hook also fetches `origin master` (bounded, best-effort: offline prints `skip`) and
   prints a `WARNING` with the commit count and the recovery (`git merge --ff-only
