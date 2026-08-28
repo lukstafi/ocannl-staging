@@ -1004,6 +1004,19 @@ class FixtureDigestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_digest.record(digests, [fx], "rog nv")
 
+    def test_a_fixture_name_with_whitespace_is_refused(self):
+        # The name-side twin of test_an_origin_with_whitespace_is_refused: `write_digests` emits
+        # names unescaped into the whitespace-split format, so `a b.safetensors` would write a
+        # line every later read refuses -- and recording rewrites the whole file, so one such
+        # recording breaks the checked-in record. Refused before the file is touched.
+        fx = self.fixture("a b.safetensors", b"whatever bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
     def test_an_origin_that_reads_as_two_origins_is_refused(self):
         # Agreeing boxes are serialized into ONE comma-joined `fixture_origin` field, carried by
         # every result row and report section. A box named `minix,rocm` would publish a field

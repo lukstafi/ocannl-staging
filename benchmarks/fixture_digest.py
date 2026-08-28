@@ -250,10 +250,22 @@ def one_path_per_name(fixtures):
     the replacement would be ANNOUNCED as a changed workload -- a regeneration event that never
     happened, with the other box's bytes gone from the file. Repeating one path is not ambiguous,
     so it is kept.
+
+    Names must also survive the whitespace-split format they are written into: `write_digests`
+    emits them unescaped, so a name containing whitespace would produce a line every later
+    `read_digests` refuses -- and since recording rewrites the whole file, one such recording
+    leaves the checked-in record unreadable. Refused here, before the file is touched (the
+    origin-side twin of this check is `check_origin`).
     """
     seen = {}
     for fixture in fixtures:
         fixture = Path(fixture)
+        if fixture.name.split() != [fixture.name]:
+            raise ValueError(
+                f"{fixture.name!r} cannot be recorded: the digest file is whitespace-split, so "
+                "this name would write a line every later read refuses, breaking the whole "
+                "rewritten file; rename the fixture to a single whitespace-free word"
+            )
         first = seen.setdefault(fixture.name, fixture)
         if first.resolve() != fixture.resolve():
             raise ValueError(
