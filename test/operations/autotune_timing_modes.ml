@@ -145,10 +145,14 @@ let () =
   if batches_here then p claim (que.dispatches > iso.dispatches)
   else Verdict.skipped ~backend:(backend ()) claim;
   (* Per launch, not per batch. A reading that forgot to divide by the depth would be about [depth]
-     times the mean cost of a launch in that call -- up to 200x -- so the two-sided factor of 3
-     leaves ample room for the difference between a minimum and a mean while refusing that. *)
+     times the mean cost of a launch in that call -- up to 200x -- which the upper factor of 3
+     refuses. The low side exists only to keep the claim two-sided (a reading divided by the depth
+     twice would be up to 200x too SMALL), and it must absorb what the upper side never faces: [ms]
+     is a min over up to 64 batches while [mean] is the whole call's average, and on a busy runner
+     the average sits severalfold above the minimum (4.3x observed on CI, gh-ocannl-851) -- so the
+     low envelope is 16, an order of magnitude inside the 200x error it refuses. *)
   let mean r = r.wall_ms /. Float.of_int (max 1 r.dispatches) in
-  let per_launch r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / 3.) in
+  let per_launch r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / 16.) in
   Verdict.pass_fail "isolated reading is a per-launch time" (per_launch iso)
     ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" iso.ms (mean iso));
   Verdict.pass_fail "queued reading is a per-launch time" (per_launch que)
