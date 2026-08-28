@@ -85,9 +85,10 @@ type mma_capability = {
           can hold the accumulator in f32 and convert once at the [d] boundary, which is what the
           {!Numerics.Fp16_wide} policy requires of every rendering (gh-ocannl-680). CUDA's
           inline-PTX [mma.sync.m16n8k16] arm can (sm_80+, the architecturally-defined fragment
-          layouts are shared by .f16 and .bf16); Metal cannot ([simdgroup_matrix] is
-          uniform-precision only, structurally); HIP's rocWMMA has [(f16, f16, f32)] fragments but
-          the d-boundary conversion is not wired yet, so it answers false for now. Where false, the
+          layouts are shared by .f16 and .bf16); HIP can since gh-ocannl-789 (rocWMMA's
+          [(f16, f16, f32)] fragments, the boundary converted elementwise through a
+          destination-typed accumulator fragment); Metal cannot ([simdgroup_matrix] is
+          uniform-precision only, structurally). Where false, the
           seeding gate in [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds
           under the wide policy — the serial legs then carry the f32 residency via [accum_prec],
           keeping the width schedule-uniform per the gh-ocannl-545/663 discipline. *)

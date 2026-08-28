@@ -531,13 +531,13 @@ files.
   the uniform-f16 combination routes to the f32-accumulate inline-PTX m16n8k16 arm (the bf16
   uniform arm's body parameterized by `mma16_spellings` — the PTX fragment layouts are shared by
   .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its f16-accumulate
-  wmma combo is gated off. Metal (uniform-precision `simdgroup_matrix`, structural) and HIP
-  (rocWMMA has `(f16,f16,f32)` fragments but no d-boundary conversion wired yet) instead UNSEED
-  uniform-f16 mma under the wide policy — `Backend_intf.mma_capability.mma_f16_wide_acc` is the
-  per-backend capability bit, and `Sketch_families.fp16_wide_withholds` (keyed on the DESTINATION's
-  storage precision, so `(f16,f16,f32-storage)` sites are untouched) gates both the tile and
-  staged-layout lookups; the emission hooks decline the same combos for hand-built IR. So `false`
-  trades the f16 tensor-unit legs on Metal/HIP for cross-backend-uniform wide f16 sums. `auto`
+  wmma combo is gated off. HIP stays tensorized too since gh-ocannl-789 (see the rocWMMA
+  d-boundary bullet below). Metal (uniform-precision `simdgroup_matrix`, structural) instead
+  UNSEEDS uniform-f16 mma under the wide policy — `Backend_intf.mma_capability.mma_f16_wide_acc` is
+  the per-backend capability bit, and `Sketch_families.fp16_wide_withholds` (keyed on the
+  DESTINATION's storage precision, so `(f16,f16,f32-storage)` sites are untouched) gates both the
+  tile and staged-layout lookups; the emission hooks decline the same combos for hand-built IR. So
+  `false` trades the f16 tensor-unit legs on Metal for cross-backend-uniform wide f16 sums. `auto`
   deliberately RETAINS LATITUDE to later resolve wide on hardware where wide f16 accumulate is
   free (datacenter NVIDIA runs f32-accumulate f16 mma at full rate; GeForce halves it) — do not
   write code or tests assuming `auto ≡ narrow` as a contract; `accum_width.ml`'s default-policy
@@ -549,8 +549,24 @@ files.
   `hardware_warp_shuffle.ml`'s `Fp16_wide` legs, which execute the path the policy newly makes
   reachable: the f16 warp-shuffle rendering the residency gate refuses under `auto` (next bullet). The reproducible
   profile pins `fp16_arithmetic=auto` (the default, so the profile still changes no math); the
-  performance profile keeps `true`. HIP's wide d-boundary conversion and hardware validation of
-  the CUDA `(mma-f16)` arm are the open remainder.
+  performance profile keeps `true`. Hardware validation of the CUDA `(mma-f16)` arm is the open
+  remainder; HIP's half was closed by gh-ocannl-789.
+- **rocWMMA fragments are opaque for LAYOUT but not for ELEMENTS, and that is what wires HIP's
+  wide-f16 d boundary** (gh-ocannl-789, `arrayjit/lib/hip_backend.ml`'s `mma_d_boundary`). Under
+  `Fp16_wide` the uniform-f16 arm pairs a `float` accumulator fragment with the unchanged f16
+  STORAGE destination; neither `load_matrix_sync` nor `store_matrix_sync` is type-correct across
+  that mismatch, so the boundary stages through a destination-typed accumulator fragment rocWMMA
+  does load and store, and copies element-for-element via `num_elements` / `x[]` — the surface the
+  header documents as "compatibility with nvcuda::wmma". The copy never assumes WHICH matrix cell
+  an element index names, only that two accumulator fragments of the same 16x16x16 shape name the
+  same cell at the same index; that holds because rocWMMA derives the accumulator's IO layout from
+  the fragment shape and wave size, not from `DataT`, and an emitted `static_assert` on the two
+  `num_elements` fails the kernel compile if a release ever packs them differently. Measured on
+  gfx1151: both fragments report 8 elements and dump identical per-`(lane, index)` values from the
+  same 16x16 tile of distinct values. No LDS traffic — the warp-staged float tile that was the
+  fallback design is not needed. The combination table and fragment-type spelling are now shared
+  by `mma_syntax` and `mma_fragment_syntax` (they were duplicated verbatim, and the two hooks are
+  required to accept together), so an arm added to one reaches both.
 - **The warp-shuffle rendering stages at the residency, and gates on it** (gh-ocannl-682).
   `C_syntax.try_warp_reduce` holds `wred_v_*`, the `__shared__ wred_partials_*` slots and every
   `ocannl_shfl_xor` stage at `accum_prec` of the storage precision, and renders the contribution

@@ -44,6 +44,8 @@ staged+tensorized half matmul matches the serial twin: true
 staged+tensorized half fragment residency: true
 staged+tensorized uniform-f16 matmul matches the serial twin bitwise: true
 staged+tensorized uniform-f16 fragment residency: true
+staged+tensorized Fp16_wide matmul equals the once-narrowed wide reference bitwise: true
+staged+tensorized Fp16_wide fragment residency converts d once: true
 ta tensorized matmul matches the serial twin: true
 ta C-backend fallback matches bitwise: true
 ta tensorized structure as expected: true
