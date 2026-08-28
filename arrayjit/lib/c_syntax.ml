@@ -640,8 +640,8 @@ module type C_syntax_config = sig
       decisions are reported per routine by the volatility census ({!volatility_summary}).
 
       The qualifier is not free — it is exactly the loss of register residency. Measured on an M4
-      Max (the [bench_metal_bug_local] tax table): 1.05x on a memory-bound per-thread reduction,
-      2.1x on an accumulator-bound dependency chain, 3.5-3.8x on a long single-threaded reduction,
+      Max (the [bench_metal_bug_local] tax table): 1.06x on a memory-bound per-thread reduction,
+      2.15x on an accumulator-bound dependency chain, 4.1x on a long single-threaded reduction,
       which is the scalar-loss shape. Correctness wins that trade until the defect is fixed
       upstream. *)
 

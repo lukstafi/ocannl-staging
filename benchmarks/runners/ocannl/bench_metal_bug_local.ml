@@ -19,7 +19,8 @@
    - the TAX: three localized-reduction kernel shapes (a streaming per-thread reduction, an
      accumulator-bound dependency chain, one long single-thread reduction — the scalar-loss shape),
      each rendered with and without the qualifier and timed on the GPU's own clock, interleaved,
-     median of N repeats. That is what says whether the wide predicate is worth narrowing.
+     best of N repeats whose arm order rotates. That is what says whether the wide predicate is
+     worth narrowing.
 
    Run it as [dune exec benchmarks/runners/ocannl/bench_metal_bug_local.exe]; it links [metal] and
    [ctypes] only, so it keeps working across OCANNL refactorings and can be handed to Apple. *)
@@ -60,8 +61,8 @@ let kernel ~name ~body = Printf.sprintf "kernel void %s(\n%s%s}\n" name pool_pre
 
 (* Pool layout, in bytes within the single slab every buffer index is bound to. Separate regions so
    no two kernels alias, and the reproducer's inputs survive the timing runs. *)
-let stream_threads = 65536
-let stream_k = 256
+let stream_threads = 16384
+let stream_k = 1024
 let chain_threads = 65536
 let chain_k = 4096
 let scalar_n = 1 lsl 20
@@ -366,11 +367,10 @@ let all_units =
   List.map (fun v -> ("repro_" ^ v.vname, v.vbody)) variants
   @ List.map (fun (name, body) -> (name, body)) timing_kernels
 
-let median xs =
-  let a = Array.of_list xs in
-  Array.sort compare a;
-  let n = Array.length a in
-  if n = 0 then 0.0 else if n land 1 = 1 then a.(n / 2) else (a.((n / 2) - 1) +. a.(n / 2)) /. 2.0
+(* The cleanest run of an arm, which is what the project's own segment timings report: a GPU kernel
+   has a floor and only ever loses time to interference, so the minimum is the estimate that noise
+   cannot inflate. Interleaving and rotation are what keep the two arms' floors comparable. *)
+let best xs = List.fold_left min infinity xs
 
 (* MSL forbids [-] and [.] in identifiers; the variant names carry dashes for readability. *)
 let mangle = String.map (fun c -> if c = '-' then '_' else c)
@@ -481,8 +481,10 @@ let () =
   done;
 
   (* ---- Half 2: the tax. ---- *)
-  let repeats = 31 in
-  Printf.printf "\n== volatile tax, GPU clock, median of %d interleaved repeats ==\n%!" repeats;
+  (* A multiple of the arm count, so the rotation gives each arm each position equally often. *)
+  let repeats = 30 in
+  Printf.printf "\n== volatile tax, GPU clock, best of %d rotated interleaved repeats ==\n%!"
+    repeats;
   Printf.printf "  %-8s %12s %12s %8s %12s %8s   %s\n%!" "shape" "plain(ms)" "vol-acc(ms)" "ratio"
     "vol-src(ms)" "ratio" "note";
   let shapes =
@@ -499,24 +501,35 @@ let () =
       ("scalar", 1, 1, Printf.sprintf "1 thread x %d-element serial reduction (loss shape)" scalar_n);
     ]
   in
+  (* Left-rotation by [n], used to move each arm through each position within a repeat. *)
+  let rotate n lst =
+    let len = List.length lst in
+    let n = ((n mod len) + len) mod len in
+    List.filteri (fun i _ -> i >= n) lst @ List.filteri (fun i _ -> i < n) lst
+  in
   List.iter
     (fun (shape, groups, threads, note) ->
-      (* Warm up both pipelines before either is timed, then interleave, so a thermal or clock ramp
-         is shared by the two arms instead of landing on whichever ran first. *)
+      (* Warm every pipeline up before any of them is timed, then interleave, so a thermal or clock
+         ramp is shared by the arms instead of landing on whichever ran first. *)
       List.iter
         (fun (arm, _) ->
           ignore (dispatch ~name:(shape ^ "_" ^ arm) ~slots:slots_bench ~groups ~threads : float))
         arms;
-      let samples = Hashtbl.create 2 in
+      let samples = Hashtbl.create 4 in
       List.iter (fun (arm, _) -> Hashtbl.replace samples arm []) arms;
-      for _ = 1 to repeats do
+      (* Interleaving alone would leave each arm pinned to a position within the cycle, so a clock
+         or thermal drift ACROSS a cycle would be read as a property of whichever qualifier sits
+         last (Codex P2, round 1). Rotating the order each repeat gives every arm each position an
+         equal number of times over a multiple of three repeats, so position averages out of the
+         the reported floors instead of loading onto one treatment. *)
+      for r = 1 to repeats do
         List.iter
           (fun (arm, _) ->
             let t = dispatch ~name:(shape ^ "_" ^ arm) ~slots:slots_bench ~groups ~threads in
             Hashtbl.replace samples arm (t :: Hashtbl.find samples arm))
-          arms
+          (rotate r arms)
       done;
-      let med arm = median (Hashtbl.find samples arm) in
+      let med arm = best (Hashtbl.find samples arm) in
       let plain = med "plain" and vacc = med "volatile-acc" and vsrc = med "volatile-src" in
       let ratio x = if plain > 0.0 then x /. plain else 0.0 in
       Printf.printf "  %-8s %12.4f %12.4f %7.2fx %12.4f %7.2fx   %s\n%!" shape (plain *. 1000.0)
@@ -526,6 +539,6 @@ let () =
     "\n\
      (GPU times come from the command buffer's own clock; thermal state still moves them, so \
      compare ratios across runs rather than absolute milliseconds. The memory-bound leg's ratio \
-     rides on traffic the qualifier does not change and lands either side of 1.0 run to run: read \
-     it as \"no measurable tax\", not as a speedup.)\n\
+     rides on traffic the qualifier does not change and lands either side of 1.0: read it as \"no \
+     measurable tax\", not as a speedup.)\n\
      %!"

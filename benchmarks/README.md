@@ -306,7 +306,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   every segment sharing identical launch geometry (gh-ocannl-531). Each segment line carries two
   censuses of what produced its kernel: `mma:` (did it tensorize, or render the scalar fallback) and
   `vol:` (how many of its serial accumulations the Metal compiler-bug workaround pinned to memory,
-  gh-ocannl-782 — on the shapes where the accumulator is the critical path that is worth up to 3.8x,
+  gh-ocannl-782 — on the shapes where the accumulator is the critical path that is worth up to 4x,
   so a surprising segment time is read together with this).
   `BENCH_SR_SITES=1` (`bench_conv_diag`) prints what `Autotune.split_reduce_sites` proposes on the
   same graph — the gh-ocannl-484 task-3 seeding can only reach the accumulations listed there, so
@@ -336,7 +336,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   formed, where the preceding device store lands, what the loop reads — each checked against a host
   oracle, so it says what the defect keys on rather than only that it exists; every row is its own
   single-kernel library. Its tax table then times three localized-reduction shapes with and without
-  the qualifier on the GPU's own clock, interleaved, median of 15, which is the measurement behind
+  the qualifier on the GPU's own clock, interleaved with a rotating arm order, best of 30, which
+  is the measurement behind
   keeping the predicate wide (gh-ocannl-782). Run it whenever the toolchain moves: a matrix that
   comes up all-`ok` means the defect is gone and the workaround can be retired.
 

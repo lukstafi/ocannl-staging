@@ -656,7 +656,7 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
           total := !total +. !best;
           censuses := routine.Context.mma :: !censuses;
           (* The volatility census beside the tensorization one (gh-ocannl-782): on Metal the
-             compiler-bug workaround pins a serial accumulator to memory, which costs up to 3.8x on
+             compiler-bug workaround pins a serial accumulator to memory, which costs up to 4x on
              the shapes where the accumulator is the critical path — so a segment timing that looks
              unexpectedly slow should be read together with how many of its accumulators are
              volatile. *)

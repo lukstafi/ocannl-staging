@@ -27,9 +27,9 @@ files.
   which no kernel can rely on). The two things that do stop it are the `volatile` accumulator and a
   `volatile` READ pointer; an accumulating loop that dereferences no node pointer at all never
   miscompiled. So the only reproducer-backed narrowing axis excludes accumulations that read no
-  device memory, which are rare and usually constant-folded — measured, the tax is 1.05x on a
-  memory-bound per-thread reduction, 2.1x accumulator-bound, 3.5-3.8x on a single-threaded
-  scalar-loss reduction. The `volatile`-source form costs 1.14x on that last shape and is the open
+  device memory, which are rare and usually constant-folded — measured, the tax is 1.06x on a
+  memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x on a single-threaded
+  scalar-loss reduction. The `volatile`-source form costs 1.03x on that last shape and is the open
   lead for a cheaper workaround.
 - Metal `Where` must stay a short-circuiting ternary: MSL `select` is a function call that
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,

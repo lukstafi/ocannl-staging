@@ -413,7 +413,7 @@ files.
   site the shadow predicate is false. But the Metal compiler can also corrupt the replacement
   scope-local accumulator whenever its loop reads any device pointer; therefore `scope_decl_type`
   qualifies every reduction-shaped scope local as `volatile` on Metal — at a measured cost of up to
-  3.8x on the shapes where the accumulator is the critical path, which is the price of correctness
+  4x on the shapes where the accumulator is the critical path, which is the price of correctness
   until the defect is fixed (gh-ocannl-782, and see the dialects note for what the matrix refuted).
   Both decisions are censused: `Context.routine.volatility` reports per routine how many
   accumulators were qualified, how many stayed register-resident, and whether the backend asked for

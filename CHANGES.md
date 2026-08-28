@@ -24,8 +24,9 @@
   inserting a device memory barrier, and moving the preceding device store to an unrelated cell. It
   is stopped by the `volatile` accumulator, by a `volatile` read pointer, or by an accumulating loop
   that dereferences no node pointer — which leaves no narrowing worth taking, so the predicate stays
-  wide. The same program measures what that costs (M4 Max, GPU clock, median of 15): 1.05x on a
-  memory-bound per-thread reduction, 2.1x accumulator-bound, 3.5-3.8x on a single-threaded
+  wide. The same program measures what that costs (M4 Max, GPU clock, best of 30 rotated
+  interleaved repeats): 1.06x on a memory-bound per-thread reduction, 2.15x accumulator-bound,
+  4.1x on a single-threaded
   scalar-loss reduction. Each compiled routine now carries a volatility census
   (`Context.routine.volatility`) reporting which accumulators were pinned to memory, which stayed
   register-resident, and whether the backend requested the workaround at all;
