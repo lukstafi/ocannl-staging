@@ -34,6 +34,7 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
@@ -103,8 +104,7 @@ let () =
         done;
         !acc)
   in
-  p "the serial reference matches the host-side wide sum"
-    (Array.for_all2_exn reference wide ~f:Float.equal);
+  p_all2 "the serial reference matches the host-side wide sum" reference wide ~f:Float.equal;
   let pre = Option.value_exn !captured in
   let i, q, r, s, t =
     match nest_path pre.LL.llc with [ i; q; r; s; t ] -> (i, q, r, s, t) | _ -> assert false

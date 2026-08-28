@@ -31,6 +31,7 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead
@@ -116,8 +117,7 @@ let () =
   let got_e = Context.get_values ctx e.Tensor.value in
   p "fission_scheduled splits the chain into two normal segments"
     (match !seg_kinds with [ `Normal; `Normal ] -> true | _ -> false);
-  p "fissioned segments through lowered_transform compute correctly"
-    (Array.for_all2_exn got_e expected_e ~f:approx);
+  p_all2 "fissioned segments through lowered_transform compute correctly" got_e expected_e ~f:approx;
 
   (* --- a hand-crafted fissioned cache entry replays through tune's cache-hit path --- *)
   let cache_dir = "autotune_cache_fission" in
@@ -192,8 +192,7 @@ let () =
   | None ->
       p "hand-crafted fissioned entry hits the cache" false;
       p "cache-hit replay is fissioned" false);
-  p "fissioned cache-hit replay computes correctly"
-    (Array.for_all2_exn got_hit expected_e ~f:approx);
+  p_all2 "fissioned cache-hit replay computes correctly" got_hit expected_e ~f:approx;
 
   (* --- tune end-to-end on the fissionable chain (fresh cache dir: search, then hit) --- *)
   let cache_dir2 = "autotune_cache_fission2" in
@@ -213,7 +212,7 @@ let () =
   let r2, r1 =
     match !reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two reports"
   in
-  p "tuned fissionable chain values correct" (Array.for_all2_exn got_t1 expected_e ~f:approx);
+  p_all2 "tuned fissionable chain values correct" got_t1 expected_e ~f:approx;
   p "chain tune searches then hits the cache" (completed r1 && replayed r2);
   (* gh-ocannl-552: the untuned-default reference is measured by the search — the config-thresholds
      fissioned seed is the first candidate that binds a hardware dimension on GPU, and on CPU it is
@@ -269,7 +268,7 @@ let () =
     (r1.Autotune.candidates_timed + not_dispatched r1 >= 2);
   p "chain tune: candidates refused as unparallelized exactly on GPU"
     (if is_gpu then not_dispatched r1 > 0 else not_dispatched r1 = 0);
-  p "chain cache-hit values correct" (Array.for_all2_exn got_t2 expected_e ~f:approx);
+  p_all2 "chain cache-hit values correct" got_t2 expected_e ~f:approx;
 
   (* === The matmul sketch: 32x32 times 32x32 === *)
   let m = 32 in
@@ -322,10 +321,9 @@ let () =
   p "tensorized (mma) sketch instantiations seeded"
     (mr1.Autotune.sketch_candidates
     >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
-  p "tuned matmul matches the serial twin" (Array.for_all2_exn got_mm1 got_serial ~f:approx);
+  p_all2 "tuned matmul matches the serial twin" got_mm1 got_serial ~f:approx;
   p "matmul tune searches then hits the cache" (completed mr1 && replayed mr2);
-  p "matmul cache-hit values match the serial twin"
-    (Array.for_all2_exn got_mm2 got_serial ~f:approx);
+  p_all2 "matmul cache-hit values match the serial twin" got_mm2 got_serial ~f:approx;
 
   (* === Per-fission-segment sketches (F_sketch): qd = qa + qb (forced materialized), then the
      matmul qe = qd * qc. The chain fissions; the matmul's [Zero_out] lands in its own [`Zeros]
@@ -382,8 +380,7 @@ let () =
   | None ->
       p "per-segment sketch candidates seeded" false;
       p "per-segment sketch candidates timed" false);
-  p "tuned fissioned matmul matches the serial twin"
-    (Array.for_all2_exn got_fs got_fs_serial ~f:approx);
+  p_all2 "tuned fissioned matmul matches the serial twin" got_fs got_fs_serial ~f:approx;
 
   (* === Multi-site F_sketch enumeration: two matmul segments with different geometries in one
      fissioned chain. Each parameter set of each site must be proposed ALONE (the other segment
@@ -447,8 +444,7 @@ let () =
     (* On cc every single compiles and times, so the composite is exactly one extra timing; on
        backends where some singles fail validation only the looser bound is stable. *)
     (if is_cpu then timed_ab = cand_ab + 1 else timed_ab > 0);
-  p "multi-site: tuned two-matmul chain matches the serial twin"
-    (Array.for_all2_exn got_ms got_ms_serial ~f:approx);
+  p_all2 "multi-site: tuned two-matmul chain matches the serial twin" got_ms got_ms_serial ~f:approx;
 
   (* --- timing_ctx on a different backend is rejected (Codex P2 on PR #109): candidates timed
      elsewhere do not predict the target device, and the winner would be cached under the target

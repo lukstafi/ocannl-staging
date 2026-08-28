@@ -26,6 +26,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -140,8 +141,7 @@ let () =
   in
   let ctx = run_forward ~transform (named "mmh_hoisted" (Train.forward mc1)) in
   let got_hoisted = Context.get_values ctx mc1.Tensor.value in
-  p "hoisted-packed matmul matches the naive twin"
-    (Array.for_all2_exn got_hoisted got_naive ~f:approx);
+  p_all2 "hoisted-packed matmul matches the naive twin" got_hoisted got_naive ~f:approx;
   let src = Generated.read "mmh_hoisted" in
   let has sub = String.is_substring src ~substring:sub in
   p "no in-kernel scratch or copy nests; packed constants are buffer params"
@@ -168,8 +168,8 @@ let () =
   in
   let ctx = run_forward ~transform (named "mme_mixed" (Train.forward mc1)) in
   let got_mixed = Context.get_values ctx mc1.Tensor.value in
-  p "mixed hoisted + in-kernel packing on edge tiles matches the naive twin"
-    (Array.for_all2_exn got_mixed got_naive ~f:approx)
+  p_all2 "mixed hoisted + in-kernel packing on edge tiles matches the naive twin" got_mixed
+    got_naive ~f:approx
 
 (* --- 3. Non-constant sources are rejected --- *)
 let () =

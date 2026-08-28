@@ -26,7 +26,12 @@ module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
-let bitwise = Array.for_all2_exn ~f:Float.equal
+
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
+let bitwise a b = (not (Array.is_empty a)) && Array.for_all2_exn a b ~f:Float.equal
 let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
 
 (* Whether the update computation mentions a tensor whose label contains [sub] — a pre-lowering

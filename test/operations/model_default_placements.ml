@@ -21,6 +21,7 @@ open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a -. b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -55,8 +56,8 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx total.Tensor.value in
-  p "model_default with placement levels returns a routine with correct values"
-    (Array.for_all2_exn got expected ~f:approx);
+  p_all2 "model_default with placement levels returns a routine with correct values" got expected
+    ~f:approx;
   match !choice with
   | None -> Stdio.printf "expected a model_choice report\n"
   | Some r ->

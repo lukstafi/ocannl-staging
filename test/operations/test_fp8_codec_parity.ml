@@ -26,6 +26,7 @@ open Ocannl.Operation.DSL_modules
 
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let skipped = Verdict.skipped ~backend:backend_name
@@ -166,7 +167,7 @@ let () =
   (if on_metal then skipped f64_claim
    else
      let dev = narrow_on_device ~src_prec:Ir.Ops.double f64_vals in
-     p f64_claim (Array.for_all2_exn dev f64_host ~f:(fun a b -> Float.equal a b)));
+     p_all2 f64_claim dev f64_host ~f:(fun a b -> Float.equal a b));
 
   (* The same underflow, but reached through fp8 ARITHMETIC rather than a conversion: an fp8
      operator computes in f32 and narrows its RESULT, which is a second narrowing site, and one a

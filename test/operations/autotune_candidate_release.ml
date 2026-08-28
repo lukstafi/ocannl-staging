@@ -40,6 +40,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let n = 128
 let beam_width = 2
 
@@ -125,8 +126,8 @@ let () =
 
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
-  p "the winner still ships and computes the right values"
-    (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-4)));
+  p_all2 "the winner still ships and computes the right values" got expected ~f:(fun a b ->
+      Float.(abs (a - b) < 1e-4));
 
   (* And the exit sweep: with the search over and its routine in hand, nothing else it compiled is
      still held. Read against the state before the search's first candidate, so the reference

@@ -33,6 +33,7 @@ module Idx = Ir.Indexing
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
@@ -62,9 +63,7 @@ let run_named ~label ~name =
    it asked for (mangling is a codegen concern, not a rename of the user's routine). *)
 let colliding ~label ~name ~emitted =
   let values, routine_name = run_named ~label ~name in
-  p
-    (Printf.sprintf "routine named %S computes correct values" name)
-    (Array.for_all2_exn values expected ~f:approx);
+  p_all2 (Printf.sprintf "routine named %S computes correct values" name) values expected ~f:approx;
   p
     (Printf.sprintf "routine named %S keeps its given name in the routine record" name)
     (String.equal routine_name name);
@@ -104,8 +103,7 @@ let () = colliding ~label:"gh686_dg" ~name:"686_leading_digit" ~emitted:"k_686_l
 let () =
   let name = "gh686_ordinary_name" in
   let values, routine_name = run_named ~label:"gh686_ok" ~name in
-  p "an ordinary routine name computes correct values"
-    (Array.for_all2_exn values expected ~f:approx);
+  p_all2 "an ordinary routine name computes correct values" values expected ~f:approx;
   p "an ordinary routine name reaches the routine record unchanged" (String.equal routine_name name);
   Generated.assert_emits ~routine:name
     ~contains:("void " ^ name ^ "(")
@@ -125,8 +123,9 @@ let () =
   let ctx = Context.auto () in
   let ctx, routine = Context.compile ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
-  p "a Block_comment-named reserved routine computes correct values"
-    (Array.for_all2_exn (Context.get_values ctx c.Tensor.value) expected ~f:approx)
+  p_all2 "a Block_comment-named reserved routine computes correct values"
+    (Context.get_values ctx c.Tensor.value)
+    expected ~f:approx
 
 (* --- 6. The other half of the same table: a tensor NODE whose label is a reserved word. Node names
    already avoid [ident_blacklist] by construction (a collision forces the disambiguated
@@ -145,5 +144,6 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.forward_once ctx t in
   let expected_not = Array.map av ~f:(fun x -> if Float.(x = 0.) then 1. else 0.) in
-  p "a node labeled by a C++ alternative token computes correct values"
-    (Array.for_all2_exn (Context.get_values ctx t.Tensor.value) expected_not ~f:approx)
+  p_all2 "a node labeled by a C++ alternative token computes correct values"
+    (Context.get_values ctx t.Tensor.value)
+    expected_not ~f:approx

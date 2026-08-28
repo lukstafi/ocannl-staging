@@ -40,6 +40,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -221,8 +222,7 @@ let () =
        in
        let sctx = Context.run sctx sroutine in
        let want = nonzero "decl_serial" (Context.get_values sctx c2.Tensor.value) in
-       p "per-chunk B~ re-pack matches the serial twin bitwise"
-         (Array.for_all2_exn got want ~f:Float.equal));
+       p_all2 "per-chunk B~ re-pack matches the serial twin bitwise" got want ~f:Float.equal);
     Generated.read name
   in
   (let src = compile_bpack ~run_parity:true ~name:"tmd_bpack_fits" ~dim:256 () in

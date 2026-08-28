@@ -12,6 +12,7 @@ open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead
@@ -59,8 +60,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx c1.Tensor.value in
-  p "tuned values match the serial twin"
-    (Array.for_all2_exn got want ~f:(fun x y -> Float.(abs (x - y) < 1e-4)));
+  p_all2 "tuned values match the serial twin" got want ~f:(fun x y -> Float.(abs (x - y) < 1e-4));
   match !reports with
   | [ r ] ->
       p "the search completed" (completed r);

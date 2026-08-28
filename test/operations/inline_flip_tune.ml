@@ -14,6 +14,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a -. b) < 1e-4)
 let n = 8
 
@@ -41,6 +42,6 @@ let () =
   in
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
-  p "tuned routine values match the plain compile" (Array.for_all2_exn got expected ~f:approx);
+  p_all2 "tuned routine values match the plain compile" got expected ~f:approx;
   p "the public report callback keeps the positional A/B contract" (List.length !arm_reports = 2);
   p "flip refinement searched at least one flip" (List.length !flip_reports >= 1)

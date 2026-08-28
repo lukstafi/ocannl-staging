@@ -35,8 +35,13 @@ let pools_freed before after = after.AC.pools_freed - before.AC.pools_freed
 let live_working_delta before after = after.AC.live_working_pools - before.AC.live_working_pools
 let contexts_released before after = after.AC.contexts_released - before.AC.contexts_released
 
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
 let approx_array a b =
-  Array.length a = Array.length b
+  (not (Array.is_empty a))
+  && Array.length a = Array.length b
   && Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
 
 let cache_entry backend best_ms : SC.entry =

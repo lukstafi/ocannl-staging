@@ -451,6 +451,11 @@ let p_none = Verdict.p_none
 let p_exists = Verdict.p_exists
 let p_empty = Verdict.p_empty
 
+(** {!Verdict.p_all2}, the executed-parity form. A hand-built-IR test reaches it with the two
+    readbacks of a differential arm, which a placement regression empties TOGETHER — the reference
+    went through the same path (gh-ocannl-746). *)
+let p_all2 = Verdict.p_all2
+
 (** {1 Structural probes}
 
     One exhaustive pair of traversals over [Low_level.t] / [scalar_t], from which every counter

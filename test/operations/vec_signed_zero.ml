@@ -49,6 +49,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
 let skipped = Verdict.skipped ~backend:backend_name
@@ -180,8 +181,8 @@ let () =
     in
     let ctx_mma = run ~ctx:ctx_twin ~name:"nz_mma" ~transform [%cd d_mma =+ ma * mb ~logic:"@"] in
     let got = Context.get_values ctx_mma d_mma.Tensor.value in
-    p "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)"
-      (Array.for_all2_exn got want ~f:bitwise);
+    p_all2 "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)" got want
+      ~f:bitwise;
     let src = Generated.read "nz_mma" in
     let has s = String.is_substring src ~substring:s in
     p "register tiling renders a bit-preserving A splat"
@@ -240,8 +241,8 @@ let () =
     in
     let ctx_vec = run ~ctx:ctx_twin ~name:"nzv_vec" ~transform (Train.forward c1) in
     let got = Context.get_values ctx_vec c1.Tensor.value in
-    p "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
-      (Array.for_all2_exn got want ~f:bitwise);
+    p_all2 "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
+      got want ~f:bitwise;
     let src = Generated.read "nzv_vec" in
     let has s = String.is_substring src ~substring:s in
     p "vectorized rendering renders a bit-preserving splat"

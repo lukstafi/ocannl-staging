@@ -1426,8 +1426,14 @@ let constructor_name sexp =
 
 let same_form a b = String.equal (form_name a) (form_name b)
 
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two
+   empty arrays, and a readback and the reference it is compared against go empty TOGETHER --
+   the reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the
+   sites reached through this helper keep a boolean, so the guard lives here. *)
 let agrees got want =
-  Array.length got = Array.length want && Array.for_all2_exn got want ~f:Float.equal
+  (not (Array.is_empty got))
+  && Array.length got = Array.length want
+  && Array.for_all2_exn got want ~f:Float.equal
 
 let show vs = String.concat ~sep:" " (Array.to_list (Array.map vs ~f:(Printf.sprintf "%h")))
 let routine_stem slug = String.tr slug ~target:'-' ~replacement:'_'

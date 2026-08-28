@@ -34,6 +34,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -254,8 +255,7 @@ let () =
         ~name:"mm_tf32_off_mma" c_off_mma
     in
     let src_off = Generated.read "mm_tf32_off_mma" in
-    p "tf32 policy-off matmul matches the serial twin bitwise"
-      (Array.for_all2_exn got_off want_off ~f:Float.equal);
+    p_all2 "tf32 policy-off matmul matches the serial twin bitwise" got_off want_off ~f:Float.equal;
     p "tf32 policy-off renders and records the scalar fallback"
       (List.for_all census_off ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
       && (not (List.is_empty census_off))
@@ -271,8 +271,8 @@ let () =
     let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
     let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
     let src_on = Generated.read "mm_tf32_on_mma" in
-    p "tf32 policy-on matmul matches the serial twin within tolerance"
-      (Array.for_all2_exn got_on want_on ~f:approx_rel);
+    p_all2 "tf32 policy-on matmul matches the serial twin within tolerance" got_on want_on
+      ~f:approx_rel;
     p "tf32 policy-on renders and records wmma tf32"
       (List.for_all census_on ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
       && (not (List.is_empty census_on))
@@ -338,8 +338,7 @@ let () =
   in
   let ctx_a = Context.run ctx_a routine_a in
   let got_mma = Context.get_values ctx_a mc1.Tensor.value in
-  p "tensorized matmul values match the serial twin"
-    (Array.for_all2_exn got_mma got_serial ~f:approx);
+  p_all2 "tensorized matmul values match the serial twin" got_mma got_serial ~f:approx;
   p "C-backend fallback matches bitwise"
     (on_gpu || Array.for_all2_exn got_mma got_serial ~f:Float.equal);
   (let src = Generated.read "mm_mma" in
@@ -403,8 +402,7 @@ let () =
   in
   let ctx_h = Context.run ctx_h routine_h in
   let got_h = Context.get_values ctx_h mch1.Tensor.value in
-  p "half tensorized matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_h got_h_serial ~f:Float.equal);
+  p_all2 "half tensorized matmul matches the serial twin bitwise" got_h got_h_serial ~f:Float.equal;
   (let src = Generated.read "mm_h_mma" in
    let has s = String.is_substring src ~substring:s in
    let ok =
@@ -471,12 +469,12 @@ let () =
   Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
   let got_hw, census_hw = compile_mma_with_census ~name:"mm_h_wide_mma" mchw1 in
   Numerics.set_policy saved_policy;
-  p "Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise"
-    (Array.for_all2_exn want_hw wide_ref_hw ~f:Float.equal);
-  p
+  p_all2 "Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise" want_hw
+    wide_ref_hw ~f:Float.equal;
+  p_all2
     "Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not \
      the schedule, sets the width)"
-    (Array.for_all2_exn got_hw wide_ref_hw ~f:Float.equal);
+    got_hw wide_ref_hw ~f:Float.equal;
   (let src = Generated.read "mm_h_wide_mma" in
    let has s = String.is_substring src ~substring:s in
    let intrinsics =
@@ -625,9 +623,7 @@ let () =
         Float.(abs (a - b) <= 0.05 * max 1. (abs b))
       else fun a b -> Float.(abs (a - b) <= 1e-5 * max 1. (abs b))
     in
-    p
-      (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)
-      (Array.for_all2_exn got want ~f:eq);
+    p_all2 (Printf.sprintf "%s tensorized matmul matches the serial twin" tag) got want ~f:eq;
     let src = Generated.read ("mm_" ^ tag ^ "_mma") in
     p (Printf.sprintf "%s tensorized structure as expected" tag) (check src)
   in
@@ -744,9 +740,9 @@ let () =
      in
      let ctx_f8 = Context.run ctx_f8 routine_f8 in
      let got = Context.get_values ctx_f8 mcf1.Tensor.value in
-     p
+     p_all2
        (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
-       (Array.for_all2_exn got want ~f:Float.equal);
+       got want ~f:Float.equal;
      let src = Generated.read ("mm_" ^ tag ^ "_mma") in
      let has s = String.is_substring src ~substring:s in
      let ok =
@@ -829,8 +825,8 @@ let () =
     in
     let ctx_e = Context.run ctx_e routine_e in
     let got_edge = Context.get_values ctx_e ec1.Tensor.value in
-    p "edge-extent tensorized matmul matches the serial twin bitwise"
-      (Array.for_all2_exn got_edge got_edge_serial ~f:Float.equal);
+    p_all2 "edge-extent tensorized matmul matches the serial twin bitwise" got_edge got_edge_serial
+      ~f:Float.equal;
     let src = Generated.read "mm_edge_mma" in
     let has s = String.is_substring src ~substring:s in
     p "edge-extent register tiling with peeled edges"
@@ -899,8 +895,8 @@ let () =
     in
     let ctx_w = Context.run ctx_w routine_w in
     let got_width = Context.get_values ctx_w wc1.Tensor.value in
-    p "extent-adapted tensorized matmul matches the serial twin bitwise"
-      (Array.for_all2_exn got_width got_width_serial ~f:Float.equal);
+    p_all2 "extent-adapted tensorized matmul matches the serial twin bitwise" got_width
+      got_width_serial ~f:Float.equal;
     let src = Generated.read "mm_width_mma" in
     let has s = String.is_substring src ~substring:s in
     p "extent-adapted tile width covers the column extent"
@@ -971,8 +967,8 @@ let () =
     p_all "full-mantissa products are inexact in f32"
       (List.range 0 (fi * fk))
       ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj))));
-    p "full-mantissa tensorized matmul matches the serial twin bitwise"
-      (Array.for_all2_exn got_fused want_fused ~f:Float.equal);
+    p_all2 "full-mantissa tensorized matmul matches the serial twin bitwise" got_fused want_fused
+      ~f:Float.equal;
     let src = Generated.read "mm_fused_mma" in
     let has s = String.is_substring src ~substring:s in
     p "register tiling offers a whole-vector fused accumulator update"
@@ -1063,8 +1059,8 @@ let () =
     in
     let ctx_c = Context.run ctx_c routine_c in
     let got_staged = Context.get_values ctx_c mc3.Tensor.value in
-    p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_staged got_serial ~f:approx);
+    p_all2 "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" got_staged got_serial
+      ~f:approx;
     let src = Generated.read "mm_staged_mma" in
     let has s = String.is_substring src ~substring:s in
     let count_sub sub =
@@ -1164,8 +1160,8 @@ let () =
     let h32_eq =
       if String.is_substring backend_name ~substring:"hip" then approx else Float.equal
     in
-    p "staged+tensorized half matmul matches the serial twin"
-      (Array.for_all2_exn got_h_staged got_h_serial ~f:h32_eq);
+    p_all2 "staged+tensorized half matmul matches the serial twin" got_h_staged got_h_serial
+      ~f:h32_eq;
     let src = Generated.read "mm_h_staged_mma" in
     let has s = String.is_substring src ~substring:s in
     (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render the
@@ -1204,8 +1200,8 @@ let () =
     in
     let ctx_u = Context.run ctx_u routine_u in
     let got_hu = Context.get_values ctx_u mchu.Tensor.value in
-    p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
-      (Array.for_all2_exn got_hu got_h_serial ~f:Float.equal);
+    p_all2 "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" got_hu
+      got_h_serial ~f:Float.equal;
     let src = Generated.read "mm_hu_staged_mma" in
     let has s = String.is_substring src ~substring:s in
     (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the accumulator
@@ -1255,9 +1251,7 @@ let () =
     in
     let ctx1 = Context.run ctx1 routine1 in
     let got = Context.get_values ctx1 tensorized.Tensor.value in
-    p
-      (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)
-      (Array.for_all2_exn got want ~f:approx);
+    p_all2 (Printf.sprintf "%s tensorized matmul matches the serial twin" tag) got want ~f:approx;
     p
       (Printf.sprintf "%s C-backend fallback matches bitwise" tag)
       (on_gpu || Array.for_all2_exn got want ~f:Float.equal);

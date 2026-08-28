@@ -42,6 +42,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -162,8 +163,8 @@ let () =
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
-    p "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_smem got_serial ~f:approx);
+    p_all2 "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" got_smem got_serial
+      ~f:approx;
     let src = Generated.read "mm_swizzled_smem" in
     let has sub = String.is_substring src ~substring:sub in
     let count_sub sub =
@@ -215,8 +216,8 @@ let () =
     in
     let ctx_b = Context.run ctx_b routine_b in
     let got = Context.get_values ctx_b mc1b.Tensor.value in
-    p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got got_serial ~f:approx);
+    p_all2 "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" got got_serial
+      ~f:approx;
     let src = Generated.read "mm_swz128_smem" in
     let count_sub sub =
       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
@@ -266,8 +267,7 @@ let () =
     in
     let ctx_p = Context.run ctx_p routine_p in
     let got = Context.get_values ctx_p mc1p.Tensor.value in
-    p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got got_serial ~f:approx);
+    p_all2 "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)" got got_serial ~f:approx;
     let src = Generated.read "mm_padstride_smem" in
     let has sub = String.is_substring src ~substring:sub in
     let count_sub sub =
@@ -361,8 +361,8 @@ let () =
     in
     let ctx_c = Context.run ctx_c routine_c in
     let got_staged = Context.get_values ctx_c mc2.Tensor.value in
-    p "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_staged got_serial ~f:approx);
+    p_all2 "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)" got_staged got_serial
+      ~f:approx;
     let src = Generated.read "mm_swizzled_mma" in
     let has sub = String.is_substring src ~substring:sub in
     let count_sub sub =

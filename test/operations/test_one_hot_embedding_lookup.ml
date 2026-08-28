@@ -117,6 +117,7 @@ let build_embedding id_values =
   (ids, embedded)
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 let () =
   (* --- Forward equivalence + observability (in-range indices) --- Run first so the forward comp is
@@ -137,7 +138,7 @@ let () =
     Array.concat_map id_values ~f:(fun idf ->
         Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + Int.of_float idf)))
   in
-  p "forward equals direct gather of table rows" (Array.for_all2_exn got expected ~f:approx);
+  p_all2 "forward equals direct gather of table rows" got expected ~f:approx;
   p "optimized IR contains a Get_dynamic gather" (dyn >= 1);
   (* The logical embedding nests batch x output x vocab loops; after the rewrite the vocabulary
      reduction loop is gone, leaving only the 2 batch/output loops (the small literals are inlined
@@ -215,8 +216,7 @@ let () =
     Array.concat_map (Array.of_list id_list) ~f:(fun idx ->
         Array.init vocab ~f:(fun k -> if k = idx then 1. else 0.))
   in
-  p "logical one_hot_of_int_list matches a dense one-hot"
-    (Array.for_all2_exn oh_vals oh_expected ~f:approx);
+  p_all2 "logical one_hot_of_int_list matches a dense one-hot" oh_vals oh_expected ~f:approx;
   let cids = Ocannl.Nn_blocks.class_ids_of_int_list id_list in
   let ctx5 = Context.cpu () in
   let ctx5 = Train.forward_once ctx5 cids in

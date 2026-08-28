@@ -470,7 +470,7 @@ let () = p "shapes agree" (String.is_substring source ~substring:"3x5")|ocaml},
       "none" );
     ( "naming the reader in a comment is not reading it",
       {ocaml|(* Generated.read would answer this, but the check is on values. *)
-let () = p "values" (Array.for_all2_exn got want ~f:Float.equal)|ocaml},
+let () = p_all2 "values" got want ~f:Float.equal|ocaml},
       "none" );
   ]
 

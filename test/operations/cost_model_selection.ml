@@ -20,6 +20,7 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -151,8 +152,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx dc.Tensor.value in
-  p "model_default returns a working routine with correct values"
-    (Array.for_all2_exn got mm_expected ~f:approx);
+  p_all2 "model_default returns a working routine with correct values" got mm_expected ~f:approx;
   let r = Option.value_exn ~here:[%here] !choice in
   p "model_default scored candidates (default pipeline included)" (r.Autotune.mc_scored >= 1);
   p "model_default reports a choice with its model score"
@@ -201,5 +201,5 @@ let () =
   p "some candidates are excluded as unbuildable" (r.Autotune.mc_rejected >= 1);
   p "the surviving argmin is a schedule, not the default fallback"
     (not (String.equal r.Autotune.mc_label "default"));
-  p "the picked schedule computes correct values"
-    (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-2)))
+  p_all2 "the picked schedule computes correct values" got expected ~f:(fun a b ->
+      Float.(abs (a - b) < 1e-2))

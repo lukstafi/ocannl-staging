@@ -145,7 +145,8 @@ let () =
         ~line:"at least two seeds exceed four (only 1 of 2 match): false" (run_child "exists_short");
       refused "an emptiness claim about a derived subset fails when the population is empty too"
         ~line:"every seed validates (empty): false" (run_child "empty_over_empty");
-      refused "an executed-parity claim over two empty readbacks fails rather than passing vacuously"
+      refused
+        "an executed-parity claim over two empty readbacks fails rather than passing vacuously"
         ~line:"the readback matches the reference cell for cell (empty): false"
         (run_child "all2_empty");
       (* A mismatch is a CLAIM line, not the `Invalid_argument` `Array.for_all2_exn` raises: an

@@ -18,6 +18,7 @@ open Stdio
 module Tn = Ir.Tnode
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let n = 12
 let k = 16
 
@@ -84,6 +85,5 @@ let () =
   let ctx = Train.forward_once ctx ybf in
   let got = Context.get_values ctx ybf.Tensor.value in
   let close a b = Float.(abs (a - b) < 0.05 *. (1. +. abs b)) in
-  p "bf16-converted weights: forward tracks f32 within bf16 tolerance"
-    (Array.for_all2_exn got want ~f:close);
+  p_all2 "bf16-converted weights: forward tracks f32 within bf16 tolerance" got want ~f:close;
   printf "\nDone.\n%!"

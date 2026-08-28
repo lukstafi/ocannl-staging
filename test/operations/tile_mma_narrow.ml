@@ -41,6 +41,7 @@ module Numerics = Ir.Numerics
 let () = Unix.putenv "OCANNL_CC_FP16_ARITHMETIC" "native"
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
@@ -158,8 +159,7 @@ let () =
            ~b:mbb.Tensor.value)
       bc1
   in
-  p "bf16 packed+tensorized matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_b want_b ~f:Float.equal);
+  p_all2 "bf16 packed+tensorized matmul matches the serial twin bitwise" got_b want_b ~f:Float.equal;
   (let src = Generated.read "nrw_bf16_packed" in
    let has s = String.is_substring src ~substring:s in
    let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
@@ -207,8 +207,8 @@ let () =
            ~b:mbi.Tensor.value)
       ic1
   in
-  p "bf16 matmul with inexact partial sums matches the serial twin bitwise (gh-ocannl-639)"
-    (Array.for_all2_exn got_i want_i ~f:Float.equal);
+  p_all2 "bf16 matmul with inexact partial sums matches the serial twin bitwise (gh-ocannl-639)"
+    got_i want_i ~f:Float.equal;
 
   (* === half storage, hoisted f32 B~ panel (host-side converting pack) + in-kernel f32 A~ === *)
   (* Half leaves are minted at their precision ([ndarray] settles a leaf as [Specified] single);
@@ -236,8 +236,7 @@ let () =
            ~b:mbh.Tensor.value)
       hc1
   in
-  p "half hoisted-packed matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_h want_h ~f:Float.equal);
+  p_all2 "half hoisted-packed matmul matches the serial twin bitwise" got_h want_h ~f:Float.equal;
   (let src = Generated.read "nrw_half_hoisted" in
    let has s = String.is_substring src ~substring:s in
    let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
@@ -272,7 +271,7 @@ let () =
      (want_f, got_f)
    with
    | want_f, got_f ->
-       p parity_name (Array.for_all2_exn got_f want_f ~f:Float.equal);
+       p_all2 parity_name got_f want_f ~f:Float.equal;
        let src = Generated.read "nrw_f16_packed" in
        let has s = String.is_substring src ~substring:s in
        let count_sub sub =

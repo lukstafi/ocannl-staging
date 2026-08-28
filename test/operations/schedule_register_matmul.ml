@@ -23,6 +23,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -143,8 +144,8 @@ let () =
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_reg = Context.get_values ctx_a mc1.Tensor.value in
-    p "register-tiled matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_reg got_serial ~f:approx);
+    p_all2 "register-tiled matmul parity (GPU) or clean rejection (CPU)" got_reg got_serial
+      ~f:approx;
     let src = Generated.read "mmr_tiled" in
     let count_sub sub =
       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length

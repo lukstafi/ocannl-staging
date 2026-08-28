@@ -139,7 +139,7 @@ let test_single_operation_padding () =
   (* Run second pass - results stable *)
   let ctx = Context.run ctx routine in
   let pooled_v2 = Context.get_values ctx pooled.value in
-  Verdict.p "second pass identical" (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal)
+  Verdict.p_all2 "second pass identical" pooled_v pooled_v2 ~f:Float.equal
 
 let () =
   test_shared_operand ();

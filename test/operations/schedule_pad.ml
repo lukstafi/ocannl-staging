@@ -34,6 +34,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -145,8 +146,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx pc1.Tensor.value in
-  p "padded packed matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got want ~f:Float.equal);
+  p_all2 "padded packed matmul matches the serial twin bitwise" got want ~f:Float.equal;
   let src = Generated.read "pad_packed" in
   let has s = String.is_substring src ~substring:s in
   p "padded 33x65x70 runs the register-tiled micro-kernel"
@@ -237,7 +237,7 @@ let () =
     in
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx gc1.Tensor.value in
-    p "padded staged+tensorized matmul parity (GPU)" (Array.for_all2_exn got want ~f:approx);
+    p_all2 "padded staged+tensorized matmul parity (GPU)" got want ~f:approx;
     let src = Generated.read "pad_gpu_mma" in
     let has s = String.is_substring src ~substring:s in
     if on_metal then

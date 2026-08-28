@@ -38,8 +38,13 @@ let sum_x = Float.of_int (inner * (inner - 1) / 2)
 let h_expected = Array.init rows ~f:(fun i -> Float.of_int (i + 1) *. sum_x)
 let sentinel = Array.create ~len:rows (-1.)
 
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
 let close got expected =
-  Array.for_all2_exn got expected ~f:(fun v w -> Float.(abs (v -. w) <= 1e-3))
+  (not (Array.is_empty got))
+  && Array.for_all2_exn got expected ~f:(fun v w -> Float.(abs (v -. w) <= 1e-3))
 
 (* The program: [h = a * x] — the contraction whose extent trips the cost guard — consumed by an
    observable output. [~materialize_h] is the one difference between the two arms. *)

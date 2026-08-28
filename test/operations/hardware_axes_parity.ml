@@ -26,6 +26,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-5)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
@@ -124,7 +125,7 @@ let () =
   in
   let ctx_u = Context.run ctx_u routine_u in
   let got_c3u = Context.get_values ctx_u c3u.Tensor.value in
-  p "unrolled variant values correct" (Array.for_all2_exn got_c3u expected_c1 ~f:approx);
+  p_all2 "unrolled variant values correct" got_c3u expected_c1 ~f:approx;
   (let src = Generated.read "unroll_annot" in
    (* The inner extent-8 loop unrolls into blocks binding the index to 0..7. *)
    p "unrolled kernel repeats the body with constant bindings"

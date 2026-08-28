@@ -28,6 +28,7 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead
@@ -137,7 +138,7 @@ let () =
     (match r.Autotune.default_ms with
     | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)
     | None -> false);
-  p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx);
+  p_all2 "tuned routine values correct" got mm_expected ~f:approx;
 
   (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
      serial baseline as the winner: it was timed then, and it wins by default whenever every
@@ -195,5 +196,5 @@ let () =
     (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
   p "a pre-gh-552 entry reports no default measurement; a re-search measures one"
     (Bool.equal (Option.is_some r.Autotune.default_ms) is_gpu);
-  p "the routine from the poisoned-cache path computes correct values"
-    (Array.for_all2_exn got mm_expected ~f:approx)
+  p_all2 "the routine from the poisoned-cache path computes correct values" got mm_expected
+    ~f:approx
