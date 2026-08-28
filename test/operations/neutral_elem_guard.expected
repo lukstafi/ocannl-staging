@@ -1,0 +1,5 @@
+the padded operation itself constructs when nothing derives early: true
+an early derivation is rejected when there is no neutral element to install: true
+an early derivation is rejected for a finite pointwise neutral: true
+an early derivation is rejected for a non-finite neutral without a padded window: true
+an early derivation is rejected for a padded window that reads margins: true

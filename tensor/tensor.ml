@@ -195,8 +195,9 @@ let max_sublabel_length = ref 25
     resulting lazy projections. Returns the update step alongside them because {!op} must set its
     [neutral_elem] {e after} the operation's assignments are built: the field is read only when the
     [projections] thunk is forced (during lowering), so the late mutation is observed — an implicit
-    invariant this seam makes explicit. The [raw_*] accumulations know their neutral element
-    up-front and pass it here. *)
+    invariant this seam makes explicit, and which {!op} enforces by refusing to mutate once
+    [unsafe_projections] is set. The [raw_*] accumulations know their neutral element up-front and
+    pass it here. *)
 let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
   let update_step =
     Shape.
@@ -484,6 +485,38 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      chain. The dependencies may have different accumulation operations which would cause false
      conflicts. *)
   let neutral_elem = Asgns.collect_neutral_elem this_op_asn.asgns in
+  (* Enforce the invariant {!make_projections} documents rather than merely assuming it: the field
+     is set here, after [op_asn], and read when the projections are derived, so the whole scheme
+     rests on nothing deriving them in between. The "already derived" test is [unsafe_projections],
+     not [Lazy.is_val] on the [projections] thunk — derivation records its result in that field, and
+     {!Shape.finish_inference} derives in bulk for every active update step without anyone forcing
+     the thunk.
+
+     The check is on the invariant itself, not on whether breaking it happened to matter for this
+     operation. Only two decisions read [neutral_elem] today — the clamped-window test, which a
+     non-finite identity flips, and the margin-neutral commitment — so a narrower rule could let
+     some early derivations through. It would have to track those decisions from here, down into
+     {!Row.solve_proj_equations} where the first is actually consulted, and follow them as they
+     change; and what it would buy is permission to call something whose cost is not local anyway.
+     Forcing the projections runs {!Shape.finish_inference}, which solves and derives for EVERY
+     active update step in the session, mid-construction of this tensor. There is no supported
+     reason to do that from an [op_asn], no [op_asn] in this repository does it, and a caller that
+     needs shape information has [Shape.set_dim] and the einsum capture syntax instead.
+
+     A violation is unrecoverable rather than merely reported: by the time it is detectable,
+     {!Shape.derive_projections} has already committed padding and [padding_elem] on this shape and
+     on the shared operand shapes. Catching this exception and reusing the operands carries that
+     forward, which is why it reads as a bug report rather than a condition to handle. *)
+  if Option.is_some preliminary_shape_update.unsafe_projections then
+    raise
+    @@ Session_error
+         ( [%string
+             "Tensor.op: the projections of tensor #%{id#Int} were derived before its neutral \
+              element was set — forcing shape inference or the projections from within [op_asn] is \
+              not supported (it finalizes shape inference for the whole session mid-construction), \
+              and the operand shapes are already mutated, so the session cannot continue. Report \
+              this as a bug."],
+           Some t );
   preliminary_shape_update.neutral_elem <- neutral_elem;
   let forward =
     Asgns.
