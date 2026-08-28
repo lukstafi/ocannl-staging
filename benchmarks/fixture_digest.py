@@ -132,6 +132,24 @@ def check_origin(origin):
     return origin
 
 
+def check_fixture_name(name):
+    """Fixture names are single whitespace-free words, for the same reason origins are.
+
+    `write_digests` emits them unescaped into the whitespace-split format, so a name containing
+    whitespace records fine and breaks every later read of the whole rewritten file. Checked
+    wherever a name is about to be committed to: recording (`one_path_per_name`) and generation
+    (`gen_fixtures.py`, BEFORE any fixture is built, since building overwrites the bytes the
+    published numbers rest on).
+    """
+    if not name or name.split() != [name]:
+        raise ValueError(
+            f"{name!r} cannot be recorded: the digest file is whitespace-split, so this name "
+            "would write a line every later read refuses, breaking the whole rewritten file; "
+            "use a single whitespace-free word"
+        )
+    return name
+
+
 def resolve_origin(origin, adopting=None):
     """The ONE place a missing origin becomes this host's -- and the only one that may.
 
@@ -192,6 +210,14 @@ def read_digests(path, legacy_origin=None):
         order-dependent, and able to persist the wrong historical digest for a fixture that is not
         even among the files being recorded.
         """
+        # Reader inputs are held to the same identity rules as writer inputs: `check_origin`
+        # guards every CLI, but a checked-in or hand-merged row bypasses them, and a recorded
+        # `minix,rocm` would flow through `status` into a `fixture_origin` field byte-identical
+        # to two agreeing boxes'.
+        try:
+            check_origin(origin)
+        except ValueError as e:
+            raise ValueError(f"{path}:{lineno}: {e}") from None
         by_origin = entries.setdefault(name, {})
         if origin in by_origin:
             raise ValueError(
@@ -260,12 +286,7 @@ def one_path_per_name(fixtures):
     seen = {}
     for fixture in fixtures:
         fixture = Path(fixture)
-        if fixture.name.split() != [fixture.name]:
-            raise ValueError(
-                f"{fixture.name!r} cannot be recorded: the digest file is whitespace-split, so "
-                "this name would write a line every later read refuses, breaking the whole "
-                "rewritten file; rename the fixture to a single whitespace-free word"
-            )
+        check_fixture_name(fixture.name)
         first = seen.setdefault(fixture.name, fixture)
         if first.resolve() != fixture.resolve():
             raise ValueError(
@@ -400,6 +421,13 @@ def _main(argv=None):
     if args.adopt_legacy is not None:
         if args.check:
             ap.error("--adopt-legacy rewrites the file, so it belongs with --record, not --check")
+    if args.check and args.origin is not None:
+        # Silently accepting it would let automation believe `--check --origin "$BOX"` verified
+        # that box's bytes, when the verdict is against every recorded origin.
+        ap.error(
+            "--check reports each fixture against EVERY recorded origin, so --origin has no "
+            "effect there; drop it, or use --record to write bytes under an origin"
+        )
         check_origin(args.adopt_legacy)
 
     digests = args.digests or args.fixture_dir / DIGEST_FILE

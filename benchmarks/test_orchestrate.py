@@ -1017,6 +1017,32 @@ class FixtureDigestTest(unittest.TestCase):
 
         self.assertFalse(digests.exists(), "refused before the file is touched")
 
+    def test_an_origin_read_from_the_file_is_held_to_the_same_identity_rules(self):
+        # check_origin guards every writer CLI, but a checked-in or hand-merged row bypasses
+        # them: a recorded `minix,rocm` parses into a fixture_origin field byte-identical to two
+        # agreeing boxes named minix and rocm. Refused at the one insertion point, line named.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.HEADER + "deadbeef  17  lenet.safetensors  minix,rocm\n"
+        )
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("minix,rocm", str(refused.exception))
+        self.assertIn(str(digests), str(refused.exception))
+
+    def test_check_mode_refuses_an_origin_it_would_ignore(self):
+        # --check reports against EVERY recorded origin; accepting --origin and doing nothing
+        # with it would let `--check --origin "$BOX"` read as having verified that box's bytes.
+        fx = self.fixture("lenet.safetensors")
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as refused:
+                fixture_digest._main(["--check", str(fx), "--origin", "rog-nv"])
+
+        self.assertEqual(refused.exception.code, 2)
+
     def test_an_origin_that_reads_as_two_origins_is_refused(self):
         # Agreeing boxes are serialized into ONE comma-joined `fixture_origin` field, carried by
         # every result row and report section. A box named `minix,rocm` would publish a field
@@ -1376,6 +1402,29 @@ class FixtureDigestTest(unittest.TestCase):
         # empty work list: the same call with a readable digest file builds it (below).
         self.assertEqual(built, [])
         self.assertEqual(stale.read_bytes(), before)
+
+    def test_a_spec_name_the_format_cannot_carry_is_refused_before_building(self):
+        # The name-side twin of the digest-file validation above: build() writes
+        # fixtures/<spec name>.safetensors, and record() would refuse a whitespace name only
+        # AFTER the previous bytes are overwritten. The name check runs first, while the bytes
+        # the published numbers rest on still exist.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        stale = fixtures / "a b.safetensors"
+        stale.write_bytes(b"the bytes the published numbers are on")
+        (fixtures / fixture_digest.DIGEST_FILE).write_text(fixture_digest.HEADER)
+        spec = self.dir / "workloads" / "spaced.json"
+        spec.parent.mkdir()
+        spec.write_text('{"name": "a b"}')
+        built = []
+
+        with unittest.mock.patch.object(gen_fixtures, "build", lambda s, d: built.append(s)):
+            with self.assertRaises(ValueError):
+                gen_fixtures.main(["--origin", "rog-nv"], here=self.dir)
+
+        self.assertEqual(built, [], "refused before any build")
+        self.assertEqual(stale.read_bytes(), b"the bytes the published numbers are on")
 
     def test_a_valid_digest_file_lets_the_generator_build(self):
         # The negative control: the guard above must refuse the unreadable file, not every file.
