@@ -666,8 +666,9 @@
 # survives -- normally, not always: this is the compiler's lowering decision, and it is not
 # guaranteed at every optimization level (gcc has been reported to keep the calls at `-O0` even on
 # an FMA-capable target, see the diagnostic below). Where the target does NOT have it, each call
-# stays a libm CALL, and an opaque call cannot be vectorized at any width, so at -O3 the surrounding
-# loop scalarizes too.
+# stays a libm CALL -- unless the arithmetic itself is relaxed, since cc_backend_fast_math can make
+# clang expand the calls into a multiply and an add (see that key) -- and an opaque call cannot be
+# vectorized at any width, so at -O3 the surrounding loop scalarizes too.
 # The condition is whether the compiler can lower those `fmaf` / `fma` calls to SOME fused
 # instruction the target has -- FMA3 or FMA4 on x86, `__ARM_FEATURE_FMA` on aarch64 (baseline
 # there, so no ARM host is affected). It is not any one feature macro, and still less the
@@ -709,8 +710,10 @@
 # one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
 # an `fmaf`-only pattern misses every call in a double-precision kernel. Note also that gcc has been
 # reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang
-# measurably does not (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`), so a probe
-# at a low `-O` is untrustworthy for this question rather than evidence either way.
+# measurably does not (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`). That cuts
+# one way only: at the `-O` your build actually uses, finding the calls IS the answer about your
+# kernels -- if you run at cc_backend_optimization_level=0 under gcc and see `fma@PLT`, your kernels
+# have them. What a low-`-O` result does not support is EXTRAPOLATION to a different level.
 # Provenance of everything above: the target rows, the flag-composition effects and the grep pattern
 # were executed on arm64 macOS with Apple clang cross-targeting x86_64 (`clang -arch x86_64`). The
 # two gcc behaviors named -- calls retained at `-O0`, and `-ffast-math` NOT expanding them -- come
@@ -731,15 +734,23 @@
 # 0, so only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain
 # that rejects the probed `-march=native`, in which case the probe falls back to no flag at all and
 # the compiler's own baseline target applies. So do NOT rule the cliff out from the CPU alone: under
-# the default "auto" an FMA-capable host is safe only if the `-march=native` probe actually
-# succeeded, or if the compiler's own default target already includes FMA. Where it matters, answer
+# the default "auto" an FMA-capable host clears this only if the `-march=native` probe actually
+# succeeded (or the compiler's own default target already includes FMA) AND the configured compiler
+# actually lowers the calls at your `-O` -- probe success selects a capable target, it does not
+# establish that no call survives. Where it matters, answer
 # it for the box in front of you with the compile-and-grep diagnostic above rather than from the
 # part number.
-# For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect: an FMA rounds once,
-# and the code generator promises that the vector body, its scalar peel and the serial fallback
-# agree bit for bit -- substituting `a*b + dst` where the instruction is absent would round twice
-# and break that. An opt-in to that trade is deliberately not offered here; it belongs with the
-# approximate-numerics work (gh-ocannl-719). (The rewrite itself is not restricted to floating
+# For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect -- but be precise about
+# WHICH promise is at stake, because it is not whole-result bit equality. A vectorized reduction
+# already reassociates: the lanes accumulate independently and are folded at the end, a different
+# summation order from the serial fallback's, which is exactly why the `reproducible` profile pins
+# cc_vector_bytes=0 to keep the serial order. What the emission does guarantee is the rounding of
+# each individual UPDATE: an FMA rounds once, and the vector body, its scalar peel and the serial
+# fallback all spell that same single-rounded operation, so they differ only by summation order and
+# not by the semantics of each step. Substituting `a*b + dst` where the instruction is absent would
+# round every update twice, changing that per-step semantics on top of the reassociation -- a second,
+# independent numerics change. An opt-in to that trade is deliberately not offered here; it belongs
+# with the approximate-numerics work (gh-ocannl-719). (The rewrite itself is not restricted to floating
 # point, and that is a separate question, not a rationale this note covers -- see the SIMD agent
 # note.)
 # What removes the calls is a target the CPU actually implements -- and that is a fix ONLY when the

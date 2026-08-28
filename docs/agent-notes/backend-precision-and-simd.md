@@ -759,7 +759,8 @@ files.
   calls into it and none survives — normally, not always: that is the compiler's lowering decision
   and it is not guaranteed at every `-O` the backend can be set to (gcc is reported to keep the
   calls at `-O0` even on an FMA-capable target). Where the target does not have it, each
-  stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an
+  stays a CALL — unless the arithmetic is relaxed, `cc_backend_fast_math` being the one setting that
+  measurably expands them (under clang) — and by the gh-ocannl-649 lesson one bullet up, an
   opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
   (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
   scalar, 64 libm calls, 128 stack refs). Three traps in reasoning about it, each of which cost this
@@ -808,7 +809,9 @@ files.
   against 5 of 5 for `fmaf?\b`, on the same `-march=x86-64` object whose calls are `callq _fma`.
   That is the same dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650,
   one bullet up. gcc is also reported to keep the calls at `-O0` even on an FMA-capable target,
-  where clang measurably does not, so a low `-O` is untrustworthy here rather than evidence.
+  where clang measurably does not — which cuts one way only: at the `-O` the build actually uses,
+  finding the calls IS the answer about those kernels; what a low-`-O` result cannot support is
+  extrapolation to a different level.
   (`-march=<t> -E -dM` prints which macros a target defines: an input to the question, not the
   answer to it.) **Everything in this bullet that is called measured was executed on arm64 macOS
   with Apple clang cross-targeting x86_64**; the two gcc behaviors (calls kept at `-O0`,
@@ -842,9 +845,18 @@ files.
   FMA-less part there is nothing to raise to and changing the arithmetic is the only lever left.
   `cc_backend_fp_contract` is not a lever either way: the calls are fused by construction, and
   `-ffp-contract=fast` leaves every one of them.
-  For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious: an
-  FMA rounds once, the emission promises the vector body, its scalar peel and the serial fallback
-  agree bit for bit, and `dst = a * b + dst` on a machine without the instruction rounds twice. The
+  For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious — but
+  **state the promise as per-UPDATE rounding, not as path-level bit equality**, or the rationale
+  claims something the renderer does not deliver. A vectorized reduction reassociates by
+  construction: lanes accumulate independently and fold at the end, a different summation order from
+  the serial fallback's, which is why `cc_vector_bytes=0` is what the `reproducible` profile pins to
+  keep the serial order, and why the width-ladder bullet below calls a newly-vectorized loop a
+  numerics change. What IS guaranteed is that every update is the same single-rounded operation in
+  the vector body, its scalar peel and the serial fallback, so those differ by summation order
+  alone; `dst = a * b + dst` on a machine without the instruction rounds each update twice, which is
+  a second and independent numerics change stacked on the reassociation. (`c_syntax.ml`'s own
+  comment says the paths "promise to equal bit for bit" — read that as the per-update promise, and
+  do not repeat it as whole-result parity, which the reassociation defeats.) The
   2026-08-27 wave decision was to document that here and at `cc_backend_arch_flags` in
   `ocannl_config.reference`, and to leave the config-gated double-rounding arm to the
   approximate-numerics work (gh-ocannl-719) — where it would have to be taken by the peel and the
