@@ -741,6 +741,78 @@ files.
   from the failure (gh-ocannl-621). Answering "no loop" is therefore a failure — which is what
   caught `Asm_census` not knowing that gcc spells the aarch64 conditional branch `bne`, not `b.ne`:
   72 rows of silent absence across both ARM columns, reported at once.
+- **The census reaches the narrow-storage arms and the GEBP grid too** (gh-ocannl-752). gh-650's
+  fixture censused only loops whose storage precision equalled their compute precision, so
+  `vec_bridge`'s widening and narrowing arms, `Ops.c_convert_precision`'s bf16/fp8/fp16 codecs and
+  `try_register_tile`'s RMxRN grid were in no generated source at all — the compile matrix proved
+  nothing about the paths real kernels take. Three additions, each with a trap worth keeping.
+  (1) **fp16's compute precision is a per-process POLICY**, not a fact about the format
+  (`Numerics.fp16_mode`), so one emission cannot carry both the native-fp16 builtin rows and the
+  (fp16, f32) bridge pair: the driver emits under two `fp16_arithmetic` settings and each child
+  asks `Numerics.cpu_compute_prec` which side it is on rather than being told a second time through
+  the environment. (2) **A `Tile_mma` anchor must name something only the tiled rendering emits**
+  (the A-splat binding `tmma_as_0__`, and its B-row load), which is what makes a silently DECLINED
+  tiling — the
+  gh-ocannl-479 failure mode — report "no loop carried the anchor" instead of censusing the scalar
+  fallback under the tile's name. Its rows are also legitimately scalar in part (`rm` A splats per
+  k step, measured at exactly 4 on every x86 column with FMA), so they carry a vector-majority
+  inequality of their own rather than joining the scalarization claim. (3) **A coverage claim is
+  needed where every other claim is an inequality**: a loop that stopped being narrow-storage — a
+  flipped numerics default, a lost `vec_bridge` arm — is still a `Vectorized` fold over an array
+  called `maxs_bf16` and passes all of them, so the fixture would report coverage it no longer has.
+  What closes that is reading the EMITTED SOURCE: every `OCANNL_VEC_WIDEN_*`/`OCANNL_VEC_NARROW_*`
+  key `Builtins_cc` defines must reach some kernel (derived from the table, so a bridge added for a
+  fourth format fails until the fixture grows), and every loop whose storage and compute precisions
+  differ must carry both directions of its `c_convert_precision` pair in its own kernel — which is
+  the only attestation fp8 gets, `vec_bridge` having no vector arm for it and converting per lane.
+  The emission is its own negative control: the native-fp16 kernel carries the `BFLOAT16` bridge
+  pair and neither `HALF` one, the wide-fp16 kernel exactly the reverse.
+- **A census reading is a fact about the emission AND about the compiler, and CI runs two of them**
+  (gh-ocannl-752). The extended fixture passed on a gcc 15.2 box and was red on BOTH CI legs, in two
+  unrelated ways, neither reachable from a gcc-only host. (a) **Line attribution.** A row is found
+  by matching the DWARF `.loc` lines inside a loop against the source lines its anchor matches, and
+  clang attributes an inlined function's instructions to the CALLEE's lines while gcc attributes
+  them to the call site. The bf16 tile's anchor was `tmma_as_0__ = bfloat16_to_single(...)` — a line
+  whose only content is a call to a function defined in the same kernel — so on macos-latest no
+  `.loc` for it appeared anywhere in the k-loop and every bf16 tile row reported "no loop", failing
+  three claims at once. clang folding a bare load into its use does the same to a plain
+  `tmma_as_0__ = tmma_a__[...]` under some `-march`es. The fix is a LIST of anchors per row
+  including a macro use or a `__builtin_memcpy`, whose instructions no inliner can move; a
+  disjointness claim keeps the extra patterns from making two loops answer for each other. Reproduce
+  without a Mac: `apt-get download clang-21 libclang-cpp21 libllvm21 libclang-common-21-dev` plus
+  the arm64 cross libc, `dpkg-deb -x` into a prefix, and point `AARCH64_CROSS_GCC` at a wrapper
+  running `clang --target=aarch64-linux-gnu --sysroot=...` — the two aarch64 columns then exercise
+  clang's attribution on arm64. (b) **Whether a whole-vector builtin is lowered whole-vector.** On
+  `-march=sapphirerapids`, where `_Float16` is a native arithmetic type, gcc 13.4 (ubuntu-latest)
+  lowers the `__builtin_convertvector` that `OCANNL_VEC_WIDEN_HALF` is made of one lane at a time —
+  `vcvtsh2ss` per lane, 4/8/16 of them at the three widths — while gcc 15.2 emits one `vcvtph2psx`,
+  from identical emission and with the arithmetic packed either way. 18 rows failed "no accumulator
+  loop is scalarized" on a claim that was really about the compiler's version. So the claim is now
+  two: `vector_ops = 0` (wholly scalar — the gh-621 class, stable across both compilers) over every
+  row, and `scalar_fp_ops = 0` over the rows whose bridge THIS toolchain lowers packed, asked by
+  compiling that one conversion and censusing it rather than by testing a version. Reproduce with
+  `apt-get download gcc-13-x86-64-linux-gnu cpp-13-x86-64-linux-gnu libgcc-13-dev` and
+  `OCANNL_CC_BACKEND_COMPILER_COMMAND=<prefix>/usr/bin/gcc-13` on the census exe. Neither compiler
+  substitutes for the other here, and a clang x86 host still reports 14 unfound rows (the `dot`
+  reductions on v2/v3/v4): the census is a gcc-hosted measurement plus whatever the `native` column
+  lands on, and a host it cannot read says so loudly rather than passing quietly. (c) **How the
+  assembler SPELLS a packed instruction.** Apple's arm64 assembler carries a NEON instruction's
+  arrangement on the MNEMONIC (`fmla.4s v0, v1, v2`) where GAS carries it on the registers (`fmla
+  v0.4s, v1.4s, v2.4s`), so `Asm_census`'s operand rules saw three plain `v` names and classified 34
+  of the bf16 tile k-loop's 49 instructions as neither vector nor scalar. Unlike the three earlier
+  Mach-O details — dot-less `LBB` labels, the checksummed `.file`, the `;` loop-header annotation —
+  this one does not make rows go missing: the loop is found, its span and instruction total are
+  right, and only the vector/scalar SPLIT reads zero. So it surfaced as ONE claim failing `0 > 0` on
+  `mma/bf16`, the only tile row with no `ldr q0` or `fcvtl v2.4s, v0.4h` for the operand rules to
+  catch by accident — `mma/f32` and `mma/f16w` PASSED the same claim on 3 and 10 accidental counts
+  out of 28 and 78 real ones. Fixed by reading an arrangement suffix on the mnemonic too (`b.ne` is
+  a dot that is not an arrangement, so the suffix is matched against the arrangement list rather
+  than merely detected), and the dialect probes now claim the COUNTS of one loop in both spellings,
+  not just that it is found — the earlier probe already carried `fmax.4s` and asserted only
+  found-ness, which is why the blindness shipped. Reproduce without a Mac: the clang prefix above
+  plus `-mllvm -aarch64-neon-syntax=apple`, which reproduces CI's row byte for byte (`insns=49
+  vector=0 scalar_fp=0`). The lesson generalizes past this census: a fixture for a foreign dialect
+  owes a claim about what was MEASURED, not only about what was found.
 - **`Max`/`Min` SIMD reductions were a libm call per lane, on every x86 target** (gh-ocannl-649,
   fixed). The `Vectorized` accumulation loop rendered them as a fixed-trip per-lane loop calling the
   scalar `fmaxf`/`fminf`, on the reasoning that the packed-max builtins have the wrong NaN semantics

@@ -40,8 +40,9 @@
     Classification is by mnemonic, from GAS output for x86-64 and aarch64:
 
     - {b vector_ops}: packed-SIMD instructions -- an x86 mnemonic ending in [ps]/[pd]/[ph], a packed
-      integer mnemonic, an operand naming [%ymm]/[%zmm], or an aarch64 operand in vector-lane form
-      ([v0.2d], [q0]).
+      integer mnemonic, an operand naming [%ymm]/[%zmm], an aarch64 operand in vector-lane form
+      ([v0.2d], [q0]), or an aarch64 mnemonic carrying the arrangement instead ([fmla.4s]), which is
+      how Apple's assembler spells the same instruction.
     - {b scalar_fp_ops}: an x86 mnemonic ending in [ss]/[sd]/[sh], or an aarch64 [f...] instruction
       on a scalar FP register. This is the count that gives away SLP scalarization, which leaves no
       stack traffic behind.
@@ -50,6 +51,10 @@
       cannot be vectorized at any optimization level or grid size.
     - {b stack_refs}: instructions addressing through the stack or frame pointer -- the spill signal
       gh-ocannl-614 measured.
+
+    Both aarch64 spellings are read, because both are compiled in CI and a dialect must not change
+    the reading: a count is a fact about the instruction, and the same loop assembled two ways has
+    to census the same. Both are exercised in [test/operations/cc_march_census]'s dialect probes.
 
     Moves are the fuzzy edge (an [%xmm] operand does not by itself say whether a [movq] moved a lane
     or a vector), so the mnemonic rule below is deliberately narrow and the counts are reported as a
@@ -248,6 +253,27 @@ let aarch64_vector_operand rest =
   in
   scan 0
 
+(* Apple's arm64 assembler writes a NEON instruction's ARRANGEMENT on the mnemonic ([fmla.4s v0,
+   v1, v2]) where GAS writes it on the registers ([fmla v0.4s, v1.4s, v2.4s]), so on that dialect
+   {!aarch64_vector_operand} sees three plain [v] names and reports nothing. That silences the
+   COUNTERS -- not the selection, and not the loop edges, which is why it survived the three earlier
+   Mach-O rounds: the loop was found, its span and instruction total were right, and only the
+   vector/scalar split read zero. CI's macos-latest leg censused a register-tiled bf16 k-loop of 24
+   [fmla.4s], 6 [shll.4s] and 4 [dup.4s] as [vector=0 scalar_fp=0] and failed the vector-majority
+   claim on [0 > 0]; the two tile rows beside it PASSED that claim on 3 and 10 instructions the
+   [q<n>] and [v<n>.<arr>] rules happened to catch out of 28 and 78 real ones -- a pass arrived at
+   from the same blindness (gh-ocannl-752).
+
+   The suffix has to be an arrangement and not merely a dot: aarch64 spells its conditional branches
+   [b.ne], and counting those as vector work would make every loop in every listing report at least
+   one. *)
+let aarch64_arrangements = [ "8b"; "16b"; "4h"; "8h"; "2s"; "4s"; "1d"; "2d" ]
+
+let aarch64_arrangement_mnemonic m =
+  match String.rsplit2 m ~on:'.' with
+  | Some (_, suffix) -> List.mem aarch64_arrangements suffix ~equal:String.equal
+  | None -> false
+
 let aarch64_scalar_fp rest =
   let n = String.length rest in
   let rec scan i =
@@ -270,6 +296,7 @@ let is_vector_insn ~mnemonic ~rest =
   | Some (`Scalar, _) -> false
   | None ->
       packed_integer_mnemonic mnemonic || has_substr rest ~sub:"%ymm" || has_substr rest ~sub:"%zmm"
+      || aarch64_arrangement_mnemonic mnemonic
       || aarch64_vector_operand rest
 
 let is_scalar_fp_insn ~mnemonic ~rest =
@@ -278,8 +305,11 @@ let is_scalar_fp_insn ~mnemonic ~rest =
   | Some (`Packed, _) -> false
   | None ->
       (* aarch64: an [f...] instruction whose operands are scalar FP registers. [fcmp s0, s0] and
-         [fcsel s1, s2, s3, ne] are what a scalarized lane loop leaves behind. *)
+         [fcsel s1, s2, s3, ne] are what a scalarized lane loop leaves behind. An Apple-dialect
+         [fmla.4s v0, v1, v2] is excluded by the mnemonic, the way its GAS spelling is excluded by
+         the operands: neither count may claim it twice, and it is the packed one. *)
       String.is_prefix mnemonic ~prefix:"f"
+      && (not (aarch64_arrangement_mnemonic mnemonic))
       && (not (aarch64_vector_operand rest))
       && aarch64_scalar_fp rest
 
@@ -403,11 +433,6 @@ let source_file_numbers lines ~basename =
     | _ -> None)
   |> Set.of_list (module Int)
 
-(** [census op_class ~asm ~source_basename ~anchor] is the innermost loop of [asm] whose body
-    carries a source line in [anchor], with that loop's instruction profile.
-
-    [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
-    emitted. That is a finding, not an absence of one: report it as a failure. *)
 let classify_asm asm = String.split_lines asm |> List.map ~f:classify_line |> Array.of_list
 
 (* Every backward branch is a loop edge; its body is the span from the target label to the branch.
@@ -425,17 +450,85 @@ let backward_edges lines =
         | None -> acc)
     | _ -> acc)
 
-(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all, which
-    is what separates the two readings of a {!census} answering [None]: this construct was hoisted
-    or folded away (some other loop was still found), or {!is_branch} does not know this ISA's
-    spelling and no loop in the file was found. The second is a defect in this module and reports
-    every anchor missing at once, so it is worth a claim of its own. *)
+(** One assembly file, classified once.
+
+    Everything below the line classification -- the loop edges, and the DWARF file numbers standing
+    for the kernel's own source -- is a property of the FILE, not of the construct being censused,
+    while a run asks about several dozen constructs per file. Parsing per question made the driver
+    re-scan every one of a 40000-line listing's lines once per anchor, which was the larger half of
+    [test/operations/cc_march_census]'s wall clock once gh-ocannl-752 raised the loop count. Hence
+    the split: {!parse} once per compiled file, {!census_in} once per anchor. *)
+type parsed = {
+  lines : line option array;
+  edges : (string * int * int) list;  (** (label, body start, backward branch) *)
+  files : Set.M(Int).t;  (** the DWARF file numbers naming the censused source *)
+}
+
+let parse ~asm ~source_basename =
+  let lines = classify_asm asm in
+  {
+    lines;
+    edges = backward_edges lines;
+    files = source_file_numbers (Array.to_list lines) ~basename:source_basename;
+  }
+
+(** [edge_count p] is how many loop edges the branch vocabulary recognized in [p] at all, which is
+    what separates the two readings of a {!census_in} answering [None]: this construct was hoisted or
+    folded away (some other loop was still found), or {!is_branch} does not know this ISA's spelling
+    and no loop in the file was found. The second is a defect in this module and reports every anchor
+    missing at once, so it is worth a claim of its own. *)
+let edge_count p = List.length p.edges
+
 let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
 
-let census op_class ~asm ~source_basename ~anchor =
+(* The instruction profile of one span of classified lines. Shared by {!census_in}, which asks it
+   about a loop body, and {!profile_all}, which asks it about a whole listing. *)
+let count_range lines op_class ~from_ ~to_ =
+  let libm = libm_names op_class in
+  let counts =
+    ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
+  in
+  for k = from_ to to_ do
+    match lines.(k) with
+    | Some (Insn { mnemonic; rest }) ->
+        let c = !counts in
+        let c = { c with instructions = c.instructions + 1 } in
+        let c =
+          if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
+        in
+        let c =
+          if is_scalar_fp_insn ~mnemonic ~rest then { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
+          else c
+        in
+        let c =
+          match call_target ~mnemonic ~rest with
+          | Some t when List.mem libm t ~equal:String.equal ->
+              { c with libm_calls = c.libm_calls + 1 }
+          | _ -> c
+        in
+        let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
+        counts := c
+    | _ -> ()
+  done;
+  !counts
+
+(** [profile_all op_class ~asm] is the instruction profile of an ENTIRE listing, with no loop
+    selection and no source anchoring.
+
+    For a listing that is one small function, which is what a toolchain PROBE compiles: the question
+    there is what the compiler made of one expression, and there is no enclosing loop to find. A
+    census of a generated kernel wants {!census_in} instead -- counting a whole kernel would average
+    every loop in it together. *)
+let profile_all op_class ~asm =
   let lines = classify_asm asm in
-  let files = source_file_numbers (Array.to_list lines) ~basename:source_basename in
-  let loops = backward_edges lines in
+  count_range lines op_class ~from_:0 ~to_:(Array.length lines - 1)
+
+(** [census_in p op_class ~anchor] is the innermost loop of [p] whose body carries a source line in
+    [anchor], with that loop's instruction profile.
+
+    [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
+    emitted. That is a finding, not an absence of one: report it as a failure. *)
+let census_in ({ lines; edges = loops; files } : parsed) op_class ~anchor =
   let carries (_, j, i) =
     let rec go k =
       if k > i then false
@@ -455,34 +548,12 @@ let census op_class ~asm ~source_basename ~anchor =
         Int.compare (i1 - j1) (i2 - j2))
   in
   Option.map best ~f:(fun (label, j, i) ->
-      let libm = libm_names op_class in
-      let counts =
-        ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
-      in
-      for k = j to i do
-        match lines.(k) with
-        | Some (Insn { mnemonic; rest }) ->
-            let c = !counts in
-            let c = { c with instructions = c.instructions + 1 } in
-            let c =
-              if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
-            in
-            let c =
-              if is_scalar_fp_insn ~mnemonic ~rest then
-                { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
-              else c
-            in
-            let c =
-              match call_target ~mnemonic ~rest with
-              | Some t when List.mem libm t ~equal:String.equal ->
-                  { c with libm_calls = c.libm_calls + 1 }
-              | _ -> c
-            in
-            let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
-            counts := c
-        | _ -> ()
-      done;
-      { loop_label = label; span = i - j; counts = !counts })
+      { loop_label = label; span = i - j; counts = count_range lines op_class ~from_:j ~to_:i })
+
+(** {!census_in} over an assembly listing parsed for this one question. Convenient where a caller
+    asks about one construct in one file; a caller asking about many should {!parse} once. *)
+let census op_class ~asm ~source_basename ~anchor =
+  census_in (parse ~asm ~source_basename) op_class ~anchor
 
 (** A one-line profile, for the stderr table a census run prints. *)
 let to_line

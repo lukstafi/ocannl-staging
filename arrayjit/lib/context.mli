@@ -12,6 +12,16 @@ module Cc_backend = Cc_backend
     against a different compiler would describe guarded arms nothing here selects. The interface is
     [cc_backend.mli]'s, so this exposes no more than that file already publishes. *)
 
+module Builtins_cc = Builtins_cc
+(** The cc backend's builtins table, re-exported for the same reason as {!Cc_backend} above: it is
+    the enumeration of the whole-vector storage bridges [C_syntax.vec_bridge] renders calls to
+    ([OCANNL_VEC_WIDEN_BFLOAT16] and its siblings), and the generated-kernel census
+    ([test/operations/cc_march_census.ml], gh-ocannl-752) claims that every one of them reaches an
+    emitted kernel. Deriving that set from the table is what makes the claim fail when a bridge is
+    added and the fixture does not grow to cover it; a list of names in the test would instead be a
+    copy asserting that it still says what it says. Each entry is a (key, definition, dependency
+    keys) triple. *)
+
 type t [@@deriving sexp_of]
 (** Execution context managing device, compilation, and buffers *)
 
