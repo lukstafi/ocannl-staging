@@ -131,8 +131,6 @@ jobs:
     # mingw gcc >= 14 on Windows (incompatible-pointer-types became an error); the
     # fix ("Fixed type cast", 2025-10-20) is unreleased.
     - run: opam pin -n pcre https://github.com/mmottl/pcre-ocaml.git
-    # dataprep is an unreleased spin-off, not in opam-repository; pin to its repo so --deps-only can resolve it.
-    - run: opam pin -n dataprep https://github.com/lukstafi/ocaml-dataprep.git
     - run: opam pin -n .
     # Cache the built dependency switch. `opam install --deps-only` compiles
     # roughly 180 packages from source — 225s on ubuntu, 730s on windows — and
@@ -156,9 +154,8 @@ jobs:
       uses: ./.github/actions/pin-revisions
       with:
         # The pins this workflow declares above, beyond what pin-depends already
-        # names -- `dataprep` is pinned above but is a pin-depends entry too, so
-        # the action resolves it either way. (A comment cannot live inside the
-        # folded scalar below; YAML reads anything indented under it as content.)
+        # names. (A comment cannot live inside the folded scalar below; YAML
+        # reads anything indented under it as content.)
         extra-specs: >-
           https://github.com/c-cube/printbox.git#HEAD
           https://github.com/mmottl/pcre-ocaml.git#HEAD
