@@ -9,6 +9,14 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > (HIP 7.1.52802), tinygrad 0.13.0. Every recorded cell PASSES the parity gate and every loss
 > trajectory moved — no `FAIL`, no `loss stationary`, anywhere in this run.
 >
+> **Fixture provenance** (added retroactively, gh-ocannl-759): these numbers are on **minix's**
+> fixture bytes, now recorded in `fixtures/DIGESTS.txt` under origin `minix` — `mlp_small` sha256
+> `2c48b1d7…c20ec0c1` and `gpt2_mini` sha256 `10839bd1…6269defb`, the two the cross-box comparison
+> covered. rog-nv holds **different bytes at identical sizes** for both (different venv, different
+> numpy `Generator` stream), so absolute step times here are **not comparable** with
+> `report-gh675-cuda.md`'s; the ratios each leg reports are, since a ratio is taken within one box
+> on one fixture. Everything within this report is on one consistent set of bytes.
+>
 > **Cell accounting**, so an absent row is never ambiguous between "failed" and "not attempted":
 >
 > | | full product | attempted | recorded | failed | not attempted |
