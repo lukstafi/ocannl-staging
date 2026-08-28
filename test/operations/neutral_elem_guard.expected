@@ -1,5 +1,5 @@
-an early derivation with no neutral element to install is accepted: true
-an early derivation whose finite neutral reads no margins is accepted: true
 the padded operation itself constructs when nothing derives early: true
-an early derivation whose non-finite neutral flips clamping is rejected: true
-an early derivation whose finite neutral reads margins is rejected: true
+an early derivation is rejected when there is no neutral element to install: true
+an early derivation is rejected for a finite pointwise neutral: true
+an early derivation is rejected for a non-finite neutral without a padded window: true
+an early derivation is rejected for a padded window that reads margins: true

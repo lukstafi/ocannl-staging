@@ -135,12 +135,6 @@ type update_step = {
       (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
           update step use the same neutral element [v], [None] when different operations have
           different neutral elements or when there are no accumulator operations. *)
-  mutable derivation_touched_margins : bool;
-      (** Whether the derivation that ran for this step reached a shape whose margins it reads —
-          i.e. whether [update_padding_elem] had anything to commit. Recorded because
-          {!Tensor.op} learns its [neutral_elem] only after the assignments exist, and needs to
-          know whether installing it late would have changed what was already derived; see
-          {!derivation_is_stale_for}. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -2390,8 +2384,7 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
        margins (demand nonzero padding on [sh] in this step) participate — a valid-window reader
        never sees the margins, so its accumulation neutral is irrelevant. A genuine conflict is
        rejected: the remedy is a materialized copy per neutral. *)
-    if step_touches_margins sh then (
-      update_step.derivation_touched_margins <- true;
+    if step_touches_margins sh then
       sh.padding_elem <-
         (match (sh.padding_elem, update_step.neutral_elem) with
         | None, None -> None (* Both unknown *)
@@ -2408,7 +2401,7 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
                       Nn_blocks.max_pool2d_copy)"],
                    [ Shape_mismatch [ sh ] ] )
         | Some None, _ -> Some None (* Unreachable: conflicts raise instead. *)
-        | Some _, None -> sh.padding_elem))
+        | Some _, None -> sh.padding_elem)
     (* Operation has no neutral elem, keep current *)
   in
   if skip_deriving then ()
@@ -2643,31 +2636,6 @@ let () =
     | _ -> assert false)
 
 (** {2 Shape builders.} *)
-
-(** Whether a derivation that has already run for [update_step] would have reached different
-    decisions had [neutral_elem] been installed on it beforehand. [Tensor.op] learns an operation's
-    neutral element only from the assignments its [op_asn] produced, so it installs the field after
-    the fact; if anything derived the projections in between, they were derived against [None], and
-    this answers whether that matters.
-
-    Exactly two decisions here read [neutral_elem], and this enumerates both so that its callers do
-    not have to:
-
-    - [clamp_padded] (gh-504's clamped-window lowering) tests the identity for non-finiteness. [None]
-      and every finite value give [false] alike, so only a non-finite element — the max/min family —
-      changes it. It feeds [solve_proj_equations], so when it differs the whole derivation does.
-    - [update_padding_elem] commits the margin neutral, but only on a shape whose margins this step
-      actually reads. Under [None] it commits nothing whatever the shape, so a late [Some v] differs
-      only where the derivation found margins to commit — which is what
-      [derivation_touched_margins] records. That flag is read only when [clamp_padded] agreed, i.e.
-      when the derivation it was computed under is the one that would have run anyway.
-
-    Anything else — a finite neutral over a step that touches no margins, which is the ordinary
-    pointwise case — derives identically either way and is not stale. *)
-let derivation_is_stale_for (update_step : update_step) (neutral_elem : float option) : bool =
-  match neutral_elem with
-  | None -> false
-  | Some v -> (not (Float.is_finite v)) || update_step.derivation_touched_margins
 
 let get_projections (update_step : update_step) : Idx.projections =
   finish_inference ();
