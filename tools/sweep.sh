@@ -328,10 +328,10 @@ test_cmd() {
 # certainly cached by the run that just failed. Nothing here may fail the unit: rc
 # is already decided, so every command is guarded and swallows its status.
 rtc_context_cmd() {
-  local backend=$1 alias=
+  local backend=$1 alias_name=
   case $backend in
-    cuda) alias=@arrayjit/test/runtest-test_cuda_compile_options ;;
-    hip) alias=@arrayjit/test/runtest-test_hip_compile_options ;;
+    cuda) alias_name=@arrayjit/test/runtest-test_cuda_compile_options ;;
+    hip) alias_name=@arrayjit/test/runtest-test_hip_compile_options ;;
   esac
   printf 'echo "=== rtc-context (%s) ==="; ' "$backend"
   case $backend in
@@ -355,8 +355,8 @@ rtc_context_cmd() {
       printf 'metal_backend.ml, not in Compiler_options (gh-ocannl-784)"; '
       ;;
   esac
-  if [ -n "$alias" ]; then
-    printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias"
+  if [ -n "$alias_name" ]; then
+    printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
   fi
   printf 'echo "=== end rtc-context ==="; true; '
 }
