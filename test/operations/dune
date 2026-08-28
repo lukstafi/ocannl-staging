@@ -4024,3 +4024,18 @@
  (deps ocannl_config)
  (modules atomic_file_race)
  (libraries base stdio unix arrayjit.utils arrayjit.verdict))
+
+; The exactness of [diff.zero_grads.embedded_nodes] (gh-ocannl-771), at both ends of the
+; recursion: a parameter's singleton, and a composite loss's set equality against what its
+; zeroing Fetches write. Tensor construction and set algebra only -- nothing is lowered.
+
+(test
+ ; ocannl-backend: none -- builds tensors and reads their Assignments.comp sets; it creates no
+ ; context and compiles no routine.
+ (name zero_grads_embedded)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules zero_grads_embedded)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
