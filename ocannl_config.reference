@@ -700,10 +700,12 @@
 # Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
 # assembly text over the shared library the command was building, which may be one your application
 # still has loaded.
-# Then `grep -E 'call.*fmaf?\b' <that>.s` -- name the assembly file, or grep waits on stdin and an
+# Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally (a bare `grep` waits
+# on stdin, and `<name>.s` would be read by the shell as redirection, clobbering the file), and an
 # empty result means nothing. Match BOTH names and both dialects: double-precision kernels call
 # `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
-# spells the call `call fma@PLT` while clang on Mach-O spells it `callq _fmaf`. A pattern pinned to
+# spells the calls `call fma@PLT` / `call fmaf@PLT` while clang on Mach-O spells them `callq _fma` /
+# `callq _fmaf` -- note the double-precision symbol is `fma`, without the `f`. A pattern pinned to
 # one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
 # an `fmaf`-only pattern misses every call in a double-precision kernel. Note also that gcc has been
 # reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang

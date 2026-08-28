@@ -755,8 +755,10 @@ files.
   `vec_acc_fma` falls through to its per-lane `#else` loop. Under clang the chain never gets that
   far — `OCANNL_HAS_ELEMENTWISE_FMA` is 1, the first arm wins, and LLVM scalarizes the builtin into
   the same `fmaf` calls; same destination, different emitted path, and the distinction matters to
-  anyone reading a kernel. Where the target has the instruction the compiler contracts the calls
-  into it and (at the optimization levels this backend uses) none survives; where it does not, each
+  anyone reading a kernel. Where the target has the instruction the compiler NORMALLY contracts the
+  calls into it and none survives — normally, not always: that is the compiler's lowering decision
+  and it is not guaranteed at every `-O` the backend can be set to (gcc is reported to keep the
+  calls at `-O0` even on an FMA-capable target). Where the target does not have it, each
   stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an
   opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
   (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
@@ -769,12 +771,16 @@ files.
   `-march=x86-64-v3` would hand them AVX2 they fault on. `__FMA__` was then wrong because Bulldozer
   (`bdver1`) has FMA4 ONLY — `__FMA4__` and `__XOP__` defined, `__FMA__` absent — and still compiles
   the loop to four-operand `vfmaddps`/`vfmaddss` with zero calls, so it has no cliff either, while
-  the `-mfma` remedy that macro suggests selects FMA3 specifically — dangerous there, but only in
-  combination with the architecture flag, which is the subtlety: `-march=bdver1 -mfma` enables FMA3
-  and FMA4 both and the compiler keeps emitting the four-operand FMA4 form (measured, `vfmaddps` /
-  `vfmaddss`, no calls), while `-march=x86-64 -mfma` emits three-operand FMA3 (`vfmadd132ps` /
-  `vfmadd231ps`) that a Bulldozer cannot execute. The fault case is `-mfma` over an architecture
-  lacking FMA4, not `-mfma` on a Bulldozer per se. A
+  the `-mfma` remedy that macro suggests selects FMA3 specifically, and **do not talk yourself into
+  it being safe behind `-march=bdver1`** — that combination's outcome is COMPILER-DEPENDENT and is
+  not settled: defining `__FMA__` is exactly what makes the emitted kernel take the
+  `#elif defined(__FMA__)` arm and call `__builtin_ia32_vfmaddps`, for which clang was measured here
+  to keep four-operand `vfmaddps` but gcc is reported to emit three-operand `vfmadd132ps`, which a
+  Bulldozer cannot execute. (An earlier revision of this note called it safe on the strength of a
+  clang probe of a *generic* `__builtin_elementwise_fma` loop — a different code path than the one
+  the table emits.) On such a part the architecture flag alone already supplies FMA4, so `-mfma`
+  buys nothing there anyway; over an architecture lacking FMA4 it emits FMA3 (`vfmadd132ps` /
+  `vfmadd231ps`) outright. A
   consequence worth keeping DISTINCT hides in that last case, and it is COMPILER-CONDITIONAL:
   `vec_fma_builtin`'s x86 rows are keyed on `defined(__FMA__)`, so on a compiler WITHOUT
   `__builtin_elementwise_fma` — gcc — an FMA4-only target matches no builtin row and lands on the
@@ -791,11 +797,14 @@ files.
   `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
   erase calls the probe still shows (measured, f32 × 4 lanes at `-march=x86-64 -O3`: 4 calls, and 0
   once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
-  flag set with `-S`, then `grep -E 'call.*fmaf?\b' <that>.s` (name the file — a bare `grep` waits on
-  stdin, and its empty output then means nothing) — match both NAMES and both dialects.
+  flag set with `-S`, then `grep -E 'call.*fmaf?\b' kernel.s` — name the file LITERALLY: a bare
+  `grep` waits on stdin and its empty output means nothing, and a placeholder like `<name>.s` is
+  worse, since the shell reads `<` and `>` as redirection and would truncate the very file you are
+  inspecting. Match both NAMES and both dialects.
   Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
-  `Double_prec`), and gcc on ELF spells it `call fma@PLT` where clang on Mach-O spells it
-  `callq _fmaf`; an `fmaf`-only pattern finds none of a double kernel's calls — measured 0 of 5,
+  `Double_prec`), so the symbols are `call fma@PLT` / `call fmaf@PLT` on gcc+ELF and `callq _fma` /
+  `callq _fmaf` on clang+Mach-O — the double-precision one has no `f`; an `fmaf`-only pattern finds
+  none of a double kernel's calls — measured 0 of 5,
   against 5 of 5 for `fmaf?\b`, on the same `-march=x86-64` object whose calls are `callq _fma`.
   That is the same dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650,
   one bullet up. gcc is also reported to keep the calls at `-O0` even on an FMA-capable target,
