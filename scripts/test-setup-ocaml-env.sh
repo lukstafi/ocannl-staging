@@ -209,7 +209,10 @@ pgid_of() { # pgid_of PID -> its process group id, or nothing if unreadable
   # too important to guess at.
   local pid="$1" line
   if [ -r "/proc/$pid/stat" ]; then
-    read -r line <"/proc/$pid/stat" 2>/dev/null || return 0
+    # Grouped: a failed redirection is reported by the shell before the
+    # command's own 2>/dev/null applies, and this is asked about pids that are
+    # expected to be gone.
+    { read -r line <"/proc/$pid/stat"; } 2>/dev/null || return 0
     line="${line##*) }"                 # comm may itself hold ") "
     # shellcheck disable=SC2086
     set -- $line                        # $1 state, $2 ppid, $3 pgrp

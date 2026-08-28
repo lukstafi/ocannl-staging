@@ -86,7 +86,10 @@ skip() { # skip LABEL REASON -- a leg this system cannot decide, not a failure
 pstate() { # <pid> -> its one-letter state, empty where this system will not say
   local line
   if [ -r "/proc/$1/stat" ]; then
-    read -r line <"/proc/$1/stat" 2>/dev/null || return 0
+    # Grouped, not `read ... 2>/dev/null`: the shell reports a failed
+    # redirection before the command's own stderr redirection applies, and
+    # these readers are asked about pids that are expected to be gone.
+    { read -r line <"/proc/$1/stat"; } 2>/dev/null || return 0
     line=${line##*) }               # comm may itself hold ") "
     # shellcheck disable=SC2086
     set -- $line                    # `state ppid pgrp ...`
@@ -98,7 +101,7 @@ pstate() { # <pid> -> its one-letter state, empty where this system will not say
 ppgid() { # <pid> -> its process group, empty where this system will not say
   local line
   if [ -r "/proc/$1/stat" ]; then
-    read -r line <"/proc/$1/stat" 2>/dev/null || return 0
+    { read -r line <"/proc/$1/stat"; } 2>/dev/null || return 0
     line=${line##*) }
     # shellcheck disable=SC2086
     set -- $line
@@ -125,6 +128,7 @@ zparent=""   # leg 4's self-stopping zombie maker; cleanup must resume it
 livepid=""   # leg 2's live group leader
 leader=""    # the stop legs' current group leader
 member=""    # and the second process it put in that group
+member_token=""  # ... and its start token, since it is not this shell's child
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-run-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
@@ -162,8 +166,8 @@ cleanup() {
   fi
   # The group's second member is not this shell's child, so it is named
   # directly as well: a group kill that failed is exactly the case where it
-  # would otherwise be left behind.
-  if [ -n "${member:-}" ]; then kill -KILL "$member" 2>/dev/null; fi
+  # would otherwise be left behind. Identity-checked -- see kill_member.
+  if [ -n "${member:-}" ]; then kill_member; fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
   elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
@@ -467,7 +471,7 @@ mk_fixture() { # <tag> <pgid> <pointer key>; 0 iff the run is reachable as `last
 
 start_leader() { # <marker> <bash -c body>; sets $leader (and its $member)
   local m=$1 body=$2 p g i
-  leader=""; member=""
+  leader=""; member=""; member_token=""
   rm -f "$m"
   # `set -m` puts the child in its own process group -- the shape stop signals,
   # and the only shape it is safe to hand a group kill.
@@ -492,6 +496,7 @@ start_leader() { # <marker> <bash -c body>; sets $leader (and its $member)
   done
   g="$(ppgid "$p")"
   member="$(tr -dc '0-9' <"$m" 2>/dev/null)"
+  member_token="$(ps_token "$member" 2>/dev/null)"
   # The second member is checked into the group, not assumed into it: a fixture
   # whose extra process ended up somewhere else would leave leg 6 judging the
   # escalation on the leader alone again, which is the hole it exists to close.
@@ -502,6 +507,20 @@ start_leader() { # <marker> <bash -c body>; sets $leader (and its $member)
   fi
   return 0
 }
+kill_member() { # KILL the group's second member -- only if it is still IT
+  # Unlike the leader, the member is a GRANDchild: nothing here holds it as a
+  # zombie, so once `stop` has killed it, init reaps it and its pid is free to
+  # be recycled. An unconditional numeric kill from the EXIT trap could then
+  # land on an unrelated process on a busy host (Codex round 2, P2). The gate
+  # is the same one the shipping script uses for every pid it did not just
+  # fork: the recorded start token has to still be the one that pid answers
+  # with. (lstart's one-second resolution is the known floor there, which is
+  # why test-run.sh prefers /proc starttime where it exists.)
+  [ -n "${member:-}" ] && [ -n "${member_token:-}" ] || return 0
+  [ "$(ps_token "$member" 2>/dev/null)" = "$member_token" ] || return 0
+  kill -KILL "$member" 2>/dev/null
+  return 0
+}
 end_leader() { # whatever the leg concluded, the whole fixture group goes
   if [ -n "${leader:-}" ]; then
     kill -KILL -- "-$leader" 2>/dev/null
@@ -509,10 +528,12 @@ end_leader() { # whatever the leg concluded, the whole fixture group goes
   fi
   # Named separately as well as reached through the group: this is the
   # harness's backstop for the very defect leg 6 now tests for, an escalation
-  # that reached only the leader.
-  if [ -n "${member:-}" ]; then kill -KILL "$member" 2>/dev/null; fi
+  # that reached only the leader. The leader needs no such check -- it is this
+  # shell's own child, held as a zombie until the `wait` below, so its pid
+  # cannot be recycled underneath us.
+  kill_member
   if [ -n "${leader:-}" ]; then wait "$leader" 2>/dev/null; fi
-  leader=""; member=""
+  leader=""; member=""; member_token=""
   return 0
 }
 # Each fixture group holds TWO processes, because a group holding only its
@@ -526,9 +547,9 @@ end_leader() { # whatever the leg concluded, the whole fixture group goes
 # a process that is not its own child.
 body_ignores='trap "" TERM; sleep 600 & echo $! >"$1"; exec sleep 600'
 body_takes='sleep 600 & echo $! >"$1"; exec sleep 600'
-stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""
+stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""; stop_diag=""
 stop_probe() { # <tag> <leader body> <script> <pointer key>
-  stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""
+  stop_out=""; stop_rc=""; stop_pg=""; stop_member=""; stop_err=""; stop_diag=""
   if ! start_leader "$TMP/$1.marker" "$2"; then
     stop_err="could not start a two-process group leader for the '$1' fixture"
     return 1
@@ -541,8 +562,16 @@ stop_probe() { # <tag> <leader body> <script> <pointer key>
     stop_err="could not build the '$1' fixture run directory under $STOP_RUNS"
     return 1
   fi
-  stop_out="$(OCANNL_TOOL_TEST_RUNS="$STOP_RUNS" "$3" stop last 2>&1)"
+  # stdout and stderr kept APART. The sentence is stdout, and it is matched
+  # whole; stderr carries diagnostics that are not part of the answer and can
+  # appear for reasons that have nothing to do with the wording -- a /proc
+  # entry vanishing under group_alive's scan being the one that actually bit
+  # (Codex round 2, P2). Merging the two made a passing stop fail an exact
+  # match. It is kept and shown on failure rather than discarded, since a
+  # failing leg is exactly when it is worth reading.
+  stop_out="$(OCANNL_TOOL_TEST_RUNS="$STOP_RUNS" "$3" stop last 2>"$TMP/$1.stderr")"
   stop_rc=$?
+  stop_diag="$(cat "$TMP/$1.stderr" 2>/dev/null)"
   return 0
 }
 said() { # <label> <the whole line stop must have printed>
@@ -554,7 +583,8 @@ said() { # <label> <the whole line stop must have printed>
     report 0 "$1"
   else
     report 1 "$1" \
-      "expected exactly \"$2\"; stop (exit ${stop_rc:-?}) said: ${stop_out:-<nothing>}"
+      "expected exactly \"$2\"; stop (exit ${stop_rc:-?}) printed: ${stop_out:-<nothing>}"
+    [ -n "${stop_diag:-}" ] && printf '      on stderr: %s\n' "$stop_diag"
   fi
 }
 

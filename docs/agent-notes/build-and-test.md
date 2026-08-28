@@ -419,7 +419,21 @@ that they earn a lookup rather than always-loaded space.
   survive it. And the leader is recorded for cleanup BETWEEN the fork and the checks, not after
   them: job control has just put that child out of reach of a signal aimed at the harness, so an
   interrupt in that window otherwise leaves the group running past the run (all three: Codex round
-  1 on staging#505, each reproduced against a mutated copy before being fixed).
+  1 on staging#505, each reproduced against a mutated copy before being fixed). The sentence is
+  matched against stop's STDOUT alone, with stderr kept and shown only on failure: a diagnostic on
+  stderr is not part of the answer, and merging the two made a passing `stop` fail an exact match.
+  The fixture's second member — a GRANDchild, so nothing holds it as a zombie — is killed only
+  under its recorded start token, the same gate the shipping script applies to any pid it did not
+  itself fork, since `stop` having already killed it frees its pid for recycling before the EXIT
+  trap runs.
+- **`cmd 2>/dev/null` does not silence a failed REDIRECTION.** The shell reports that before the
+  command's own stderr redirection applies, so `read -r line <"$f" 2>/dev/null` prints
+  `/proc/NNN/stat: No such file or directory` whenever the entry vanishes mid-scan — routine, not
+  exceptional, for a glob over every process on the box, and for any reader asked about a pid that
+  is supposed to be gone. `{ read -r line <"$f"; } 2>/dev/null` is the spelling that suppresses it.
+  All four `/proc`-reading shell tools here (`tools/test-run.sh`, `scripts/setup-ocaml-env.sh` and
+  both hand-run harnesses) use the grouped form; the plain one leaked the message into a caller
+  that captured stderr.
   The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
   leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
   itself a running member — in the field it is reached by the census losing a race with a leader
