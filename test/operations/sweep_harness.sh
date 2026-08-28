@@ -92,11 +92,14 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 [ "$(awk -F '\t' 'NR == 4 { print $5 ":" $10 }' "$state/history.tsv")" = 'pass:forced' ]
 [ "$(awk -F '\t' 'NR == 5 { print $5 ":" $8 ":" $10 }' "$state/history.tsv")" = 'pass:1:forced' ]
 
-[ "$(sed -n '1p' "$calls")" = 'exec -- dune runtest' ]
+# A full-suite unit builds @runtest and @train together in one dune call
+# (test/training/dune says why the tier exists); only a narrow --target run
+# still spells `dune runtest <target>`.
+[ "$(sed -n '1p' "$calls")" = 'exec -- dune build @runtest @train' ]
 [ "$(sed -n '2p' "$calls")" = 'exec -- dune clean' ]
-[ "$(sed -n '3p' "$calls")" = 'exec -- dune runtest --force' ]
+[ "$(sed -n '3p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '4p' "$calls")" = 'exec -- dune clean' ]
-[ "$(sed -n '5p' "$calls")" = 'exec -- dune runtest --force' ]
+[ "$(sed -n '5p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '6p' "$calls")" = 'exec -- dune build --force @slow' ]
 
 # Hold one run after it owns the worktree lock, then replace its history with

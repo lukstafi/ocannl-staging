@@ -171,13 +171,15 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/training/dune                       @runtest-env_spelling_gate
   test/training/dune                       @slow
   test/training/dune                       @slow-cifar_conv
-  test/training/dune                       @slow-circles_conv
   test/training/dune                       @slow-env_spelling_gate
-  test/training/dune                       @slow-fsm_transformer
-  test/training/dune                       @slow-mlp_bn_names
-  test/training/dune                       @slow-mlp_names
   test/training/dune                       @slow-mnist_conv
-  test/training/dune                       @slow-transformer_names
+  test/training/dune                       @train
+  test/training/dune                       @train-circles_conv
+  test/training/dune                       @train-env_spelling_gate
+  test/training/dune                       @train-fsm_transformer
+  test/training/dune                       @train-mlp_bn_names
+  test/training/dune                       @train-mlp_names
+  test/training/dune                       @train-transformer_names
   benchmarks/dune -- no gate: its one runtest action runs python3 over the benchmark orchestrator's own unit tests, which import no OCANNL executable -- there is no startup check in reach to gate, the same reason `config_dep_completeness` exempts it from the ocannl_config dependency
 
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
