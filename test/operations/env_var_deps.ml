@@ -225,14 +225,17 @@ let aliases_reached_from stanzas alias =
 
 (* The suite a per-test alias belongs to, by the naming convention: `<suite>-<name>` is one test and
    `<suite>` the suite, an `(alias (name <suite>) (deps …))` stanza listing its members -- so a
-   member the list omits is one `dune build @<suite>` skips, silently. Two suites are built this
-   way. `slow` is the one gh-ocannl-667 introduced. `runtest` is the same arrangement for the
-   golden-diff rules (gh-ocannl-726): dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas
-   and inline-test libraries only, so an `(executable)` plus a `(rule)` that diffs has to be given
-   one -- and it has to be given it ALONE, since a rule attached to two aliases makes building
-   either build both, which would put the whole directory behind every per-test alias. Aggregating
-   the members here is then the only thing that keeps them in `dune runtest`. *)
-let suites = [ "slow"; "runtest" ]
+   member the list omits is one `dune build @<suite>` skips, silently. Three suites are built this
+   way. `slow` is the one gh-ocannl-667 introduced. `train` carries the training integration runs
+   -- toy problems by intent, but serialized on the training lock, so on their own entry point (a
+   daily-sweep unit, runnable as a CI shard) rather than in `runtest` where they set every full
+   run's wall-clock tail. `runtest` is the same arrangement for the golden-diff rules (gh-ocannl-726):
+   dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries only,
+   so an `(executable)` plus a `(rule)` that diffs has to be given one -- and it has to be given it
+   ALONE, since a rule attached to two aliases makes building either build both, which would put
+   the whole directory behind every per-test alias. Aggregating the members here is then the only
+   thing that keeps them in `dune runtest`. *)
+let suites = [ "slow"; "train"; "runtest" ]
 let member_of suite alias = String.is_prefix alias ~prefix:(suite ^ "-")
 
 (* The repo-wide scans and the family alias that runs them (gh-ocannl-703). Which rules are in the

@@ -290,8 +290,18 @@ test_cmd() {
   if [ "$FORCE" = 1 ]; then
     printf 'opam exec -- dune clean; clean_rc=$?; [ $clean_rc -eq 0 ] || exit 126; '
   fi
-  printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s %s; rc1=$?; ' \
-    "$backend" "$force_arg" "$TARGET"
+  # A full-suite unit also builds @train, the training-integration tier that
+  # lives off the runtest path (test/training/dune says why); one dune call, so
+  # the two suites share a build graph and rc1 stays one verdict. A narrow
+  # --target run keeps its narrow meaning -- the `target` column already marks
+  # it as refreshing no coverage.
+  if [ -z "$TARGET" ]; then
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s @runtest @train; rc1=$?; ' \
+      "$backend" "$force_arg"
+  else
+    printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s %s; rc1=$?; ' \
+      "$backend" "$force_arg" "$TARGET"
+  fi
   if [ "$SLOW" = 1 ]; then
     printf 'OCANNL_BACKEND=%s opam exec -- dune build %s @slow; rc2=$?; ' \
       "$backend" "$force_arg"

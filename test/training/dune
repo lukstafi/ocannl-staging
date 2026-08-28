@@ -45,6 +45,19 @@
  (action
   (run %{dep:env_spelling_gate.exe})))
 
+; The same gate for the `train` suite -- the training integration runs, a third entry point beside
+; `runtest` and `slow` (see the `train` aggregate below for what the tier means).
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias train-env_spelling_gate)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 ; The same gate for the per-test `runtest-<name>` aliases (gh-ocannl-703, gh-ocannl-726). A rule
 ; that diffs a golden sits on an alias of its own, so that ONE of them can be rerun targeted --
 ; `dune build @test/training/runtest-transformer_names` -- and a per-test alias is a build entry
@@ -68,31 +81,48 @@
 ; (gh-ocannl-726). A golden-diff rule attaches to its own `runtest-<name>` alias and to NOTHING
 ; else, and this stanza is what keeps plain `dune runtest` running it -- a rule missing from this
 ; list is one `dune runtest` skips silently, which `test/operations/env_var_deps` checks, the
-; same check it makes of the `slow` suite. Currently only the ambient gate remains: the training
-; golden-diff rules all sit on the `slow` path (see the aggregate below).
+; same check it makes of the `train` and `slow` suites. Currently only the ambient gate remains:
+; the training golden-diff rules all sit on the `train` and `slow` paths (see the aggregates
+; below).
 
 (alias
  (name runtest)
  (deps
   (alias runtest-env_spelling_gate)))
 
-; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
-; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
-; @test/training/slow-mlp_names` -- without rebuilding the whole `@slow` suite; this stanza is what
-; makes `dune build @slow` still run all of them. A `slow-<name>` rule missing from this list is one
-; `@slow` silently skips, which `test/operations/env_var_deps` checks.
+; This directory's `train` suite: the training integration runs. They are TOY problems by intent
+; -- as small as a run that still exercises real training dynamics can be -- not slow tests, but
+; they serialize on the `ocannl_training_test` lock, so as `runtest` members they set the
+; wall-clock tail of every full run on every substrate (each is tens to hundreds of seconds; more
+; cores cannot help a serialized chain). On their own alias they run in the daily sweep beside
+; `@runtest` (`tools/sweep.sh`), as a whole -- `dune build @train` -- and targeted:
+; `OCANNL_BACKEND=cc dune build @test/training/train-mlp_names` reruns one of them, gate first. A
+; `train-<name>` rule missing from this list is one `dune build @train` silently skips, which
+; `test/operations/env_var_deps` checks -- the same check it makes of `runtest` and `slow`.
+
+(alias
+ (name train)
+ (deps
+  (alias train-env_spelling_gate)
+  (alias train-mlp_names)
+  (alias train-mlp_bn_names)
+  (alias train-circles_conv)
+  (alias train-fsm_transformer)
+  (alias train-transformer_names)))
+
+; This directory's `slow` suite: the runs that are genuinely long (real datasets, many epochs --
+; compare mnist_conv/cifar_conv to the toy `train` members above). Each slow rule attaches to its
+; own `slow-<name>` alias, so that ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc
+; dune build @test/training/slow-cifar_conv` -- without rebuilding the whole `@slow` suite; this
+; stanza is what makes `dune build @slow` still run all of them. A `slow-<name>` rule missing from
+; this list is one `@slow` silently skips, which `test/operations/env_var_deps` checks.
 
 (alias
  (name slow)
  (deps
   (alias slow-env_spelling_gate)
-  (alias slow-mlp_names)
-  (alias slow-mlp_bn_names)
   (alias slow-mnist_conv)
-  (alias slow-cifar_conv)
-  (alias slow-circles_conv)
-  (alias slow-fsm_transformer)
-  (alias slow-transformer_names)))
+  (alias slow-cifar_conv)))
 
 ; Training executables can each saturate the CPU through the cc backend's process-local OpenMP
 ; pool. Serialize their actions by default: concurrent pools oversubscribe non-macOS hosts badly,
@@ -162,7 +192,7 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-; mlp_names is a slow training run: gated behind the `slow` alias (see cifar_conv).
+; mlp_names is a training integration run on the `train` tier (see the aggregate above).
 
 (executable
  (name mlp_names)
@@ -172,7 +202,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow-mlp_names)
+ (alias train-mlp_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -181,7 +211,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_names.actual from becoming a build target, so plain
- ; `dune build` (@all) does not run this slow exe -- only `@slow` and `@slow-mlp_names` do.
+ ; `dune build` (@all) does not run this exe -- only `@train` and `@train-mlp_names` do.
  (action
   (no-infer
    (progn
@@ -190,7 +220,7 @@
      (run %{dep:mlp_names.exe}))
     (diff mlp_names.expected mlp_names.actual)))))
 
-; mlp_bn_names is a slow training run: gated behind the `slow` alias (see cifar_conv).
+; mlp_bn_names is a training integration run on the `train` tier (see the aggregate above).
 
 (executable
  (name mlp_bn_names)
@@ -200,7 +230,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow-mlp_bn_names)
+ (alias train-mlp_bn_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -217,7 +247,7 @@
      (run %{dep:mlp_bn_names.exe}))
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
-; circles_conv is a training integration run, gated behind the `slow` alias (see cifar_conv): it
+; circles_conv is a training integration run on the `train` tier (see the aggregate above): it
 ; and fsm_transformer/transformer_names are the heaviest members of the serialized
 ; `ocannl_training_test` chain on every substrate measured (~95s on a 24-thread Linux box, ~129s
 ; on the reference Mac), so in the default suite they set CI's wall-clock tail. The loss
@@ -235,7 +265,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow-circles_conv)
+ (alias train-circles_conv)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -315,7 +345,7 @@
      (run %{dep:cifar_conv.exe}))
     (diff cifar_conv.expected cifar_conv.actual)))))
 
-; fsm_transformer is a transformer training integration test, gated behind the `slow` alias (see
+; fsm_transformer is a transformer training integration test on the `train` tier (see
 ; circles_conv): the heaviest single member of the serialized `ocannl_training_test` chain
 ; (~195s on a 24-thread Linux box, ~83s on the reference Mac). Its sgd step is autotuned
 ; (materialized intermediates + Autotune.tune).
@@ -328,7 +358,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow-fsm_transformer)
+ (alias train-fsm_transformer)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -345,7 +375,7 @@
      (run %{dep:fsm_transformer.exe}))
     (diff fsm_transformer.expected fsm_transformer.actual)))))
 
-; transformer_names is a transformer training integration run, gated behind the `slow` alias (see
+; transformer_names is a transformer training integration run on the `train` tier (see
 ; circles_conv): the longest member of the serialized `ocannl_training_test` chain on Linux
 ; (~246s cc on a 24-thread box, ~132s cc on the reference Mac, batch 128 / 2.5k steps). Its sgd
 ; step is autotuned (materialized intermediates + Autotune.tune), the whole one-hot dataset lives
@@ -361,7 +391,7 @@
 ; sampling RNG state legitimately diverge and no single promotion serves both. Recorded on this
 ; repository's reference Mac for cc, multidev_cc and metal; the cuda and hip goldens carry the
 ; previously shared golden verbatim, which is the content they were passing against in the daily
-; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/slow-transformer_names`
+; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/train-transformer_names`
 ; and `dune promote`.
 ;
 ; `../config/ocannl_backend.txt` is the resolved backend name, built by the shared rule in
@@ -378,7 +408,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow-transformer_names)
+ (alias train-transformer_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
@@ -387,7 +417,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps transformer_names.actual from becoming a build target, so plain `dune build`
- ; (@all) does not run this training exe -- only `@slow` and `@slow-transformer_names` do.
+ ; (@all) does not run this training exe -- only `@train` and `@train-transformer_names` do.
  (action
   (no-infer
    (progn

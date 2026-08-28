@@ -953,17 +953,21 @@ that they earn a lookup rather than always-loaded space.
   (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
   gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
-- The per-PR suite does not run the heavy training integrations. `circles_conv`, `fsm_transformer`
-  and `transformer_names` sit on the `slow` alias beside `mlp_names`/`mnist_conv`/`cifar_conv`,
-  because the `ocannl_training_test` lock serializes them and they were CI's wall-clock tail on
-  every substrate measured (2026-08: ~95s/195s/246s cc on a 24-thread Linux box; the ubuntu
-  runner's whole `dune runtest` step was ~8min, most of it this chain). Between Sunday `--slow`
-  sweeps they are compiled by `@check` but EXECUTED nowhere automatically, so a change to training
-  dynamics, `Train.*` plumbing or the autotuner's fission path should run them by hand:
-  `dune build @test/training/slow-circles_conv @test/training/slow-fsm_transformer
-  @test/training/slow-transformer_names` (~6min serialized). CI also runs its one dune walk as
-  `dune build @default @runtest` — two separate commands would hold the serialized training lock
-  chain (what remains of it) against an otherwise idle runner after every file target finished.
+- The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
+  `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
+  tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
+  `ocannl_training_test` lock, which made them CI's wall-clock tail on every substrate measured
+  (2026-08: ~95s/195s/246s cc for the last three on a 24-thread Linux box; the ubuntu runner's
+  whole `dune runtest` step was ~8min, most of it this chain; taking it off the per-PR path took
+  ubuntu CI from ~31min to ~15 and macOS from ~16 to ~10). The daily sweep's full-suite units
+  build `@runtest @train` together, so every backend still executes them daily; per-PR, a change
+  to training dynamics, `Train.*` plumbing or the autotuner's fission path should run
+  `dune build @train` (or the affected `@test/training/train-<name>`) by hand. `@slow` keeps the
+  genuinely long real-dataset runs (`mnist_conv`, `cifar_conv`, `gpt2_dry_run`). CI also runs its
+  one dune walk as `dune build "@default" "@runtest"` — two separate commands would hold the
+  serialized lock chain (what remains of it) against an otherwise idle runner after every file
+  target finished, and the quotes are for PowerShell on the Windows leg, which splats unquoted
+  `@` tokens to nothing.
 - The two opam caches are not one cache seen twice. `ci.yml` caches the built dependency switch
   `_opam`, where its ~180 compiled packages live; `gh-pages-api.yml` caches opam's ROOT `~/.opam`
   while its switch is a LOCAL `_opam` that nothing caches, so that job recompiles the dependencies
