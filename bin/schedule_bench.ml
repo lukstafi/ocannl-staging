@@ -70,8 +70,12 @@ module Numerics = Ir.Numerics
    survive that rounding exactly. They do, by construction rather than by luck: ma is a multiple of
    1/16 below 3 (six significant bits) and mb an integer in -8..8 (four), against tf32's 11-bit
    significand. Confirmed on an RTX 5070 Ti under CUDA 13.3 at the gh-ocannl-738 granularity bump —
-   mma_pd1 and mma_pd2 both report [= reference], with the census confirming they tensorized. A
-   backend or a granularity that breaks the six-bit budget owes that measurement again. *)
+   mma_pd1 and mma_pd2 both report [= reference] at 256^3, 512^3, 128x128x1024 and 320x192x64, with
+   the census confirming they tensorized. The check is not vacuous: reminting ma at 1/4096 (twelve
+   significant bits) turns exactly those two legs red — [DIFFERS from reference at [0]] — and leaves
+   parallel, smem and regtile green, since only the tensorized legs round. That is the negative
+   control to re-run before raising the granularity again, or when porting the claim to a backend
+   whose mma input format is narrower than tf32. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 (* Flushed per line ([Bench_out]): an unflushed table reaches the reader only when the process
    exits, which on a leg that is seconds to minutes per run reads as a hang (gh-ocannl-829). *)
