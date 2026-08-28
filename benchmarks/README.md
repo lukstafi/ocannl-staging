@@ -215,7 +215,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   to be stuck in a driver ioctl — the failure says so, because every later cell of that run was
   then measured against it. A SIGTERM to the sweep itself (a job cancellation, a scheduler's time
   limit) and a Ctrl-C both take the running cell's group with them: the cell is in its own session
-  precisely so the sweep's signals do *not* reach it by default.
+  precisely so the sweep's signals do *not* reach it by default. On **Windows** the same kill is
+  best-effort: the cell gets `CREATE_NEW_PROCESS_GROUP` and the force step is `taskkill /F /T`,
+  which walks the tree from its anchor — so a descendant whose leader has already exited is out
+  of its reach, and there is no group-liveness probe to escalate on. Killing that reliably wants
+  a Job Object at spawn time, which this does not create yet.
 
   A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
   complete result nor searches from scratch, while `searched` reports one of the two, so a retry
