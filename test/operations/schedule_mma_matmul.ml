@@ -102,8 +102,14 @@ let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
 (* The per-backend marker sets for [residency_holds] on a staged half leg. The fragment scope emits
    the same anchor comments regardless of accumulator element type, so both the uniform-f16 and the
    f16->f32 legs share these. Metal keeps the fragment first in its store; the wmma backends put the
-   destination pointer first. *)
-let staged_half_resident src =
+   destination pointer first.
+
+   [converted_d] names HIP's wide-f16 arm (gh-ocannl-789), where the accumulator array's element
+   type is not the destination's: there rocWMMA loads a STAGING fragment and the accumulator array
+   is populated by the elementwise copy, so the "populated once before the body" anchor is that
+   copy rather than a [load_matrix_sync] naming the array. The store anchor is unchanged — the
+   staging fragment is still stored to [__mma_dp] once, after the body. *)
+let staged_half_resident ?(converted_d = false) src =
   if on_metal then
     residency_holds src ~frag_load:"simdgroup_load(__mma_fragment_"
       ~body_begin:"/* simdgroup fragment reduction body begins */"
@@ -111,7 +117,10 @@ let staged_half_resident src =
       ~frag_store:"simdgroup_store(__mma_fragment_"
       ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
   else if String.is_substring backend_name ~substring:"hip" then
-    residency_holds src ~frag_load:"rocwmma::load_matrix_sync(__mma_fragment_"
+    residency_holds src
+      ~frag_load:
+        (if converted_d then ".x[__ei] = (float)__mma_dstage"
+         else "rocwmma::load_matrix_sync(__mma_fragment_")
       ~body_begin:"/* rocwmma fragment reduction body begins */"
       ~body_end:"/* rocwmma fragment reduction body ends */"
       ~frag_store:"rocwmma::store_matrix_sync(__mma_dp" ~barrier:"__syncthreads();"
@@ -1227,6 +1236,51 @@ let () =
   else (
     skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
     skipped "staged+tensorized uniform-f16 fragment residency");
+
+  (* --- The same staged uniform-f16 composition under [Numerics.Fp16_wide] (gh-ocannl-789): the
+     leg that EXECUTES HIP's converted [d] boundary in the FRAGMENT scope, which the [mm_h_wide_mma]
+     leg above cannot reach — its schedule keeps no accumulator across [k_o], so it takes
+     [mma_syntax]'s own load/store instead of [mma_fragment_syntax]'s. On the width-sensitive
+     inputs against the once-narrowed wide reference, so the parity is not a formality: a boundary
+     that converted per [k_o] instead of once would narrow the partial sums, which is precisely
+     what these inputs separate, and a mis-mapped elementwise copy moves values by O(1).
+
+     HIP-only, deliberately. Under this policy Metal withholds the uniform-f16 arm outright and
+     CUDA's wide uniform-f16 arm is inline-PTX with no fragment-scope counterpart, so what the other
+     backends render here is a fallback whose own narrowing points are a different question from the
+     one this leg asks; the cross-backend wide contract is [mm_h_wide_mma]'s above. --- *)
+  let claim_fw_value =
+    "staged+tensorized Fp16_wide matmul equals the once-narrowed wide reference bitwise"
+  in
+  let claim_fw_struct = "staged+tensorized Fp16_wide fragment residency converts d once" in
+  if String.is_substring backend_name ~substring:"hip" then (
+    Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+    let%op mchfw = mwa * mwb in
+    Tn.update_prec mchfw.Tensor.value Ir.Ops.half;
+    let transform_fw opt =
+      Sched.apply
+        (staged_schedule ~out:mchfw.Tensor.value ~src_a:mwa.Tensor.value ~src_b:mwb.Tensor.value opt)
+        opt
+    in
+    let ctx_fw = Context.auto () in
+    let ctx_fw, routine_fw =
+      Context.compile ~lowered_transform:(fun o -> [ transform_fw o ]) ctx_fw
+        (named "mm_huw_staged_mma" (Train.forward mchfw))
+        Ir.Indexing.Empty
+    in
+    let ctx_fw = Context.run ctx_fw routine_fw in
+    let got_fw = Context.get_values ctx_fw mchfw.Tensor.value in
+    Numerics.set_policy saved_policy;
+    p_all2 claim_fw_value got_fw wide_ref_hw ~f:Float.equal;
+    let src = Generated.read "mm_huw_staged_mma" in
+    let has s = String.is_substring src ~substring:s in
+    p claim_fw_struct
+      (staged_half_resident ~converted_d:true src
+      && has "rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>"
+      && has "__mma_dstage"))
+  else (
+    skipped claim_fw_value;
+    skipped claim_fw_struct);
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize
