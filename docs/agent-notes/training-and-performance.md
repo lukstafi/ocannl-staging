@@ -159,9 +159,29 @@ files.
   `communicate()` — the trap to remember whenever a runner is bounded from outside. Two facts
   outlive the fix: `timeout(1)` cannot be the mechanism here (uutils' `-k` misses the process
   group), and a search killed midway leaves tinygrad's single `cache.db` partial, so the next run
-  over it reports a `searched` verdict nobody wrote — the kill renames it aside, and any hand-killed
-  wedge must have the same done to it before its retry means anything. OCANNL's `autotune_cache/`
-  needs no such handling: `Utils.Atomic_file` commits entries by rename.
+  over it reports a `searched` verdict nobody wrote — the kill renames it aside (with the sqlite
+  sidecars UNDER the quarantined name, since `<database>-wal` is the only place sqlite looks for
+  them), and any hand-killed wedge must have the same done to it before its retry means anything.
+  OCANNL's `autotune_cache/` is not torn by a kill — `Utils.Atomic_file` commits entries by rename —
+  but a retry over it is still not a from-scratch search: the finished arms replay and the rest are
+  searched, and a pass reports SEARCHED whenever ANY arm searched, so the mixed retry's compile cost
+  wears a from-scratch label. Wipe it before quoting a search timing.
+
+- Killing a runner from outside: the escalation to SIGKILL is owed to the process GROUP, never to
+  the child's pipes (`gh675_cells.kill_group`, and `orchestrate.kill_cell_group` after the
+  gh-ocannl-760 review re-learned it). A descendant that ignores SIGTERM but does not hold the
+  cell's stdout lets `communicate` return promptly, so a kill path that escalates only when its
+  read blocks skips the SIGKILL exactly where it was needed — and the survivor keeps the GPU while
+  the sweep stamps every later cell valid. The reverse trap is in the same function: a descendant
+  that DOES hold the pipe makes the parent's read the new hang. Both are answered by
+  `os.killpg(pgid, 0)` polled while reaping, and by carrying the pgid rather than looking it up
+  after the leader is gone. The escalation must also be spelled as a boolean rather than a signal
+  number if the code runs on Windows: `signal.SIGKILL` does not exist there, so a
+  "SIGKILL if posix else SIGTERM" argument silently picks the CTRL_BREAK branch again instead of
+  `taskkill /F /T`. And `start_new_session` cuts both ways — it is what lets a cap reach the
+  descendants, and it is why a SIGTERM to the DRIVER no longer reaches them, so a driver that
+  spawns cells this way owes itself a SIGTERM handler that takes the running cell with it.
+
 - A `bin/` bench's correctness guard is a position-weighted checksum of the WHOLE output, and its
   position dependence is the whole of it: a residue of the FLATTENED offset `t = i*n + j` loses its
   row dependence exactly when the modulus divides the row stride, so `1 + (t mod 251)` gives every
