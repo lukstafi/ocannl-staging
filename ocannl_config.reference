@@ -782,8 +782,12 @@
 # the host's own family and uses that family's native spelling. Do NOT hand-write `-march=native`
 # unless you are on x86 -- it is the x86 spelling only, and Apple clang accepts it on arm64 while
 # DOWNGRADING the target (the top of this entry has the details), so writing it by hand on ARM undoes
-# the protection `auto` gives you; the ARM spelling is `-mcpu=native`. Naming your exact CPU's
-# `-march` works too, on either architecture.
+# the protection `auto` gives you; the ARM spelling is `-mcpu=native`. Naming a specific part works
+# too, but the option differs by architecture the same way: on x86 the CPU goes in `-march`
+# (`-march=bdver2`), while on ARM `-march` takes an ARCHITECTURE (`-march=armv8-a`) and a CPU needs
+# `-mcpu` (`-mcpu=cortex-a72`; `-march=cortex-a72` is rejected outright). This value is passed
+# through verbatim with no probe behind it, so a spelling the compiler rejects fails the kernel
+# compile rather than quietly falling back.
 # Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
 # than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
 # escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns
