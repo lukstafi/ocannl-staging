@@ -243,6 +243,14 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   5070 Ti searches in 15.6 s at the default and 56.4 s at `--beam-parallel 0` — so nothing makes
   it the default: the root cause is upstream and unchased, and the cap already bounds the damage.
 
+  Two facts about that default worth knowing before picking an `N`. It applies to the **GPU
+  column only**: tinygrad sizes the pool as `cpu_count()` for its CUDA/AMD/NV/METAL/HIP devices
+  and as `0` for `CPU`, so the CPU column's beam cell compiles its candidates in-process and
+  cannot meet this deadlock at all. And `cpu_count()` ignores the **affinity mask**, so a sweep
+  pinned with `taskset -c 0-15` on a 32-thread box still spawns 32 candidate-compile workers onto
+  16 cores — the oversubscribed shape, on the machine class where the wedges were seen. If you
+  pin, pass `--beam-parallel <mask size>`; a wedge is bounded by the cap either way.
+
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures
   *tuned bf16*, which on RDNA3/3.5 is the only route to a tensor-core candidate at all (WMMA has
