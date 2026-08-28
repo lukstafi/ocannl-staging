@@ -40,6 +40,15 @@ let () =
         ] );
     ]
   in
+  (* Both lists on stderr for all four cases (gh-ocannl-784). The claim below is one boolean over the
+     whole matrix, so a failure used to say only that SOMETHING moved -- and the thing that moves
+     here is an option's position under an umbrella flag, which is unreadable from a [false]. stderr
+     rather than stdout because it is diagnostic rather than a verdict, and because a run that fails
+     exits nonzero, which is exactly when dune discards the redirected stdout. *)
+  List.iter cases ~f:(fun (uses_rocwmma, with_debug, want) ->
+      Stdio.eprintf "rocwmma=%b debug=%b:\n  got:  %s\n  want: %s\n" uses_rocwmma with_debug
+        (Ir.Compiler_options.render (build ~uses_rocwmma ~with_debug))
+        (Ir.Compiler_options.render want));
   Verdict.p_all "every HIPRTC variant keeps both fast-math overrides, in order, after the umbrella"
     cases ~f:(fun (uses_rocwmma, with_debug, want) ->
       List.equal String.equal (build ~uses_rocwmma ~with_debug) want)

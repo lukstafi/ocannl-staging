@@ -48,6 +48,10 @@ ONLY=()
 # local and the remote side: macOS has no timeout(1) at all, and where timeout(1)
 # does exist it is not necessarily one whose -k reaches the process group.
 CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
+# The budget for the post-unit RTC context collection, deliberately separate from
+# CAP: see collect_rtc_context for why sharing the unit's deadline would let a
+# diagnostic overwrite the verdict it is explaining.
+CONTEXT_CAP=${OCANNL_TOOL_SWEEP_CONTEXT_CAP:-300}
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -298,6 +302,161 @@ test_cmd() {
   printf 'exit $(( rc1 != 0 ? rc1 : rc2 ))'
 }
 
+# What a failing GPU unit is missing when someone reads its fingerprint the next
+# morning: the flags the kernels were compiled under, and which toolkit did it.
+# gh-ocannl-735 was found as a schedule-dependent numeric mismatch and took a long
+# hunt to reach "the optimizer reassociated the recurrence"; the option vector was
+# assembled inline in the backend, visible nowhere, and the ROCm version was
+# whatever the box happened to have. Both belong beside the failure.
+#
+# Emitted as shell text, and run on the machine that OWNS the worktree -- the
+# versions are the ones that just compiled the kernels, not the sweep host's --
+# under the same lock and PATH, appending to `$log`, which `fingerprint` then
+# carries into the digest.
+#
+# It runs as its OWN phase after the unit's row has been recorded, never inside
+# `test_cmd`, and that separation is load-bearing rather than tidiness. Folded
+# into the unit it would share the unit's `CAP`: a suite that fails a minute
+# before the deadline would have this forced Dune build cross it, and the
+# supervisor's 142 would then REPLACE the already-decided test status -- filing a
+# red suite as `timeout`, the verdict that says coverage was lost, and losing the
+# context it was collecting on the way out (Codex P2 on PR #510). Best-effort
+# diagnosis must not be able to change the verdict it exists to explain, so it
+# gets its own budget (OCANNL_TOOL_SWEEP_CONTEXT_CAP) outside the unit's, and its
+# status is discarded.
+#
+# The option vector is not restated here. It is produced by the repository's own
+# GPU-free option tests, which call the production builders in `Compiler_options`
+# and print got/want vectors on stderr; a copy in shell would be a second source
+# of truth that no test compares against the first. `--force` because the alias is
+# certainly cached by the run that just failed.
+#
+# What those tests print is the option POLICY, and the block says so rather than
+# letting a reader take it for the failing compile's own command line (Codex P2 on
+# PR #510). The builders take two slots the tests fill with sentinels -- the
+# discovered CUDA/ROCm include directory, and the source-dependent architecture
+# target -- so `-I/cuda/include` and `--gpu-architecture=compute_80` in the output
+# below are fixture values, and a fingerprint that presented them as this box's
+# would misattribute. The three things worth having beside a red unit survive that
+# honestly: which flags the builder ALWAYS emits, which it NEVER emits (the
+# reassociation opt-in, the membership claim gh-ocannl-784 rests on), and whether
+# the debug variant was in play. The per-slot inputs are printed as what they are,
+# environment readings from the owning box.
+#
+# Where the effective vector genuinely exists the block points at it -- and that
+# is CUDA only, which is what the per-backend line below now says. `cuda_to_ptx`
+# re-raises `Nvrtc_error` with the vector appended to nvrtc's message, while
+# `hip_to_code` still calls `Hiprtc.compile_to_code` bare, so a hiprtc failure
+# carries no vector anywhere (Codex P2 on PR #510). Promising both would be a
+# claim the tree does not implement; the HIP-side append is left to a box that
+# can compile hip_backend.ml (gh-ocannl-794).
+
+# Which runtime compiler the BACKEND loads, not which one happens to be first on
+# PATH (Codex P2 on PR #510). cudajit and hipjit reach nvrtc/hiprtc through a
+# ctypes stub library that carries the soname as a NEEDED entry and no RPATH, so
+# the file is chosen by the dynamic loader -- LD_LIBRARY_PATH, then the ldconfig
+# cache -- and `nvcc --version` reports an unrelated toolkit that need not even
+# be installed: the rog-nv box compiles CUDA kernels with no nvcc on PATH at all,
+# which is exactly the misattribution this replaces. `ldd` on the stub answers
+# with the file the backend will load, and its realpath carries the version in
+# its name (libnvrtc.so.13.3.33 -- strictly more than nvrtcVersion's 13.3).
+loaded_rtc_cmd() {
+  local rtc=$1 tmpl
+  # Written once with an `RTC` placeholder: the two arms differ only in the name,
+  # and the CUDA one is the arm executed on the box this was verified on.
+  tmpl='so=$(ldd "$(opam var lib 2>/dev/null)"/stublibs/dll*RTC*stubs.so 2>/dev/null'
+  tmpl=$tmpl' | sed -n "s/.*=> *\([^ ]*libRTC[^ ]*\).*/\1/p" | head -1); '
+  tmpl=$tmpl'if [ -n "$so" ]; then echo "loaded RTC: $(readlink -f "$so")"; '
+  tmpl=$tmpl'else echo "loaded RTC: unresolved -- no RTC stub in this opam switch, or no ldd"; fi; '
+  printf '%s' "${tmpl//RTC/$rtc}"
+}
+
+rtc_context_cmd() {
+  local backend=$1 alias_name=
+  case $backend in
+    cuda) alias_name=@arrayjit/test/runtest-test_cuda_compile_options ;;
+    hip) alias_name=@arrayjit/test/runtest-test_hip_compile_options ;;
+  esac
+  printf 'echo "=== rtc-context (%s) ==="; ' "$backend"
+  case $backend in
+    cuda)
+      loaded_rtc_cmd nvrtc
+      printf 'command -v nvidia-smi >/dev/null 2>&1 && '
+      printf 'nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>&1; '
+      # The include slot's input, read from this box rather than inferred: the
+      # builder's own fallback is documented in `cuda_include_options`, and
+      # re-deriving it in shell is exactly the second source of truth this block
+      # avoids elsewhere.
+      printf 'echo "discovery input: CUDA_PATH=${CUDA_PATH:-(unset)}"; '
+      ;;
+    hip)
+      loaded_rtc_cmd hiprtc
+      printf 'command -v rocminfo >/dev/null 2>&1 && rocminfo 2>&1 | grep -m2 -E "gfx|Runtime Version"; '
+      printf 'echo "discovery input: ROCM_PATH=${ROCM_PATH:-(unset)} HIP_PATH=${HIP_PATH:-(unset)}"; '
+      ;;
+    metal)
+      printf 'command -v sw_vers >/dev/null 2>&1 && sw_vers 2>&1; '
+      printf 'command -v xcrun >/dev/null 2>&1 && xcrun -sdk macosx metal --version 2>&1 | head -3; '
+      # Named, not silently absent: Metal's MSL options are still assembled inside
+      # metal_backend.ml rather than in `Compiler_options`, so there is no builder
+      # for a GPU-free test to print. Until that lands, MSL fast math is the one
+      # unguarded reassociation surface left (gh-ocannl-784).
+      printf 'echo "rtc options: not available -- MSL options are still assembled in '
+      printf 'metal_backend.ml, not in Compiler_options (gh-ocannl-784)"; '
+      ;;
+  esac
+  if [ -n "$alias_name" ]; then
+    # Labelled, because the got/want vectors below are the option POLICY that the
+    # GPU-free builder test prints under sentinel inputs -- not the command line of
+    # the compile that just failed. Four lines, not a paragraph: `fingerprint`
+    # carries this block under a line bound, and prose that crowded the vectors out
+    # of it would cost more than it explains.
+    printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
+    printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
+    printf 'echo "discovery input above and the failing kernel arch markers."; '
+    # Line four says which of the two the reader is holding. A CUDA compile that
+    # failed logs its own vector; a HIP one does not, because nothing appends it.
+    case $backend in
+      cuda)
+        printf 'echo "A failed nvrtc compile also logged its OWN vector, on an \x27nvrtc options:\x27 line."; '
+        ;;
+      hip)
+        printf 'echo "A failed hiprtc compile logs no vector of its own: nothing appends one yet."; '
+        ;;
+    esac
+    printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
+  fi
+  printf 'echo "=== end rtc-context ==="; true'
+}
+
+# Run that block for one finished unit, appending to its log. Called only after
+# `record` has written the row, so nothing here can reach the outcome; the status
+# is discarded for the same reason, and the whole phase is bounded by its own
+# CONTEXT_CAP rather than by what is left of the unit's.
+#
+# Only for a `fail`. A `timeout` had its process group destroyed and may still
+# have the box -- and the far-side worktree lock -- busy, and an `error` never
+# reached dune at all: neither has kernels whose flags would explain anything.
+collect_rtc_context() {
+  local backend=$1 host=$2 wt=$3 log=$4 path_prefix=${5:-} cmd
+  # `exit 0`, not a failure: the worktree is gone or unreadable, which the row
+  # already records; this phase has nothing to add and nothing to complain about.
+  cmd="cd \"$wt\" || exit 0; $(rtc_context_cmd "$backend")"
+  if [ -n "$host" ]; then
+    # Bounded on both sides and re-taking the far-side worktree lock, for the
+    # reasons the unit's own remote call documents: the unit's ssh has exited, so
+    # its lock is released, and a dune running there unlocked is exactly what the
+    # next sweep's preparation would reset the tree underneath.
+    run_capped "$(( CONTEXT_CAP + 120 ))" ssh -o BatchMode=yes -o ConnectTimeout=8 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
+      "$host" "$(remote_capped "$CONTEXT_CAP" "$path_prefix $(remote_lock_cmd "$wt") $cmd")" \
+      >>"$log" 2>&1
+  else
+    run_capped "$CONTEXT_CAP" /bin/sh -c "$cmd" >>"$log" 2>&1
+  fi
+  return 0
+}
+
 # POSIX single-quoting, so a generated command can be handed to `sh -c` on the
 # far side without the remote shell re-splitting or re-expanding any of it.
 sq() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
@@ -443,7 +602,24 @@ fingerprint() {
   {
     grep -hoE '^File "[^"]+", line [0-9]+' "$1"
     grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$1"
+    # The one PRODUCTION option vector a sweep can ever hold: `cuda_to_ptx`
+    # appends it to the nvrtc message it re-raises, so a CUDA compile failure --
+    # and only a compile failure -- carries the flags it was compiled under on its
+    # own line. The selectors above cannot reach it (it starts neither at an error
+    # site nor at `Error`/`Fatal error`/`Exception`), so it stopped at the log and
+    # never reached the file callers actually diff (Codex P2 on PR #510). Matched
+    # by the prefix the backend writes, not by the rendered vector, so a changed
+    # option set shows up as a fingerprint diff rather than as a missing line.
+    grep -hoE '^nvrtc options: .*' "$1"
   } 2>/dev/null | sort -u | head -60
+  # The rtc-context block a failing GPU unit appended (see rtc_context_cmd),
+  # verbatim and unsorted: it is a small fixed-size report whose ORDER is what
+  # makes it readable, not a set of error sites to deduplicate. Carried into the
+  # fingerprint rather than left in the log because the fingerprint is what a
+  # caller diffs against yesterday's -- a toolkit upgrade or a changed option
+  # vector then shows up as a diff beside the failure it explains, which is the
+  # whole point (gh-ocannl-784).
+  sed -n '/^=== rtc-context /,/^=== end rtc-context ===$/p' "$1" 2>/dev/null | head -40
 }
 
 if [ "$FORCE" = 1 ]; then
@@ -591,6 +767,14 @@ for unit in "${UNITS[@]}"; do
   esac
   echo "  $machine/$backend: $outcome (${elapsed}s; execution=$execution)"
   record "$machine" "$backend" "$outcome" "$elapsed" "$log" "$execution"
+  # Diagnosis, strictly after the row and the elapsed time it reports: this phase
+  # has its own budget, and nothing it does can reach $outcome or $elapsed. It
+  # runs before the fingerprint so that what it appends to the log is carried in.
+  case $outcome:$backend in
+    fail:cuda | fail:hip | fail:metal)
+      collect_rtc_context "$backend" "$host" "$wt" "$log" "${path_prefix:-}"
+      ;;
+  esac
   case $outcome in
     fail | timeout | error) fingerprint "$log" >"${log%.log}.fingerprint" ;;
   esac
