@@ -481,7 +481,7 @@ let () =
   done;
 
   (* ---- Half 2: the tax. ---- *)
-  let repeats = 15 in
+  let repeats = 31 in
   Printf.printf "\n== volatile tax, GPU clock, median of %d interleaved repeats ==\n%!" repeats;
   Printf.printf "  %-8s %12s %12s %8s %12s %8s   %s\n%!" "shape" "plain(ms)" "vol-acc(ms)" "ratio"
     "vol-src(ms)" "ratio" "note";
@@ -525,5 +525,7 @@ let () =
   Printf.printf
     "\n\
      (GPU times come from the command buffer's own clock; thermal state still moves them, so \
-     compare ratios across runs rather than absolute milliseconds.)\n\
+     compare ratios across runs rather than absolute milliseconds. The memory-bound leg's ratio \
+     rides on traffic the qualifier does not change and lands either side of 1.0 run to run: read \
+     it as \"no measurable tax\", not as a speedup.)\n\
      %!"
