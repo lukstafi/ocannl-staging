@@ -558,6 +558,15 @@ that they earn a lookup rather than always-loaded space.
   `Tile_mma`'s `fallback` rather than stopping at the tile, and reports the operands through the
   fallback alone — reporting the tile's own `d`/`a`/`b` as well would count every operand of a
   tensorized nest twice.
+- The dynamic-indexing pair has builders of its own: `Ll_test.gather` (`Get_dynamic`),
+  `Ll_test.scatter` (`Set_dynamic`) and `Ll_test.scatter_add`, the read-modify-write shape
+  `rewrite_one_hot_reductions` actually mints. Reach for them rather than spelling the record:
+  the `idcs` array must carry a `Fixed_idx 0` PLACEHOLDER at `dyn_axis` — a convention stated
+  only in `low_level.ml`'s type declaration, and one a hand-spelled site gets to state again for
+  every axis it happens to have — so the builders plant it and refuse a `dyn_axis` outside the
+  array. Neither constructor reaches `optimize` through the ordinary pipeline (lowering emits
+  neither, and the rewrite runs after both virtualization arms), so hand-built IR is the only way
+  to put one in front of the analyses; `gather_table_placement.ml` is what that looks like.
 - A test operand minted from a FLATTENED offset stops discriminating at sizes that divide its
   modulus, and does it while still looking right: `(row * stride + col) mod p` collapses to
   `col mod p` whenever `p` divides the row stride, so every row becomes identical. That makes a
