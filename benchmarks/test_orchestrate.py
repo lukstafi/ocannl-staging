@@ -963,6 +963,35 @@ class FixtureDigestTest(unittest.TestCase):
             for e in recorded:
                 self.assertTrue(e.origin and e.origin.strip(), name)
 
+    def test_a_regenerating_box_is_told_which_others_it_has_left_behind(self):
+        # What gen_fixtures.py prints after regenerating: the other boxes' entries survive, so
+        # nothing fails, and that silence is exactly what would let the boxes drift apart again.
+        fx = self.fixture("mlp_small.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        fx.write_bytes(b"rog-nv regenerates")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.other_origins(digests, [fx.name], "rog-nv"), ["minix"])
+        self.assertEqual(fixture_digest.other_origins(digests, [fx.name], "minix"), ["rog-nv"])
+
+    def test_a_box_that_is_the_only_one_recorded_leaves_nobody_behind(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.other_origins(digests, [fx.name], "rog-nv"), [])
+
+    def test_the_checked_in_file_keeps_every_box_that_published_numbers(self):
+        # gh-ocannl-759 recorded minix's and rog-nv's bytes for the two fixtures both boxes have
+        # published numbers on. Neither may be evicted -- by a regeneration, or by a re-record
+        # that forgets the other box -- or a standing report is retroactively on a workload
+        # nothing pins. (Their digests are deliberately NOT pinned here: a coordinated
+        # regeneration is allowed to change them, it is only allowed to change them for BOTH.)
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        for name in ("mlp_small.safetensors", "gpt2_mini.safetensors"):
+            self.assertEqual({e.origin for e in entries[name]}, {"minix", "rog-nv"}, name)
+
     def test_the_sweep_refuses_bytes_nothing_records(self):
         fx = self.fixture("lenet.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE

@@ -190,6 +190,19 @@ def status(fixture, entries):
     return "MATCH", sha, size, ",".join(sorted(matching))
 
 
+def other_origins(path, names, origin):
+    """Origins other than `origin` recorded in `path` for any of `names`, sorted.
+
+    What a regenerating box has to be told: their entries survive (so their fixtures still pass
+    the gate), but their bytes are now a different workload from the one just generated, and
+    nothing else will say so until someone compares two reports.
+    """
+    entries = read_digests(path)
+    return sorted(
+        {e.origin for name in names for e in entries.get(name, []) if e.origin != origin}
+    )
+
+
 def describe(name, entries):
     """`'<origin> <short sha>, ...'` for every recorded entry of `name` -- diagnostics for a
     fixture that matched nothing, so the operator sees which boxes are on record and can tell a

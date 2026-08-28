@@ -127,8 +127,24 @@ files.
   decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
   first — otherwise the second run reports `state=cache-replay`, `timed=0`, `declines=[]` and every
   counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
-  fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
-  them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.
+  fresh checkout (`benchmarks/fixtures/*.safetensors` is gitignored and generated), and they are
+  only valid while `gen_fixtures.py`, `benchmarks/workloads/` **and the generating numpy** are
+  unchanged.
+- **Do not run `gen_fixtures.py` to get past the digest gate.** It is the reflex the refusal
+  message used to invite, and it is wrong: regenerating draws a NEW workload from this box's
+  numpy, which retires every published number on the old bytes and does nothing for the other
+  measuring boxes. If your copies are merely unrecorded, `python3 benchmarks/fixture_digest.py
+  --record` pins them as they are (stdlib-only, no venv, and it leaves other origins alone);
+  `--check` reports disk against record. Regeneration is a cross-box event to be coordinated
+  across every origin in `DIGESTS.txt` at once (gh-ocannl-759).
+- The boxes are **not** on the same fixture bytes, and the digest file says so per origin
+  (`<sha256>  <bytes>  <name>  <origin>`, gh-ocannl-759). `mlp_small` and `gpt2_mini` hash
+  differently on minix and rog-nv at identical sizes — two venvs, two numpy `Generator` streams,
+  one spec — so `report-hip.md` and `report-gh675-cuda.md` are **not cross-box comparable for
+  those two workloads**; each is self-consistent within its box, so within-box session-to-session
+  comparisons stand. A fixture MATCHes if it is *some* recorded box's bytes, and every row
+  (`fixture_origin`) and report section names whose. Before quoting one box's number against
+  another's, check that the two sections name the same origin.
 - Because of that, no *comparable* cell runs without a Python ML venv -- but the MEASUREMENT path
   does: `bench_mlp --self-test` / `Bench_harness.run_self_test` fabricates a tiny model in memory
   and drives the whole protocol and emitter (gh-ocannl-702), and `test/operations/bench_self_test`

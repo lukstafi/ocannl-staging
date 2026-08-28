@@ -229,12 +229,7 @@ if __name__ == "__main__":
     if any(was is not None for _, _, was, _ in changes):
         print("  a changed fixture is a changed workload: reports measured on the previous "
               "digest are not comparable with reports measured on this one.")
-    others = sorted(
-        {e.origin
-         for fx in written
-         for e in fixture_digest.read_digests(digests).get(fx.name, [])
-         if e.origin != origin}
-    )
+    others = fixture_digest.other_origins(digests, [fx.name for fx in written], origin)
     if others:
         # The trap gh-ocannl-759 was filed about: their entries survive (so their fixtures still
         # pass the gate), but their bytes are now a different workload from this box's.

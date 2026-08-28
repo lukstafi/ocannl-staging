@@ -73,19 +73,37 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   axes then input axes; channels-last images — layouts documented per model in the
   generator), dataset, and all hyperparameters in the safetensors `__metadata__` map, so
   fixtures are self-describing and runners need only the fixture path.
-- `fixtures/DIGESTS.txt` + `fixture_digest.py` — **which bytes a published number is on**
-  (gh-ocannl-645). The fixtures are gitignored regenerable artifacts, so this file is the only
-  checked-in statement of what one contains: `gen_fixtures.py` records `<sha256>  <bytes>
-  <name>` as it generates (announcing a *changed* digest loudly, and leaving a reviewable git
-  diff), `orchestrate.py` refuses to measure a fixture whose bytes do not match it
-  (`--no-fixture-digest-check` opts out, for a deliberate regeneration you are about to
-  re-record), and every result row and report section states the digest it ran on. Fixture
-  bytes depend on the spec, on the generator, *and* on the numpy version that drew the random
-  streams — numpy promises no `Generator` stream stability across releases — so a mismatch is
-  real information even when `workloads/` is untouched. A fixture regenerated at a different
-  spec revision is otherwise invisible: it is consumed **uniformly** by every cell, and the
-  cross-cell parity gate compares cells with each other, not with the workload the report
-  names, so it certifies exactly as it certifies the intended one.
+- `fixtures/DIGESTS.txt` + `fixture_digest.py` — **which bytes a published number is on, and
+  whose** (gh-ocannl-645, gh-ocannl-759). The fixtures are gitignored regenerable artifacts, so
+  this file is the only checked-in statement of what one contains: `gen_fixtures.py` records
+  `<sha256>  <bytes>  <name>  <origin>` as it generates (announcing a *changed* digest loudly,
+  and leaving a reviewable git diff), `orchestrate.py` refuses to measure a fixture whose bytes
+  match no recorded entry (`--no-fixture-digest-check` opts out, for a deliberate regeneration
+  you are about to re-record), and every result row and report section states the digest *and
+  the origin* it ran on. Fixture bytes depend on the spec, on the generator, *and* on the numpy
+  version that drew the random streams — numpy promises no `Generator` stream stability across
+  releases — so a mismatch is real information even when `workloads/` is untouched. A fixture
+  regenerated at a different spec revision is otherwise invisible: it is consumed **uniformly**
+  by every cell, and the cross-cell parity gate compares cells with each other, not with the
+  workload the report names, so it certifies exactly as it certifies the intended one.
+  - **Entries are per box, and today the boxes differ.** `mlp_small` and `gpt2_mini` hash
+    differently on minix and rog-nv at identical sizes — two venvs, two numpy streams, one
+    workload spec — so `report-hip.md` and `report-gh675-cuda.md` are **not cross-box
+    comparable for those two workloads**, and never have been. Each is self-consistent within
+    its box, so within-box session-to-session comparisons stand. The file records both boxes'
+    bytes rather than letting one win; a fixture MATCHes if it is *some* recorded box's bytes,
+    and the report names which.
+  - **Pin fixtures you already have, without regenerating**: `python3 fixture_digest.py
+    --record` (add `--origin <box>` when the hostname is not the name the reports use). It is
+    stdlib-only — no venv needed — and it leaves every other origin's entry alone.
+    `python3 fixture_digest.py --check` reports what is on disk against what is recorded, and
+    exits non-zero on anything that is not a MATCH.
+  - **Regeneration is a cross-box event.** `gen_fixtures.py` draws from *this* box's numpy, so
+    regenerating here does not give the other measuring boxes the same workload — it gives this
+    box a new one and leaves theirs behind. Coordinate it across every origin listed in
+    `DIGESTS.txt` in one go, or the boxes diverge again and the next report silently compares
+    two workloads. Recording is not the same act: `--record` pins what exists and changes no
+    number's meaning.
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
@@ -350,9 +368,17 @@ benchmarks/.venv/bin/python benchmarks/gen_fixtures.py
 benchmarks/.venv/bin/python benchmarks/orchestrate.py
 ```
 
-`gen_fixtures.py` rewrites `fixtures/DIGESTS.txt` for whatever it regenerates. Review that diff
-before publishing numbers: a changed digest means the workload changed, and reports measured on
-either side of it are not comparable.
+`gen_fixtures.py` rewrites `fixtures/DIGESTS.txt` for whatever it regenerates, under this box's
+origin. Review that diff before publishing numbers: a changed digest means the workload changed,
+and reports measured on either side of it are not comparable.
+
+**Do not run `gen_fixtures.py` to make an existing fixture pass the digest gate.** If your copies
+are simply not recorded yet, pin them with `python3 fixture_digest.py --record` — that states what
+the bytes are and changes no number's meaning. Regenerating instead draws a *new* workload from
+this box's numpy, silently retires every published number on the old bytes, and, because it is
+per-box, leaves the other measuring boxes on a workload that is now different from yours.
+Regeneration is a cross-box event: coordinate it across every origin in `DIGESTS.txt` at once
+(gh-ocannl-759).
 
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
@@ -504,9 +530,13 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   framework internals (tinygrad's beam disk cache, torch's FX-graph cache counters) and answer
   `null` — reported as `?` — when they cannot tell, rather than guessing a `false` that would be
   exactly the silent claim this field exists to prevent.
-- **A report states the fixture digest its numbers are on.** `orchestrate.py` puts it in each
-  workload section of `results/report.md` and in every `results.jsonl` row (`fixture`,
-  `fixture_sha256`); a hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
+- **A report states the fixture digest its numbers are on, and whose bytes those are.**
+  `orchestrate.py` puts both in each workload section of `results/report.md` and in every
+  `results.jsonl` row (`fixture`, `fixture_sha256`, `fixture_origin`). The origin is not implied
+  by the report's own platform line — fixtures get copied between boxes, which is fine as long as
+  the report says so — and it is what keeps a cross-box comparison honest now that the boxes are
+  known to hold different bytes for `mlp_small` and `gpt2_mini` (gh-ocannl-759).
+  A hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
   hand-written driver pins it (`gh612_cells.sh` refuses to run a cell whose fixture does not
   match a pinned digest, with an env opt-out for deliberate re-generation). Cross-session
   comparisons depend on it entirely: `report-gh569-hip.md`'s 46.65 ms denominator and
