@@ -34,7 +34,9 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
-let p = Stdio.printf
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
+   the process exits, which on a slow leg reads as a hang. *)
+let p fmt = Bench_out.p fmt
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in

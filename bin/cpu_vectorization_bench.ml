@@ -31,7 +31,9 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 
-let p = Stdio.printf
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
+   the process exits, which on a slow leg reads as a hang. *)
+let p fmt = Bench_out.p fmt
 
 let () =
   (* Positional args beside the [--ocannl_*] config flags, split and range-checked by [Bench_args]

@@ -90,13 +90,8 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Outcome = Ir.Schedule_outcome
 
-(* Flushed per line: a long remote run should be readable while it is still going. *)
-let p fmt =
-  Printf.ksprintf
-    (fun s ->
-      Stdio.print_string s;
-      Stdio.Out_channel.flush Stdio.stdout)
-    fmt
+(* Flushed per line ([Bench_out]): a long remote run should be readable while it is still going. *)
+let p fmt = Bench_out.p fmt
 
 (* Process-level conditions are not candidate failures: containing them turns an OOM or an interrupt
    into one "failed cell" and keeps the run going, which prolongs thrashing and can make a

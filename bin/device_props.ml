@@ -34,7 +34,9 @@
 
 open Base
 
-let p = Stdio.printf
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
+   the process exits, which on a slow leg reads as a hang. *)
+let p fmt = Bench_out.p fmt
 
 (* Flattens a sexp to [path = value] lines. The backends' dumps are [Sexp.message]-shaped -- lists
    of [(key value)] pairs, nested -- so keys carry through as dotted path components; anything else
