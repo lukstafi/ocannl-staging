@@ -995,13 +995,13 @@ def main():
     ap.add_argument(
         "--beam-parallel",
         type=int,
-        default=0,
+        default=None,
         metavar="N",
-        help="cap the tinygrad beam search's candidate-compile pool at N workers (0 = "
-        "tinygrad's own default, which is one worker per logical core on a GPU device). The "
-        "intermittent deadlock of gh-ocannl-760 was seen on 24-core boxes; a smaller pool is "
-        "fewer workers to lose a result from, and PARALLEL=1 runs the candidates in-process "
-        "with no pool at all",
+        help="run the tinygrad beam cells with PARALLEL=N — tinygrad's own knob for the "
+        "candidate-compile pool. Unset leaves its default, one worker per logical core on a GPU "
+        "device (24 on the box the gh-ocannl-760 deadlocks were seen on); N=0 is what disables "
+        "the pool outright and compiles the candidates in-process, which is the configuration a "
+        "pool deadlock cannot occur in, at the cost of a serial search",
     )
     ap.add_argument(
         "--cell-timeout",
@@ -1202,11 +1202,12 @@ def main():
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--jit", str(jit)],
                     )
                 if args.beam:
-                    # PARALLEL caps tinygrad's candidate-compile pool (its own knob, read by
-                    # `beam_search`); left unset, the pool is one worker per logical core on a GPU
-                    # device, which is the shape the gh-ocannl-760 deadlocks were seen in.
+                    # PARALLEL sizes tinygrad's candidate-compile pool (its own knob, read where
+                    # the pool is created); left unset, it is one worker per logical core on a GPU
+                    # device, which is the shape the gh-ocannl-760 deadlocks were seen in. 0 means
+                    # no pool at all, so it is passed through rather than read as "unset".
                     beam_env = dict(os.environ)
-                    if args.beam_parallel:
+                    if args.beam_parallel is not None:
                         beam_env["PARALLEL"] = str(args.beam_parallel)
                     collect(
                         f"{name} tinygrad/{device}/beam",

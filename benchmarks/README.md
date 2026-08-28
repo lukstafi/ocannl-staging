@@ -223,10 +223,14 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 
   `--beam-parallel N` passes tinygrad's own `PARALLEL` knob through to the beam cells. Its
   default is one candidate-compile worker per logical core on a GPU device (24 on the box the
-  wedges were seen on); `PARALLEL=1` runs the candidates in-process with no pool at all, which
-  is the configuration the deadlock cannot occur in — at the cost of a serial search. Nothing
-  makes it the default: the root cause is upstream and unchased, and the cap already bounds the
-  damage.
+  wedges were seen on, and measured as exactly that many `--multiprocessing-fork` children
+  during a search); `--beam-parallel 0` is the value that disables the pool outright and
+  compiles the candidates in-process, which is the configuration a pool deadlock cannot occur in
+  — `1` still means a one-worker pool, not no pool. It costs search wall time (`mlp_wide` beam
+  on the RTX 5070 Ti: 60.5 s of search at the 24-worker default against 149.5 s at
+  `--beam-parallel 2`, two runs that overlapped on the GPU, so read the ratio and not the
+  seconds), so nothing makes it the default: the root cause is upstream and unchased, and the
+  cap already bounds the damage.
 
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures
