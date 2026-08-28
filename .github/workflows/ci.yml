@@ -23,6 +23,30 @@ on:
         description: "Also run the scheduled-only jobs (Windows, OCaml floor)"
         type: boolean
         default: true
+# A push superseded by another push to the same ref no longer needs a verdict:
+# runs here serialize on a queue that is often hours deep, so without this a
+# review round of N pushes creates N queued runs and the head commit -- the only
+# one whose verdict anyone will act on -- waits behind N-1 answers to questions
+# nobody is still asking (thirteen runs deep on one PR before this landed).
+#
+# Master pushes are cancellable too, and that is a real trade: at ~30 commits a
+# day a superseded merge commit then gets no verdict of its own, so a break is
+# localized to a span rather than to a commit. It is still the right side of the
+# trade while the queue is hours deep -- what master's HEAD does is the question
+# people act on, and `git bisect` over a span is cheaper than a stale answer.
+#
+# `github.event_name` is in the group so that only like supersedes like. All
+# three non-PR triggers share `refs/heads/master` as their ref, and two of them
+# must not be cancellable by a routine master push: the scheduled sweep carries
+# that period's only Windows and OCaml-floor coverage (the same reasoning as
+# `fail-fast: false` below -- cancellation destroys information), and a
+# workflow_dispatch run was launched deliberately, usually from a branch, to get
+# the extended matrix ahead of the sweep. Scheduled runs cannot overlap each
+# other in practice (74min worst case against a 3-day cadence), so grouping
+# them is harmless.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   run:
     name: Build
