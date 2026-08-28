@@ -803,8 +803,9 @@ files.
   answer to it.) **Everything in this bullet that is called measured was executed on arm64 macOS
   with Apple clang cross-targeting x86_64**; the two gcc behaviors (calls kept at `-O0`,
   `-ffast-math` not expanding them) are from review on gh-ocannl-753 and have no GNU gcc here to
-  check against. Reading the backend's own logged compile command was tried as a way to skip the
-  flag reconstruction and does NOT work — see the next bullet. **It is a property
+  check against. To skip the flag reconstruction entirely and read the backend's own logged compile
+  command, see the bullet below — it works, at `OCANNL_LOG_LEVEL_CC_BACKEND=9` with a text backend.
+  **It is a property
   of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
   LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
@@ -839,24 +840,30 @@ files.
   `test/operations/cc_march_census` is where it shows: its "no FMA accumulator loop calls libm where
   the ISA has a fused multiply-add" claim excludes the FMA-less rows by design, so widening that
   claim is the test-side move.
-- **`OCANNL_LOG_LEVEL_CC_BACKEND` does not build at 1 or 3, and its logs are not greppable text**
-  (found while trying to document a diagnostic that reads the backend's own compile command;
-  gh-ocannl-753, unfiled). `cc_backend.ml` logs its exact compiler invocation as
-  `[%log3 "command", cmdline]`, which looks like the ideal way to answer "what flags did my kernel
-  actually compile with" — it is not, on three counts, each of which was run here rather than
-  reasoned about. The gate is a PREPROCESSING one
-  (`[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_CC_BACKEND"]`, declared as a
-  `preprocessor_deps` `env_var` in `arrayjit/lib/dune`), so a runtime `log_level` alone leaves the
-  call stripped — the same runtime-vs-preprocessing confusion recorded at the top of that dune file
-  from gh-ocannl-628. Rebuilding under it then FAILS at low values: `=1` and `=3` both die on
-  warning 27 (`unused-var-strict`) for `base_name`, `cmdline` and `rc` in `cc_backend.ml` — `name`
-  too at `=1` — which are warnings-as-errors here. `=9` builds clean, and 9 is the value the file's
-  own header comment names, so the low values look simply untested. Even at `=9` the payoff is not
-  a greppable command: the logs land in `log_files/<exe>/debug.db` + `debug_meta.db`, ppx_minidebug's
-  binary database needing its rendering client, and a run with `debug_backend=text` produced no
-  `.log` file at all in the attempt made here. Two takeaways: do not document "read the logged
-  compile command" as a user-facing diagnostic (reconstruct the flag composition instead, as the
-  bullet above now does), and the `=1`/`=3` build break is a real defect nobody has filed.
+- **Reading the backend's own compile command: it works, but only at `OCANNL_LOG_LEVEL_CC_BACKEND=9`
+  and with a text backend** (gh-ocannl-753). `cc_backend.ml` logs its exact invocation as
+  `[%log3 "command", cmdline]`, which is the direct answer to "what flags did my kernel actually
+  compile with". Three things stand between you and it, all established by running them. The gate is
+  a PREPROCESSING one (`[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_CC_BACKEND"]`,
+  declared as a `preprocessor_deps` `env_var` in `arrayjit/lib/dune`), so a runtime `log_level`
+  alone leaves the call stripped — the same runtime-vs-preprocessing confusion recorded at the top
+  of that dune file from gh-ocannl-628. Rebuilding under it FAILS at low values: `=1` and `=3` both
+  die on warning 27 (`unused-var-strict`) for `base_name`, `cmdline` and `rc` — `name` too at `=1`
+  — which are warnings-as-errors here; **`=9` builds clean**, and 9 is the value the file's own
+  header comment names, so the low values look simply untested (an unfiled defect: a debug knob that
+  does not compile at two of its values). And the default `debug_backend=db` writes
+  `log_files/<exe>/debug.db` + `debug_meta.db`, ppx_minidebug's binary database, which needs its
+  rendering client; `debug_backend=text` gives readable output instead. With
+  `OCANNL_LOG_LEVEL_CC_BACKEND=9`, `log_level=9`, `debug_backend=text` the command appears verbatim
+  under a `command` node:
+  `cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1`.
+  Two cautions. Do not hunt for it by extension — in this configuration the text runtime prints to
+  stdout rather than to a `log_files/*.log`, and a `*.log` glob finding nothing is what led an
+  earlier revision of this note to declare the whole route broken and delete it. And the logged
+  command carries `-o <...>.so`: rerunning it with `-S` added but the `-o` unchanged writes assembly
+  over the shared library, possibly one a running process still has mapped, so repoint `-o` at a
+  fresh `.s`. Expect a verbose run to fail a golden-diff test purely by the extra stdout; that is
+  not a signal about the compile.
 - **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
   that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
   docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no

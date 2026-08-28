@@ -689,6 +689,14 @@
 # explicit `cc_backend_simd_flags=-mfma` makes a bare `-march=x86-64` probe report calls your
 # kernels do not have; cc_backend_fast_math can remove calls the probe still shows. Compile a small
 # `fmaf` loop of your own with that flag set and `-S`, into an `.s` path of your choosing.
+# To read the backend's REAL invocation instead of reconstructing it: rebuild with
+# `OCANNL_LOG_LEVEL_CC_BACKEND=9` (a preprocessing-time gate -- a runtime log_level alone leaves the
+# call stripped, and the values 1 and 3 do not currently compile), then run with log_level=9 and
+# debug_backend=text. The command appears in the log under a `command` node, e.g.
+#   cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1
+# Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
+# assembly text over the shared library the command was building, which may be one your application
+# still has loaded.
 # Then `grep -E 'call.*fmaf?\b'`. Match BOTH names and both dialects: double-precision kernels call
 # `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
 # spells the call `call fma@PLT` while clang on Mach-O spells it `callq _fmaf`. A pattern pinned to
@@ -725,20 +733,26 @@
 # approximate-numerics work (gh-ocannl-719). (The rewrite itself is not restricted to floating
 # point, and that is a separate question, not a rationale this note covers -- see the SIMD agent
 # note.)
-# What removes the calls is a target the CPU actually implements. Prefer the spellings that let
-# the compiler read the host rather than ones that assert a feature: "auto" (the default) on a host
-# whose CPU has FMA, `cc_backend_arch_flags=-march=native`, or the `-march` naming your exact CPU.
+# What removes the calls is a target the CPU actually implements -- and that is a fix ONLY when the
+# CPU has an FMA that a conservative compiler target was hiding. On a CPU with no FMA at all (the
+# Silvermont / Goldmont / Tremont / Jaguar cases above) there is no target to raise to: every
+# FMA-capable `-march` names instructions that part cannot execute, so raising it trades the
+# slowdown for an illegal-instruction fault. Such a machine keeps the cliff, and the only things
+# that change it are changing the arithmetic (cc_backend_fast_math, with its own caveats below) or
+# running elsewhere. Where the hardware IS capable, prefer the spellings that let the compiler read
+# the host over ones that assert a feature: "auto" (the default), `cc_backend_arch_flags=-march=native`,
+# or the `-march` naming your exact CPU.
 # Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
 # than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
 # escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns
-# `__FMA__` on. Whether that is dangerous depends on the ARCHITECTURE it is added to, not on the CPU
-# alone. Added on top of an architecture that already offers FMA4 (`-march=bdver1`, or "auto" on a
-# Bulldozer host) it is harmless: both FMA3 and FMA4 are then enabled and the compiler keeps
-# emitting the four-operand FMA4 form the CPU has (measured: `-march=bdver1 -mfma` emits `vfmaddps`
-# / `vfmaddss`, no calls). Added on top of an architecture WITHOUT FMA4 -- `none`, `-march=x86-64`
-# -- it makes the compiler emit three-operand FMA3 (measured: `vfmadd132ps` / `vfmadd231ps`), which
-# a CPU implementing only FMA4 cannot execute. So it is safe where the CPU implements FMA3, or
-# where the architecture flag already supplies FMA4. What it avoids relative to `-march=x86-64-v3`
+# `__FMA__` on -- which is also what makes the emitted kernel's `#elif defined(__FMA__)` arm select
+# the FMA3 builtin `__builtin_ia32_vfmaddps`. Use it ONLY where the CPU implements FMA3. Do NOT
+# reach for it on an FMA4-only Bulldozer even with `-march=bdver1` still in front: which instruction
+# form that combination produces is compiler-dependent and is not settled here -- clang was measured
+# to keep the four-operand `vfmaddps`, while gcc is reported to emit three-operand `vfmadd132ps` for
+# that same builtin, which such a CPU cannot execute. There it needs no feature flag anyway: the
+# architecture flag alone (`-march=native`, `-march=bdver1`) already supplies FMA4. What `-mfma`
+# avoids relative to `-march=x86-64-v3`
 # is bringing AVX2 and the rest of a broader target along, so it is the narrower escalation, not a
 # free one. And `-march=x86-64-v3` brings AVX2, which bdver1 through bdver3 cannot execute --
 # Excavator (bdver4) can, having both AVX2 and FMA.
