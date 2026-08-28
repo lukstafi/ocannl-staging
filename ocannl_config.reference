@@ -662,9 +662,12 @@
 # generator rewrites every floating-point `a*b + c` into a fused multiply-add and spells it `fmaf`
 # / `fma`: in the serial rendering, in the scalar peel of a vectorized loop, and -- where the
 # target offers no whole-vector FMA builtin -- once per lane inside the vector body. Where the
-# target has the instruction the compiler contracts all of those into it and no call survives.
-# Where it does not, each one stays a libm CALL, and an opaque call cannot be vectorized at any
-# width, so at -O3 the surrounding loop scalarizes too.
+# target has the instruction, the compiler normally contracts all of those into it and no call
+# survives -- normally, not always: this is the compiler's lowering decision, and it is not
+# guaranteed at every optimization level (gcc has been reported to keep the calls at `-O0` even on
+# an FMA-capable target, see the diagnostic below). Where the target does NOT have it, each call
+# stays a libm CALL, and an opaque call cannot be vectorized at any width, so at -O3 the surrounding
+# loop scalarizes too.
 # The condition is whether the compiler can lower those `fmaf` / `fma` calls to SOME fused
 # instruction the target has -- FMA3 or FMA4 on x86, `__ARM_FEATURE_FMA` on aarch64 (baseline
 # there, so no ARM host is affected). It is not any one feature macro, and still less the
@@ -728,11 +731,17 @@
 # Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
 # than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
 # escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns
-# `__FMA__` on, so it is safe only where the CPU implements FMA3. What it avoids relative to
-# `-march=x86-64-v3` is bringing AVX2 and the rest of a broader target along with it, so it is the
-# narrower escalation, not a free one; on an FMA4-only Bulldozer (bdver1) it would fault. And
-# `-march=x86-64-v3` brings AVX2, which bdver1 through bdver3 cannot execute -- Excavator (bdver4)
-# can, having both AVX2 and FMA.
+# `__FMA__` on. Whether that is dangerous depends on the ARCHITECTURE it is added to, not on the CPU
+# alone. Added on top of an architecture that already offers FMA4 (`-march=bdver1`, or "auto" on a
+# Bulldozer host) it is harmless: both FMA3 and FMA4 are then enabled and the compiler keeps
+# emitting the four-operand FMA4 form the CPU has (measured: `-march=bdver1 -mfma` emits `vfmaddps`
+# / `vfmaddss`, no calls). Added on top of an architecture WITHOUT FMA4 -- `none`, `-march=x86-64`
+# -- it makes the compiler emit three-operand FMA3 (measured: `vfmadd132ps` / `vfmadd231ps`), which
+# a CPU implementing only FMA4 cannot execute. So it is safe where the CPU implements FMA3, or
+# where the architecture flag already supplies FMA4. What it avoids relative to `-march=x86-64-v3`
+# is bringing AVX2 and the rest of a broader target along, so it is the narrower escalation, not a
+# free one. And `-march=x86-64-v3` brings AVX2, which bdver1 through bdver3 cannot execute --
+# Excavator (bdver4) can, having both AVX2 and FMA.
 #cc_backend_arch_flags=auto
 
 # Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections

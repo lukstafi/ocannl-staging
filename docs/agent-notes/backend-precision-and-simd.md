@@ -750,10 +750,14 @@ files.
   the scalar path** (gh-ocannl-753, documented rather than fixed). Three facts compose into it, none
   of them local to the SIMD emission. The simplifier rewrites every `a*b + c` into `Ternop (FMA, …)`
   (`Low_level`, no config gate); `Ops.ternop_c_syntax` spells that `fmaf(` / `fma(` for every C
-  backend; and `C_syntax.vec_fma_builtin`'s x86 rows are guarded on `defined(__FMA__)`, so where
-  that macro is absent the table is empty and `vec_acc_fma` falls through to its per-lane `#else`
-  loop. Where the target has the instruction the compiler contracts the calls into it and none
-  survives; where it does not, each stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an
+  backend; and `C_syntax.vec_fma_builtin`'s x86 rows are guarded on `defined(__FMA__)`, so on a
+  compiler WITHOUT `__builtin_elementwise_fma` (gcc) an FMA-less target matches no row and
+  `vec_acc_fma` falls through to its per-lane `#else` loop. Under clang the chain never gets that
+  far — `OCANNL_HAS_ELEMENTWISE_FMA` is 1, the first arm wins, and LLVM scalarizes the builtin into
+  the same `fmaf` calls; same destination, different emitted path, and the distinction matters to
+  anyone reading a kernel. Where the target has the instruction the compiler contracts the calls
+  into it and (at the optimization levels this backend uses) none survives; where it does not, each
+  stays a CALL — and by the gh-ocannl-649 lesson one bullet up, an
   opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
   (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
   scalar, 64 libm calls, 128 stack refs). Three traps in reasoning about it, each of which cost this
@@ -765,7 +769,12 @@ files.
   `-march=x86-64-v3` would hand them AVX2 they fault on. `__FMA__` was then wrong because Bulldozer
   (`bdver1`) has FMA4 ONLY — `__FMA4__` and `__XOP__` defined, `__FMA__` absent — and still compiles
   the loop to four-operand `vfmaddps`/`vfmaddss` with zero calls, so it has no cliff either, while
-  the `-mfma` remedy that macro suggests selects FMA3 specifically and would SIGILL there. A
+  the `-mfma` remedy that macro suggests selects FMA3 specifically — dangerous there, but only in
+  combination with the architecture flag, which is the subtlety: `-march=bdver1 -mfma` enables FMA3
+  and FMA4 both and the compiler keeps emitting the four-operand FMA4 form (measured, `vfmaddps` /
+  `vfmaddss`, no calls), while `-march=x86-64 -mfma` emits three-operand FMA3 (`vfmadd132ps` /
+  `vfmadd231ps`) that a Bulldozer cannot execute. The fault case is `-mfma` over an architecture
+  lacking FMA4, not `-mfma` on a Bulldozer per se. A
   consequence worth keeping DISTINCT hides in that last case, and it is COMPILER-CONDITIONAL:
   `vec_fma_builtin`'s x86 rows are keyed on `defined(__FMA__)`, so on a compiler WITHOUT
   `__builtin_elementwise_fma` — gcc — an FMA4-only target matches no builtin row and lands on the
