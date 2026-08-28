@@ -402,8 +402,14 @@ def kill_cell_group(proc):
             got, _ = proc.communicate(timeout=timeout)
             out = got or out
             reaped = True
-        except subprocess.TimeoutExpired:
-            pass
+        except subprocess.TimeoutExpired as expired:
+            # What the cell had printed is on the exception. It matters in exactly the case where
+            # nothing else can deliver it: a member that outlives SIGKILL still owns the pipe, so
+            # every `communicate` here times out and the cell's own log — the only evidence about
+            # a cell nobody will run again — would otherwise be empty (gh-ocannl-760 review).
+            partial = expired.output
+            if partial:
+                out = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
         except ValueError:  # pipes already closed by an earlier communicate
             reaped = True
 
@@ -551,18 +557,29 @@ def run_supporting(cmd, cwd=None, capture_output=False, check=False, timeout=Non
 
     Returns the `CompletedProcess` that `subprocess.run` would have.
     """
-    proc = subprocess.Popen(
-        cmd,
-        cwd=cwd,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
-        text=capture_output,
-        **_own_group_kwargs(),
-    )
+    with _deferring_cancellation():
+        return _run_supporting(cmd, cwd, capture_output, check, timeout)
+
+
+def _run_supporting(cmd, cwd, capture_output, check, timeout):
+    proc = None
     try:
-        out, err = proc.communicate(timeout=timeout)
+        # The same window a cell gets, for the same reason: between `_execute_child` and `Popen`
+        # returning there is no name for the new process, so a cancellation there orphans a
+        # freshly isolated group (gh-ocannl-760 review).
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=capture_output,
+            **_own_group_kwargs(),
+        )
+        with _cancellable():
+            out, err = proc.communicate(timeout=timeout)
     except BaseException:
-        kill_cell_group(proc)
+        if proc is not None:
+            kill_cell_group(proc)
         raise
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
@@ -1216,6 +1233,23 @@ def failure_line(failure):
     return f"{label} ({note})" if note else label
 
 
+def cell_timeout_arg(text):
+    """`--cell-timeout` as a number of seconds: finite and not negative, or an argparse error.
+
+    Only zero (no cap) and a positive number of seconds mean anything here. A negative cap expires
+    every `communicate` at once — killing every cell of the sweep and quarantining their caches on
+    the way — and `nan`/`inf` raise from inside `communicate`, which the generic cleanup path
+    turns into a killed cell and an aborted run. Both are worth refusing before the first process
+    is spawned rather than discovering them cell by cell (gh-ocannl-760 review).
+    """
+    seconds = float(text)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(
+            f"--cell-timeout must be a finite number of seconds, 0 or more (got {text!r})"
+        )
+    return seconds
+
+
 def report(results, out_dir, unavailable=(), failures=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
@@ -1418,7 +1452,7 @@ def main():
     )
     ap.add_argument(
         "--cell-timeout",
-        type=float,
+        type=cell_timeout_arg,
         default=DEFAULT_CELL_TIMEOUT_S,
         metavar="SECONDS",
         help=f"per-cell wall-clock cap (default {DEFAULT_CELL_TIMEOUT_S:g} s; 0 disables). A "

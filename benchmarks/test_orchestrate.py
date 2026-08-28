@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import io
 import json
@@ -1464,6 +1465,48 @@ class CellTimeoutTest(unittest.TestCase):
 
         worker = int(pidfile.read_text())
         self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived the cancelled build")
+
+    def test_a_cap_that_cannot_mean_anything_is_refused_before_the_first_cell(self):
+        # A negative cap expires every `communicate` at once -- killing every cell of the sweep
+        # and quarantining their caches on the way -- and nan/inf raise from inside it. Both are
+        # worth refusing at the argument rather than cell by cell.
+        for bad in ("-1", "nan", "inf", "-0.5"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                orchestrate.cell_timeout_arg(bad)
+        self.assertEqual(orchestrate.cell_timeout_arg("0"), 0.0)  # 0 is "no cap", not "cap of 0"
+        self.assertEqual(orchestrate.cell_timeout_arg("1800"), 1800.0)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_survivor_holding_the_pipe_does_not_swallow_the_cells_output(self):
+        # A member that outlives SIGKILL still owns the captured stdout, so every `communicate`
+        # in the kill loop times out and the output would be lost -- exactly where the partial log
+        # is the only evidence about a cell nobody will run again. It lives on the exception.
+        # Nothing outlives SIGKILL on demand, so the survivor is stood in for by a grandchild
+        # that ESCAPES the group (its own session) while still holding the stdout it inherited --
+        # which reproduces the property that matters here: every `communicate` in the kill loop
+        # times out, so the output can only come off the exception.
+        pidfile = self.dir / "pipe_holder.pid"
+        cell = self.python(
+            "import subprocess, sys, time\n"
+            "print('the evidence', flush=True)\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  start_new_session=True)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        def clear_the_holder():
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+        self.addCleanup(clear_the_holder)
+        with unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 1.0):
+            _, note, log = self.run_cell("wedged behind a held pipe", cell, timeout=1.5)
+
+        self.assertIn("TIMED OUT", note)
+        self.assertIn("the evidence", log)
 
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
