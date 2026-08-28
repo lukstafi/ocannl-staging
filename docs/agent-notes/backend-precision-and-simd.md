@@ -780,13 +780,21 @@ files.
   `simd_flags`, `-ffast-math`, `-ffp-contract=` and `-fopenmp`, so a probe omitting any of them
   answers about a different compilation — an explicit `cc_backend_simd_flags=-mfma` makes a bare
   `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
-  erase calls the probe still shows. `log_level=3` logs the exact invocation the backend runs (as
-  `"command"`); rerun that with `-S` and grep its assembly. Then `grep -E 'call.*fmaf'`, matching
-  LOOSELY — gcc on ELF spells it `call fmaf@PLT`, clang on Mach-O `callq _fmaf`, and a pattern
-  pinned to one reports zero on the other, so an FMA-less target reads as clean; that is the same
-  dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650, one bullet up. gcc
-  is also reported to keep the calls at `-O0` even on an FMA-capable target, where clang measurably
-  does not, so a low `-O` is untrustworthy here rather than evidence. (`-march=<t> -E -dM` prints
+  erase calls the probe still shows. To read the exact invocation rather than rebuild it, note that
+  the `[%log3 "command", cmdline]` in `cc_backend` is a PREPROCESSING-time gate: it needs a rebuild
+  under `OCANNL_LOG_LEVEL_CC_BACKEND=3` (plus runtime `log_level=3`), and on a normally built or
+  installed package the call is stripped and the runtime level alone yields nothing — the same
+  runtime-vs-preprocessing confusion this repo already paid for in gh-ocannl-628, recorded at the
+  top of `arrayjit/lib/dune`. And when rerunning that command with `-S`, replace its
+  `-o <library path>`: unchanged, it writes assembly over the `.so`/`.dll` the command was building,
+  possibly one the running process still has mapped. Then `grep -E 'call.*fmaf?\b'` — match both
+  NAMES and both dialects. Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax`
+  emits `fma(` for `Double_prec`), and gcc on ELF spells it `call fma@PLT` where clang on Mach-O
+  spells it `callq _fmaf`; an `fmaf`-only pattern finds none of a double kernel's calls (measured:
+  0 of 5), which is the same dialect trap that cost `Asm_census` 72 rows of silent absence in
+  gh-ocannl-650, one bullet up. gcc is also reported to keep the calls at `-O0` even on an
+  FMA-capable target, where clang measurably does not, so a low `-O` is untrustworthy here rather
+  than evidence. (`-march=<t> -E -dM` prints
   which macros a target defines: an input to the question, not the answer to it.) **It is a property
   of the TARGET, not of which arm of the `#if` chain is taken**:
   `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and

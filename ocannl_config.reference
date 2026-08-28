@@ -679,21 +679,27 @@
 # So `__FMA__` is not necessary (bdver1 lacks it and has no cliff), and the v3 level is not the
 # only way to get FMA3 (bdver2/bdver3 have it without AVX2). The diagnostic that answers the
 # question directly, for your compiler and target TOGETHER rather than through a macro proxy, is to
-# compile and look. Do NOT hand-build the flags: this backend's compile is the composition of
-# several settings -- `-O` at cc_backend_optimization_level, then cc_backend_arch_flags, then the
-# resolved cc_backend_simd_flags, then `-ffast-math`, `-ffp-contract=`, `-fopenmp` -- and a probe
-# missing any of them answers about a different compilation than yours. An explicit
-# `cc_backend_simd_flags=-mfma` makes a bare `-march=x86-64` probe report calls your kernels do not
-# have; cc_backend_fast_math can remove calls the probe still shows. Take the real command instead:
-# with log_level=3 the backend logs the exact compiler invocation it runs (as "command"), so run
-# THAT with `-S` added and grep its assembly. Only if you cannot, reproduce every flag above in that
-# order.
-# Then `grep -E 'call.*fmaf'`, matching the call loosely: gcc on ELF spells it `call fmaf@PLT` while
-# clang on Mach-O spells it `callq _fmaf`, so a pattern pinned to either one reports zero on the
-# other and an FMA-less target reads as clean. Note also that gcc has been reported to keep
-# `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang measurably does not
-# (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`), so a probe at a low `-O` is
-# untrustworthy for this question rather than evidence either way.
+# compile and look -- with the SAME flags the backend uses, because it composes several settings and
+# a probe missing any of them answers about a different compilation than yours: `-O` at
+# cc_backend_optimization_level (default 3), then cc_backend_arch_flags, then the resolved
+# cc_backend_simd_flags, then `-ffast-math`, `-ffp-contract=`, `-fopenmp`, in that order. An
+# explicit `cc_backend_simd_flags=-mfma` makes a bare `-march=x86-64` probe report calls your
+# kernels do not have; cc_backend_fast_math can remove calls the probe still shows.
+# To read the exact invocation instead of reconstructing it, REBUILD with
+# `OCANNL_LOG_LEVEL_CC_BACKEND=3` and run with log_level=3: the command is logged through
+# `[%log3 "command", ...]`, which is a PREPROCESSING-time gate, so on a normally built or installed
+# package that call is compiled out and the runtime log_level alone will not produce it. When you
+# rerun that command with `-S`, also replace its `-o <library path>` with a fresh `.s` path --
+# unchanged, `-S` writes assembly text over the shared library the command was building, which may
+# be one your application still has loaded.
+# Then `grep -E 'call.*fmaf?\b'`. Match BOTH names and both dialects: double-precision kernels call
+# `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
+# spells the call `call fma@PLT` while clang on Mach-O spells it `callq _fmaf`. A pattern pinned to
+# one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
+# an `fmaf`-only pattern misses every call in a double-precision kernel. Note also that gcc has been
+# reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang
+# measurably does not (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`), so a probe
+# at a low `-O` is untrustworthy for this question rather than evidence either way.
 # You reach a no-FMA target on ANY CPU that lacks a fused multiply-add, which is not a clean date
 # cutoff. Big-core x86 got FMA3 at Haswell and AMD got FMA4 at Bulldozer, but the low-power lines
 # shipped without either for years afterwards: Intel Silvermont, Goldmont and Tremont, and AMD
