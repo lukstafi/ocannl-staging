@@ -403,6 +403,22 @@ that they earn a lookup rather than always-loaded space.
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
   cleanup assertion pass vacuously.
+  The same harness drives `stop` itself, since the predicate exists to keep three sentences apart:
+  a FORGED run directory (`cmd`, `cap`, `wt`, `log`, `pgid`, `gtoken`, and deliberately no
+  `pid`/`wpid`/`exit`, so the surviving-group branch is the one reached), pointed at by `last` under
+  a private `OCANNL_TOOL_TEST_RUNS` so the ambient run history is never touched, with the pointer's
+  worktree key EXTRACTED from the shipping script rather than guessed. Against it: a group whose
+  leader ignores TERM — reported as ignoring it, and the escalation separately checked to have
+  actually killed the group, since announcing a KILL it did not send would leave the worktree lock
+  held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The two
+  legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly one.
+  The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
+  leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
+  itself a running member — in the field it is reached by the census losing a race with a leader
+  that exits between the two probes. That leg therefore FORCES the predicate, the way the zombie leg
+  forces the signal probe: a copy of the shipping script with `return 1` inserted as `group_alive`'s
+  first statement, asserted to be that one line and nothing else, so what is under test is the
+  sentence rather than the predicate legs 2-5 own.
 - **Promote through `tools/promote.sh` during a merge, on every platform.** Promotion writes the
   WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
   add` is committed with its PRE-promotion content, and nothing local objects — every later `dune
