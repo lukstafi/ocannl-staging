@@ -201,7 +201,14 @@ let max_sublabel_length = ref 25
 let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
   let update_step =
     Shape.
-      { shape; logic = shape_logic; id = get_update_id (); unsafe_projections = None; neutral_elem }
+      {
+        shape;
+        logic = shape_logic;
+        id = get_update_id ();
+        unsafe_projections = None;
+        neutral_elem;
+        derivation_touched_margins = false;
+      }
   in
   Shape.propagate_shapes update_step;
   let projections =
@@ -491,19 +498,21 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      its result in that field, and {!Shape.finish_inference} derives in bulk for every active update
      step without anyone forcing the thunk.
 
-     The rejection is by staleness, not by earliness: derivation read [neutral_elem = None], so it
-     was misled only if the value now being installed differs from that — i.e. only if it is
-     [Some _]. Collecting [None] (no [Accum_op] leaf, or leaves whose neutral elements conflict)
-     makes the mutation a no-op, and both consumers in {!Shape.derive_projections} — the
-     [clamp_padded] test and [update_padding_elem] — behave identically under [None], so an early
-     derivation has nothing stale in it and is let through.
+     What makes an early derivation a fault is staleness, not earliness, and {!Shape} is what knows
+     the difference: it owns both decisions that read [neutral_elem], so
+     {!Shape.derivation_is_stale_for} answers whether installing this value now would have changed
+     what was already derived. Asking it beats restating its rules here, which is a copy that goes
+     out of date the next time a decision starts reading the field.
 
-     A stale one is unrecoverable rather than merely reported: by the time it is detectable,
+     A stale derivation is unrecoverable rather than merely reported: by the time it is detectable,
      {!Shape.derive_projections} has already committed padding and [padding_elem] on this shape and
      on the shared operand shapes, using the neutral element it did not have. Catching this
      exception and reusing the operands carries that forward, which is why it reads as a bug report
      rather than a condition to handle. *)
-  if Option.is_some neutral_elem && Option.is_some preliminary_shape_update.unsafe_projections then
+  if
+    Option.is_some preliminary_shape_update.unsafe_projections
+    && Shape.derivation_is_stale_for preliminary_shape_update neutral_elem
+  then
     raise
     @@ Session_error
          ( [%string

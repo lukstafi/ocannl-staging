@@ -302,6 +302,9 @@ type update_step = {
       (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
           update step use the same neutral element [v], [None] when different operations have
           different neutral elements or when there are no accumulator operations. *)
+  mutable derivation_touched_margins : bool;
+      (** Whether the derivation that ran for this step reached a shape whose margins it reads —
+          i.e. whether the margin neutral had anything to commit. See {!derivation_is_stale_for}. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -336,6 +339,17 @@ val get_projections : update_step -> Ir.Indexing.projections
 (** Returns the projections for this update step, computing them if not already done. This triggers
     [finish_inference] and then retrieves the projections from [unsafe_projections]. Use this
     instead of [derive_projections] directly. *)
+
+val derivation_is_stale_for : update_step -> float option -> bool
+(** Whether a derivation that has already run for this step would have reached different decisions
+    had the given neutral element been installed on it beforehand.
+
+    [Tensor.op] learns an operation's neutral element only from the assignments its [op_asn]
+    produced, so it installs the field after the fact; if anything derived the projections in
+    between, they were derived against [None]. Only two decisions read the field — the clamped-window
+    test, which a non-finite (max/min-family) identity flips, and the margin-neutral commitment,
+    which is reachable only where the step reads a shape's margins — so an ordinary finite-neutral
+    step that touches no margins is not stale. The implementation carries the reasoning. *)
 
 val of_spec : ?deduced:deduce_within_shape -> debug_name:string -> id:int -> string -> t
 val default_display_indices : t -> int array
