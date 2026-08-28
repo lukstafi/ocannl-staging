@@ -1593,6 +1593,23 @@ class CellTimeoutTest(unittest.TestCase):
         worker = int(pidfile.read_text())
         self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived its supporting command")
 
+    def test_a_supporting_survivor_stops_the_sweep_before_it_dispatches(self):
+        # Where a cell's survivor fails that cell, a survivor from the BUILD or a device probe is
+        # shared by every row the sweep is about to produce -- there is no subset of the results
+        # to disbelieve, and a cap cannot bound damage that is already in all of them. So this one
+        # stops the sweep. (The survivor is stood in for, as elsewhere: nothing outlives SIGKILL
+        # except a process stuck in the kernel.)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            with self.assertRaises(SystemExit) as raised:
+                orchestrate.run_supporting(self.python("pass"), capture_output=True)
+
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
+        self.assertIn("nothing is dispatched", str(raised.exception))
+
     def test_a_fractional_cap_is_reported_as_the_cap_it_was(self):
         # `{:.0f}` rounded a sub-second cap to `TIMED OUT after 0s`, one clause before the text
         # saying that zero disables the cap.

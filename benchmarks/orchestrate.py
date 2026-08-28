@@ -588,7 +588,18 @@ def _run_supporting(cmd, cwd, capture_output, check, timeout):
         # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER
         # exited, and a build's compiler worker or a probe's framework helper can outlive it
         # holding the GPU (gh-ocannl-760 review).
-        kill_cell_group(proc)
+        _, stuck = kill_cell_group(proc)
+        if stuck:
+            # And here the sweep DOES stop, where a cell's survivor only fails that cell. This
+            # runs before any cell is dispatched, so a member still holding the device would be
+            # shared by every row the sweep is about to produce — there is no subset of the
+            # results to disbelieve, and a cap cannot bound damage that is already in all of
+            # them (gh-ocannl-760 review).
+            raise SystemExit(
+                f"orchestrate: a member of {cmd[0]}'s process group SURVIVED SIGKILL and still "
+                "holds the device. Every cell of this sweep would be measured against it, so "
+                "nothing is dispatched: clear the survivors and re-run."
+            )
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
