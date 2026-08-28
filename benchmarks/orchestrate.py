@@ -177,6 +177,22 @@ def cell_name(variant, precision):
     return variant if precision == "f32" else f"{variant}/{precision}"
 
 
+def rendered_variant(result):
+    """The variant as the report names it — with the search's pool size when one was chosen.
+
+    A beam row's compile cost is a search cost, and the search's candidate pool changes it by a
+    factor of three or four, so `beam` alone gives a row measured with tinygrad's default, one
+    measured with `PARALLEL=0` and one measured with an explicit N the same identity in the table
+    that people read numbers out of (gh-ocannl-760 review). The default stays the bare name — it
+    is what every report so far recorded, and re-labelling it would make old and new reports
+    disagree about rows that are in fact the same — and a chosen pool is spelled out: `beam P=0`
+    is the no-pool serial search, `beam P=4` a four-worker one.
+    """
+    variant = result["variant"]
+    parallel = result.get("beam_parallel")
+    return variant if parallel is None else f"{variant} P={parallel}"
+
+
 def precision_base(precision):
     """The storage precision a cell computes in, without a gate-leg suffix."""
     return precision.split("-", 1)[0]
@@ -670,7 +686,11 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         # provenance nobody wrote. The cell says so here as it does on the kill path, with
         # `killed=False`: what differs is not the risk but what may be DONE about it
         # (gh-ocannl-760 review).
-        failed_note = (on_incomplete(False) if on_incomplete else "") or ""
+        # `killed` is about whether anything of this cell was interrupted, not about how the
+        # LEADER ended: if the leftover sweep above killed a member, a candidate worker may have
+        # been cut off mid-write, which is the torn cache the kill path quarantines
+        # (gh-ocannl-760 review).
+        failed_note = (on_incomplete(bool(leftovers)) if on_incomplete else "") or ""
         if failed_note:
             note += f"; {failed_note}"
         if failed_note:
@@ -1274,7 +1294,7 @@ def report(results, out_dir, unavailable=(), failures=()):
             if with_tensorization:
                 provenance += " %s |" % TENSORIZATION_MARK.get(r.get("tensorization"), "—")
             lines.append(
-                f"| {r['framework']} | {r['backend']} | {r['variant']} "
+                f"| {r['framework']} | {r['backend']} | {rendered_variant(r)} "
                 f"| {r.get('precision', 'f32')} "
                 f"| {num(s['p50'], '.3f')} | {num(s['p10'], '.3f')} | {num(s['p90'], '.3f')} "
                 f"| {num(r['queued_step_ms'], '.3f')} | {compile_s} |{provenance} {parity} |{tokens}"

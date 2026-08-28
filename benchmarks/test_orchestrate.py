@@ -1364,6 +1364,53 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIn("CACHE AT RISK", note)
         self.assertIn("exited rather than being killed", note)
 
+    def test_the_report_names_the_pool_a_beam_row_searched_with(self):
+        # A beam row's compile cost IS a search cost, and the pool changes it threefold -- so
+        # `beam` alone gives the default, `PARALLEL=0` and an explicit N one identity in the table
+        # people read numbers out of. The default keeps the bare name (every report so far
+        # recorded it that way, and rows that are the same should read the same).
+        out = Path(tempfile.mkdtemp())
+        rows = [
+            cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1]),
+            cell("tinygrad", "HIP", "beam", [2.3, 2.2, 2.1]),
+            cell("tinygrad", "HIP", "beam", [2.3, 2.2, 2.1]),
+        ]
+        rows[1]["beam_parallel"] = 0
+        rows[2]["beam_parallel"] = None
+        orchestrate.parity_check(rows)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            orchestrate.report(rows, out)
+
+        text = (out / "report.md").read_text()
+        self.assertIn("| beam P=0 |", text)
+        self.assertIn("| beam |", text)
+
+    def test_a_cell_whose_leftovers_were_killed_reports_a_killed_search(self):
+        # The leftover sweep interrupted a member -- possibly mid-write -- so the cache is in the
+        # state the kill path quarantines, whatever the leader's own exit said.
+        seen = []
+        pidfile = self.dir / "leftover_killed.pid"
+        cell = self.python(
+            "import subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.exit(1)\n",
+            pidfile,
+        )
+
+        _, note, _ = self.run_cell(
+            "failed leaving workers",
+            cell,
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "cache handled",
+        )
+
+        self.assertEqual(seen, [True], "a cell whose members we killed reported killed=False")
+        self.assertIn("process group behind", note)
+        self.assertTrue(self.wait_gone(int(pidfile.read_text())))
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session
