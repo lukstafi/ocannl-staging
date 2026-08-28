@@ -403,11 +403,6 @@ let source_file_numbers lines ~basename =
     | _ -> None)
   |> Set.of_list (module Int)
 
-(** [census op_class ~asm ~source_basename ~anchor] is the innermost loop of [asm] whose body
-    carries a source line in [anchor], with that loop's instruction profile.
-
-    [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
-    emitted. That is a finding, not an absence of one: report it as a failure. *)
 let classify_asm asm = String.split_lines asm |> List.map ~f:classify_line |> Array.of_list
 
 (* Every backward branch is a loop edge; its body is the span from the target label to the branch.
@@ -425,17 +420,43 @@ let backward_edges lines =
         | None -> acc)
     | _ -> acc)
 
-(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all, which
-    is what separates the two readings of a {!census} answering [None]: this construct was hoisted
-    or folded away (some other loop was still found), or {!is_branch} does not know this ISA's
-    spelling and no loop in the file was found. The second is a defect in this module and reports
-    every anchor missing at once, so it is worth a claim of its own. *)
+(** One assembly file, classified once.
+
+    Everything below the line classification -- the loop edges, and the DWARF file numbers standing
+    for the kernel's own source -- is a property of the FILE, not of the construct being censused,
+    while a run asks about several dozen constructs per file. Parsing per question made the driver
+    re-scan every one of a 40000-line listing's lines once per anchor, which was the larger half of
+    [test/operations/cc_march_census]'s wall clock once gh-ocannl-752 raised the loop count. Hence
+    the split: {!parse} once per compiled file, {!census_in} once per anchor. *)
+type parsed = {
+  lines : line option array;
+  edges : (string * int * int) list;  (** (label, body start, backward branch) *)
+  files : Set.M(Int).t;  (** the DWARF file numbers naming the censused source *)
+}
+
+let parse ~asm ~source_basename =
+  let lines = classify_asm asm in
+  {
+    lines;
+    edges = backward_edges lines;
+    files = source_file_numbers (Array.to_list lines) ~basename:source_basename;
+  }
+
+(** [edge_count p] is how many loop edges the branch vocabulary recognized in [p] at all, which is
+    what separates the two readings of a {!census_in} answering [None]: this construct was hoisted or
+    folded away (some other loop was still found), or {!is_branch} does not know this ISA's spelling
+    and no loop in the file was found. The second is a defect in this module and reports every anchor
+    missing at once, so it is worth a claim of its own. *)
+let edge_count p = List.length p.edges
+
 let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
 
-let census op_class ~asm ~source_basename ~anchor =
-  let lines = classify_asm asm in
-  let files = source_file_numbers (Array.to_list lines) ~basename:source_basename in
-  let loops = backward_edges lines in
+(** [census_in p op_class ~anchor] is the innermost loop of [p] whose body carries a source line in
+    [anchor], with that loop's instruction profile.
+
+    [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
+    emitted. That is a finding, not an absence of one: report it as a failure. *)
+let census_in ({ lines; edges = loops; files } : parsed) op_class ~anchor =
   let carries (_, j, i) =
     let rec go k =
       if k > i then false
@@ -483,6 +504,11 @@ let census op_class ~asm ~source_basename ~anchor =
         | _ -> ()
       done;
       { loop_label = label; span = i - j; counts = !counts })
+
+(** {!census_in} over an assembly listing parsed for this one question. Convenient where a caller
+    asks about one construct in one file; a caller asking about many should {!parse} once. *)
+let census op_class ~asm ~source_basename ~anchor =
+  census_in (parse ~asm ~source_basename) op_class ~anchor
 
 (** A one-line profile, for the stderr table a census run prints. *)
 let to_line
