@@ -615,20 +615,27 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
 |}
     (lanes * 2) (lanes * 4)
 
-let half_widen_cache : (string * int, bool) Hashtbl.t = Hashtbl.Poly.create ()
+let half_widen_cache : (string * int * int, bool) Hashtbl.t = Hashtbl.Poly.create ()
 
-(* [packed_half_widen t ~width] is whether [t] lowers the emitted fp16 widening bridge to
-   whole-vector instructions at the lane count [width] implies. A toolchain that does not COMPILE
-   the probe answers [false]: it cannot express the bridge whole-vector either, and the rows that
-   would be excluded are reported. Memoized per (column, width): this is asked once per row and a
-   run has hundreds. *)
-let packed_half_widen t ~width =
-  Hashtbl.find_or_add half_widen_cache (t.Census.label, width) ~default:(fun () ->
+(* [packed_half_widen t ~width ~opt_level] is whether [t] lowers the emitted fp16 widening bridge to
+   whole-vector instructions at the lane count [width] implies, WHEN COMPILING THE WAY THE ROW IT
+   excludes was compiled. A toolchain that does not COMPILE the probe answers [false]: it cannot
+   express the bridge whole-vector either, and the rows that would be excluded are reported.
+
+   The optimization level is part of the question and not a constant, for the same reason the width
+   is: this probe decides which rows a claim is held over, and a row is a (column, width, -O) triple.
+   Vectorizing a whole-vector builtin per lane is a lowering decision, and a compiler that makes it
+   at one level and not the other would have the probe excluding a row whose bridge is packed, or
+   holding the strict claim over one whose bridge is not -- a false green as easily as a false red,
+   from an answer taken at an optimization level nothing here compiles the row at. Memoized per
+   (column, width, level): this is asked once per row and a run has hundreds. *)
+let packed_half_widen t ~width ~opt_level =
+  Hashtbl.find_or_add half_widen_cache (t.Census.label, width, opt_level) ~default:(fun () ->
       let src = Stdlib.Filename.temp_file "ocannl_census_widen_" ".c" in
       let asm = Stdlib.Filename.temp_file "ocannl_census_widen_" ".s" in
       Stdio.Out_channel.write_all src ~data:(half_widen_probe_source ~lanes:(width / 4));
       let verdict =
-        match Census.compile t ~opt_level:2 ~src_path:src ~asm_path:asm with
+        match Census.compile t ~opt_level ~src_path:src ~asm_path:asm with
         | Error _ -> false
         | Ok () ->
             let p = Census.profile_all Census.Fma ~asm:(Stdio.In_channel.read_all asm) in
@@ -1021,7 +1028,7 @@ let () =
                                 (if
                                    String.equal loop.store half
                                    && not (String.equal loop.comp half)
-                                 then packed_half_widen t ~width:e.width
+                                 then packed_half_widen t ~width:e.width ~opt_level:opt
                                  else true);
                               profile = c;
                             }))))
