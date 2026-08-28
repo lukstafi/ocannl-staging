@@ -1411,6 +1411,31 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIn("process group behind", note)
         self.assertTrue(self.wait_gone(int(pidfile.read_text())))
 
+    def test_a_survivor_failure_still_handles_the_cache(self):
+        # The survivor branch returns early, and part of the search was forcibly interrupted --
+        # which is what `stuck` means -- so the cache is in the state the cap's path quarantines.
+        # Returning without asking would leave it for the next beam cell to read.
+        seen = []
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            _, note, _ = self.run_cell(
+                "successful over a survivor",
+                cell,
+                timeout=60,
+                on_incomplete=lambda killed: seen.append(killed) or "cache quarantined",
+            )
+
+        self.assertEqual(seen, [True])
+        self.assertIn("SURVIVED SIGKILL", note)
+        self.assertIn("cache quarantined", note)
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session

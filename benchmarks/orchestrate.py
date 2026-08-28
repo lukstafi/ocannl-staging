@@ -673,6 +673,12 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
             "still hold the device, so this cell's own timing and every later cell's in this run "
             "were measured against them; clear the survivors and re-run"
         )
+        # This branch returns early, so the cache handling has to happen here too: part of the
+        # search was forcibly interrupted (that is what `stuck` means), which is exactly the torn
+        # cache the cap's path quarantines (gh-ocannl-760 review).
+        stuck_cache_note = (on_incomplete(True) if on_incomplete else "") or ""
+        if stuck_cache_note:
+            note += f"; {stuck_cache_note}"
         print(f"!!! {label} {note}", flush=True)
         return None, note
     if proc.returncode != 0 or line is None:
@@ -1585,7 +1591,11 @@ def main():
                     # no pool at all, so it is passed through rather than read as "unset".
                     beam_env = beam_cell_env(os.environ, args.beam_parallel)
                     collect(
-                        f"{name} tinygrad/{device}/beam",
+                        # The pool is in the LABEL as well as in the row, because a failure has
+                        # only the label: a wedged cell records no result, and which pool it
+                        # wedged with is the first thing anyone asks (gh-ocannl-760 review).
+                        f"{name} tinygrad/{device}/beam"
+                        + ("" if args.beam_parallel is None else f" P={args.beam_parallel}"),
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--beam", str(args.beam)],
                         # What pool the search ran with, recorded where the row is read. Without
                         # it the default, `0` and `--beam-parallel 2` all land as `beam` with no
