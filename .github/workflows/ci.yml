@@ -87,17 +87,39 @@ jobs:
           || '["ubuntu-latest", "macos-latest"]') }}
         ocaml-compiler:
           - 5.5.x
-        # The floor the opam files claim: `"ocaml" {>= "5.3.0"}`. Per-PR runs
-        # build only 5.5, so without this the lower bound is a promise nothing
-        # checks -- and the alternative, raising the constraint to the version we
-        # happen to test, would drop users for no technical reason. One extra
-        # ubuntu job on the schedule tests the claim instead. It rides the same
-        # cadence as Windows because a floor breaks the way Windows does: slowly,
-        # through the dependency cone rather than through this repo's code.
+        # Which dune targets the job builds. `main` is the regular suite; the
+        # `train` shard (added through `include` below) builds only the
+        # training-integration tier, which lives off the runtest path because
+        # its members serialize on the ocannl_training_test lock and set every
+        # full run's wall-clock tail (test/training/dune says why).
+        suite:
+          - main
+        # Two kinds of include entry. The `train` shards: macOS on every run,
+        # Windows only on the scheduled/extended matrix beside its main job.
+        # macOS ONLY per-PR, deliberately: the tier is a serialized chain
+        # (measured ~4.7min on an M4 Max, ~10min on a 24-thread Linux box with
+        # the compile cached), so a ubuntu shard would run ~15-20min and
+        # replace the ~15min main job as the matrix's latency ceiling, while
+        # the macOS shard fits under it -- per-PR execution coverage of the
+        # tier on one substrate, at no latency cost. Ubuntu still executes the
+        # tier daily through tools/sweep.sh's full-suite units.
+        #
+        # And the floor the opam files claim: `"ocaml" {>= "5.3.0"}`. Per-PR
+        # runs build only 5.5, so without this the lower bound is a promise
+        # nothing checks -- and the alternative, raising the constraint to the
+        # version we happen to test, would drop users for no technical reason.
+        # One extra ubuntu job on the schedule tests the claim instead. It
+        # rides the same cadence as Windows because a floor breaks the way
+        # Windows does: slowly, through the dependency cone rather than through
+        # this repo's code. Its `suite` is spelled out because an include entry
+        # that omits a matrix key would otherwise match and EXTEND an existing
+        # combination instead of adding a job.
         include: >-
           ${{ fromJSON((github.event_name == 'schedule' || inputs.extended)
-          && '[{"os": "ubuntu-latest", "ocaml-compiler": "5.3.x"}]'
-          || '[]') }}
+          && '[{"os": "ubuntu-latest", "ocaml-compiler": "5.3.x", "suite": "main"},
+               {"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"},
+               {"os": "windows-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]'
+          || '[{"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]') }}
     runs-on: ${{ matrix.os }}
     # setup-ocaml's `dune-cache: true` exports DUNE_CACHE_ROOT but never
     # DUNE_CACHE, and dune's shared cache is opt-in -- so the cache it saves is
@@ -294,11 +316,12 @@ jobs:
     # directories that keep multidev goldens (`grep -rl multidev_cc
     # test/*/dune`) over a full second suite.
     #
-    # The aliases are QUOTED for the Windows leg, whose default `run:` shell is
-    # PowerShell: unquoted, `@default`/`@runtest` are splatted (empty) variables
-    # and the command degrades to a plain `dune build` that compiles everything
-    # and runs no tests -- a silent false green. bash and cmd are unaffected.
-    - run: opam exec -- dune build "@default" "@runtest"
+    # The aliases are QUOTED for the Windows legs, whose default `run:` shell is
+    # PowerShell: unquoted, `@default`/`@runtest`/`@train` are splatted (empty)
+    # variables and the command degrades to a plain `dune build` that compiles
+    # everything and runs no tests -- a silent false green. bash and cmd are
+    # unaffected.
+    - run: opam exec -- dune build ${{ matrix.suite == 'train' && '"@train"' || '"@default" "@runtest"' }}
     # `tools/test-run.sh` carries branches that ONLY execute under MSYS: it
     # sources `tools/opam-env.sh` unconditionally and fatally (a dune on PATH
     # does not imply rewritten cygwin paths there), routes dune through
@@ -347,8 +370,10 @@ jobs:
     # opam's cygwin `bin` on the inherited PATH, verified by launching it with
     # exactly that PATH. The raw `usr\bin\bash.exe` provisions nothing and would
     # need the prefix set by hand.
+    # Main suite only: the scheduled Windows `train` shard shares the runner
+    # image, so a second smoke there would test the same plumbing twice.
     - name: Smoke tools/test-run.sh (Git Bash)
-      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      if: ${{ !cancelled() && runner.os == 'Windows' && matrix.suite != 'train' }}
       shell: 'C:\Progra~1\Git\bin\bash.exe --noprofile --norc -eo pipefail {0}'
       run: |
         # The shell pin above is the whole reason the branches below are the MSYS

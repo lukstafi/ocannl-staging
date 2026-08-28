@@ -960,9 +960,14 @@ that they earn a lookup rather than always-loaded space.
   (2026-08: ~95s/195s/246s cc for the last three on a 24-thread Linux box; the ubuntu runner's
   whole `dune runtest` step was ~8min, most of it this chain; taking it off the per-PR path took
   ubuntu CI from ~31min to ~15 and macOS from ~16 to ~10). The daily sweep's full-suite units
-  build `@runtest @train` together, so every backend still executes them daily; per-PR, a change
-  to training dynamics, `Train.*` plumbing or the autotuner's fission path should run
-  `dune build @train` (or the affected `@test/training/train-<name>`) by hand. `@slow` keeps the
+  build `@runtest @train` together, so every backend still executes them daily, and per-PR CI
+  runs the tier as a macOS-ONLY shard: measured with the compile cached, `@train` is ~4.7min on
+  an M4 Max but ~10min on a 24-thread Linux box, so a ubuntu shard (slower still on the 4-vCPU
+  runner) would replace the ~15min main job as the matrix's latency ceiling while the macOS shard
+  fits under it. A change to training dynamics, `Train.*` plumbing or the autotuner's fission
+  path is still worth a local `dune build @train` (or the affected
+  `@test/training/train-<name>`) before pushing, since ubuntu-specific breakage there surfaces
+  only in the sweep. `@slow` keeps the
   genuinely long real-dataset runs (`mnist_conv`, `cifar_conv`, `gpt2_dry_run`). CI also runs its
   one dune walk as `dune build "@default" "@runtest"` — two separate commands would hold the
   serialized lock chain (what remains of it) against an otherwise idle runner after every file
