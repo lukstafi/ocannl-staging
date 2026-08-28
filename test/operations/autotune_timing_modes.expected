@@ -12,6 +12,8 @@ a misspelling is refused rather than defaulted: true
 == the instrument's two modes ==
 both modes returned a positive finite per-launch time: true
 isolated timing dispatched one launch per timed run, warmup included: true
+isolated timing reports batch depth 1: true
+queued timing's dispatches decompose into whole batches of the reported depth: true
 queued timing dispatched more launches than isolated timing did: true
 isolated reading is a per-launch time: PASS
 queued reading is a per-launch time: PASS

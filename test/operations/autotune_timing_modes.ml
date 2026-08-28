@@ -103,7 +103,7 @@ let counter_routine () =
   let ctx, routine = Ll_test.link ~name:"gh755_counter" o in
   (o, ctx, routine)
 
-type reading = { ms : float; wall_ms : float; dispatches : int }
+type reading = { ms : float; wall_ms : float; dispatches : int; depth : int }
 
 (* Held so the cache-key section below asks about the SAME lowering the instrument measured, rather
    than minting a second one whose canonical form it would have to argue is equivalent. *)
@@ -115,44 +115,72 @@ let () =
   let ctx = Context.set_values ctx counter_node [| 0. |] in
   measured := Some (opt, ctx);
   let count () = Int.of_float (Context.get_values ctx counter_node).(0) in
+  (* The depth each call settles on, off the instrument's own observation seam: the queued call
+     calibrates independently, so nothing derived from a reading taken outside it (gh-ocannl-851,
+     Codex round 2 on PR #521) stands in for what it actually used. *)
+  let depth_seen = ref 0 in
+  (Autotune.on_batch_depth := fun d -> depth_seen := d);
   let measure timing =
     let before = count () in
     let c0 = Mtime_clock.counter () in
     let ms = Autotune.time_routine ~repeats:3 ~timing ctx routine in
     let wall_ms = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
-    { ms; wall_ms; dispatches = count () - before }
+    { ms; wall_ms; dispatches = count () - before; depth = !depth_seen }
   in
-  (* Isolated first: its reading is also the estimate the gate below asks the policy about. *)
   let iso = measure Autotune.Isolated in
   let que = measure Autotune.Queued in
   Stdio.eprintf
     "  (not part of the golden) isolated %.6f ms over %d dispatches in %.1f ms wall; queued %.6f ms \
-     over %d dispatches in %.1f ms wall\n\
+     over %d dispatches (batch depth %d) in %.1f ms wall\n\
      %!"
-    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.wall_ms;
+    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.depth que.wall_ms;
   let finite r = Float.is_finite r.ms && Float.is_positive r.ms in
   p "both modes returned a positive finite per-launch time" (finite iso && finite que);
   (* One launch per timed run, at least [repeats] runs and at most the 64-run top-up cap, plus the
      warmup. Two-sided: the upper bound would also admit a loop that stopped at the warmup. *)
   p "isolated timing dispatched one launch per timed run, warmup included"
     (iso.dispatches >= 4 && iso.dispatches <= 65);
-  (* Depth > 1 is what queued mode IS. Gated on the policy's own answer for this machine's isolated
-     reading rather than on a threshold restated here: on a machine where one dispatch already costs
-     a whole batch target the claim is vacuously true, and a vacuous [true] must not read like a
-     verified one. *)
-  let batches_here = Autotune.queued_batch_depth ~est_ms:iso.ms > 1 in
+  p "isolated timing reports batch depth 1" (iso.depth = 1);
+  (* The seam's report is not taken on faith: past the warmup (1) and the calibration runs (3),
+     the dispatch counter must decompose into whole batches of the reported depth, between the 3
+     guaranteed timed runs and the 64-run top-up cap. A loop batching at some depth other than the
+     one it reported fails this on any count the reported depth does not divide. *)
+  p "queued timing's dispatches decompose into whole batches of the reported depth"
+    (que.depth >= 1
+    && (que.dispatches - 4) % que.depth = 0
+    && (que.dispatches - 4) / que.depth >= 3
+    && (que.dispatches - 4) / que.depth <= 64);
+  (* Depth > 1 is what queued mode IS. Gated on the depth the queued call itself reported: on a
+     machine where one dispatch already costs a whole batch target the claim is vacuously true, and
+     a vacuous [true] must not read like a verified one. *)
+  let batches_here = que.depth > 1 in
   let claim = "queued timing dispatched more launches than isolated timing did" in
   if batches_here then p claim (que.dispatches > iso.dispatches)
   else Verdict.skipped ~backend:(backend ()) claim;
   (* Per launch, not per batch. A reading that forgot to divide by the depth would be about [depth]
-     times the mean cost of a launch in that call -- up to 200x -- so the two-sided factor of 3
-     leaves ample room for the difference between a minimum and a mean while refusing that. *)
+     times the mean cost of a launch in that call -- up to 200x -- which the upper factor of 3
+     refuses. The low side refuses the mirror error, a reading divided by the depth twice, which
+     sits at about [mean / depth] -- so its divisor must stay BELOW the depth the call actually
+     used (the seam-reported one, cross-checked against the dispatch counter above) while
+     absorbing what the upper side never faces: [ms] is a min over up to 64 batches, [mean] the
+     whole call's average, and on a busy runner the average sits severalfold above the minimum
+     (4.3x observed on CI, gh-ocannl-851). The divisor scales with that depth: at the cap
+     (microsecond launches, the jitter-dominated regime) the envelope is 16, and at small depths
+     -- millisecond launches, batches of tens of milliseconds, the jitter amortized -- it is half
+     the depth, refusing [mean / depth] with a factor-2 margin. The floor of 3 keeps the claim
+     meaningful at depth <= 3, where a double division is a <= 3x under-read inside the noise
+     floor and out of this instrument's reach -- as it already was under the pre-widening factor
+     of 3. Isolated timing has depth 1 and no division to get wrong, so its low side is
+     two-sidedness alone, at 16. *)
   let mean r = r.wall_ms /. Float.of_int (max 1 r.dispatches) in
-  let per_launch r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / 3.) in
-  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch iso)
+  let per_launch ~low_div r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / low_div) in
+  let que_low_div = Float.(max 3. (min 16. (of_int que.depth / 2.))) in
+  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch ~low_div:16. iso)
     ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" iso.ms (mean iso));
-  Verdict.pass_fail "queued reading is a per-launch time" (per_launch que)
-    ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" que.ms (mean que));
+  Verdict.pass_fail "queued reading is a per-launch time" (per_launch ~low_div:que_low_div que)
+    ~detail:(fun () ->
+      Printf.sprintf "%.6f ms vs mean %.6f ms (depth %d, low divisor %.0f)" que.ms (mean que)
+        que.depth que_low_div);
   (* Amortizing a round trip can only remove time, so a queued reading above the isolated one is the
      instrument reporting the wrong quantity, not a slow machine. The factor absorbs the noise a
      min-of-N leaves; the point of the claim is the direction. *)
