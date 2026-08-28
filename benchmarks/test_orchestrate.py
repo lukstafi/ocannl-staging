@@ -1019,7 +1019,14 @@ class CellTimeoutTest(unittest.TestCase):
             pidfile,
         )
 
-        result, note, _ = self.run_cell("stubborn descendant", cell, timeout=2.0)
+        # The grace is shortened because this test spends ALL of it: the leader dies on the first
+        # SIGTERM, so nothing can end the first pass early and the loop runs to its deadline
+        # before the SIGKILL that is the point of the test. At the production 10 s that is ten
+        # seconds of sleeping on every run of this suite on both CI platforms, and none of it is
+        # under test here -- what is under test is which pass the escalation is owed to, and that
+        # is the same at any grace length.
+        with unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.5):
+            result, note, _ = self.run_cell("stubborn descendant", cell, timeout=2.0)
 
         self.assertIsNone(result)
         stubborn = int(pidfile.read_text())
@@ -1295,17 +1302,29 @@ class CellTimeoutTest(unittest.TestCase):
         # the group outlives the sweep (gh-ocannl-760 review). The cell here holds the grace open
         # by ignoring SIGTERM, and the sweep is cancelled while it does.
         pidfile = self.dir / "mid_kill.pid"
+        termfile = self.dir / "mid_kill.termed"
+        # The cell RECORDS the SIGTERM instead of `SIG_IGN`-ing it -- it still does not die of one,
+        # which is all the test needs of it, and the marker is the moment the grace loop opened.
+        # Sleeping a fixed 4 s to land inside a 10 s window was the old way to hit that window,
+        # and it cost the suite the wait on every run; waiting for the marker hits it exactly, so
+        # the grace can be shortened (below) without the cancellation racing the SIGKILL.
         driver = self.python(
-            "import signal, sys, orchestrate\n"
+            "import sys, orchestrate\n"
             "orchestrate.install_termination_handler()\n"
+            # The grace this cancellation lands in has to be long enough for the parent to see the
+            # marker and signal, not long enough to be realistic: what is under test is that the
+            # escalation FINISHES across a signal, and the deferral that makes it do so is the
+            # same at any grace length.
+            "orchestrate.CELL_KILL_GRACE_S = 2.0\n"
             "cell = [sys.executable, '-c',\n"
             "  'import os, signal, sys, time\\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+            "signal.signal(signal.SIGTERM, lambda *_: open(sys.argv[2], \\'w\\').close())\\n"
             "open(sys.argv[1], \\'w\\').write(str(os.getpid()))\\n"
             "sys.stdout.flush()\\n"
-            "time.sleep(300)\\n', sys.argv[1]]\n"
+            "time.sleep(300)\\n', sys.argv[1], sys.argv[2]]\n"
             "orchestrate.run_cell('cell cancelled mid-kill', cell, timeout=2)\n",
             pidfile,
+            termfile,
         )
         sweep = subprocess.Popen(
             driver,
@@ -1319,9 +1338,12 @@ class CellTimeoutTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertTrue(pidfile.exists(), "the cell never started")
         stubborn = int(pidfile.read_text())
-        # Into the cap (2 s) and then into the grace, where the kill is waiting on a cell that
-        # will not answer SIGTERM.
-        time.sleep(4)
+        # Through the cap (2 s) and into the grace, where the kill is waiting on a cell that will
+        # not answer SIGTERM: the marker is written by the cell's handler, from inside that wait.
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not termfile.exists():
+            time.sleep(0.02)
+        self.assertTrue(termfile.exists(), "the kill never reached its grace loop")
         self.assertTrue(self.alive(stubborn), "the cell was gone before the kill was interrupted")
 
         sweep.terminate()
