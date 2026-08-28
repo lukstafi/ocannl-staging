@@ -741,6 +741,31 @@ files.
   from the failure (gh-ocannl-621). Answering "no loop" is therefore a failure — which is what
   caught `Asm_census` not knowing that gcc spells the aarch64 conditional branch `bne`, not `b.ne`:
   72 rows of silent absence across both ARM columns, reported at once.
+- **The census reaches the narrow-storage arms and the GEBP grid too** (gh-ocannl-752). gh-650's
+  fixture censused only loops whose storage precision equalled their compute precision, so
+  `vec_bridge`'s widening and narrowing arms, `Ops.c_convert_precision`'s bf16/fp8/fp16 codecs and
+  `try_register_tile`'s RMxRN grid were in no generated source at all — the compile matrix proved
+  nothing about the paths real kernels take. Three additions, each with a trap worth keeping.
+  (1) **fp16's compute precision is a per-process POLICY**, not a fact about the format
+  (`Numerics.fp16_mode`), so one emission cannot carry both the native-fp16 builtin rows and the
+  (fp16, f32) bridge pair: the driver emits under two `fp16_arithmetic` settings and each child
+  asks `Numerics.cpu_compute_prec` which side it is on rather than being told a second time through
+  the environment. (2) **A `Tile_mma` anchor must name something only the tiled rendering emits**
+  (the A-splat binding `tmma_as_0__`), which is what makes a silently DECLINED tiling — the
+  gh-ocannl-479 failure mode — report "no loop carried the anchor" instead of censusing the scalar
+  fallback under the tile's name. Its rows are also legitimately scalar in part (`rm` A splats per
+  k step, measured at exactly 4 on every x86 column with FMA), so they carry a vector-majority
+  inequality of their own rather than joining the scalarization claim. (3) **A coverage claim is
+  needed where every other claim is an inequality**: a loop that stopped being narrow-storage — a
+  flipped numerics default, a lost `vec_bridge` arm — is still a `Vectorized` fold over an array
+  called `maxs_bf16` and passes all of them, so the fixture would report coverage it no longer has.
+  What closes that is reading the EMITTED SOURCE: every `OCANNL_VEC_WIDEN_*`/`OCANNL_VEC_NARROW_*`
+  key `Builtins_cc` defines must reach some kernel (derived from the table, so a bridge added for a
+  fourth format fails until the fixture grows), and every loop whose storage and compute precisions
+  differ must carry both directions of its `c_convert_precision` pair in its own kernel — which is
+  the only attestation fp8 gets, `vec_bridge` having no vector arm for it and converting per lane.
+  The emission is its own negative control: the native-fp16 kernel carries the `BFLOAT16` bridge
+  pair and neither `HALF` one, the wide-fp16 kernel exactly the reverse.
 - **`Max`/`Min` SIMD reductions were a libm call per lane, on every x86 target** (gh-ocannl-649,
   fixed). The `Vectorized` accumulation loop rendered them as a fixed-trip per-lane loop calling the
   scalar `fmaxf`/`fminf`, on the reasoning that the packed-max builtins have the wrong NaN semantics
