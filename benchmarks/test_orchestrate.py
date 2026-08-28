@@ -775,6 +775,36 @@ class FixtureDigestTest(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    #: The origin `gen_fixtures.main` records under when none is given, pinned so the
+    #: generator tests do not depend on what this box happens to be called.
+    this_box = "test-box"
+
+    def gen_fixtures_module(self):
+        """`gen_fixtures`, imported without the bench venv, with `build` never reached.
+
+        It imports numpy and safetensors at module scope, but the property the tests below pin --
+        the ORDER of `main()`'s steps -- patches `build` out, so nothing here draws a random
+        number or writes a safetensors file. Stubbing the two imports is what keeps the check
+        running under the bare `python3` the dune rule invokes: skipping there would mean the
+        one place it runs unattended never evaluates it.
+        """
+        stub = types.ModuleType("safetensors.numpy")
+        stub.save_file = None
+        stubs = {
+            "numpy": types.ModuleType("numpy"),
+            "safetensors": types.ModuleType("safetensors"),
+            "safetensors.numpy": stub,
+        }
+        with unittest.mock.patch.dict(sys.modules, stubs):
+            sys.modules.pop("gen_fixtures", None)
+            import gen_fixtures
+        patch = unittest.mock.patch.object(
+            fixture_digest.platform, "node", return_value=self.this_box
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        return gen_fixtures
+
     def check(self, *args, **kwargs):
         """check_fixture_digests with its per-fixture log kept out of the test output."""
         with contextlib.redirect_stdout(io.StringIO()):
@@ -784,47 +814,126 @@ class FixtureDigestTest(unittest.TestCase):
         fx = self.fixture("mlp_small.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
 
-        changes = fixture_digest.record(digests, [fx])
+        changes = fixture_digest.record(digests, [fx], "rog-nv")
 
-        self.assertEqual([(name, was) for name, was, _ in changes], [("mlp_small.safetensors", None)])
+        self.assertEqual(
+            [(name, origin, was) for name, origin, was, _ in changes],
+            [("mlp_small.safetensors", "rog-nv", None)],
+        )
         entries = fixture_digest.read_digests(digests)
-        self.assertEqual(entries[fx.name], (fixture_digest.sha256_file(fx), fx.stat().st_size))
+        self.assertEqual(
+            entries[fx.name],
+            [fixture_digest.Entry(fixture_digest.sha256_file(fx), fx.stat().st_size, "rog-nv")],
+        )
         self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_a_match_names_the_box_whose_bytes_they_are(self):
+        # gh-ocannl-759: "which bytes" was never the whole question. The reports compare boxes,
+        # so a number has to carry whose workload it is on, not only that it is on a pinned one.
+        fx = self.fixture("gpt2_mini.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+
+        verdict, _, _, origins = fixture_digest.status(fx, fixture_digest.read_digests(digests))
+
+        self.assertEqual((verdict, origins), ("MATCH", "minix"))
 
     def test_regenerating_different_bytes_is_announced_as_a_change(self):
         fx = self.fixture("gpt2_mini.safetensors", b"generated at spec revision A")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
-        was = fixture_digest.read_digests(digests)[fx.name]
+        fixture_digest.record(digests, [fx], "rog-nv")
+        (was,) = fixture_digest.read_digests(digests)[fx.name]
 
         fx.write_bytes(b"generated at spec revision B")
-        changes = fixture_digest.record(digests, [fx])
+        changes = fixture_digest.record(digests, [fx], "rog-nv")
 
         self.assertEqual(len(changes), 1)
-        name, previous, now = changes[0]
-        self.assertEqual((name, previous), (fx.name, was))
-        self.assertEqual(now, fixture_digest.read_digests(digests)[fx.name])
+        name, origin, previous, now = changes[0]
+        self.assertEqual((name, origin, previous), (fx.name, "rog-nv", was))
+        self.assertEqual([now], fixture_digest.read_digests(digests)[fx.name])
 
     def test_regenerating_one_fixture_keeps_the_others_recorded(self):
         # gen_fixtures.py takes a spec list; regenerating one workload must not drop the
         # identities of the fixtures already on disk, or the pin silently narrows to one.
         a, b = self.fixture("a.safetensors", b"aaa"), self.fixture("b.safetensors", b"bbb")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [a, b])
+        fixture_digest.record(digests, [a, b], "rog-nv")
 
-        fixture_digest.record(digests, [a])
+        fixture_digest.record(digests, [a], "rog-nv")
 
         self.assertEqual(set(fixture_digest.read_digests(digests)), {a.name, b.name})
+
+    def test_two_boxes_bytes_are_both_recorded_and_both_match(self):
+        # The state gh-ocannl-759 found and this format exists for: mlp_small and gpt2_mini hash
+        # differently on minix and rog-nv at identical sizes (different venvs, different numpy
+        # streams). Neither box's published numbers may be evicted to make the other's fit.
+        fx = self.fixture("mlp_small.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+
+        fx.write_bytes(b"rog-nv bytes")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries[fx.name]], ["minix", "rog-nv"])
+        self.assertEqual(fixture_digest.status(fx, entries)[3], "rog-nv")
+        fx.write_bytes(b"minix bytes")
+        self.assertEqual(fixture_digest.status(fx, entries)[3], "minix")
+
+    def test_one_box_regenerating_does_not_unpin_the_other(self):
+        # The trap the issue was filed about: with one entry per name, whichever box regenerated
+        # first pinned its numpy stream and the other box's untouched fixtures then read as a
+        # CHANGED workload -- a false alarm that would have been "fixed" by re-recording, i.e. by
+        # evicting the first box in turn, forever.
+        fx = self.fixture("gpt2_mini.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        minix_entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"rog-nv regenerates its own copy")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual(entries[fx.name][0], minix_entries[fx.name][0])
+        fx.write_bytes(b"minix bytes")
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_agreeing_boxes_are_reported_as_agreeing(self):
+        # The happy outcome of a coordinated regeneration, and it should be visible: one set of
+        # bytes recorded by both boxes reads as both, not as an arbitrary one of them.
+        fx = self.fixture("lenet.safetensors", b"the coordinated bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+        fixture_digest.record(digests, [fx], "minix")
+
+        verdict, _, _, origins = fixture_digest.status(fx, fixture_digest.read_digests(digests))
+
+        self.assertEqual((verdict, origins), ("MATCH", "minix,rog-nv"))
 
     def test_a_differently_generated_fixture_does_not_match(self):
         # The hazard: the difference is applied uniformly to every cell, so the cross-cell parity
         # gate certifies it. Only the digest contradicts the report's workload name.
         fx = self.fixture("lenet.safetensors", b"the bytes the report was measured on")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
         entries = fixture_digest.read_digests(digests)
 
         fx.write_bytes(b"the bytes someone regenerated later")
+
+        verdict, _, _, origins = fixture_digest.status(fx, entries)
+        self.assertEqual((verdict, origins), ("MISMATCH", None))
+
+    def test_bytes_no_recorded_box_has_still_mismatch(self):
+        # Multi-origin widens what MATCHes to "some recorded box's bytes" -- it must not widen it
+        # to "recorded under this name", or the gate becomes a filename check.
+        fx = self.fixture("mlp_wide.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        fx.write_bytes(b"rog-nv bytes")
+        fixture_digest.record(digests, [fx], "rog-nv")
+        entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"a third box nobody recorded")
 
         self.assertEqual(fixture_digest.status(fx, entries)[0], "MISMATCH")
 
@@ -840,6 +949,125 @@ class FixtureDigestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_digest.read_digests(digests)
 
+    def test_an_unattributed_legacy_line_is_refused_not_guessed(self):
+        # A three-field line is the pre-759 format. Adopting it under a guessed origin would
+        # record a coin flip as a fact, and the boxes' bytes really do differ.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  lenet.safetensors\n")
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("--record", str(refused.exception))
+
+    def test_one_origin_cannot_be_recorded_twice_for_one_fixture(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.HEADER
+            + "aa  1  lenet.safetensors  rog-nv\nbb  2  lenet.safetensors  rog-nv\n"
+        )
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+    def test_two_files_cannot_be_recorded_under_one_fixture_name(self):
+        # `read_digests` refuses one (name, origin) twice; recording must not manufacture the same
+        # ambiguity from the other side. Two boxes' copies of one workload passed to one command
+        # (`box-a/mlp_small.safetensors`, `box-b/mlp_small.safetensors`) had the later replace the
+        # earlier, and the replacement was ANNOUNCED as a changed workload -- a regeneration that
+        # never happened, with the first box's bytes gone from the file.
+        (self.dir / "box-a").mkdir()
+        (self.dir / "box-b").mkdir()
+        a = self.fixture("box-a/mlp_small.safetensors", b"box-a bytes")
+        b = self.fixture("box-b/mlp_small.safetensors", b"box-b bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [a, b], "rog-nv")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
+    def test_repeating_one_fixture_path_is_not_an_ambiguity(self):
+        # The control: the guard refuses two files claiming one name, not one file named twice --
+        # which says nothing contradictory and records exactly what it always did.
+        fx = self.fixture("mlp_small.safetensors", b"one box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        fixture_digest.record(digests, [fx, fx], "rog-nv")
+
+        self.assertEqual(
+            [(e.origin, e.sha256) for e in fixture_digest.read_digests(digests)[fx.name]],
+            [("rog-nv", fixture_digest.sha256_file(fx))],
+        )
+
+    def test_an_origin_with_whitespace_is_refused(self):
+        # The format is whitespace-split, so an origin containing a space would write a line that
+        # reads back as a different (or malformed) entry.
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "rog nv")
+
+    def test_a_fixture_name_with_whitespace_is_refused(self):
+        # The name-side twin of test_an_origin_with_whitespace_is_refused: `write_digests` emits
+        # names unescaped into the whitespace-split format, so `a b.safetensors` would write a
+        # line every later read refuses -- and recording rewrites the whole file, so one such
+        # recording breaks the checked-in record. Refused before the file is touched.
+        fx = self.fixture("a b.safetensors", b"whatever bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
+    def test_an_origin_read_from_the_file_is_held_to_the_same_identity_rules(self):
+        # check_origin guards every writer CLI, but a checked-in or hand-merged row bypasses
+        # them: a recorded `minix,rocm` parses into a fixture_origin field byte-identical to two
+        # agreeing boxes named minix and rocm. Refused at the one insertion point, line named.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.HEADER + "deadbeef  17  lenet.safetensors  minix,rocm\n"
+        )
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("minix,rocm", str(refused.exception))
+        self.assertIn(str(digests), str(refused.exception))
+
+    def test_check_mode_refuses_an_origin_it_would_ignore(self):
+        # --check reports against EVERY recorded origin; accepting --origin and doing nothing
+        # with it would let `--check --origin "$BOX"` read as having verified that box's bytes.
+        fx = self.fixture("lenet.safetensors")
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as refused:
+                fixture_digest._main(["--check", str(fx), "--origin", "rog-nv"])
+
+        self.assertEqual(refused.exception.code, 2)
+
+    def test_an_origin_that_reads_as_two_origins_is_refused(self):
+        # Agreeing boxes are serialized into ONE comma-joined `fixture_origin` field, carried by
+        # every result row and report section. A box named `minix,rocm` would publish a field
+        # byte-identical to the one two boxes named `minix` and `rocm` produce by agreeing, and no
+        # consumer of a published row could tell one box from two. The control is that exact
+        # string, arrived at honestly.
+        fx = self.fixture("lenet.safetensors", b"same bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "minix,rocm")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+        agreed = self.dir / "agreed.txt"
+        fixture_digest.record(agreed, [fx], "minix")
+        fixture_digest.record(agreed, [fx], "rocm")
+        self.assertEqual(
+            fixture_digest.status(fx, fixture_digest.read_digests(agreed))[3], "minix,rocm"
+        )
+
     def test_the_checked_in_file_parses_and_names_live_workloads(self):
         # A digest for a workload spec that no longer exists is stale: it pins bytes no current
         # run can produce, and reads as coverage.
@@ -849,6 +1077,196 @@ class FixtureDigestTest(unittest.TestCase):
         for name in entries:
             self.assertTrue(name.endswith(".safetensors"), name)
             self.assertIn(name[: -len(".safetensors")], specs, name)
+
+    def test_the_checked_in_file_attributes_every_entry(self):
+        # The whole point of gh-ocannl-759: no entry may be anonymous, because the published
+        # numbers are on more than one box's bytes and the reports have to say which.
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        self.assertTrue(entries, "the checked-in digest file records nothing (gh-ocannl-759)")
+        for name, recorded in entries.items():
+            for e in recorded:
+                self.assertTrue(e.origin and e.origin.strip(), name)
+
+    def test_a_regenerating_box_is_told_which_others_it_has_left_behind(self):
+        # What gen_fixtures.py prints after regenerating: the other boxes' entries survive, so
+        # nothing fails, and that silence is exactly what would let the boxes drift apart again.
+        fx = self.fixture("mlp_small.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        fx.write_bytes(b"rog-nv regenerates")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "rog-nv"), ["minix"])
+        self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "minix"), ["rog-nv"])
+
+    def test_a_box_that_is_the_only_one_recorded_leaves_nobody_behind(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "rog-nv"), [])
+
+    def test_a_coordinated_regeneration_is_not_reported_as_divergence(self):
+        # The success case of the cross-box event: both boxes land the SAME bytes. Naming the
+        # other box as "still on a different workload" would tell the operator to redo the thing
+        # they just succeeded at. Divergence is judged on bytes, never on the name differing.
+        fx = self.fixture("gpt2_mini.safetensors", b"the coordinated bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "rog-nv"), [])
+
+    def test_divergence_is_reported_per_fixture_not_per_box(self):
+        # Boxes can agree on one workload and differ on another; the warning must fire on the
+        # second without being suppressed by the first.
+        agree = self.fixture("lenet.safetensors", b"same everywhere")
+        differ = self.fixture("mlp_wide.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [agree, differ], "minix")
+        differ.write_bytes(b"rog-nv bytes")
+        fixture_digest.record(digests, [agree, differ], "rog-nv")
+
+        self.assertEqual(fixture_digest.divergent_origins(digests, [agree.name], "rog-nv"), [])
+        self.assertEqual(
+            fixture_digest.divergent_origins(digests, [agree.name, differ.name], "rog-nv"),
+            ["minix"],
+        )
+
+    def test_an_explicitly_empty_origin_is_refused_not_defaulted(self):
+        # How automation fails: `--origin "$BOX"` with $BOX unset. Silently substituting this
+        # hostname would attribute the fixture to the wrong box and persist it -- the exact error
+        # the file exists to prevent.
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "")
+
+    def test_the_advertised_legacy_migration_actually_runs(self):
+        # The refusal names a command; that command has to be able to reach a valid file. Without
+        # --adopt-legacy, record() would raise from its own read before rewriting anything.
+        fx = self.fixture("lenet.safetensors", b"the legacy bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        sha, size = fixture_digest.sha256_file(fx), fx.stat().st_size
+        digests.write_text(fixture_digest.HEADER + f"{sha}  {size}  {fx.name}\n")
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = fixture_digest._main(
+                ["--record", str(fx), "--origin", "minix", "--adopt-legacy", "minix",
+                 "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries[fx.name]], ["minix"])
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_adopting_legacy_lines_attributes_them_without_changing_bytes(self):
+        # The migration states whose the bytes were; it must not restate WHAT they were. A legacy
+        # line for a fixture not being recorded now keeps its digest exactly.
+        other = "cifar_conv.safetensors"
+        fx = self.fixture("lenet.safetensors", b"recorded now")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + f"deadbeef  17  {other}\n")
+
+        fixture_digest.record(digests, [fx], "minix", legacy_origin="minix")
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual(entries[other], [fixture_digest.Entry("deadbeef", 17, "minix")])
+
+    def test_a_migration_does_not_split_one_box_across_two_origin_names(self):
+        # The migration writes two facts -- whose the old rows were, and whose the bytes on disk
+        # are -- and resolved them from two independent sources: `--adopt-legacy rog-nv` on a host
+        # that calls itself `rog-nv-wsl` attributed the rows to rog-nv and recorded the fixtures
+        # as rog-nv-wsl. One box then wears two origin names, which reads downstream as two boxes
+        # agreeing -- or, for a fixture whose legacy entry was just adopted, as the box having
+        # diverged from itself, with `divergent_origins` telling it to coordinate with itself.
+        fx = self.fixture("mlp_small.safetensors", b"this box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + f"deadbeef  17  {fx.name}\n")
+        before = digests.read_text()
+
+        with unittest.mock.patch.object(
+            fixture_digest.platform, "node", return_value="rog-nv-wsl"
+        ):
+            with self.assertRaises(ValueError) as refused:
+                fixture_digest._main(
+                    ["--record", str(fx), "--adopt-legacy", "rog-nv", "--digests", str(digests)]
+                )
+
+        self.assertIn("--origin", str(refused.exception))
+        self.assertEqual(digests.read_text(), before, "refused before the file is rewritten")
+
+    def test_the_migration_still_defaults_where_the_two_names_agree(self):
+        # First control: on the box the rows are being adopted as, the advertised command still
+        # needs no --origin. The refusal above must not have made the ordinary migration harder.
+        fx = self.fixture("mlp_small.safetensors", b"this box's bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + f"deadbeef  17  {fx.name}\n")
+
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value="rog-nv"):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = fixture_digest._main(
+                    ["--record", str(fx), "--adopt-legacy", "rog-nv", "--digests", str(digests)]
+                )
+
+        self.assertEqual(code, 0)
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries[fx.name]], ["rog-nv"])
+
+    def test_one_box_may_still_migrate_another_boxs_legacy_rows(self):
+        # Second control: two origins in one file ARE right when both were stated -- rog-nv
+        # attributing rows it knows were minix's while recording its own bytes as its own. The
+        # rule is about an origin nobody typed, not about a file naming two boxes.
+        fx = self.fixture("lenet.safetensors", b"rog-nv bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  cifar_conv.safetensors\n")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = fixture_digest._main(
+                ["--record", str(fx), "--origin", "rog-nv", "--adopt-legacy", "minix",
+                 "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries["cifar_conv.safetensors"]], ["minix"])
+        self.assertEqual([e.origin for e in entries[fx.name]], ["rog-nv"])
+
+    def test_the_legacy_refusal_names_a_command_that_runs_from_the_repo_root(self):
+        # The canonical sweep command runs from the repository root, where a bare
+        # `fixture_digest.py` names nothing -- the operator cannot paste the remediation.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  lenet.safetensors\n")
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("--adopt-legacy", str(refused.exception))
+        self.assertIn(fixture_digest.cli_command(), str(refused.exception))
+
+    def test_the_advertised_path_resolves_against_the_callers_cwd(self):
+        # From the repository root it must spell benchmarks/fixture_digest.py, not
+        # fixture_digest.py; from an unrelated cwd it falls back to an absolute path.
+        root = HERE.parent
+        with unittest.mock.patch.object(Path, "cwd", staticmethod(lambda: root)):
+            self.assertEqual(fixture_digest.cli_command(), "benchmarks/fixture_digest.py")
+        with unittest.mock.patch.object(Path, "cwd", staticmethod(lambda: Path(self.dir))):
+            self.assertTrue(Path(fixture_digest.cli_command()).is_absolute())
+
+    def test_the_checked_in_file_keeps_every_box_that_published_numbers(self):
+        # gh-ocannl-759 recorded minix's and rog-nv's bytes for the two fixtures both boxes have
+        # published numbers on. Neither may be evicted -- by a regeneration, or by a re-record
+        # that forgets the other box -- or a standing report is retroactively on a workload
+        # nothing pins. (Their digests are deliberately NOT pinned here: a coordinated
+        # regeneration is allowed to change them, it is only allowed to change them for BOTH.)
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        for name in ("mlp_small.safetensors", "gpt2_mini.safetensors"):
+            self.assertEqual({e.origin for e in entries[name]}, {"minix", "rog-nv"}, name)
 
     def test_the_sweep_refuses_bytes_nothing_records(self):
         fx = self.fixture("lenet.safetensors")
@@ -863,23 +1281,183 @@ class FixtureDigestTest(unittest.TestCase):
     def test_the_sweep_runs_and_stamps_a_recorded_fixture(self):
         fx = self.fixture("lenet.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
 
-        shas = self.check([fx], digests_path=digests)
+        ids = self.check([fx], digests_path=digests)
 
-        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+        self.assertEqual(ids, {fx: (fixture_digest.sha256_file(fx), "rog-nv")})
 
     def test_the_opt_out_measures_them_and_still_reports_the_digest(self):
         # A deliberate regeneration is a legitimate reason to run unpinned; it must not also cost
         # the run its record of what it ran on.
         fx = self.fixture("lenet.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
         fx.write_bytes(b"regenerated")
 
-        shas = self.check([fx], digests_path=digests, allow_unpinned=True)
+        ids = self.check([fx], digests_path=digests, allow_unpinned=True)
 
-        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+        self.assertEqual(ids, {fx: (fixture_digest.sha256_file(fx), None)})
+
+    def test_a_report_section_says_whose_bytes_its_numbers_are_on(self):
+        # The published half of gh-ocannl-759: a reader comparing this report against the other
+        # box's has to be able to see, without leaving the report, that the two are on different
+        # bytes -- which for mlp_small and gpt2_mini they are.
+        rows = [
+            dict(
+                cell("ocannl", "cuda", "default", [2.3026, 2.3010]),
+                fixture="gpt2_mini.safetensors",
+                fixture_sha256="043c1ea8",
+                fixture_origin="rog-nv",
+            )
+        ]
+        orchestrate.parity_check(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestrate.report(rows, out)
+            text = (out / "report.md").read_text()
+
+        self.assertIn("sha256 `043c1ea8`, rog-nv's bytes", text)
+
+    def test_the_record_cli_pins_existing_bytes_without_regenerating(self):
+        # The gh-ocannl-759 command: fixtures that predate the digest file get pinned as they are.
+        fx = self.fixture("lenet.safetensors", b"bytes the published numbers are on")
+        before = fx.read_bytes()
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = fixture_digest._main(
+                ["--record", str(fx), "--origin", "rog-nv", "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(fx.read_bytes(), before, "recording must not touch the fixture")
+        self.assertEqual(fixture_digest.read_digests(digests)[fx.name][0].origin, "rog-nv")
+
+    def test_the_record_cli_defaults_to_this_host(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            fixture_digest._main(["--record", str(fx), "--digests", str(digests)])
+
+        self.assertEqual(
+            fixture_digest.read_digests(digests)[fx.name][0].origin, fixture_digest.this_origin()
+        )
+
+    def test_the_check_cli_passes_a_recorded_fixture_and_fails_a_perturbed_one(self):
+        fx = self.fixture("lenet.safetensors", b"recorded bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        with contextlib.redirect_stdout(io.StringIO()) as good:
+            passed = fixture_digest._main(["--check", str(fx), "--digests", str(digests)])
+        fx.write_bytes(b"perturbed bytes")
+        with contextlib.redirect_stdout(io.StringIO()) as bad:
+            failed = fixture_digest._main(["--check", str(fx), "--digests", str(digests)])
+
+        self.assertEqual((passed, failed), (0, 1))
+        self.assertIn("MATCH — rog-nv's bytes", good.getvalue())
+        self.assertIn("MISMATCH", bad.getvalue())
+
+    def test_a_host_that_cannot_name_itself_is_refused_not_given_a_placeholder(self):
+        # A literal `unknown-host` is not an origin, it is every nameless box sharing one name:
+        # the second such box to record different bytes for a fixture would replace the first's
+        # entry under it, which is the whichever-box-records-last provenance loss keying by
+        # origin exists to prevent -- only now wearing a name that reads like an answer.
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value=""):
+            self.assertIsNone(fixture_digest.this_origin())
+            with self.assertRaises(ValueError) as refused:
+                fixture_digest.resolve_origin(None)
+
+        self.assertIn("--origin", str(refused.exception))
+
+    def test_a_named_host_still_supplies_the_default(self):
+        # The negative control for the refusal above: absence still defaults where there is a
+        # name to default to, which is the whole convenience of the recording CLI.
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value="rog-nv"):
+            self.assertEqual(fixture_digest.resolve_origin(None), "rog-nv")
+
+    def test_the_digest_file_is_validated_before_any_fixture_is_overwritten(self):
+        # Generating OVERWRITES the fixture bytes, so anything record() would refuse -- a legacy
+        # three-field line, a duplicate origin, a malformed row -- has to be found while the
+        # previous bytes still exist. Refusing afterwards loses the bytes the published numbers
+        # were measured on AND leaves the new ones unrecorded, which is worse than either alone.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        stale = fixtures / "lenet.safetensors"
+        stale.write_bytes(b"the bytes the published numbers are on")
+        before = stale.read_bytes()
+        (fixtures / fixture_digest.DIGEST_FILE).write_text(
+            fixture_digest.HEADER + "deadbeef  17  lenet.safetensors\n"
+        )
+        spec = self.dir / "workloads" / "lenet.json"
+        spec.parent.mkdir()
+        spec.write_text("{}")
+        built = []
+
+        with unittest.mock.patch.object(gen_fixtures, "build", lambda s, d: built.append(s)):
+            with self.assertRaises(ValueError):
+                gen_fixtures.main(["--origin", "rog-nv"], here=self.dir)
+
+        # And the spec really was one this run would have built, so [] is a refusal and not an
+        # empty work list: the same call with a readable digest file builds it (below).
+        self.assertEqual(built, [])
+        self.assertEqual(stale.read_bytes(), before)
+
+    def test_a_spec_name_the_format_cannot_carry_is_refused_before_building(self):
+        # The name-side twin of the digest-file validation above: build() writes
+        # fixtures/<spec name>.safetensors, and record() would refuse a whitespace name only
+        # AFTER the previous bytes are overwritten. The name check runs first, while the bytes
+        # the published numbers rest on still exist.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        stale = fixtures / "a b.safetensors"
+        stale.write_bytes(b"the bytes the published numbers are on")
+        (fixtures / fixture_digest.DIGEST_FILE).write_text(fixture_digest.HEADER)
+        spec = self.dir / "workloads" / "spaced.json"
+        spec.parent.mkdir()
+        spec.write_text('{"name": "a b"}')
+        built = []
+
+        with unittest.mock.patch.object(gen_fixtures, "build", lambda s, d: built.append(s)):
+            with self.assertRaises(ValueError):
+                gen_fixtures.main(["--origin", "rog-nv"], here=self.dir)
+
+        self.assertEqual(built, [], "refused before any build")
+        self.assertEqual(stale.read_bytes(), b"the bytes the published numbers are on")
+
+    def test_a_valid_digest_file_lets_the_generator_build(self):
+        # The negative control: the guard above must refuse the unreadable file, not every file.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        digests = fixtures / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER)
+
+        spec = self.dir / "workloads" / "lenet.json"
+        spec.parent.mkdir()
+        spec.write_text("{}")
+        built = []
+
+        def build(spec_path, out_dir):
+            built.append(spec_path)
+            path = out_dir / "lenet.safetensors"
+            path.write_bytes(b"regenerated")
+            return path
+
+        with unittest.mock.patch.object(gen_fixtures, "build", build):
+            with contextlib.redirect_stdout(io.StringIO()):
+                gen_fixtures.main(["--origin", self.this_box], here=self.dir)
+
+        self.assertEqual(built, [spec])
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries["lenet.safetensors"]], [self.this_box])
 
     def test_generated_fixtures_are_named_after_their_spec(self):
         # What the recorded-name check above relies on: gen_fixtures.py writes

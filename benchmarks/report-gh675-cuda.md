@@ -30,17 +30,21 @@ names.**
 
 Those are written in full deliberately: the raw records live on the measurement box, so this
 checked-in file is the only place a reader can check whether a regenerated fixture is still the
-workload these numbers are about. `fixtures/DIGESTS.txt` is NOT the place for them -- it carries no
-entries for these fixtures, and adding this box's would break the ROCm leg, whose bytes differ (see
-next paragraph); which of the two becomes canonical is a decision for the suite, not for one leg's
-report.
+workload these numbers are about.
 
 The fixture digests differ from the ROCm leg's for the same workload names (same sizes, different
 bytes: `gen_fixtures.py` draws from a numpy version that does not promise stream stability).
 Absolute step times are therefore **not** comparable across the two legs -- the *ratios* are what
 both legs report, and a ratio is taken within one box, one fixture, one pair of processes.
-`fixtures/DIGESTS.txt` still carries no entries, so these are recorded here rather than checked
-against it.
+
+> **Resolved by gh-ocannl-759.** This report asked which of the two boxes' bytes becomes canonical
+> and said it was a decision for the suite, not for one leg's report. The suite's answer is
+> *neither*: `fixtures/DIGESTS.txt` now records digests per origin
+> (`<sha256>  <bytes>  <name>  <origin>`), so both boxes' bytes are pinned, a fixture passes the
+> gate if it is some recorded box's, and every row and report section names whose. The two digests
+> above are the checked-in `rog-nv` entries; minix's are checked in beside them. The
+> non-comparability the paragraph above describes is therefore now a recorded fact rather than a
+> caveat one report happens to carry.
 
 ## Method
 

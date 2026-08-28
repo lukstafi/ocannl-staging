@@ -1079,30 +1079,40 @@ def parity_check(results):
 def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
     """What the fixtures ARE, checked before anything is measured on them (gh-ocannl-645).
 
-    Returns `{fixture path: sha256}` for stamping onto the results. Exits on a fixture whose
-    bytes are not the ones `fixtures/DIGESTS.txt` records unless `allow_unpinned` — a
-    differently generated fixture is consumed uniformly by every cell, so the cross-cell parity
-    gate certifies it exactly as it certifies the intended workload, and the digest is the only
-    thing that ties a published number to the workload the report names.
+    Returns `{fixture path: (sha256, origin)}` for stamping onto the results. Exits on a fixture
+    whose bytes are nobody's in `fixtures/DIGESTS.txt` unless `allow_unpinned` — a differently
+    generated fixture is consumed uniformly by every cell, so the cross-cell parity gate certifies
+    it exactly as it certifies the intended workload, and the digest is the only thing that ties a
+    published number to the workload the report names.
+
+    `origin` is the box whose recorded bytes these are (gh-ocannl-759), None when nothing records
+    them. It rides onto every row and report section, because the same workload spec has different
+    bytes on different boxes: the digest says the numbers are on *some* pinned workload, the origin
+    says *whose*, and only the pair makes a cross-box comparison an honest one.
     """
     entries = fixture_digest.read_digests(
         digests_path or HERE / "fixtures" / fixture_digest.DIGEST_FILE
     )
-    shas = {}
+    measured = {}
     unpinned = []
     for fx in fixtures:
-        verdict, sha, size = fixture_digest.status(fx, entries)
-        shas[fx] = sha
-        print(f"fixture {fx.name}: sha256 {sha} ({size} bytes) — {verdict}", flush=True)
+        verdict, sha, size, origins = fixture_digest.status(fx, entries)
+        measured[fx] = (sha, origins)
+        where = f" — {origins}'s bytes" if verdict == "MATCH" else ""
+        print(f"fixture {fx.name}: sha256 {sha} ({size} bytes) — {verdict}{where}", flush=True)
         if verdict != "MATCH":
+            print(f"  recorded: {fixture_digest.describe(fx.name, entries)}", flush=True)
             unpinned.append((fx, verdict))
     named = ", ".join(f"{fx.name} ({verdict})" for fx, verdict in unpinned)
     if unpinned and not allow_unpinned:
         sys.exit(
             f"refusing to measure {named}: these bytes are not the ones "
-            "fixtures/DIGESTS.txt records, so a report of them would name a workload nothing "
-            "pins. Re-run gen_fixtures.py to regenerate and re-record (the digest diff is the "
-            "review), or pass --no-fixture-digest-check to measure them as they are."
+            "fixtures/DIGESTS.txt records for any origin, so a report of them would name a "
+            "workload nothing pins. If they are an unrecorded box's copies, pin them with "
+            f"`python3 {fixture_digest.cli_command()} --record --origin <box>` (no regeneration, "
+            "and it leaves the other boxes' entries alone); if you deliberately regenerated, "
+            "re-run gen_fixtures.py to re-record (the digest diff is the review); or pass "
+            "--no-fixture-digest-check to measure them as they are."
         )
     if unpinned:
         print(
@@ -1110,7 +1120,7 @@ def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
             "nothing checked in describes them",
             flush=True,
         )
-    return shas
+    return measured
 
 
 def search_provenance(result):
@@ -1357,14 +1367,23 @@ def report(results, out_dir, unavailable=(), failures=()):
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
-        # Which bytes these numbers are on (gh-ocannl-645). A report is compared across sessions
-        # and machines; without this the comparison rests on the assumption that everyone
-        # regenerated the same fixture. More than one line here means the section mixes fixtures.
+        # Which bytes these numbers are on (gh-ocannl-645), and whose (gh-ocannl-759). A report is
+        # compared across sessions and machines; without this the comparison rests on the
+        # assumption that everyone regenerated the same fixture, and today they demonstrably have
+        # not. More than one line here means the section mixes fixtures.
         measured_on = sorted(
-            {(r.get("fixture"), r.get("fixture_sha256")) for r in rows if r.get("fixture_sha256")}
+            {
+                (r.get("fixture"), r.get("fixture_sha256"), r.get("fixture_origin"))
+                for r in rows
+                if r.get("fixture_sha256")
+            }
         )
-        for fixture, sha in measured_on:
-            lines.append(f"measured on `{fixture}`, sha256 `{sha}`\n")
+        for fixture, sha, origin in measured_on:
+            # Named, not implied by the report's own platform line: the recorded origin is the box
+            # whose GENERATOR drew these bytes, which is not necessarily the box now measuring them
+            # (fixtures get copied between boxes, and that is fine as long as the report says so).
+            whose = f", {origin}'s bytes" if origin else ", bytes no origin records"
+            lines.append(f"measured on `{fixture}`, sha256 `{sha}`{whose}\n")
         # Precision-major, p50-ascending within a precision: scheduling variants are ranked
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
@@ -1605,7 +1624,7 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
-    fixture_shas = check_fixture_digests(fixtures, allow_unpinned=args.no_fixture_digest_check)
+    fixture_ids = check_fixture_digests(fixtures, allow_unpinned=args.no_fixture_digest_check)
 
     metas = {fx: read_st_metadata(fx) for fx in fixtures}
     models = {fx: metas[fx].get("model", "mlp") for fx in fixtures}
@@ -1666,7 +1685,8 @@ def main():
         name = fx.stem
         model = models[fx]
         stamp.clear()
-        stamp.update(fixture=fx.name, fixture_sha256=fixture_shas[fx])
+        sha, origin = fixture_ids[fx]
+        stamp.update(fixture=fx.name, fixture_sha256=sha, fixture_origin=origin)
         if "ocannl" in args.only:
             variants = ["default"]
             if args.materialized:
