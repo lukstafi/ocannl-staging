@@ -209,7 +209,7 @@ files.
   a linear functional of the output, so a row swap survives it whenever the value difference is
   orthogonal to the weight difference — by the weights colliding (a capped weight puts a row's
   weight vector in `cap ^ row_stride` values, so at stride 2 rows 9 and 363 share one) or by plain
-  cancellation (at m = 2000, n = 2 the generated rows 459 and 1310 cancel in BOTH streams). No
+  cancellation (at n = 2 the generated rows 355 and 2891 cancel in BOTH streams). No
   bounded-weight scalar escapes that class, and more streams only shrink it. What decides is
   `Bench_checksum.first_difference`, an elementwise comparison against the first variant to
   complete; the checksum is what the line PRINTS, a fingerprint for reading a table and comparing
@@ -232,8 +232,24 @@ files.
   could not do — so the multiplicand whose row spans the reduction is minted strictly positive
   (`Bench_checksum.positive_level`). And two identical operand rows make a wrong-row schedule
   compute the right answer: how many rows a generator keeps distinct is bounded by
-  `levels ^ row_stride` whatever it does, which at the narrowest reduction is a dozen — a limit to
-  state, not to engineer around.
+  `levels ^ row_stride` whatever it does, and keying on the (row, column) pair does not move that
+  bound — only the LEVEL COUNT does. `schedule_bench`'s `ma` is 48 levels of 1/16 over (0, 3] since
+  gh-ocannl-738, up from 12 of 1/4, which at the narrowest reduction it accepts (k = 2) takes the
+  bound from 144 to 2304 and the measured first repeat from row 11 to row 33; the table over k is
+  the golden of `test/operations/bench_checksum_discrimination`, and it is the point of that test
+  rather than noise in it.
+- What caps that level count is the MMA OPERAND FORMAT, not f32. A bench whose legs tensorize
+  compares them against an unscheduled oracle that carries no `Tile_mma` and so rounds nothing,
+  while the tensorized legs round both operands to the mma input format — so `= reference` on an
+  mma line is a claim that the operands survive that rounding exactly, and the operand generator's
+  granularity is the thing that has to fit. CUDA's uniform-f32 arm is gated on `tf32_matmuls`
+  (which `schedule_bench` sets), and tf32 carries an 11-bit significand, as does f16; a multiple of
+  1/16 below 3 needs six significant bits and mb's integers in -8..8 need four, so the budget has
+  about five bits of headroom. Measured on an RTX 5070 Ti under CUDA 13.3 at 256³, 512³, 128x128x1024
+  and 320x192x64: `= reference` on every leg, `mma_pd1`/`mma_pd2` confirmed `Mma_intrinsics` by the
+  census. The check is not vacuous — reminting `ma` at 1/4096 (twelve significant bits) turns
+  exactly the two mma legs red and leaves `parallel`/`smem`/`regtile` green, which is the negative
+  control to re-run before raising the granularity again.
 - A mixing function that folds its state DOWN to its output width must not do it linearly. The
   aperiodic mix here folded a 40-bit product into 24 bits with one xor-shift, which is GF(2)-linear,
   so two rows' outputs differed by a value depending on neither the column nor the salt: row pairs

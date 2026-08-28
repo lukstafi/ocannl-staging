@@ -121,12 +121,12 @@ let () =
     (List.length !missed_plain = List.length extents * List.length row_pairs);
 
   (* Operands. [schedule_bench] draws ma over a row-major m x k array and mb as a residue mod 17
-     over a k x n one, so the collapse lands at 12 | k and 17 | n respectively. Sweep the multiples
-     of each modulus (ma's is 12 since gh-ocannl-711's review: see the zero-sentinel claims
-     below). *)
+     over a k x n one, so the collapse lands at 48 | k and 17 | n respectively. Sweep the multiples
+     of each modulus (ma's is 48 since gh-ocannl-738 took its granularity to 1/16: see the
+     repeat-distance table below, and the zero-sentinel claims). *)
   let operand_multiples = List.range 1 25 in
   List.iter
-    [ ("ma", 0x5A17, 12); ("mb", 0x3C6E, 17) ]
+    [ ("ma", 0x5A17, 48); ("mb", 0x3C6E, 17) ]
     ~f:(fun (name, salt, modulus) ->
       let strides = List.map operand_multiples ~f:(fun mult -> modulus * mult) in
       Verdict.pf "mixed %s rows stay pairwise distinct at every row stride %d divides" name modulus
@@ -203,7 +203,7 @@ let () =
      against a zero-initialized destination. Under a residue that admits zero, a row of k
      independent draws is all-zero with probability levels^-k, which at k = 2 is one row in 169. *)
   let ma_value ~row_stride t =
-    Bc.positive_level ~salt:0x5A17 ~row_stride ~levels:12 ~scale:0.25 t
+    Bc.positive_level ~salt:0x5A17 ~row_stride ~levels:48 ~scale:0.0625 t
   in
   let ma_rows_with_zero ~row_stride ~rows =
     List.count (List.range 0 rows) ~f:(fun r ->
@@ -223,6 +223,11 @@ let () =
         ~f:(fun t -> Float.( > ) (ma_value ~row_stride t) 0.0));
   Verdict.p_all "no ma row is all-zero at any row stride swept" ma_strides ~f:(fun row_stride ->
       ma_rows_with_zero ~row_stride ~rows:600 = 0);
+  (* The control keeps the pre-fix modulus, 13, rather than following ma's level count to 48: what
+     it demonstrates is that a ZERO-ADMITTING residue produces the all-zero row, and raising the
+     level count only pushes the probability down ((levels + 1)^-k) without ever reaching zero. The
+     fix is [positive_level]'s strict positivity, so the control has to be a form that admits zero
+     at a rate a 600-row sweep can see. *)
   Verdict.p
     "a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control)"
     (zeroing_rows ~row_stride:2 ~rows:600 > 0);
@@ -233,7 +238,7 @@ let () =
      constant across the two columns, so both sums cancel and the swap is invisible to the printed
      fingerprint. It is not invisible to a comparison of the outputs. *)
   let sb_ma ~m ~k =
-    Array.init (m * k) ~f:(Bc.positive_level ~salt:0x5A17 ~row_stride:k ~levels:12 ~scale:0.25)
+    Array.init (m * k) ~f:(Bc.positive_level ~salt:0x5A17 ~row_stride:k ~levels:48 ~scale:0.0625)
   in
   let sb_mb ~k ~n =
     Array.init (k * n) ~f:(fun t ->
@@ -272,10 +277,14 @@ let () =
             then Some (a, b, v)
             else None))
   in
-  (* Two geometries, so the class is not read as a property of the narrowest one. *)
+  (* Two geometries, so the class is not read as a property of the narrowest one. The n = 2 one
+     sweeps twice as many rows as the n = 3 one because ma's finer levels moved its first cancelling
+     pair out past 2000 (gh-ocannl-738): a richer operand set makes an accidental cancellation
+     rarer, which is the same improvement the repeat-distance table below measures — it does not
+     remove the class, and this is where that is shown. *)
   let cancel_cases =
     List.filter_map
-      [ (2000, 2, 2); (2000, 3, 2) ]
+      [ (4000, 2, 2); (2000, 3, 2) ]
       ~f:(fun (m, n, k) ->
         Option.map (cancelling ~m ~n ~k) ~f:(fun (a, b, v) -> (m, n, k, a, b, v)))
   in
@@ -351,10 +360,14 @@ let () =
              Option.is_some (first_value_collision pre_fix_mix ~salt ~column ~rows:100_000))));
 
   (* Narrow reductions, which the four-row and 12-multiple sweeps above cannot reach. How many rows
-     an operand keeps distinct is bounded by [levels ^ row_stride] whatever the generator — 144 at
-     the narrowest reduction this bench accepts — so the honest claim is a COMPARISON against the
-     form this replaced, not distinctness. The flat residue's bound is not a birthday at all: rows
-     repeat with the modulus's period, 13, at EVERY stride. *)
+     an operand keeps distinct is bounded by [levels ^ row_stride] whatever the generator — 2304 at
+     the narrowest reduction this bench accepts, since gh-ocannl-738 took ma to 48 levels of 1/16
+     from 12 of 1/4 and the bound at k = 2 from 144 — so the honest claim is a COMPARISON against
+     the form this replaced, not distinctness. The flat residue's bound is not a birthday at all:
+     rows repeat with the modulus's period, 13, at EVERY stride. That is what the granularity bump
+     bought and what this table measures: ma's first repeat at k = 2 moved from row 11 to row 33,
+     which is the first stride at which the mixed form overtakes the flat one at all, so the
+     crossover below is k = 1 rather than the k = 2 it was. *)
   let first_row_collision rowf =
     let seen = Hashtbl.create (module String) in
     List.find_map (List.range 0 20_000) ~f:(fun r ->
@@ -379,7 +392,7 @@ let () =
     first_row_collision (fun r -> List.init stride ~f:(fun c -> ((r * stride) + c) % modulus))
   in
   let render_row = function None -> "none below 20000" | Some r -> Int.to_string r in
-  let operands = [ ("ma", 0x5A17, 12, 13, "k", 2); ("mb", 0x3C6E, 17, 17, "n", 2) ] in
+  let operands = [ ("ma", 0x5A17, 48, 13, "k", 1); ("mb", 0x3C6E, 17, 17, "n", 2) ] in
   List.iter operands ~f:(fun (name, salt, levels, modulus, axis, crossover) ->
       p "row at which %s rows first repeat, by %s (mixed over %d levels vs flat mod %d):\n" name
         axis levels modulus;
