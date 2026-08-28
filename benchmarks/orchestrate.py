@@ -20,11 +20,13 @@ the run log and in a report section, rather than quietly not being run (gh-ocann
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -50,6 +52,21 @@ CELL_LOG_DIR = (
     Path(os.environ["BENCH_CELL_LOG_DIR"]) if os.environ.get("BENCH_CELL_LOG_DIR") else None
 )
 PARITY_TOL = 2e-3
+# Per-cell wall-clock cap (gh-ocannl-760). tinygrad's parallel beam search deadlocks
+# intermittently — a candidate-compile worker dying between `imap_unordered` chunks leaves the
+# parent blocked in `futex_do_wait` forever — and an unattended sweep that meets one loses the
+# whole sweep rather than one cell. The cap is generous against what has ever been MEASURED here:
+# the beam searches that wedged take 53-115 s in their other repeats, the slowest tuned cell of
+# any sweep on record is cifar_conv/metal at ~4 min wall, and the only run that ever came near
+# half an hour is a pre-gh-538 standalone Metal search (2069 s) whose successor takes 230 s. A
+# cell over the cap is reported as a runner failure with the cap named in the message, and
+# --cell-timeout raises it (0 disables), so a legitimately slower box is a flag away rather than
+# a silently truncated measurement.
+DEFAULT_CELL_TIMEOUT_S = 1800
+# Grace between the process group's SIGTERM and its SIGKILL. A wedged tinygrad parent is blocked
+# in a futex and its pool workers in a socket read, so the handler usually never runs; the grace
+# is for the cells that CAN unwind (a Python runner's atexit, a backend's device teardown).
+CELL_KILL_GRACE_S = 10
 # Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4), with roughly
 # 10x headroom over the largest drift measured by the macOS cc/Metal sweep.
 PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
@@ -160,6 +177,22 @@ def cell_name(variant, precision):
     return variant if precision == "f32" else f"{variant}/{precision}"
 
 
+def rendered_variant(result):
+    """The variant as the report names it — with the search's pool size when one was chosen.
+
+    A beam row's compile cost is a search cost, and the search's candidate pool changes it by a
+    factor of three or four, so `beam` alone gives a row measured with tinygrad's default, one
+    measured with `PARALLEL=0` and one measured with an explicit N the same identity in the table
+    that people read numbers out of (gh-ocannl-760 review). The default stays the bare name — it
+    is what every report so far recorded, and re-labelling it would make old and new reports
+    disagree about rows that are in fact the same — and a chosen pool is spelled out: `beam P=0`
+    is the no-pool serial search, `beam P=4` a four-worker one.
+    """
+    variant = result["variant"]
+    parallel = result.get("beam_parallel")
+    return variant if parallel is None else f"{variant} P={parallel}"
+
+
 def precision_base(precision):
     """The storage precision a cell computes in, without a gate-leg suffix."""
     return precision.split("-", 1)[0]
@@ -236,34 +269,701 @@ def ocannl_exe(model):
     return ROOT / f"_build/default/benchmarks/runners/ocannl/bench_{model}.exe"
 
 
-def run_cell(label, cmd, env=None, cwd=None):
-    print(f"--- {label}", flush=True)
-    proc = subprocess.run(
-        cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+def _own_group_kwargs():
+    """Popen kwargs that give a cell a process group of its own (gh-ocannl-760).
+
+    A wedged cell is not one process: tinygrad's beam search runs its candidate compiles in a
+    `spawn` pool, a torch.compile cell forks inductor workers, and an OCANNL cell shells out to a
+    compiler. Killing the direct child leaves those alive — holding the output pipe open, so even
+    reading what the cell managed to print would then block forever — which is why the cap kills a
+    GROUP and the group has to be established at spawn time.
+    """
+    if os.name == "posix":
+        # setsid: the child leads a new session and a new process group whose id is its pid.
+        return {"start_new_session": True}
+    # Windows has no process groups in the POSIX sense; this is what `taskkill /T` walks.
+    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+
+
+def _signal_group(proc, force):
+    """Ask the whole group led by `proc` to stop (`force=False`) or kill it (`force=True`).
+
+    The escalation is a BOOLEAN rather than a signal number because the two platforms spell the
+    two steps in different vocabularies, and passing a POSIX signal through decides the Windows
+    branch by accident: `signal.SIGKILL` does not exist on Windows at all, so the obvious
+    "SIGKILL if posix else SIGTERM" hands the console-control branch its own SIGTERM and sends a
+    second CTRL_BREAK where the force kill was due — a cell that ignores CTRL_BREAK would then
+    never be killed while the sweep reports that it was (gh-ocannl-760 review).
+    """
+    try:
+        if os.name == "posix":
+            sig = signal.SIGKILL if force else signal.SIGTERM
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                # No group with that id — either it is gone, or it does not exist YET: `setsid`
+                # runs in the child between the fork and the exec, so a kill decided in the
+                # moments after `Popen` returns can arrive before the child leads a group of its
+                # own. Signalling the child directly is then both correct and necessary; what it
+                # must NOT do is fall back to a group id it does not own, which at that instant
+                # is the sweep's own. (Found by the spawn-window test taking 10 s to kill a cell
+                # that should have died at once: the graceful pass was missing it entirely and
+                # only the SIGKILL pass, a grace period later, landed.)
+                if proc.poll() is None:
+                    proc.send_signal(sig)
+        elif force:
+            # /T walks the tree the group anchors, which is the point — see _own_group_kwargs.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            # The Windows console-control route: only a group leader spawned with
+            # CREATE_NEW_PROCESS_GROUP can be reached this way, and only with CTRL_BREAK.
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _group_alive(pid):
+    """Whether the process group led by `pid` still has a RUNNING member.
+
+    A zombie is not one, and the distinction decides both of this function's callers. What the
+    escalation is really asking is "does anything still hold the device", and a zombie holds
+    nothing — it is an exit status waiting to be read. But `killpg(pgid, 0)` succeeds for a group
+    whose every member is a zombie, and after the kill that is the normal state of the
+    descendants: they are orphans by then, so whether they vanish or linger unreaped is decided by
+    whoever inherits them, and under a PID 1 that does not reap (a container) they linger. Signal
+    0 alone would then report a killed group as alive — announcing a SIGKILL survivor that does
+    not exist, and sitting through both grace periods to do it (gh-ocannl-760 review).
+
+    So on Linux the answer comes from `/proc`: any process whose process-group id is `pid` and
+    whose state is not `Z`. Elsewhere the signal-0 answer is all there is; on macOS launchd reaps
+    orphans promptly, which is what makes that acceptable there.
+    """
+    if os.name != "posix":
+        # No POSIX groups: see `kill_cell_group` for what stands in.
+        return False
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Members exist; they are just not ours to signal (a setuid child). Not "gone".
+        return True
+    except OSError:
+        return False
+    proc_fs = Path("/proc")
+    if not (proc_fs / "self" / "stat").exists():
+        return True  # no procfs to refine the answer with
+    for entry in proc_fs.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            # `comm` can hold spaces and parentheses, so the fields are counted from the LAST
+            # ')': state is the first after it, and the process-group id the third.
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] != "Z" and int(fields[2]) == pid:
+                return True
+        except (OSError, IndexError, ValueError):
+            continue  # it exited while we looked, or /proc served a partial line
+    return False
+
+
+def kill_cell_group(proc):
+    """Kill a cell and everything it spawned; return `(output, survived)`.
+
+    SIGTERM the group, give it `CELL_KILL_GRACE_S` to unwind, then SIGKILL it. The output read is
+    what the run had already written: a wedged cell's log up to the point it stopped making
+    progress is the only evidence about it the sweep will ever have, so it is kept rather than
+    discarded with the process.
+
+    The escalation is decided by the GROUP and not by the cell's pipes (the discipline
+    `gh675_cells.kill_group` already runs on, for the same reason): a descendant that ignores
+    SIGTERM but does not hold stdout lets `communicate` return promptly, so keying the SIGKILL on
+    the pipe closing skips it exactly when it is needed — and the survivor keeps the GPU while the
+    sweep walks into the next cell and stamps its timing valid (gh-ocannl-760 review).
+
+    `survived` says a member outlived SIGKILL, which means it is stuck in the kernel (an
+    uninterruptible driver ioctl) and still holds the device. Unlike that standalone driver this
+    one does not stop the sweep over it — losing the run to a wedge is the cost gh-ocannl-760
+    exists to remove — but the caller says so in the cell's failure note, because every later cell
+    in the run was then measured against it.
+    """
+    out = ""
+    reaped = False
+
+    def reap(timeout):
+        nonlocal out, reaped
+        if reaped:
+            return
+        try:
+            got, _ = proc.communicate(timeout=timeout)
+            out = got or out
+            reaped = True
+        except subprocess.TimeoutExpired as expired:
+            # What the cell had printed is on the exception. It matters in exactly the case where
+            # nothing else can deliver it: a member that outlives SIGKILL still owns the pipe, so
+            # every `communicate` here times out and the cell's own log — the only evidence about
+            # a cell nobody will run again — would otherwise be empty (gh-ocannl-760 review).
+            partial = expired.output
+            if partial:
+                out = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
+        except ValueError:  # pipes already closed by an earlier communicate
+            reaped = True
+
+    for force in (False, True):
+        _signal_group(proc, force)
+        deadline = time.monotonic() + CELL_KILL_GRACE_S
+        while time.monotonic() < deadline:
+            reap(0.5)
+            if reaped and not _group_alive(proc.pid):
+                if force or os.name == "posix":
+                    return out, False
+                # Windows has no group liveness to read: `_group_alive` answers False there
+                # whatever is running, so returning here on the FIRST pass would be equating a
+                # closed leader pipe with a dead tree — the very inference the group kill exists
+                # to avoid — and `taskkill /F /T` would never run (gh-ocannl-760 review). Fall
+                # through to the force pass, which is what a Windows tree is killed by. It is
+                # best-effort even so: `/T` walks the tree from its anchor, so a descendant whose
+                # leader is already gone is out of its reach, and killing that reliably wants a
+                # Job Object the spawn does not create yet.
+                break
+            time.sleep(0.05)
+    reap(1)
+    if not reaped:
+        # Nothing more will ever be read here: the only way out of the loop without reaping is a
+        # member that outlived SIGKILL and still owns the write end. The sweep would otherwise
+        # keep the read end for the rest of the run — one leaked descriptor per cell it could not
+        # reap, on the path least able to spare them (it announced itself as a ResourceWarning
+        # under `dune build @benchmarks/runtest`).
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        # And the leader itself, which is reapable even here: what `reap` could not finish is the
+        # READ, blocked on a pipe the survivor holds — the leader took the SIGKILL. Left unwaited
+        # it stays a zombie in the sweep's child table for the rest of the run, and `Popen` says
+        # so at collection ("subprocess N is still running") about a process that is not running.
+        with contextlib.suppress(OSError):
+            proc.poll()
+    return out, _group_alive(proc.pid)
+
+
+def install_termination_handler():
+    """Make a SIGTERM to the sweep reach the cell the sweep is running (gh-ocannl-760 review).
+
+    The same `start_new_session` that lets the cap reach a cell's descendants detaches them from
+    the sweep's own signals, and Python's default SIGTERM action exits the interpreter without
+    unwinding — so a job cancellation, a scheduler's time limit or a plain `kill` on the sweep
+    would leave the runner and its whole worker pool orphaned, holding the GPU, with nobody left
+    to reap them. The handler turns the signal into an ordinary exception, which is all `run_cell`
+    needs: its `except BaseException` already kills the group and re-raises.
+
+    Installed from `main` rather than at import, since a process that merely imports this module
+    (the unit tests, a notebook) has its own idea of what SIGTERM should mean.
+    """
+
+    def handler(signum, _frame):
+        global _deferred_signal
+        if _defer_depth:
+            # Inside a `_deferring_cancellation` block: raising here would unwind past a cell that
+            # has no name yet, or out of the `except` clause that is killing one. Hand it over;
+            # that block raises it once the cell is bound and its group is dead.
+            _deferred_signal = signum
+            return
+        # No cell is running here — a deferred one is delivered by `_raise_deferred`, which says
+        # so — but a supporting subprocess may be, and `run_supporting` kills its group on the way
+        # out. Hence the plainer sentence: this path has no cell to claim it killed.
+        raise SystemExit(f"orchestrate: terminated by signal {signum}")
+
+    def interrupt(signum, _frame):
+        global _deferred_signal
+        if _defer_depth:
+            _deferred_signal = signum
+            return
+        raise KeyboardInterrupt
+
+    for signum, action in ((signal.SIGTERM, handler), (signal.SIGINT, interrupt)):
+        try:
+            signal.signal(signum, action)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform without it: the cap still works, only the sweep's
+            # own cancellation goes back to being the caller's problem.
+            pass
+
+
+# Where a cancellation must not land, and the signal that tried to. Two such stretches, and they
+# fail the same way — a cell left alive on the GPU with the sweep gone (gh-ocannl-760 review):
+#
+#   - between `_execute_child` starting a cell and `Popen` returning it, no name refers to the new
+#     process, so an exception raised there unwinds past a cleanup that has nothing to clean;
+#   - inside the kill itself, a signal raises out of the `except` clause that was doing the
+#     killing — and a sibling `except BaseException` does not catch what another `except` clause
+#     raises — so the escalation stops halfway and the group survives the sweep.
+#
+# The handlers therefore DEFER inside these stretches rather than raise, and the outermost one
+# re-raises on the way out: by then the cell is bound and its group is dead, which is the state a
+# cancellation wanted in the first place. What this must NOT do is block the signals with
+# `pthread_sigmask`: the mask is inherited across fork/exec, so every cell would start with
+# SIGTERM blocked — the graceful phase of its own kill would do nothing, every cap would cost the
+# full grace before SIGKILL (measured: 1.0 s to 11.5 s per killed cell), and no runner would ever
+# get to flush.
+_defer_depth = 0
+_deferred_signal = None
+
+
+def _raise_deferred():
+    """Deliver a cancellation that was held, as the exception it would have been."""
+    global _deferred_signal
+    if _deferred_signal is None:
+        return
+    signum, _deferred_signal = _deferred_signal, None
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(
+        f"orchestrate: terminated by signal {signum}; the subprocess it was running, and its "
+        "process group, were killed first"
     )
+
+
+@contextlib.contextmanager
+def _deferring_cancellation():
+    """Hold SIGINT/SIGTERM until this block (and any enclosing one) is done, then re-raise."""
+    global _defer_depth
+    _defer_depth += 1
+    try:
+        yield
+    finally:
+        _defer_depth -= 1
+    if _defer_depth == 0:
+        _raise_deferred()
+
+
+@contextlib.contextmanager
+def _cancellable():
+    """The one hole in the deferral: the wait that a cancellation is actually FOR.
+
+    Chasing the gaps one at a time is how four rounds of this review went — the spawn, then the
+    kill, then the probe, then the assignments between them, then the same list again for the
+    sweep's own subprocesses. The genre is simpler than its instances: from the moment a child
+    exists until its group is dead, a cancellation must not unwind anything, and the ONLY point
+    where raising immediately is right is while the sweep sits in `communicate` waiting for it. So
+    `run_cell` and `run_supporting` each defer across their whole body and open this one hole,
+    rather than protecting each stretch that someone notices (gh-ocannl-760 review).
+    """
+    global _defer_depth
+    held, _defer_depth = _defer_depth, 0
+    try:
+        # A cancellation held during the spawn is delivered HERE rather than after the cell
+        # finishes: this is the first moment at which raising is both safe and what the operator
+        # asked for. Without it the sweep would sit out the whole cell (its cap, if it wedged)
+        # before noticing it had been cancelled — 60 s in the spawn-window test that caught it.
+        _raise_deferred()
+        yield
+    finally:
+        _defer_depth = held
+
+
+def run_supporting(cmd, cwd=None, capture_output=False, check=False, timeout=None):
+    """A subprocess the sweep runs for ITSELF — a build, a device probe — in its own group.
+
+    Same discipline as a cell, for the same reason: `dune build` forks compilers, the probes
+    import frameworks that spawn helpers, and a cancellation arriving here would otherwise leave
+    them running while the sweep exits (gh-ocannl-760 review). `subprocess.run` kills its direct
+    child on an exception but knows nothing of that child's own children; the group does.
+
+    Returns the `CompletedProcess` that `subprocess.run` would have.
+    """
+    with _deferring_cancellation():
+        return _run_supporting(cmd, cwd, capture_output, check, timeout)
+
+
+def _run_supporting(cmd, cwd, capture_output, check, timeout):
+    proc = None
+    try:
+        # The same window a cell gets, for the same reason: between `_execute_child` and `Popen`
+        # returning there is no name for the new process, so a cancellation there orphans a
+        # freshly isolated group (gh-ocannl-760 review).
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=capture_output,
+            **_own_group_kwargs(),
+        )
+        with _cancellable():
+            out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        if proc is not None:
+            _, stuck = kill_cell_group(proc)
+            if stuck:
+                # The other exit from this function, and the same survivor. Here the sweep is
+                # already leaving, so there is nothing to stop — but the operator is about to be
+                # told the group was killed, and it was not: a cancellation that reports a clean
+                # exit over a process still holding the device is how the next run gets measured
+                # against it (gh-ocannl-760 review).
+                print(
+                    "!!! a member of the process group of "
+                    f"{cmd[0]} SURVIVED SIGKILL and still holds the device — clear the "
+                    "survivors before re-running anything on this box",
+                    flush=True,
+                )
+        raise
+    if _group_alive(proc.pid):
+        # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER
+        # exited, and a build's compiler worker or a probe's framework helper can outlive it
+        # holding the GPU (gh-ocannl-760 review).
+        _, stuck = kill_cell_group(proc)
+        if stuck:
+            # And here the sweep DOES stop, where a cell's survivor only fails that cell. This
+            # runs before any cell is dispatched, so a member still holding the device would be
+            # shared by every row the sweep is about to produce — there is no subset of the
+            # results to disbelieve, and a cap cannot bound damage that is already in all of
+            # them (gh-ocannl-760 review).
+            raise SystemExit(
+                f"orchestrate: a member of {cmd[0]}'s process group SURVIVED SIGKILL and still "
+                "holds the device. Every cell of this sweep would be measured against it, so "
+                "nothing is dispatched: clear the survivors and re-run."
+            )
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_incomplete=None):
+    """Run one cell; return `(result, failure_note)`.
+
+    `failure_note` is None when the cell produced a result line, and otherwise says what went
+    wrong in a form the run's failure list can carry: a plain non-zero exit, or a cell that
+    outlived `timeout` and was killed (gh-ocannl-760). `on_incomplete(killed)` is called on every
+    path that ends without a result — the cap's kill, an interrupt, and an ordinary failure — and
+    is the cell's chance to say, and where it can undo, what a search that stopped midway does to
+    the cache it was writing; its sentence is appended to the failure note. `killed` separates the
+    two cases, because what is safe to DO about them differs: see `quarantine_tinygrad_cache`.
+
+    The whole body runs inside one `_deferring_cancellation` window whose only hole is the
+    `communicate` wait. Chasing that protection stretch by stretch is how several review rounds
+    went — the spawn, then the kill, then the leftover probe, then the assignments between them —
+    and the invariant behind all of them is single: from the moment a cell exists until its group
+    is dead, a cancellation must not unwind anything, because what it unwinds is left running on
+    the GPU with the sweep gone.
+    """
+    with _deferring_cancellation():
+        return _run_cell(label, cmd, env, cwd, timeout, on_incomplete)
+
+
+def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
+    print(f"--- {label}", flush=True)
+    timed_out = False
+    survived = False
+    cache_note = ""
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **_own_group_kwargs(),
+        )
+        with _cancellable():
+            # The wait a cancellation is FOR: here, and only here, a signal should raise at once.
+            stdout, _ = proc.communicate(timeout=timeout or None)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        stdout, survived = kill_cell_group(proc)
+        # Before anything fallible: the kill is what tore the cache, so undoing it must not be
+        # reachable only through code that can raise first (the optional cell log below writes
+        # to an operator-supplied directory, which can be unwritable or full). Losing the sweep to
+        # that would leave the partial cache.db in place AND lose the failure record.
+        cache_note = (on_incomplete(True) if on_incomplete else "") or ""
+    except BaseException:
+        # An operator's Ctrl-C reaches the sweep alone once the cell is in its own group, so the
+        # cell would keep running (and keep the GPU) after the sweep is gone. Take it with us —
+        # and a cell killed here was killed midway just as surely as one over the cap, so the
+        # cache it was writing gets the same treatment. Ctrl-C on a wedged beam cell is the
+        # likeliest way anyone meets this bug by hand, and a retry over the cache that kill left
+        # behind is not the pass it claims to be (gh-ocannl-760 review).
+        if proc is not None:
+            _, outlived = kill_cell_group(proc)
+            if outlived:
+                # The one branch that exits rather than records, so this is the operator's
+                # only chance to hear it: the cancellation's own message says the cell was
+                # killed, and a retry started over a survivor that still holds the device
+                # would be measured against it (gh-ocannl-760 review).
+                print(
+                    f"!!! {label}: A MEMBER SURVIVED SIGKILL and still holds the device — "
+                    "clear the survivors before re-running anything on this box",
+                    flush=True,
+                )
+            if on_incomplete:
+                print(f"!!! {label} interrupted; {on_incomplete(True)}", flush=True)
+        raise
+    stdout = stdout or ""
+    leftovers = ""
+    stuck = False
+    if not timed_out and _group_alive(proc.pid):
+        # The cell is done and something it spawned is not. `communicate` returned because the
+        # LEADER exited and the pipe closed, which says nothing about a worker that redirected
+        # its own output — and that worker still holds the GPU, so every later cell of the
+        # sweep would be measured against it. Collect it here, on the ordinary path, not only
+        # on the cap's.
+        _, stuck = kill_cell_group(proc)
+        leftovers = (
+            "the cell left members of its process group behind; they were killed"
+            if not stuck
+            else "the cell left members of its process group behind AND THEY SURVIVED SIGKILL"
+        )
+        print(f"!!! {label}: {leftovers}", flush=True)
     if CELL_LOG_DIR:
         # A cell's own output is otherwise discarded on success, which throws away exactly the
         # evidence a measurement sweep is asked to report: with autotune_log=true the search
         # pass's candidate lines (seeded vs timed, FAILED, dedup, split-reduce evictions) live
         # here and nowhere else, and re-running the searches to recover them costs as much as the
         # sweep. Off unless BENCH_CELL_LOG_DIR is set, so the default run is unchanged.
-        CELL_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in label)
-        (CELL_LOG_DIR / f"{safe}.log").write_text(proc.stdout)
-    line = next(
-        (l for l in reversed(proc.stdout.splitlines()) if l.startswith("{")), None
-    )
+        try:
+            CELL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in label)
+            (CELL_LOG_DIR / f"{safe}.log").write_text(stdout)
+        except OSError as exc:
+            # An unwritable log directory is a lost convenience, not a lost sweep.
+            print(f"!!! {label}: could not write the cell log ({exc})", flush=True)
+    line = next((l for l in reversed(stdout.splitlines()) if l.startswith("{")), None)
+    if timed_out:
+        # A cell over the cap is a FAILURE, not a slow measurement: whatever it was doing, it was
+        # not making progress in the time the same search takes in every other repeat, and a
+        # result line salvaged from a killed process would be a partial run's (gh-ocannl-760).
+        print(stdout[-4000:])
+        note = (
+            f"TIMED OUT after {timeout:g}s (cap; --cell-timeout raises it, 0 disables) — "
+            "killed the cell's whole process group"
+        )
+        if survived:
+            # A member outlived SIGKILL: it is stuck in the kernel and still holds the device, so
+            # every cell measured after it in this run was measured against it. The sweep goes on
+            # (that is the point of the cap) but no later row from this run is quotable until
+            # someone has cleared the survivor and re-run them.
+            note += (
+                "; A MEMBER SURVIVED SIGKILL and still holds the device — every later cell in "
+                "this run was measured against it, so clear the survivors and re-run them"
+            )
+        if cache_note:
+            note += f"; {cache_note}"
+        print(f"!!! {label} {note}", flush=True)
+        return None, note
+    if stuck:
+        # The cell ran to completion — it may even have printed a result line — but something it
+        # spawned outlived SIGKILL and still holds the device. That makes THIS cell's own timing
+        # suspect (it shared the device with a process nobody scheduled) and every later cell of
+        # the run too, so it is a runner failure whatever the leader's exit code says: a warning
+        # on a console nobody keeps is not a record, and the report would otherwise publish the
+        # row and everything after it (gh-ocannl-760 review).
+        note = (
+            "the cell left members of its process group behind AND THEY SURVIVED SIGKILL — they "
+            "still hold the device, so this cell's own timing and every later cell's in this run "
+            "were measured against them; clear the survivors and re-run"
+        )
+        # This branch returns early, so the cache handling has to happen here too: part of the
+        # search was forcibly interrupted (that is what `stuck` means), which is exactly the torn
+        # cache the cap's path quarantines (gh-ocannl-760 review).
+        stuck_cache_note = (on_incomplete(True) if on_incomplete else "") or ""
+        if stuck_cache_note:
+            note += f"; {stuck_cache_note}"
+        print(f"!!! {label} {note}", flush=True)
+        return None, note
     if proc.returncode != 0 or line is None:
-        print(proc.stdout[-4000:])
+        print(stdout[-4000:])
         print(f"!!! {label} failed (exit {proc.returncode})", flush=True)
-        return None
+        note = f"exit {proc.returncode}" if proc.returncode else "no result line"
+        if leftovers:
+            note += f"; {leftovers}"
+        # A search that exits nonzero partway through leaves the same partial cache a killed one
+        # does — some arms committed, the rest never run — and the next attempt over it reports a
+        # provenance nobody wrote. The cell says so here as it does on the kill path, with
+        # `killed=False`: what differs is not the risk but what may be DONE about it
+        # (gh-ocannl-760 review).
+        # `killed` is about whether anything of this cell was interrupted, not about how the
+        # LEADER ended: if the leftover sweep above killed a member, a candidate worker may have
+        # been cut off mid-write, which is the torn cache the kill path quarantines
+        # (gh-ocannl-760 review).
+        failed_note = (on_incomplete(bool(leftovers)) if on_incomplete else "") or ""
+        if failed_note:
+            note += f"; {failed_note}"
+        if failed_note:
+            print(f"!!! {label}: {failed_note}", flush=True)
+        return None, note
     result = json.loads(line)
+    if leftovers and on_incomplete:
+        # The row stands — the cell ran and printed its result — but a member of its group was
+        # killed on the way out, possibly mid-write, and the cache it shares with every later
+        # beam cell is in the state a kill leaves (gh-ocannl-760 review). Same handling as the
+        # failure paths; it is the cache that is at issue here, not this row.
+        killed_note = on_incomplete(True)
+        if killed_note:
+            print(f"!!! {label}: {killed_note}", flush=True)
     print(
         f"    p50 {num(result['step_ms']['p50'], '.3f')} ms, "
         f"compile {num(result['compile_s'], '.2f')} s",
         flush=True,
     )
-    return result
+    return result, None
+
+
+def tinygrad_cachedb(env=None):
+    """Path of the kernel cache a tinygrad cell writes — asked of the library that writes it.
+
+    `CACHEDB` is composed by tinygrad's own helpers (an explicit `CACHEDB`, else `XDG_CACHE_HOME`
+    or the platform cache dir), so it is read out of the venv's tinygrad rather than recomputed
+    here: a rule copied into this file would go stale silently and quarantine the wrong file, or
+    nothing. The composition below is only the fallback for a probe that could not run.
+    """
+    try:
+        probe = subprocess.run(
+            [str(VENV_PY), "-c", "from tinygrad.helpers import CACHEDB; print(CACHEDB)"],
+            env=env,
+            cwd=str(HERE),
+            capture_output=True,
+            text=True,
+            timeout=CELL_KILL_GRACE_S,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            return Path(probe.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        # No venv interpreter, or a tinygrad that cannot be imported here. The kill path must
+        # still finish and still say something true about the cache.
+        pass
+    env = env if env is not None else os.environ
+    if env.get("CACHEDB"):
+        return Path(env["CACHEDB"])
+    default_home = "~/Library/Caches" if platform.system() == "Darwin" else "~/.cache"
+    cache_dir = env.get("XDG_CACHE_HOME") or os.path.expanduser(default_home)
+    return Path(cache_dir) / "tinygrad" / "cache.db"
+
+
+def quarantine_tinygrad_cache(env=None, enabled=True, killed=True):
+    """Move a killed beam search's kernel cache aside; return what was done, for the failure note.
+
+    The consequence a killed search leaves behind, recorded on the HIP leg of gh-ocannl-760: the
+    search writes into a single sqlite file, so a kill midway leaves it holding whatever that
+    search had committed so far, and the next run over that cache neither replays a complete
+    result nor searches from scratch — while `searched` reports one of the two. A retry over it is
+    not the pass it claims to be, which is exactly the retry an operator makes after a wedge.
+
+    tinygrad's cache is one file (plus its `-wal`/`-shm` siblings), so the clean handling is
+    available: rename it aside, with its siblings, so the retry starts cold and the torn cache is
+    still there to look at. Renamed rather than deleted — it is evidence — and only ever after the
+    kill, when the cell is already a failure. `enabled=False` (`--no-cache-quarantine`) leaves the
+    file alone and only names the risk.
+
+    OCANNL's tuned cell needs no equivalent: its schedule cache is a directory whose entries are
+    written through `Utils.Atomic_file` (staged, then committed by rename), so a killed search
+    leaves complete entries and at most a staging file the next writer sweeps. Nothing there is
+    torn; what a retry over it costs is a mixed pass, which `ocannl_cache_note` states.
+    """
+    db = tinygrad_cachedb(env)
+    if not db.exists():
+        return f"tinygrad kernel cache {db} does not exist; nothing to quarantine"
+    risk = (
+        f"a search killed midway leaves {db} holding a partial result, and the next run over it "
+        "reports a `searched` verdict nobody wrote deliberately"
+    )
+    if not killed:
+        # The cell exited on its own, which can mean it never searched at all (a bad flag, a
+        # missing compiler) as easily as it can mean it searched halfway. The cache is SHARED
+        # with every later cell of the sweep, so moving it aside on an ordinary failure would
+        # cost all of them their warm kernels for a risk that may not exist. Name it instead,
+        # and let whoever quotes the retry decide (gh-ocannl-760 review).
+        return f"CACHE AT RISK: {risk} (left in place: the cell exited rather than being killed)"
+    if not enabled:
+        return f"CACHE AT RISK: {risk} (--no-cache-quarantine: left in place)"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    quarantined = db.with_name(f"{db.name}.wedged-{stamp}")
+    # A second-resolution stamp is not a unique name: two cells killed within the same second (a
+    # low `--cell-timeout`, or a sweep whose whole GPU column wedges at once) would land on it
+    # twice, and the second `os.replace` would overwrite the first cell's quarantined database
+    # with no trace — destroying exactly the evidence the rename exists to keep (gh-ocannl-760
+    # review). Take the first free name instead, counting the family as one: the sidecars must
+    # end up beside THEIR database.
+    suffixes = ("", "-wal", "-shm")
+    attempt = 1
+    while any(Path(f"{quarantined}{suffix}").exists() for suffix in suffixes):
+        attempt += 1
+        quarantined = db.with_name(f"{db.name}.wedged-{stamp}.{attempt}")
+    moved = []
+    rolled_back = []
+    # The sidecars are renamed UNDER the quarantined database's name, not beside their own:
+    # sqlite finds a write-ahead log only at `<database>-wal` (and its index at `-shm`), so
+    # `cache.db-wal.wedged-<stamp>` next to `cache.db.wedged-<stamp>` is a database that opens
+    # without the very writes the killed search had not checkpointed — the evidence this move
+    # exists to preserve, silently dropped (gh-ocannl-760 review).
+    for suffix in suffixes:
+        path = Path(f"{db}{suffix}")
+        if not path.exists():
+            continue
+        dest = Path(f"{quarantined}{suffix}")
+        try:
+            os.replace(path, dest)
+        except OSError as exc:
+            # All or nothing: a half-moved family is worse than an unmoved one — a database
+            # separated from its write-ahead log opens without the writes it holds, and the cache
+            # left behind gains a stale sidecar the next tinygrad process will read against a
+            # database it never belonged to (gh-ocannl-760 review). Put back what was moved.
+            undone = []
+            for done, origin in reversed(rolled_back):
+                try:
+                    os.replace(done, origin)
+                except OSError:
+                    undone.append(done.name)
+            trouble = f" (and {', '.join(undone)} could not be put back)" if undone else ""
+            return f"CACHE AT RISK: {risk}; could not quarantine it ({exc}){trouble}"
+        rolled_back.append((dest, path))
+        moved.append(dest.name)
+    return f"quarantined the tinygrad kernel cache to {db.parent}/{{{', '.join(moved)}}} — {risk}"
+
+
+def beam_cell_env(base_env, beam_parallel):
+    """The environment a tinygrad beam cell runs in: `PARALLEL` is the orchestrator's to say.
+
+    `--beam-parallel N` sets it; unset means tinygrad's own default, and that has to mean the
+    DEFAULT and not the invoking shell's opinion. An exported `PARALLEL` — left over from a
+    hand-run `PARALLEL=0 …` experiment, say — would otherwise reach the cell through the inherited
+    environment and measure a different candidate-pool configuration under the default's name,
+    with nothing in the row, its label or the report to show which one was measured
+    (gh-ocannl-760 review). So the unset case removes it rather than passing it through.
+    """
+    env = dict(base_env)
+    if beam_parallel is None:
+        env.pop("PARALLEL", None)
+    else:
+        env["PARALLEL"] = str(beam_parallel)
+    return env
+
+
+def ocannl_cache_note(_killed=True):
+    """What a killed OCANNL search leaves in its schedule cache, for the failure record.
+
+    Nothing to undo — see `quarantine_tinygrad_cache` for why the two caches differ — but the
+    retry's provenance is still not a from-scratch search's, and saying so where the failure is
+    read is cheaper than rediscovering it from a `(cached)` compile cost.
+
+    What it must NOT claim is that the retry reports REPLAY. A kill lands mid-search, so the
+    retry's arms are mixed: those that finished replay, those that did not are searched again —
+    and `search_provenance` reads `searched`, which is true whenever ANY arm searched, so the
+    mixed pass reports SEARCHED. Its compile cost is then neither a from-scratch search's nor a
+    replay's while wearing the from-scratch label, which is precisely the misreading this note
+    exists to prevent (gh-ocannl-760 review).
+    """
+    return (
+        "autotune_cache/ keeps the arms that finished before the kill (entries are committed "
+        "atomically, so none of them is torn); a retry replays those and searches the rest, and "
+        "since the pass reports SEARCHED whenever any arm searched, its search cost is a partial "
+        "one wearing a from-scratch label — wipe autotune_cache/ for a comparable search timing"
+    )
 
 
 def finite(x):
@@ -595,7 +1295,46 @@ def provenance_check(results):
     return violations
 
 
-def report(results, out_dir, unavailable=()):
+def failure_line(failure):
+    """One `(label, note)` runner failure, as the run log and the report name it."""
+    label, note = failure
+    return f"{label} ({note})" if note else label
+
+
+def beam_parallel_arg(text):
+    """`--beam-parallel` as a worker count: zero (no pool) or more, never negative.
+
+    tinygrad builds its pool for any truthy PARALLEL and passes the value straight to
+    `multiprocessing.Pool`, which refuses a negative process count — so `-1` does not mean
+    "unset" or "default", it means every beam cell of the sweep dies on a `ValueError` from
+    inside the runner (gh-ocannl-760 review).
+    """
+    workers = int(text)
+    if workers < 0:
+        raise argparse.ArgumentTypeError(
+            f"--beam-parallel must be 0 (no pool) or more (got {text!r})"
+        )
+    return workers
+
+
+def cell_timeout_arg(text):
+    """`--cell-timeout` as a number of seconds: finite and not negative, or an argparse error.
+
+    Only zero (no cap) and a positive number of seconds mean anything here. A negative cap expires
+    every `communicate` at once — killing every cell of the sweep and quarantining their caches on
+    the way — and `nan`/`inf` raise from inside `communicate`, which the generic cleanup path
+    turns into a killed cell and an aborted run. Both are worth refusing before the first process
+    is spawned rather than discovering them cell by cell (gh-ocannl-760 review).
+    """
+    seconds = float(text)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(
+            f"--cell-timeout must be a finite number of seconds, 0 or more (got {text!r})"
+        )
+    return seconds
+
+
+def report(results, out_dir, unavailable=(), failures=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
@@ -710,7 +1449,7 @@ def report(results, out_dir, unavailable=()):
             if with_tensorization:
                 provenance += " %s |" % TENSORIZATION_MARK.get(r.get("tensorization"), "—")
             lines.append(
-                f"| {r['framework']} | {r['backend']} | {r['variant']} "
+                f"| {r['framework']} | {r['backend']} | {rendered_variant(r)} "
                 f"| {r.get('precision', 'f32')} "
                 f"| {num(s['p50'], '.3f')} | {num(s['p10'], '.3f')} | {num(s['p90'], '.3f')} "
                 f"| {num(r['queued_step_ms'], '.3f')} | {compile_s} |{provenance} {parity} |{tokens}"
@@ -727,6 +1466,20 @@ def report(results, out_dir, unavailable=()):
         lines.append("|---|---|---|")
         for workload, precision, reason in unavailable:
             lines.append(f"| {workload} | {precision} | {reason} |")
+    if failures:
+        # A cell that produced no result is absent from every table above, and an absent row and a
+        # failed one read identically once the report outlives the run log — which is the whole
+        # cost of an unattended sweep meeting a wedge (gh-ocannl-760). Named here, with what the
+        # sweep did about it, including any cache it quarantined on the way out.
+        lines.append("\n## Runner failures\n")
+        lines.append(
+            "Cells that produced no result line. Their absence from the tables above is a "
+            "failure, not a measurement — nothing here is comparable with anything.\n"
+        )
+        lines.append("| cell | why |")
+        lines.append("|---|---|")
+        for label, note in failures:
+            lines.append(f"| {label} | {note or 'no result line'} |")
     text = "\n".join(lines) + "\n"
     (out_dir / "report.md").write_text(text)
     print("\n" + text)
@@ -771,6 +1524,34 @@ def main():
         help="add the tinygrad BEAM=N search variant (0 = off)",
     )
     ap.add_argument(
+        "--beam-parallel",
+        type=beam_parallel_arg,
+        default=None,
+        metavar="N",
+        help="run the tinygrad beam cells with PARALLEL=N — tinygrad's own knob for the "
+        "candidate-compile pool. Unset leaves its default, one worker per logical core on a GPU "
+        "device (24 on the box the gh-ocannl-760 deadlocks were seen on); N=0 is what disables "
+        "the pool outright and compiles the candidates in-process, which is the configuration a "
+        "pool deadlock cannot occur in, at the cost of a serial search",
+    )
+    ap.add_argument(
+        "--cell-timeout",
+        type=cell_timeout_arg,
+        default=DEFAULT_CELL_TIMEOUT_S,
+        metavar="SECONDS",
+        help=f"per-cell wall-clock cap (default {DEFAULT_CELL_TIMEOUT_S:g} s; 0 disables). A "
+        "cell over the cap has its whole process group killed and is recorded as a runner "
+        "failure, so an unattended sweep meeting a wedged cell loses that cell rather than the "
+        "sweep (gh-ocannl-760)",
+    )
+    ap.add_argument(
+        "--no-cache-quarantine",
+        action="store_true",
+        help="on a killed tinygrad beam cell, leave its kernel cache in place instead of "
+        "renaming it aside. The failure still names the risk: a search killed midway leaves a "
+        "partial cache.db, and the next run over it reports a `searched` verdict nobody wrote",
+    )
+    ap.add_argument(
         "--gpu",
         choices=sorted(GPU_DEVICES),
         default="metal" if platform.system() == "Darwin" else "cuda",
@@ -798,11 +1579,12 @@ def main():
         help="frameworks to run",
     )
     args = ap.parse_args()
+    install_termination_handler()
     gpu_ocannl, gpu_torch, gpu_tiny = GPU_DEVICES[args.gpu]
     if args.gpu == "hip" and gpu_torch and "pytorch" in args.only:
         # "cuda" only reaches the AMD GPU when torch is a ROCm/HIP build (a stock CPU or
         # CUDA wheel isn't); probe the bench venv and fall back to the CPU-only column.
-        probe = subprocess.run(
+        probe = run_supporting(
             [str(VENV_PY), "-c", "import sys, torch; sys.exit(0 if torch.version.hip else 1)"],
             capture_output=True,
         )
@@ -831,7 +1613,7 @@ def main():
         targets = sorted(
             {f"benchmarks/runners/ocannl/bench_{m}.exe" for m in models.values()}
         )
-        subprocess.run(["dune", "build", "--root", ".", *targets], cwd=ROOT, check=True)
+        run_supporting(["dune", "build", "--root", ".", *targets], cwd=ROOT, check=True)
 
     results = []
     failures = []
@@ -839,15 +1621,33 @@ def main():
     partial = HERE / "results" / "partial.jsonl"
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
+    # Failures stream too, beside the results (gh-ocannl-760 review). A sweep that is interrupted,
+    # terminated or crashed before `report()` otherwise leaves an artifact in which the cell that
+    # WEDGED is indistinguishable from one that never ran — losing the cap, the survivor and the
+    # quarantine record, which for an unattended run is the whole finding.
+    partial_failures = HERE / "results" / "partial-failures.jsonl"
+    partial_failures.write_text("")
 
     # The fixture the cells currently being dispatched are measuring — stamped onto every result
     # so a row, and the report built from it, states its own workload identity (gh-ocannl-645)
     # rather than leaving it to how the operator ran the sweep.
     stamp = {}
 
+    def record_failure(label, note):
+        """The one path a failed cell takes, wherever in the sweep it failed.
+
+        Both the in-memory list the report is built from and the checkpoint an interrupted run
+        leaves behind — appended here rather than at each call site, because the tuned search
+        pass's own failure went straight to the list and so vanished from the artifact
+        (gh-ocannl-760 review).
+        """
+        failures.append((label, note))
+        with open(partial_failures, "a") as f:
+            f.write(json.dumps({"cell": label, "why": note}) + "\n")
+
     def collect(label, cmd, override=None, **kwargs):
         t0 = time.monotonic()
-        r = run_cell(label, cmd, **kwargs)
+        r, note = run_cell(label, cmd, timeout=args.cell_timeout, **kwargs)
         if r:
             r.update(stamp)
             if override:
@@ -859,7 +1659,7 @@ def main():
             with open(partial, "a") as f:
                 f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
         else:
-            failures.append(label)
+            record_failure(label, note)
         print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
 
     for fx in fixtures:
@@ -911,9 +1711,16 @@ def main():
                             # gh-ocannl-675), so pass 1 runs the search and
                             # populates autotune_cache (its compile_s is the search cost), and a
                             # fresh pass-2 process replays the cached winner for the step timings.
-                            pass1 = run_cell(f"{label} (search pass)", cmd, env=env, cwd=HERE)
+                            pass1, note = run_cell(
+                                f"{label} (search pass)",
+                                cmd,
+                                env=env,
+                                cwd=HERE,
+                                timeout=args.cell_timeout,
+                                on_incomplete=ocannl_cache_note,
+                            )
                             if pass1 is None:
-                                failures.append(f"{label} (search pass)")
+                                record_failure(f"{label} (search pass)", note)
                                 continue
                             # What the search pass actually did, which is not derivable from the
                             # compile_s it hands over: a warm autotune_cache makes it a replay, and
@@ -945,15 +1752,37 @@ def main():
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--jit", str(jit)],
                     )
                 if args.beam:
+                    # PARALLEL sizes tinygrad's candidate-compile pool (its own knob, read where
+                    # the pool is created); left unset, it is one worker per logical core on a GPU
+                    # device, which is the shape the gh-ocannl-760 deadlocks were seen in. 0 means
+                    # no pool at all, so it is passed through rather than read as "unset".
+                    beam_env = beam_cell_env(os.environ, args.beam_parallel)
                     collect(
-                        f"{name} tinygrad/{device}/beam",
+                        # The pool is in the LABEL as well as in the row, because a failure has
+                        # only the label: a wedged cell records no result, and which pool it
+                        # wedged with is the first thing anyone asks (gh-ocannl-760 review).
+                        f"{name} tinygrad/{device}/beam"
+                        + ("" if args.beam_parallel is None else f" P={args.beam_parallel}"),
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--beam", str(args.beam)],
+                        # What pool the search ran with, recorded where the row is read. Without
+                        # it the default, `0` and `--beam-parallel 2` all land as `beam` with no
+                        # way to tell them apart, while their search costs differ by a factor of
+                        # three or four -- so a compile_s from one configuration reads as the
+                        # other's (gh-ocannl-760 review). `null` is tinygrad's own default, which
+                        # is one worker per logical core on a GPU device and no pool on CPU.
+                        override={"beam": args.beam, "beam_parallel": args.beam_parallel},
+                        env=beam_env,
+                        # The one cell whose cache a kill can tear: the beam search writes its
+                        # winners into a single sqlite file as it goes (gh-ocannl-760).
+                        on_incomplete=lambda killed: quarantine_tinygrad_cache(
+                            beam_env, enabled=not args.no_cache_quarantine, killed=killed
+                        ),
                     )
 
     parity_check(results)
     provenance_violations = provenance_check(results)
     tensorization_mismatches = tensorization_check(results)
-    report(results, HERE / "results", unavailable)
+    report(results, HERE / "results", unavailable, failures)
     ok = True
     if unavailable:
         # Not a failure: these cells were requested but the workload cannot express them. Saying so
@@ -965,9 +1794,12 @@ def main():
         )
     if failures:
         ok = False
+        # One line per cell: a timed-out cell's reason carries what was killed and what became of
+        # the cache it was writing, which run together into one line is unreadable exactly where
+        # an unattended run is read (gh-ocannl-760).
         print(
-            f"RUNNER FAILURES: {len(failures)} cell(s) produced no result: "
-            + ", ".join(failures),
+            f"RUNNER FAILURES: {len(failures)} cell(s) produced no result:\n"
+            + "\n".join(f"  - {failure_line(f)}" for f in failures),
             flush=True,
         )
     no_ref = [r for r in results if r["parity"] == "NO-REF"]

@@ -190,13 +190,70 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
   CPU-only matrix), `--no-fixture-digest-check` (measure fixtures that do not match
-  `fixtures/DIGESTS.txt`). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
+  `fixtures/DIGESTS.txt`),
+  `--cell-timeout SECONDS` / `--beam-parallel N` / `--no-cache-quarantine` (the wedged-cell
+  mitigations below). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
   output, one file per cell label — a successful cell's output is otherwise discarded, which throws away the
   candidate-level evidence a measurement sweep has to report. Combined with
   `OCANNL_AUTOTUNE_LOG=true` it makes the seeded-vs-timed mma and split-reduce counts, the
   `FAILED` blocker breakdown and the split-reduce evictions fall out of the sweep's own search
   passes instead of costing a second round of searches (it does inflate a tuned cell's reported
   `compile_s` a little; step times come from the pass-2 replay and are unaffected).
+
+  **A wedged cell costs the cell, not the sweep** (gh-ocannl-760). tinygrad's parallel beam
+  search deadlocks intermittently — the same search that takes 53–115 s in its other repeats
+  sits at ~1% CPU with the GPU idle indefinitely, seen on both the CUDA and the HIP box — so
+  every cell runs in a process group of its own under a wall-clock cap, `--cell-timeout SECONDS`
+  (default 1800; `0` disables). Over the cap, the whole group is killed — the runner *and*
+  whatever it spawned, tinygrad's candidate-compile pool included, which is also why the kill is
+  a group kill: those workers hold the cell's stdout pipe, so killing the direct child alone
+  would move the hang into the sweep's own read — and the cell is recorded as a runner failure,
+  in the run log and in the report's **Runner failures** section. Raise the cap for a box whose
+  legitimate cells run longer; the failure names it either way. The kill escalates on the *group*
+  still having members rather than on the cell's pipe closing, so a descendant that ignores
+  SIGTERM without holding stdout is still reached; if one somehow outlives SIGKILL — it would have
+  to be stuck in a driver ioctl — the failure says so, because every later cell of that run was
+  then measured against it. A SIGTERM to the sweep itself (a job cancellation, a scheduler's time
+  limit) and a Ctrl-C both take the running cell's group with them: the cell is in its own session
+  precisely so the sweep's signals do *not* reach it by default. On **Windows** the same kill is
+  best-effort: the cell gets `CREATE_NEW_PROCESS_GROUP` and the force step is `taskkill /F /T`,
+  which walks the tree from its anchor — so a descendant whose leader has already exited is out
+  of its reach, and there is no group-liveness probe to escalate on. Killing that reliably wants
+  a Job Object at spawn time, which this does not create yet.
+
+  A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
+  complete result nor searches from scratch, while `searched` reports one of the two, so a retry
+  over that cache is not the pass it claims to be. tinygrad's cache is a single sqlite file, so
+  the kill path renames it to `cache.db.wedged-<timestamp>`, its `-wal`/`-shm` siblings following
+  it *under that name* (sqlite looks for a write-ahead log only at `<database>-wal`, so parking
+  them under their own names would leave a quarantined database that opens without the killed
+  search's uncheckpointed writes) — the retry starts cold and the torn cache is still there to
+  inspect. `--no-cache-quarantine` leaves it in place and still names the risk in the failure. A
+  cell interrupted with Ctrl-C takes the same path: it was killed midway just as surely.
+
+  OCANNL's `autotune_cache/` needs no equivalent — entries are committed by rename
+  (`Utils.Atomic_file`), so a killed search leaves complete entries and nothing torn — but the
+  failure still says what a retry over it costs, because that is not a from-scratch search either:
+  the arms that finished replay and the rest are searched again, and since a pass reports
+  `SEARCHED` whenever *any* arm searched, the mixed retry's compile cost wears a from-scratch
+  label. Wipe `autotune_cache/` for a search timing comparable with the others.
+
+  `--beam-parallel N` passes tinygrad's own `PARALLEL` knob through to the beam cells. Its
+  default is one candidate-compile worker per logical core on a GPU device — 24 on the box the
+  wedges were seen on, and measured as exactly that many spawned children during a search.
+  `--beam-parallel 0` is the value that disables the pool outright and compiles the candidates
+  in-process, which is the configuration a pool deadlock cannot occur in; `1` still means a
+  one-worker pool, not no pool. It costs search wall time — `mlp_small` beam 2 on the RTX
+  5070 Ti searches in 15.6 s at the default and 56.4 s at `--beam-parallel 0` — so nothing makes
+  it the default: the root cause is upstream and unchased, and the cap already bounds the damage.
+
+  Two facts about that default worth knowing before picking an `N`. It applies to the **GPU
+  column only**: tinygrad sizes the pool as `cpu_count()` for its CUDA/AMD/NV/METAL/HIP devices
+  and as `0` for `CPU`, so the CPU column's beam cell compiles its candidates in-process and
+  cannot meet this deadlock at all. And `cpu_count()` ignores the **affinity mask**, so a sweep
+  pinned with `taskset -c 0-15` on a 32-thread box still spawns 32 candidate-compile workers onto
+  16 cores — the oversubscribed shape, on the machine class where the wedges were seen. If you
+  pin, pass `--beam-parallel <mask size>`; a wedge is bounded by the cap either way.
 
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures

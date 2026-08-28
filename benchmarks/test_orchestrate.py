@@ -1,8 +1,13 @@
+import argparse
 import contextlib
 import io
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import unittest.mock
@@ -881,6 +886,958 @@ class FixtureDigestTest(unittest.TestCase):
         # fixtures/<spec name>.safetensors, and every spec's `name` is its file stem.
         for spec in (HERE / "workloads").glob("*.json"):
             self.assertEqual(json.loads(spec.read_text())["name"], spec.stem, spec.name)
+
+
+class CellTimeoutTest(unittest.TestCase):
+    """gh-ocannl-760: a cell that stops making progress costs the cell, not the sweep."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_cell(self, *args, **kwargs):
+        """run_cell with the cell's own output kept out of the test's."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            result, note = orchestrate.run_cell(*args, **kwargs)
+        return result, note, out.getvalue()
+
+    def python(self, source, *argv):
+        return [sys.executable, "-c", source, *map(str, argv)]
+
+    def alive(self, pid):
+        """Whether `pid` is still a running process — a zombie is not one.
+
+        The distinction is load-bearing, not pedantry: the grandchild these tests kill is an
+        ORPHAN by then (its parent, the cell, was killed too), so whether it disappears or lingers
+        as an unreaped zombie is decided by whoever inherits it. Under a normal init it is reaped
+        at once; in a container whose PID 1 does not reap, it stays a zombie indefinitely — and
+        `kill(pid, 0)` succeeds for a zombie, so a bare signal-0 probe would report the process
+        the kill did remove as alive and fail the test in exactly the environments CI runs in.
+        """
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        stat = Path(f"/proc/{pid}/stat")
+        if not stat.exists():
+            return True  # not Linux, or no procfs: the signal-0 answer is all there is
+        try:
+            # `comm` can contain spaces and parentheses; the state letter is the field after the
+            # LAST ')'.
+            return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False  # it went away between the probe and the read
+
+    def wait_gone(self, pid, deadline_s=15.0):
+        end = time.monotonic() + deadline_s
+        while time.monotonic() < end and self.alive(pid):
+            time.sleep(0.05)
+        return not self.alive(pid)
+
+    def test_a_finished_cell_is_unaffected_by_the_cap(self):
+        # The cap must be invisible to every cell that runs: same result line, no note.
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+
+        result, note, _ = self.run_cell("finished", cell, timeout=60)
+
+        self.assertIsNone(note)
+        self.assertEqual(result["workload"], "w")
+
+    def test_the_cap_can_be_turned_off(self):
+        # `--cell-timeout 0` is the escape hatch for a box whose legitimate cells outrun any cap
+        # worth setting; it must mean "no cap", not "a cap of zero seconds".
+        cell = self.python(
+            "import json, time; time.sleep(0.2); print(json.dumps("
+            "{'workload': 'uncapped', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+
+        result, note, _ = self.run_cell("uncapped", cell, timeout=0)
+
+        self.assertIsNone(note)
+        self.assertEqual(result["workload"], "uncapped")
+
+    def test_a_cell_over_the_cap_is_a_runner_failure_naming_the_cap(self):
+        result, note, log = self.run_cell(
+            "wedged", self.python("import time; time.sleep(300)"), timeout=1.0
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("TIMED OUT after 1s", note)
+        self.assertIn("--cell-timeout", note)
+        self.assertIn("wedged", log)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_the_kill_takes_the_whole_process_group(self):
+        # The failure mode this exists for: tinygrad's beam search wedges with a pool of workers
+        # alive, and those workers hold the cell's stdout pipe open. Kill the direct child alone
+        # and the sweep then blocks reading a pipe nobody will ever close -- the hang moves, it
+        # does not go away. So the assertion is both halves: the grandchild dies, and the call
+        # returns promptly rather than waiting on the inherited pipe.
+        pidfile = self.dir / "grandchild.pid"
+        cell = self.python(
+            "import subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        t0 = time.monotonic()
+        result, note, _ = self.run_cell("wedged with workers", cell, timeout=2.0)
+        elapsed = time.monotonic() - t0
+
+        self.assertIsNone(result)
+        self.assertIn("process group", note)
+        self.assertLess(elapsed, 2.0 + orchestrate.CELL_KILL_GRACE_S + 10)
+        grandchild = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(grandchild), f"pid {grandchild} survived the cap")
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_the_escalation_is_decided_by_the_group_and_not_by_the_pipe(self):
+        # The survivor case the pipe cannot see: a descendant that ignores SIGTERM and does NOT
+        # hold the cell's stdout. The cell itself dies on SIGTERM, the pipe closes, and a kill path
+        # that escalates only when its read blocks would return here reporting a killed group --
+        # while the survivor keeps the GPU and every later cell of the sweep is measured against
+        # it. So the SIGKILL has to be owed to the GROUP still having members (gh-ocannl-760
+        # review).
+        pidfile = self.dir / "stubborn.pid"
+        cell = self.python(
+            "import signal, subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c',\n"
+            "  'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            " time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        result, note, _ = self.run_cell("stubborn descendant", cell, timeout=2.0)
+
+        self.assertIsNone(result)
+        stubborn = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(stubborn), f"pid {stubborn} ignored SIGTERM and survived")
+        self.assertNotIn("SURVIVED SIGKILL", note)
+
+    def test_a_member_outliving_sigkill_is_said_so_in_the_failure(self):
+        # Nothing survives SIGKILL except a process stuck in the kernel (an uninterruptible driver
+        # ioctl), which is not synthesizable -- so the group probe is stood in for. What is pinned
+        # is the consequence: the sweep goes on, and the failure says every later cell in the run
+        # was measured against whatever is still holding the device.
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True))
+            _, note, _ = self.run_cell(
+                "stuck in the driver", self.python("import time; time.sleep(300)"), timeout=0.5
+            )
+
+        self.assertIn("SURVIVED SIGKILL", note)
+        self.assertIn("measured against it", note)
+
+    def test_the_windows_force_step_is_a_force_step(self):
+        # The escalation is a boolean, not a signal number, because passing one decides the
+        # Windows branch by accident: `signal.SIGKILL` does not exist there, so the natural
+        # "SIGKILL if posix else SIGTERM" sends a second CTRL_BREAK where the force kill was due
+        # and a cell that ignores CTRL_BREAK is never killed at all (gh-ocannl-760 review).
+        win_signal = types.SimpleNamespace(
+            SIGTERM=signal.SIGTERM, SIGKILL=None, CTRL_BREAK_EVENT=1
+        )
+        proc = unittest.mock.Mock(pid=4242)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate.os, "name", "nt"))
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "signal", win_signal))
+            run = stack.enter_context(unittest.mock.patch.object(orchestrate.subprocess, "run"))
+
+            orchestrate._signal_group(proc, force=False)
+            self.assertEqual(proc.send_signal.call_args[0][0], win_signal.CTRL_BREAK_EVENT)
+            self.assertEqual(run.call_count, 0)
+
+            orchestrate._signal_group(proc, force=True)
+            self.assertEqual(run.call_args[0][0], ["taskkill", "/F", "/T", "/PID", "4242"])
+            self.assertEqual(proc.send_signal.call_count, 1)  # not a second CTRL_BREAK
+
+    @unittest.skipUnless(os.name == "posix", "SIGALRM and process groups are POSIX here")
+    def test_an_interrupted_cell_gets_the_same_cache_treatment_as_a_capped_one(self):
+        # Ctrl-C on a wedged beam cell is the likeliest way anyone meets this bug by hand, and the
+        # search it interrupts leaves exactly the partial cache the cap's kill path quarantines.
+        called = []
+
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_cell(
+                "interrupted",
+                self.python("import time; time.sleep(300)"),
+                on_incomplete=lambda killed: called.append(("killed", killed))
+                or "quarantined the cache",
+            )
+
+        # ... and told that this cell was KILLED, which is what decides whether the cache may
+        # be moved aside at all.
+        self.assertEqual(called, [("killed", True)])
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_sigterm_to_the_sweep_takes_the_running_cell_with_it(self):
+        # A job cancellation or a scheduler's time limit is a SIGTERM to the sweep, and Python's
+        # default action for it exits without unwinding -- so without a handler the cell and its
+        # whole worker pool are orphaned, holding the GPU, with nobody to reap them. The cell is
+        # in its own session precisely so the sweep's signals do NOT reach it (gh-ocannl-760
+        # review).
+        pidfile = self.dir / "orphan.pid"
+        driver = self.python(
+            "import sys, orchestrate\n"
+            "orchestrate.install_termination_handler()\n"
+            "cell = [sys.executable, '-c',\n"
+            "  'import subprocess, sys, time\\n"
+            "kid = subprocess.Popen([sys.executable, \\'-c\\', \\'import time; time.sleep(300)\\'])\\n"
+            "open(sys.argv[1], \\'w\\').write(str(kid.pid))\\n"
+            "time.sleep(300)\\n', sys.argv[1]]\n"
+            "orchestrate.run_cell('cell under a cancelled sweep', cell)\n",
+            pidfile,
+        )
+        sweep = subprocess.Popen(
+            driver,
+            cwd=str(Path(orchestrate.__file__).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: sweep.poll() is None and sweep.kill())
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not pidfile.exists():
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the cell never started")
+        grandchild = int(pidfile.read_text())
+
+        sweep.terminate()
+        sweep.wait(timeout=30)
+
+        self.assertTrue(
+            self.wait_gone(grandchild), f"pid {grandchild} outlived the cancelled sweep"
+        )
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "the zombie distinction needs procfs")
+    def test_a_group_of_nothing_but_zombies_is_not_alive(self):
+        # What the escalation is asking is "does anything still hold the device", and a zombie
+        # holds nothing. But `killpg(pgid, 0)` succeeds for a group whose every member is one, and
+        # after the kill that is the normal state of the descendants -- orphans, reaped or not at
+        # the whim of whoever inherits them. Under a PID 1 that does not reap (a container) a bare
+        # signal-0 probe would announce a SIGKILL survivor that does not exist, and sit through
+        # both grace periods to do it (gh-ocannl-760 review).
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL, start_new_session=True
+        )
+        self.addCleanup(proc.wait)
+        # Bounded, not `while alive`: against a probe that cannot see the distinction this must
+        # FAIL rather than hang. Deliberately unreaped throughout -- the process becomes a zombie
+        # in its own group (pgid == pid), and signal 0 still finds it.
+        end = time.monotonic() + 10
+        alive = True
+        while time.monotonic() < end and alive:
+            alive = orchestrate._group_alive(proc.pid)
+            if alive:
+                time.sleep(0.02)
+        os.kill(proc.pid, 0)
+
+        self.assertFalse(alive, "a group of nothing but zombies read as alive")
+
+    def test_the_windows_force_step_is_not_skipped_when_the_leader_is_reaped(self):
+        # Windows has no group liveness to read, so `_group_alive` answers False there whatever is
+        # running. Returning on that answer at the first pass would equate a closed leader pipe
+        # with a dead tree -- the inference the group kill exists to avoid -- and `taskkill /F /T`
+        # would never run (gh-ocannl-760 review).
+        win_signal = types.SimpleNamespace(
+            SIGTERM=signal.SIGTERM, SIGKILL=None, CTRL_BREAK_EVENT=1
+        )
+        proc = unittest.mock.Mock(pid=4242)
+        proc.communicate.return_value = ("cell output", None)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate.os, "name", "nt"))
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "signal", win_signal))
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            run = stack.enter_context(unittest.mock.patch.object(orchestrate.subprocess, "run"))
+
+            out, survived = orchestrate.kill_cell_group(proc)
+
+        self.assertEqual(out, "cell output")
+        self.assertFalse(survived)
+        self.assertEqual(run.call_args[0][0], ["taskkill", "/F", "/T", "/PID", "4242"])
+
+    def test_two_cells_killed_in_the_same_second_do_not_overwrite_each_other(self):
+        # The stamp is second-resolution, so a low cap or a GPU column that wedges at once puts
+        # two kills inside one second -- and `os.replace` onto the same name would destroy the
+        # first cell's quarantined database, which is the evidence the rename exists to keep.
+        db = self.dir / "cache.db"
+        db.write_bytes(b"first wedged search")
+        first = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+        db.write_bytes(b"second wedged search")
+
+        second = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+
+        kept = sorted(p for p in self.dir.glob("cache.db.wedged-*"))
+        self.assertEqual(len(kept), 2, kept)
+        self.assertEqual(
+            sorted(p.read_bytes() for p in kept),
+            [b"first wedged search", b"second wedged search"],
+        )
+        self.assertNotEqual(first, second)
+
+    def test_an_exported_parallel_does_not_become_the_default_beam_cell(self):
+        # "Unset" must mean tinygrad's default, not the invoking shell's opinion: an inherited
+        # PARALLEL would measure a different candidate-pool configuration under the default's
+        # name, with nothing in the row or its label to show which one ran.
+        ambient = {"PATH": "/usr/bin", "PARALLEL": "0"}
+
+        self.assertNotIn("PARALLEL", orchestrate.beam_cell_env(ambient, None))
+        self.assertEqual(orchestrate.beam_cell_env(ambient, 4)["PARALLEL"], "4")
+        # Zero is a value, not an absence: it is what disables tinygrad's pool outright.
+        self.assertEqual(orchestrate.beam_cell_env(ambient, 0)["PARALLEL"], "0")
+
+    @unittest.skipUnless(os.name == "posix", "the deferral is about POSIX signal delivery")
+    def test_a_cancellation_inside_the_spawn_window_still_kills_the_cell(self):
+        # Between `_execute_child` starting the cell and `Popen` returning it, no name refers to
+        # the new process -- so an exception raised there unwinds past a cleanup with nothing to
+        # clean, and the isolated runner is orphaned on the GPU with the sweep gone. The signal is
+        # delivered here at exactly that point, by a Popen wrapper.
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous_term)
+        self.addCleanup(signal.signal, signal.SIGINT, previous_int)
+        orchestrate.install_termination_handler()
+        cell = self.python("import time; time.sleep(300)")
+        real_popen = orchestrate.subprocess.Popen
+        spawned = []
+
+        def popen_then_cancel(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            # The child's pid is taken HERE rather than from a file it writes: at this point it
+            # may not have run a line of its own yet, and a cancellation that works kills it
+            # before it does.
+            spawned.append(proc.pid)
+            os.kill(os.getpid(), signal.SIGTERM)  # lands inside the window
+            return proc
+
+        started = time.monotonic()
+        with unittest.mock.patch.object(
+            orchestrate.subprocess, "Popen", side_effect=popen_then_cancel
+        ):
+            with self.assertRaises(SystemExit):
+                self.run_cell("cancelled mid-spawn", cell, timeout=60)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(self.wait_gone(spawned[0]), "the cell outlived the cancellation")
+        # And it was killed on the way out of the spawn window, not left running until the cell's
+        # own cap noticed: a held signal is delivered at the first point where raising is safe.
+        self.assertLess(elapsed, orchestrate.CELL_KILL_GRACE_S + 5)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_finished_cell_that_left_workers_behind_has_them_collected(self):
+        # `communicate` returned because the LEADER exited and the pipe closed, which says nothing
+        # about a worker that redirected its own output -- and that worker still holds the GPU, so
+        # every later cell of the sweep would be measured against it (gh-ocannl-760 review).
+        pidfile = self.dir / "leftover.pid"
+        cell = self.python(
+            "import subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.exit(1)\n",
+            pidfile,
+        )
+
+        result, note, _ = self.run_cell("leaky cell", cell, timeout=60)
+
+        self.assertIsNone(result)
+        self.assertIn("exit 1", note)
+        self.assertIn("process group behind", note)
+        leftover = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(leftover), f"pid {leftover} outlived its cell")
+
+    def test_a_survivor_makes_a_successful_cell_a_failure(self):
+        # The cell ran, printed a result line and exited zero -- and something it spawned outlived
+        # SIGKILL and still holds the device. That makes this row's own timing suspect and every
+        # later row of the run too, so recording it as a success (with a warning on a console
+        # nobody keeps) publishes exactly what the failure section exists to stop. The survivor is
+        # stood in for: nothing outlives SIGKILL but a process stuck in the kernel.
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            result, note, _ = self.run_cell("successful with a survivor", cell, timeout=60)
+
+        self.assertIsNone(result)
+        self.assertIn("SURVIVED SIGKILL", note)
+        self.assertIn("every later cell", note)
+
+    @unittest.skipUnless(os.name == "posix", "the deferral is about POSIX signal delivery")
+    def test_a_cancellation_during_the_kill_does_not_abandon_the_group(self):
+        # A signal arriving while `kill_cell_group` is in its grace loop raises out of the `except
+        # TimeoutExpired` clause that is doing the killing -- and a sibling `except BaseException`
+        # does not catch what another `except` clause raises, so the escalation stops halfway and
+        # the group outlives the sweep (gh-ocannl-760 review). The cell here holds the grace open
+        # by ignoring SIGTERM, and the sweep is cancelled while it does.
+        pidfile = self.dir / "mid_kill.pid"
+        driver = self.python(
+            "import signal, sys, orchestrate\n"
+            "orchestrate.install_termination_handler()\n"
+            "cell = [sys.executable, '-c',\n"
+            "  'import os, signal, sys, time\\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+            "open(sys.argv[1], \\'w\\').write(str(os.getpid()))\\n"
+            "sys.stdout.flush()\\n"
+            "time.sleep(300)\\n', sys.argv[1]]\n"
+            "orchestrate.run_cell('cell cancelled mid-kill', cell, timeout=2)\n",
+            pidfile,
+        )
+        sweep = subprocess.Popen(
+            driver,
+            cwd=str(Path(orchestrate.__file__).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: sweep.poll() is None and sweep.kill())
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not pidfile.exists():
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the cell never started")
+        stubborn = int(pidfile.read_text())
+        # Into the cap (2 s) and then into the grace, where the kill is waiting on a cell that
+        # will not answer SIGTERM.
+        time.sleep(4)
+        self.assertTrue(self.alive(stubborn), "the cell was gone before the kill was interrupted")
+
+        sweep.terminate()
+        sweep.wait(timeout=40)
+
+        self.assertTrue(
+            self.wait_gone(stubborn, deadline_s=30),
+            f"pid {stubborn} outlived a sweep cancelled mid-kill",
+        )
+
+    def test_a_search_that_failed_partway_names_its_cache_too(self):
+        # A search that exits nonzero partway leaves the same partial cache a killed one does --
+        # some arms committed, the rest never run -- and the next attempt over it reports a
+        # provenance nobody wrote. So the cell is asked on this path too, with killed=False: the
+        # risk is the same, what may be DONE about it is not (the cache is shared with every later
+        # cell of the sweep, and the failure may have been a pre-search one).
+        seen = []
+
+        result, note, _ = self.run_cell(
+            "failed search",
+            self.python("import sys; sys.exit(3)"),
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "CACHE AT RISK: partial search",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(seen, [False])
+        self.assertIn("exit 3", note)
+        self.assertIn("CACHE AT RISK", note)
+
+    def test_the_failed_path_leaves_the_shared_cache_alone(self):
+        # ... and "asked" must not mean "moved": a cell that exited on its own may never have
+        # searched at all, while the cache is shared with every later cell of the sweep.
+        db = self.dir / "cache.db"
+        db.write_bytes(b"the sweep's warm kernels")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)}, killed=False)
+
+        self.assertTrue(db.exists())
+        self.assertEqual(db.read_bytes(), b"the sweep's warm kernels")
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("exited rather than being killed", note)
+
+    def test_the_report_names_the_pool_a_beam_row_searched_with(self):
+        # A beam row's compile cost IS a search cost, and the pool changes it threefold -- so
+        # `beam` alone gives the default, `PARALLEL=0` and an explicit N one identity in the table
+        # people read numbers out of. The default keeps the bare name (every report so far
+        # recorded it that way, and rows that are the same should read the same).
+        out = Path(tempfile.mkdtemp())
+        rows = [
+            cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1]),
+            cell("tinygrad", "HIP", "beam", [2.3, 2.2, 2.1]),
+            cell("tinygrad", "HIP", "beam", [2.3, 2.2, 2.1]),
+        ]
+        rows[1]["beam_parallel"] = 0
+        rows[2]["beam_parallel"] = None
+        orchestrate.parity_check(rows)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            orchestrate.report(rows, out)
+
+        text = (out / "report.md").read_text()
+        self.assertIn("| beam P=0 |", text)
+        self.assertIn("| beam |", text)
+
+    def test_a_cell_whose_leftovers_were_killed_reports_a_killed_search(self):
+        # The leftover sweep interrupted a member -- possibly mid-write -- so the cache is in the
+        # state the kill path quarantines, whatever the leader's own exit said.
+        seen = []
+        pidfile = self.dir / "leftover_killed.pid"
+        cell = self.python(
+            "import subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.exit(1)\n",
+            pidfile,
+        )
+
+        _, note, _ = self.run_cell(
+            "failed leaving workers",
+            cell,
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "cache handled",
+        )
+
+        self.assertEqual(seen, [True], "a cell whose members we killed reported killed=False")
+        self.assertIn("process group behind", note)
+        self.assertTrue(self.wait_gone(int(pidfile.read_text())))
+
+    def test_a_survivor_failure_still_handles_the_cache(self):
+        # The survivor branch returns early, and part of the search was forcibly interrupted --
+        # which is what `stuck` means -- so the cache is in the state the cap's path quarantines.
+        # Returning without asking would leave it for the next beam cell to read.
+        seen = []
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            _, note, _ = self.run_cell(
+                "successful over a survivor",
+                cell,
+                timeout=60,
+                on_incomplete=lambda killed: seen.append(killed) or "cache quarantined",
+            )
+
+        self.assertEqual(seen, [True])
+        self.assertIn("SURVIVED SIGKILL", note)
+        self.assertIn("cache quarantined", note)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_supporting_build_is_killed_with_its_own_children(self):
+        # The sweep's own subprocesses -- the build, the device probes -- get the same discipline
+        # as a cell: `subprocess.run` kills its direct child on an exception but knows nothing of
+        # that child's children, and `dune build` forks compilers (gh-ocannl-760 review).
+        pidfile = self.dir / "build_worker.pid"
+        build = self.python(
+            "import subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 1.5)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+        with self.assertRaises(KeyboardInterrupt):
+            orchestrate.run_supporting(build, capture_output=True)
+
+        worker = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived the cancelled build")
+
+    def test_a_cap_that_cannot_mean_anything_is_refused_before_the_first_cell(self):
+        # A negative cap expires every `communicate` at once -- killing every cell of the sweep
+        # and quarantining their caches on the way -- and nan/inf raise from inside it. Both are
+        # worth refusing at the argument rather than cell by cell.
+        for bad in ("-1", "nan", "inf", "-0.5"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                orchestrate.cell_timeout_arg(bad)
+        self.assertEqual(orchestrate.cell_timeout_arg("0"), 0.0)  # 0 is "no cap", not "cap of 0"
+        self.assertEqual(orchestrate.cell_timeout_arg("1800"), 1800.0)
+
+    def test_a_negative_pool_size_is_refused_too(self):
+        # `-1` is not "unset" and not "default": tinygrad builds a pool for any truthy PARALLEL
+        # and hands the value to `multiprocessing.Pool`, which refuses a negative count -- so
+        # every beam cell of the sweep would die inside the runner.
+        for bad in ("-1", "-8"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                orchestrate.beam_parallel_arg(bad)
+        self.assertEqual(orchestrate.beam_parallel_arg("0"), 0)  # 0 is no pool at all
+        self.assertEqual(orchestrate.beam_parallel_arg("4"), 4)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_survivor_holding_the_pipe_does_not_swallow_the_cells_output(self):
+        # A member that outlives SIGKILL still owns the captured stdout, so every `communicate`
+        # in the kill loop times out and the output would be lost -- exactly where the partial log
+        # is the only evidence about a cell nobody will run again. It lives on the exception.
+        # Nothing outlives SIGKILL on demand, so the survivor is stood in for by a grandchild
+        # that ESCAPES the group (its own session) while still holding the stdout it inherited --
+        # which reproduces the property that matters here: every `communicate` in the kill loop
+        # times out, so the output can only come off the exception.
+        pidfile = self.dir / "pipe_holder.pid"
+        cell = self.python(
+            "import subprocess, sys, time\n"
+            "print('the evidence', flush=True)\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  start_new_session=True)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "time.sleep(300)\n",
+            pidfile,
+        )
+
+        def clear_the_holder():
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+        self.addCleanup(clear_the_holder)
+        with unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 1.0):
+            _, note, log = self.run_cell("wedged behind a held pipe", cell, timeout=1.5)
+
+        self.assertIn("TIMED OUT", note)
+        self.assertIn("the evidence", log)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_kill_that_could_not_reap_still_lets_go_of_the_pipes(self):
+        # The one way out of the kill loop without reaping is a member that outlived SIGKILL
+        # holding the write end, so every `communicate` timed out and `Popen` was left owning an
+        # open read end for the rest of the sweep -- a descriptor per unreapable cell, leaked on
+        # the path least able to spare them (it announced itself as a ResourceWarning under
+        # `dune build @benchmarks/runtest`). The survivor is stood in for by a grandchild that
+        # ESCAPES the group into its own session while still holding the stdout it inherited,
+        # which is what makes every reap in the loop time out.
+        pidfile = self.dir / "unreapable.pid"
+        holder = subprocess.Popen(
+            self.python(
+                "import subprocess, sys, time\n"
+                "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+                "  start_new_session=True)\n"
+                "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+                "time.sleep(300)\n",
+                pidfile,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **orchestrate._own_group_kwargs(),
+        )
+        # The kill loop cannot reap this leader (that is the point), so the test reaps it.
+        self.addCleanup(holder.wait)
+
+        def clear_the_holder():
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+        self.addCleanup(clear_the_holder)
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 1.0):
+            orchestrate.kill_cell_group(holder)
+
+        self.assertTrue(holder.stdout.closed, "the kill left the cell's read end open")
+        # And the leader is reaped: what the loop could not finish is the READ, blocked on a pipe
+        # the survivor holds, not the wait -- the leader took the SIGKILL.
+        self.assertIsNotNone(holder.returncode, "the kill left the cell's leader unreaped")
+
+    @unittest.skipUnless(os.name == "posix", "the cancellation is delivered by a signal here")
+    def test_a_cancelled_supporting_command_says_its_group_outlived_the_kill(self):
+        # The other exit from `_run_supporting`, and the same survivor its ordinary path stops
+        # the sweep over. Here the sweep is already leaving, so there is nothing to stop -- but a
+        # cancellation that reports a clean exit over a process still holding the device is how
+        # the NEXT run gets measured against it (gh-ocannl-760 review). The survivor is stood in
+        # for as elsewhere: nothing outlives SIGKILL but a process stuck in the kernel.
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            signal.setitimer(signal.ITIMER_REAL, 1.0)
+            with self.assertRaises(KeyboardInterrupt):
+                orchestrate.run_supporting(self.python("import time; time.sleep(300)"))
+
+        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_successful_cell_whose_leftovers_were_killed_still_handles_the_cache(self):
+        # The row stands -- the cell ran and printed its result -- but a member of its group was
+        # killed on the way out, possibly mid-write, and the cache it shares with every later beam
+        # cell is in the state a kill leaves. It is the cache that is at issue, not the row.
+        seen = []
+        pidfile = self.dir / "successful_leftover.pid"
+        cell = self.python(
+            "import json, subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "print(json.dumps({'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))\n",
+            pidfile,
+        )
+
+        result, note, _ = self.run_cell(
+            "successful with leftovers",
+            cell,
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "cache quarantined",
+        )
+
+        self.assertIsNotNone(result)  # the row is good; the cache is what needed handling
+        self.assertIsNone(note)
+        self.assertEqual(seen, [True])
+        self.assertTrue(self.wait_gone(int(pidfile.read_text())))
+
+    def test_a_quarantine_that_cannot_finish_puts_back_what_it_moved(self):
+        # A half-moved family is worse than an unmoved one: a database separated from its WAL
+        # opens without the writes it holds, and the cache left behind gains a stale sidecar the
+        # next tinygrad process reads against a database it never belonged to.
+        db = self.dir / "cache.db"
+        for path in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+            path.write_bytes(b"live cache " + path.name.encode())
+        real_replace = orchestrate.os.replace
+        calls = []
+
+        def replace_then_fail(src, dst):
+            calls.append(src)
+            if len(calls) == 2:  # the -wal move, after the database has already moved
+                raise OSError(13, "Permission denied")
+            return real_replace(src, dst)
+
+        with unittest.mock.patch.object(orchestrate.os, "replace", replace_then_fail):
+            note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("could not quarantine", note)
+        # Everything is back where the next cell expects it, and nothing is left half-quarantined.
+        self.assertEqual(db.read_bytes(), b"live cache cache.db")
+        self.assertEqual(Path(f"{db}-wal").read_bytes(), b"live cache cache.db-wal")
+        self.assertEqual(sorted(p.name for p in self.dir.glob("*.wedged-*")), [])
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_supporting_command_leaves_no_descendants_behind(self):
+        # `communicate` returned because the LEADER exited, which says nothing about a build's
+        # compiler worker or a probe's framework helper -- and those hold the GPU while the sweep
+        # measures against them (gh-ocannl-760 review).
+        pidfile = self.dir / "supporting_leftover.pid"
+        build = self.python(
+            "import subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.exit(0)\n",
+            pidfile,
+        )
+
+        done = orchestrate.run_supporting(build, capture_output=True)
+
+        self.assertEqual(done.returncode, 0)
+        worker = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived its supporting command")
+
+    def test_a_supporting_survivor_stops_the_sweep_before_it_dispatches(self):
+        # Where a cell's survivor fails that cell, a survivor from the BUILD or a device probe is
+        # shared by every row the sweep is about to produce -- there is no subset of the results
+        # to disbelieve, and a cap cannot bound damage that is already in all of them. So this one
+        # stops the sweep. (The survivor is stood in for, as elsewhere: nothing outlives SIGKILL
+        # except a process stuck in the kernel.)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            with self.assertRaises(SystemExit) as raised:
+                orchestrate.run_supporting(self.python("pass"), capture_output=True)
+
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
+        self.assertIn("nothing is dispatched", str(raised.exception))
+
+    def test_a_fractional_cap_is_reported_as_the_cap_it_was(self):
+        # `{:.0f}` rounded a sub-second cap to `TIMED OUT after 0s`, one clause before the text
+        # saying that zero disables the cap.
+        _, note, _ = self.run_cell(
+            "briefly capped", self.python("import time; time.sleep(300)"), timeout=0.25
+        )
+
+        self.assertIn("TIMED OUT after 0.25s", note)
+
+    def test_the_leftover_probe_itself_runs_deferred(self):
+        # A cancellation landing on the probe -- or between it reading the group as alive and the
+        # kill starting -- would leave exactly the worker the probe just found, in a session
+        # nothing else will reach (gh-ocannl-760 review). So the property is that the probe and
+        # its cleanup are inside ONE deferral window, which is what this reads: the depth seen by
+        # the probe itself.
+        depth_at_probe = []
+
+        def probe(_pid):
+            depth_at_probe.append(orchestrate._defer_depth)
+            return False
+
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with unittest.mock.patch.object(orchestrate, "_group_alive", probe):
+            result, note, _ = self.run_cell("probed", cell, timeout=60)
+
+        self.assertIsNone(note)
+        self.assertIsNotNone(result)
+        self.assertTrue(depth_at_probe, "the ordinary path never probed for leftovers")
+        self.assertTrue(
+            all(depth > 0 for depth in depth_at_probe),
+            f"the leftover probe ran with cancellations undeferred: {depth_at_probe}",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "the interrupt path needs POSIX signals")
+    def test_an_interrupted_cell_with_a_survivor_says_so(self):
+        # The interrupt branch exits rather than records, so its print is the operator's only
+        # chance to hear that something still holds the device -- while the cancellation's own
+        # message says the cell was killed, and the retry they are about to start would be
+        # measured against the survivor. The survivor is stood in for, as elsewhere.
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaises(KeyboardInterrupt):
+                orchestrate.run_cell(
+                    "interrupted over a survivor", self.python("import time; time.sleep(300)")
+                )
+
+        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+
+    def test_the_cache_is_quarantined_even_if_the_cell_log_cannot_be_written(self):
+        # The kill is what tore the cache, so undoing it must not sit behind fallible code: the
+        # optional cell log writes to an operator-supplied directory, which can be unwritable or
+        # full, and losing the sweep to that would leave the partial cache.db in place AND lose
+        # the failure record.
+        called = []
+        with unittest.mock.patch.object(
+            orchestrate, "CELL_LOG_DIR", Path("/dev/null/not-a-directory")
+        ):
+            result, note, _ = self.run_cell(
+                "wedged with a broken log dir",
+                self.python("import time; time.sleep(300)"),
+                timeout=1.0,
+                on_incomplete=lambda killed: called.append(("killed", killed))
+                or "quarantined the cache",
+            )
+
+        self.assertIsNone(result)
+        # ... and told that this cell was KILLED, which is what decides whether the cache may
+        # be moved aside at all.
+        self.assertEqual(called, [("killed", True)])
+        self.assertIn("quarantined the cache", note)
+
+    def test_a_killed_beam_cell_quarantines_the_cache_it_was_writing(self):
+        # The contaminated-cache consequence recorded on the issue's HIP leg: the search writes
+        # its winners into one sqlite file as it goes, so a kill leaves a partial cache that the
+        # next run neither replays nor searches past -- while `searched` reports one of the two.
+        db = self.dir / "cache.db"
+        for path in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+            path.write_bytes(b"half a beam search")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+
+        self.assertFalse(db.exists())
+        moved = sorted(p.name for p in self.dir.glob("cache.db.wedged-*"))
+        self.assertEqual(len(moved), 3, moved)
+        # The sidecars move UNDER the quarantined database's name, because that is the only place
+        # sqlite looks for them: `cache.db-wal.wedged-<stamp>` beside `cache.db.wedged-<stamp>` is
+        # a database that opens without the writes the killed search never checkpointed -- the
+        # evidence the move exists to keep, dropped silently (gh-ocannl-760 review).
+        base = next(name for name in moved if not name.endswith(("-wal", "-shm")))
+        self.assertEqual(moved, sorted([base, f"{base}-wal", f"{base}-shm"]))
+        self.assertIn("quarantined", note)
+        self.assertIn("searched", note)
+
+    def test_declining_the_quarantine_still_names_the_risk(self):
+        db = self.dir / "cache.db"
+        db.write_bytes(b"half a beam search")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)}, enabled=False)
+
+        self.assertTrue(db.exists())
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("--no-cache-quarantine", note)
+
+    def test_a_cache_that_was_never_written_is_not_invented(self):
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(self.dir / "absent.db")})
+
+        self.assertIn("nothing to quarantine", note)
+
+    def test_the_ocannl_note_describes_that_cache_rather_than_tinygrads(self):
+        # The two caches differ where it matters: OCANNL commits entries atomically, so the
+        # honest statement is about the retry's provenance, not about a torn file.
+        note = orchestrate.ocannl_cache_note()
+
+        self.assertIn("autotune_cache", note)
+        # And what it must NOT say is that the retry replays: a kill lands mid-search, so the
+        # retry replays the finished arms and searches the rest, and `search_provenance` reads
+        # `searched` -- true whenever any arm searched. The mixed pass reports SEARCHED, and a
+        # note promising REPLAY would misdescribe exactly the case it exists for.
+        self.assertIn("SEARCHED", note)
+        self.assertEqual(orchestrate.search_provenance({"searched": True}), "SEARCHED")
+
+    def test_a_failed_cell_is_named_in_the_report(self):
+        # A failure is invisible in every table above it -- an unrun cell and a wedged one read
+        # identically once the report outlives the run log.
+        out = Path(tempfile.mkdtemp())
+        failures = [("mlp_small tinygrad/CUDA/beam", "TIMED OUT after 1800s; quarantined ...")]
+        cells = [cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])]
+        orchestrate.parity_check(cells)
+
+        orchestrate.report(cells, out, (), failures)
+
+        text = (out / "report.md").read_text()
+        self.assertIn("Runner failures", text)
+        self.assertIn("mlp_small tinygrad/CUDA/beam", text)
+        self.assertIn("TIMED OUT", text)
+
+    def test_a_run_with_no_failures_says_nothing_about_them(self):
+        out = Path(tempfile.mkdtemp())
+        cells = [cell("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])]
+        orchestrate.parity_check(cells)
+
+        orchestrate.report(cells, out)
+
+        self.assertNotIn("Runner failures", (out / "report.md").read_text())
 
 
 if __name__ == "__main__":
