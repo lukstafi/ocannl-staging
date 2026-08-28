@@ -1518,6 +1518,60 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIn("TIMED OUT", note)
         self.assertIn("the evidence", log)
 
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_successful_cell_whose_leftovers_were_killed_still_handles_the_cache(self):
+        # The row stands -- the cell ran and printed its result -- but a member of its group was
+        # killed on the way out, possibly mid-write, and the cache it shares with every later beam
+        # cell is in the state a kill leaves. It is the cache that is at issue, not the row.
+        seen = []
+        pidfile = self.dir / "successful_leftover.pid"
+        cell = self.python(
+            "import json, subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "print(json.dumps({'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))\n",
+            pidfile,
+        )
+
+        result, note, _ = self.run_cell(
+            "successful with leftovers",
+            cell,
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "cache quarantined",
+        )
+
+        self.assertIsNotNone(result)  # the row is good; the cache is what needed handling
+        self.assertIsNone(note)
+        self.assertEqual(seen, [True])
+        self.assertTrue(self.wait_gone(int(pidfile.read_text())))
+
+    def test_a_quarantine_that_cannot_finish_puts_back_what_it_moved(self):
+        # A half-moved family is worse than an unmoved one: a database separated from its WAL
+        # opens without the writes it holds, and the cache left behind gains a stale sidecar the
+        # next tinygrad process reads against a database it never belonged to.
+        db = self.dir / "cache.db"
+        for path in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+            path.write_bytes(b"live cache " + path.name.encode())
+        real_replace = orchestrate.os.replace
+        calls = []
+
+        def replace_then_fail(src, dst):
+            calls.append(src)
+            if len(calls) == 2:  # the -wal move, after the database has already moved
+                raise OSError(13, "Permission denied")
+            return real_replace(src, dst)
+
+        with unittest.mock.patch.object(orchestrate.os, "replace", replace_then_fail):
+            note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)})
+
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("could not quarantine", note)
+        # Everything is back where the next cell expects it, and nothing is left half-quarantined.
+        self.assertEqual(db.read_bytes(), b"live cache cache.db")
+        self.assertEqual(Path(f"{db}-wal").read_bytes(), b"live cache cache.db-wal")
+        self.assertEqual(sorted(p.name for p in self.dir.glob("*.wedged-*")), [])
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session

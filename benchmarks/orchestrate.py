@@ -751,6 +751,14 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
             print(f"!!! {label}: {failed_note}", flush=True)
         return None, note
     result = json.loads(line)
+    if leftovers and on_incomplete:
+        # The row stands — the cell ran and printed its result — but a member of its group was
+        # killed on the way out, possibly mid-write, and the cache it shares with every later
+        # beam cell is in the state a kill leaves (gh-ocannl-760 review). Same handling as the
+        # failure paths; it is the cache that is at issue here, not this row.
+        killed_note = on_incomplete(True)
+        if killed_note:
+            print(f"!!! {label}: {killed_note}", flush=True)
     print(
         f"    p50 {num(result['step_ms']['p50'], '.3f')} ms, "
         f"compile {num(result['compile_s'], '.2f')} s",
@@ -840,6 +848,7 @@ def quarantine_tinygrad_cache(env=None, enabled=True, killed=True):
         attempt += 1
         quarantined = db.with_name(f"{db.name}.wedged-{stamp}.{attempt}")
     moved = []
+    rolled_back = []
     # The sidecars are renamed UNDER the quarantined database's name, not beside their own:
     # sqlite finds a write-ahead log only at `<database>-wal` (and its index at `-shm`), so
     # `cache.db-wal.wedged-<stamp>` next to `cache.db.wedged-<stamp>` is a database that opens
@@ -853,7 +862,19 @@ def quarantine_tinygrad_cache(env=None, enabled=True, killed=True):
         try:
             os.replace(path, dest)
         except OSError as exc:
-            return f"CACHE AT RISK: {risk}; could not quarantine it ({exc})"
+            # All or nothing: a half-moved family is worse than an unmoved one — a database
+            # separated from its write-ahead log opens without the writes it holds, and the cache
+            # left behind gains a stale sidecar the next tinygrad process will read against a
+            # database it never belonged to (gh-ocannl-760 review). Put back what was moved.
+            undone = []
+            for done, origin in reversed(rolled_back):
+                try:
+                    os.replace(done, origin)
+                except OSError:
+                    undone.append(done.name)
+            trouble = f" (and {', '.join(undone)} could not be put back)" if undone else ""
+            return f"CACHE AT RISK: {risk}; could not quarantine it ({exc}){trouble}"
+        rolled_back.append((dest, path))
         moved.append(dest.name)
     return f"quarantined the tinygrad kernel cache to {db.parent}/{{{', '.join(moved)}}} — {risk}"
 
@@ -1553,6 +1574,12 @@ def main():
     partial = HERE / "results" / "partial.jsonl"
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
+    # Failures stream too, beside the results (gh-ocannl-760 review). A sweep that is interrupted,
+    # terminated or crashed before `report()` otherwise leaves an artifact in which the cell that
+    # WEDGED is indistinguishable from one that never ran — losing the cap, the survivor and the
+    # quarantine record, which for an unattended run is the whole finding.
+    partial_failures = HERE / "results" / "partial-failures.jsonl"
+    partial_failures.write_text("")
 
     # The fixture the cells currently being dispatched are measuring — stamped onto every result
     # so a row, and the report built from it, states its own workload identity (gh-ocannl-645)
@@ -1574,6 +1601,8 @@ def main():
                 f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
         else:
             failures.append((label, note))
+            with open(partial_failures, "a") as f:
+                f.write(json.dumps({"cell": label, "why": note}) + "\n")
         print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
 
     for fx in fixtures:
