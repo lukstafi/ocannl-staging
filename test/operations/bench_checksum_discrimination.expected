@@ -4,8 +4,8 @@ the shared checksum sees every 4-row swap at every extent swept: true
 the flat-offset weight misses a row swap at every multiple of 251 (negative control): true
 the shared checksum sees a 4-row swap at those same multiples of 251: true
 an unweighted sum misses every 4-row swap at every extent (negative control): true
-mixed ma rows stay pairwise distinct at every row stride 12 divides: true
-flat-offset ma rows are all identical at every row stride 12 divides (negative control): true
+mixed ma rows stay pairwise distinct at every row stride 48 divides: true
+flat-offset ma rows are all identical at every row stride 48 divides (negative control): true
 mixed mb rows stay pairwise distinct at every row stride 17 divides: true
 flat-offset mb rows are all identical at every row stride 17 divides (negative control): true
 row strides swept for weight collisions: 2..64 plus 251, 502, 753, over 512 rows
@@ -16,7 +16,7 @@ the swap that single stream is blind to changes the data and is seen by both str
 every ma value is strictly positive, so no ma row can be all-zero: true
 no ma row is all-zero at any row stride swept: true
 a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control): true
-both weight streams miss the swap of generated rows 459 and 1310 at m=2000 n=2 k=2
+both weight streams miss the swap of generated rows 355 and 2891 at m=4000 n=2 k=2
 both weight streams miss the swap of generated rows 312 and 1166 at m=2000 n=3 k=2
 the printed checksum can miss a swap of generated output rows, so it is not the guard (negative control): true
 those swaps really do leave every printed checksum stream unchanged: true
@@ -27,17 +27,17 @@ the pre-fix fold made rows 5977 and 10232 identical at every column of every sal
 the mix keeps those two rows apart: true
 no two rows below 100000 share a mix value in a column, at any salt or column swept: true
 the pre-fix fold did collide there, so that sweep can fail (negative control): true
-row at which ma rows first repeat, by k (mixed over 12 levels vs flat mod 13):
-  k = 1   mixed 3                  flat 13
-  k = 2   mixed 11                 flat 13
-  k = 3   mixed 22                 flat 13
-  k = 4   mixed 22                 flat 13
-  k = 6   mixed 65                 flat 13
-  k = 8   mixed 406                flat 13
-  k = 12  mixed 11499              flat 13
+row at which ma rows first repeat, by k (mixed over 48 levels vs flat mod 13):
+  k = 1   mixed 7                  flat 13
+  k = 2   mixed 33                 flat 13
+  k = 3   mixed 164                flat 13
+  k = 4   mixed 526                flat 13
+  k = 6   mixed 963                flat 13
+  k = 8   mixed 4993               flat 13
+  k = 12  mixed none below 20000   flat 13
   k = 16  mixed none below 20000   flat 13
-the mixed ma keeps rows distinct at least as far as the flat form, at every k above 2: true
-at k <= 2 both forms are exhausted within twenty rows, against a levels^k space bound of 144 that leaves no room to improve: true
+the mixed ma keeps rows distinct at least as far as the flat form, at every k above 1: true
+at k <= 1 both forms are exhausted within twenty rows, against a levels^k space bound of 48 that leaves no room to improve: true
 row at which mb rows first repeat, by n (mixed over 17 levels vs flat mod 17):
   n = 1   mixed 4                  flat 17
   n = 2   mixed 13                 flat 17

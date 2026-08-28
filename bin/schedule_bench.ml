@@ -61,9 +61,17 @@ module Numerics = Ir.Numerics
 (* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s of
    the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel that
    never tensorizes ("timed is not tensorized", docs/agent-notes/scheduling-and-autotune.md).
-   Metal's f32 [simdgroup_matrix] path has no such gate and is unaffected. This bench asserts no
-   parity, so the tf32 rounding is free; cross-check a new backend's emission with
-   --ocannl_schedule_log_declines=true before trusting the labels. *)
+   Metal's f32 [simdgroup_matrix] path has no such gate and is unaffected. Cross-check a new
+   backend's emission with --ocannl_schedule_log_declines=true before trusting the labels.
+
+   The tf32 rounding is not free of the bench's guard, and never was: the comparison oracle is the
+   UNSCHEDULED kernel, which carries no [Tile_mma] and so rounds nothing, while an mma variant
+   rounds both its operands to tf32 — so [= reference] on an mma line is a claim that the operands
+   survive that rounding exactly. They do, by construction rather than by luck: ma is a multiple of
+   1/16 below 3 (six significant bits) and mb an integer in -8..8 (four), against tf32's 11-bit
+   significand. Confirmed on an RTX 5070 Ti under CUDA 13.3 at the gh-ocannl-738 granularity bump —
+   mma_pd1 and mma_pd2 both report [= reference], with the census confirming they tensorized. A
+   backend or a granularity that breaks the six-bit budget owes that measurement again. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 (* Flushed per line ([Bench_out]): an unflushed table reaches the reader only when the process
    exits, which on a leg that is seconds to minutes per run reads as a hang (gh-ocannl-829). *)
@@ -144,22 +152,35 @@ let () =
      divides k), and a schedule that substitutes the wrong row of a collapsed operand then computes
      the correct output, which no whole-output check can see. Keying on the (row, column) pair
      removes the class: the row index enters the value in its own right, so no divisibility relation
-     between a modulus and a stride can erase it. The value RANGES are unchanged — ma in multiples
-     of 0.25 up to 3, mb the integers -8..8 — so the products stay exact in binary and the
-     checksum's exactness argument is the one it was.
+     between a modulus and a stride can erase it. The value RANGE is unchanged — ma over (0, 3], mb
+     the integers -8..8 — so the products stay exact in binary and the checksum's exactness argument
+     is the one it was.
 
-     ma drops the zero from its set ([Bench_checksum.positive_level], 12 levels rather than 13),
-     which the flat form did not need and the mixed one does: ma's row spans the reduction, so an
-     all-zero ma row zeroes the whole output row, which against a zero-initialized destination is
-     indistinguishable from a schedule that dropped that row. Under the flat form no ma row could be
-     all-zero for k >= 2 (its values marched with the column); under the mix each entry is
-     independent, so a row of k of them is all-zero with probability 13^-k — at k = 2 that is one
-     row in 169, and m = 465 has one. mb keeps its zero: with ma strictly positive no output row is
+     ma's GRANULARITY is 1/16, 48 levels rather than the 12 of 1/4 it was minted at through
+     gh-ocannl-711 (gh-ocannl-738). Keying on the (row, column) pair does not answer how many rows a
+     generator can keep distinct over a k-wide row: that is bounded by [levels ^ k] whatever it
+     encodes, so at the narrowest reduction this bench accepts, k = 2, 12 levels left only 144 rows
+     to draw from and ma's rows first repeated at row 11. 48 levels take the bound to 2304 and the
+     measured first repeat to 33; every k above 2 moves out by a comparable factor
+     ([test/operations/bench_checksum_discrimination] prints the table). The finer levels stay exact
+     in binary — a multiple of 1/16 below 3 needs six significant bits, which f32, tf32 (11) and f16
+     (11) all hold — so no leg's reduction rounds, and the CUDA mma variants were re-run to confirm
+     it rather than argued into it: see the [tf32_matmuls] note at the top of this file.
+
+     ma drops the zero from its set ([Bench_checksum.positive_level] mints [1..levels] rather than
+     [0..levels]), which the flat form did not need and the mixed one does: ma's row spans the
+     reduction, so an all-zero ma row zeroes the whole output row, which against a zero-initialized
+     destination is indistinguishable from a schedule that dropped that row. Under the flat form no
+     ma row could be all-zero for k >= 2 (its values marched with the column); under the mix each
+     entry is independent, so a row of k of them drawn from a zero-admitting residue is all-zero
+     with probability (levels + 1)^-k — at 13 levels and k = 2 that is one row in 169, and m = 465
+     has one. More levels only make that rarer, never impossible, which is why the fix is strict
+     positivity and not granularity. mb keeps its zero: with ma strictly positive no output row is
      systematically zero, and mb's near-mean-zero set is what keeps the partial sums random-walking
      rather than growing with k. *)
   let mav =
     Array.init (m * k)
-      ~f:(Bench_checksum.positive_level ~salt:0x5A17 ~row_stride:k ~levels:12 ~scale:0.25)
+      ~f:(Bench_checksum.positive_level ~salt:0x5A17 ~row_stride:k ~levels:48 ~scale:0.0625)
   in
   let mbv =
     Array.init (k * n) ~f:(fun t ->
@@ -784,8 +805,9 @@ let () =
      variant has been reported — a guard that only prints leaves an automated run free to keep the
      speedup of a kernel already known to be wrong, which is the same hazard `Verdict` exists for on
      the test side. There is no rounding to excuse it: ma and mb are exact in binary with at most
-     four mantissa bits each, so every product is exact (in tf32 and f16 as well as f32) and every
-     leg's reduction is exact whatever order it sums in, at any extent this bench runs. *)
+     six and four significant bits respectively, so every product is exact (in tf32 and f16 as well
+     as f32 — both carry an 11-bit significand) and every leg's reduction is exact whatever order it
+     sums in, at any extent this bench runs. *)
   if !disagreements > 0 then
     p
       "WRONG RESULT: %d variant(s) did not reproduce the reference output cell for cell — the \
