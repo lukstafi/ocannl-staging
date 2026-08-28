@@ -409,9 +409,9 @@ def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
             f"refusing to measure {named}: these bytes are not the ones "
             "fixtures/DIGESTS.txt records for any origin, so a report of them would name a "
             "workload nothing pins. If they are an unrecorded box's copies, pin them with "
-            "`python3 fixture_digest.py --record --origin <box>` (no regeneration, and it leaves "
-            "the other boxes' entries alone); if you deliberately regenerated, re-run "
-            "gen_fixtures.py to re-record (the digest diff is the review); or pass "
+            f"`python3 {fixture_digest.cli_command()} --record --origin <box>` (no regeneration, "
+            "and it leaves the other boxes' entries alone); if you deliberately regenerated, "
+            "re-run gen_fixtures.py to re-record (the digest diff is the review); or pass "
             "--no-fixture-digest-check to measure them as they are."
         )
     if unpinned:

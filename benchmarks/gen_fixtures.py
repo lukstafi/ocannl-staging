@@ -229,10 +229,12 @@ if __name__ == "__main__":
     if any(was is not None for _, _, was, _ in changes):
         print("  a changed fixture is a changed workload: reports measured on the previous "
               "digest are not comparable with reports measured on this one.")
-    others = fixture_digest.other_origins(digests, [fx.name for fx in written], origin)
+    others = fixture_digest.divergent_origins(digests, [fx.name for fx in written], origin)
     if others:
         # The trap gh-ocannl-759 was filed about: their entries survive (so their fixtures still
-        # pass the gate), but their bytes are now a different workload from this box's.
-        print(f"  other origins still recorded for these fixtures: {', '.join(others)} — "
+        # pass the gate), but their bytes are now a different workload from this box's. Only
+        # origins actually on different BYTES are named -- a coordinated regeneration that landed
+        # the same bytes on both boxes is the goal, not something to warn about.
+        print(f"  origins still on DIFFERENT bytes for these fixtures: {', '.join(others)} — "
               "regeneration is a cross-box event, so until they regenerate too, their published "
-              "numbers and this box's are on different bytes.")
+              "numbers and this box's are on different workloads.")

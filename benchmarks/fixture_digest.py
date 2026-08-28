@@ -33,8 +33,8 @@ checkout without the benchmark venv can still read, check and record digests. Th
 numpy and no safetensors, and the boxes whose published numbers most need pinning are exactly the
 ones whose fixtures predate any venv you could reconstruct.
 
-    python3 fixture_digest.py --record            # pin fixtures/*.safetensors as this box's
-    python3 fixture_digest.py --check             # what is on disk, against what is recorded
+    python3 benchmarks/fixture_digest.py --record   # pin fixtures/*.safetensors as this box's
+    python3 benchmarks/fixture_digest.py --check    # what is on disk, against what is recorded
 """
 
 import argparse
@@ -87,6 +87,20 @@ def this_origin():
     return platform.node() or "unknown-host"
 
 
+def cli_command():
+    """`fixture_digest.py` spelled so it runs from the CALLER's cwd, whatever that is.
+
+    Remediation text is read by an operator who will paste it, and the canonical sweep command
+    (`benchmarks/.venv/bin/python benchmarks/orchestrate.py`) runs from the repository root, where
+    a bare `fixture_digest.py` names nothing.
+    """
+    here = Path(__file__).resolve()
+    try:
+        return str(here.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(here)
+
+
 def check_origin(origin):
     """Origins are whitespace-free (the format is whitespace-split) and non-empty."""
     if not origin or origin.split() != [origin]:
@@ -94,10 +108,14 @@ def check_origin(origin):
     return origin
 
 
-def read_digests(path):
+def read_digests(path, legacy_origin=None):
     """`{name: [Entry, ...]}` recorded in `path`; an absent file records nothing.
 
     Entries under one name are origin-sorted, and one origin appears at most once per name.
+
+    `legacy_origin` attributes pre-gh-ocannl-759 three-field lines to that box instead of
+    refusing them. It exists only for the one-shot migration behind `--record --adopt-legacy`,
+    where the operator is ASSERTING whose those bytes were; nothing infers it.
     """
     path = Path(path)
     entries = {}
@@ -109,13 +127,21 @@ def read_digests(path):
             continue
         fields = line.split()
         if len(fields) == 3:
-            # The pre-gh-ocannl-759 three-field format. Not silently adopted under some guessed
-            # origin: an unattributed digest is precisely the "which box is this?" silence this
-            # file exists to break, and the two boxes' bytes really do differ, so a guess would
-            # be a coin flip recorded as a fact.
+            # The pre-gh-ocannl-759 three-field format. Never adopted under a GUESSED origin: an
+            # unattributed digest is precisely the "which box is this?" silence this file exists
+            # to break, and the boxes' bytes really do differ, so a guess would be a coin flip
+            # recorded as a fact. An operator who knows whose they are says so with
+            # --adopt-legacy, which is what makes this refusal a migration rather than a wall.
+            if legacy_origin is not None:
+                sha, size, name = fields
+                entries.setdefault(name, {})[legacy_origin] = Entry(
+                    sha, int(size), legacy_origin
+                )
+                continue
             raise ValueError(
-                f"{path}:{lineno}: {line!r} is the old unattributed format; re-record it with "
-                "`python3 fixture_digest.py --record --origin <box>` so the entry says whose "
+                f"{path}:{lineno}: {line!r} is the old unattributed format; attribute it with "
+                f"`python3 {cli_command()} --record --adopt-legacy <box>` (which rewrites these "
+                "lines under that box and leaves their bytes untouched) so the entry says whose "
                 "bytes it is (gh-ocannl-759)"
             )
         if len(fields) != 4:
@@ -143,7 +169,7 @@ def write_digests(path, entries):
     Path(path).write_text(HEADER + body)
 
 
-def record(path, fixtures, origin=None):
+def record(path, fixtures, origin=None, legacy_origin=None):
     """Record `fixtures` (paths) as `origin`'s bytes in the digest file at `path`.
 
     Every other entry is kept -- including other origins' entries for the same fixture, which is
@@ -154,8 +180,11 @@ def record(path, fixtures, origin=None):
     origin had not recorded. The caller says so out loud: a silently rewritten digest is the
     failure this file exists to prevent, and a regeneration is where it would happen.
     """
-    origin = check_origin(origin or this_origin())
-    entries = read_digests(path)
+    # `is None`, not `or`: an explicit empty origin -- `--origin "$BOX"` with $BOX unset, which is
+    # how automation fails -- must be REFUSED, not quietly replaced by this hostname. Attributing
+    # a fixture to the wrong box is the exact error this file exists to prevent, and it persists.
+    origin = check_origin(this_origin() if origin is None else origin)
+    entries = read_digests(path, legacy_origin=legacy_origin)
     changes = []
     for fixture in fixtures:
         fixture = Path(fixture)
@@ -190,17 +219,31 @@ def status(fixture, entries):
     return "MATCH", sha, size, ",".join(sorted(matching))
 
 
-def other_origins(path, names, origin):
-    """Origins other than `origin` recorded in `path` for any of `names`, sorted.
+def divergent_origins(path, names, origin):
+    """Origins recorded in `path` that are on DIFFERENT bytes from `origin` for some of `names`.
 
     What a regenerating box has to be told: their entries survive (so their fixtures still pass
     the gate), but their bytes are now a different workload from the one just generated, and
     nothing else will say so until someone compares two reports.
+
+    Divergence is judged on the bytes, never on the name being different. A coordinated
+    regeneration that lands the SAME bytes on both boxes is the outcome this whole mechanism is
+    steering towards, and reporting it as "the other box is still on a different workload" would
+    tell the operator to redo the thing they just succeeded at.
     """
     entries = read_digests(path)
-    return sorted(
-        {e.origin for name in names for e in entries.get(name, []) if e.origin != origin}
-    )
+    divergent = set()
+    for name in names:
+        recorded = entries.get(name, [])
+        mine = next((e for e in recorded if e.origin == origin), None)
+        if mine is None:
+            continue
+        divergent |= {
+            e.origin
+            for e in recorded
+            if e.origin != origin and (e.sha256, e.size) != (mine.sha256, mine.size)
+        }
+    return sorted(divergent)
 
 
 def describe(name, entries):
@@ -236,9 +279,21 @@ def _main(argv=None):
         help=f"the box these bytes are (default: this host, {this_origin()!r}). Reports name it, "
         "so make it the name the reports use.",
     )
+    ap.add_argument(
+        "--adopt-legacy",
+        metavar="BOX",
+        default=None,
+        help="with --record: attribute any pre-gh-ocannl-759 unattributed (three-field) lines to "
+        "BOX, which you are asserting they belong to. One-shot migration; without it such a line "
+        "is an error, since nothing can infer whose bytes it recorded.",
+    )
     ap.add_argument("--digests", type=Path, default=None, help=f"path to {DIGEST_FILE}")
     ap.add_argument("--fixture-dir", type=Path, default=here / "fixtures")
     args = ap.parse_args(argv)
+    if args.adopt_legacy is not None:
+        if args.check:
+            ap.error("--adopt-legacy rewrites the file, so it belongs with --record, not --check")
+        check_origin(args.adopt_legacy)
 
     digests = args.digests or args.fixture_dir / DIGEST_FILE
     fixtures = args.fixtures or sorted(args.fixture_dir.glob("*.safetensors"))
@@ -260,8 +315,8 @@ def _main(argv=None):
                 bad += 1
         return 1 if bad else 0
 
-    changes = record(digests, fixtures, args.origin)
-    origin = args.origin or this_origin()
+    changes = record(digests, fixtures, args.origin, legacy_origin=args.adopt_legacy)
+    origin = this_origin() if args.origin is None else args.origin
     print(f"recorded {len(fixtures)} fixture(s) in {digests} as origin {origin!r}")
     for name, org, was, now in changes:
         if was is None:
