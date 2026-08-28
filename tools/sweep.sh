@@ -48,6 +48,10 @@ ONLY=()
 # local and the remote side: macOS has no timeout(1) at all, and where timeout(1)
 # does exist it is not necessarily one whose -k reaches the process group.
 CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
+# The budget for the post-unit RTC context collection, deliberately separate from
+# CAP: see collect_rtc_context for why sharing the unit's deadline would let a
+# diagnostic overwrite the verdict it is explaining.
+CONTEXT_CAP=${OCANNL_TOOL_SWEEP_CONTEXT_CAP:-300}
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -295,18 +299,7 @@ test_cmd() {
     printf 'rc2=0; '
   fi
   printf 'for r in $rc1 $rc2; do case $r in 124|137|142) exit $r ;; esac; done; '
-  printf 'rc=$(( rc1 != 0 ? rc1 : rc2 )); '
-  # Only on a red suite, and only for the RTC backends: this is diagnosis, and a
-  # green unit does not need it. The timeout statuses above have already exited --
-  # a capped unit had its process group destroyed, so there is nothing left here
-  # to run dune with, and the machine state a hang leaves is not what a numeric
-  # mismatch wants explained.
-  case $backend in
-    cuda | hip | metal)
-      printf '[ $rc -eq 0 ] || { %s }; ' "$(rtc_context_cmd "$backend")"
-      ;;
-  esac
-  printf 'exit $rc'
+  printf 'exit $(( rc1 != 0 ? rc1 : rc2 ))'
 }
 
 # What a failing GPU unit is missing when someone reads its fingerprint the next
@@ -316,17 +309,27 @@ test_cmd() {
 # assembled inline in the backend, visible nowhere, and the ROCm version was
 # whatever the box happened to have. Both belong beside the failure.
 #
-# Emitted as shell text and spliced into `test_cmd`, so it runs on the machine
-# that OWNS the worktree -- the versions are the ones that just compiled the
-# kernels, not the sweep host's -- inside the same lock and PATH, and lands in
-# `$log`, which `fingerprint` then carries into the digest.
+# Emitted as shell text, and run on the machine that OWNS the worktree -- the
+# versions are the ones that just compiled the kernels, not the sweep host's --
+# under the same lock and PATH, appending to `$log`, which `fingerprint` then
+# carries into the digest.
+#
+# It runs as its OWN phase after the unit's row has been recorded, never inside
+# `test_cmd`, and that separation is load-bearing rather than tidiness. Folded
+# into the unit it would share the unit's `CAP`: a suite that fails a minute
+# before the deadline would have this forced Dune build cross it, and the
+# supervisor's 142 would then REPLACE the already-decided test status -- filing a
+# red suite as `timeout`, the verdict that says coverage was lost, and losing the
+# context it was collecting on the way out (Codex P2 on PR #510). Best-effort
+# diagnosis must not be able to change the verdict it exists to explain, so it
+# gets its own budget (OCANNL_TOOL_SWEEP_CONTEXT_CAP) outside the unit's, and its
+# status is discarded.
 #
 # The option vector is not restated here. It is produced by the repository's own
 # GPU-free option tests, which call the production builders in `Compiler_options`
 # and print got/want vectors on stderr; a copy in shell would be a second source
 # of truth that no test compares against the first. `--force` because the alias is
-# certainly cached by the run that just failed. Nothing here may fail the unit: rc
-# is already decided, so every command is guarded and swallows its status.
+# certainly cached by the run that just failed.
 rtc_context_cmd() {
   local backend=$1 alias_name=
   case $backend in
@@ -358,7 +361,35 @@ rtc_context_cmd() {
   if [ -n "$alias_name" ]; then
     printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
   fi
-  printf 'echo "=== end rtc-context ==="; true; '
+  printf 'echo "=== end rtc-context ==="; true'
+}
+
+# Run that block for one finished unit, appending to its log. Called only after
+# `record` has written the row, so nothing here can reach the outcome; the status
+# is discarded for the same reason, and the whole phase is bounded by its own
+# CONTEXT_CAP rather than by what is left of the unit's.
+#
+# Only for a `fail`. A `timeout` had its process group destroyed and may still
+# have the box -- and the far-side worktree lock -- busy, and an `error` never
+# reached dune at all: neither has kernels whose flags would explain anything.
+collect_rtc_context() {
+  local backend=$1 host=$2 wt=$3 log=$4 path_prefix=${5:-} cmd
+  # `exit 0`, not a failure: the worktree is gone or unreadable, which the row
+  # already records; this phase has nothing to add and nothing to complain about.
+  cmd="cd \"$wt\" || exit 0; $(rtc_context_cmd "$backend")"
+  if [ -n "$host" ]; then
+    # Bounded on both sides and re-taking the far-side worktree lock, for the
+    # reasons the unit's own remote call documents: the unit's ssh has exited, so
+    # its lock is released, and a dune running there unlocked is exactly what the
+    # next sweep's preparation would reset the tree underneath.
+    run_capped "$(( CONTEXT_CAP + 120 ))" ssh -o BatchMode=yes -o ConnectTimeout=8 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
+      "$host" "$(remote_capped "$CONTEXT_CAP" "$path_prefix $(remote_lock_cmd "$wt") $cmd")" \
+      >>"$log" 2>&1
+  else
+    run_capped "$CONTEXT_CAP" /bin/sh -c "$cmd" >>"$log" 2>&1
+  fi
+  return 0
 }
 
 # POSIX single-quoting, so a generated command can be handed to `sh -c` on the
@@ -662,6 +693,14 @@ for unit in "${UNITS[@]}"; do
   esac
   echo "  $machine/$backend: $outcome (${elapsed}s; execution=$execution)"
   record "$machine" "$backend" "$outcome" "$elapsed" "$log" "$execution"
+  # Diagnosis, strictly after the row and the elapsed time it reports: this phase
+  # has its own budget, and nothing it does can reach $outcome or $elapsed. It
+  # runs before the fingerprint so that what it appends to the log is carried in.
+  case $outcome:$backend in
+    fail:cuda | fail:hip | fail:metal)
+      collect_rtc_context "$backend" "$host" "$wt" "$log" "${path_prefix:-}"
+      ;;
+  esac
   case $outcome in
     fail | timeout | error) fingerprint "$log" >"${log%.log}.fingerprint" ;;
   esac

@@ -131,6 +131,12 @@ holder_pid=
 # run dune a second time on every sweep.
 SWEEP_TEST_OPAM_RC=1 run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"
+# The recorded outcome is the column the collection must not be able to corrupt.
+# Folded into the unit, the diagnostic shares the unit's CAP, and a red suite that
+# ran the cap down would be filed as `timeout` -- coverage lost -- instead of as
+# the failure it was (Codex P2 on PR #510). The structural guarantee is that
+# collection happens strictly after `record`; this pins the column it protects.
+[ "$(awk -F '\t' '$3 == "metal" { print $5 }' "$state/history.tsv" | tail -1)" = fail ]
 metal_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail -1)
 [ -n "$metal_log" ] && [ -f "$metal_log" ]
 grep -q '^=== rtc-context (metal) ===$' "$metal_log"
