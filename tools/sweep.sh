@@ -341,9 +341,16 @@ test_cmd() {
 # honestly: which flags the builder ALWAYS emits, which it NEVER emits (the
 # reassociation opt-in, the membership claim gh-ocannl-784 rests on), and whether
 # the debug variant was in play. The per-slot inputs are printed as what they are,
-# environment readings from the owning box; the actual vector of a compile that
-# FAILED to compile is already in the unit's log, appended to nvrtc's/hiprtc's
-# message by the backend.
+# environment readings from the owning box.
+#
+# Where the effective vector genuinely exists the block points at it -- and that
+# is CUDA only, which is what the per-backend line below now says. `cuda_to_ptx`
+# re-raises `Nvrtc_error` with the vector appended to nvrtc's message, while
+# `hip_to_code` still calls `Hiprtc.compile_to_code` bare, so a hiprtc failure
+# carries no vector anywhere (Codex P2 on PR #510). Promising both would be a
+# claim the tree does not implement; the HIP-side append is left to a box that
+# can compile hip_backend.ml (gh-ocannl-794).
+
 # Which runtime compiler the BACKEND loads, not which one happens to be first on
 # PATH (Codex P2 on PR #510). cudajit and hipjit reach nvrtc/hiprtc through a
 # ctypes stub library that carries the soname as a NEEDED entry and no RPATH, so
@@ -401,13 +408,22 @@ rtc_context_cmd() {
   if [ -n "$alias_name" ]; then
     # Labelled, because the got/want vectors below are the option POLICY that the
     # GPU-free builder test prints under sentinel inputs -- not the command line of
-    # the compile that just failed. Three lines, not a paragraph: `fingerprint`
+    # the compile that just failed. Four lines, not a paragraph: `fingerprint`
     # carries this block under a line bound, and prose that crowded the vectors out
     # of it would cost more than it explains.
     printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
-    printf 'echo "--gpu-architecture below are TEST SENTINELS, not this box\x27s: those come from the"; '
-    printf 'echo "discovery input above and the failing kernel arch markers. A compile that FAILED to"; '
-    printf 'echo "compile carries its own effective vector in this log, appended by the backend."; '
+    printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
+    printf 'echo "discovery input above and the failing kernel arch markers."; '
+    # Line four says which of the two the reader is holding. A CUDA compile that
+    # failed logs its own vector; a HIP one does not, because nothing appends it.
+    case $backend in
+      cuda)
+        printf 'echo "A failed nvrtc compile also logged its OWN vector, on an \x27nvrtc options:\x27 line."; '
+        ;;
+      hip)
+        printf 'echo "A failed hiprtc compile logs no vector of its own: nothing appends one yet."; '
+        ;;
+    esac
     printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
   fi
   printf 'echo "=== end rtc-context ==="; true'
