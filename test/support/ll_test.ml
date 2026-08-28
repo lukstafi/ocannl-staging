@@ -58,13 +58,20 @@ let node_factory ?(prec = single) ~first_id ~dims () =
 (** Declares [tn] materialized and observable: the executed legs seed and read back exactly these
     nodes, and observability is also what forbids the buffer-aliasing planner from handing their
     bytes to another node. Both are declared intent, settled before optimization, so neither
-    perturbs a structural pin. *)
+    perturbs a structural pin — see {!virtualize} for what "declared intent" reaches. *)
 let materialize tn =
   Tn.update_memory_mode tn Tn.On_device 99;
   Tn.set_observable tn
 
 (** Declares [tn] virtual — the standing of the scope-local scalars a virtualizer-emitted
-    [Local_scope] owns. *)
+    [Local_scope] owns.
+
+    This and {!materialize} write the tnode's DECLARED INTENT
+    ([Tn.update_memory_mode], the [memory_mode_intent] field), not a lineage decision. Placement
+    decisions live on the [optimize_ctx]'s placements table, and [Tn.Placements.get] falls back to
+    the declared intent for a node the lineage has not decided — which is the whole reason a test can
+    hand [optimize] a node that is ALREADY virtual (or already materialized) before the analyses run,
+    and the reason the passes read it back as such. *)
 let virtualize tn = Tn.update_memory_mode tn Tn.Virtual 99
 
 (** {1 Index and statement builders} *)
@@ -98,6 +105,55 @@ let loop_n s n body : LL.t = loop ~upto:(n - 1) s body
 (** [set_at tn idx llsc] writes the single-axis cell [idx] — [set] over a one-element index array,
     which is the shape of every hand-built one-dimensional case. *)
 let set_at tn idx llsc : LL.t = set tn [| idx |] llsc
+
+(** {2 Dynamic indexing}
+
+    The gather/scatter pair ({!Ir.Low_level.Get_dynamic} / {!Ir.Low_level.Set_dynamic}): a read or
+    write whose row along ONE axis is a runtime value rather than an index expression. The ordinary
+    pipeline never hands these to [optimize] — [Assignments] lowering emits neither, and the ones the
+    pipeline does mint come from [rewrite_one_hot_reductions], which runs after both virtualization
+    arms — so hand-built IR is the only way to put one in front of the analyses (gh-ocannl-734).
+
+    Their [idcs] array is static everywhere except [dyn_axis], where the type's contract asks for a
+    [Fixed_idx 0] placeholder standing in for the runtime row. The builders below PLANT that
+    placeholder themselves: pass the static indices of the other axes at full array width (whatever
+    sits at [dyn_axis] is overwritten) and a slot cannot be spelled wrong, nor a [dyn_axis] pointed
+    outside the array. *)
+
+(* Whatever the caller put at [dyn_axis] is replaced by the placeholder: the runtime row is
+   [dyn_value]'s to supply, and a leftover index expression there would be silently ignored by
+   codegen while still being reported as a read by the index-walking analyses. *)
+let dyn_idcs ~idcs ~dyn_axis =
+  if dyn_axis < 0 || dyn_axis >= Array.length idcs then
+    invalid_arg
+      ("Ll_test: dyn_axis " ^ Int.to_string dyn_axis ^ " is outside the "
+      ^ Int.to_string (Array.length idcs)
+      ^ " index slots of the node");
+  Array.mapi idcs ~f:(fun i idx -> if i = dyn_axis then fixed 0 else idx)
+
+(** [gather ~tn ~idcs ~dyn_axis ~dyn_value] reads [tn] at [idcs] with the [dyn_axis] row taken from
+    the runtime value [dyn_value] (an index-valued scalar paired with the precision it is read at —
+    {!iprec} for an index computation, the node's own precision for a row number stored in a
+    tensor). Counts as a read of [tn], like {!get}. *)
+let gather ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) : LL.scalar_t =
+  LL.Get_dynamic { tn; idcs = dyn_idcs ~idcs ~dyn_axis; dyn_axis; dyn_value }
+
+(** [scatter ~tn ~idcs ~dyn_axis ~dyn_value llsc] writes [llsc] into that same cell: {!set} with the
+    [dyn_axis] row supplied at runtime. Loops whose index reaches [dyn_value] carry a
+    cross-iteration write dependency, so schedule analyses must treat the write as statically
+    unknown — which is much of what makes this shape worth building by hand. *)
+let scatter ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) llsc : LL.t =
+  LL.Set_dynamic { tn; idcs = dyn_idcs ~idcs ~dyn_axis; dyn_axis; dyn_value; llsc; debug = "" }
+
+(** [scatter_add ~tn ~idcs ~dyn_axis ~dyn_value addend] is the accumulating form
+    [tn[.., dyn_value, ..] += addend] — the shape [rewrite_one_hot_reductions] actually mints for the
+    embedding-table gradient. The read-back is an explicit {!gather} of the written cell, at the
+    node's storage precision, which is what makes the accumulation visible to read-tracking and to
+    [has_accumulation]. *)
+let scatter_add ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) addend : LL.t =
+  let prec = Lazy.force tn.Tn.storage_prec in
+  scatter ~tn ~idcs ~dyn_axis ~dyn_value
+    (LL.Binop (Ops.Add, (gather ~tn ~idcs ~dyn_axis ~dyn_value, prec), (addend, prec)))
 
 (** {1 Scalar builders} *)
 

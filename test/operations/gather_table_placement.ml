@@ -26,16 +26,13 @@ module Ops = Ir.Ops
 
 let p = Ll_test.p
 
-(* [table[dyn]] with the runtime row read out of [idx]. [idcs] is static everywhere except
-   [dyn_axis], which carries the [Fixed_idx 0] placeholder [rewrite_one_hot_reductions] leaves. *)
+(* [table[dyn]] with the runtime row read out of [idx]: a one-axis gather, so the sole index slot is
+   the dynamic one and [Ll_test.gather] plants the placeholder there. *)
 let gather ~table ~idx : LL.scalar_t =
-  LL.Get_dynamic
-    {
-      tn = table;
-      idcs = [| Ll_test.fixed 0 |];
-      dyn_axis = 0;
-      dyn_value = (Ll_test.get idx [| Ll_test.fixed 0 |], Ops.single);
-    }
+  Ll_test.gather ~tn:table
+    ~idcs:[| Ll_test.fixed 0 |]
+    ~dyn_axis:0
+    ~dyn_value:(Ll_test.get idx [| Ll_test.fixed 0 |], Ops.single)
 
 let () =
   let node = Ll_test.node_factory ~first_id:9900 ~dims:[| 4 |] () in
