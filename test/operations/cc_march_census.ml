@@ -162,6 +162,14 @@ type kernel_loop = {
       (** the precision this loop's ARITHMETIC resolved to, which is what an ISA-scoped claim has to
           ask about -- not the storage precision the row's name leads with. Recorded by the child
           that emitted the loop, from the same {!comp_prec} the emission used. *)
+  widen : string;
+      (** the [Ops.c_convert_precision] prefix that takes this loop's STORAGE precision to its
+          COMPUTE precision, and {!field-narrow} the prefix that takes it back. Empty for a
+          uniform-precision loop, which converts nothing. Taken from the compiler's own table by
+          the child that emitted the loop rather than spelled here: the codec-coverage claim below
+          is about whether the emission REACHED that table's entry, and a second copy of the entry
+          would make the claim true of itself. *)
+  narrow : string;
 }
 
 (* Directory handling through the OCaml stdlib rather than [Sys.command "mkdir -p"] / [Sys.command
@@ -202,6 +210,7 @@ let build (emit_dir : string) =
   in
   let loops = ref [] in
   let add ~anchor ~op_class ~kind ~what ~store_prec =
+    let compute_prec = comp_prec store_prec in
     loops :=
       {
         anchor;
@@ -209,7 +218,9 @@ let build (emit_dir : string) =
         kind;
         what;
         store = Ir.Ops.prec_string store_prec;
-        comp = Ir.Ops.prec_string (comp_prec store_prec);
+        comp = Ir.Ops.prec_string compute_prec;
+        widen = fst (Ir.Ops.c_convert_precision ~from:store_prec ~to_:compute_prec);
+        narrow = fst (Ir.Ops.c_convert_precision ~from:compute_prec ~to_:store_prec);
       }
       :: !loops
   in
@@ -374,11 +385,11 @@ let build (emit_dir : string) =
     (Stdlib.Filename.concat emit_dir (routine ^ ".loops"))
     ~data:
       (String.concat ~sep:"\n"
-         (List.rev_map !loops ~f:(fun { anchor; op_class; kind; what; store; comp } ->
-              Printf.sprintf "%s\t%s\t%s\t%s\t%s\t%s" anchor
+         (List.rev_map !loops ~f:(fun { anchor; op_class; kind; what; store; comp; widen; narrow } ->
+              Printf.sprintf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" anchor
                 (match op_class with Census.Fma -> "fma" | Census.Max_min -> "maxmin")
                 (match kind with Reduce -> "reduce" | Tile -> "tile")
-                what store comp)))
+                what store comp widen narrow)))
 
 (* {1 The driver} *)
 
@@ -546,7 +557,7 @@ let emit_all ~exe ~root =
                  Stdio.In_channel.read_lines loops_path
                  |> List.filter_map ~f:(fun l ->
                      match String.split l ~on:'\t' with
-                     | [ anchor; cls; kind; what; store; comp ] ->
+                     | [ anchor; cls; kind; what; store; comp; widen; narrow ] ->
                          Some
                            {
                              anchor;
@@ -556,6 +567,8 @@ let emit_all ~exe ~root =
                              what;
                              store;
                              comp;
+                             widen;
+                             narrow;
                            }
                      | _ -> None)
                in
@@ -679,6 +692,50 @@ let () =
          no source at all -- and every claim below would still pass, over the surviving group. *)
       Verdict.p_all "every fp16 numerics setting emitted a kernel" fp16_settings
         ~f:(fun (tag, _) -> List.exists emitted ~f:(fun e -> String.equal e.fp16 tag));
+      (* {2 That the narrow-storage rows are really narrow}
+
+         Every claim below this point is about how well gcc rendered a loop, and a loop that stopped
+         being a NARROW-storage one -- a numerics default flipped, a [vec_bridge] arm lost, a
+         storage precision the emission silently computed at -- passes all of them. It is still a
+         [Vectorized] fold over an array called [maxs_bf16]; it is just no longer the thing
+         gh-ocannl-752 added it for, and nothing in a golden of inequalities would say so. So the
+         COVERAGE is claimed too, from the emitted source rather than from the row names:
+
+         - the whole-vector bridges, which are the discriminating half. [OCANNL_VEC_WIDEN_BFLOAT16]
+         and its siblings are emitted by {!C_syntax.vec_bridge}'s narrow arms and by nothing else,
+         and {!Cc_backend} prepends a builtin only where the kernel calls it (or something it calls
+         does), so a kernel carrying the name is a kernel that bridged. The set comes from
+         {!Context.Builtins_cc.builtins}: a bridge added for a fourth format fails this claim until
+         the fixture emits a loop that reaches it.
+         - the scalar codecs, which is where fp8 lives. {!C_syntax.vec_bridge} has no vector arm for
+         it and converts per lane through [Ops.c_convert_precision] instead, so no [OCANNL_VEC_*]
+         name attests to an fp8 bridge and the codec's own spelling is what does. Asked of every
+         loop whose storage and compute precisions differ, in BOTH directions -- the load's widening
+         and the accumulator store's narrowing are separate entries of that table, and a rendering
+         that reached only one of them is a rendering this fixture was meant to catch. *)
+      let vec_bridges =
+        List.filter_map Context.Builtins_cc.builtins ~f:(fun (key, _, _) ->
+            if
+              String.is_prefix key ~prefix:"OCANNL_VEC_WIDEN_"
+              || String.is_prefix key ~prefix:"OCANNL_VEC_NARROW_"
+            then Some key
+            else None)
+      in
+      Verdict.p_all "every whole-vector storage bridge the cc builtins define reaches a kernel"
+        vec_bridges ~f:(fun key ->
+            List.exists emitted ~f:(fun e -> String.is_substring e.source ~substring:key));
+      let narrow_rows =
+        List.concat_map emitted ~f:(fun e ->
+            List.filter_map e.loops ~f:(fun l ->
+                if String.equal l.store l.comp then None else Some (e, l)))
+      in
+      Verdict.p_all
+        "every narrow-storage loop's kernel spells both directions of its conversion" narrow_rows
+        ~f:(fun (e, l) ->
+            (not (String.is_empty l.widen))
+            && (not (String.is_empty l.narrow))
+            && String.is_substring e.source ~substring:l.widen
+            && String.is_substring e.source ~substring:l.narrow);
       let all = toolchains () in
       let available = List.filter all ~f:Census.accepts in
       Stdio.eprintf "\n=== cc kernel census (not part of the golden) ===\n";

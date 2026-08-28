@@ -2,6 +2,8 @@ the census reads both assembler dialects, not only this host's: true
 a libm call spelled the Mach-O way is still counted as one: true
 every requested vector width emitted a kernel: true
 every fp16 numerics setting emitted a kernel: true
+every whole-vector storage bridge the cc builtins define reaches a kernel: true
+every narrow-storage loop's kernel spells both directions of its conversion: true
 native: the -march column compiles clean and its loops are censused: true
 x86-64: the -march column compiles clean and its loops are censused: true
 x86-64-v2: the -march column compiles clean and its loops are censused: true
