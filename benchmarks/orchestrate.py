@@ -432,6 +432,22 @@ def kill_cell_group(proc):
                 break
             time.sleep(0.05)
     reap(1)
+    if not reaped:
+        # Nothing more will ever be read here: the only way out of the loop without reaping is a
+        # member that outlived SIGKILL and still owns the write end. The sweep would otherwise
+        # keep the read end for the rest of the run — one leaked descriptor per cell it could not
+        # reap, on the path least able to spare them (it announced itself as a ResourceWarning
+        # under `dune build @benchmarks/runtest`).
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        # And the leader itself, which is reapable even here: what `reap` could not finish is the
+        # READ, blocked on a pipe the survivor holds — the leader took the SIGKILL. Left unwaited
+        # it stays a zombie in the sweep's child table for the rest of the run, and `Popen` says
+        # so at collection ("subprocess N is still running") about a process that is not running.
+        with contextlib.suppress(OSError):
+            proc.poll()
     return out, _group_alive(proc.pid)
 
 
@@ -582,7 +598,19 @@ def _run_supporting(cmd, cwd, capture_output, check, timeout):
             out, err = proc.communicate(timeout=timeout)
     except BaseException:
         if proc is not None:
-            kill_cell_group(proc)
+            _, stuck = kill_cell_group(proc)
+            if stuck:
+                # The other exit from this function, and the same survivor. Here the sweep is
+                # already leaving, so there is nothing to stop — but the operator is about to be
+                # told the group was killed, and it was not: a cancellation that reports a clean
+                # exit over a process still holding the device is how the next run gets measured
+                # against it (gh-ocannl-760 review).
+                print(
+                    "!!! a member of the process group of "
+                    f"{cmd[0]} SURVIVED SIGKILL and still holds the device — clear the "
+                    "survivors before re-running anything on this box",
+                    flush=True,
+                )
         raise
     if _group_alive(proc.pid):
         # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER

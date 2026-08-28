@@ -1519,6 +1519,75 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIn("the evidence", log)
 
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_kill_that_could_not_reap_still_lets_go_of_the_pipes(self):
+        # The one way out of the kill loop without reaping is a member that outlived SIGKILL
+        # holding the write end, so every `communicate` timed out and `Popen` was left owning an
+        # open read end for the rest of the sweep -- a descriptor per unreapable cell, leaked on
+        # the path least able to spare them (it announced itself as a ResourceWarning under
+        # `dune build @benchmarks/runtest`). The survivor is stood in for by a grandchild that
+        # ESCAPES the group into its own session while still holding the stdout it inherited,
+        # which is what makes every reap in the loop time out.
+        pidfile = self.dir / "unreapable.pid"
+        holder = subprocess.Popen(
+            self.python(
+                "import subprocess, sys, time\n"
+                "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+                "  start_new_session=True)\n"
+                "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+                "time.sleep(300)\n",
+                pidfile,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **orchestrate._own_group_kwargs(),
+        )
+        # The kill loop cannot reap this leader (that is the point), so the test reaps it.
+        self.addCleanup(holder.wait)
+
+        def clear_the_holder():
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+        self.addCleanup(clear_the_holder)
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 1.0):
+            orchestrate.kill_cell_group(holder)
+
+        self.assertTrue(holder.stdout.closed, "the kill left the cell's read end open")
+        # And the leader is reaped: what the loop could not finish is the READ, blocked on a pipe
+        # the survivor holds, not the wait -- the leader took the SIGKILL.
+        self.assertIsNotNone(holder.returncode, "the kill left the cell's leader unreaped")
+
+    @unittest.skipUnless(os.name == "posix", "the cancellation is delivered by a signal here")
+    def test_a_cancelled_supporting_command_says_its_group_outlived_the_kill(self):
+        # The other exit from `_run_supporting`, and the same survivor its ordinary path stops
+        # the sweep over. Here the sweep is already leaving, so there is nothing to stop -- but a
+        # cancellation that reports a clean exit over a process still holding the device is how
+        # the NEXT run gets measured against it (gh-ocannl-760 review). The survivor is stood in
+        # for as elsewhere: nothing outlives SIGKILL but a process stuck in the kernel.
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            signal.setitimer(signal.ITIMER_REAL, 1.0)
+            with self.assertRaises(KeyboardInterrupt):
+                orchestrate.run_supporting(self.python("import time; time.sleep(300)"))
+
+        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_successful_cell_whose_leftovers_were_killed_still_handles_the_cache(self):
         # The row stands -- the cell ran and printed its result -- but a member of its group was
         # killed on the way out, possibly mid-write, and the cache it shares with every later beam
