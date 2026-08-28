@@ -310,7 +310,7 @@ let phase2 () =
     let s = sym () in
     loop_n s dim (set v [| iter s |] (add (get ell [| iter s |]) (c 100.)))
   in
-  let o_a = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_rar_a" [] llc_a in
+  let o_a = optimize_in ctx ~name:"ssem_rar_a" llc_a in
   p "recompute-at-read: routine A defers v" (known_virtual o_a v);
   let llc_b =
     let s = sym () and s2 = sym () in
@@ -318,7 +318,7 @@ let phase2 () =
       (loop_n s dim (set ell [| iter s |] (ramp 2000. s)))
       (loop_n s2 dim (set out [| iter s2 |] (get v [| iter s2 |])))
   in
-  let o_b = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_rar_b" [] llc_b in
+  let o_b = optimize_in ctx ~name:"ssem_rar_b" llc_b in
   p "overwrite-then-consume: the full overwrite covers the spliced reads -- ell is not an input"
     ((not (read_before_write o_b ell)) && not (Set.mem (inputs o_b) ell));
   let ell_old = Array.init dim ~f:(fun i -> 41. +. Float.of_int i) in
@@ -345,24 +345,18 @@ let phase2 () =
     let s = sym () in
     loop_n s dim (set v2 [| iter s |] (add (get ell3 [| iter s |]) (c 100.)))
   in
-  let o_a2 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_a" [] llc_a2
-  in
+  let o_a2 = optimize_in ctx2 ~name:"ssem_inter_a" llc_a2 in
   p "intervening write: routine A defers v2" (known_virtual o_a2 v2);
   let llc_c =
     let s = sym () in
     loop_n s dim (set ell3 [| iter s |] (ramp 3000. s))
   in
-  let o_c =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_c" [] llc_c
-  in
+  let o_c = optimize_in ctx2 ~name:"ssem_inter_c" llc_c in
   let llc_b2 =
     let s = sym () in
     loop_n s dim (set out2 [| iter s |] (get v2 [| iter s |]))
   in
-  let o_b2 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_b" [] llc_b2
-  in
+  let o_b2 = optimize_in ctx2 ~name:"ssem_inter_b" llc_b2 in
   p "intervening write: ell3 is an input of the consuming routine" (Set.mem (inputs o_b2) ell3);
   let ell3_old = Array.init dim ~f:(fun i -> 51. +. Float.of_int i) in
   let cctx = Context.auto () in
@@ -387,9 +381,7 @@ let phase2 () =
     let s = sym () in
     loop_n s dim (set v3 [| iter s |] (add (get ell4 [| iter s |]) (c 100.)))
   in
-  let o_a3 =
-    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_snap_a" [] llc_a3
-  in
+  let o_a3 = optimize_in ctx3 ~name:"ssem_snap_a" llc_a3 in
   p "materialized twin: v3 stays non-virtual" (known_non_virtual o_a3 v3);
   let llc_b3 =
     let s = sym () and s2 = sym () in
@@ -397,9 +389,7 @@ let phase2 () =
       (loop_n s dim (set ell4 [| iter s |] (ramp 4000. s)))
       (loop_n s2 dim (set out3 [| iter s2 |] (get v3 [| iter s2 |])))
   in
-  let o_b3 =
-    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_snap_b" [] llc_b3
-  in
+  let o_b3 = optimize_in ctx3 ~name:"ssem_snap_b" llc_b3 in
   let ell4_old = Array.init dim ~f:(fun i -> 61. +. Float.of_int i) in
   let cctx3 = Context.auto () in
   let cctx3 = run ~ctx:cctx3 ~name:"ssem_snap_a" o_a3 ~seed:[ (ell4, ell4_old) ] in

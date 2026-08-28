@@ -42,9 +42,7 @@ let build_llc (x, prod, oa, ob) =
   let use_b = loop k (set k ob (get k prod)) in
   seq producer (seq use_a use_b)
 
-let optimize llc ~static_indices =
-  LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None ~name:"ac_test"
-    static_indices llc
+let optimize llc ~static_indices = Ll_test.optimize ~static_indices ~name:"ac_test" llc
 
 (* Runs [f] and reports whether the analysis cache registered a hit (and no miss) for it. *)
 let delta f =
