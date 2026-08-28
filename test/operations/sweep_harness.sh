@@ -50,7 +50,7 @@ if [ -n "${SWEEP_TEST_WAIT_PREFIX:-}" ]; then
     [ "$waited" -lt 200 ] || exit 99
   done
 fi
-exit 0
+exit "${SWEEP_TEST_OPAM_RC:-0}"
 EOF
 chmod +x "$fake_bin/opam"
 
@@ -59,15 +59,20 @@ chmod +x "$fake_bin/opam"
 printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n' >"$state/history.tsv"
 printf '20260820T000000Z\tlocal\tcc\tdeadbee\tpass\t1\t<all>\t0\t-\n' >>"$state/history.tsv"
 
-run_sweep() {
+run_sweep_backend() {
+  local backend=$1
+  shift
   HOME=$tmp/home \
   PATH=$fake_bin:$PATH \
   SWEEP_TEST_CALLS=$calls \
   SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-} \
+  SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0} \
   OCANNL_TOOL_SWEEP_REPO=$main \
   OCANNL_TOOL_SWEEP_STATE=$state \
-    "$sweep" --only cc "$@"
+    "$sweep" --only "$backend" "$@"
 }
+
+run_sweep() { run_sweep_backend cc "$@"; }
 
 incremental=$(run_sweep)
 forced=$(run_sweep --force)
@@ -113,4 +118,36 @@ touch "$wait_prefix.release"
 wait "$holder_pid"
 holder_pid=
 
-printf 'sweep execution accounting: PASS\n'
+# A red GPU unit must carry its RTC context (gh-ocannl-784): the flags the
+# kernels were compiled under and which toolkit did it, beside the failure rather
+# than nowhere. `metal` is the case this can pin without hardware and without a
+# reachable remote -- it is a LOCAL unit, and its context block is built only from
+# `command -v` guards and one echo, so on a machine with no macOS tooling it
+# reduces to exactly the residual line and still proves the block was emitted,
+# reached the log, and was carried into the fingerprint. The cuda and hip arms
+# differ from it only in which commands they guard.
+#
+# A red unit, not a green one: this is diagnosis, and emitting it on a pass would
+# run dune a second time on every sweep.
+SWEEP_TEST_OPAM_RC=1 run_sweep_backend metal >"$tmp/metal.out" 2>&1
+grep -q 'local/metal: fail' "$tmp/metal.out"
+metal_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail -1)
+[ -n "$metal_log" ] && [ -f "$metal_log" ]
+grep -q '^=== rtc-context (metal) ===$' "$metal_log"
+grep -q '^=== end rtc-context ===$' "$metal_log"
+grep -q 'MSL options are still assembled in metal_backend.ml' "$metal_log"
+# The fingerprint is what a caller diffs against yesterday's, so the block has to
+# reach it and not merely the log.
+grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
+
+# And a GREEN unit must NOT pay for it -- the same backend, so the only thing
+# that differs is the outcome. The log path is derived from the sweep's timestamp
+# and may well be the one above, rewritten: that is fine and is itself part of the
+# check, since the assertions on the failing run have already read it.
+run_sweep_backend metal >"$tmp/metal_pass.out" 2>&1
+grep -q 'local/metal: incremental-pass' "$tmp/metal_pass.out"
+metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail -1)
+[ -f "$metal_pass_log" ]
+! grep -q 'rtc-context' "$metal_pass_log"
+
+printf 'sweep execution accounting and RTC context: PASS\n'
