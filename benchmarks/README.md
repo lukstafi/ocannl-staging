@@ -93,10 +93,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
     its box, so within-box session-to-session comparisons stand. The file records both boxes'
     bytes rather than letting one win; a fixture MATCHes if it is *some* recorded box's bytes,
     and the report names which.
-  - **Pin fixtures you already have, without regenerating**: `python3 fixture_digest.py
+  - **Pin fixtures you already have, without regenerating**: `python3 benchmarks/fixture_digest.py
     --record` (add `--origin <box>` when the hostname is not the name the reports use). It is
     stdlib-only — no venv needed — and it leaves every other origin's entry alone.
-    `python3 fixture_digest.py --check` reports what is on disk against what is recorded, and
+    `python3 benchmarks/fixture_digest.py --check` reports what is on disk against what is recorded, and
     exits non-zero on anything that is not a MATCH.
   - **Regeneration is a cross-box event.** `gen_fixtures.py` draws from *this* box's numpy, so
     regenerating here does not give the other measuring boxes the same workload — it gives this
@@ -373,7 +373,7 @@ origin. Review that diff before publishing numbers: a changed digest means the w
 and reports measured on either side of it are not comparable.
 
 **Do not run `gen_fixtures.py` to make an existing fixture pass the digest gate.** If your copies
-are simply not recorded yet, pin them with `python3 fixture_digest.py --record` — that states what
+are simply not recorded yet, pin them with `python3 benchmarks/fixture_digest.py --record` — that states what
 the bytes are and changes no number's meaning. Regenerating instead draws a *new* workload from
 this box's numpy, silently retires every published number on the old bytes, and, because it is
 per-box, leaves the other measuring boxes on a workload that is now different from yours.

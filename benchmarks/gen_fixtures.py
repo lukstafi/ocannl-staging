@@ -194,7 +194,7 @@ if __name__ == "__main__":
         "box's numpy, so regenerating here does not give the other measuring boxes the same "
         "workload, and every number they published stays on their own bytes until they "
         "regenerate too. To merely pin fixtures that already exist, without changing any "
-        "workload, use `fixture_digest.py --record` instead.",
+        f"workload, use `python3 {fixture_digest.cli_command()} --record` instead.",
     )
     ap.add_argument("specs", nargs="*", type=Path, help="workload specs (default: all of them)")
     ap.add_argument(
@@ -204,6 +204,10 @@ if __name__ == "__main__":
         f"{fixture_digest.this_origin()!r})",
     )
     args = ap.parse_args()
+    # BEFORE building anything: generating rewrites the fixture bytes, so a bad origin discovered
+    # at the recording step would leave a regenerated workload that cannot be attributed. Through
+    # resolve_origin, which refuses an explicitly empty value instead of substituting this host.
+    origin = fixture_digest.resolve_origin(args.origin)
     specs = args.specs or sorted((here / "workloads").glob("*.json"))
     out_dir = here / "fixtures"
     written = [build(spec, out_dir) for spec in specs]
@@ -213,7 +217,6 @@ if __name__ == "__main__":
     # one box must not drop the identities another box's published numbers rest on
     # (gh-ocannl-759).
     digests = out_dir / fixture_digest.DIGEST_FILE
-    origin = args.origin or fixture_digest.this_origin()
     changes = fixture_digest.record(digests, written, origin)
     print(f"recorded {len(written)} digest(s) in {digests} as origin {origin!r}")
     for name, org, was, now in changes:

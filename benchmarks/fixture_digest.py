@@ -108,6 +108,18 @@ def check_origin(origin):
     return origin
 
 
+def resolve_origin(origin):
+    """The ONE place a missing origin becomes this host's -- and the only one that may.
+
+    Every caller routes through here rather than writing `origin or this_origin()`, because that
+    idiom cannot tell "not given" from "given as empty", and an empty one is how automation fails
+    (`--origin "$BOX"` with $BOX unset). Silently substituting the hostname there attributes a
+    fixture to the wrong box and persists it, which is the exact error this file exists to
+    prevent -- so absence defaults, and emptiness is refused.
+    """
+    return check_origin(this_origin() if origin is None else origin)
+
+
 def read_digests(path, legacy_origin=None):
     """`{name: [Entry, ...]}` recorded in `path`; an absent file records nothing.
 
@@ -121,6 +133,23 @@ def read_digests(path, legacy_origin=None):
     entries = {}
     if not path.exists():
         return entries
+
+    def add(lineno, sha, size, name, origin):
+        """The ONE insertion point, so every parse path pays the duplicate check.
+
+        A four-field entry and an adopted legacy line can land on the same (name, origin), and
+        with two insertion sites whichever came last silently won -- making `--adopt-legacy`
+        order-dependent, and able to persist the wrong historical digest for a fixture that is not
+        even among the files being recorded.
+        """
+        by_origin = entries.setdefault(name, {})
+        if origin in by_origin:
+            raise ValueError(
+                f"{path}:{lineno}: {name} is recorded twice for origin {origin!r}; one box has "
+                "one set of bytes per fixture, so this file cannot say which"
+            )
+        by_origin[origin] = Entry(sha, int(size), origin)
+
     for lineno, line in enumerate(path.read_text().splitlines(), start=1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -134,9 +163,7 @@ def read_digests(path, legacy_origin=None):
             # --adopt-legacy, which is what makes this refusal a migration rather than a wall.
             if legacy_origin is not None:
                 sha, size, name = fields
-                entries.setdefault(name, {})[legacy_origin] = Entry(
-                    sha, int(size), legacy_origin
-                )
+                add(lineno, sha, size, name, legacy_origin)
                 continue
             raise ValueError(
                 f"{path}:{lineno}: {line!r} is the old unattributed format; attribute it with "
@@ -148,14 +175,7 @@ def read_digests(path, legacy_origin=None):
             raise ValueError(
                 f"{path}:{lineno}: expected '<sha256>  <bytes>  <name>  <origin>', got {line!r}"
             )
-        sha, size, name, origin = fields
-        by_origin = entries.setdefault(name, {})
-        if origin in by_origin:
-            raise ValueError(
-                f"{path}:{lineno}: {name} is recorded twice for origin {origin!r}; one box has "
-                "one set of bytes per fixture, so this file cannot say which"
-            )
-        by_origin[origin] = Entry(sha, int(size), origin)
+        add(lineno, *fields)
     return {name: [by_origin[o] for o in sorted(by_origin)] for name, by_origin in entries.items()}
 
 
@@ -180,10 +200,7 @@ def record(path, fixtures, origin=None, legacy_origin=None):
     origin had not recorded. The caller says so out loud: a silently rewritten digest is the
     failure this file exists to prevent, and a regeneration is where it would happen.
     """
-    # `is None`, not `or`: an explicit empty origin -- `--origin "$BOX"` with $BOX unset, which is
-    # how automation fails -- must be REFUSED, not quietly replaced by this hostname. Attributing
-    # a fixture to the wrong box is the exact error this file exists to prevent, and it persists.
-    origin = check_origin(this_origin() if origin is None else origin)
+    origin = resolve_origin(origin)
     entries = read_digests(path, legacy_origin=legacy_origin)
     changes = []
     for fixture in fixtures:
@@ -315,8 +332,8 @@ def _main(argv=None):
                 bad += 1
         return 1 if bad else 0
 
-    changes = record(digests, fixtures, args.origin, legacy_origin=args.adopt_legacy)
-    origin = this_origin() if args.origin is None else args.origin
+    origin = resolve_origin(args.origin)
+    changes = record(digests, fixtures, origin, legacy_origin=args.adopt_legacy)
     print(f"recorded {len(fixtures)} fixture(s) in {digests} as origin {origin!r}")
     for name, org, was, now in changes:
         if was is None:
