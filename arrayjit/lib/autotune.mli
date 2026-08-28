@@ -1025,8 +1025,9 @@ type timing_mode =
     submit/sync round trip is ~50-60 us while the fastest candidates at the gpt2_mini out-projection
     shape run in 60-70 us, so {!Isolated} reads about 2x the steady-state cost there — and the
     offset varies from candidate to candidate with the block count and the per-launch queue work
-    (41-74 us over that site's ten seeded geometries), which is what lets two candidates 10% apart
-    in steady state swap places. Consequently a [best_ms] measured under {!Isolated} is not a
+    (39-86 us over that site's ten seeded geometries, and up to 45 us of spread within a single
+    run), which is what lets two candidates 5-8 us apart in steady state swap places — measured, in
+    2 of 8 runs. Consequently a [best_ms] measured under {!Isolated} is not a
     throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
     is, up to the batch's residual ~1% of round trip. *)
 
@@ -1045,7 +1046,7 @@ val timing_of_setting : string -> timing_mode
     raises [Invalid_argument] on anything else. *)
 
 val time_routine :
-  ?tag_failures:bool -> ?timing:timing_mode -> repeats:int -> Context.t -> Context.routine -> float
+  ?tag_failures:bool -> timing:timing_mode -> repeats:int -> Context.t -> Context.routine -> float
 (** The tuner's own instrument, exposed so a harness can rank candidates by exactly what a search
     ranks them by (gh-ocannl-755) rather than by a re-derivation of it. Binds test values
     ({!set_test_bindings}) and restores the routine's bindings afterwards, runs one warmup, then

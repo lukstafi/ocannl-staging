@@ -227,9 +227,11 @@ let max_timing_runs = 64
    trip is ~50-60 us; at the gpt2_mini out-projection shape (134 MFLOP) the fastest candidates run
    in 60-70 us, so [Isolated] reads about 2x their steady-state cost — and the offset is not a
    constant the ranking could ignore: measured per candidate over that site's ten seeded geometries
-   it ranges from 41 us to 74 us, varying with the block count and the per-launch queue work. Two
-   candidates 10% apart in steady state can therefore swap places once each has ~55 us of host round
-   trip added to it, and at that site they do. See the tables in gh-ocannl-755.
+   it spans 39-86 us, varying with the block count and the per-launch queue work, and within a
+   single run it spans up to 45 us across candidates that are 5-8 us apart in steady state. Two such
+   candidates therefore swap places once each has its own round trip added to it, and at that site
+   they do -- in 2 of 8 measured runs, against 0 of 8 for [Queued] against an independent batched
+   instrument. See the tables in gh-ocannl-755.
 
    [Queued] is the default because it is the objective the workload presents: a training step queues
    every kernel of a layer into one stream and synchronizes at the end, so no kernel in it pays a
@@ -284,7 +286,7 @@ let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ()
 
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
-let time_routine ?(tag_failures = false) ?(timing = Isolated) ~repeats cctx routine =
+let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
   let saved_bindings = List.map routine.Context.bindings ~f:(fun (_ss, r) -> (r, !r)) in
   let run ctx =
     if tag_failures then Outcome.tag Outcome.Launch (fun () -> Context.run ctx routine)
