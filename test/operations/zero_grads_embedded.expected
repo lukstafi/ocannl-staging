@@ -1,0 +1,7 @@
+a parameter's zero_grads embeds exactly its own gradient: true
+a parameter's zero_grads writes exactly its own gradient: true
+every gradient the composite loss's zero_grads writes is embedded in it: true
+every node the composite loss's zero_grads embeds is one it writes: true
+the composite loss's zero_grads embeds each parameter's gradient: true
+the exactness check rejects an extra embedded node: true
+the exactness check rejects a dropped embedded node: true

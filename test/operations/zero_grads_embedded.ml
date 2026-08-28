@@ -1,0 +1,100 @@
+(* [diff.zero_grads] is an [Assignments.comp] whose [embedded_nodes] is derived where gradients are
+   minted (gh-ocannl-771): a routine built out of the zeroing code alone -- which is exactly what
+   {!Train.zero_params_grads} does -- must be able to ALLOCATE the gradients it zeroes rather than
+   demand them of a prior context.
+
+   The two directions of that derivation fail very differently. A MISSING node fails loudly: linking
+   the routine refuses a node that is neither embedded nor already in the context. An EXTRA node
+   fails nothing at all -- the routine allocates a buffer nobody asked for, [zero_params_grads]
+   quietly claims a gradient it does not zero, and every existing test stays green. So the invariant
+   worth pinning is EXACTNESS, in both directions, and this test pins it at both ends of the
+   recursion:
+
+   - the base case, {!Tensor.force_param_diff}: a [Tensor.param] mints one fresh gradient and zeroes
+     only it, so its [embedded_nodes] must be exactly the singleton [{ p.diff.grad }]. That equality
+     is what makes {!Train.zero_params_grads} -- which sequences one parameter's [zero_grads] per
+     trained parameter -- mean what its name says;
+   - the inductive case, {!Tensor.op}: a composite loss sequences its operands' [zero_grads] and
+     appends the zeroing of its own gradient, so its [embedded_nodes] must equal the set of nodes
+     its zeroing [Fetch]es actually write. That set is DERIVED from the tree through
+     [Asgns.collect_written] rather than written down here: a restatement of the expected gradients
+     would pin this test's idea of the graph, not the relationship between the two fields. *)
+
+open Base
+open Ocannl.Operation.DSL_modules
+module Asgns = Ir.Assignments
+module Tn = Ir.Tnode
+
+let diff_of t = Option.value_exn ~here:[%here] t.Tensor.diff
+let grad_of t = (diff_of t).Tensor.grad
+let zero_grads_of t = (diff_of t).Tensor.zero_grads
+let names s = String.concat ~sep:", " (List.map (Set.to_list s) ~f:Tn.debug_name)
+
+(* Set equality of the two fields, as one predicate. The positive claims below spell it as its two
+   inclusions instead (each guarded against a vacuously empty side); this is the form the negative
+   control perturbs, where a single boolean over a deliberately broken [comp] is what is wanted. *)
+let embeds_exactly_what_it_writes (c : Asgns.comp) =
+  Set.equal c.Asgns.embedded_nodes (Asgns.collect_written c.Asgns.asgns)
+
+(* ----- The base case: [Tensor.param] via [Tensor.force_param_diff] ----- *)
+
+let param_case () =
+  Tensor.unsafe_reinitialize ();
+  let p = TDSL.param ~values:[| 1.; 2.; 3. |] "p" () in
+  let z = zero_grads_of p in
+  Stdio.eprintf "param zero_grads embeds: %s\n" (names z.Asgns.embedded_nodes);
+  Verdict.p "a parameter's zero_grads embeds exactly its own gradient"
+    (Set.equal z.Asgns.embedded_nodes (Set.singleton (module Tn) (grad_of p)));
+  (* The other half of the same fact: the code really does zero that one gradient and nothing else,
+     so the singleton above is not an over-claim that happens to typecheck. *)
+  Verdict.p "a parameter's zero_grads writes exactly its own gradient"
+    (Set.equal (Asgns.collect_written z.Asgns.asgns) (Set.singleton (module Tn) (grad_of p)))
+
+(* ----- The inductive case: a composite loss ----- *)
+
+let composite_case () =
+  Tensor.unsafe_reinitialize ();
+  let x =
+    NTDSL.init ~l:"x" ~prec:Ir.Ops.single ~o:[ 3 ]
+      ~f:(function [| d |] -> Float.of_int (1 + d) | _ -> assert false)
+      ()
+  in
+  let w = TDSL.param ~values:[| 0.5; -0.5; 2.0 |] "w" () in
+  let b = TDSL.param ~values:[| 0.25; 0.0; -0.25 |] "b" () in
+  let%op y = (w *. x) + b in
+  let%op loss = y *. y in
+  let z = zero_grads_of loss in
+  let embedded = z.Asgns.embedded_nodes in
+  let written = Asgns.collect_written z.Asgns.asgns in
+  Stdio.eprintf "composite zero_grads embeds: %s\n" (names embedded);
+  Stdio.eprintf "composite zero_grads writes: %s\n" (names written);
+  (* Set equality, split into its two inclusions so that each is guarded against a collection that
+     went empty: [Set.equal] of two empty sets is true, and in a golden that line is
+     indistinguishable from one a real graph passed. The floor of three says this is a composite --
+     a graph that collapsed to a single gradient would satisfy both inclusions honestly and still
+     have stopped testing the induction. *)
+  Verdict.p_all ~min:3 "every gradient the composite loss's zero_grads writes is embedded in it"
+    (Set.to_list written) ~f:(Set.mem embedded);
+  Verdict.p_all ~min:3 "every node the composite loss's zero_grads embeds is one it writes"
+    (Set.to_list embedded) ~f:(Set.mem written);
+  (* The parameters' gradients are among them: that is why a routine compiled from the loss's
+     zeroing code alone can allocate what the backprop later accumulates into. *)
+  Verdict.p_all "the composite loss's zero_grads embeds each parameter's gradient" [ w; b ]
+    ~f:(fun p -> Set.mem embedded (grad_of p));
+  (* Negative control: both directions of the check must be able to fail on this very tree.
+     Otherwise the two inclusions above could be passing for a reason that has nothing to do with
+     the derivation -- and the extra-node direction, the one nothing else in the system catches, is
+     precisely the one worth controlling. *)
+  let stranger = x.Tensor.value in
+  Verdict.p "the exactness check rejects an extra embedded node"
+    (not
+       (embeds_exactly_what_it_writes
+          { z with Asgns.embedded_nodes = Set.add embedded stranger }));
+  Verdict.p "the exactness check rejects a dropped embedded node"
+    (not
+       (embeds_exactly_what_it_writes
+          { z with Asgns.embedded_nodes = Set.remove embedded (grad_of loss) }))
+
+let () =
+  param_case ();
+  composite_case ()
