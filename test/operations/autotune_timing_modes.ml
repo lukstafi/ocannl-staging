@@ -19,6 +19,7 @@ open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
 module Idx = Ir.Indexing
+module SC = Ir.Schedule_cache
 
 let p = Verdict.p
 
@@ -99,14 +100,20 @@ let counter_routine () =
       (Ll_test.add (Ll_test.get counter_node [| idx |]) (Ll_test.c 1.))
   in
   let o = Ll_test.optimize ~materialized:[ counter_node ] ~name:"gh755_counter" bump in
-  Ll_test.link ~name:"gh755_counter" o
+  let ctx, routine = Ll_test.link ~name:"gh755_counter" o in
+  (o, ctx, routine)
 
 type reading = { ms : float; wall_ms : float; dispatches : int }
 
+(* Held so the cache-key section below asks about the SAME lowering the instrument measured, rather
+   than minting a second one whose canonical form it would have to argue is equivalent. *)
+let measured : (LL.optimized * Context.t) option ref = ref None
+
 let () =
   Stdio.printf "\n== the instrument's two modes ==\n";
-  let ctx, routine = counter_routine () in
+  let opt, ctx, routine = counter_routine () in
   let ctx = Context.set_values ctx counter_node [| 0. |] in
+  measured := Some (opt, ctx);
   let count () = Int.of_float (Context.get_values ctx counter_node).(0) in
   let measure timing =
     let before = count () in
@@ -159,3 +166,33 @@ let () =
   Verdict.pass_fail "queued timing's wall cost is bounded by the budget, not by the batch depth"
     Float.(que.wall_ms <= (iso.wall_ms * 3.) + 100.)
     ~detail:(fun () -> Printf.sprintf "queued %.1f ms vs isolated %.1f ms wall" que.wall_ms iso.wall_ms)
+
+(* {1 The objective is part of the cache identity} *)
+
+(* gh-ocannl-755, Codex P1 on PR #512: the two objectives crown different candidates, so an entry
+   stored under one is not the answer to a search asking the other -- and its stored times are
+   readings of a different quantity that a replay would copy into the reading process's report under
+   that process's label. Keying on the objective is what keeps the regimes apart, and it is also
+   what stops a warm cache from replaying isolated-crowned winners forever and defeating the new
+   default outright. Pinned at the key rather than by driving a search: the key is the mechanism --
+   a mismatched entry lives in a different file and is never looked up at all. *)
+let () =
+  Stdio.printf "\n== the objective in the cache key ==\n";
+  let opt, ctx = Option.value_exn !measured in
+  let canon = SC.canonicalize ~static_indices:[] opt in
+  let limits = Context.hardware_limits ctx and backend = Context.backend_name ctx in
+  let key objective = SC.cache_key ~objective ~limits canon ~backend in
+  p "the cache key is stable within one objective"
+    (String.equal (key "queued") (key "queued"));
+  p "the cache key separates the two timing objectives"
+    (not (String.equal (key "isolated") (key "queued")));
+  (* Derived, not restated: a caller that resolved no mode of its own must key exactly as one that
+     resolved the configured mode, or a test's hand-built entry would sit under a key no search
+     looks up. *)
+  p "an omitted objective keys as the configured one"
+    (String.equal (SC.cache_key ~limits canon ~backend) (key (SC.objective_tag ())));
+  (* The tag a key carries is the mode's own spelling, so a report's objective and the entry that
+     stored its times name the same thing. *)
+  p "the key's objective spelling round-trips through the mode"
+    (List.for_all [ Autotune.Isolated; Autotune.Queued ] ~f:(fun m ->
+         Poly.equal (Autotune.timing_of_setting (Autotune.timing_string m)) m))

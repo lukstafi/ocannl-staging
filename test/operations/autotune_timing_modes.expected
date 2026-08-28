@@ -17,3 +17,9 @@ isolated reading is a per-launch time: PASS
 queued reading is a per-launch time: PASS
 queued timing does not read above isolated timing: PASS
 queued timing's wall cost is bounded by the budget, not by the batch depth: PASS
+
+== the objective in the cache key ==
+the cache key is stable within one objective: true
+the cache key separates the two timing objectives: true
+an omitted objective keys as the configured one: true
+the key's objective spelling round-trips through the mode: true

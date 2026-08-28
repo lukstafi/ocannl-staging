@@ -415,6 +415,11 @@
 # finishes isolated timing in a few milliseconds and queued timing at the budget, so a search over
 # sub-millisecond kernels spends a few extra milliseconds per candidate, which is immaterial beside
 # the compile each candidate already costs.
+# The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
+# transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry
+# crowned under one objective is not the answer to a search asking the other, and the times it
+# stores are readings of a different quantity. Changing this setting therefore re-tunes rather than
+# replaying, which is the point.
 #autotune_timing=queued
 
 # Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the

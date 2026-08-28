@@ -545,6 +545,32 @@ type outcome =
           attributing arms by arrival order (the positional [?report] of {!Train.tune_placements})
           gets a slot for it. *)
 
+type timing_mode =
+  | Isolated
+      (** One launch followed by a host synchronization: the number is the latency of a lone
+          dispatch, kernel plus one submit/sync round trip. What every schedule crowned before
+          gh-ocannl-755 was ranked by, and the right objective for a workload that really does
+          dispatch one kernel and wait for it. *)
+  | Queued
+      (** A calibrated number of launches dispatched back to back with one synchronization, divided
+          by the count: the round trip is amortized and the number is what the kernel sustains
+          inside a stream that already has work in it. The default, because that is what a training
+          step presents — it queues every kernel of a layer and synchronizes at the end, so no
+          kernel in it pays a round trip of its own. *)
+
+(** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
+    [autotune_timing].
+
+    The two are different objectives and they do not crown the same candidate. On gfx1151 the
+    submit/sync round trip is ~50-60 us while the fastest candidates at the gpt2_mini out-projection
+    shape run in 60-70 us, so {!Isolated} reads about 2x the steady-state cost there — and the
+    offset varies from candidate to candidate with the block count and the per-launch queue work
+    (39-86 us over that site's ten seeded geometries, and up to 45 us of spread within a single
+    run), which is what lets two candidates 5-8 us apart in steady state swap places — measured, in
+    2 of 8 runs. Consequently a [best_ms] measured under {!Isolated} is not a
+    throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
+    is, up to the batch's residual ~1% of round trip. *)
+
 type report = {
   outcome : outcome;
       (** What this call did about searching. The counters below say how much work that state got
@@ -667,6 +693,16 @@ type report = {
           to [baseline_ms], [default_ms] and [mma_best_ms], which are the same instrument's
           readings; ratios between them are safe, since all four were taken under one setting within
           one search. *)
+  timing : timing_mode option;
+      (** The {!timing_mode} every time in this report was measured under (gh-ocannl-755), including
+          the times a [Cache_replay] carries: the objective is a cache-key component, so an entry
+          this call could look up was measured under this call's objective. [None] only on
+          {!no_search_report}, which is a template rather than a report of any call.
+
+          It is here because nothing else records it. A consumer storing a [best_ms] in an artifact,
+          or comparing one across processes, otherwise has to reconstruct the objective from ambient
+          configuration — which a caller's explicit [?timing] need not match, and which a later
+          reader of the artifact does not have at all. *)
   best_label : string;
       (** The crowned candidate's spec label — the same string the [autotune_log] lines carry (e.g.
           ["F_sketch[mma-gpu 16x32x32 ep]"]). ["baseline"] when no candidate beat the serial
@@ -1005,32 +1041,6 @@ val set_test_bindings : Context.routine -> unit
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
-type timing_mode =
-  | Isolated
-      (** One launch followed by a host synchronization: the number is the latency of a lone
-          dispatch, kernel plus one submit/sync round trip. What every schedule crowned before
-          gh-ocannl-755 was ranked by, and the right objective for a workload that really does
-          dispatch one kernel and wait for it. *)
-  | Queued
-      (** A calibrated number of launches dispatched back to back with one synchronization, divided
-          by the count: the round trip is amortized and the number is what the kernel sustains
-          inside a stream that already has work in it. The default, because that is what a training
-          step presents — it queues every kernel of a layer and synchronizes at the end, so no
-          kernel in it pays a round trip of its own. *)
-
-(** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
-    [autotune_timing].
-
-    The two are different objectives and they do not crown the same candidate. On gfx1151 the
-    submit/sync round trip is ~50-60 us while the fastest candidates at the gpt2_mini out-projection
-    shape run in 60-70 us, so {!Isolated} reads about 2x the steady-state cost there — and the
-    offset varies from candidate to candidate with the block count and the per-launch queue work
-    (39-86 us over that site's ten seeded geometries, and up to 45 us of spread within a single
-    run), which is what lets two candidates 5-8 us apart in steady state swap places — measured, in
-    2 of 8 runs. Consequently a [best_ms] measured under {!Isolated} is not a
-    throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
-    is, up to the batch's residual ~1% of round trip. *)
-
 val queued_batch_depth : est_ms:float -> int
 (** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
     synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
@@ -1040,6 +1050,10 @@ val queued_batch_depth : est_ms:float -> int
     and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
     the target). Total, over every float: a subnormal estimate saturates rather than raising. Exposed because those two boundaries are what a regression would
     cross silently: a depth stuck at 1 turns a queued search back into an isolated one. *)
+
+val timing_string : timing_mode -> string
+(** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component
+    carries, what a report's mode is rendered as, and the round trip of {!timing_of_setting}. *)
 
 val timing_of_setting : string -> timing_mode
 (** Parses the [autotune_timing] spelling ([isolated] / [queued], case- and space-insensitive);

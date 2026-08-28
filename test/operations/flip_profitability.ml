@@ -135,6 +135,7 @@ let () =
       backend = "metal";
       numerics = "n";
       codegen = None;
+      objective = None;
       source_digest = "d";
       saved = [];
       segments = None;

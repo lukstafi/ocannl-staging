@@ -255,6 +255,7 @@ let () =
       backend = backend_name;
       numerics = SC.numerics_tag ();
       codegen = Some (SC.codegen_tag ~limits:slimits ());
+      objective = Some (SC.objective_tag ());
       source_digest = SC.digest base_canon;
       saved = !prelude_saved;
       segments = Some !segments_assoc;

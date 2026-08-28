@@ -576,3 +576,12 @@ files.
   routine slower than 10 ms per launch is measured identically in both modes by construction —
   `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
   counts its own launches, that the reading is per launch rather than per batch.
+  **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
+  `Keyed "timing"`), which is the one place this differs from its `autotune_*` neighbours: those
+  change how carefully the SAME quantity is measured, so either process's winner answers the
+  other's question, whereas an isolated-crowned entry answers a question a queued search did not
+  ask — and, left unkeyed, a warm cache would replay isolated winners forever and defeat the
+  default outright. Practical consequences: changing `autotune_timing` re-tunes rather than
+  replaying, pre-gh-755 entries are never replayed, and a `Cache_replay` report's times are
+  therefore known to be this call's objective, which is what lets `Autotune.report.timing` (and the
+  benchmark JSON's `timing` field) be filled in on a replay at all.

@@ -27,6 +27,38 @@ type outcome =
       (** A failure before (or instead of) the search proper: the base compile, the baseline link or
           timing, a fatal cache replay, an untuned fallback compile. *)
 
+(* gh-ocannl-755: what a timed candidate's number is a measurement OF. [Isolated] times one launch
+   followed by a host synchronization, so the number is the latency of a lone dispatch — the kernel
+   plus one submit/sync round trip. [Queued] dispatches a calibrated number of launches back to back
+   and synchronizes once, dividing by the count, so the round trip is amortized and what is left is
+   what the kernel sustains inside a stream that already has work in it.
+
+   They are not the same objective and they do not crown the same candidate. On gfx1151 the round
+   trip is ~50-60 us; at the gpt2_mini out-projection shape (134 MFLOP) the fastest candidates run
+   in 60-70 us, so [Isolated] reads about 2x their steady-state cost — and the offset is not a
+   constant the ranking could ignore: measured per candidate over that site's ten seeded geometries
+   it spans 39-86 us, varying with the block count and the per-launch queue work, and within a
+   single run it spans up to 45 us across candidates that are 5-8 us apart in steady state. Two such
+   candidates therefore swap places once each has its own round trip added to it, and at that site
+   they do -- in 2 of 8 measured runs, against 0 of 8 for [Queued] against an independent batched
+   instrument. See the tables in gh-ocannl-755.
+
+   [Queued] is the default because it is the objective the workload presents: a training step queues
+   every kernel of a layer into one stream and synchronizes at the end, so no kernel in it pays a
+   round trip of its own. [Isolated] remains selectable for a workload that really does dispatch one
+   kernel and wait — and because it is what every schedule crowned before gh-ocannl-755 was ranked
+   by. *)
+type timing_mode = Isolated | Queued
+
+let timing_string = function Isolated -> "isolated" | Queued -> "queued"
+
+let timing_of_setting s =
+  match String.lowercase (String.strip s) with
+  | "isolated" -> Isolated
+  | "queued" -> Queued
+  | other ->
+      invalid_arg ("ocannl_autotune_timing setting should be isolated or queued; found: " ^ other)
+
 type report = {
   outcome : outcome;
   candidates_timed : int;
@@ -60,6 +92,7 @@ type report = {
   baseline_ms : float;
   default_ms : float option;
   best_ms : float;
+  timing : timing_mode option;
   best_label : string;
   best_tensorized : bool;
   best_tensorization : Ir.C_syntax.tensorization option;
@@ -102,6 +135,9 @@ let no_search_report =
     baseline_ms = Float.infinity;
     default_ms = None;
     best_ms = Float.infinity;
+    (* A template, not a report of a call: no objective has been resolved. Every report [tune]
+       emits goes through [base_report], which fills it in. *)
+    timing = None;
     (* Nothing was timed, so there is no winner to name — and since gh-ocannl-677 the state is in
        [outcome] rather than smuggled through this string. Keeps [best_label]'s contract exact:
        empty exactly when [best_ms] is [infinity]. *)
@@ -217,29 +253,6 @@ let set_test_bindings routine =
 let min_timing_ms = 25.
 let max_timing_runs = 64
 
-(* gh-ocannl-755: what a timed candidate's number is a measurement OF. [Isolated] times one launch
-   followed by a host synchronization, so the number is the latency of a lone dispatch — the kernel
-   plus one submit/sync round trip. [Queued] dispatches a calibrated number of launches back to back
-   and synchronizes once, dividing by the count, so the round trip is amortized and what is left is
-   what the kernel sustains inside a stream that already has work in it.
-
-   They are not the same objective and they do not crown the same candidate. On gfx1151 the round
-   trip is ~50-60 us; at the gpt2_mini out-projection shape (134 MFLOP) the fastest candidates run
-   in 60-70 us, so [Isolated] reads about 2x their steady-state cost — and the offset is not a
-   constant the ranking could ignore: measured per candidate over that site's ten seeded geometries
-   it spans 39-86 us, varying with the block count and the per-launch queue work, and within a
-   single run it spans up to 45 us across candidates that are 5-8 us apart in steady state. Two such
-   candidates therefore swap places once each has its own round trip added to it, and at that site
-   they do -- in 2 of 8 measured runs, against 0 of 8 for [Queued] against an independent batched
-   instrument. See the tables in gh-ocannl-755.
-
-   [Queued] is the default because it is the objective the workload presents: a training step queues
-   every kernel of a layer into one stream and synchronizes at the end, so no kernel in it pays a
-   round trip of its own. [Isolated] remains selectable for a workload that really does dispatch one
-   kernel and wait — and because it is what every schedule crowned before gh-ocannl-755 was ranked
-   by. *)
-type timing_mode = Isolated | Queued
-
 (* Queued mode's batch depth is calibrated per candidate rather than fixed. A fixed depth is either
    too shallow to amortize the round trip on a fast kernel, or minutes of uninterruptible dispatches
    on a slow one — and the tuner meets both within one search. [queued_batch_ms] is the wall time
@@ -279,13 +292,6 @@ let queued_batch_depth ~est_ms =
     let want = queued_batch_ms /. est_ms in
     if Float.(want >= of_int max_queue_depth) then max_queue_depth
     else Int.max 1 (Float.iround_up_exn want)
-
-let timing_of_setting s =
-  match String.lowercase (String.strip s) with
-  | "isolated" -> Isolated
-  | "queued" -> Queued
-  | other ->
-      invalid_arg ("ocannl_autotune_timing setting should be isolated or queued; found: " ^ other)
 
 (* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
    rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
@@ -2499,12 +2505,21 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
       ~default:
         (int_setting ~default:3 @@ Utils.get_global_arg ~arg_name:"autotune_repeats" ~default:"3")
   in
+  (* Not [Option.value ~default:…] (Codex P2 on PR #512): that evaluates the default eagerly, so an
+     unparsable ambient [autotune_timing] would be rejected even for a caller that passed its own
+     mode — and for a [~search:false] call, which times nothing at all. The other settings escape
+     this only because [int_setting] swallows a bad value; this one is meant to refuse it, so the
+     read has to be in the branch that needs it. *)
   let timing =
-    Option.value timing
-      ~default:
-        (timing_of_setting
-        @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued")
+    match timing with
+    | Some t -> t
+    | None -> timing_of_setting @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued"
   in
+  (* Every report this call emits starts here rather than at [no_search_report], so the objective
+     its times were taken under travels with them (gh-ocannl-755): a consumer comparing a [best_ms]
+     across processes, or storing one in a benchmark artifact, otherwise has to guess it from
+     ambient configuration that a [?timing] override may not match. *)
+  let base_report = { no_search_report with timing = Some timing } in
   let max_split_reduce_sites =
     max 0
       (Option.value max_split_reduce_sites
@@ -2568,7 +2583,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
      at launch, at sync — instead of guessing. Reporting is best-effort here, as on the search's own
      fatal path: it must not replace the compiler failure. [base] carries whatever the call did
      learn before failing (e.g. a decline census). *)
-  let emit_pre_search_failure ?(base = no_search_report) ~phase ~candidate ~detail () =
+  let emit_pre_search_failure ?(base = base_report) ~phase ~candidate ~detail () =
     let r = { base with outcome = Pre_search_failure { phase; candidate; detail } } in
     try emit_report r
     with report_exn when not (process_fatal_exn report_exn) ->
@@ -2633,11 +2648,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
     logf
       "search disabled (autotune_search=false) and no chosen cache: compiling the untuned default";
     (* Report AFTER the fallback compile: a report is a record of what this call achieved, and
-       [no_search_report] says the untuned default shipped. Emitting it first would leave a consumer
+       the base report says the untuned default shipped. Emitting it first would leave a consumer
        holding a clean, non-partial report for a call that then raised (Codex P2 on PR #291); a
        compile that raises reports its own failure instead (gh-ocannl-550). *)
     let result = compile_untuned_default () in
-    report_or_release no_search_report ~result;
+    report_or_release base_report ~result;
     result)
   else
     let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
@@ -2742,7 +2757,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
     let base_digest = SC.digest canon in
     let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
     let codegen_tag = SC.codegen_tag ~limits () in
-    let key = SC.cache_key ~limits canon ~backend in
+    let objective = timing_string timing in
+    let key = SC.cache_key ~objective ~limits canon ~backend in
     let compile_spec =
       compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
         ~provenance:Outcome.Candidate search_ctx comp bindings
@@ -2790,7 +2806,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
        []]). *)
     let census () =
       {
-        no_search_report with
+        base_report with
         candidates_failed = failed_count declines;
         baseline_declined = Option.is_some baseline_decline;
         declines = decline_summaries declines;
@@ -2808,7 +2824,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
         | Some entry
           when String.equal entry.SC.source_digest base_digest
                && String.equal entry.SC.numerics (SC.numerics_tag ())
-               && Option.value_map entry.SC.codegen ~default:true ~f:(String.equal codegen_tag) -> (
+               && Option.value_map entry.SC.codegen ~default:true ~f:(String.equal codegen_tag)
+               && Option.value_map entry.SC.objective ~default:true ~f:(String.equal objective) -> (
             let spec =
               match entry.SC.segments with
               (* A fissioned entry with a non-empty [saved] is a split-reduce winner: [saved] is the
@@ -2861,6 +2878,10 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                 emit_report
                   {
                     outcome = Cache_replay;
+                    (* The entry's times are the storing search's, but the objective is this
+                       call's: since gh-ocannl-755 the objective is a cache-key component, so an
+                       entry under this key was measured under this objective. *)
+                    timing = Some timing;
                     candidates_timed = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
@@ -3206,6 +3227,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           let partial_report =
             {
               outcome = Search_died failure;
+              timing = Some timing;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
@@ -3843,6 +3865,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                    backend;
                    numerics = SC.numerics_tag ();
                    codegen = Some codegen_tag;
+                   objective = Some objective;
                    source_digest = base_digest;
                    saved;
                    segments;
@@ -3883,6 +3906,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           let completed_report =
             {
               outcome = Searched;
+              timing = Some timing;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;

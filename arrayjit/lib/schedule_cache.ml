@@ -513,6 +513,12 @@ type entry = {
       (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572), the same
           self-description as [numerics] and with the same belt-and-braces role. Optional so that
           entries written before this field existed stay readable. *)
+  objective : string option; [@sexp.option]
+      (** The autotuner's timing objective ([autotune_timing]) the search ran under
+          (gh-ocannl-755), the same self-description as [numerics] and [codegen] and with the same
+          belt-and-braces role beside the key's own [timing] component. Optional so entries written
+          before this field existed stay readable — they are under a different key anyway, so
+          nothing looks them up. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -552,13 +558,26 @@ let sanitize name =
   String.map name ~f:(fun c ->
       if Char.is_alphanum c || Char.equal c '-' || Char.equal c '_' then c else '_')
 
+(* gh-ocannl-755: the autotuner's timing objective, normalized to the spelling the key carries. Read
+   from configuration here the way the numerics and codegen tags read theirs, so a caller that has
+   not resolved a mode of its own keys against the one a search in this process would use. A caller
+   that HAS resolved one — [Autotune.tune] with an explicit [~timing] — passes it instead: the
+   configuration is then not what the times were taken under. A spelling this module does not know
+   is passed through rather than rejected; the setting is validated where it is acted on, and a
+   cache key's job here is only to keep unlike regimes apart. *)
+let objective_tag () =
+  sanitize
+    (String.lowercase
+       (String.strip (Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued")))
+
 (* The named components of a cache key, in the order they are concatenated. This list DRIVES
    {!cache_key} (each name dispatches to an arm below, and an unknown name raises), so the
    enumeration cannot go stale against the implementation — which is what makes it usable as the
    thing the digest-completeness registry classifies config keys against (gh-ocannl-572). *)
-let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool" ]
+let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool"; "timing" ]
 
-let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
+let cache_key ?objective ~(limits : Backend_intf.hardware_limits) canonical ~backend =
+  let objective = match objective with Some o -> sanitize o | None -> objective_tag () in
   let component = function
     | "digest" -> canonical.digest
     | "backend" -> sanitize backend
@@ -567,6 +586,12 @@ let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
     (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a pool
        change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
     | "pool" -> ( match limits.worker_pool_tag with None -> "" | Some tag -> "p" ^ sanitize tag)
+    (* The autotuner's timing objective (gh-ocannl-755). Isolated timing -- one launch plus one host
+       sync -- and queued timing crown DIFFERENT candidates, measured, so an entry crowned under one
+       is not the answer to a search asking the other, and its stored times are readings of a
+       different quantity. Unlike the pool component this never contributes nothing: a key that
+       omitted the objective on some path would let the two regimes share a file. *)
+    | "timing" -> "t" ^ objective
     | other -> invalid_arg ("Schedule_cache.cache_key: unhandled key component " ^ other)
   in
   String.concat ~sep:"-"

@@ -361,7 +361,9 @@ let tune_json t =
         in
         Bench_json.tune_arm ~name
           ~state:(Autotune.outcome_name r.Autotune.outcome)
-          ~searched ~cache_hit ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
+          ~searched ~cache_hit
+          ~timing:(Option.map r.Autotune.timing ~f:Autotune.timing_string)
+          ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
           ~tensorized:r.Autotune.best_tensorized
           ~tensorization:
             (Option.map r.Autotune.best_tensorization ~f:Ir.C_syntax.tensorization_name)
