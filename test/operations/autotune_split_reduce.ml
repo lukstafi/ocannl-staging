@@ -29,6 +29,7 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead
@@ -207,7 +208,7 @@ let () =
   | None ->
       p "split-reduce candidates seeded" false;
       p "split-reduce candidates timed" false);
-  p "tuned skinny matvec matches the serial reference" (Array.for_all2_exn got want ~f:approx)
+  p_all2 "tuned skinny matvec matches the serial reference" got want ~f:approx
 
 (* === Leg 4: a hand-crafted split-reduce cache entry replays (the F_split_saved path). === *)
 
@@ -281,7 +282,7 @@ let () =
   | None ->
       p "split-reduce entry hits the cache" false;
       p "split-reduce cache-hit replay is fissioned" false);
-  p "split-reduce cache-hit replay computes correctly" (Array.for_all2_exn got want ~f:approx)
+  p_all2 "split-reduce cache-hit replay computes correctly" got want ~f:approx
 
 (* === Leg 5: multi-site — per-site singles plus the recombined composite. === *)
 
@@ -338,7 +339,7 @@ let () =
   | None ->
       p "multi-site split-reduce singles seeded" false;
       p "best-timed singles recombined into a composite" false);
-  p "tuned multi-site routine matches the serial reference" (Array.for_all2_exn got want ~f:approx)
+  p_all2 "tuned multi-site routine matches the serial reference" got want ~f:approx
 
 (* === Leg 6: the conv-gradient shape — the enabling interchange (gh-ocannl-537). ===
 
@@ -442,7 +443,7 @@ let () =
   | None ->
       p "conv-gradient split-reduce candidates seeded" false;
       p "the interchanged bias-gradient candidate reaches timing" false);
-  p "tuned bias gradient matches the serial reference" (Array.for_all2_exn got want ~f:approx)
+  p_all2 "tuned bias gradient matches the serial reference" got want ~f:approx
 
 (* === Leg 7: cost ranking and the eviction census (gh-ocannl-541). ===
 
@@ -527,5 +528,5 @@ let () =
       p "only the top-cost site is seeded under the cap" false;
       p "the two evicted sites appear in the decline census" false;
       p "the census still sums to candidates_failed" false);
-  p "the capped tuned routine matches the serial reference" (Array.for_all2_exn got want ~f:approx);
+  p_all2 "the capped tuned routine matches the serial reference" got want ~f:approx;
   Stdio.printf "\nDone.\n%!"

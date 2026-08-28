@@ -27,6 +27,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -111,7 +112,7 @@ let () =
   in
   let got1 = run_with "epf_plain" transform1 mc1 in
   p "plain-nest fusion leaves a single nest (tail merged)" (!fused_count = 1);
-  p "plain-nest fused values match two-kernel bitwise" (Array.for_all2_exn got1 want ~f:Float.equal);
+  p_all2 "plain-nest fused values match two-kernel bitwise" got1 want ~f:Float.equal;
 
   (* --- Site 2: the S4 packed pipeline's Privatize store-back (all-Serial, every backend) --- *)
   let ma2, mb2, prod2, mc2 = make_graph () in
@@ -163,8 +164,7 @@ let () =
     Sched.apply sched opt
   in
   let got2 = run_with "epf_packed" transform2 mc2 in
-  p "packed+privatized fused values match two-kernel bitwise"
-    (Array.for_all2_exn got2 want ~f:Float.equal);
+  p_all2 "packed+privatized fused values match two-kernel bitwise" got2 want ~f:Float.equal;
 
   (* --- Site 1: the staged tensorized fragment store-back --- *)
   let _, _, prod3, mc3 = make_graph () in
@@ -229,8 +229,7 @@ let () =
   in
   let got3 = run_with "epf_mma" transform3 mc3 in
   p "staged fused: epilogue is a sibling of the fragment store-back" !has_epilogue_sibling;
-  p "staged fused values match two-kernel"
-    (Array.for_all2_exn got3 want ~f:(fun a b -> Float.(abs (a - b) < 1e-2)));
+  p_all2 "staged fused values match two-kernel" got3 want ~f:(fun a b -> Float.(abs (a - b) < 1e-2));
   p "staged fused bitwise on C backends" (on_gpu || Array.for_all2_exn got3 want ~f:Float.equal);
   (let src = Generated.read "epf_mma" in
    let has s = String.is_substring src ~substring:s in
@@ -291,8 +290,8 @@ let () =
         (r.Autotune.epilogue_sketch_candidates > 0
         && r.Autotune.epilogue_sketch_candidates * flavors = r.Autotune.sketch_candidates)
   | _ -> p "fused-epilogue sketch twins seeded" false);
-  p "tuned matmul+tail matches two-kernel"
-    (Array.for_all2_exn got_t want ~f:(fun a b -> Float.(abs (a - b) < 1e-2)));
+  p_all2 "tuned matmul+tail matches two-kernel" got_t want ~f:(fun a b ->
+      Float.(abs (a - b) < 1e-2));
 
   (* --- Pattern discipline: targeted errors --- *)
   let ma4, _, prod4, mc4 = make_graph () in

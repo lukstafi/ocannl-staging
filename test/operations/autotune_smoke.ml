@@ -22,6 +22,7 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means. In
@@ -184,7 +185,7 @@ let () =
   in
   let pctx = Context.run pctx proutine in
   let priv_got = Context.get_values pctx mc.Tensor.value in
-  p "privatized replay values correct" (Array.for_all2_exn priv_got mm_expected ~f:approx);
+  p_all2 "privatized replay values correct" priv_got mm_expected ~f:approx;
   p "privatized replay structurally equals the direct application"
     (String.equal !priv_replay_digest priv_direct_digest);
 
@@ -213,7 +214,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx c.Tensor.value in
-  p "replayed schedule values correct" (Array.for_all2_exn got expected_c ~f:approx);
+  p_all2 "replayed schedule values correct" got expected_c ~f:approx;
   p "replayed schedule structurally equals the direct application"
     (String.equal !replay_digest direct_digest);
   p "saved schedule roundtrips through sexp"
@@ -435,5 +436,4 @@ let () =
   let r6 = Option.value_exn ~here:[%here] !r6 in
   p "search off ignores the unchosen default cache directory"
     (match r6.Autotune.outcome with Autotune.Search_disabled -> true | _ -> false);
-  p "the ignored-cache fallback is still a correct routine"
-    (Array.for_all2_exn got6 expected_c ~f:approx)
+  p_all2 "the ignored-cache fallback is still a correct routine" got6 expected_c ~f:approx

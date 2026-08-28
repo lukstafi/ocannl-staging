@@ -22,6 +22,7 @@ module LL = Ir.Low_level
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let p_empty = Verdict.p_empty
 let p_all = Verdict.p_all
 let p_none = Verdict.p_none
@@ -230,8 +231,8 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx y.Tensor.value in
-  p "bc: tuned batched head matches the reference"
-    (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  p_all2 "bc: tuned batched head matches the reference" got expected ~f:(fun a b ->
+      Float.(abs (a - b) < 1e-3));
   (* Exactly one report, then its census — a vacuous [for_all] over zero reports would claim the
      census was clean without having inspected one. *)
   p "bc: the tuning census records no companion-coverage decline"
@@ -438,7 +439,11 @@ let () =
       (Sched.fission_scheduled ~promote_locals:is_gpu ~arity_cuts:true ~preset ~zero_sched
          ~static_indices:[] opt) ~f:(fun (_, _, _, post) -> post)
   in
-  let approx got want = Array.for_all2_exn got want ~f:(fun a c -> Float.(abs (a - c) < 1e-3)) in
+  (* Non-empty by construction (gh-ocannl-746): two arrays emptied together compare equal. *)
+  let approx got want =
+    (not (Array.is_empty got))
+    && Array.for_all2_exn got want ~f:(fun a c -> Float.(abs (a - c) < 1e-3))
+  in
   p "lm: the finer fissioned form executes correctly"
     (match
        let ctx, routine =

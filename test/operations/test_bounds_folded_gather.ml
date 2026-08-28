@@ -31,6 +31,7 @@ let id_ints = [ 1; 3; 0; 5 ]
 let batch = List.length id_ints
 let approx a b = Float.(abs (a - b) < 1e-4)
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* emb[b,o] = C[o, ids[b]] = o*vocab + ids[b] *)
 let expected =
@@ -103,8 +104,7 @@ let () =
      proposing bounds [0, 5]), and runs. *)
   let ctx_a = Train.forward_once ctx_a guarded_emb in
   let got_a = Context.get_values ctx_a guarded_emb.Tensor.value in
-  p "guarded baseline executes the direct table gather"
-    (Array.for_all2_exn got_a expected ~f:approx);
+  p_all2 "guarded baseline executes the direct table gather" got_a expected ~f:approx;
   let has_guard_ternary c =
     (* [Where] renders as [(cond != 0 ? ... : ...)] (or [!= 0.0] at float guard precisions). *)
     String.is_substring c ~substring:"!= 0 ?" || String.is_substring c ~substring:"!= 0.0 ?"
@@ -166,8 +166,7 @@ let () =
   let%op dev_emb = c_d * Nn_blocks.one_hot_of_ids ~num_classes:vocab ids_dev in
   let ctx_d = Train.forward_once ctx_d dev_emb in
   let got_d = Context.get_values ctx_d dev_emb.Tensor.value in
-  p "device-written ids kernel executes the direct table gather"
-    (Array.for_all2_exn got_d expected ~f:approx);
+  p_all2 "device-written ids kernel executes the direct table gather" got_d expected ~f:approx;
   let dyn_d, wheres_d, _ = inspect dev_emb in
   p "device-written ids keep the Get_dynamic gather" (dyn_d >= 1);
   p "device-written ids keep the guard (bounds pinned to top)" (wheres_d >= 1)

@@ -32,6 +32,7 @@ module IDX = Train.IDX
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -134,7 +135,11 @@ let fission_annotate opt =
   Sched.fission_scheduled ~preset ~zero_sched:(fun _ -> []) ~static_indices:[] opt
   |> List.map ~f:(fun (_, _, _, scheduled) -> scheduled)
 
-let bitwise = Array.for_all2_exn ~f:Float.equal
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
+let bitwise a b = (not (Array.is_empty a)) && Array.for_all2_exn a b ~f:Float.equal
 
 (* === Leg 1: static reduction — matvec y[i] = Σ_k m[i,k] * v[k], awkward extents. === *)
 
@@ -226,8 +231,7 @@ let () =
   p "split-reduce on a read-only operand is Op_illegal"
     (match !illegal_target with Some (Sched.Op_illegal _) -> true | _ -> false);
   p "schedule-cache round-trip re-mints an applicable Split_reduce" !cache_ok;
-  p "split-schedule serial twin approximates the unsplit reference"
-    (Array.for_all2_exn twin want ~f:approx);
+  p_all2 "split-schedule serial twin approximates the unsplit reference" twin want ~f:approx;
 
   (* -- The same schedule, fissioned and annotated: must match the serial twin BITWISE. -- *)
   let seg_pins = ref (false, false) in
@@ -267,7 +271,7 @@ let () =
   in
   let ifs6, _, _ = !stats in
   p "non-dividing split-reduce keeps the remainder guard" (ifs6 > 0);
-  p "non-dividing serial twin approximates the reference" (Array.for_all2_exn twin6 want ~f:approx);
+  p_all2 "non-dividing serial twin approximates the reference" twin6 want ~f:approx;
   let y4, _ = make_matvec "4" in
   let par6 =
     run_forward

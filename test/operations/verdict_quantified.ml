@@ -1,10 +1,18 @@
-(* The non-emptiness guarantee of Verdict's quantified claims (gh-ocannl-729).
+(* The non-emptiness guarantee of Verdict's quantified claims (gh-ocannl-729, gh-ocannl-746).
 
    "every X holds" is TRUE of an empty X. Written as `p "every seed spreads j" (List.for_all seeds
    ~f:...)` it prints the same passing line whether the property was checked on a hundred seeds or
    on none, and the golden records it as verified either way -- the gh-ocannl-601 hazard one level
    up, arriving through `Verdict.p` itself. `p_all`, `p_none`, `p_empty` and `p_exists` carry the
    guard, so the claim is the shortest thing to write AND cannot pass on nothing.
+
+   `p_all2` (gh-ocannl-746) is the same guarantee one type over, on the executed-parity genre: `p L
+   (Array.for_all2_exn got want ~f)`, "every cell matches the reference". `Array.for_all2_exn [||]
+   [||]` is `true` too, and the emptiness is REACHABLE -- both sides usually come out of
+   `Context.get_values`, and a node that stopped being materialized empties them at once, so the
+   reference does not discriminate, because it went through the same path. It carries one refusal
+   its siblings have no analogue of: a length mismatch is a failed CLAIM naming both lengths, not
+   the `Invalid_argument` `Array.for_all2_exn` raises without saying which claim raised it.
 
    Every guarantee here fires only when a collection is empty, which in a green suite is never --
    the same shape as `generated_provenance`, and the same construction: the passing forms run
@@ -15,8 +23,8 @@
 
    Two properties, not one. The claim must FAIL on an empty collection -- exit status and a line
    naming emptiness -- and it must print BYTE-IDENTICALLY to `Verdict.p` when the collection is not
-   empty, which is what lets ~44 test files convert without their goldens moving. The second is
-   checked by running `p` and `p_all` in two children and comparing what each wrote. *)
+   empty, which is what lets ~90 test files convert without their goldens moving. The second is
+   checked by running `p` beside each combinator in two children and comparing what each wrote. *)
 
 open Base
 
@@ -66,6 +74,10 @@ let seeds = [ 2; 4; 6 ]
 let even n = n % 2 = 0
 let odd n = n % 2 = 1
 
+(* The executed-parity shape `p_all2` serves: a readback and the reference it is checked against. *)
+let got = [| 1.0; 2.0; 3.0 |]
+let want = [| 1.0; 2.0; 3.0 |]
+
 let () =
   let mode =
     match Array.to_list Stdlib.Sys.argv with
@@ -81,16 +93,21 @@ let () =
       Verdict.p_exists "some seed exceeds four" seeds ~f:(fun n -> n > 4);
       Verdict.p_exists ~min:2 "at least two seeds exceed two" seeds ~f:(fun n -> n > 2);
       Verdict.p_empty "every seed validates" ~over:seeds (List.filter seeds ~f:odd);
-      (* An array reaches the combinators through [Array.to_list]; the eight array sites in the
-         sweep spell it that way rather than growing a second family of entry points. *)
+      (* An array reaches the SINGLE-collection combinators through [Array.to_list]; the eight array
+         sites in the gh-ocannl-729 sweep spell it that way rather than growing a second family of
+         entry points. The pairwise one takes arrays, because it compares their lengths. *)
       Verdict.p_all "every sampled value is finite"
         (Array.to_list [| 1.0; 2.0 |])
-        ~f:Float.is_finite
+        ~f:Float.is_finite;
+      Verdict.p_all2 "the readback matches the reference cell for cell" got want ~f:Float.equal;
+      Verdict.p_all2 ~min:3 "all three cells match the reference" got want ~f:Float.equal
   (* === Shape: what a non-empty collection prints, compared against [p]'s own line. === *)
   | "shape_p" -> Verdict.p "the claim" true
   | "shape_p_all" -> Verdict.p_all "the claim" seeds ~f:even
+  | "shape_p_all2" -> Verdict.p_all2 "the claim" got want ~f:Float.equal
   | "shape_p_false" -> Verdict.p "the claim" false
   | "shape_p_all_false" -> Verdict.p_all "the claim" seeds ~f:odd
+  | "shape_p_all2_false" -> Verdict.p_all2 "the claim" got [| 1.0; 9.0; 3.0 |] ~f:Float.equal
   (* === Must be refused: run as children by [refusals]. === *)
   | "all_empty" -> Verdict.p_all "every seed is even" [] ~f:even
   | "all_short" -> Verdict.p_all ~min:3 "every one of the three seeds is even" [ 2 ] ~f:even
@@ -101,6 +118,17 @@ let () =
   | "exists_none" -> Verdict.p "the claim" (List.exists seeds ~f:odd)
   | "exists_none_combinator" -> Verdict.p_exists "the claim" seeds ~f:odd
   | "empty_over_empty" -> Verdict.p_empty "every seed validates" ~over:[] []
+  (* gh-ocannl-746: the pairwise refusals. A de-materialized node empties BOTH sides at once, so
+     "both empty" is the shape the executed-parity claims actually go vacuous in. *)
+  | "all2_empty" ->
+      Verdict.p_all2 "the readback matches the reference cell for cell" [||] [||] ~f:Float.equal
+  | "all2_length" ->
+      Verdict.p_all2 "the readback matches the reference cell for cell" got [| 1.0; 2.0 |]
+        ~f:Float.equal
+  | "all2_length_left_empty" ->
+      Verdict.p_all2 "the readback matches the reference cell for cell" [||] want ~f:Float.equal
+  | "all2_short" ->
+      Verdict.p_all2 ~min:3 "all three cells match the reference" [| 1.0 |] [| 1.0 |] ~f:Float.equal
   | "refusals" ->
       refused "an `every` claim over an empty collection fails rather than passing vacuously"
         ~line:"every seed is even (empty): false" (run_child "all_empty");
@@ -117,15 +145,37 @@ let () =
         ~line:"at least two seeds exceed four (only 1 of 2 match): false" (run_child "exists_short");
       refused "an emptiness claim about a derived subset fails when the population is empty too"
         ~line:"every seed validates (empty): false" (run_child "empty_over_empty");
+      refused
+        "an executed-parity claim over two empty readbacks fails rather than passing vacuously"
+        ~line:"the readback matches the reference cell for cell (empty): false"
+        (run_child "all2_empty");
+      (* A mismatch is a CLAIM line, not the `Invalid_argument` `Array.for_all2_exn` raises: an
+         exception fails the run without naming which claim, and the two lengths are the finding. *)
+      refused "a length mismatch is reported as a failed claim naming both lengths"
+        ~line:"the readback matches the reference cell for cell (length 3 vs 2): false"
+        (run_child "all2_length");
+      refused "a one-sided empty readback reports the mismatch rather than plain emptiness"
+        ~line:"the readback matches the reference cell for cell (length 0 vs 3): false"
+        (run_child "all2_length_left_empty");
+      refused "a pair below its stated floor fails, naming the shortfall"
+        ~line:"all three cells match the reference (only 1 of 3): false" (run_child "all2_short");
       (* The conversion is golden-neutral exactly to the extent that this holds. *)
       let _, plain_true, _ = run_child "shape_p" in
       let _, all_true, _ = run_child "shape_p_all" in
       Verdict.p "a satisfied quantified claim prints what `Verdict.p` prints"
         (String.equal plain_true all_true && String.equal plain_true "the claim: true\n");
+      let _, all2_true, _ = run_child "shape_p_all2" in
+      Verdict.p "a satisfied executed-parity claim prints what `Verdict.p` prints"
+        (String.equal plain_true all2_true);
       let _, plain_false, _ = run_child "shape_p_false" in
       let _, all_false, _ = run_child "shape_p_all_false" in
       Verdict.p "a non-empty collection that refutes the claim prints what `Verdict.p` prints"
         (String.equal plain_false all_false && String.equal plain_false "the claim: false\n");
+      (* The elementwise refutation — the failure the sweep must keep catching — still prints the
+         bare line: the `(…)` detail is reserved for what the claim could not express. *)
+      let _, all2_false, _ = run_child "shape_p_all2_false" in
+      Verdict.p "a genuinely differing cell refutes the claim and prints what `Verdict.p` prints"
+        (String.equal plain_false all2_false);
       (* At the default floor there is no shortfall to name, so an unwitnessed existential prints
          the bare line too -- the `(…)` detail is reserved for what the claim could not express. *)
       let _, plain_none, _ = run_child "exists_none" in

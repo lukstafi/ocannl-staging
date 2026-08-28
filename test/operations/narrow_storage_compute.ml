@@ -32,6 +32,7 @@ module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
 
@@ -144,9 +145,9 @@ let () =
     ~f:(fun (name, prec) ->
       let twin = run ~name:("nsc_twin_" ^ name) ~transform:serial ~prec ~label:("t" ^ name) () in
       let vec = run ~name:("nsc_vec_" ^ name) ~transform:vectorize ~prec ~label:("v" ^ name) () in
-      p
+      p_all2
         (name ^ " vectorized rendering is bitwise identical to the serial twin")
-        (Array.for_all2_exn vec twin ~f:Float.equal));
+        vec twin ~f:Float.equal);
 
   (* --- 2b. Native fp16 arithmetic (gh-ocannl-516): same parity obligation, one precision up. ---
      Where the target has genuine 16-bit arithmetic the half legs compute *in* half at twice f32's
@@ -157,8 +158,8 @@ let () =
   Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_narrow };
   let twin = run ~name:"nsc_twin_nat" ~transform:serial ~prec:Ir.Ops.half ~label:"tnat" () in
   let vec = run ~name:"nsc_vec_nat" ~transform:vectorize ~prec:Ir.Ops.half ~label:"vnat" () in
-  p "native-fp16 vectorized rendering is bitwise identical to the serial twin"
-    (Array.for_all2_exn vec twin ~f:Float.equal);
+  p_all2 "native-fp16 vectorized rendering is bitwise identical to the serial twin" vec twin
+    ~f:Float.equal;
   (* Half's range and mantissa are wider than the chain needs, so computing in half must still land
      within a couple of half ulps of the f32 reference -- a wrong lane geometry or a mismatched FMA
      would not. *)

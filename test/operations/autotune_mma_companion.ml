@@ -15,6 +15,7 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -112,8 +113,8 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx y.Tensor.value in
-  p "mc: tuned classifier head matches the reference"
-    (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  p_all2 "mc: tuned classifier head matches the reference" got expected ~f:(fun a b ->
+      Float.(abs (a - b) < 1e-3));
   match !reports with
   | [ r ] ->
       (* The assertion the arc was missing: SEEDED is not TIMED. Every GPU backend used to seed

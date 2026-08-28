@@ -26,8 +26,8 @@
    the default and cap-disabled compiles.
 
    Phase 3 pins the cross-routine reading (review round 1): the same chain split across two
-   [LL.optimize] calls sharing one [optimize_ctx] — the second routine reads a node the first
-   committed [Virtual], whose fan-in is derived from the stored computation rather than from
+   [Ll_test.optimize_in] calls sharing one [optimize_ctx] — the second routine reads a node the
+   first committed [Virtual], whose fan-in is derived from the stored computation rather than from
    (absent) local setters, so the chain cannot escape the cap by being compiled in pieces. The
    executed leg is gh-ocannl-610's acceptance test: routine B's kernel parameters must include the
    leaves (x0, w1..w5) that reach it only through the spliced cross-routine computation.
@@ -362,10 +362,10 @@ let phase3 () =
   let llc_a = List.reduce_exn ~f:seq (List.take c.links split @ [ copy_out ]) in
   let llc_b = List.reduce_exn ~f:seq (List.drop c.links split @ [ c.consumer ]) in
   let ctx = LL.empty_optimize_ctx () in
-  let o_a = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xchain_a" [] llc_a in
+  let o_a = optimize_in ctx ~name:"vcf_xchain_a" llc_a in
   p "cross-routine: routine A leaves x1..x5 virtual"
     (Array.for_alli c.xs ~f:(fun k tn -> k >= split || known_virtual o_a tn));
-  let o_b = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xchain_b" [] llc_b in
+  let o_b = optimize_in ctx ~name:"vcf_xchain_b" llc_b in
   (* Routine B never sets x5, yet x5's stored computation is replayed when inlined: its fan-in (6:
      {x0, w1..w5}) is derived from the computation, so x6 sees 7, x7 sees 8, and x8 trips the cap
      exactly as in the single-routine reading. *)
@@ -415,11 +415,9 @@ let phase3 () =
     loop_n s dim (set c2.out [| iter s |] (get c2.xs.(7) [| iter s |]))
   in
   let ctx2 = LL.empty_optimize_ctx () in
-  let _o_a2 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xupd_a" [] llc_a2
-  in
+  let _o_a2 = optimize_in ctx2 ~name:"vcf_xupd_a" llc_a2 in
   let o_b2 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xupd_b" []
+    optimize_in ctx2 ~name:"vcf_xupd_b"
       (List.reduce_exn ~f:seq [ upd; link6; link7; link8; consumer2 ])
   in
   p "cross-routine update: x6 stays virtual (fan-in 8, prefix counted through the update)"
@@ -442,9 +440,7 @@ let phase4 () =
   let llc_a = List.reduce_exn ~f:seq (List.take c.links split) in
   let llc_b = List.reduce_exn ~f:seq (List.drop c.links split @ [ c.consumer ]) in
   let ctx = LL.empty_optimize_ctx () in
-  let o_a =
-    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_allvirt_a" [] llc_a
-  in
+  let o_a = optimize_in ctx ~name:"vcf_allvirt_a" llc_a in
   p "all-virtual: routine A optimizes to an empty schedule"
     (match o_a.LL.llc with LL.Noop -> true | _ -> false);
   (* Review round 1 (P2): the interface must match the empty schedule — the deferred computations'
@@ -459,9 +455,7 @@ let phase4 () =
   (* The empty routine must remain compilable and runnable end to end. *)
   let _ctx_a = run ~name:"vcf_allvirt_a" o_a ~seed:[] in
   p "all-virtual: routine A compiles and runs as a no-op" true;
-  let o_b =
-    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_allvirt_b" [] llc_b
-  in
+  let o_b = optimize_in ctx ~name:"vcf_allvirt_b" llc_b in
   p "all-virtual: fan-in decisions unchanged in routine B (x8 trips the cap)"
     (known_virtual o_b c.xs.(6) && known_non_virtual o_b c.xs.(7) && known_virtual o_b c.xs.(8));
   p "all-virtual: routine B declares the spliced leaves as inputs"
@@ -487,9 +481,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v [| iter s |] (add (get ell [| iter s |]) (c 100.)))
   in
-  let o_a =
-    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_prewrite_a" [] llc_a
-  in
+  let o_a = optimize_in ctx ~name:"vcf_prewrite_a" llc_a in
   p "pre-write splice: routine A defers v" (known_virtual o_a v);
   let llc_b =
     let s = sym () and s2 = sym () in
@@ -497,9 +489,7 @@ let phase5 () =
       (loop_n s dim (set out [| iter s |] (get v [| iter s |])))
       (loop_n s2 dim (set ell [| iter s2 |] (ramp 1000. s2)))
   in
-  let o_b =
-    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_prewrite_b" [] llc_b
-  in
+  let o_b = optimize_in ctx ~name:"vcf_prewrite_b" llc_b in
   p "pre-write splice: ell flips to read_before_write" (read_before_write o_b ell);
   p "pre-write splice: ell is an input of routine B"
     (let (ins, _), _ = LL.input_and_output_nodes o_b in
@@ -527,9 +517,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set mv [| iter s |] (LL.Get_merge_buffer (msrc, [| iter s |])))
   in
-  let o_ma =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_a" [] llc_ma
-  in
+  let o_ma = optimize_in ctx2 ~name:"vcf_merge_a" llc_ma in
   p "merge splice: routine A defers the merge-reading node" (known_virtual o_ma mv);
   p "merge splice: the deferred-away merge declaration is dropped from routine A"
     (Option.is_none o_ma.LL.merge_node);
@@ -539,9 +527,7 @@ let phase5 () =
   in
   let rejected =
     try
-      ignore
-        (LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_b" [] llc_mb
-          : LL.optimized);
+      ignore (optimize_in ctx2 ~name:"vcf_merge_b" llc_mb : LL.optimized);
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
@@ -562,9 +548,7 @@ let phase5 () =
   in
   let rejected2 =
     try
-      ignore
-        (LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_b2" [] llc_mb2
-          : LL.optimized);
+      ignore (optimize_in ctx2 ~name:"vcf_merge_b2" llc_mb2 : LL.optimized);
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
@@ -581,9 +565,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set mtar [| iter s |] (LL.Get_merge_buffer (msrc3, [| iter s |])))
   in
-  let o_m3 =
-    LL.optimize ctx7 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_self" [] llc_m3
-  in
+  let o_m3 = optimize_in ctx7 ~name:"vcf_merge_self" llc_m3 in
   p "same-routine merge read: source is the merge param, not an ordinary entry"
     ((match o_m3.LL.merge_node with Some m -> Tn.equal m msrc3 | None -> false)
     && not (Hashtbl.mem o_m3.LL.traced_store msrc3));
@@ -604,9 +586,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v2 [| iter s |] (add (get ell2 [| iter s |]) (c 100.)))
   in
-  let o_a3 =
-    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_partial_a" [] llc_a3
-  in
+  let o_a3 = optimize_in ctx3 ~name:"vcf_partial_a" llc_a3 in
   p "partial-write splice: routine A defers v2" (known_virtual o_a3 v2);
   let llc_b3 =
     let s = sym () in
@@ -614,9 +594,7 @@ let phase5 () =
       (set ell2 [| fixed 0 |] (c 5000.))
       (loop_n s (dim - 1) (set out2 [| iter s |] (get v2 [| aff [ (1, s) ] 1 |])))
   in
-  let o_b3 =
-    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_partial_b" [] llc_b3
-  in
+  let o_b3 = optimize_in ctx3 ~name:"vcf_partial_b" llc_b3 in
   p "partial-write splice: ell2 stays read_before_write (per-cell coverage)"
     (read_before_write o_b3 ell2);
   p "partial-write splice: ell2 is an input of routine B"
@@ -645,9 +623,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v3 [| iter s |] (add (get ell3 [| iter s |]) (c 100.)))
   in
-  let o_a4 =
-    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_a" [] llc_a4
-  in
+  let o_a4 = optimize_in ctx4 ~name:"vcf_dead_a" llc_a4 in
   p "dead-write splice: routine A defers v3" (known_virtual o_a4 v3);
   (* ghost/ghost2 are mentioned ONLY inside a dead loop: since round 13 drops dead loops at
      virtualization, nothing about them survives — no registry entry, no parameter, no interface
@@ -666,9 +642,7 @@ let phase5 () =
         loop_n s2 dim (set ell3 [| iter s2 |] (ramp 2000. s2));
       ]
   in
-  let o_b4 =
-    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_b" [] llc_b4
-  in
+  let o_b4 = optimize_in ctx4 ~name:"vcf_dead_b" llc_b4 in
   p "dead-write splice: ell3 is read-before-write (a dead write supplies no coverage)"
     (read_before_write o_b4 ell3);
   p "dead-only mention: dead code is dropped wholesale, nothing registered"
@@ -709,17 +683,13 @@ let phase5 () =
             (add (LL.Get_merge_buffer (msrc, [| iter s |])) (get extra [| iter s |]))
             (get ell5 [| iter s |])))
   in
-  let o_a5 =
-    LL.optimize ctx5 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj_a" [] llc_a5
-  in
+  let o_a5 = optimize_in ctx5 ~name:"vcf_proj_a" llc_a5 in
   p "discarded operand: routine A defers v5" (known_virtual o_a5 v5);
   let llc_b5 =
     let s = sym () in
     loop_n s dim (set out5 [| iter s |] (get v5 [| iter s |]))
   in
-  let o_b5 =
-    LL.optimize ctx5 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj_b" [] llc_b5
-  in
+  let o_b5 = optimize_in ctx5 ~name:"vcf_proj_b" llc_b5 in
   p "discarded operand: no phantom input from the discarded read"
     (let (ins, _), _ = LL.input_and_output_nodes o_b5 in
      (not (Set.mem ins extra)) && Set.mem ins ell5);
@@ -744,9 +714,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v7 [| iter s |] (add (get ell7 [| iter s |]) (c 100.)))
   in
-  let o_a6 =
-    LL.optimize ctx6 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_guard_a" [] llc_a6
-  in
+  let o_a6 = optimize_in ctx6 ~name:"vcf_guard_a" llc_a6 in
   p "guarded-write splice: routine A defers v7" (known_virtual o_a6 v7);
   let llc_b6 =
     let sg = sym () and s = sym () in
@@ -758,9 +726,7 @@ let phase5 () =
          })
       (loop_n s (dim - 1) (set out7 [| iter s |] (get v7 [| aff [ (1, s) ] 1 |])))
   in
-  let o_b6 =
-    LL.optimize ctx6 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_guard_b" [] llc_b6
-  in
+  let o_b6 = optimize_in ctx6 ~name:"vcf_guard_b" llc_b6 in
   p "guarded-write splice: ell7 stays read_before_write (guarded write is not definite)"
     (read_before_write o_b6 ell7);
   p "guarded-write splice: ell7 is an input of routine B"
@@ -801,7 +767,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v9 [| iter s |] (add (get ell9 [| iter s |]) (c 100.)))
   in
-  let o_a8 = LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_a" [] llc_a8 in
+  let o_a8 = optimize_in ctx8 ~name:"vcf_rmw_a" llc_a8 in
   p "same-position splice: routine A defers v9" (known_virtual o_a8 v9);
   let llc_b8 =
     let s = sym () in
@@ -809,7 +775,7 @@ let phase5 () =
       (set ell9 [| fixed 0 |] (c 5000.))
       (loop_n s dim (set ell9 [| iter s |] (get v9 [| iter s |])))
   in
-  let o_b8 = LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_b" [] llc_b8 in
+  let o_b8 = optimize_in ctx8 ~name:"vcf_rmw_b" llc_b8 in
   p "same-position splice: ell9 is read-before-write (rmw is not exempt from the interface)"
     (read_before_write o_b8 ell9);
   let ell9_old = Array.init dim ~f:(fun i -> 5. +. Float.of_int i) in
@@ -835,17 +801,13 @@ let phase5 () =
          (set sib [| iter s |] (LL.Get_merge_buffer (msrc4, [| iter s |])))
          (set v10 [| iter s |] (add (get ell10 [| iter s |]) (c 100.))))
   in
-  let o_a9 =
-    LL.optimize ctx9 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_shared_a" [] llc_a9
-  in
+  let o_a9 = optimize_in ctx9 ~name:"vcf_shared_a" llc_a9 in
   p "sibling merge: v10 stays virtual in the shared loop" (known_virtual o_a9 v10);
   let llc_b9 =
     let s = sym () in
     loop_n s dim (set out10 [| iter s |] (get v10 [| iter s |]))
   in
-  let o_b9 =
-    LL.optimize ctx9 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_shared_b" [] llc_b9
-  in
+  let o_b9 = optimize_in ctx9 ~name:"vcf_shared_b" llc_b9 in
   let ell10_vals = Array.init dim ~f:(fun i -> 60. +. Float.of_int i) in
   let got9 =
     execute ~name:"vcf_shared_b" o_b9
@@ -868,9 +830,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v12 [| iter s |] (add (get ell12 [| iter s |]) (c 100.)))
   in
-  let o_a10 =
-    LL.optimize ctx10 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_upd_a" [] llc_a10
-  in
+  let o_a10 = optimize_in ctx10 ~name:"vcf_upd_a" llc_a10 in
   p "update splice: routine A defers v12" (known_virtual o_a10 v12);
   let llc_b10 =
     let s = sym () and s2 = sym () and s3 = sym () in
@@ -881,9 +841,7 @@ let phase5 () =
         loop_n s3 dim (set ell12 [| iter s3 |] (ramp 3000. s3));
       ]
   in
-  let o_b10 =
-    LL.optimize ctx10 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_upd_b" [] llc_b10
-  in
+  let o_b10 = optimize_in ctx10 ~name:"vcf_upd_b" llc_b10 in
   p "update splice: ell12 is read-before-write despite the local v12 assignment"
     (read_before_write o_b10 ell12);
   let ell12_old = Array.init dim ~f:(fun i -> 9. +. Float.of_int i) in
@@ -917,9 +875,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v13 [| iter s |] (add (get ell13 [| iter s |]) (c 100.)))
   in
-  let o_a11 =
-    LL.optimize ctx11 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_raw_a" [] llc_a11
-  in
+  let o_a11 = optimize_in ctx11 ~name:"vcf_raw_a" llc_a11 in
   p "raw-read isolation: routine A defers v13" (known_virtual o_a11 v13);
   let llc_b11 =
     let sg = sym () and sh = sym () and s = sym () in
@@ -934,9 +890,7 @@ let phase5 () =
          })
       (loop_n s dim (set out14 [| iter s |] (get v13 [| iter s |])))
   in
-  let o_b11 =
-    LL.optimize ctx11 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_raw_b" [] llc_b11
-  in
+  let o_b11 = optimize_in ctx11 ~name:"vcf_raw_b" llc_b11 in
   p "raw-read isolation: ew keeps its raw guards-taken verdict (not an input)"
     ((not (read_before_write o_b11 ew))
     && (not (Set.mem o_b11.LL.spliced_rbw ew))
@@ -974,9 +928,7 @@ let phase5 () =
     loop_n s dim
       (set v14 [| iter s |] (binop Ir.Ops.Arg2 (get extra3 [| iter s |]) (get ell14 [| iter s |])))
   in
-  let o_a12 =
-    LL.optimize ctx12 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj2_a" [] llc_a12
-  in
+  let o_a12 = optimize_in ctx12 ~name:"vcf_proj2_a" llc_a12 in
   p "discarded-splice: routine A defers v14" (known_virtual o_a12 v14);
   let llc_b12 =
     let sg = sym () and sh = sym () and s = sym () in
@@ -991,9 +943,7 @@ let phase5 () =
          })
       (loop_n s dim (set out17 [| iter s |] (get v14 [| iter s |])))
   in
-  let o_b12 =
-    LL.optimize ctx12 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj2_b" [] llc_b12
-  in
+  let o_b12 = optimize_in ctx12 ~name:"vcf_proj2_b" llc_b12 in
   p "discarded-splice: extra3 keeps its raw verdict (discarded operand did not splice it)"
     ((not (read_before_write o_b12 extra3)) && not (Set.mem o_b12.LL.spliced_rbw extra3));
   let ell14_vals = Array.init dim ~f:(fun i -> 33. +. Float.of_int i) in
@@ -1023,9 +973,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v15 [| iter s |] (add (get leaf15 [| iter s |]) (c 100.)))
   in
-  let o_a13 =
-    LL.optimize ctx13 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_domg_a" [] llc_a13
-  in
+  let o_a13 = optimize_in ctx13 ~name:"vcf_domg_a" llc_a13 in
   p "dominated-guard splice: routine A defers v15" (known_virtual o_a13 v15);
   let llc_b13 =
     let sg = sym () and sh = sym () in
@@ -1038,9 +986,7 @@ let phase5 () =
             (loop_n sh dim (set out18 [| iter sh |] (get v15 [| iter sh |])));
       }
   in
-  let o_b13 =
-    LL.optimize ctx13 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_domg_b" [] llc_b13
-  in
+  let o_b13 = optimize_in ctx13 ~name:"vcf_domg_b" llc_b13 in
   p "dominated-guard splice: the same-guard write covers, leaf15 is not an input"
     ((not (read_before_write o_b13 leaf15))
     && (not (Set.mem o_b13.LL.spliced_rbw leaf15))
@@ -1072,9 +1018,7 @@ let phase5 () =
     loop_n s dim
       (set out19 [| iter s |] (binop Ir.Ops.Arg2 (get mv [| iter s |]) (get ell16 [| iter s |])))
   in
-  let o_b14 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj3_b" [] llc_b14
-  in
+  let o_b14 = optimize_in ctx2 ~name:"vcf_proj3_b" llc_b14 in
   let ell16_vals = Array.init dim ~f:(fun i -> 71. +. Float.of_int i) in
   let got14 =
     execute ~name:"vcf_proj3_b" o_b14
@@ -1101,9 +1045,7 @@ let phase5 () =
       (loop_n s dim (set mtar2 [| iter s |] (LL.Get_merge_buffer (msrc5, [| iter s |]))))
       (loop ~upto:(-1) sd (set mtar3 [| iter sd |] (LL.Get_merge_buffer (msrc6, [| iter sd |]))))
   in
-  let o_m5 =
-    LL.optimize ctx14 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_dead" [] llc_m5
-  in
+  let o_m5 = optimize_in ctx14 ~name:"vcf_merge_dead" llc_m5 in
   p "dead merge read: ignored, the live declaration stands"
     (match o_m5.LL.merge_node with Some m -> Tn.equal m msrc5 | None -> false);
   (* Review round 10, P2: a merge read only inside a DEAD loop of a stored computation must not
@@ -1137,17 +1079,13 @@ let phase5 () =
               mint = LL.Inlined_computation;
             }))
   in
-  let o_a15 =
-    LL.optimize ctx15 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dtaint_a" [] llc_a15
-  in
+  let o_a15 = optimize_in ctx15 ~name:"vcf_dtaint_a" llc_a15 in
   p "dead-taint: routine A defers v16" (known_virtual o_a15 v16);
   let llc_b15 =
     let s = sym () in
     loop_n s dim (set out20 [| iter s |] (get v16 [| iter s |]))
   in
-  let o_b15 =
-    LL.optimize ctx15 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dtaint_b" [] llc_b15
-  in
+  let o_b15 = optimize_in ctx15 ~name:"vcf_dtaint_b" llc_b15 in
   let ell17_vals = Array.init dim ~f:(fun i -> 84. +. Float.of_int i) in
   let got15 =
     execute ~name:"vcf_dtaint_b" o_b15
@@ -1166,9 +1104,7 @@ let phase5 () =
   materialize out21;
   let ctx16 = LL.empty_optimize_ctx () in
   let llc_a16 = set v17 [| fixed 0 |] (add (get ell18 [| fixed 0 |]) (c 100.)) in
-  let o_a16 =
-    LL.optimize ctx16 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_fail_a" [] llc_a16
-  in
+  let o_a16 = optimize_in ctx16 ~name:"vcf_fail_a" llc_a16 in
   p "failed-inline: routine A defers v17" (known_virtual o_a16 v17);
   let llc_b16 =
     let s = sym () in
@@ -1176,9 +1112,7 @@ let phase5 () =
   in
   let rejected_fail =
     try
-      ignore
-        (LL.optimize ctx16 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_fail_b" [] llc_b16
-          : LL.optimized);
+      ignore (optimize_in ctx16 ~name:"vcf_fail_b" llc_b16 : LL.optimized);
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"could not be inlined"
   in
@@ -1197,9 +1131,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v18 [| iter s |] (add (get ell21 [| iter s |]) (c 100.)))
   in
-  let o_a17 =
-    LL.optimize ctx17 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_gd_a" [] llc_a17
-  in
+  let o_a17 = optimize_in ctx17 ~name:"vcf_gd_a" llc_a17 in
   p "dynamic-table: routine A defers v18" (known_virtual o_a17 v18);
   let llc_b17 =
     let s = sym () in
@@ -1216,9 +1148,7 @@ let phase5 () =
   in
   let rejected_gd =
     try
-      ignore
-        (LL.optimize ctx17 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_gd_b" [] llc_b17
-          : LL.optimized);
+      ignore (optimize_in ctx17 ~name:"vcf_gd_b" llc_b17 : LL.optimized);
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"dynamic-gather"
   in
@@ -1236,9 +1166,7 @@ let phase5 () =
       (loop ~upto:(-1) sd (set out23 [| iter sd |] (get mv [| iter sd |])))
       (loop_n s dim (set out23 [| iter s |] (get ell22 [| iter s |])))
   in
-  let o_b18 =
-    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_deadcons_b" [] llc_b18
-  in
+  let o_b18 = optimize_in ctx2 ~name:"vcf_deadcons_b" llc_b18 in
   let ell22_vals = Array.init dim ~f:(fun i -> 91. +. Float.of_int i) in
   let got18 =
     execute ~name:"vcf_deadcons_b" o_b18

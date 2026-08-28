@@ -38,6 +38,7 @@ module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
@@ -393,7 +394,7 @@ let () =
       ()
   in
   let want16 = run ~name:"aw_f16_refc" mref16 in
-  p claim_f16_wide_matmul (Array.for_all2_exn got_wide16 want16 ~f:Float.equal);
+  p_all2 claim_f16_wide_matmul got_wide16 want16 ~f:Float.equal;
   let got_auto16 = f16_matmul ~name:"aw_f16_naive_auto" () in
   p claim_f16_default_matmul
     (Bool.equal (Array.for_all2_exn got_auto16 want16 ~f:Float.equal) on_cpu)
@@ -460,7 +461,7 @@ let () =
         ()
     in
     let want = run ~name:"aw_bf16_ref" mref in
-    p claim_parity (Array.for_all2_exn got want ~f:Float.equal);
+    p_all2 claim_parity got want ~f:Float.equal;
     cc_only claim_shape (fun () ->
         let src = Generated.read ~ext:".c" "aw_bf16_naive" in
         let has s = String.is_substring src ~substring:s in
@@ -491,7 +492,7 @@ let () =
       let%op mc_u = ma_u * mb_u in
       Tn.update_prec mc_u.Tensor.value Ir.Ops.bfloat16;
       let got_u = run ~name ~schedule:sched mc_u in
-      p claim (Array.for_all2_exn got_u got ~f:Float.equal)
+      p_all2 claim got_u got ~f:Float.equal
     in
     matmul_leg ~claim:claim_unroll_annot ~name:"aw_bf16_unroll_annot"
       ~sched:(unroll_k ~materialize:false);
@@ -549,10 +550,10 @@ let () =
       NTDSL.init ~l:"aw2_ref" ~prec:Ir.Ops.bfloat16 ~o:[ ni ] ~f:(fun idcs -> wide2.(idcs.(0))) ()
     in
     let want2 = run ~name:"aw2_refc" mref2 in
-    p claim_2ax_ref (Array.for_all2_exn got2 want2 ~f:Float.equal);
+    p_all2 claim_2ax_ref got2 want2 ~f:Float.equal;
     let leg2 ~claim ~name ~sched =
       let got_l = run2 ~name ~schedule:(two_axis_sched ~f:sched) () in
-      p claim (Array.for_all2_exn got_l got2 ~f:Float.equal)
+      p_all2 claim got_l got2 ~f:Float.equal
     in
     leg2 ~claim:claim_2ax_inner ~name:"aw2_unroll_inner" ~sched:(fun ~r:_ ~s ->
         [ Sched.Unroll { axis = s; materialize = true } ]);
@@ -645,7 +646,7 @@ let () =
                    [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
             ()
         in
-        p claim_wgr_nested (Array.for_all2_exn got_wnn got_wn ~f:Float.equal));
+        p_all2 claim_wgr_nested got_wnn got_wn ~f:Float.equal);
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
        boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16 twice
@@ -978,7 +979,7 @@ let () =
         let got_wg =
           run_sum ~cols:16 ~name:"aw_wgr_hw" ~schedule:(retype_reduction LL.Workgroup_reduce) ()
         in
-        p claim_wgreduce (Array.for_all2_exn got_wg got_w ~f:Float.equal));
+        p_all2 claim_wgreduce got_wg got_w ~f:Float.equal);
     (* === the SIMD reduction's scalar remainder === *)
     (* 67 is no multiple of any chains*lanes step, so the vector partial must fold into the wide
        total together with the tail contributions and narrow once — the pre-fix rendering stored

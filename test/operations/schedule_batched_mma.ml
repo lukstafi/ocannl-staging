@@ -31,6 +31,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -133,9 +134,7 @@ let check_leg ~tag ~serial ~tensorized =
     p (tag ^ ": cpu mma seeds present") (Option.is_some !seed);
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx tensorized.Tensor.value in
-    p
-      (tag ^ " tensorized matches the serial twin bitwise")
-      (Array.for_all2_exn got want ~f:Float.equal);
+    p_all2 (tag ^ " tensorized matches the serial twin bitwise") got want ~f:Float.equal;
     Generated.assert_emits ~routine:(tag ^ "_mma") ~contains:"Tile_mma register tiling"
       (tag ^ " tensorized structure as expected");
     opt

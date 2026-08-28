@@ -24,6 +24,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -126,7 +127,7 @@ let () =
   in
   let ctx_a = Context.run ctx_a routine_a in
   let got_packed = Context.get_values ctx_a mc1.Tensor.value in
-  p "packed tiled matmul matches the naive twin" (Array.for_all2_exn got_packed got_naive ~f:approx);
+  p_all2 "packed tiled matmul matches the naive twin" got_packed got_naive ~f:approx;
   let src = Generated.read "mmp_packed" in
   let has sub = String.is_substring src ~substring:sub in
   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in

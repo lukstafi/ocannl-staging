@@ -17,6 +17,7 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -86,4 +87,4 @@ let () =
   let ctx_a = Context.run ctx_a routine_a in
   let got_priv = Context.get_values ctx_a mc1.Tensor.value in
   p "extension appends exactly one Privatize targeting the accumulator" (!n_privatize = 1);
-  p "privatized preset matches the identity twin" (Array.for_all2_exn got_priv got_naive ~f:approx)
+  p_all2 "privatized preset matches the identity twin" got_priv got_naive ~f:approx

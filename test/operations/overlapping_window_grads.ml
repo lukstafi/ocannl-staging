@@ -25,7 +25,14 @@ open Ocannl.Operation.DSL_modules
 open Stdio
 
 let p = Verdict.p
-let close a b = Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
+
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
+let close a b =
+  (not (Array.is_empty a)) && Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
+
 let fa a = String.concat ~sep:" " (Array.to_list a |> List.map ~f:(fun v -> Printf.sprintf "%g" v))
 let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
 

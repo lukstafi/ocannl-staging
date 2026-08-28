@@ -33,6 +33,7 @@ module IDX = Train.IDX
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
@@ -81,7 +82,7 @@ let () =
   let ctx, routine = Context.compile ctx comp Ir.Indexing.Empty in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx e.Tensor.value in
-  p "chain values correct" (Array.for_all2_exn got expected ~f:approx);
+  p_all2 "chain values correct" got expected ~f:approx;
   (* Run again: results must be stable. *)
   let ctx = Context.run ctx routine in
   let got2 = Context.get_values ctx e.Tensor.value in
@@ -511,5 +512,5 @@ let () =
   in
   let wg = Context.get_values ctx (grad_of w) in
   (* dl/dw = x. *)
-  p "backward gradient values correct" (Array.for_all2_exn wg xv ~f:approx);
+  p_all2 "backward gradient values correct" wg xv ~f:approx;
   Generated.assert_emits ~routine:"fission_bwd__seg" ~contains:"__seg0" "backward pass fissioned"

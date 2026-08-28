@@ -66,9 +66,17 @@ let pair tag =
   let%op d = e *. f in
   (c, d, named ("mdf_" ^ tag) (Asgns.sequence [ Train.forward c; Train.forward d ]))
 
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
 let values ctx (c : Tensor.t) (d : Tensor.t) =
-  Array.for_all2_exn (Context.get_values ctx c.Tensor.value) expected_c ~f:approx
-  && Array.for_all2_exn (Context.get_values ctx d.Tensor.value) expected_d ~f:approx
+  let got_c = Context.get_values ctx c.Tensor.value in
+  let got_d = Context.get_values ctx d.Tensor.value in
+  (not (Array.is_empty got_c))
+  && (not (Array.is_empty got_d))
+  && Array.for_all2_exn got_c expected_c ~f:approx
+  && Array.for_all2_exn got_d expected_d ~f:approx
 
 let () =
   (* --- The escape: the rejection happens in codegen, past the transform seam --- *)

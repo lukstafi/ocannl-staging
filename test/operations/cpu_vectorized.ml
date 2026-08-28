@@ -23,6 +23,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
@@ -89,7 +90,7 @@ let () =
         Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt)
       c1
   in
-  p "vectorized mul-add values match the serial twin" (Array.for_all2_exn got twin ~f:approx);
+  p_all2 "vectorized mul-add values match the serial twin" got twin ~f:approx;
   (let src = Generated.read "simd_retype" in
    let has s = String.is_substring src ~substring:s in
    let ok =
@@ -126,7 +127,7 @@ let () =
         Sched.apply [ op; Sched.Retype { axis = inner; ty = LL.Vectorized } ] opt)
       d1
   in
-  p "split+vectorized values match the serial twin" (Array.for_all2_exn got2 twin2 ~f:approx);
+  p_all2 "split+vectorized values match the serial twin" got2 twin2 ~f:approx;
   let src = Generated.read "simd_split" in
   let has s = String.is_substring src ~substring:s in
   p "affine-indexed vector accesses rendered"

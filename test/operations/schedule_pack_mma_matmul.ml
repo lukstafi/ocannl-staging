@@ -57,6 +57,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -162,8 +163,7 @@ let () =
   let want = run_serial ~name:"pmm_serial" mc0 in
   let%op mc1 = ma * mb in
   let got = run_composed ~name:"pmm_packed" ~a:ma.Tensor.value ~b:mb.Tensor.value mc1 in
-  p "packed+tensorized matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got want ~f:Float.equal);
+  p_all2 "packed+tensorized matmul matches the serial twin bitwise" got want ~f:Float.equal;
   (let src = Generated.read "pmm_packed" in
    let has s = String.is_substring src ~substring:s in
    let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
@@ -191,8 +191,7 @@ let () =
   let want_tb = run_serial ~name:"pmm_tb_serial" td0 in
   let%op td1 = mta +* "ik;jk=>ij" mtb in
   let got_tb = run_composed ~name:"pmm_tb_packed" ~a:mta.Tensor.value ~b:mtb.Tensor.value td1 in
-  p "packed transposed-B matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_tb want_tb ~f:Float.equal);
+  p_all2 "packed transposed-B matmul matches the serial twin bitwise" got_tb want_tb ~f:Float.equal;
   (let src = Generated.read "pmm_tb_packed" in
    let has s = String.is_substring src ~substring:s in
    p "packing normalizes the transposed-B layout for the register tiling"
@@ -229,8 +228,8 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got_g = Context.get_values ctx gc1.Tensor.value in
-  p "grid-blocked tensorized matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_g want_g ~f:Float.equal);
+  p_all2 "grid-blocked tensorized matmul matches the serial twin bitwise" got_g want_g
+    ~f:Float.equal;
   (let src = Generated.read "pmm_grid_mma" in
    p "grid-blocked Tile_mma renders pool-parallel"
      (if on_cpu then
@@ -290,8 +289,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got_pp = Context.get_values ctx pp1.Tensor.value in
-  p "parallel packed matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_pp want_pp ~f:Float.equal);
+  p_all2 "parallel packed matmul matches the serial twin bitwise" got_pp want_pp ~f:Float.equal;
   let src = Generated.read "pmm_par_packed" in
   let has s = String.is_substring src ~substring:s in
   p "parallel packed composition renders pool-parallel with per-chunk tiles"
@@ -363,8 +361,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx hc1.Tensor.value in
-  p "grid + hoisted-pack matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got want ~f:Float.equal);
+  p_all2 "grid + hoisted-pack matmul matches the serial twin bitwise" got want ~f:Float.equal;
   let src = Generated.read "pmm_gridpack" in
   let has s = String.is_substring src ~substring:s in
   p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes"
@@ -442,8 +439,7 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx mx1.Tensor.value in
-  p "mixed grid-outermost matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got want ~f:Float.equal);
+  p_all2 "mixed grid-outermost matmul matches the serial twin bitwise" got want ~f:Float.equal;
   let src = Generated.read "pmm_mixed" in
   let has s = String.is_substring src ~substring:s in
   p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile"

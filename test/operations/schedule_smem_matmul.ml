@@ -27,6 +27,7 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -146,8 +147,7 @@ let () =
     in
     let ctx_a = Context.run ctx_a routine_a in
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
-    p "SMEM matmul parity (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_smem got_serial ~f:approx);
+    p_all2 "SMEM matmul parity (GPU) or clean rejection (CPU)" got_smem got_serial ~f:approx;
     let src = Generated.read "mm_smem" in
     let has sub = String.is_substring src ~substring:sub in
     let count_sub sub =
@@ -230,8 +230,8 @@ let () =
     in
     let ctx_b = Context.run ctx_b routine_b in
     let got_b = Context.get_values ctx_b cb.Tensor.value in
-    p "broadcast staging values correct (GPU) or clean rejection (CPU)"
-      (Array.for_all2_exn got_b bcast_expected ~f:approx);
+    p_all2 "broadcast staging values correct (GPU) or clean rejection (CPU)" got_b bcast_expected
+      ~f:approx;
     let src = Generated.read "bcast_staged" in
     let count_sub sub =
       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length

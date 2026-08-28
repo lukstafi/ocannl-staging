@@ -27,6 +27,7 @@ module SO = Ir.Schedule_outcome
 
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so each claim below names the state it
@@ -155,8 +156,7 @@ let () =
     (arm_b.Autotune.candidates_timed > 0 && not (Float.is_inf arm_b.Autotune.best_ms));
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
-  p "the surviving arm's routine ships and computes the right values"
-    (Array.for_all2_exn got expected ~f:approx);
+  p_all2 "the surviving arm's routine ships and computes the right values" got expected ~f:approx;
 
   (* --- Run 2, no injection: arm A's winner survived to the disk cache --- *)
   let reports = ref [] in
@@ -171,7 +171,7 @@ let () =
     (SC.equal_saved_schedule arm_a.Autotune.best_schedule arm_a2.Autotune.best_schedule);
   let ctx_2 = Context.run ctx_2 routine_2 in
   let got_2 = Context.get_values ctx_2 t2.Tensor.value in
-  p "the cached winner replays to the right values" (Array.for_all2_exn got_2 expected ~f:approx);
+  p_all2 "the cached winner replays to the right values" got_2 expected ~f:approx;
 
   (* --- Run 3: arm B dies at its FIRST attempt — its base compile, before a search exists.
      [?report] is positional, so consumers name arms by arrival order; the failed arm must still
@@ -199,8 +199,9 @@ let () =
          String.is_substring tf.Autotune.detail ~substring:message
          && Ir.Schedule_outcome.equal_phase tf.Autotune.phase Ir.Schedule_outcome.Transform));
   let ctx_3 = Context.run ctx_3 routine_3 in
-  p "arm A still ships when arm B dies before reporting"
-    (Array.for_all2_exn (Context.get_values ctx_3 t2.Tensor.value) expected ~f:approx);
+  p_all2 "arm A still ships when arm B dies before reporting"
+    (Context.get_values ctx_3 t2.Tensor.value)
+    expected ~f:approx;
 
   (* --- A report-callback exception is the caller's, not the search's: it propagates instead of
      being reclassified as an arm failure. --- *)
@@ -404,8 +405,9 @@ let () =
   p_all "the search that declined it completed" reports_d ~f:completed;
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_d));
   let ctx_d' = Context.run ctx_d' routine_d in
-  p "a winner still ships and computes the right values"
-    (Array.for_all2_exn (Context.get_values ctx_d' t2.Tensor.value) expected ~f:approx);
+  p_all2 "a winner still ships and computes the right values"
+    (Context.get_values ctx_d' t2.Tensor.value)
+    expected ~f:approx;
 
   (* An out-of-range static binding, likewise from real bind-time validation, and a different
      exception constructor from the dependency case — so this also pins that the phase rather than
@@ -428,8 +430,9 @@ let () =
   p_all "the search that declined it completed" reports_b ~f:completed;
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_b));
   let ctx_b' = Context.run ctx_b' routine_b in
-  p "a winner still ships and computes the right values"
-    (Array.for_all2_exn (Context.get_values ctx_b' t2.Tensor.value) expected ~f:approx);
+  p_all2 "a winner still ships and computes the right values"
+    (Context.get_values ctx_b' t2.Tensor.value)
+    expected ~f:approx;
 
   (* --- Containment stops at the one pre-dispatch condition that is not fixable: a poisoned lineage
      has no restore (gh-ocannl-536), so every later timing run in it is dead too, and declining this
@@ -495,5 +498,6 @@ let () =
       Ir.Indexing.Empty
   in
   let ctx_u3 = Context.run ctx_u3 routine_u in
-  p "and the retry in it succeeds once the dependency has executed"
-    (Array.for_all2_exn (Context.get_values ctx_u3 t2.Tensor.value) expected ~f:approx)
+  p_all2 "and the retry in it succeeds once the dependency has executed"
+    (Context.get_values ctx_u3 t2.Tensor.value)
+    expected ~f:approx

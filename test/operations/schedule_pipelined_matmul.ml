@@ -51,6 +51,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
 let p_all = Verdict.p_all
+let p_all2 = Verdict.p_all2
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
@@ -269,10 +270,9 @@ let () =
      p_all "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" results
        ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx);
      (* The invariant: pipelining is a pure prefetch-timing transform. *)
-     p "depth 2 matches depth 1 BITWISE" (Array.for_all2_exn got_d2 got_d1 ~f:Float.equal);
+     p_all2 "depth 2 matches depth 1 BITWISE" got_d2 got_d1 ~f:Float.equal;
      (* The gh-567 invariant: grouping and eliding barriers is a pure synchronization transform. *)
-     p "depth 1 matches the un-elided barrier structure BITWISE"
-       (Array.for_all2_exn got_d1 got_ref ~f:Float.equal);
+     p_all2 "depth 1 matches the un-elided barrier structure BITWISE" got_d1 got_ref ~f:Float.equal;
      let count_sub src sub =
        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
      in

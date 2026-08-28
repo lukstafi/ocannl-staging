@@ -27,6 +27,7 @@ module Numerics = Ir.Numerics
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all2 = Verdict.p_all2
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead
@@ -125,7 +126,7 @@ let () =
   Numerics.set_policy policy_a;
   let r, got = tune () in
   p "the cold call ran a search rather than replaying" (completed r);
-  p "the cold search computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
+  p_all2 "the cold search computes correct values" got mm_expected ~f:approx;
   (* On a GPU backend a search that timed nothing stores nothing (gh-ocannl-532), so the replay
      assertions below are conditioned on an entry actually having been written. *)
   let stored_a = entry_count () = 1 in
@@ -133,7 +134,7 @@ let () =
     (stored_a || (is_gpu && entry_count () = 0));
   let r, got = tune () in
   p "the entry replays under the policy that wrote it" (Bool.equal (replayed r) stored_a);
-  p "the replayed routine computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
+  p_all2 "the replayed routine computes correct values" got mm_expected ~f:approx;
 
   (* --- Regime B: the same code, the same directory, the other policy --- *)
   Numerics.set_policy policy_b;
@@ -141,7 +142,7 @@ let () =
   p "the entry does NOT replay under a different policy (gh-ocannl-568)" (not (replayed r));
   p "the cross-policy run searches instead of replaying"
     ((not stored_a) || r.Autotune.candidates_timed >= 1);
-  p "the cross-policy run computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
+  p_all2 "the cross-policy run computes correct values" got mm_expected ~f:approx;
 
   (* --- The regimes coexist rather than overwriting each other --- *)
   Numerics.set_policy policy_a;
