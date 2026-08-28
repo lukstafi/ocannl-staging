@@ -705,9 +705,12 @@
 # Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
 # assembly text over the shared library the command was building, which may be one your application
 # still has loaded.
-# Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally (a bare `grep` waits
-# on stdin, and `<name>.s` would be read by the shell as redirection, clobbering the file), and an
-# empty result means nothing. Match BOTH names and both dialects: double-precision kernels call
+# Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally. With the operand
+# there, no match (exit status 1) is a REAL answer: that assembly contains none of the call
+# spellings below, so your kernel is on the fast path. It is the operand-less form that tells you
+# nothing -- a bare `grep` reads stdin instead of the file, and a placeholder like the
+# angle-bracketed one is worse still, since the shell reads it as redirection and truncates the very
+# file you meant to inspect. Match BOTH names and both dialects: double-precision kernels call
 # `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`); clang on Mach-O
 # spells the calls `callq _fma` / `callq _fmaf` (measured here), and gcc on ELF spells them
 # `call fma@PLT` / `call fmaf@PLT` (reported in review on gh-ocannl-753, not reproduced here) --

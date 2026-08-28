@@ -801,9 +801,10 @@ files.
   erase calls the probe still shows (measured, f32 × 4 lanes at `-march=x86-64 -O3`: 4 calls, and 0
   once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
   flag set with `-S`, then `grep -E 'call.*fmaf?\b' kernel.s` — name the file LITERALLY: a bare
-  `grep` waits on stdin and its empty output means nothing, and a placeholder like `<name>.s` is
-  worse, since the shell reads `<` and `>` as redirection and would truncate the very file you are
-  inspecting. Match both NAMES and both dialects.
+  `grep` waits on stdin and its empty output means nothing, while WITH the operand a no-match is a
+  real negative (exit status 1) — that assembly carries none of the spellings below. A placeholder
+  like `<name>.s` is worse, since the shell reads `<` and `>` as redirection and would truncate the
+  very file you are inspecting. Match both NAMES and both dialects.
   Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
   `Double_prec`), so the symbols are `callq _fma` / `callq _fmaf` on clang+Mach-O (measured here)
   and `call fma@PLT` / `call fmaf@PLT` on gcc+ELF (review-reported, no GNU gcc here) — the
