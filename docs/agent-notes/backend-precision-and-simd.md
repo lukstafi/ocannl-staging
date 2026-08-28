@@ -857,13 +857,19 @@ files.
   `OCANNL_LOG_LEVEL_CC_BACKEND=9`, `log_level=9`, `debug_backend=text` the command appears verbatim
   under a `command` node:
   `cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1`.
-  Two cautions. Do not hunt for it by extension — in this configuration the text runtime prints to
-  stdout rather than to a `log_files/*.log`, and a `*.log` glob finding nothing is what led an
-  earlier revision of this note to declare the whole route broken and delete it. And the logged
-  command carries `-o <...>.so`: rerunning it with `-S` added but the `-o` unchanged writes assembly
-  over the shared library, possibly one a running process still has mapped, so repoint `-o` at a
-  fresh `.s`. Expect a verbose run to fail a golden-diff test purely by the extra stdout; that is
-  not a signal about the compile.
+  **Where that lands is decided by `log_main_domain_to_stdout`, and both answers are live in this
+  repo.** It defaults to FALSE, and `Utils.get_local_debug_runtime` then resolves `log_file_stem`
+  (default `debug`) into a filename — so the ordinary answer is the EXTENSIONLESS file
+  `log_files/<exe>/debug`, and watching stdout finds nothing. But `test/config/ocannl_config` sets
+  `log_main_domain_to_stdout=true`, so a run under `dune runtest` prints it inline instead and
+  writes no file at all — which is what a golden diff then trips over, a perturbation of the test's
+  stdout rather than a signal about the compile. That difference is worth stating because searching
+  the wrong one of the two produces a confident wrong conclusion: globbing `log_files/**/*.log`
+  under the test config found nothing (there was no file, and it would have had no `.log` suffix
+  either way), and an earlier revision of this note concluded from that emptiness that the whole
+  route was broken and deleted it. One more caution: the logged command carries `-o <...>.so`, so
+  rerunning it with `-S` added but `-o` unchanged writes assembly over the shared library, possibly
+  one a running process still has mapped — repoint `-o` at a fresh `.s`.
 - **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
   that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
   docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no

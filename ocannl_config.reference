@@ -692,8 +692,11 @@
 # To read the backend's REAL invocation instead of reconstructing it: rebuild with
 # `OCANNL_LOG_LEVEL_CC_BACKEND=9` (a preprocessing-time gate -- a runtime log_level alone leaves the
 # call stripped, and the values 1 and 3 do not currently compile), then run with log_level=9 and
-# debug_backend=text. The command appears in the log under a `command` node, e.g.
+# debug_backend=text. The command appears under a `command` node, e.g.
 #   cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1
+# Look in the right place: with log_main_domain_to_stdout at its default of false, the text log is
+# the EXTENSIONLESS file `log_files/<exe>/debug` (named by log_file_stem), never a `*.log`; only
+# with log_main_domain_to_stdout=true does it go to stdout instead.
 # Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
 # assembly text over the shared library the command was building, which may be one your application
 # still has loaded.
