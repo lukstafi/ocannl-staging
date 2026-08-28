@@ -859,6 +859,23 @@ that they earn a lookup rather than always-loaded space.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- `cuda_backend.ml` and `hip_backend.ml` are compiled by NEITHER the macOS dev boxes nor CI, so a
+  green `dune build @check` locally proves nothing about them. Each lives in an `(optional)` library
+  over `cudajit`/`hipjit`, and `arrayjit.context` reaches its implementation through a dune `select`
+  whose fallback arm is `<backend>_backend_impl.missing.ml`; with the vendor package absent both
+  mechanisms succeed SILENTLY, so an exit status cannot distinguish "compiled" from "skipped".
+  Verify on the box carrying the toolchain — `rog-nv-wsl` for cudajit, `minix-amd-wsl` for hipjit —
+  and check two things there rather than one: that
+  `_build/default/arrayjit/lib/.<backend>_backend.objs/byte/<backend>_backend.cmi` exists, and that
+  the `select` landed on the vendor arm, which
+  `head -1 _build/default/arrayjit/lib/<backend>_backend_impl.ml` names outright — dune copies the
+  chosen arm under a `# 1 "…"` line directive naming it, and `.missing.ml` there is the stub. Each
+  box carries exactly one of the two toolchains, so the OTHER backend's absent `.objs` on that same
+  build is a free negative control. `@check` also proves compilation and never execution, so pair it
+  with a runnable probe wherever one exists. Two PRs in two days paid for this: gh-ocannl-758
+  (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
+  gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
+  coverage, gh-ocannl-796 for scripting the off-box loop.
 - The two opam caches are not one cache seen twice. `ci.yml` caches the built dependency switch
   `_opam`, where its ~180 compiled packages live; `gh-pages-api.yml` caches opam's ROOT `~/.opam`
   while its switch is a LOCAL `_opam` that nothing caches, so that job recompiles the dependencies
