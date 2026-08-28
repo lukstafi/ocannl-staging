@@ -7,8 +7,8 @@ only the fixture path. All payloads are float32; weights are [fan_out, fan_in] r
 (the shared convention: PyTorch nn.Linear layout, OCANNL output-axes-then-input-axes).
 """
 
+import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -187,25 +187,57 @@ def build(spec_path: Path, out_dir: Path):
 
 if __name__ == "__main__":
     here = Path(__file__).parent
-    specs = [Path(a) for a in sys.argv[1:]] or sorted((here / "workloads").glob("*.json"))
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Regeneration is a CROSS-BOX event (gh-ocannl-759): the bytes depend on this "
+        "box's numpy, so regenerating here does not give the other measuring boxes the same "
+        "workload, and every number they published stays on their own bytes until they "
+        "regenerate too. To merely pin fixtures that already exist, without changing any "
+        "workload, use `fixture_digest.py --record` instead.",
+    )
+    ap.add_argument("specs", nargs="*", type=Path, help="workload specs (default: all of them)")
+    ap.add_argument(
+        "--origin",
+        default=None,
+        help=f"the box these bytes are, recorded with them (default: this host, "
+        f"{fixture_digest.this_origin()!r})",
+    )
+    args = ap.parse_args()
+    specs = args.specs or sorted((here / "workloads").glob("*.json"))
     out_dir = here / "fixtures"
     written = [build(spec, out_dir) for spec in specs]
     # fixtures/ is gitignored, so this file is the only record of what was just generated
-    # (gh-ocannl-645). Only the regenerated entries are rewritten: generating one workload must
-    # not drop the identities of the fixtures already on disk.
+    # (gh-ocannl-645). Only this origin's regenerated entries are rewritten: generating one
+    # workload must not drop the identities of the fixtures already on disk, and generating on
+    # one box must not drop the identities another box's published numbers rest on
+    # (gh-ocannl-759).
     digests = out_dir / fixture_digest.DIGEST_FILE
-    changes = fixture_digest.record(digests, written)
-    print(f"recorded {len(written)} digest(s) in {digests}")
-    for name, was, now in changes:
+    origin = args.origin or fixture_digest.this_origin()
+    changes = fixture_digest.record(digests, written, origin)
+    print(f"recorded {len(written)} digest(s) in {digests} as origin {origin!r}")
+    for name, org, was, now in changes:
         if was is None:
-            print(f"  new: {name} sha256 {now[0]}")
+            print(f"  new: {name} sha256 {now.sha256} [{org}]")
         else:
             # Loudly, and not only in a git diff: numbers measured on the old bytes are not
             # comparable with numbers measured on the new ones, whatever the report calls the
             # workload.
-            print(f"  CHANGED: {name}")
-            print(f"    was  sha256 {was[0]} ({was[1]} bytes)")
-            print(f"    now  sha256 {now[0]} ({now[1]} bytes)")
-    if any(was is not None for _, was, _ in changes):
+            print(f"  CHANGED for {org}: {name}")
+            print(f"    was  sha256 {was.sha256} ({was.size} bytes)")
+            print(f"    now  sha256 {now.sha256} ({now.size} bytes)")
+    if any(was is not None for _, _, was, _ in changes):
         print("  a changed fixture is a changed workload: reports measured on the previous "
               "digest are not comparable with reports measured on this one.")
+    others = sorted(
+        {e.origin
+         for fx in written
+         for e in fixture_digest.read_digests(digests).get(fx.name, [])
+         if e.origin != origin}
+    )
+    if others:
+        # The trap gh-ocannl-759 was filed about: their entries survive (so their fixtures still
+        # pass the gate), but their bytes are now a different workload from this box's.
+        print(f"  other origins still recorded for these fixtures: {', '.join(others)} — "
+              "regeneration is a cross-box event, so until they regenerate too, their published "
+              "numbers and this box's are on different bytes.")

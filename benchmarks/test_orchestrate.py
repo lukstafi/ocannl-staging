@@ -779,47 +779,126 @@ class FixtureDigestTest(unittest.TestCase):
         fx = self.fixture("mlp_small.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
 
-        changes = fixture_digest.record(digests, [fx])
+        changes = fixture_digest.record(digests, [fx], "rog-nv")
 
-        self.assertEqual([(name, was) for name, was, _ in changes], [("mlp_small.safetensors", None)])
+        self.assertEqual(
+            [(name, origin, was) for name, origin, was, _ in changes],
+            [("mlp_small.safetensors", "rog-nv", None)],
+        )
         entries = fixture_digest.read_digests(digests)
-        self.assertEqual(entries[fx.name], (fixture_digest.sha256_file(fx), fx.stat().st_size))
+        self.assertEqual(
+            entries[fx.name],
+            [fixture_digest.Entry(fixture_digest.sha256_file(fx), fx.stat().st_size, "rog-nv")],
+        )
         self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_a_match_names_the_box_whose_bytes_they_are(self):
+        # gh-ocannl-759: "which bytes" was never the whole question. The reports compare boxes,
+        # so a number has to carry whose workload it is on, not only that it is on a pinned one.
+        fx = self.fixture("gpt2_mini.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+
+        verdict, _, _, origins = fixture_digest.status(fx, fixture_digest.read_digests(digests))
+
+        self.assertEqual((verdict, origins), ("MATCH", "minix"))
 
     def test_regenerating_different_bytes_is_announced_as_a_change(self):
         fx = self.fixture("gpt2_mini.safetensors", b"generated at spec revision A")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
-        was = fixture_digest.read_digests(digests)[fx.name]
+        fixture_digest.record(digests, [fx], "rog-nv")
+        (was,) = fixture_digest.read_digests(digests)[fx.name]
 
         fx.write_bytes(b"generated at spec revision B")
-        changes = fixture_digest.record(digests, [fx])
+        changes = fixture_digest.record(digests, [fx], "rog-nv")
 
         self.assertEqual(len(changes), 1)
-        name, previous, now = changes[0]
-        self.assertEqual((name, previous), (fx.name, was))
-        self.assertEqual(now, fixture_digest.read_digests(digests)[fx.name])
+        name, origin, previous, now = changes[0]
+        self.assertEqual((name, origin, previous), (fx.name, "rog-nv", was))
+        self.assertEqual([now], fixture_digest.read_digests(digests)[fx.name])
 
     def test_regenerating_one_fixture_keeps_the_others_recorded(self):
         # gen_fixtures.py takes a spec list; regenerating one workload must not drop the
         # identities of the fixtures already on disk, or the pin silently narrows to one.
         a, b = self.fixture("a.safetensors", b"aaa"), self.fixture("b.safetensors", b"bbb")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [a, b])
+        fixture_digest.record(digests, [a, b], "rog-nv")
 
-        fixture_digest.record(digests, [a])
+        fixture_digest.record(digests, [a], "rog-nv")
 
         self.assertEqual(set(fixture_digest.read_digests(digests)), {a.name, b.name})
+
+    def test_two_boxes_bytes_are_both_recorded_and_both_match(self):
+        # The state gh-ocannl-759 found and this format exists for: mlp_small and gpt2_mini hash
+        # differently on minix and rog-nv at identical sizes (different venvs, different numpy
+        # streams). Neither box's published numbers may be evicted to make the other's fit.
+        fx = self.fixture("mlp_small.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+
+        fx.write_bytes(b"rog-nv bytes")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries[fx.name]], ["minix", "rog-nv"])
+        self.assertEqual(fixture_digest.status(fx, entries)[3], "rog-nv")
+        fx.write_bytes(b"minix bytes")
+        self.assertEqual(fixture_digest.status(fx, entries)[3], "minix")
+
+    def test_one_box_regenerating_does_not_unpin_the_other(self):
+        # The trap the issue was filed about: with one entry per name, whichever box regenerated
+        # first pinned its numpy stream and the other box's untouched fixtures then read as a
+        # CHANGED workload -- a false alarm that would have been "fixed" by re-recording, i.e. by
+        # evicting the first box in turn, forever.
+        fx = self.fixture("gpt2_mini.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        minix_entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"rog-nv regenerates its own copy")
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual(entries[fx.name][0], minix_entries[fx.name][0])
+        fx.write_bytes(b"minix bytes")
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_agreeing_boxes_are_reported_as_agreeing(self):
+        # The happy outcome of a coordinated regeneration, and it should be visible: one set of
+        # bytes recorded by both boxes reads as both, not as an arbitrary one of them.
+        fx = self.fixture("lenet.safetensors", b"the coordinated bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+        fixture_digest.record(digests, [fx], "minix")
+
+        verdict, _, _, origins = fixture_digest.status(fx, fixture_digest.read_digests(digests))
+
+        self.assertEqual((verdict, origins), ("MATCH", "minix,rog-nv"))
 
     def test_a_differently_generated_fixture_does_not_match(self):
         # The hazard: the difference is applied uniformly to every cell, so the cross-cell parity
         # gate certifies it. Only the digest contradicts the report's workload name.
         fx = self.fixture("lenet.safetensors", b"the bytes the report was measured on")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
         entries = fixture_digest.read_digests(digests)
 
         fx.write_bytes(b"the bytes someone regenerated later")
+
+        verdict, _, _, origins = fixture_digest.status(fx, entries)
+        self.assertEqual((verdict, origins), ("MISMATCH", None))
+
+    def test_bytes_no_recorded_box_has_still_mismatch(self):
+        # Multi-origin widens what MATCHes to "some recorded box's bytes" -- it must not widen it
+        # to "recorded under this name", or the gate becomes a filename check.
+        fx = self.fixture("mlp_wide.safetensors", b"minix bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "minix")
+        fx.write_bytes(b"rog-nv bytes")
+        fixture_digest.record(digests, [fx], "rog-nv")
+        entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"a third box nobody recorded")
 
         self.assertEqual(fixture_digest.status(fx, entries)[0], "MISMATCH")
 
@@ -835,6 +914,36 @@ class FixtureDigestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_digest.read_digests(digests)
 
+    def test_an_unattributed_legacy_line_is_refused_not_guessed(self):
+        # A three-field line is the pre-759 format. Adopting it under a guessed origin would
+        # record a coin flip as a fact, and the boxes' bytes really do differ.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  lenet.safetensors\n")
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("--record", str(refused.exception))
+
+    def test_one_origin_cannot_be_recorded_twice_for_one_fixture(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.HEADER
+            + "aa  1  lenet.safetensors  rog-nv\nbb  2  lenet.safetensors  rog-nv\n"
+        )
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+    def test_an_origin_with_whitespace_is_refused(self):
+        # The format is whitespace-split, so an origin containing a space would write a line that
+        # reads back as a different (or malformed) entry.
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "rog nv")
+
     def test_the_checked_in_file_parses_and_names_live_workloads(self):
         # A digest for a workload spec that no longer exists is stale: it pins bytes no current
         # run can produce, and reads as coverage.
@@ -844,6 +953,15 @@ class FixtureDigestTest(unittest.TestCase):
         for name in entries:
             self.assertTrue(name.endswith(".safetensors"), name)
             self.assertIn(name[: -len(".safetensors")], specs, name)
+
+    def test_the_checked_in_file_attributes_every_entry(self):
+        # The whole point of gh-ocannl-759: no entry may be anonymous, because the published
+        # numbers are on more than one box's bytes and the reports have to say which.
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        self.assertTrue(entries, "the checked-in digest file records nothing (gh-ocannl-759)")
+        for name, recorded in entries.items():
+            for e in recorded:
+                self.assertTrue(e.origin and e.origin.strip(), name)
 
     def test_the_sweep_refuses_bytes_nothing_records(self):
         fx = self.fixture("lenet.safetensors")
@@ -858,23 +976,86 @@ class FixtureDigestTest(unittest.TestCase):
     def test_the_sweep_runs_and_stamps_a_recorded_fixture(self):
         fx = self.fixture("lenet.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
 
-        shas = self.check([fx], digests_path=digests)
+        ids = self.check([fx], digests_path=digests)
 
-        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+        self.assertEqual(ids, {fx: (fixture_digest.sha256_file(fx), "rog-nv")})
 
     def test_the_opt_out_measures_them_and_still_reports_the_digest(self):
         # A deliberate regeneration is a legitimate reason to run unpinned; it must not also cost
         # the run its record of what it ran on.
         fx = self.fixture("lenet.safetensors")
         digests = self.dir / fixture_digest.DIGEST_FILE
-        fixture_digest.record(digests, [fx])
+        fixture_digest.record(digests, [fx], "rog-nv")
         fx.write_bytes(b"regenerated")
 
-        shas = self.check([fx], digests_path=digests, allow_unpinned=True)
+        ids = self.check([fx], digests_path=digests, allow_unpinned=True)
 
-        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+        self.assertEqual(ids, {fx: (fixture_digest.sha256_file(fx), None)})
+
+    def test_a_report_section_says_whose_bytes_its_numbers_are_on(self):
+        # The published half of gh-ocannl-759: a reader comparing this report against the other
+        # box's has to be able to see, without leaving the report, that the two are on different
+        # bytes -- which for mlp_small and gpt2_mini they are.
+        rows = [
+            dict(
+                cell("ocannl", "cuda", "default", [2.3026, 2.3010]),
+                fixture="gpt2_mini.safetensors",
+                fixture_sha256="043c1ea8",
+                fixture_origin="rog-nv",
+            )
+        ]
+        orchestrate.parity_check(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestrate.report(rows, out)
+            text = (out / "report.md").read_text()
+
+        self.assertIn("sha256 `043c1ea8`, rog-nv's bytes", text)
+
+    def test_the_record_cli_pins_existing_bytes_without_regenerating(self):
+        # The gh-ocannl-759 command: fixtures that predate the digest file get pinned as they are.
+        fx = self.fixture("lenet.safetensors", b"bytes the published numbers are on")
+        before = fx.read_bytes()
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = fixture_digest._main(
+                ["--record", str(fx), "--origin", "rog-nv", "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(fx.read_bytes(), before, "recording must not touch the fixture")
+        self.assertEqual(fixture_digest.read_digests(digests)[fx.name][0].origin, "rog-nv")
+
+    def test_the_record_cli_defaults_to_this_host(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            fixture_digest._main(["--record", str(fx), "--digests", str(digests)])
+
+        self.assertEqual(
+            fixture_digest.read_digests(digests)[fx.name][0].origin, fixture_digest.this_origin()
+        )
+
+    def test_the_check_cli_passes_a_recorded_fixture_and_fails_a_perturbed_one(self):
+        fx = self.fixture("lenet.safetensors", b"recorded bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        with contextlib.redirect_stdout(io.StringIO()) as good:
+            passed = fixture_digest._main(["--check", str(fx), "--digests", str(digests)])
+        fx.write_bytes(b"perturbed bytes")
+        with contextlib.redirect_stdout(io.StringIO()) as bad:
+            failed = fixture_digest._main(["--check", str(fx), "--digests", str(digests)])
+
+        self.assertEqual((passed, failed), (0, 1))
+        self.assertIn("MATCH — rog-nv's bytes", good.getvalue())
+        self.assertIn("MISMATCH", bad.getvalue())
 
     def test_generated_fixtures_are_named_after_their_spec(self):
         # What the recorded-name check above relies on: gen_fixtures.py writes

@@ -1,9 +1,9 @@
-# Fixture digests: the bytes each published measurement is on (gh-ocannl-645).
+# Fixture digests: the bytes each published measurement is on (gh-ocannl-645, gh-ocannl-759).
 #
 # The fixtures themselves are gitignored, so this file is the only checked-in statement of
 # what one contains. gen_fixtures.py rewrites the entries it regenerates; orchestrate.py
-# refuses to measure a fixture that does not match one (--no-fixture-digest-check opts out),
-# and stamps every result row and report section with the digest it ran on.
+# refuses to measure a fixture that matches none of them (--no-fixture-digest-check opts out),
+# and stamps every result row and report section with the digest -- and the origin -- it ran on.
 #
 # A changed digest here is a changed workload: numbers measured before it are not comparable
 # with numbers measured after it, whatever the report calls the workload. Fixture bytes depend
@@ -11,4 +11,19 @@
 # streams (numpy does not promise Generator stream stability across releases), so a mismatch
 # names a real difference even when the spec is untouched.
 #
-# <sha256>  <bytes>  <name>
+# The <origin> field names the box whose fixtures these bytes are, because the same workload
+# has different bytes on different boxes and the reports have to say which. Two entries under
+# one name are two boxes' bytes, NOT a history: numbers measured on one are not comparable
+# with numbers measured on the other. Regenerating replaces only the recording box's entry --
+# regeneration is a cross-box event and has to be coordinated across every origin listed here,
+# or the boxes silently diverge again (see benchmarks/README.md).
+#
+# <sha256>  <bytes>  <name>  <origin>
+d008d1cff9885ffaa01eca91b95b9a0cadc2175f9b79a9e4ed8c06dc1dd7b74a  26190952  cifar_conv.safetensors  rog-nv
+b9540f5a6a084a81b764b84108e6c319837448f6064f0f9359e15f7a7e4ea734  32789600  cifar_stride.safetensors  rog-nv
+10839bd1dee72a62c54f6589a727e53cfe174f6d676dfba201ede80f6269defb  13871360  gpt2_mini.safetensors  minix
+043c1ea8b42817fca8b713ac0eadae6e8b7b7326cb5ff7ea0fd527487ca2009e  13871360  gpt2_mini.safetensors  rog-nv
+5a38f19751d03b412be66d70b2462968c1e43c9bd0b0fb7167592d95bbbc3c93  4483288  lenet.safetensors  rog-nv
+2c48b1d78c6820f639d431b3f57902bcdb79e09f909e0f83415d851cc20ec0c1  51384  mlp_small.safetensors  minix
+f09de9504262eb184672c9f58da821c47e0ee9f6311bd69207700c33298c44ca  51384  mlp_small.safetensors  rog-nv
+56b3d2ce63ac668bc150264f40850cfb49ad477ea8a42b82d2f033841ed15742  9650952  mlp_wide.safetensors  rog-nv
