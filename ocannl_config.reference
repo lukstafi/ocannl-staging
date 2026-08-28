@@ -700,14 +700,19 @@
 # debug_backend=text. The command appears under a `command` node, e.g.
 #   cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1
 # Look in the right place: with log_main_domain_to_stdout at its default of false, the text log is
-# the EXTENSIONLESS file `log_files/<exe>/debug` (named by log_file_stem), never a `*.log`; only
+# an EXTENSIONLESS file named by log_file_stem, never a `*.log`. Its directory follows
+# build_files_prefix, like every other artifact: unset gives `log_files/<exe>/debug`, an explicit
+# prefix gives `log_files/<prefix>/debug`, and `.` gives a flat `log_files/debug`. Only
 # with log_main_domain_to_stdout=true does it go to stdout instead.
 # Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
 # assembly text over the shared library the command was building, which may be one your application
 # still has loaded.
 # Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally. With the operand
 # there, no match (exit status 1) is a REAL answer: that assembly contains none of the call
-# spellings below, so your kernel is on the fast path. It is the operand-less form that tells you
+# spellings below, so that kernel is clear of THIS cliff. It does not certify the kernel fast in
+# general: on gcc with an FMA4-only target the emission takes `vec_acc_fma`'s per-lane arm, which has
+# no libm calls to find and is still the spill-or-scalarize hazard the SIMD note describes -- passing
+# this check and taking the good arm are separate questions. It is the operand-less form that tells you
 # nothing -- a bare `grep` reads stdin instead of the file, and a placeholder like the
 # angle-bracketed one is worse still, since the shell reads it as redirection and truncates the very
 # file you meant to inspect. Match BOTH names and both dialects: double-precision kernels call
@@ -773,8 +778,12 @@
 # slowdown for an illegal-instruction fault. Such a machine keeps the cliff, and the only things
 # that change it are changing the arithmetic (cc_backend_fast_math, with its own caveats below) or
 # running elsewhere. Where the hardware IS capable, prefer the spellings that let the compiler read
-# the host over ones that assert a feature: "auto" (the default), `cc_backend_arch_flags=-march=native`,
-# or the `-march` naming your exact CPU.
+# the host over ones that assert a feature. "auto" (the default) is the one to reach for: it probes
+# the host's own family and uses that family's native spelling. Do NOT hand-write `-march=native`
+# unless you are on x86 -- it is the x86 spelling only, and Apple clang accepts it on arm64 while
+# DOWNGRADING the target (the top of this entry has the details), so writing it by hand on ARM undoes
+# the protection `auto` gives you; the ARM spelling is `-mcpu=native`. Naming your exact CPU's
+# `-march` works too, on either architecture.
 # Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
 # than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
 # escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns

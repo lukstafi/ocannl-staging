@@ -802,7 +802,9 @@ files.
   once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
   flag set with `-S`, then `grep -E 'call.*fmaf?\b' kernel.s` — name the file LITERALLY: a bare
   `grep` waits on stdin and its empty output means nothing, while WITH the operand a no-match is a
-  real negative (exit status 1) — that assembly carries none of the spellings below. A placeholder
+  real negative (exit status 1) — that assembly is clear of the libm cliff, though NOT thereby on the
+  good arm: a gcc/FMA4-only kernel takes the per-lane `#else` with no calls to find and keeps the
+  spill-or-scalarize hazard, per the paragraph above. A placeholder
   like `<name>.s` is worse, since the shell reads `<` and `>` as redirection and would truncate the
   very file you are inspecting. Match both NAMES and both dialects.
   Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
@@ -893,7 +895,9 @@ files.
   — which are warnings-as-errors here; **`=9` builds clean**, and 9 is the value the file's own
   header comment names, so the low values look simply untested (an unfiled defect: a debug knob that
   does not compile at two of its values). And the default `debug_backend=db` writes
-  `log_files/<exe>/debug.db` + `debug_meta.db`, ppx_minidebug's binary database, which needs its
+  `log_files/<exe>/debug.db` + `debug_meta.db` (that directory follows `build_files_prefix` like
+  every artifact — `log_files/<prefix>/` when set, flat `log_files/` at `.`), ppx_minidebug's binary
+  database, which needs its
   rendering client; `debug_backend=text` gives readable output instead. With
   `OCANNL_LOG_LEVEL_CC_BACKEND=9`, `log_level=9`, `debug_backend=text` the command appears verbatim
   under a `command` node:
@@ -901,7 +905,9 @@ files.
   **Where that lands is decided by `log_main_domain_to_stdout`, and both answers are live in this
   repo.** It defaults to FALSE, and `Utils.get_local_debug_runtime` then resolves `log_file_stem`
   (default `debug`) into a filename — so the ordinary answer is the EXTENSIONLESS file
-  `log_files/<exe>/debug`, and watching stdout finds nothing. But `test/config/ocannl_config` sets
+  `log_files/<exe>/debug` — or `log_files/<prefix>/debug`, or a flat `log_files/debug`, as
+  `build_files_prefix` dictates — and watching stdout finds nothing. But `test/config/ocannl_config`
+  sets
   `log_main_domain_to_stdout=true`, so a run under `dune runtest` prints it inline instead and
   writes no file at all — which is what a golden diff then trips over, a perturbation of the test's
   stdout rather than a signal about the compile. That difference is worth stating because searching
