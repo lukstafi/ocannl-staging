@@ -524,27 +524,40 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
         # behind is not the pass it claims to be (gh-ocannl-760 review).
         if proc is not None:
             with _deferring_cancellation():
-                kill_cell_group(proc)
+                _, outlived = kill_cell_group(proc)
+                if outlived:
+                    # The one branch that exits rather than records, so this is the operator's
+                    # only chance to hear it: the cancellation's own message says the cell was
+                    # killed, and a retry started over a survivor that still holds the device
+                    # would be measured against it (gh-ocannl-760 review).
+                    print(
+                        f"!!! {label}: A MEMBER SURVIVED SIGKILL and still holds the device — "
+                        "clear the survivors before re-running anything on this box",
+                        flush=True,
+                    )
                 if on_timeout:
                     print(f"!!! {label} interrupted; {on_timeout()}", flush=True)
         raise
     stdout = stdout or ""
     leftovers = ""
     stuck = False
-    if not timed_out and _group_alive(proc.pid):
-        # The cell is done and something it spawned is not. `communicate` returned because the
-        # LEADER exited and the pipe closed, which says nothing about a worker that redirected
-        # its own output — and that worker still holds the GPU, so every later cell of the sweep
-        # would be measured against it (gh-ocannl-760 review). Collect it here, on the ordinary
-        # path, not only on the cap's.
-        with _deferring_cancellation():
+    # The probe and its cleanup are one deferred block: a cancellation landing between them —
+    # after the group reads as alive and before the kill starts — would leave exactly the worker
+    # the probe just found, in a session nothing else will reach (gh-ocannl-760 review).
+    with _deferring_cancellation():
+        if not timed_out and _group_alive(proc.pid):
+            # The cell is done and something it spawned is not. `communicate` returned because the
+            # LEADER exited and the pipe closed, which says nothing about a worker that redirected
+            # its own output — and that worker still holds the GPU, so every later cell of the
+            # sweep would be measured against it. Collect it here, on the ordinary path, not only
+            # on the cap's.
             _, stuck = kill_cell_group(proc)
-        leftovers = (
-            "the cell left members of its process group behind; they were killed"
-            if not stuck
-            else "the cell left members of its process group behind AND THEY SURVIVED SIGKILL"
-        )
-        print(f"!!! {label}: {leftovers}", flush=True)
+            leftovers = (
+                "the cell left members of its process group behind; they were killed"
+                if not stuck
+                else "the cell left members of its process group behind AND THEY SURVIVED SIGKILL"
+            )
+            print(f"!!! {label}: {leftovers}", flush=True)
     if CELL_LOG_DIR:
         # A cell's own output is otherwise discarded on success, which throws away exactly the
         # evidence a measurement sweep is asked to report: with autotune_log=true the search

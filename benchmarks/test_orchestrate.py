@@ -1329,6 +1329,60 @@ class CellTimeoutTest(unittest.TestCase):
             f"pid {stubborn} outlived a sweep cancelled mid-kill",
         )
 
+    def test_the_leftover_probe_itself_runs_deferred(self):
+        # A cancellation landing on the probe -- or between it reading the group as alive and the
+        # kill starting -- would leave exactly the worker the probe just found, in a session
+        # nothing else will reach (gh-ocannl-760 review). So the property is that the probe and
+        # its cleanup are inside ONE deferral window, which is what this reads: the depth seen by
+        # the probe itself.
+        depth_at_probe = []
+
+        def probe(_pid):
+            depth_at_probe.append(orchestrate._defer_depth)
+            return False
+
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with unittest.mock.patch.object(orchestrate, "_group_alive", probe):
+            result, note, _ = self.run_cell("probed", cell, timeout=60)
+
+        self.assertIsNone(note)
+        self.assertIsNotNone(result)
+        self.assertTrue(depth_at_probe, "the ordinary path never probed for leftovers")
+        self.assertTrue(
+            all(depth > 0 for depth in depth_at_probe),
+            f"the leftover probe ran with cancellations undeferred: {depth_at_probe}",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "the interrupt path needs POSIX signals")
+    def test_an_interrupted_cell_with_a_survivor_says_so(self):
+        # The interrupt branch exits rather than records, so its print is the operator's only
+        # chance to hear that something still holds the device -- while the cancellation's own
+        # message says the cell was killed, and the retry they are about to start would be
+        # measured against the survivor. The survivor is stood in for, as elsewhere.
+        def handler(_signum, _frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGALRM, handler)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaises(KeyboardInterrupt):
+                orchestrate.run_cell(
+                    "interrupted over a survivor", self.python("import time; time.sleep(300)")
+                )
+
+        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+
     def test_the_cache_is_quarantined_even_if_the_cell_log_cannot_be_written(self):
         # The kill is what tore the cache, so undoing it must not sit behind fallible code: the
         # optional cell log writes to an operator-supplied directory, which can be unwritable or
