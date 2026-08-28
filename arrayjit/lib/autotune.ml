@@ -92,7 +92,7 @@ type report = {
   baseline_ms : float;
   default_ms : float option;
   best_ms : float;
-  timing : timing_mode option;
+  timing : timing_mode;
   best_label : string;
   best_tensorized : bool;
   best_tensorization : Ir.C_syntax.tensorization option;
@@ -111,8 +111,14 @@ type report = {
     every counter zero and every time [infinity], like a search whose candidates all failed. The
     caller gets the untuned default compile; [outcome] says why. Also the base that the [census]
     below and the pre-search failure reports build on — the census keeps [Search_disabled] (it
-    describes exactly that call), a pre-search failure replaces it. *)
-let no_search_report =
+    describes exactly that call), a pre-search failure replaces it.
+
+    A function of the objective rather than a constant (gh-ocannl-755 follow-up): [timing] describes
+    what every millisecond of a report was measured under, and a report that never resolved one is
+    not a state [tune] can be in — a call resolves its objective before it can emit anything. Made a
+    constant, this would have to carry [None] and make the field an option for the sake of a
+    template, so every consumer of a real report would handle an absence no report has. *)
+let no_search_report ~timing =
   {
     outcome = Search_disabled;
     candidates_timed = 0;
@@ -135,9 +141,7 @@ let no_search_report =
     baseline_ms = Float.infinity;
     default_ms = None;
     best_ms = Float.infinity;
-    (* A template, not a report of a call: no objective has been resolved. Every report [tune]
-       emits goes through [base_report], which fills it in. *)
-    timing = None;
+    timing;
     (* Nothing was timed, so there is no winner to name — and since gh-ocannl-677 the state is in
        [outcome] rather than smuggled through this string. Keeps [best_label]'s contract exact:
        empty exactly when [best_ms] is [infinity]. *)
@@ -2515,11 +2519,12 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
     | Some t -> t
     | None -> timing_of_setting @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued"
   in
-  (* Every report this call emits starts here rather than at [no_search_report], so the objective
-     its times were taken under travels with them (gh-ocannl-755): a consumer comparing a [best_ms]
-     across processes, or storing one in a benchmark artifact, otherwise has to guess it from
-     ambient configuration that a [?timing] override may not match. *)
-  let base_report = { no_search_report with timing = Some timing } in
+  (* Every report this call emits starts here, so the objective its times were taken under travels
+     with them (gh-ocannl-755): a consumer comparing a [best_ms] across processes, or storing one in
+     a benchmark artifact, otherwise has to guess it from ambient configuration that a [?timing]
+     override may not match. Which is why the objective is resolved above this line and not below
+     it. *)
+  let base_report = no_search_report ~timing in
   let max_split_reduce_sites =
     max 0
       (Option.value max_split_reduce_sites
@@ -2881,7 +2886,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     (* The entry's times are the storing search's, but the objective is this
                        call's: since gh-ocannl-755 the objective is a cache-key component, so an
                        entry under this key was measured under this objective. *)
-                    timing = Some timing;
+                    timing;
                     candidates_timed = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
@@ -3227,7 +3232,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           let partial_report =
             {
               outcome = Search_died failure;
-              timing = Some timing;
+              timing;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
@@ -3906,7 +3911,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           let completed_report =
             {
               outcome = Searched;
-              timing = Some timing;
+              timing;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;

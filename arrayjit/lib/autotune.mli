@@ -693,11 +693,12 @@ type report = {
           to [baseline_ms], [default_ms] and [mma_best_ms], which are the same instrument's
           readings; ratios between them are safe, since all four were taken under one setting within
           one search. *)
-  timing : timing_mode option;
+  timing : timing_mode;
       (** The {!timing_mode} every time in this report was measured under (gh-ocannl-755), including
           the times a [Cache_replay] carries: the objective is a cache-key component, so an entry
-          this call could look up was measured under this call's objective. [None] only on
-          {!no_search_report}, which is a template rather than a report of any call.
+          this call could look up was measured under this call's objective. Never absent: {!tune}
+          resolves the objective before it constructs any report, and {!no_search_report} takes it
+          as an argument for the same reason.
 
           It is here because nothing else records it. A consumer storing a [best_ms] in an artifact,
           or comparing one across processes, otherwise has to reconstruct the objective from ambient
@@ -785,12 +786,18 @@ type report = {
           schedules (informational). Empty when nothing was timed. *)
 }
 
-val no_search_report : report
+val no_search_report : timing:timing_mode -> report
 (** The report of a {!tune} call that never searched (config [autotune_search=false], gh-ocannl-559,
     and no cache entry to replay): [outcome = Search_disabled], every counter zero, every time
     [infinity], [best_label] empty and [best_tensorization = None]. The caller gets the untuned
     default compile. Also the base the pre-search failure reports are built on, with [outcome]
-    replaced and whatever census the call had reached filled in. *)
+    replaced and whatever census the call had reached filled in.
+
+    [timing] is the objective the call resolved, which is all that distinguishes one of these from
+    another: it names what the (absent) times {e would} have been measured under, and keeps
+    {!report.timing} a plain field rather than an option every consumer of a real report would have
+    to unwrap. A caller synthesizing a report — a test building a search outcome to feed
+    {!family_profit_of_reports}, say — passes whichever objective its scenario is about. *)
 
 val outcome_name : outcome -> string
 (** The stable one-word name of an outcome state — ["searched"], ["search-died"], ["cache-replay"],
@@ -1123,10 +1130,10 @@ val tune :
   (* Whether to search at all; default from config [autotune_search] (true). With [false]
      (gh-ocannl-559: the [reproducible] profile) a committed cache entry still replays -- a pinned
      schedule is deterministic -- but nothing is timed, and a cache miss compiles the untuned
-     default pipeline and reports {!no_search_report}. Only a CHOSEN cache replays: [cache_dir]
-     passed here, or [autotune_cache_dir] set at some config source. The built-in default counts as
-     no cache, so a search-less run cannot silently pin itself to whatever an earlier local search
-     left in ./autotune_cache. *)
+     default pipeline and reports {!no_search_report} under the resolved objective. Only a CHOSEN
+     cache replays: [cache_dir] passed here, or [autotune_cache_dir] set at some config source. The
+     built-in default counts as no cache, so a search-less run cannot silently pin itself to
+     whatever an earlier local search left in ./autotune_cache. *)
   ?beam_width:int ->
   (* Default from config [autotune_beam_width] (2). *)
   ?rounds:int ->
