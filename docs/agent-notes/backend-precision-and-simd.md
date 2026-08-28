@@ -791,7 +791,8 @@ files.
   `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
   erase calls the probe still shows (measured, f32 × 4 lanes at `-march=x86-64 -O3`: 4 calls, and 0
   once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
-  flag set with `-S`, then `grep -E 'call.*fmaf?\b'` — match both NAMES and both dialects.
+  flag set with `-S`, then `grep -E 'call.*fmaf?\b' <that>.s` (name the file — a bare `grep` waits on
+  stdin, and its empty output then means nothing) — match both NAMES and both dialects.
   Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
   `Double_prec`), and gcc on ELF spells it `call fma@PLT` where clang on Mach-O spells it
   `callq _fmaf`; an `fmaf`-only pattern finds none of a double kernel's calls — measured 0 of 5,
@@ -827,7 +828,9 @@ files.
   (verified at `-march=x86-64`), recovering the vectorization at two roundings, but gcc was reported
   in review to keep the `fmaf` call there at `-O3 -ffast-math` — unverified here, this fleet's Macs
   have no GNU gcc, and gcc is the common default since `cc_backend_compiler_command` follows
-  `ocamlc -config`. So fast-math is not a portable workaround; raising the target is.
+  `ocamlc -config`. So fast-math is not a portable workaround — and neither is "raise the target",
+  which only helps where the CPU HAS an FMA that a conservative target was hiding; on a genuinely
+  FMA-less part there is nothing to raise to and changing the arithmetic is the only lever left.
   `cc_backend_fp_contract` is not a lever either way: the calls are fused by construction, and
   `-ffp-contract=fast` leaves every one of them.
   For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious: an
@@ -839,7 +842,13 @@ files.
   serial fallback too, or the promise breaks worse than the cliff costs. If a fix does land,
   `test/operations/cc_march_census` is where it shows: its "no FMA accumulator loop calls libm where
   the ISA has a fused multiply-add" claim excludes the FMA-less rows by design, so widening that
-  claim is the test-side move.
+  claim is the test-side move. **That census does not currently see FMA4 at all**, which matters
+  before citing it as cover for anything written above: `has_fma` is
+  `has "__FMA__" || has "__ARM_FEATURE_FMA"` with no `__FMA4__`, so `isa_has` drops the FMA row on
+  an FMA4-only target, and `toolchains ()` has no `bdver` row to raise the question anyway. It can
+  therefore stay green no matter what the FMA4 path does — adding `__FMA4__` to the predicate and a
+  `bdver1` column is unfiled work, and until it exists the FMA4 claims in this note rest on the
+  hand probes recorded here rather than on the suite.
 - **Reading the backend's own compile command: it works, but only at `OCANNL_LOG_LEVEL_CC_BACKEND=9`
   and with a text backend** (gh-ocannl-753). `cc_backend.ml` logs its exact invocation as
   `[%log3 "command", cmdline]`, which is the direct answer to "what flags did my kernel actually

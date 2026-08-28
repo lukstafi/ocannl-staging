@@ -700,7 +700,8 @@
 # Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
 # assembly text over the shared library the command was building, which may be one your application
 # still has loaded.
-# Then `grep -E 'call.*fmaf?\b'`. Match BOTH names and both dialects: double-precision kernels call
+# Then `grep -E 'call.*fmaf?\b' <that>.s` -- name the assembly file, or grep waits on stdin and an
+# empty result means nothing. Match BOTH names and both dialects: double-precision kernels call
 # `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
 # spells the call `call fma@PLT` while clang on Mach-O spells it `callq _fmaf`. A pattern pinned to
 # one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
@@ -714,7 +715,10 @@
 # from code review on gh-ocannl-753 and were not reproducible here, which has no GNU gcc; they are
 # flagged in place. For an in-tree check that runs on whatever toolchain you have,
 # `test/operations/cc_march_census` compiles the emitted kernel across `-march` targets and censuses
-# the accumulator loops, holding the line that no FMA loop calls libm where the ISA has an FMA.
+# the accumulator loops, holding the line that no FMA loop calls libm where the ISA has an FMA --
+# for the FMA3 and NEON paths only. It does NOT cover FMA4: its capability predicate is
+# `has_fma = has "__FMA__" || has "__ARM_FEATURE_FMA"`, with no `__FMA4__`, and its target matrix
+# has no `bdver` row, so it stays green whatever the FMA4 path does. Extending it is unfiled work.
 # You reach a no-FMA target on ANY CPU that lacks a fused multiply-add, which is not a clean date
 # cutoff. Big-core x86 got FMA3 at Haswell and AMD got FMA4 at Bulldozer, but the low-power lines
 # shipped without either for years afterwards: Intel Silvermont, Goldmont and Tremont, and AMD
@@ -800,8 +804,11 @@
 # where the call could not (see the cliff described at cc_backend_arch_flags), at two roundings
 # instead of one. This is compiler-specific and NOT a general workaround for that cliff: gcc was
 # reported to keep the `fmaf` call at `-O3 -ffast-math` on a baseline x86 target, and gcc is the
-# common default here, since cc_backend_compiler_command follows `ocamlc -config`. Raising the
-# target is the portable fix; this is not one.
+# common default here, since cc_backend_compiler_command follows `ocamlc -config`. Where the host
+# CPU does have an FMA that a conservative target was hiding, raising the target is the fix to reach
+# for instead of this one; where the CPU has no FMA at all, there is no target to raise to and
+# changing the arithmetic is the only lever left -- which is what this flag does, at two roundings
+# and with everything else `-ffast-math` implies.
 #cc_backend_fast_math=false
 
 # If true, compiled dynamic libraries (.dll/.so files) for the CC backend are placed 
