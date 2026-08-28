@@ -360,7 +360,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial reduction
     loop. A routine-local accumulator beats a device-memory RMW on every backend, and on Metal it
     additionally sidesteps the volatile-RMW miscompile workaround tax (c_syntax.ml
-    [volatile_scalar_rmw]). Detection is permissive: each proposal is validated by try-applying
+    [volatile_serial_accumulation]). Detection is permissive: each proposal is validated by try-applying
     against the segment (Privatize's own preconditions — single index vector, uniform
     iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
 

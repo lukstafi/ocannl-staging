@@ -67,6 +67,17 @@ type routine = private {
           peels the inner level only, under a lane-private guard the cell separates — and the two
           render the same localized kernel. A test classifying emitted code is therefore green over
           either; this field is what lets it say which code path actually ran. *)
+  volatility : Ir.C_syntax.volatility_summary;
+      (** Which of this routine's serial accumulations carry the Metal compiler-bug workaround
+          (gh-ocannl-782), in which of its two forms, and how many were left register-resident.
+
+          A field of the routine, beside {!mma} and {!peel}, because the qualifier is precisely the
+          loss of register residency: a performance question about a Metal reduction starts by
+          asking how many of its accumulators are pinned to memory, and a residency test needs to
+          know what the compile DECIDED rather than re-deriving it from the backend's name. On a
+          backend that requests no workaround the accumulator sites are still reported, as
+          {!Ir.C_syntax.Plain_accumulator}, with
+          {!Ir.C_syntax.volatility_summary.requested} [= false]. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every

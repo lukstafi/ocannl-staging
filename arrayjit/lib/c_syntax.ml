@@ -302,6 +302,118 @@ let with_peel_census f =
   restore ();
   (result, summarize_peel_census sites)
 
+(* {2 The volatility census (gh-ocannl-782)}
+
+   Which serial accumulations in a routine carry the {!C_syntax_config.volatile_serial_accumulation}
+   workaround, in which of its two forms, and which were left alone. The emitted text answers "is
+   this local volatile"; it does not answer "how many accumulators did this routine have, and did
+   any of them escape the qualifier" — and that second question is the one a residency or
+   performance investigation asks, because the qualifier is what stops an accumulator being
+   register-resident.
+
+   Collected where each decision is made ([scope_decl_type] for the localized form,
+   [pp_ll]'s [Set] case for the read-modify-write pointer shadow) and bracketed by
+   {!with_volatility_census}, which {!Context.compile} calls around every routine's codegen, so the
+   summary is a field of the compiled routine.
+
+   The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
+   recorded on EVERY backend — the classification it needs is computed anyway, so a routine compiled
+   for a C backend still reports "three accumulators, none qualified" — while the pointer shadow is
+   recorded only where the backend requests the workaround, because elsewhere its structural
+   predicate is never evaluated (the capability short-circuits it) and there is no decision to
+   record. {!field-volatility_summary.requested} is what tells the two situations apart. *)
+
+type volatility_site =
+  | Volatile_accumulator of string
+      (** A reduction-shaped scope local declared [volatile], by its emitted identifier: the
+          localized accumulation form (gh-ocannl-731). *)
+  | Plain_accumulator of string
+      (** A reduction-shaped scope local left unqualified — this backend does not request the
+          workaround, so the accumulator stays register-resident. *)
+  | Volatile_rmw_shadow of string
+      (** A device-memory read-modify-write at an address invariant across an enclosing serial loop,
+          rendered through a [volatile]-qualified shadow of the named node's pointer. *)
+[@@deriving sexp, equal, compare]
+
+type volatility_summary = {
+  entries : (string * volatility_site) list;
+      (** The census entries of one compile, in emission order (kernel name, site). Fissioned
+          segments of one routine contribute their kernels to the same summary. *)
+  requested : bool;
+      (** Whether the backend this compile ran on asks for the workaround
+          ({!C_syntax_config.volatile_serial_accumulation}). [false] makes every accumulator site a
+          {!Plain_accumulator} and suppresses the shadow arm entirely. *)
+  volatile_accumulators : int;
+  plain_accumulators : int;
+  rmw_shadows : int;
+}
+[@@deriving sexp_of]
+(** What a compile's volatility census says about the routine it produced (gh-ocannl-782). *)
+
+(* Set by [compile_proc] before any analysis or rendering: the kernel name, for the decline
+   diagnostics ([log_declines]) and for every census entry. Module level, not functor level, for the
+   same reason the census refs are: compiles are sequential on the main domain, and a census
+   collected around one compile must name the kernels of whichever backend ran it. *)
+let current_kernel_name = ref ""
+
+let volatility_census_enabled = ref false
+let volatility_census : (string * volatility_site) list ref = ref []
+
+(* Set by the backend functor at each [compile_proc], read by the summary: the capability is a
+   per-backend source constant, and a summary that did not carry it could not tell "this backend
+   leaves accumulators alone" from "this routine had none". *)
+let volatility_requested = ref false
+
+let summarize_volatility_census ~requested entries =
+  let count f = List.count entries ~f:(fun (_, s) -> f s) in
+  {
+    entries;
+    requested;
+    volatile_accumulators = count (function Volatile_accumulator _ -> true | _ -> false);
+    plain_accumulators = count (function Plain_accumulator _ -> true | _ -> false);
+    rmw_shadows = count (function Volatile_rmw_shadow _ -> true | _ -> false);
+  }
+
+let empty_volatility_summary = summarize_volatility_census ~requested:false []
+
+(** The one-line volatility census a report prints beside a routine (gh-ocannl-782): how many serial
+    accumulations this routine carries and how many of them the compiler-bug workaround pinned to
+    memory. *)
+let volatility_summary_string summary =
+  let accumulators = summary.volatile_accumulators + summary.plain_accumulators in
+  if not summary.requested then
+    Printf.sprintf "%d accumulator(s), workaround not requested by this backend" accumulators
+  else
+    Printf.sprintf "%d of %d accumulator(s) volatile, %d rmw pointer shadow(s)"
+      summary.volatile_accumulators accumulators summary.rmw_shadows
+
+(** Run [f] with the volatility census collecting, and return its result alongside the summary of
+    what the accumulation workaround decided during it (gh-ocannl-782). Nests additively and
+    restores the refs, exactly as {!with_census} and {!with_peel_census} do. *)
+let with_volatility_census f =
+  let saved_enabled = !volatility_census_enabled
+  and saved_census = !volatility_census
+  and saved_requested = !volatility_requested in
+  volatility_census_enabled := true;
+  volatility_census := [];
+  volatility_requested := false;
+  let restore () =
+    let inner = !volatility_census in
+    volatility_census_enabled := saved_enabled;
+    volatility_census := (if saved_enabled then inner @ saved_census else saved_census);
+    volatility_requested := saved_requested
+  in
+  let result =
+    match f () with
+    | r -> r
+    | exception e ->
+        restore ();
+        raise e
+  in
+  let entries = List.rev !volatility_census and requested = !volatility_requested in
+  restore ();
+  (result, summarize_volatility_census ~requested entries)
+
 type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
 (** The address space of a tile-MMA operand as the emission hooks see it. *)
 
@@ -498,23 +610,40 @@ module type C_syntax_config = sig
   (** Declaration prefix for workgroup-shared placements ([__shared__ ] / [threadgroup ]); [None]
       makes a non-empty [workgroup_shared] set a compile-time error. *)
 
-  val volatile_scalar_rmw : bool
-  (** Workaround for a Metal shader-compiler miscompilation (observed on macOS 15/Metal 3.1-3.2,
-      reproduced standalone in [benchmarks/runners/ocannl/bench_metal_bug.ml]): a serial loop
-      accumulating into a loop-invariant address of a kernel-parameter-derived pointer —
-      [acc[k] = acc[k] + f(i)] with [k] free of [i] — can execute as if the load were hoisted above
-      the loop and the store sunk below it {e without} carrying the accumulation, leaving only the
-      last iteration's contribution (scalar losses collapsed to the last sample's CE; [w.grad]
-      accumulated only the last batch element). The trigger involves pointers derived from
-      dynamically-loaded offsets (the pooled-parameter slot table) but is otherwise capricious —
-      plain-FMA and inlined-recompute statements alike miscompiled in some kernels and compiled fine
-      in byte-alike others — so the rule keys on the pass's precondition: when [true], [Set]
-      statements that read the written node at an index invariant across at least one enclosing
-      serial [for] loop render both accesses through a [volatile]-qualified shadow pointer, pinning
-      the per-iteration read-modify-write. The same compiler pass also miscompiles the equivalent
-      localized form — a reduction-shaped scope local updated from a pooled-pointer read
-      (gh-ocannl-731) — so such locals are [volatile] too. This covers reduction accumulators;
-      pointwise updates and non-accumulator locals stay unqualified. *)
+  val volatile_serial_accumulation : bool
+  (** Workaround for a Metal shader-compiler miscompilation of serial accumulations (observed on
+      macOS 15/Metal 3.1-3.2 through macOS 26/Metal 4), in both spellings a reduction can take.
+      Named for what it covers rather than for either spelling: it was [volatile_scalar_rmw] while
+      only the read-modify-write arm existed (gh-ocannl-782 renamed it).
+
+      The original manifestation: a serial loop accumulating into a loop-invariant address of a
+      kernel-parameter-derived pointer — [acc[k] = acc[k] + f(i)] with [k] free of [i] — can execute
+      as if the load were hoisted above the loop and the store sunk below it {e without} carrying
+      the accumulation, leaving only the last iteration's contribution (scalar losses collapsed to
+      the last sample's CE; [w.grad] accumulated only the last batch element). Standalone repro:
+      [benchmarks/runners/ocannl/bench_metal_bug.ml].
+
+      The localized manifestation (gh-ocannl-731): after the serial-reduction localizer the
+      accumulator is a scope local and the node is stored once, and the same pass corrupts THAT form
+      instead — by a data-independent additive constant. Standalone repro and one-factor-at-a-time
+      matrix: [benchmarks/runners/ocannl/bench_metal_bug_local.ml], whose findings are why the rule
+      keys on statement shape rather than on anything finer. Neither the pooled slot table nor
+      [__restrict] nor the placement of the preceding device store is the trigger: dropping every
+      dynamic load (pointers built from literal offsets straight off a kernel parameter) miscompiles
+      identically, and so does moving the preceding store to an unrelated cell. What does remove it,
+      besides the qualifier, is having the accumulating loop read no device pointer at all.
+
+      When [true]: [Set] statements that read the written node at an index invariant across at least
+      one enclosing serial [for] loop render both accesses through a [volatile]-qualified shadow
+      pointer, pinning the per-iteration read-modify-write; and reduction-shaped scope locals are
+      declared [volatile]. Pointwise updates and non-accumulator locals stay unqualified. Both
+      decisions are reported per routine by the volatility census ({!volatility_summary}).
+
+      The qualifier is not free — it is exactly the loss of register residency. Measured on an M4
+      Max (the [bench_metal_bug_local] tax table): 1.05x on a memory-bound per-thread reduction,
+      2.1x on an accumulator-bound dependency chain, 3.5-3.8x on a long single-threaded reduction,
+      which is the scalar-loss shape. Correctness wins that trade until the defect is fixed
+      upstream. *)
 
   val restrict_keyword : string option
   (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
@@ -1480,7 +1609,7 @@ struct
   let vector_style = `Vec_extensions
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
-  let volatile_scalar_rmw = false
+  let volatile_serial_accumulation = false
 
   (* Clang defines both [__clang__] and [__GNUC__], so test [__clang__] first. *)
   let vectorize_pragma =
@@ -1948,16 +2077,28 @@ module C_syntax (B : C_syntax_config) = struct
     else if Hash_set.mem accum_scope_ids id.scope_id then acc_prec p
     else comp_prec p
 
-  (* Metal's pooled-pointer compiler bug also reaches the localized spelling of a scalar
-     accumulation (gh-ocannl-731): instead of a device-memory RMW, the loop updates a scope local
-     and reads its contribution through a pointer derived from [__pool_slots]. Shader validation
-     hides both manifestations. Keep every reduction-shaped scope local volatile on the backend that
-     requests the workaround; ordinary locals and every other backend stay byte-identical. *)
+  (* The emitted name of a scope local. One definition, so that the volatility census below names
+     the same identifier the declaration carries rather than a second spelling of the convention. *)
+  let scope_local_ident Low_level.{ scope_id; tn } =
+    "v" ^ Int.to_string scope_id ^ "_" ^ get_ident tn
+
+  (* The Metal compiler bug also reaches the localized spelling of a scalar accumulation
+     (gh-ocannl-731): instead of a device-memory RMW, the loop updates a scope local and stores it
+     once. Shader validation hides both manifestations. Keep every reduction-shaped scope local
+     volatile on the backend that requests the workaround; ordinary locals and every other backend
+     stay byte-identical. The decision is censused on EVERY backend (gh-ocannl-782) — an accumulator
+     left plain because the backend asks for nothing is exactly what a residency investigation wants
+     to see, and the classification it needs was computed for the precision decision anyway. *)
   let scope_decl_type (id : Low_level.scope_id) =
-    let qualifier =
-      if B.volatile_scalar_rmw && Hash_set.mem accum_scope_ids id.scope_id then "volatile " else ""
-    in
-    qualifier ^ B.typ_of_prec (scope_prec_of id)
+    let is_accum = Hash_set.mem accum_scope_ids id.scope_id in
+    let qualified = B.volatile_serial_accumulation && is_accum in
+    if is_accum && !volatility_census_enabled then
+      volatility_census :=
+        ( !current_kernel_name,
+          if qualified then Volatile_accumulator (scope_local_ident id)
+          else Plain_accumulator (scope_local_ident id) )
+        :: !volatility_census;
+    (if qualified then "volatile " else "") ^ B.typ_of_prec (scope_prec_of id)
 
   let wrap_conversion (pre, post) doc =
     let open PPrint in
@@ -2757,10 +2898,6 @@ module C_syntax (B : C_syntax_config) = struct
      Always empty for [`Openmp]/[`None]. *)
   let current_local_ptr_alias : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
-  (* Set by [compile_proc] before any analysis or rendering: the kernel name, for the decline
-     diagnostics ([log_declines]) and the [mma_census]. *)
-  let current_kernel_name = ref ""
-
   let declinef fmt =
     Printf.ksprintf
       (fun s ->
@@ -3194,7 +3331,7 @@ module C_syntax (B : C_syntax_config) = struct
   let zero_out_seen : int Hash_set.t = Hash_set.create (module Int)
 
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
-     first): maintained by [serial_loop] below, consulted by the [Set] case's [volatile_scalar_rmw]
+     first): maintained by [serial_loop] below, consulted by the [Set] case's [volatile_serial_accumulation]
      rule and by [pp_pipelined_rotation]. *)
   let serial_loop_stack : Indexing.symbol list ref = ref []
 
@@ -4489,7 +4626,7 @@ module C_syntax (B : C_syntax_config) = struct
            storage width. At those the widening half is vacuous (the local's precision IS the
            storage precision) and the rewrite is exactly value-neutral, which is why it is
            unconditional: leaving it precision-gated made residency "whichever schedule happened to
-           place it" at f32, and on Metal [volatile_scalar_rmw] pinned the resulting RMW to device
+           place it" at f32, and on Metal [volatile_serial_accumulation] pinned the resulting RMW to device
            memory by construction.
 
            Implemented as a local rewrite into exactly the [Local_scope] form virtualization gives
@@ -4514,7 +4651,7 @@ module C_syntax (B : C_syntax_config) = struct
            carve-out, [renders_at_store_prec]), so rendering it inside a scope's precision would
            change the draw, not just move it.
 
-           Interaction with [volatile_scalar_rmw] (Metal) has two forms. Localization lifts the node
+           Interaction with [volatile_serial_accumulation] (Metal) has two forms. Localization lifts the node
            [Set] out of exactly the invariant-address loops, so the volatile POINTER shadow's
            predicate is false at a fully localized site. But gh-ocannl-731 showed the same shader
            compiler pass corrupting the replacement scope-local accumulation when its contribution
@@ -4770,7 +4907,7 @@ module C_syntax (B : C_syntax_config) = struct
             let offset_doc =
               pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims)
             in
-            (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write
+            (* See {!C_syntax_config.volatile_serial_accumulation}: pin the per-iteration read-modify-write
                of loop-invariant-address accumulators by shadowing the node's pointer with a
                volatile-qualified alias for the whole statement (the shadow also covers reads inside
                [local_defs]). The rule keys on the miscompiling pass's precondition — a
@@ -4781,7 +4918,7 @@ module C_syntax (B : C_syntax_config) = struct
                plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
                byte-alike statements in others compiled fine. *)
             let rmw_volatile =
-              B.volatile_scalar_rmw
+              B.volatile_serial_accumulation
               && List.exists !serial_loop_stack ~f:(fun s ->
                   not (Array.exists idcs ~f:(Indexing.axis_index_mentions_symbol s)))
               (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
@@ -4812,6 +4949,13 @@ module C_syntax (B : C_syntax_config) = struct
               in
               reads_tn llsc
             in
+            (* The volatility census (gh-ocannl-782) records this arm only where it fires. Unlike
+               the accumulator arm, its predicate is not evaluated at all on a backend that requests
+               nothing — the capability short-circuits it — so there is no decision there to
+               report, and [volatility_summary.requested] is what says so. *)
+            if rmw_volatile && !volatility_census_enabled then
+              volatility_census :=
+                (!current_kernel_name, Volatile_rmw_shadow (get_ident tn)) :: !volatility_census;
             let wrap_rmw_volatile stmt_doc =
               if not rmw_volatile then stmt_doc
               else
@@ -6062,6 +6206,10 @@ module C_syntax (B : C_syntax_config) = struct
             C_syntax.kernel_ident first, which would give %S"
            name (kernel_ident name));
     current_kernel_name := name;
+    (* The volatility census's [requested] field (gh-ocannl-782): the capability is a per-backend
+       source constant, and the census is collected around a compile that does not know which
+       backend ran it. Set here, where the backend is the functor's own. *)
+    volatility_requested := B.volatile_serial_accumulation;
     current_placements := Some optimize_ctx.Low_level.placements;
     (* gh-ocannl-584: scope purity, the pipeline's EXIT gate ([Low_level.optimize_proc] is the entry
        one) — this catches what a schedule transform constructs, which the entry gate cannot see.

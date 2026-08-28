@@ -83,6 +83,7 @@ type routine = {
   execution_deps : Set.M(Int).t;
   mma : Ir.C_syntax.mma_summary;
   peel : Ir.C_syntax.peel_summary;
+  volatility : Ir.C_syntax.volatility_summary;
 }
 
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
@@ -153,10 +154,14 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
                codegen (gh-ocannl-626): whether a routine tensorized is a property of the compiled
                routine, not of whichever timing harness remembered to bracket the global. Fissioned
                segments compile inside this bracket, so their kernels land in the same summary. *)
-            let (outcome, mma), peel =
+            let ((outcome, mma), peel), volatility =
               (* And the reduction peel's own census (gh-ocannl-733), bracketed the same way and for
                  the same reason: which decision produced a kernel is a property of the compiled
-                 routine, not of whichever test remembered to collect it. *)
+                 routine, not of whichever test remembered to collect it. Likewise the volatility
+                 census (gh-ocannl-782): which of this routine's serial accumulations the Metal
+                 compiler-bug workaround pinned to memory, and therefore which of them are not
+                 register-resident. *)
+              Ir.C_syntax.with_volatility_census @@ fun () ->
               Ir.C_syntax.with_peel_census @@ fun () ->
               Ir.C_syntax.with_census (fun () ->
                   Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
@@ -171,14 +176,21 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
             match outcome with
             | Ok r ->
                 ( r.BI.context,
-                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs, mma, peel)
-                )
+                  Ok
+                    ( r.BI.schedule,
+                      r.BI.bindings,
+                      r.BI.name,
+                      r.BI.inputs,
+                      r.BI.outputs,
+                      mma,
+                      peel,
+                      volatility ) )
             | Error failure -> (bctx, Error failure));
       }
   in
   match backend_outcome with
   | Error failure -> Error failure
-  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma, peel) ->
+  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma, peel, volatility) ->
       (* Allocate unique ID from shared ledger *)
       let id = ctx.ledger.next_id in
       ctx.ledger.next_id <- id + 1;
@@ -256,6 +268,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
           execution_deps = deps;
           mma;
           peel;
+          volatility;
         }
       in
 
