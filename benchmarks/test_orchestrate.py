@@ -927,6 +927,19 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIsNone(note)
         self.assertEqual(result["workload"], "w")
 
+    def test_the_cap_can_be_turned_off(self):
+        # `--cell-timeout 0` is the escape hatch for a box whose legitimate cells outrun any cap
+        # worth setting; it must mean "no cap", not "a cap of zero seconds".
+        cell = self.python(
+            "import json, time; time.sleep(0.2); print(json.dumps("
+            "{'workload': 'uncapped', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+
+        result, note, _ = self.run_cell("uncapped", cell, timeout=0)
+
+        self.assertIsNone(note)
+        self.assertEqual(result["workload"], "uncapped")
+
     def test_a_cell_over_the_cap_is_a_runner_failure_naming_the_cap(self):
         result, note, log = self.run_cell(
             "wedged", self.python("import time; time.sleep(300)"), timeout=1.0

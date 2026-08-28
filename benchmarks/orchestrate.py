@@ -1234,9 +1234,12 @@ def main():
         )
     if failures:
         ok = False
+        # One line per cell: a timed-out cell's reason carries what was killed and what became of
+        # the cache it was writing, which run together into one line is unreadable exactly where
+        # an unattended run is read (gh-ocannl-760).
         print(
-            f"RUNNER FAILURES: {len(failures)} cell(s) produced no result: "
-            + "; ".join(failure_line(f) for f in failures),
+            f"RUNNER FAILURES: {len(failures)} cell(s) produced no result:\n"
+            + "\n".join(f"  - {failure_line(f)}" for f in failures),
             flush=True,
         )
     no_ref = [r for r in results if r["parity"] == "NO-REF"]

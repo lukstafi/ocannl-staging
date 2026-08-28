@@ -190,13 +190,43 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
   CPU-only matrix), `--no-fixture-digest-check` (measure fixtures that do not match
-  `fixtures/DIGESTS.txt`). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
+  `fixtures/DIGESTS.txt`),
+  `--cell-timeout SECONDS` / `--beam-parallel N` / `--no-cache-quarantine` (the wedged-cell
+  mitigations below). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
   output, one file per cell label — a successful cell's output is otherwise discarded, which throws away the
   candidate-level evidence a measurement sweep has to report. Combined with
   `OCANNL_AUTOTUNE_LOG=true` it makes the seeded-vs-timed mma and split-reduce counts, the
   `FAILED` blocker breakdown and the split-reduce evictions fall out of the sweep's own search
   passes instead of costing a second round of searches (it does inflate a tuned cell's reported
   `compile_s` a little; step times come from the pass-2 replay and are unaffected).
+
+  **A wedged cell costs the cell, not the sweep** (gh-ocannl-760). tinygrad's parallel beam
+  search deadlocks intermittently — the same search that takes 53–115 s in its other repeats
+  sits at ~1% CPU with the GPU idle indefinitely, seen on both the CUDA and the HIP box — so
+  every cell runs in a process group of its own under a wall-clock cap, `--cell-timeout SECONDS`
+  (default 1800; `0` disables). Over the cap, the whole group is killed — the runner *and*
+  whatever it spawned, tinygrad's candidate-compile pool included, which is also why the kill is
+  a group kill: those workers hold the cell's stdout pipe, so killing the direct child alone
+  would move the hang into the sweep's own read — and the cell is recorded as a runner failure,
+  in the run log and in the report's **Runner failures** section. Raise the cap for a box whose
+  legitimate cells run longer; the failure names it either way.
+
+  A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
+  complete result nor searches from scratch, while `searched` reports one of the two, so a retry
+  over that cache is not the pass it claims to be. tinygrad's cache is a single sqlite file, so
+  the kill path renames it (with its `-wal`/`-shm` siblings) to `cache.db.wedged-<timestamp>` —
+  the retry starts cold and the torn cache is still there to inspect. `--no-cache-quarantine`
+  leaves it in place and still names the risk in the failure. OCANNL's `autotune_cache/` needs no
+  equivalent: entries are committed by rename (`Utils.Atomic_file`), so a killed search leaves
+  complete entries and the only consequence — a retry replaying the arms that finished — is what
+  the `search pass verdict` line already reports.
+
+  `--beam-parallel N` passes tinygrad's own `PARALLEL` knob through to the beam cells. Its
+  default is one candidate-compile worker per logical core on a GPU device (24 on the box the
+  wedges were seen on); `PARALLEL=1` runs the candidates in-process with no pool at all, which
+  is the configuration the deadlock cannot occur in — at the cost of a serial search. Nothing
+  makes it the default: the root cause is upstream and unchased, and the cap already bounds the
+  damage.
 
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures

@@ -148,6 +148,20 @@ files.
   rather than a numerics one — when a sweep loses only one framework's rows, suspect the emitter's
   spelling before the framework.
 
+- A benchmark cell can WEDGE, and a wedged cell is a failure rather than a slow one
+  (gh-ocannl-760). tinygrad's parallel beam search deadlocks intermittently — its candidate-compile
+  pool is `spawn`-based with `maxtasksperchild`, and a worker lost between `imap_unordered` chunks
+  leaves the parent in `futex_do_wait` forever, at ~1% CPU with the GPU idle, on searches that take
+  under two minutes in their other repeats. Seen on both the CUDA and the HIP box; the root cause is
+  upstream and unchased. `orchestrate.py` now spawns each cell in its own process group under
+  `--cell-timeout` (default 1800 s) and kills the GROUP on expiry: the pool workers hold the cell's
+  stdout pipe, so killing the direct child alone moves the hang into the sweep's own
+  `communicate()` — the trap to remember whenever a runner is bounded from outside. Two facts
+  outlive the fix: `timeout(1)` cannot be the mechanism here (uutils' `-k` misses the process
+  group), and a search killed midway leaves tinygrad's single `cache.db` partial, so the next run
+  over it reports a `searched` verdict nobody wrote — the kill renames it aside, and any hand-killed
+  wedge must have the same done to it before its retry means anything. OCANNL's `autotune_cache/`
+  needs no such handling: `Utils.Atomic_file` commits entries by rename.
 - A `bin/` bench's correctness guard is a position-weighted checksum of the WHOLE output, and its
   position dependence is the whole of it: a residue of the FLATTENED offset `t = i*n + j` loses its
   row dependence exactly when the modulus divides the row stride, so `1 + (t mod 251)` gives every
