@@ -581,6 +581,11 @@ def _run_supporting(cmd, cwd, capture_output, check, timeout):
         if proc is not None:
             kill_cell_group(proc)
         raise
+    if _group_alive(proc.pid):
+        # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER
+        # exited, and a build's compiler worker or a probe's framework helper can outlive it
+        # holding the GPU (gh-ocannl-760 review).
+        kill_cell_group(proc)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
@@ -693,7 +698,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         # result line salvaged from a killed process would be a partial run's (gh-ocannl-760).
         print(stdout[-4000:])
         note = (
-            f"TIMED OUT after {timeout:.0f}s (cap; --cell-timeout raises it, 0 disables) — "
+            f"TIMED OUT after {timeout:g}s (cap; --cell-timeout raises it, 0 disables) — "
             "killed the cell's whole process group"
         )
         if survived:
@@ -1586,6 +1591,18 @@ def main():
     # rather than leaving it to how the operator ran the sweep.
     stamp = {}
 
+    def record_failure(label, note):
+        """The one path a failed cell takes, wherever in the sweep it failed.
+
+        Both the in-memory list the report is built from and the checkpoint an interrupted run
+        leaves behind — appended here rather than at each call site, because the tuned search
+        pass's own failure went straight to the list and so vanished from the artifact
+        (gh-ocannl-760 review).
+        """
+        failures.append((label, note))
+        with open(partial_failures, "a") as f:
+            f.write(json.dumps({"cell": label, "why": note}) + "\n")
+
     def collect(label, cmd, override=None, **kwargs):
         t0 = time.monotonic()
         r, note = run_cell(label, cmd, timeout=args.cell_timeout, **kwargs)
@@ -1600,9 +1617,7 @@ def main():
             with open(partial, "a") as f:
                 f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
         else:
-            failures.append((label, note))
-            with open(partial_failures, "a") as f:
-                f.write(json.dumps({"cell": label, "why": note}) + "\n")
+            record_failure(label, note)
         print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
 
     for fx in fixtures:
@@ -1663,7 +1678,7 @@ def main():
                                 on_incomplete=ocannl_cache_note,
                             )
                             if pass1 is None:
-                                failures.append((f"{label} (search pass)", note))
+                                record_failure(f"{label} (search pass)", note)
                                 continue
                             # What the search pass actually did, which is not derivable from the
                             # compile_s it hands over: a warm autotune_cache makes it a replay, and

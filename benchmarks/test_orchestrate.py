@@ -1572,6 +1572,36 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertEqual(Path(f"{db}-wal").read_bytes(), b"live cache cache.db-wal")
         self.assertEqual(sorted(p.name for p in self.dir.glob("*.wedged-*")), [])
 
+    @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
+    def test_a_supporting_command_leaves_no_descendants_behind(self):
+        # `communicate` returned because the LEADER exited, which says nothing about a build's
+        # compiler worker or a probe's framework helper -- and those hold the GPU while the sweep
+        # measures against them (gh-ocannl-760 review).
+        pidfile = self.dir / "supporting_leftover.pid"
+        build = self.python(
+            "import subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+            "sys.exit(0)\n",
+            pidfile,
+        )
+
+        done = orchestrate.run_supporting(build, capture_output=True)
+
+        self.assertEqual(done.returncode, 0)
+        worker = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(worker), f"pid {worker} outlived its supporting command")
+
+    def test_a_fractional_cap_is_reported_as_the_cap_it_was(self):
+        # `{:.0f}` rounded a sub-second cap to `TIMED OUT after 0s`, one clause before the text
+        # saying that zero disables the cap.
+        _, note, _ = self.run_cell(
+            "briefly capped", self.python("import time; time.sleep(300)"), timeout=0.25
+        )
+
+        self.assertIn("TIMED OUT after 0.25s", note)
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session
