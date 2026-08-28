@@ -304,6 +304,14 @@ let queued_batch_depth ~est_ms =
    and cannot express "this one declined, the search went on". *)
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
+(* Observation seam for the timing tests (gh-ocannl-851), reporting the batch depth each
+   [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] always
+   reports 1. The negative control for a twice-divided queued reading needs the depth the call
+   ACTUALLY used: the call recalibrates independently, so re-applying the policy to an estimate
+   taken outside it guesses wrong exactly on the busy runners the control must survive. Default
+   no-op, no config key selects it. *)
+let on_batch_depth : (int -> unit) ref = ref (fun _depth -> ())
+
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
 let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
@@ -356,6 +364,7 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
             done;
             queued_batch_depth ~est_ms:!est
       in
+      !on_batch_depth depth;
       let best = ref Float.infinity in
       let total = ref 0. in
       let count = ref 0 in

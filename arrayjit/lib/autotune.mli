@@ -1092,6 +1092,14 @@ val time_routine :
     measurement: the number of dispatches is bounded by the same ~25 ms of wall time either way, and
     a candidate's time is not what it accumulated. *)
 
+val on_batch_depth : (int -> unit) ref
+(** Observation seam for the timing tests (gh-ocannl-851), called by each {!time_routine} call with
+    the batch depth it settled on — after calibration, before the timed loop; {!Isolated} always
+    reports 1. The negative control for a twice-divided queued reading needs the depth the call
+    ACTUALLY used: the call recalibrates independently, so re-applying {!queued_batch_depth} to an
+    estimate taken outside it guesses wrong exactly on the busy runners the control must survive.
+    The default is a no-op and no configuration selects it. *)
+
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's
     label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533);
