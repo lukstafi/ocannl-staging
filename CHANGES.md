@@ -13,6 +13,26 @@
 
 ### Changed
 
+- **Metal's accumulation workaround is renamed, censused and measured** (gh-ocannl-782). The
+  backend capability `volatile_scalar_rmw` is now `volatile_serial_accumulation`: since
+  gh-ocannl-731 it covers both spellings of a serial reduction (the device-memory read-modify-write
+  pointer shadow and the localized scope-local accumulator), and it turns out to key on neither
+  "scalar" nor the pooled binding. A new standalone probe,
+  `benchmarks/runners/ocannl/bench_metal_bug_local.ml`, reproduces the localized manifestation
+  without OCANNL and varies the emitted kernel one factor at a time: the defect survives dropping
+  the pooled slot table entirely (literal offsets off a kernel parameter), dropping `__restrict`,
+  inserting a device memory barrier, and moving the preceding device store to an unrelated cell. It
+  is stopped by the `volatile` accumulator, by a `volatile` read pointer, or by an accumulating loop
+  that dereferences no node pointer — which leaves no narrowing worth taking, so the predicate stays
+  wide. The same program measures what that costs (M4 Max, GPU clock, best of 30 rotated
+  interleaved repeats): 1.06x on a memory-bound per-thread reduction, 2.15x accumulator-bound,
+  4.1x on a single-threaded
+  scalar-loss reduction. Each compiled routine now carries a volatility census
+  (`Context.routine.volatility`) reporting which accumulators were pinned to memory, which stayed
+  register-resident, and whether the backend requested the workaround at all;
+  `test/operations/reduction_accumulator_residency` states its expectation from that census instead
+  of matching the backend's name against `"metal"`.
+
 - **`Train.to_routine` returns the post-compile context** (`Context.t * Context.routine`) instead of
   discarding it (gh-ocannl-772), matching `Context.compile` and `Train.run_once`. The context was
   never actually lost -- `routine.Context.context` carries the same value, which is why the 2026-06

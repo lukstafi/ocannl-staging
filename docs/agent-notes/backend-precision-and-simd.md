@@ -268,7 +268,7 @@ files.
   `Set_local`/`Get_local` arms already carry the widening. The rewrite is NOT precision-gated: it
   used to bail when `acc_prec` was the identity on the storage precision, which left every f32
   reduction no schedule op reached accumulating in the output node's global memory, one
-  read-modify-write per step — and on Metal `volatile_scalar_rmw` pinned it there by construction,
+  read-modify-write per step — and on Metal `volatile_serial_accumulation` pinned it there by construction,
   since its trigger predicate is verbatim the localization opportunity. At identity precision the
   widening half is vacuous and the rewrite is exactly value-neutral, so there is nothing for a gate
   to protect. Codegen is the ONLY localizer of a materialized accumulator (`optimize` rejects such
@@ -406,13 +406,19 @@ files.
   `reduction_forms` the cell `out[r]` mentions the output index, which is what stops the outer peel.
   Keeping an outer guard around the whole scope instead of declining would localize more still; it
   needs the peel to report its outer guards separately, which is wider than any of this.
-- Metal's `volatile_scalar_rmw` has TWO localization interactions (gh-ocannl-731). The pointer
-  shadow keys on an emitted `Set` reading its own node at a cell invariant across an enclosing
-  SERIAL loop, and localization lifts that `Set` out of exactly those loops
+- Metal's `volatile_serial_accumulation` has TWO localization interactions (gh-ocannl-731). The
+  pointer shadow keys on an emitted `Set` reading its own node at a cell invariant across an
+  enclosing SERIAL loop, and localization lifts that `Set` out of exactly those loops
   (`peel_accum_nest` runs outermost-first, since `pp_ll` recurses top-down), so at a fully localized
   site the shadow predicate is false. But the Metal compiler can also corrupt the replacement
-  scope-local accumulator when its contribution reads through the pooled slot table; therefore
-  `scope_decl_type` qualifies every reduction-shaped scope local as `volatile` on Metal. Where the
+  scope-local accumulator whenever its loop reads any device pointer; therefore `scope_decl_type`
+  qualifies every reduction-shaped scope local as `volatile` on Metal — at a measured cost of up to
+  4x on the shapes where the accumulator is the critical path, which is the price of correctness
+  until the defect is fixed (gh-ocannl-782, and see the dialects note for what the matrix refuted).
+  Both decisions are censused: `Context.routine.volatility` reports per routine how many
+  accumulators were qualified, how many stayed register-resident, and whether the backend asked for
+  the workaround at all, which is how a test states the expectation without re-deriving it from the
+  backend's name. Where the
   peel was blocked at an outer level — a sibling statement, a data-dependent guard — the store
   stays inside an invariant-address loop and the POINTER shadow still fires, correctly: the
   per-iteration device-memory RMW genuinely remains. Localization joins virtual scopes,

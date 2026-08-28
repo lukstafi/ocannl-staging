@@ -52,9 +52,13 @@
   (pps ppx_here ppx_ocannl))
  (modes exe))
 
-(executable
- (name bench_metal_bug)
- (modules bench_metal_bug)
+; The two standalone (OCANNL-free) Metal compiler-bug probes: the original device-memory
+; read-modify-write manifestation, and the localized-accumulator one plus the measurement of what
+; the volatile workaround costs (gh-ocannl-782).
+
+(executables
+ (names bench_metal_bug bench_metal_bug_local)
+ (modules bench_metal_bug bench_metal_bug_local)
  (libraries metal ctypes)
  (enabled_if
   (= %{system} macosx))

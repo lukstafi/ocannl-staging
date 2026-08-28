@@ -6,17 +6,31 @@ backend config functor binds its overrides.
 Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
 files.
 
-- Metal shader compiler miscompiles serial accumulations when pointers derive from
-  dynamically-loaded offsets (the pooled `__pool_slots` binding), and API validation hides it
+- Metal shader compiler miscompiles serial accumulations, and API validation hides it
   (`MTL_SHADER_VALIDATION=1` makes it vanish). Two spellings are affected: the original
   `acc[k] = acc[k] + f(i)` device-memory RMW can leave only the last iteration (fingerprint: loss
   ≈ correct/batch_size), and gh-ocannl-731 showed that codegen's replacement scope-local
-  accumulator can instead produce a large unrelated divergence while reading a pooled pointer.
-  `volatile_scalar_rmw` in `arrayjit/lib/c_syntax.ml` (Metal sets it) therefore qualifies both the
-  RMW pointer shadow and reduction-shaped scope locals. Standalone original repro:
-  `benchmarks/runners/ocannl/bench_metal_bug.ml`; executed guards:
-  `scalar_rmw_accumulation.ml`, `reduction_accumulator_residency.ml`, and `rope_test.ml`. Suspect
-  this class first for a Metal-only accumulation bug that disappears under shader validation.
+  accumulator can instead diverge by a data-independent additive constant.
+  `volatile_serial_accumulation` in `arrayjit/lib/c_syntax.ml` (Metal sets it) therefore qualifies
+  both the RMW pointer shadow and reduction-shaped scope locals, and the volatility census
+  (`Context.routine.volatility`) reports per routine which accumulators it pinned. Standalone
+  repros: `bench_metal_bug.ml` (RMW form) and `bench_metal_bug_local.ml` (localized form, plus a
+  one-factor-at-a-time matrix and the tax measurement) under `benchmarks/runners/ocannl/`; executed
+  guards: `scalar_rmw_accumulation.ml`, `reduction_accumulator_residency.ml`, and `rope_test.ml`.
+  Suspect this class first for a Metal-only accumulation bug that disappears under shader
+  validation.
+- What that matrix refuted is worth knowing before proposing a narrower predicate (gh-ocannl-782,
+  M4 Max / macOS 26): the pooled slot table is NOT the trigger — building the pointers from literal
+  offsets straight off a kernel parameter, with no dynamic load anywhere, miscompiles identically —
+  and neither is `__restrict`, nor a device memory barrier, nor where the preceding device store
+  lands (moving it to an unrelated cell keeps the defect; removing it altogether is what stops it,
+  which no kernel can rely on). The two things that do stop it are the `volatile` accumulator and a
+  `volatile` READ pointer; an accumulating loop that dereferences no node pointer at all never
+  miscompiled. So the only reproducer-backed narrowing axis excludes accumulations that read no
+  device memory, which are rare and usually constant-folded — measured, the tax is 1.06x on a
+  memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x on a single-threaded
+  scalar-loss reduction. The `volatile`-source form costs 1.03x on that last shape and is the open
+  lead for a cheaper workaround.
 - Metal `Where` must stay a short-circuiting ternary: MSL `select` is a function call that
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:

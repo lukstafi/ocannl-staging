@@ -303,7 +303,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   changes (the acceptance instrument for the gh-500 blocking decision). On `bench_gpt_diag` the
   same instrument attributes the transformer blocks: it is what showed gpt2_mini's step to be
   concentrated in the per-layer FFN projections and the lm_head rather than spread evenly, despite
-  every segment sharing identical launch geometry (gh-ocannl-531).
+  every segment sharing identical launch geometry (gh-ocannl-531). Each segment line carries two
+  censuses of what produced its kernel: `mma:` (did it tensorize, or render the scalar fallback) and
+  `vol:` (how many of its serial accumulations the Metal compiler-bug workaround pinned to memory,
+  gh-ocannl-782 — on the shapes where the accumulator is the critical path that is worth up to 4x,
+  so a surprising segment time is read together with this).
   `BENCH_SR_SITES=1` (`bench_conv_diag`) prints what `Autotune.split_reduce_sites` proposes on the
   same graph — the gh-ocannl-484 task-3 seeding can only reach the accumulations listed there, so
   it is the companion to the census above when asking why a seeded split-reduce family did or did
@@ -322,9 +326,20 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
-  around it via `volatile_scalar_rmw` in `arrayjit/lib/c_syntax.ml`; this repro documents the
+  around it via `volatile_serial_accumulation` in `arrayjit/lib/c_syntax.ml`; this repro documents the
   raw bug (prints the wrong value as long as the toolchain is affected) and
   `test/operations/scalar_rmw_accumulation.ml` guards the workaround end to end.
+- `runners/ocannl/bench_metal_bug_local.ml` — the same defect in the spelling the serial-reduction
+  localizer produces (a scope-local accumulator stored once), which is what OCANNL emits today.
+  Also standalone, and it answers two questions rather than one. Its matrix renders the emitted
+  kernel with one factor changed at a time — the qualifier, `__restrict`, how the pointers are
+  formed, where the preceding device store lands, what the loop reads — each checked against a host
+  oracle, so it says what the defect keys on rather than only that it exists; every row is its own
+  single-kernel library. Its tax table then times three localized-reduction shapes with and without
+  the qualifier on the GPU's own clock, interleaved with a rotating arm order, best of 30, which
+  is the measurement behind
+  keeping the predicate wide (gh-ocannl-782). Run it whenever the toolchain moves: a matrix that
+  comes up all-`ok` means the defect is gone and the workaround can be retired.
 
 ## Setup
 

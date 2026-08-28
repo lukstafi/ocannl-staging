@@ -563,7 +563,7 @@ module Impl = struct
 
     (* Metal shader-compiler miscompilation workaround; see {!C_syntax.C_syntax_config} and the
        standalone repro [benchmarks/runners/ocannl/bench_metal_bug.ml]. *)
-    let volatile_scalar_rmw = true
+    let volatile_serial_accumulation = true
     let vectorize_pragma = []
     let aligned_local_attr = None
     let vector_bytes = 16

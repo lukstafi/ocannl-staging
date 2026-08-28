@@ -111,7 +111,7 @@ files.
   invalidate it by digest.
 - **Every Metal number recorded before gh-ocannl-693 carries a ~4x accumulator tax and must not be
   compared against one taken after.** Until then a serial reduction at f32 accumulated in the output
-  node's global memory, and `volatile_scalar_rmw` shadowed each step's read-modify-write with a
+  node's global memory, and `volatile_serial_accumulation` shadowed each step's read-modify-write with a
   `device volatile` alias — which defeats every cache and every reassociation, on every unmatched
   contraction, not merely on loss reductions. Localizing the accumulator took gpt2_mini forward on
   Metal (M4 Max, default schedule) from a step p50 of 367.1 ms to 93.9 ms, -74.4%, with the emitted

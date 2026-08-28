@@ -655,8 +655,14 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
           done;
           total := !total +. !best;
           censuses := routine.Context.mma :: !censuses;
-          Stdio.printf "  seg%-3d %s %8.4f ms  mma:%s  w:%s\n" i kind_s !best
+          (* The volatility census beside the tensorization one (gh-ocannl-782): on Metal the
+             compiler-bug workaround pins a serial accumulator to memory, which costs up to 4x on
+             the shapes where the accumulator is the critical path — so a segment timing that looks
+             unexpectedly slow should be read together with how many of its accumulators are
+             volatile. *)
+          Stdio.printf "  seg%-3d %s %8.4f ms  mma:%s  vol:%s  w:%s\n" i kind_s !best
             (Ir.C_syntax.mma_summary_string routine.Context.mma)
+            (Ir.C_syntax.volatility_summary_string routine.Context.volatility)
             ws);
   Stdio.printf "  total (sum of per-segment minima): %.4f ms%s\n" !total
     (if !declined = 0 then ""
