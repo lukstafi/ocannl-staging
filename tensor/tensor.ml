@@ -195,8 +195,9 @@ let max_sublabel_length = ref 25
     resulting lazy projections. Returns the update step alongside them because {!op} must set its
     [neutral_elem] {e after} the operation's assignments are built: the field is read only when the
     [projections] thunk is forced (during lowering), so the late mutation is observed — an implicit
-    invariant this seam makes explicit. The [raw_*] accumulations know their neutral element
-    up-front and pass it here. *)
+    invariant this seam makes explicit, and which {!op} enforces by refusing to mutate once
+    [unsafe_projections] is set. The [raw_*] accumulations know their neutral element up-front and
+    pass it here. *)
 let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
   let update_step =
     Shape.
@@ -484,6 +485,21 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      chain. The dependencies may have different accumulation operations which would cause false
      conflicts. *)
   let neutral_elem = Asgns.collect_neutral_elem this_op_asn.asgns in
+  (* Enforce the invariant {!make_projections} documents rather than merely assuming it: the late
+     mutation is only observed if nothing forced the projections in between. The "already derived"
+     test is [unsafe_projections], not [Lazy.is_val] on the [projections] thunk — derivation records
+     its result in that field, and {!Shape.finish_inference} derives in bulk for every active
+     update step without anyone forcing the thunk. Deriving before this point would read
+     [neutral_elem = None] and silently change the padding and guard decisions in
+     {!Shape.derive_projections}: a wrong-value hazard, not a crash. *)
+  if Option.is_some preliminary_shape_update.unsafe_projections then
+    raise
+    @@ Session_error
+         ( [%string
+             "Tensor.op: the projections of tensor #%{id#Int} were derived before its neutral \
+              element was known — forcing shape inference or the projections from within [op_asn] \
+              is not supported, report this as a bug."],
+           Some t );
   preliminary_shape_update.neutral_elem <- neutral_elem;
   let forward =
     Asgns.

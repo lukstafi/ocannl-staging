@@ -4039,3 +4039,19 @@
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; The invariant guarding [Tensor.op]'s late [neutral_elem] mutation: the field is set after
+; [op_asn] has produced the assignments, and is read when the projections are derived, so an
+; [op_asn] that derives them early gets them derived against [neutral_elem = None]. This drives
+; deliberately misbehaving [op_asn]s and pins that [Tensor.op] raises on them.
+
+(test
+ ; ocannl-backend: none -- it builds a tensor graph and expects the construction to raise; nothing
+ ; is ever lowered, compiled or run.
+ (name neutral_elem_guard)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules neutral_elem_guard)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
