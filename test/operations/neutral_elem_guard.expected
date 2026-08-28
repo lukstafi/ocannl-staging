@@ -1,1 +1,2 @@
-op_asn deriving the projections early is rejected: true
+an early derivation with no neutral element to install is accepted: true
+op_asn deriving the projections early with a stale neutral element is rejected: true

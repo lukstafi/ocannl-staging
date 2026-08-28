@@ -488,17 +488,29 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
   (* Enforce the invariant {!make_projections} documents rather than merely assuming it: the late
      mutation is only observed if nothing forced the projections in between. The "already derived"
      test is [unsafe_projections], not [Lazy.is_val] on the [projections] thunk — derivation records
-     its result in that field, and {!Shape.finish_inference} derives in bulk for every active
-     update step without anyone forcing the thunk. Deriving before this point would read
-     [neutral_elem = None] and silently change the padding and guard decisions in
-     {!Shape.derive_projections}: a wrong-value hazard, not a crash. *)
-  if Option.is_some preliminary_shape_update.unsafe_projections then
+     its result in that field, and {!Shape.finish_inference} derives in bulk for every active update
+     step without anyone forcing the thunk.
+
+     The rejection is by staleness, not by earliness: derivation read [neutral_elem = None], so it
+     was misled only if the value now being installed differs from that — i.e. only if it is
+     [Some _]. Collecting [None] (no [Accum_op] leaf, or leaves whose neutral elements conflict)
+     makes the mutation a no-op, and both consumers in {!Shape.derive_projections} — the
+     [clamp_padded] test and [update_padding_elem] — behave identically under [None], so an early
+     derivation has nothing stale in it and is let through.
+
+     A stale one is unrecoverable rather than merely reported: by the time it is detectable,
+     {!Shape.derive_projections} has already committed padding and [padding_elem] on this shape and
+     on the shared operand shapes, using the neutral element it did not have. Catching this
+     exception and reusing the operands carries that forward, which is why it reads as a bug report
+     rather than a condition to handle. *)
+  if Option.is_some neutral_elem && Option.is_some preliminary_shape_update.unsafe_projections then
     raise
     @@ Session_error
          ( [%string
              "Tensor.op: the projections of tensor #%{id#Int} were derived before its neutral \
-              element was known — forcing shape inference or the projections from within [op_asn] \
-              is not supported, report this as a bug."],
+              element was known, so the padding they committed is wrong — forcing shape inference \
+              or the projections from within [op_asn] is not supported, and the operand shapes are \
+              already mutated, so the session cannot continue. Report this as a bug."],
            Some t );
   preliminary_shape_update.neutral_elem <- neutral_elem;
   let forward =
