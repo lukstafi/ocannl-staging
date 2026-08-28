@@ -1016,6 +1016,38 @@ files.
   and `x - x = 0` fold to a constant, silently disabling an overflow gate (the shape
   `Mixed_prec.gated_scaled_update` needs). It is the same reason `Builtins_metal`'s fp8 codec is
   written in integer/bitcast form rather than float arithmetic.
+- **First suspect for a `reduction_forms` red on a GPU backend: that backend's fast math
+  reassociated the recurrence.** HIP is the only one guarded by a flag (above). The other two:
+  - **CUDA is a measured boundary, not a flag** (gh-ocannl-784). nvrtc has no `-fno-associative-math`
+    — every clang-shaped spelling is rejected as an unrecognized option — so there is nothing to
+    pass. What was measured instead, on the project's CUDA box (nvrtc 13.3, driver 610.62, GeForce
+    RTX 5070 Ti, sm_120), is that there is nothing to guard against: a 128-term float reduction
+    compiled through nvrtc and **executed** returned the bit-exact strictly-sequential value under
+    `--use_fast_math`, and also under `--use_fast_math` plus `--extra-device-vectorization`, plus
+    `--dopt=on --ptxas-options=-O3`, and plus `--fmad=false` — in all three of the spellings that
+    broke hiprtc (a counted loop, a runtime-bound loop, 128 repeated statements), plus an
+    `(a+b)-a` cancellation probe. The detector is not blind: the same reduction built by host gcc at
+    `-O3 -ffast-math` does reassociate, and `-fno-associative-math` restores it. nvrtc 13.3's parser
+    *does* know `--fassociative-math` — a bare opt-in flag, with no negative spelling and no entry in
+    NVIDIA's nvrtc option reference — which is why `Compiler_options.nvrtc`'s test claims MEMBERSHIP
+    (that vector never contains it) where HIP's claims ordering. Re-run the probe after a toolkit
+    upgrade before suspecting anything else; the option vector is now printed beside a failing GPU
+    sweep unit (`tools/sweep.sh`'s `rtc_context_cmd`) and appended to a failed nvrtc compile's log.
+  - **Metal is the remaining unguarded one.** MSL defaults fast math on, `metal_backend.ml` passes no
+    reassociation guard, and — unlike CUDA — nobody has run the probe against it, so "it passes
+    today" is all that is known. Its MSL options are also still assembled inline in
+    `metal_backend.ml` rather than in `Compiler_options`, so no GPU-free test pins them and a sweep
+    cannot print them (gh-ocannl-784 residual, Mac-box work).
+- **`__FAST_MATH__` audit**: negating one component of a fast-math umbrella can *unset the macro*
+  while leaving the remaining optimizations on — clang defines `__FAST_MATH__` only when the whole
+  bundle is in force, so HIP's `-fno-associative-math` (and `-fhonor-infinities`) turn it off. No
+  OCANNL-emitted code reads it, and today's ROCm narrow operators do not branch on it either, so
+  nothing depends on this. It is a **vendor-header upgrade hazard**: a future `hip_fp16.h`/
+  `hip_bf16.h` that selects a faster operator body under `#ifdef __FAST_MATH__` would silently take
+  the slow branch on HIP alone, and the symptom would be a performance or precision difference
+  between backends with no OCANNL-side change to point at. When bumping ROCm (or any RTC vendor
+  headers), grep the SDK include tree for `__FAST_MATH__` and check whether any header OCANNL
+  includes newly conditions on it.
 
 - **An `external` typed `int array` carries no length, so a stub reading fixed fields must check
   `Wosize_val` first** (gh-ocannl-688). `builtins.c`'s uint4x32 helpers take an OCaml array and read

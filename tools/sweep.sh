@@ -295,7 +295,70 @@ test_cmd() {
     printf 'rc2=0; '
   fi
   printf 'for r in $rc1 $rc2; do case $r in 124|137|142) exit $r ;; esac; done; '
-  printf 'exit $(( rc1 != 0 ? rc1 : rc2 ))'
+  printf 'rc=$(( rc1 != 0 ? rc1 : rc2 )); '
+  # Only on a red suite, and only for the RTC backends: this is diagnosis, and a
+  # green unit does not need it. The timeout statuses above have already exited --
+  # a capped unit had its process group destroyed, so there is nothing left here
+  # to run dune with, and the machine state a hang leaves is not what a numeric
+  # mismatch wants explained.
+  case $backend in
+    cuda | hip | metal)
+      printf '[ $rc -eq 0 ] || { %s }; ' "$(rtc_context_cmd "$backend")"
+      ;;
+  esac
+  printf 'exit $rc'
+}
+
+# What a failing GPU unit is missing when someone reads its fingerprint the next
+# morning: the flags the kernels were compiled under, and which toolkit did it.
+# gh-ocannl-735 was found as a schedule-dependent numeric mismatch and took a long
+# hunt to reach "the optimizer reassociated the recurrence"; the option vector was
+# assembled inline in the backend, visible nowhere, and the ROCm version was
+# whatever the box happened to have. Both belong beside the failure.
+#
+# Emitted as shell text and spliced into `test_cmd`, so it runs on the machine
+# that OWNS the worktree -- the versions are the ones that just compiled the
+# kernels, not the sweep host's -- inside the same lock and PATH, and lands in
+# `$log`, which `fingerprint` then carries into the digest.
+#
+# The option vector is not restated here. It is produced by the repository's own
+# GPU-free option tests, which call the production builders in `Compiler_options`
+# and print got/want vectors on stderr; a copy in shell would be a second source
+# of truth that no test compares against the first. `--force` because the alias is
+# certainly cached by the run that just failed. Nothing here may fail the unit: rc
+# is already decided, so every command is guarded and swallows its status.
+rtc_context_cmd() {
+  local backend=$1 alias=
+  case $backend in
+    cuda) alias=@arrayjit/test/runtest-test_cuda_compile_options ;;
+    hip) alias=@arrayjit/test/runtest-test_hip_compile_options ;;
+  esac
+  printf 'echo "=== rtc-context (%s) ==="; ' "$backend"
+  case $backend in
+    cuda)
+      printf 'command -v nvcc >/dev/null 2>&1 && nvcc --version 2>&1 | tail -2; '
+      printf 'command -v nvidia-smi >/dev/null 2>&1 && '
+      printf 'nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>&1; '
+      ;;
+    hip)
+      printf 'command -v hipcc >/dev/null 2>&1 && hipcc --version 2>&1 | head -6; '
+      printf 'command -v rocminfo >/dev/null 2>&1 && rocminfo 2>&1 | grep -m2 -E "gfx|Runtime Version"; '
+      ;;
+    metal)
+      printf 'command -v sw_vers >/dev/null 2>&1 && sw_vers 2>&1; '
+      printf 'command -v xcrun >/dev/null 2>&1 && xcrun -sdk macosx metal --version 2>&1 | head -3; '
+      # Named, not silently absent: Metal's MSL options are still assembled inside
+      # metal_backend.ml rather than in `Compiler_options`, so there is no builder
+      # for a GPU-free test to print. Until that lands, MSL fast math is the one
+      # unguarded reassociation surface left (gh-ocannl-784).
+      printf 'echo "rtc options: not available -- MSL options are still assembled in '
+      printf 'metal_backend.ml, not in Compiler_options (gh-ocannl-784)"; '
+      ;;
+  esac
+  if [ -n "$alias" ]; then
+    printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias"
+  fi
+  printf 'echo "=== end rtc-context ==="; true; '
 }
 
 # POSIX single-quoting, so a generated command can be handed to `sh -c` on the
@@ -444,6 +507,14 @@ fingerprint() {
     grep -hoE '^File "[^"]+", line [0-9]+' "$1"
     grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$1"
   } 2>/dev/null | sort -u | head -60
+  # The rtc-context block a failing GPU unit appended (see rtc_context_cmd),
+  # verbatim and unsorted: it is a small fixed-size report whose ORDER is what
+  # makes it readable, not a set of error sites to deduplicate. Carried into the
+  # fingerprint rather than left in the log because the fingerprint is what a
+  # caller diffs against yesterday's -- a toolkit upgrade or a changed option
+  # vector then shows up as a diff beside the failure it explains, which is the
+  # whole point (gh-ocannl-784).
+  sed -n '/^=== rtc-context /,/^=== end rtc-context ===$/p' "$1" 2>/dev/null | head -40
 }
 
 if [ "$FORCE" = 1 ]; then
