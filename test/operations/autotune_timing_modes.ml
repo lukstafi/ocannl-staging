@@ -42,6 +42,9 @@ let depth_cases =
     ("an infinitely slow routine", Float.infinity, 1);
     ("a clock that resolved nothing (zero)", 0., 200);
     ("a clock that resolved nothing (nan)", Float.nan, 200);
+    (* Saturates rather than raising: the ratio here is past the integer range, so a cap applied
+       after the float-to-int conversion would raise instead of capping. *)
+    ("a subnormal estimate", Float.min_positive_subnormal_value, 200);
   ]
 
 let () =
@@ -149,9 +152,10 @@ let () =
   Verdict.pass_fail "queued timing does not read above isolated timing"
     Float.(que.ms <= iso.ms * 2.)
     ~detail:(fun () -> Printf.sprintf "queued %.6f ms vs isolated %.6f ms" que.ms iso.ms);
-  (* Both modes are bounded by the same wall-time budget, so switching the objective does not make a
-     search take longer. One top-up target (~25 ms) plus the warmup and, in queued mode, one batch
-     overshoot: a generous bound, since what a regression here would do is spend seconds. *)
-  Verdict.pass_fail "queued timing costs the same order of wall time as isolated timing"
+  (* Queued timing costs MORE than isolated timing on a fast routine -- isolated stops at the
+     64-run cap, queued runs to the wall budget -- but it is bounded by that budget rather than
+     scaling with the batch depth. A loop that counted launches instead of wall time would spend up
+     to [max_queue_depth] times longer, which is what this refuses. *)
+  Verdict.pass_fail "queued timing's wall cost is bounded by the budget, not by the batch depth"
     Float.(que.wall_ms <= (iso.wall_ms * 3.) + 100.)
     ~detail:(fun () -> Printf.sprintf "queued %.1f ms vs isolated %.1f ms wall" que.wall_ms iso.wall_ms)

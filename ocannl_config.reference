@@ -410,8 +410,11 @@
 # candidate to candidate with the block count and the per-launch queue work, which is what lets two
 # candidates 10% apart in steady state swap places. A best_ms measured under "isolated" is
 # therefore not a throughput number and must not be compared against a batched per-kernel figure.
-# Timing costs the same wall time either way: the ~25 ms top-up below bounds accumulated wall time
-# in both modes.
+# Both modes sit under the same wall-time ceiling -- the ~25 ms top-up below accumulates wall time
+# in both -- but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
+# finishes isolated timing in a few milliseconds and queued timing at the budget, so a search over
+# sub-millisecond kernels spends a few extra milliseconds per candidate, which is immaterial beside
+# the compile each candidate already costs.
 #autotune_timing=queued
 
 # Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the

@@ -1038,7 +1038,7 @@ val queued_batch_depth : est_ms:float -> int
     {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
     non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel,
     and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
-    the target). Exposed because those two boundaries are what a regression would
+    the target). Total, over every float: a subnormal estimate saturates rather than raising. Exposed because those two boundaries are what a regression would
     cross silently: a depth stuck at 1 turns a queued search back into an isolated one. *)
 
 val timing_of_setting : string -> timing_mode
@@ -1054,14 +1054,22 @@ val time_routine :
     wall time has accumulated (at most 64 runs) so that a sub-millisecond candidate is not crowned
     by one lucky sample. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth
     is calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
-    than that target is measured identically in both modes.
+    than that target is measured identically in both modes. Both modes sit under the same ~25 ms
+    ceiling, but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
+    finishes isolated timing in a few milliseconds and queued timing at the budget, so queued timing
+    spends a few milliseconds more per candidate — immaterial beside the compile each candidate
+    already costs.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
     {!Ir.Schedule_outcome.protect} attribute a failure to the phase it happened in; without it they
     propagate raw. Timing dispatches the routine repeatedly against live buffers, so an accumulating
     routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
-    afterwards. *)
+    afterwards. [Queued] raises how many such dispatches happen — at most 65 under [Isolated],
+    against at most 12805 for a microsecond kernel batched at the cap — so a routine whose values
+    grow per run reaches larger ones. That is a fact about the scratch buffers, not about the
+    measurement: the number of dispatches is bounded by the same ~25 ms of wall time either way, and
+    a candidate's time is not what it accumulated. *)
 
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's

@@ -709,10 +709,11 @@ let () =
       "\n\
        -- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, \
        split_reduce_max_sites %d, cache disabled\n\
-       -- ambient search gates: autotune_bound_pruning=%s model_peak_flops=%s \
+       -- ambient search gates: autotune_bound_pruning=%s autotune_timing=%s model_peak_flops=%s \
        model_peak_memory_bandwidth=%s\n"
       tn_beam tn_rounds tn_repeats tn_keep tn_split
       (Utils.get_global_arg ~arg_name:"autotune_bound_pruning" ~default:"false")
+      (Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued")
       (shown (Utils.get_global_arg ~arg_name:"model_peak_flops" ~default:""))
       (shown (Utils.get_global_arg ~arg_name:"model_peak_memory_bandwidth" ~default:""));
     let winners =

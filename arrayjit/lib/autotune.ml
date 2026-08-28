@@ -244,9 +244,13 @@ type timing_mode = Isolated | Queued
    too shallow to amortize the round trip on a fast kernel, or minutes of uninterruptible dispatches
    on a slow one — and the tuner meets both within one search. [queued_batch_ms] is the wall time
    one batch aims for: at a ~60 us round trip it keeps the overhead under 1% of the reading, and it
-   makes a queued candidate cost the same wall time as an isolated one, since [min_timing_ms] bounds
-   the accumulated wall in both modes. [max_queue_depth] stops a microsecond kernel from minting an
-   unbounded batch. A routine slower than the target gets depth 1 and is then measured exactly as
+   puts a queued candidate under the SAME wall-time ceiling as an isolated one, since
+   [min_timing_ms] bounds the accumulated wall in both modes. Not the same wall time: a candidate
+   fast enough that [max_timing_runs] single launches finish well inside the budget gets timed for
+   about 6 ms isolated and about 30 ms queued, so a search over microsecond kernels spends a few
+   milliseconds more per candidate -- immaterial beside the compile each candidate already costs,
+   and it buys a measurement that is not half host round trip. [max_queue_depth] stops a microsecond
+   kernel from minting an unbounded batch. A routine slower than the target gets depth 1 and is then measured exactly as
    [Isolated] measures it, which is the right degeneracy: there is nothing left to amortize. *)
 let queued_batch_ms = 10.
 let max_queue_depth = 200
@@ -265,10 +269,16 @@ let queue_calibration_runs = 3
    or NaN estimate is a clock that resolved nothing, not a zero-cost kernel: batch as deeply as the
    cap allows rather than degenerating on the very routines queueing exists for. An infinite one is
    not that case and is left to the arithmetic, which floors it at depth 1 — an unboundedly slow
-   routine is the far end of the scale the policy is FOR, not a reading it failed to take. *)
+   routine is the far end of the scale the policy is FOR, not a reading it failed to take. The cap
+   is applied to the FLOAT, before the conversion: [Float.iround_up_exn] raises on a value outside
+   the integer range, and an estimate of a few times [Float.min_positive_subnormal_value] produces
+   exactly such a value — the clamp has to happen while the quantity can still hold it. *)
 let queued_batch_depth ~est_ms =
   if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
-  else Int.max 1 (Int.min max_queue_depth (Float.iround_up_exn (queued_batch_ms /. est_ms)))
+  else
+    let want = queued_batch_ms /. est_ms in
+    if Float.(want >= of_int max_queue_depth) then max_queue_depth
+    else Int.max 1 (Float.iround_up_exn want)
 
 let timing_of_setting s =
   match String.lowercase (String.strip s) with

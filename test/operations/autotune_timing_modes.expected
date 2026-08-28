@@ -16,4 +16,4 @@ queued timing dispatched more launches than isolated timing did: true
 isolated reading is a per-launch time: PASS
 queued reading is a per-launch time: PASS
 queued timing does not read above isolated timing: PASS
-queued timing costs the same order of wall time as isolated timing: PASS
+queued timing's wall cost is bounded by the budget, not by the batch depth: PASS
