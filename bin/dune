@@ -18,6 +18,18 @@
 ; single module is what makes `Bench_args.` and `Bench_checksum.` both spell directly. Depends on
 ; base alone -- the discrimination test that pins it links no backend.
 
+; The flushed line printer every tool here reports through (gh-ocannl-829): OCaml's stdout is
+; block-buffered, so an unflushed bench that is minutes per leg produces no output at all until it
+; exits, which reads as a hang. Its own library for the same reason `bench_checksum` is one -- dune
+; allows a module in only one stanza -- and separate from `bench_args` because printing and
+; positional-geometry parsing are not the same set of tools.
+
+(library
+ (name bench_out)
+ (package neural_nets_lib)
+ (modules bench_out)
+ (libraries stdio))
+
 (library
  (name bench_checksum)
  (package neural_nets_lib)
@@ -39,7 +51,7 @@
  (public_name schedule_bench)
  (name schedule_bench)
  (modules schedule_bench)
- (libraries ocannl base stdio time_now bench_args bench_checksum)
+ (libraries ocannl base stdio time_now bench_args bench_checksum bench_out)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -49,7 +61,7 @@
  (public_name cpu_vectorization_bench)
  (name cpu_vectorization_bench)
  (modules cpu_vectorization_bench)
- (libraries ocannl base stdio time_now bench_args)
+ (libraries ocannl base stdio time_now bench_args bench_out)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -59,7 +71,7 @@
  (public_name narrow_storage_bench)
  (name narrow_storage_bench)
  (modules narrow_storage_bench)
- (libraries ocannl base stdio time_now bench_args)
+ (libraries ocannl base stdio time_now bench_args bench_out)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -69,7 +81,7 @@
  (public_name narrow_gebp_bench)
  (name narrow_gebp_bench)
  (modules narrow_gebp_bench)
- (libraries ocannl base stdio time_now bench_args bench_checksum)
+ (libraries ocannl base stdio time_now bench_args bench_checksum bench_out)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -83,7 +95,7 @@
  (public_name ocannl_device_props)
  (name device_props)
  (modules device_props)
- (libraries ocannl base stdio)
+ (libraries ocannl base stdio bench_out)
  (preprocess
   (pps ppx_sexp_conv))
  (modes exe))
@@ -96,7 +108,7 @@
  (public_name projection_shape_bench)
  (name projection_shape_bench)
  (modules projection_shape_bench)
- (libraries ocannl base stdio mtime.clock.os bench_args)
+ (libraries ocannl base stdio mtime.clock.os bench_args bench_out)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

@@ -52,7 +52,9 @@ module Numerics = Ir.Numerics
    parity, so the tf32 rounding is free; cross-check a new backend's emission with
    --ocannl_schedule_log_declines=true before trusting the labels. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
-let p = Stdio.printf
+(* Flushed per line ([Bench_out]): an unflushed table reaches the reader only when the process
+   exits, which on a leg that is seconds to minutes per run reads as a hang (gh-ocannl-829). *)
+let p fmt = Bench_out.p fmt
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
