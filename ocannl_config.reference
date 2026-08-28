@@ -657,6 +657,151 @@
 # architecture flag at all -- the portable baseline, spelled as a word because a config source
 # cannot carry an empty value ("" means unset), which is how the `reproducible` profile pins it.
 # Any other value is passed through verbatim (`-march=native` restores the pre-gh-517 behavior).
+#
+# PERFORMANCE CLIFF on a target with no fused multiply-add INSTRUCTION (gh-ocannl-753). The code
+# generator rewrites every floating-point `a*b + c` into a fused multiply-add and spells it `fmaf`
+# / `fma`: in the serial rendering, in the scalar peel of a vectorized loop, and -- where the
+# target offers no whole-vector FMA builtin -- once per lane inside the vector body. Where the
+# target has the instruction, the compiler normally contracts all of those into it and no call
+# survives -- normally, not always: this is the compiler's lowering decision, and it is not
+# guaranteed at every optimization level (gcc has been reported to keep the calls at `-O0` even on
+# an FMA-capable target, see the diagnostic below). Where the target does NOT have it, each call
+# stays a libm CALL -- unless the arithmetic itself is relaxed, since cc_backend_fast_math can make
+# clang expand the calls into a multiply and an add (see that key) -- and an opaque call cannot be
+# vectorized, so the loop around it can degrade badly: gh-ocannl-753's gcc census reports it fully
+# scalarized at -O3 (64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector operations, 256
+# scalar, 64 libm calls, 128 stack references). That census is gcc's; clang measured here keeps the
+# surrounding loop packed at both -O2 and -O3 (26 packed ops, 0 scalar) while still emitting the
+# per-lane calls -- so treat the scalarization as a gcc-observed amplifier, not as universal.
+# The condition is whether the compiler can lower those `fmaf` / `fma` calls to SOME fused
+# instruction the target has -- FMA3 or FMA4 on x86, `__ARM_FEATURE_FMA` on aarch64 (baseline
+# there, so no ARM host is affected). It is not any one feature macro, and still less the
+# `x86-64-v3` level: naming a proxy for it is how both of the wrong prescriptions this entry
+# previously carried got written. Three real families show the spread, all measured with clang
+# cross-targeting x86_64 (recipe in the SIMD agent note):
+#   `-march=x86-64` and `-march=x86-64-v2` -- no FMA at all: one `fmaf` call per lane per iteration
+#   (4 calls at 4 lanes, 8 at 8), and a call per iteration in the scalar loop. This is the cliff.
+#   `-march=bdver2` / `bdver3` (Piledriver, Steamroller) -- FMA3 with AVX but no AVX2: zero calls.
+#   `-march=bdver1` (Bulldozer) -- FMA4 ONLY, defining `__FMA4__` and `__XOP__` but not `__FMA__`:
+#   also zero calls, compiling to the four-operand `vfmaddps` / `vfmaddss`.
+# So `__FMA__` is not necessary (bdver1 lacks it and has no cliff), and the v3 level is not the
+# only way to get FMA3 (bdver2/bdver3 have it without AVX2). The diagnostic that answers the
+# question directly, for your compiler and target TOGETHER rather than through a macro proxy, is to
+# compile and look -- with the SAME flags the backend uses, because it composes several settings and
+# a probe missing any of them answers about a different compilation than yours: `-O` at
+# cc_backend_optimization_level (default 3), then cc_backend_arch_flags, then the resolved
+# cc_backend_simd_flags, then `-ffast-math`, `-ffp-contract=`, `-fopenmp`, in that order. An
+# explicit `cc_backend_simd_flags=-mfma` makes a bare `-march=x86-64` probe report calls your
+# kernels do not have; cc_backend_fast_math can remove calls the probe still shows. Compile a small
+# `fmaf` loop of your own with that flag set and `-S`, into an `.s` path of your choosing.
+# To read the backend's REAL invocation instead of reconstructing it: rebuild with
+# `OCANNL_LOG_LEVEL_CC_BACKEND=9` (a preprocessing-time gate -- a runtime log_level alone leaves the
+# call stripped, and the values 1 and 3 do not currently compile), then run with log_level=9 and
+# debug_backend=text. The command appears under a `command` node, e.g.
+#   cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1
+# Look in the right place: with log_main_domain_to_stdout at its default of false, the text log is
+# an EXTENSIONLESS file named by log_file_stem, never a `*.log`. Its directory follows
+# build_files_prefix, like every other artifact: unset gives `log_files/<exe>/debug`, an explicit
+# prefix gives `log_files/<prefix>/debug`, and `.` gives a flat `log_files/debug`. Only
+# with log_main_domain_to_stdout=true does it go to stdout instead.
+# Rerun that with `-S` added AND its `-o` pointed at a fresh `.s`: left as it is, `-S` writes
+# assembly text over the shared library the command was building, which may be one your application
+# still has loaded.
+# Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally. With the operand
+# there, no match (exit status 1) is a REAL answer: that assembly contains none of the call
+# spellings below, so that kernel is clear of THIS cliff. It does not certify the kernel fast in
+# general: on gcc with an FMA4-only target the emission takes `vec_acc_fma`'s per-lane arm, which has
+# no libm calls to find and is still the spill-or-scalarize hazard the SIMD note describes -- passing
+# this check and taking the good arm are separate questions. It is the operand-less form that tells you
+# nothing -- a bare `grep` reads stdin instead of the file, and a placeholder like the
+# angle-bracketed one is worse still, since the shell reads it as redirection and truncates the very
+# file you meant to inspect. Match BOTH names and both dialects: double-precision kernels call
+# `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`); clang on Mach-O
+# spells the calls `callq _fma` / `callq _fmaf` (measured here), and gcc on ELF spells them
+# `call fma@PLT` / `call fmaf@PLT` (reported in review on gh-ocannl-753, not reproduced here) --
+# note the double-precision symbol is `fma`, without the `f`. A pattern pinned to
+# one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
+# an `fmaf`-only pattern misses every call in a double-precision kernel. Note also that gcc has been
+# reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang
+# measurably does not (zero calls at every level from -O0 to -O3 on `-march=x86-64-v3`). That cuts
+# one way only: at the `-O` your build actually uses, finding the calls IS the answer about your
+# kernels -- if you run at cc_backend_optimization_level=0 under gcc and see `fma@PLT`, your kernels
+# have them. What a low-`-O` result does not support is EXTRAPOLATION to a different level.
+# Provenance of everything above: the target rows, the flag-composition effects and the grep pattern
+# were executed on arm64 macOS with Apple clang cross-targeting x86_64 (`clang -arch x86_64`). The
+# gcc-sourced statements -- calls retained at `-O0`, `-ffast-math` NOT expanding them, the `@PLT`
+# call spellings, the three-operand `vfmadd132ps` for `__builtin_ia32_vfmaddps`, and the fully
+# scalarized -O3 loop -- come from code review on gh-ocannl-753 or from that issue's census, and
+# none was reproducible here, which has no GNU gcc; each is flagged in place. Claims about what the
+# CODE does (the rewrite, the spelling, the builtin guards, the flag composition, the fold
+# structure, the census predicate) are from reading those expressions, not their comments. For an in-tree check that runs on whatever toolchain you have,
+# `test/operations/cc_march_census` compiles the emitted kernel across `-march` targets and censuses
+# the accumulator loops, holding the line that no FMA loop calls libm where the ISA has an FMA --
+# for the FMA3 and NEON paths only. It does NOT cover FMA4: its capability predicate is
+# `has_fma = has "__FMA__" || has "__ARM_FEATURE_FMA"`, with no `__FMA4__`, and its target matrix
+# has no `bdver` row, so it stays green whatever the FMA4 path does. Extending it is unfiled work.
+# You reach a no-FMA target on ANY CPU that lacks a fused multiply-add, which is not a clean date
+# cutoff. Big-core x86 got FMA3 at Haswell and AMD got FMA4 at Bulldozer, but the low-power lines
+# shipped without either for years afterwards: Intel Silvermont, Goldmont and Tremont, and AMD
+# Jaguar (`btver2`), define neither `__FMA__` nor `__FMA4__` and hit this under a perfectly
+# successful `-march=native`. Treat generations as examples, never as a boundary.
+# You also reach it by pinning
+# this key to "none" (as the `reproducible` profile does -- though it also pins cc_vector_bytes to
+# 0, so only the serial calls remain there) or to a `-march` without FMA, or by using a toolchain
+# that rejects the probed `-march=native`, in which case the probe falls back to no flag at all and
+# the compiler's own baseline target applies. So do NOT rule the cliff out from the CPU alone: under
+# the default "auto" an FMA-capable host clears this only if the `-march=native` probe actually
+# succeeded (or the compiler's own default target already includes FMA) AND the configured compiler
+# actually lowers the calls at your `-O` -- probe success selects a capable target, it does not
+# establish that no call survives. Where it matters, answer
+# it for the box in front of you with the compile-and-grep diagnostic above rather than from the
+# part number.
+# For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect -- but be precise about
+# WHICH promise is at stake, because it is not whole-result bit equality. A vectorized reduction
+# already reassociates: `C_syntax.vec_acc_grid_fold` folds the register grid into one accumulator
+# and `vec_acc_lane_fold` then chains that vector's lanes into a scalar, so the lanes accumulate
+# independently and are combined at the end -- a different summation order from the serial
+# fallback's. (That is also why the `reproducible` profile pins cc_vector_bytes=0, to keep the
+# serial order.) What the emission does guarantee is the rounding of
+# each individual UPDATE: an FMA rounds once, and the vector body, its scalar peel and the serial
+# fallback all spell that same single-rounded operation, so they differ only by summation order and
+# not by the semantics of each step. Substituting `a*b + dst` where the instruction is absent would
+# round every update twice, changing that per-step semantics on top of the reassociation -- a second,
+# independent numerics change. An opt-in to that trade is deliberately not offered here; it belongs
+# with the approximate-numerics work (gh-ocannl-719). (The rewrite itself is not restricted to floating
+# point, and that is a separate question, not a rationale this note covers -- see the SIMD agent
+# note.)
+# What removes the calls is a target the CPU actually implements -- and that is a fix ONLY when the
+# CPU has an FMA that a conservative compiler target was hiding. On a CPU with no FMA at all (the
+# Silvermont / Goldmont / Tremont / Jaguar cases above) there is no target to raise to: every
+# FMA-capable `-march` names instructions that part cannot execute, so raising it trades the
+# slowdown for an illegal-instruction fault. Such a machine keeps the cliff, and the only things
+# that change it are changing the arithmetic (cc_backend_fast_math, with its own caveats below) or
+# running elsewhere. Where the hardware IS capable, prefer the spellings that let the compiler read
+# the host over ones that assert a feature. "auto" (the default) is the one to reach for: it probes
+# the host's own family and uses that family's native spelling. Do NOT hand-write `-march=native`
+# unless you are on x86 -- it is the x86 spelling only, and Apple clang accepts it on arm64 while
+# DOWNGRADING the target (the top of this entry has the details), so writing it by hand on ARM undoes
+# the protection `auto` gives you; the ARM spelling is `-mcpu=native`. Naming a specific part works
+# too, but the option differs by architecture the same way: on x86 the CPU goes in `-march`
+# (`-march=bdver2`), while on ARM `-march` takes an ARCHITECTURE (`-march=armv8-a`) and a CPU needs
+# `-mcpu` (`-mcpu=cortex-a72`; `-march=cortex-a72` is rejected outright). This value is passed
+# through verbatim with no probe behind it, so a spelling the compiler rejects fails the kernel
+# compile rather than quietly falling back.
+# Explicit feature flags work but must match the part, and getting that wrong costs a SIGILL rather
+# than a slowdown. `cc_backend_simd_flags=-mfma` is appended after the architecture flag and DOES
+# escalate the selected ISA -- that is the point of it: on `none` or `-march=x86-64` it turns
+# `__FMA__` on -- which is also what makes the emitted kernel's `#elif defined(__FMA__)` arm select
+# the FMA3 builtin `__builtin_ia32_vfmaddps`. Use it ONLY where the CPU implements FMA3. Do NOT
+# reach for it on an FMA4-only Bulldozer even with `-march=bdver1` still in front: which instruction
+# form that combination produces is compiler-dependent and is not settled here -- clang was measured
+# to keep the four-operand `vfmaddps`, while gcc is reported to emit three-operand `vfmadd132ps` for
+# that same builtin, which such a CPU cannot execute. There it needs no feature flag anyway: the
+# architecture flag alone (`-march=native`, `-march=bdver1`) already supplies FMA4. What `-mfma`
+# avoids relative to `-march=x86-64-v3`
+# is bringing AVX2 and the rest of a broader target along, so it is the narrower escalation, not a
+# free one. And `-march=x86-64-v3` brings AVX2, which bdver1 through bdver3 cannot execute --
+# Excavator (bdver4) can, having both AVX2 and FMA.
 #cc_backend_arch_flags=auto
 
 # Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections
@@ -665,6 +810,12 @@
 # fuse `a*b+c` into a single rounding differs across compilers and targets, which is why the
 # `reproducible` profile pins it off; the results change either way, so this is a deliberate
 # numerics choice, not an optimization level.
+# It is NOT a lever on the no-FMA-target cliff documented at cc_backend_arch_flags: contraction
+# decides whether an `a*b+c` the codegen wrote as such may become one rounding, while the calls in
+# question are already fused by construction, and on a target without the instruction they stay
+# calls under every value here (measured with clang: `-ffp-contract=fast` at `-march=x86-64` leaves
+# all of them). cc_backend_fast_math below does move them under clang, but that is compiler-specific
+# and a blanket unsafe-math switch besides, not the targeted trade gh-ocannl-719 is about.
 #cc_backend_fp_contract=auto
 
 # Explicit SIMD flags appended to the CC backend compiler invocation (gh-ocannl-164).
@@ -687,6 +838,16 @@
 #cc_backend_probe_cache=true
 
 # If true, enables `-ffast-math` for the CC backend. This may change numerical behavior.
+# UNDER CLANG, on a target with no fused multiply-add instruction, it also changes the CODE SHAPE:
+# clang expands the codegen's `fmaf` / `fma` calls into a multiply and an add, which vectorizes
+# where the call could not (see the cliff described at cc_backend_arch_flags), at two roundings
+# instead of one. This is compiler-specific and NOT a general workaround for that cliff: gcc was
+# reported to keep the `fmaf` call at `-O3 -ffast-math` on a baseline x86 target, and gcc is the
+# common default here, since cc_backend_compiler_command follows `ocamlc -config`. Where the host
+# CPU does have an FMA that a conservative target was hiding, raising the target is the fix to reach
+# for instead of this one; where the CPU has no FMA at all, there is no target to raise to and
+# changing the arithmetic is the only lever left -- which is what this flag does, at two roundings
+# and with everything else `-ffast-math` implies.
 #cc_backend_fast_math=false
 
 # If true, compiled dynamic libraries (.dll/.so files) for the CC backend are placed 

@@ -746,6 +746,190 @@ files.
   closes fp16, where gcc scalarizes a 16-bit vector COMPARISON whatever type it is spelled in
   — `_Float16` and `__fp16` alike, at `-O2` and `-O3` — widening every lane to float: 343
   instructions and 172 scalar ops become 9 and 0.
+- **On a target with no FMA instruction the FMA is a libm call per element, on BOTH the vector and
+  the scalar path** (gh-ocannl-753, documented rather than fixed). Three facts compose into it, none
+  of them local to the SIMD emission. The simplifier rewrites every `a*b + c` into `Ternop (FMA, …)`
+  (`Low_level`, no config gate); `Ops.ternop_c_syntax` spells that `fmaf(` / `fma(` for every C
+  backend; and `C_syntax.vec_fma_builtin`'s x86 rows are guarded on `defined(__FMA__)`, so on a
+  compiler WITHOUT `__builtin_elementwise_fma` (gcc) an FMA-less target matches no row and
+  `vec_acc_fma` falls through to its per-lane `#else` loop. Under clang the chain never gets that
+  far — `OCANNL_HAS_ELEMENTWISE_FMA` is 1, the first arm wins, and LLVM scalarizes the builtin into
+  the same `fmaf` calls; same destination, different emitted path, and the distinction matters to
+  anyone reading a kernel. Where the target has the instruction the compiler NORMALLY contracts the
+  calls into it and none survives — normally, not always: that is the compiler's lowering decision
+  and it is not guaranteed at every `-O` the backend can be set to (gcc is reported to keep the
+  calls at `-O0` even on an FMA-capable target). Where the target does not have it, each
+  stays a CALL — unless the arithmetic is relaxed, `cc_backend_fast_math` being the one setting that
+  measurably expands them (under clang) — and by the gh-ocannl-649 lesson one bullet up, an
+  opaque call cannot be vectorized, so the loop around it can degrade badly — issue #753's census
+  has it fully scalarized at `-O3` (64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector
+  ops, 256 scalar, 64 libm calls, 128 stack refs). That census is GCC's, and the amplifier is not
+  universal: clang measured here keeps the surrounding loop packed at both `-O2` and `-O3` (26
+  packed ops, 0 scalar) while still emitting the per-lane calls. Three traps in reasoning about it, each of which cost this
+  note a review round. **Do not name a feature macro as the condition. The condition is whether the
+  compiler can lower `fmaf` to SOME fused instruction the target has** — two successive proxies were
+  written here and both were wrong, each failing on a real part and each failing the same way, by
+  prescribing instructions a CPU cannot execute. `x86-64-v3` was wrong because AMD Piledriver and
+  Steamroller (`bdver2`/`bdver3`) carry FMA3 with AVX and no AVX2: already fast, and
+  `-march=x86-64-v3` would hand them AVX2 they fault on. `__FMA__` was then wrong because Bulldozer
+  (`bdver1`) has FMA4 ONLY — `__FMA4__` and `__XOP__` defined, `__FMA__` absent — and still compiles
+  the loop to four-operand `vfmaddps`/`vfmaddss` with zero calls, so it has no cliff either, while
+  the `-mfma` remedy that macro suggests selects FMA3 specifically, and **do not talk yourself into
+  it being safe behind `-march=bdver1`** — that combination's outcome is COMPILER-DEPENDENT and is
+  not settled: defining `__FMA__` is exactly what makes the emitted kernel take the
+  `#elif defined(__FMA__)` arm and call `__builtin_ia32_vfmaddps`, for which clang was measured here
+  to keep four-operand `vfmaddps` but gcc is reported to emit three-operand `vfmadd132ps`, which a
+  Bulldozer cannot execute. (An earlier revision of this note called it safe on the strength of a
+  clang probe of a *generic* `__builtin_elementwise_fma` loop — a different code path than the one
+  the table emits.) On such a part the architecture flag alone already supplies FMA4, so `-mfma`
+  buys nothing there anyway; over an architecture lacking FMA4 it emits FMA3 (`vfmadd132ps` /
+  `vfmadd231ps`) outright. A
+  consequence worth keeping DISTINCT hides in that last case, and it is COMPILER-CONDITIONAL:
+  `vec_fma_builtin`'s x86 rows are keyed on `defined(__FMA__)`, so on a compiler WITHOUT
+  `__builtin_elementwise_fma` — gcc — an FMA4-only target matches no builtin row and lands on the
+  per-lane `#else`: no libm calls, but precisely the arm gh-ocannl-614/621 measured as gcc's
+  spill-or-scalarize hazard. Under clang none of that applies, since `OCANNL_HAS_ELEMENTWISE_FMA` is
+  1 and the first arm wins before any `__FMA__` guard is consulted. Escaping the libm cliff and
+  taking the good arm are two different questions, and it is gcc + bdver1 specifically that answers
+  them differently. (The bdver family is not uniform on the AVX2 half either: Excavator, `bdver4`,
+  has AVX2 and FMA3 both — it is bdver1 through bdver3 that cannot execute AVX2.) Ask the
+  compiler-and-target pair directly rather than a macro, and **do not hand-build the flags to ask
+  it**: `compiler_flags` composes `-O` (`cc_backend_optimization_level`), `arch_flags`, the resolved
+  `simd_flags`, `-ffast-math`, `-ffp-contract=` and `-fopenmp`, so a probe omitting any of them
+  answers about a different compilation — an explicit `cc_backend_simd_flags=-mfma` makes a bare
+  `-march=x86-64` probe report calls the real kernels do not have, and `cc_backend_fast_math` can
+  erase calls the probe still shows (measured, f32 × 4 lanes at `-march=x86-64 -O3`: 4 calls, and 0
+  once either `-mfma` or `-ffast-math` joins the line). Compile your own small `fmaf` loop under that
+  flag set with `-S`, then `grep -E 'call.*fmaf?\b' kernel.s` — name the file LITERALLY: a bare
+  `grep` waits on stdin and its empty output means nothing, while WITH the operand a no-match is a
+  real negative (exit status 1) — that assembly is clear of the libm cliff, though NOT thereby on the
+  good arm: a gcc/FMA4-only kernel takes the per-lane `#else` with no calls to find and keeps the
+  spill-or-scalarize hazard, per the paragraph above. A placeholder
+  like `<name>.s` is worse, since the shell reads `<` and `>` as redirection and would truncate the
+  very file you are inspecting. Match both NAMES and both dialects.
+  Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
+  `Double_prec`), so the symbols are `callq _fma` / `callq _fmaf` on clang+Mach-O (measured here)
+  and `call fma@PLT` / `call fmaf@PLT` on gcc+ELF (review-reported, no GNU gcc here) — the
+  double-precision one has no `f`; an `fmaf`-only pattern finds
+  none of a double kernel's calls — measured 0 of 5,
+  against 5 of 5 for `fmaf?\b`, on the same `-march=x86-64` object whose calls are `callq _fma`.
+  That is the same dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650,
+  one bullet up. gcc is also reported to keep the calls at `-O0` even on an FMA-capable target,
+  where clang measurably does not — which cuts one way only: at the `-O` the build actually uses,
+  finding the calls IS the answer about those kernels; what a low-`-O` result cannot support is
+  extrapolation to a different level.
+  (`-march=<t> -E -dM` prints which macros a target defines: an input to the question, not the
+  answer to it.) **Every claim here carries its source class, and that is the discipline this bullet
+  cost the most to learn.** Measured = executed on arm64 macOS with Apple clang cross-targeting
+  x86_64. Code = read off the expression named, never off its comment — after
+  `c_syntax.ml`'s "promises to equal bit for bit" was restated here as a whole-result guarantee the
+  renderer does not make (see the rationale below), the rule is that **a comment is a claim by a
+  past author, not a specification: cite the code or a transcript, never the comment**. Everything
+  gcc-sourced — calls kept at `-O0`, `-ffast-math` not expanding them, the `@PLT` spellings, the
+  three-operand `vfmadd132ps`, the fully scalarized `-O3` loop — is from review on gh-ocannl-753 or
+  that issue's census, unreproducible here for want of a GNU gcc, and is flagged at each use. To skip the flag reconstruction entirely and read the backend's own logged compile
+  command, see the bullet below — it works, at `OCANNL_LOG_LEVEL_CC_BACKEND=9` with a text backend.
+  **It is a property
+  of the TARGET, not of which arm of the `#if` chain is taken**:
+  `OCANNL_HAS_ELEMENTWISE_FMA` carries no target guard, so clang always takes the first arm, and
+  LLVM then scalarizes `llvm.fma` into the same `fmaf` calls — "clang, so the elementwise builtin,
+  so fine" is wrong. And **it is not reached only by exotic hardware**, nor by anything as tidy as a
+  date cutoff — Intel's low-power line (Silvermont, Goldmont, Tremont) and AMD Jaguar (`btver2`)
+  define neither `__FMA__` nor `__FMA4__` and reach it under a successful `-march=native`, long
+  after Haswell and Bulldozer. On the configuration side: `cc_backend_arch_flags=none`
+  (the `reproducible` profile's pin — which also sets `cc_vector_bytes=0`, so only the serial calls
+  remain there), an explicitly pinned FMA-less `-march`, or a toolchain that rejects the probed
+  `-march=native` (`arch_flags` then falls back to no flag at all) each select such a target on a
+  modern host. No x86 hardware is needed to check any of this from an Apple Silicon box: Apple clang
+  cross-targets x86_64, so `clang -arch x86_64 -march=<target> -O2 -S` over a four-line
+  `__builtin_elementwise_fma` loop counts `callq _fmaf` directly — 4 per iteration at 4 lanes and 8
+  at 8 lanes under `x86-64` and `x86-64-v2`, zero under `x86-64-v3`, `bdver2` and `x86-64 -mfma`
+  (`vfmadd*`) and under `bdver1` (`vfmaddps`/`vfmaddss`, the FMA4 forms), with the plain scalar
+  `fmaf` loop going the same way. **Scope every claim here to the compiler that
+  produced it.** All of the above is clang. The one claim that does not survive the change of
+  compiler is `cc_backend_fast_math`: clang expands the calls to `mulps`/`addps` under `-ffast-math`
+  (verified at `-march=x86-64`), recovering the vectorization at two roundings, but gcc was reported
+  in review to keep the `fmaf` call there at `-O3 -ffast-math` — unverified here, this fleet's Macs
+  have no GNU gcc, and gcc is the common default since `cc_backend_compiler_command` follows
+  `ocamlc -config`. So fast-math is not a portable workaround — and neither is "raise the target",
+  which only helps where the CPU HAS an FMA that a conservative target was hiding; on a genuinely
+  FMA-less part there is nothing to raise to and changing the arithmetic is the only lever left.
+  `cc_backend_fp_contract` is not a lever either way: the calls are fused by construction, and
+  `-ffp-contract=fast` leaves every one of them.
+  For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious — but
+  **state the promise as per-UPDATE rounding, not as path-level bit equality**, or the rationale
+  claims something the renderer does not deliver. A vectorized reduction reassociates by
+  construction — read it off the emission, not off a comment: `vec_acc_grid_fold` folds the register
+  grid into one accumulator and `vec_acc_lane_fold` then chains that vector's lanes into a scalar, so
+  lanes accumulate independently and combine at the end, a different summation order from the serial
+  fallback's. (Consistent with `cc_vector_bytes=0` being what the `reproducible` profile pins to keep
+  the serial order, and with the width-ladder bullet below calling a newly-vectorized loop a numerics
+  change.) What IS guaranteed is that every update is the same single-rounded operation in
+  the vector body, its scalar peel and the serial fallback, so those differ by summation order
+  alone; `dst = a * b + dst` on a machine without the instruction rounds each update twice, which is
+  a second and independent numerics change stacked on the reassociation. (`c_syntax.ml`'s own
+  comment says the paths "promise to equal bit for bit" — read that as the per-update promise, and
+  do not repeat it as whole-result parity, which the reassociation defeats.) The
+  2026-08-27 wave decision was to document that here and at `cc_backend_arch_flags` in
+  `ocannl_config.reference`, and to leave the config-gated double-rounding arm to the
+  approximate-numerics work (gh-ocannl-719) — where it would have to be taken by the peel and the
+  serial fallback too, or the promise breaks worse than the cliff costs. If a fix does land,
+  `test/operations/cc_march_census` is where it shows: its "no FMA accumulator loop calls libm where
+  the ISA has a fused multiply-add" claim excludes the FMA-less rows by design, so widening that
+  claim is the test-side move. **That census does not currently see FMA4 at all**, which matters
+  before citing it as cover for anything written above: `has_fma` is
+  `has "__FMA__" || has "__ARM_FEATURE_FMA"` with no `__FMA4__`, so `isa_has` drops the FMA row on
+  an FMA4-only target, and `toolchains ()` has no `bdver` row to raise the question anyway. It can
+  therefore stay green no matter what the FMA4 path does — adding `__FMA4__` to the predicate and a
+  `bdver1` column is unfiled work, and until it exists the FMA4 claims in this note rest on the
+  hand probes recorded here rather than on the suite.
+- **Reading the backend's own compile command: it works, but only at `OCANNL_LOG_LEVEL_CC_BACKEND=9`
+  and with a text backend** (gh-ocannl-753). `cc_backend.ml` logs its exact invocation as
+  `[%log3 "command", cmdline]`, which is the direct answer to "what flags did my kernel actually
+  compile with". Three things stand between you and it, all established by running them. The gate is
+  a PREPROCESSING one (`[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_CC_BACKEND"]`,
+  declared as a `preprocessor_deps` `env_var` in `arrayjit/lib/dune`), so a runtime `log_level`
+  alone leaves the call stripped — the same runtime-vs-preprocessing confusion recorded at the top
+  of that dune file from gh-ocannl-628. Rebuilding under it FAILS at low values: `=1` and `=3` both
+  die on warning 27 (`unused-var-strict`) for `base_name`, `cmdline` and `rc` — `name` too at `=1`
+  — which are warnings-as-errors here; **`=9` builds clean**, and 9 is the value the file's own
+  header comment names, so the low values look simply untested (an unfiled defect: a debug knob that
+  does not compile at two of its values). And the default `debug_backend=db` writes
+  `log_files/<exe>/debug.db` + `debug_meta.db` (that directory follows `build_files_prefix` like
+  every artifact — `log_files/<prefix>/` when set, flat `log_files/` at `.`), ppx_minidebug's binary
+  database, which needs its
+  rendering client; `debug_backend=text` gives readable output instead. With
+  `OCANNL_LOG_LEVEL_CC_BACKEND=9`, `log_level=9`, `debug_backend=text` the command appears verbatim
+  under a `command` node:
+  `cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1`.
+  **Where that lands is decided by `log_main_domain_to_stdout`, and both answers are live in this
+  repo.** It defaults to FALSE, and `Utils.get_local_debug_runtime` then resolves `log_file_stem`
+  (default `debug`) into a filename — so the ordinary answer is the EXTENSIONLESS file
+  `log_files/<exe>/debug` — or `log_files/<prefix>/debug`, or a flat `log_files/debug`, as
+  `build_files_prefix` dictates — and watching stdout finds nothing. But `test/config/ocannl_config`
+  sets
+  `log_main_domain_to_stdout=true`, so a run under `dune runtest` prints it inline instead and
+  writes no file at all — which is what a golden diff then trips over, a perturbation of the test's
+  stdout rather than a signal about the compile. That difference is worth stating because searching
+  the wrong one of the two produces a confident wrong conclusion: globbing `log_files/**/*.log`
+  under the test config found nothing (there was no file, and it would have had no `.log` suffix
+  either way), and an earlier revision of this note concluded from that emptiness that the whole
+  route was broken and deleted it. One more caution: the logged command carries `-o <...>.so`, so
+  rerunning it with `-S` added but `-o` unchanged writes assembly over the shared library, possibly
+  one a running process still has mapped — repoint `-o` at a fresh `.s`.
+- **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
+  that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
+  docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no
+  `Ops.is_float` guard even though its neighbouring reassociations do, and its own comment is
+  `(* TODO: this is tentative. *)`. Downstream, `Ops.ternop_c_syntax` renders `Byte`, `Uint16`,
+  `Int32`, `Uint32`, `Int64`, `Uint64` and `Fp8` precisions through the DOUBLE-precision `fma(`, and
+  `C_syntax.vec_acc_fma`'s per-lane arm sends anything that is neither `Double` nor `Half` to
+  `fmaf` — single precision. If an integer mul-add reaches either, `int64` operands past 2^53 lose
+  bits and wraparound semantics change, so there `a*b + c` would be the RESTORATION of correctness,
+  not a second rounding: the bit-parity rationale one bullet up is a floating-point argument only,
+  and must not be read as covering the integer path. What is NOT established is reachability — no
+  emitted kernel was inspected for an integer `Ternop (FMA, …)` — which is exactly what an issue on
+  this should settle first, before anything is changed.
 - **"No such hardware" is a claim about a machine, not about the project — so name the machine.**
   The rows above were written from an Arrow Lake-HX box, where AVX-512 is fused off across the
   whole hybrid part, and the note recorded that as if it held everywhere; the machine that actually
