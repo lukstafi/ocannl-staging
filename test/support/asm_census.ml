@@ -451,6 +451,48 @@ let edge_count p = List.length p.edges
 
 let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
 
+(* The instruction profile of one span of classified lines. Shared by {!census_in}, which asks it
+   about a loop body, and {!profile_all}, which asks it about a whole listing. *)
+let count_range lines op_class ~from_ ~to_ =
+  let libm = libm_names op_class in
+  let counts =
+    ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
+  in
+  for k = from_ to to_ do
+    match lines.(k) with
+    | Some (Insn { mnemonic; rest }) ->
+        let c = !counts in
+        let c = { c with instructions = c.instructions + 1 } in
+        let c =
+          if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
+        in
+        let c =
+          if is_scalar_fp_insn ~mnemonic ~rest then { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
+          else c
+        in
+        let c =
+          match call_target ~mnemonic ~rest with
+          | Some t when List.mem libm t ~equal:String.equal ->
+              { c with libm_calls = c.libm_calls + 1 }
+          | _ -> c
+        in
+        let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
+        counts := c
+    | _ -> ()
+  done;
+  !counts
+
+(** [profile_all op_class ~asm] is the instruction profile of an ENTIRE listing, with no loop
+    selection and no source anchoring.
+
+    For a listing that is one small function, which is what a toolchain PROBE compiles: the question
+    there is what the compiler made of one expression, and there is no enclosing loop to find. A
+    census of a generated kernel wants {!census_in} instead -- counting a whole kernel would average
+    every loop in it together. *)
+let profile_all op_class ~asm =
+  let lines = classify_asm asm in
+  count_range lines op_class ~from_:0 ~to_:(Array.length lines - 1)
+
 (** [census_in p op_class ~anchor] is the innermost loop of [p] whose body carries a source line in
     [anchor], with that loop's instruction profile.
 
@@ -476,34 +518,7 @@ let census_in ({ lines; edges = loops; files } : parsed) op_class ~anchor =
         Int.compare (i1 - j1) (i2 - j2))
   in
   Option.map best ~f:(fun (label, j, i) ->
-      let libm = libm_names op_class in
-      let counts =
-        ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
-      in
-      for k = j to i do
-        match lines.(k) with
-        | Some (Insn { mnemonic; rest }) ->
-            let c = !counts in
-            let c = { c with instructions = c.instructions + 1 } in
-            let c =
-              if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
-            in
-            let c =
-              if is_scalar_fp_insn ~mnemonic ~rest then
-                { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
-              else c
-            in
-            let c =
-              match call_target ~mnemonic ~rest with
-              | Some t when List.mem libm t ~equal:String.equal ->
-                  { c with libm_calls = c.libm_calls + 1 }
-              | _ -> c
-            in
-            let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
-            counts := c
-        | _ -> ()
-      done;
-      { loop_label = label; span = i - j; counts = !counts })
+      { loop_label = label; span = i - j; counts = count_range lines op_class ~from_:j ~to_:i })
 
 (** {!census_in} over an assembly listing parsed for this one question. Convenient where a caller
     asks about one construct in one file; a caller asking about many should {!parse} once. *)
