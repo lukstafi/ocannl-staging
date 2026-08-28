@@ -182,6 +182,18 @@ files.
   descendants, and it is why a SIGTERM to the DRIVER no longer reaches them, so a driver that
   spawns cells this way owes itself a SIGTERM handler that takes the running cell with it.
 
+- Two traps in that handler, both paid for in gh-ocannl-760's review. A cancellation must be
+  DEFERRED across the spawn and across the kill — between `_execute_child` and `Popen` returning
+  there is no name for the new process, and a signal raised inside an `except` clause that is
+  doing the killing cannot be caught by a sibling `except BaseException`, so the escalation stops
+  halfway — but deferring must not be spelled `pthread_sigmask`: the mask is INHERITED across
+  fork/exec, so every child starts with SIGTERM blocked, its graceful phase does nothing, and
+  every kill costs the full grace before SIGKILL (measured here: 1.0 s → 11.5 s per killed cell).
+  Defer with a flag the handler checks, and re-raise on the way out. The other one is about what
+  a survivor means: a cell that ran to completion while something it spawned outlived SIGKILL is
+  a FAILED cell, not a successful one with a warning — the survivor holds the device, so the
+  row's own timing and every later row of that run were measured against it.
+
 - A `bin/` bench's correctness guard is a position-weighted checksum of the WHOLE output, and its
   position dependence is the whole of it: a residue of the FLATTENED offset `t = i*n + j` loses its
   row dependence exactly when the modulus divides the row stride, so `1 + (t mod 251)` gives every
