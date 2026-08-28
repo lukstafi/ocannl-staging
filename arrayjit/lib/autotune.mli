@@ -654,7 +654,19 @@ type report = {
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
           failed and the baseline was not dispatched (or was declined). In that case no cache entry
           is stored and the returned routine is the untuned default compile, not the serial
-          baseline. *)
+          baseline.
+
+          It is a reading of {!timing_mode}, and which one is not recorded anywhere in the report or
+          the cache entry, so a number carried across processes is only comparable to another taken
+          under the same setting. Under the default [Queued] it is a per-launch steady-state time
+          and can be compared with a batched per-kernel figure (up to the batch's residual ~1% of
+          round trip). Under [Isolated] it is a lone dispatch's latency, kernel plus one
+          submit/sync round trip: on gfx1151 that is a 26-105% inflation over the same candidate's
+          steady-state cost at the gpt2_mini projection shapes, varying per candidate, and the
+          number must NOT be read as a throughput figure (gh-ocannl-755). The same caution applies
+          to [baseline_ms], [default_ms] and [mma_best_ms], which are the same instrument's
+          readings; ratios between them are safe, since all four were taken under one setting within
+          one search. *)
   best_label : string;
       (** The crowned candidate's spec label — the same string the [autotune_log] lines carry (e.g.
           ["F_sketch[mma-gpu 16x32x32 ep]"]). ["baseline"] when no candidate beat the serial
