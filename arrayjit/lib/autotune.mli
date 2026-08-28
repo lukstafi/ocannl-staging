@@ -1018,6 +1018,16 @@ type timing_mode =
     throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
     is, up to the batch's residual ~1% of round trip. *)
 
+val queued_batch_depth : est_ms:float -> int
+(** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
+    synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
+    at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
+    {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
+    non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel,
+    and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
+    the target). Exposed because those two boundaries are what a regression would
+    cross silently: a depth stuck at 1 turns a queued search back into an isolated one. *)
+
 val timing_of_setting : string -> timing_mode
 (** Parses the [autotune_timing] spelling ([isolated] / [queued], case- and space-insensitive);
     raises [Invalid_argument] on anything else. *)

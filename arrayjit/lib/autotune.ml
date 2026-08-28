@@ -256,6 +256,18 @@ let max_queue_depth = 200
    badly overestimating single sample shortens it a lot. *)
 let queue_calibration_runs = 3
 
+(* The calibration policy itself, as a function of the estimate, so a test can pin it without a
+   device: what [Queued] measures depends on it, and its two boundaries are the ones a regression
+   would silently cross -- a depth stuck at 1 turns a queued search back into an isolated one, and
+   an uncapped depth turns a microsecond kernel's batch into an unbounded dispatch. A non-positive
+   or NaN estimate is a clock that resolved nothing, not a zero-cost kernel: batch as deeply as the
+   cap allows rather than degenerating on the very routines queueing exists for. An infinite one is
+   not that case and is left to the arithmetic, which floors it at depth 1 — an unboundedly slow
+   routine is the far end of the scale the policy is FOR, not a reading it failed to take. *)
+let queued_batch_depth ~est_ms =
+  if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
+  else Int.max 1 (Int.min max_queue_depth (Float.iround_up_exn (queued_batch_ms /. est_ms)))
+
 let timing_of_setting s =
   match String.lowercase (String.strip s) with
   | "isolated" -> Isolated
@@ -320,12 +332,7 @@ let time_routine ?(tag_failures = false) ?(timing = Isolated) ~repeats cctx rout
               let dt = batch 1 in
               if Float.(dt < !est) then est := dt
             done;
-            (* A non-positive or non-finite estimate is a clock that resolved nothing, not a
-               zero-cost kernel: batch as deeply as the cap allows rather than degenerating to
-               isolated timing on the very routines queueing exists for. *)
-            if Float.(is_positive !est) && Float.is_finite !est then
-              Int.max 1 (Int.min max_queue_depth (Float.iround_up_exn (queued_batch_ms /. !est)))
-            else max_queue_depth
+            queued_batch_depth ~est_ms:!est
       in
       let best = ref Float.infinity in
       let total = ref 0. in
