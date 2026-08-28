@@ -83,8 +83,21 @@ def sha256_file(path):
 
 
 def this_origin():
-    """Default origin: the box doing the recording, which is the fact being recorded."""
-    return platform.node() or "unknown-host"
+    """The box doing the recording, or None when it cannot name itself.
+
+    None rather than a placeholder: a literal `unknown-host` is not an origin, it is every
+    nameless box sharing one. Two of them recording different bytes for one fixture would see the
+    second replace the first under that one name -- exactly the "whichever box records last wins"
+    loss that keying entries by origin exists to prevent, only now with a name that reads like an
+    answer. `resolve_origin` turns it into a demand for an explicit --origin instead.
+    """
+    return platform.node() or None
+
+
+def origin_default_help():
+    """How the CLIs describe the default origin, on a host that may not be able to name itself."""
+    node = this_origin()
+    return f"default: this host, {node!r}" if node else "no default: this host reports no name"
 
 
 def cli_command():
@@ -115,9 +128,19 @@ def resolve_origin(origin):
     idiom cannot tell "not given" from "given as empty", and an empty one is how automation fails
     (`--origin "$BOX"` with $BOX unset). Silently substituting the hostname there attributes a
     fixture to the wrong box and persists it, which is the exact error this file exists to
-    prevent -- so absence defaults, and emptiness is refused.
+    prevent -- so absence defaults, emptiness is refused, and a host that cannot name itself is
+    refused rather than sharing a placeholder with every other nameless box.
     """
-    return check_origin(this_origin() if origin is None else origin)
+    if origin is None:
+        origin = this_origin()
+        if origin is None:
+            raise ValueError(
+                "this host reports no name (platform.node() is empty), so nothing here can say "
+                "whose bytes these are; pass --origin <box> explicitly. Recording them under a "
+                "shared placeholder would let the next nameless box overwrite this entry under "
+                "that same name, which is the provenance loss this file exists to prevent"
+            )
+    return check_origin(origin)
 
 
 def read_digests(path, legacy_origin=None):
@@ -293,7 +316,7 @@ def _main(argv=None):
     ap.add_argument(
         "--origin",
         default=None,
-        help=f"the box these bytes are (default: this host, {this_origin()!r}). Reports name it, "
+        help=f"the box these bytes are ({origin_default_help()}). Reports name it, "
         "so make it the name the reports use.",
     )
     ap.add_argument(

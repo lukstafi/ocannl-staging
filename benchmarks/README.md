@@ -97,13 +97,18 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
     --record` (add `--origin <box>` when the hostname is not the name the reports use). It is
     stdlib-only — no venv needed — and it leaves every other origin's entry alone.
     `python3 benchmarks/fixture_digest.py --check` reports what is on disk against what is recorded, and
-    exits non-zero on anything that is not a MATCH.
+    exits non-zero on anything that is not a MATCH. Both tools refuse an origin they cannot
+    trust rather than inventing one: an explicitly empty `--origin` (how `--origin "$BOX"`
+    fails when `$BOX` is unset) and a host that reports no name at all, since a shared
+    placeholder would let the next such box overwrite this one's entry under it.
   - **Regeneration is a cross-box event.** `gen_fixtures.py` draws from *this* box's numpy, so
     regenerating here does not give the other measuring boxes the same workload — it gives this
     box a new one and leaves theirs behind. Coordinate it across every origin listed in
     `DIGESTS.txt` in one go, or the boxes diverge again and the next report silently compares
     two workloads. Recording is not the same act: `--record` pins what exists and changes no
-    number's meaning.
+    number's meaning. `gen_fixtures.py` reads `DIGESTS.txt` *before* it builds anything, so a
+    file it could not record into (a pre-gh-ocannl-759 unattributed line, a malformed row) stops
+    the run while the bytes your published numbers are on are still on disk.
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and

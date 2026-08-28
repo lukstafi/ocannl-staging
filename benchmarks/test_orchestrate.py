@@ -770,6 +770,36 @@ class FixtureDigestTest(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    #: The origin `gen_fixtures.main` records under when none is given, pinned so the
+    #: generator tests do not depend on what this box happens to be called.
+    this_box = "test-box"
+
+    def gen_fixtures_module(self):
+        """`gen_fixtures`, imported without the bench venv, with `build` never reached.
+
+        It imports numpy and safetensors at module scope, but the property the tests below pin --
+        the ORDER of `main()`'s steps -- patches `build` out, so nothing here draws a random
+        number or writes a safetensors file. Stubbing the two imports is what keeps the check
+        running under the bare `python3` the dune rule invokes: skipping there would mean the
+        one place it runs unattended never evaluates it.
+        """
+        stub = types.ModuleType("safetensors.numpy")
+        stub.save_file = None
+        stubs = {
+            "numpy": types.ModuleType("numpy"),
+            "safetensors": types.ModuleType("safetensors"),
+            "safetensors.numpy": stub,
+        }
+        with unittest.mock.patch.dict(sys.modules, stubs):
+            sys.modules.pop("gen_fixtures", None)
+            import gen_fixtures
+        patch = unittest.mock.patch.object(
+            fixture_digest.platform, "node", return_value=self.this_box
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        return gen_fixtures
+
     def check(self, *args, **kwargs):
         """check_fixture_digests with its per-fixture log kept out of the test output."""
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1178,6 +1208,80 @@ class FixtureDigestTest(unittest.TestCase):
         self.assertEqual((passed, failed), (0, 1))
         self.assertIn("MATCH — rog-nv's bytes", good.getvalue())
         self.assertIn("MISMATCH", bad.getvalue())
+
+    def test_a_host_that_cannot_name_itself_is_refused_not_given_a_placeholder(self):
+        # A literal `unknown-host` is not an origin, it is every nameless box sharing one name:
+        # the second such box to record different bytes for a fixture would replace the first's
+        # entry under it, which is the whichever-box-records-last provenance loss keying by
+        # origin exists to prevent -- only now wearing a name that reads like an answer.
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value=""):
+            self.assertIsNone(fixture_digest.this_origin())
+            with self.assertRaises(ValueError) as refused:
+                fixture_digest.resolve_origin(None)
+
+        self.assertIn("--origin", str(refused.exception))
+
+    def test_a_named_host_still_supplies_the_default(self):
+        # The negative control for the refusal above: absence still defaults where there is a
+        # name to default to, which is the whole convenience of the recording CLI.
+        with unittest.mock.patch.object(fixture_digest.platform, "node", return_value="rog-nv"):
+            self.assertEqual(fixture_digest.resolve_origin(None), "rog-nv")
+
+    def test_the_digest_file_is_validated_before_any_fixture_is_overwritten(self):
+        # Generating OVERWRITES the fixture bytes, so anything record() would refuse -- a legacy
+        # three-field line, a duplicate origin, a malformed row -- has to be found while the
+        # previous bytes still exist. Refusing afterwards loses the bytes the published numbers
+        # were measured on AND leaves the new ones unrecorded, which is worse than either alone.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        stale = fixtures / "lenet.safetensors"
+        stale.write_bytes(b"the bytes the published numbers are on")
+        before = stale.read_bytes()
+        (fixtures / fixture_digest.DIGEST_FILE).write_text(
+            fixture_digest.HEADER + "deadbeef  17  lenet.safetensors\n"
+        )
+        spec = self.dir / "workloads" / "lenet.json"
+        spec.parent.mkdir()
+        spec.write_text("{}")
+        built = []
+
+        with unittest.mock.patch.object(gen_fixtures, "build", lambda s, d: built.append(s)):
+            with self.assertRaises(ValueError):
+                gen_fixtures.main(["--origin", "rog-nv"], here=self.dir)
+
+        # And the spec really was one this run would have built, so [] is a refusal and not an
+        # empty work list: the same call with a readable digest file builds it (below).
+        self.assertEqual(built, [])
+        self.assertEqual(stale.read_bytes(), before)
+
+    def test_a_valid_digest_file_lets_the_generator_build(self):
+        # The negative control: the guard above must refuse the unreadable file, not every file.
+        gen_fixtures = self.gen_fixtures_module()
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        digests = fixtures / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER)
+
+        spec = self.dir / "workloads" / "lenet.json"
+        spec.parent.mkdir()
+        spec.write_text("{}")
+        built = []
+
+        def build(spec_path, out_dir):
+            built.append(spec_path)
+            path = out_dir / "lenet.safetensors"
+            path.write_bytes(b"regenerated")
+            return path
+
+        with unittest.mock.patch.object(gen_fixtures, "build", build):
+            with contextlib.redirect_stdout(io.StringIO()):
+                gen_fixtures.main(["--origin", self.this_box], here=self.dir)
+
+        self.assertEqual(built, [spec])
+
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual([e.origin for e in entries["lenet.safetensors"]], [self.this_box])
 
     def test_generated_fixtures_are_named_after_their_spec(self):
         # What the recorded-name check above relies on: gen_fixtures.py writes
