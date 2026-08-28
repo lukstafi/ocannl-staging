@@ -416,16 +416,17 @@ def install_termination_handler():
 
     def handler(signum, _frame):
         global _deferred_signal
-        if _spawn_in_progress:
-            # Inside `_spawn_uninterrupted`: raising here would unwind past a cell that exists but
-            # has no name yet. Hand it to the window, which raises it once `proc` is bound.
+        if _defer_depth:
+            # Inside a `_deferring_cancellation` block: raising here would unwind past a cell that
+            # has no name yet, or out of the `except` clause that is killing one. Hand it over;
+            # that block raises it once the cell is bound and its group is dead.
             _deferred_signal = signum
             return
         raise SystemExit(f"orchestrate: terminated by signal {signum}; killed the running cell")
 
     def interrupt(signum, _frame):
         global _deferred_signal
-        if _spawn_in_progress:
+        if _defer_depth:
             _deferred_signal = signum
             return
         raise KeyboardInterrupt
@@ -439,32 +440,39 @@ def install_termination_handler():
             pass
 
 
-# The spawn window, and the signal that arrived inside it. Between `_execute_child` starting a
-# cell and `Popen` returning it there is a stretch in which no name refers to the new process: an
-# exception raised there — the termination handler's, or a Ctrl-C's — unwinds past a cleanup that
-# has nothing to clean, and the freshly isolated runner (and, moments later, its worker pool) is
-# orphaned on the GPU with the sweep gone (gh-ocannl-760 review).
+# Where a cancellation must not land, and the signal that tried to. Two such stretches, and they
+# fail the same way — a cell left alive on the GPU with the sweep gone (gh-ocannl-760 review):
 #
-# The handlers therefore DEFER inside that window rather than raise, and the window re-raises on
-# the way out, by which time `proc` is bound and `run_cell`'s cleanup has something to kill. What
-# this must NOT do is block the signals with `pthread_sigmask`: the mask is inherited across
-# fork/exec, so every cell would start with SIGTERM blocked — the graceful phase of its own kill
-# would do nothing and every cap would cost the full grace before SIGKILL (measured: 0.5 s to
-# 11.5 s per killed cell) and no runner would ever get to flush.
-_spawn_in_progress = False
+#   - between `_execute_child` starting a cell and `Popen` returning it, no name refers to the new
+#     process, so an exception raised there unwinds past a cleanup that has nothing to clean;
+#   - inside the kill itself, a signal raises out of the `except` clause that was doing the
+#     killing — and a sibling `except BaseException` does not catch what another `except` clause
+#     raises — so the escalation stops halfway and the group survives the sweep.
+#
+# The handlers therefore DEFER inside these stretches rather than raise, and the outermost one
+# re-raises on the way out: by then the cell is bound and its group is dead, which is the state a
+# cancellation wanted in the first place. What this must NOT do is block the signals with
+# `pthread_sigmask`: the mask is inherited across fork/exec, so every cell would start with
+# SIGTERM blocked — the graceful phase of its own kill would do nothing, every cap would cost the
+# full grace before SIGKILL (measured: 1.0 s to 11.5 s per killed cell), and no runner would ever
+# get to flush.
+_defer_depth = 0
 _deferred_signal = None
 
 
 @contextlib.contextmanager
-def _spawn_uninterrupted():
-    global _spawn_in_progress, _deferred_signal
-    _spawn_in_progress = True
+def _deferring_cancellation():
+    """Hold SIGINT/SIGTERM until this block (and any enclosing one) is done, then re-raise."""
+    global _defer_depth, _deferred_signal
+    _defer_depth += 1
     try:
         yield
     finally:
-        _spawn_in_progress = False
-    if _deferred_signal is not None:
+        _defer_depth -= 1
+    if _defer_depth == 0 and _deferred_signal is not None:
         signum, _deferred_signal = _deferred_signal, None
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
         raise SystemExit(f"orchestrate: terminated by signal {signum}; killed the running cell")
 
 
@@ -483,7 +491,7 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
     cache_note = ""
     proc = None
     try:
-        with _spawn_uninterrupted():
+        with _deferring_cancellation():
             proc = subprocess.Popen(
                 cmd,
                 env=env,
@@ -495,14 +503,18 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
             )
         stdout, _ = proc.communicate(timeout=timeout or None)
     except subprocess.TimeoutExpired:
-        timed_out = True
-        stdout, survived = kill_cell_group(proc)
-        # Before anything fallible: the kill is what tore the cache, so undoing it must not be
-        # reachable only through code that can raise first (the optional cell log below writes to
-        # an operator-supplied directory, which can be unwritable or full). Losing the sweep to
-        # that would leave the partial cache.db in place AND lose the failure record
-        # (gh-ocannl-760 review).
-        cache_note = (on_timeout() if on_timeout else "") or ""
+        with _deferring_cancellation():
+            # Deferring, because a cancellation arriving mid-kill raises out of THIS clause and
+            # the sibling `except BaseException` cannot catch it — the escalation would stop
+            # halfway and leave the group the cap was killing (gh-ocannl-760 review). The signal
+            # is raised on the way out of the block, with the group already dead.
+            timed_out = True
+            stdout, survived = kill_cell_group(proc)
+            # Before anything fallible: the kill is what tore the cache, so undoing it must not be
+            # reachable only through code that can raise first (the optional cell log below writes
+            # to an operator-supplied directory, which can be unwritable or full). Losing the
+            # sweep to that would leave the partial cache.db in place AND lose the failure record.
+            cache_note = (on_timeout() if on_timeout else "") or ""
     except BaseException:
         # An operator's Ctrl-C reaches the sweep alone once the cell is in its own group, so the
         # cell would keep running (and keep the GPU) after the sweep is gone. Take it with us —
@@ -511,19 +523,22 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
         # likeliest way anyone meets this bug by hand, and a retry over the cache that kill left
         # behind is not the pass it claims to be (gh-ocannl-760 review).
         if proc is not None:
-            kill_cell_group(proc)
-            if on_timeout:
-                print(f"!!! {label} interrupted; {on_timeout()}", flush=True)
+            with _deferring_cancellation():
+                kill_cell_group(proc)
+                if on_timeout:
+                    print(f"!!! {label} interrupted; {on_timeout()}", flush=True)
         raise
     stdout = stdout or ""
     leftovers = ""
+    stuck = False
     if not timed_out and _group_alive(proc.pid):
         # The cell is done and something it spawned is not. `communicate` returned because the
         # LEADER exited and the pipe closed, which says nothing about a worker that redirected
         # its own output — and that worker still holds the GPU, so every later cell of the sweep
         # would be measured against it (gh-ocannl-760 review). Collect it here, on the ordinary
         # path, not only on the cap's.
-        _, stuck = kill_cell_group(proc)
+        with _deferring_cancellation():
+            _, stuck = kill_cell_group(proc)
         leftovers = (
             "the cell left members of its process group behind; they were killed"
             if not stuck
@@ -564,6 +579,20 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
             )
         if cache_note:
             note += f"; {cache_note}"
+        print(f"!!! {label} {note}", flush=True)
+        return None, note
+    if stuck:
+        # The cell ran to completion — it may even have printed a result line — but something it
+        # spawned outlived SIGKILL and still holds the device. That makes THIS cell's own timing
+        # suspect (it shared the device with a process nobody scheduled) and every later cell of
+        # the run too, so it is a runner failure whatever the leader's exit code says: a warning
+        # on a console nobody keeps is not a record, and the report would otherwise publish the
+        # row and everything after it (gh-ocannl-760 review).
+        note = (
+            "the cell left members of its process group behind AND THEY SURVIVED SIGKILL — they "
+            "still hold the device, so this cell's own timing and every later cell's in this run "
+            "were measured against them; clear the survivors and re-run"
+        )
         print(f"!!! {label} {note}", flush=True)
         return None, note
     if proc.returncode != 0 or line is None:

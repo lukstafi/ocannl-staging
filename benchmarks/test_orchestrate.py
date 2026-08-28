@@ -1263,6 +1263,72 @@ class CellTimeoutTest(unittest.TestCase):
         leftover = int(pidfile.read_text())
         self.assertTrue(self.wait_gone(leftover), f"pid {leftover} outlived its cell")
 
+    def test_a_survivor_makes_a_successful_cell_a_failure(self):
+        # The cell ran, printed a result line and exited zero -- and something it spawned outlived
+        # SIGKILL and still holds the device. That makes this row's own timing suspect and every
+        # later row of the run too, so recording it as a success (with a warning on a console
+        # nobody keeps) publishes exactly what the failure section exists to stop. The survivor is
+        # stood in for: nothing outlives SIGKILL but a process stuck in the kernel.
+        cell = self.python(
+            "import json; print(json.dumps("
+            "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            stack.enter_context(
+                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+            )
+            result, note, _ = self.run_cell("successful with a survivor", cell, timeout=60)
+
+        self.assertIsNone(result)
+        self.assertIn("SURVIVED SIGKILL", note)
+        self.assertIn("every later cell", note)
+
+    @unittest.skipUnless(os.name == "posix", "the deferral is about POSIX signal delivery")
+    def test_a_cancellation_during_the_kill_does_not_abandon_the_group(self):
+        # A signal arriving while `kill_cell_group` is in its grace loop raises out of the `except
+        # TimeoutExpired` clause that is doing the killing -- and a sibling `except BaseException`
+        # does not catch what another `except` clause raises, so the escalation stops halfway and
+        # the group outlives the sweep (gh-ocannl-760 review). The cell here holds the grace open
+        # by ignoring SIGTERM, and the sweep is cancelled while it does.
+        pidfile = self.dir / "mid_kill.pid"
+        driver = self.python(
+            "import signal, sys, orchestrate\n"
+            "orchestrate.install_termination_handler()\n"
+            "cell = [sys.executable, '-c',\n"
+            "  'import os, signal, sys, time\\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+            "open(sys.argv[1], \\'w\\').write(str(os.getpid()))\\n"
+            "sys.stdout.flush()\\n"
+            "time.sleep(300)\\n', sys.argv[1]]\n"
+            "orchestrate.run_cell('cell cancelled mid-kill', cell, timeout=2)\n",
+            pidfile,
+        )
+        sweep = subprocess.Popen(
+            driver,
+            cwd=str(Path(orchestrate.__file__).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: sweep.poll() is None and sweep.kill())
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not pidfile.exists():
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the cell never started")
+        stubborn = int(pidfile.read_text())
+        # Into the cap (2 s) and then into the grace, where the kill is waiting on a cell that
+        # will not answer SIGTERM.
+        time.sleep(4)
+        self.assertTrue(self.alive(stubborn), "the cell was gone before the kill was interrupted")
+
+        sweep.terminate()
+        sweep.wait(timeout=40)
+
+        self.assertTrue(
+            self.wait_gone(stubborn, deadline_s=30),
+            f"pid {stubborn} outlived a sweep cancelled mid-kill",
+        )
+
     def test_the_cache_is_quarantined_even_if_the_cell_log_cannot_be_written(self):
         # The kill is what tore the cache, so undoing it must not sit behind fallible code: the
         # optional cell log writes to an operator-supplied directory, which can be unwritable or
