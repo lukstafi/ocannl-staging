@@ -344,6 +344,26 @@ test_cmd() {
 # environment readings from the owning box; the actual vector of a compile that
 # FAILED to compile is already in the unit's log, appended to nvrtc's/hiprtc's
 # message by the backend.
+# Which runtime compiler the BACKEND loads, not which one happens to be first on
+# PATH (Codex P2 on PR #510). cudajit and hipjit reach nvrtc/hiprtc through a
+# ctypes stub library that carries the soname as a NEEDED entry and no RPATH, so
+# the file is chosen by the dynamic loader -- LD_LIBRARY_PATH, then the ldconfig
+# cache -- and `nvcc --version` reports an unrelated toolkit that need not even
+# be installed: the rog-nv box compiles CUDA kernels with no nvcc on PATH at all,
+# which is exactly the misattribution this replaces. `ldd` on the stub answers
+# with the file the backend will load, and its realpath carries the version in
+# its name (libnvrtc.so.13.3.33 -- strictly more than nvrtcVersion's 13.3).
+loaded_rtc_cmd() {
+  local rtc=$1 tmpl
+  # Written once with an `RTC` placeholder: the two arms differ only in the name,
+  # and the CUDA one is the arm executed on the box this was verified on.
+  tmpl='so=$(ldd "$(opam var lib 2>/dev/null)"/stublibs/dll*RTC*stubs.so 2>/dev/null'
+  tmpl=$tmpl' | sed -n "s/.*=> *\([^ ]*libRTC[^ ]*\).*/\1/p" | head -1); '
+  tmpl=$tmpl'if [ -n "$so" ]; then echo "loaded RTC: $(readlink -f "$so")"; '
+  tmpl=$tmpl'else echo "loaded RTC: unresolved -- no RTC stub in this opam switch, or no ldd"; fi; '
+  printf '%s' "${tmpl//RTC/$rtc}"
+}
+
 rtc_context_cmd() {
   local backend=$1 alias_name=
   case $backend in
@@ -353,7 +373,7 @@ rtc_context_cmd() {
   printf 'echo "=== rtc-context (%s) ==="; ' "$backend"
   case $backend in
     cuda)
-      printf 'command -v nvcc >/dev/null 2>&1 && nvcc --version 2>&1 | tail -2; '
+      loaded_rtc_cmd nvrtc
       printf 'command -v nvidia-smi >/dev/null 2>&1 && '
       printf 'nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>&1; '
       # The include slot's input, read from this box rather than inferred: the
@@ -363,7 +383,7 @@ rtc_context_cmd() {
       printf 'echo "discovery input: CUDA_PATH=${CUDA_PATH:-(unset)}"; '
       ;;
     hip)
-      printf 'command -v hipcc >/dev/null 2>&1 && hipcc --version 2>&1 | head -6; '
+      loaded_rtc_cmd hiprtc
       printf 'command -v rocminfo >/dev/null 2>&1 && rocminfo 2>&1 | grep -m2 -E "gfx|Runtime Version"; '
       printf 'echo "discovery input: ROCM_PATH=${ROCM_PATH:-(unset)} HIP_PATH=${HIP_PATH:-(unset)}"; '
       ;;
