@@ -668,7 +668,11 @@
 # an FMA-capable target, see the diagnostic below). Where the target does NOT have it, each call
 # stays a libm CALL -- unless the arithmetic itself is relaxed, since cc_backend_fast_math can make
 # clang expand the calls into a multiply and an add (see that key) -- and an opaque call cannot be
-# vectorized at any width, so at -O3 the surrounding loop scalarizes too.
+# vectorized, so the loop around it can degrade badly: gh-ocannl-753's gcc census reports it fully
+# scalarized at -O3 (64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector operations, 256
+# scalar, 64 libm calls, 128 stack references). That census is gcc's; clang measured here keeps the
+# surrounding loop packed at both -O2 and -O3 (26 packed ops, 0 scalar) while still emitting the
+# per-lane calls -- so treat the scalarization as a gcc-observed amplifier, not as universal.
 # The condition is whether the compiler can lower those `fmaf` / `fma` calls to SOME fused
 # instruction the target has -- FMA3 or FMA4 on x86, `__ARM_FEATURE_FMA` on aarch64 (baseline
 # there, so no ARM host is affected). It is not any one feature macro, and still less the
@@ -704,9 +708,10 @@
 # Then `grep -E 'call.*fmaf?\b' kernel.s` -- name the assembly file literally (a bare `grep` waits
 # on stdin, and `<name>.s` would be read by the shell as redirection, clobbering the file), and an
 # empty result means nothing. Match BOTH names and both dialects: double-precision kernels call
-# `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`), and gcc on ELF
-# spells the calls `call fma@PLT` / `call fmaf@PLT` while clang on Mach-O spells them `callq _fma` /
-# `callq _fmaf` -- note the double-precision symbol is `fma`, without the `f`. A pattern pinned to
+# `fma`, not `fmaf` (that is what `Ops.ternop_c_syntax` emits for `Double_prec`); clang on Mach-O
+# spells the calls `callq _fma` / `callq _fmaf` (measured here), and gcc on ELF spells them
+# `call fma@PLT` / `call fmaf@PLT` (reported in review on gh-ocannl-753, not reproduced here) --
+# note the double-precision symbol is `fma`, without the `f`. A pattern pinned to
 # one name or one dialect reports zero on the other, and an FMA-less target then reads as clean --
 # an `fmaf`-only pattern misses every call in a double-precision kernel. Note also that gcc has been
 # reported to keep `fma@PLT` / `fmaf@PLT` at `-O0` even on an FMA-capable target, where clang
@@ -716,9 +721,12 @@
 # have them. What a low-`-O` result does not support is EXTRAPOLATION to a different level.
 # Provenance of everything above: the target rows, the flag-composition effects and the grep pattern
 # were executed on arm64 macOS with Apple clang cross-targeting x86_64 (`clang -arch x86_64`). The
-# two gcc behaviors named -- calls retained at `-O0`, and `-ffast-math` NOT expanding them -- come
-# from code review on gh-ocannl-753 and were not reproducible here, which has no GNU gcc; they are
-# flagged in place. For an in-tree check that runs on whatever toolchain you have,
+# gcc-sourced statements -- calls retained at `-O0`, `-ffast-math` NOT expanding them, the `@PLT`
+# call spellings, the three-operand `vfmadd132ps` for `__builtin_ia32_vfmaddps`, and the fully
+# scalarized -O3 loop -- come from code review on gh-ocannl-753 or from that issue's census, and
+# none was reproducible here, which has no GNU gcc; each is flagged in place. Claims about what the
+# CODE does (the rewrite, the spelling, the builtin guards, the flag composition, the fold
+# structure, the census predicate) are from reading those expressions, not their comments. For an in-tree check that runs on whatever toolchain you have,
 # `test/operations/cc_march_census` compiles the emitted kernel across `-march` targets and censuses
 # the accumulator loops, holding the line that no FMA loop calls libm where the ISA has an FMA --
 # for the FMA3 and NEON paths only. It does NOT cover FMA4: its capability predicate is
@@ -742,9 +750,11 @@
 # part number.
 # For FLOATING-POINT precisions this is a cost of CORRECTNESS, not a defect -- but be precise about
 # WHICH promise is at stake, because it is not whole-result bit equality. A vectorized reduction
-# already reassociates: the lanes accumulate independently and are folded at the end, a different
-# summation order from the serial fallback's, which is exactly why the `reproducible` profile pins
-# cc_vector_bytes=0 to keep the serial order. What the emission does guarantee is the rounding of
+# already reassociates: `C_syntax.vec_acc_grid_fold` folds the register grid into one accumulator
+# and `vec_acc_lane_fold` then chains that vector's lanes into a scalar, so the lanes accumulate
+# independently and are combined at the end -- a different summation order from the serial
+# fallback's. (That is also why the `reproducible` profile pins cc_vector_bytes=0, to keep the
+# serial order.) What the emission does guarantee is the rounding of
 # each individual UPDATE: an FMA rounds once, and the vector body, its scalar peel and the serial
 # fallback all spell that same single-rounded operation, so they differ only by summation order and
 # not by the semantics of each step. Substituting `a*b + dst` where the instruction is absent would

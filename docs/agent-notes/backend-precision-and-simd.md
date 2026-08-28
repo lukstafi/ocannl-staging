@@ -761,9 +761,11 @@ files.
   calls at `-O0` even on an FMA-capable target). Where the target does not have it, each
   stays a CALL — unless the arithmetic is relaxed, `cc_backend_fast_math` being the one setting that
   measurably expands them (under clang) — and by the gh-ocannl-649 lesson one bullet up, an
-  opaque call cannot be vectorized at any width, so at `-O3` the surrounding loop scalarizes as well
-  (issue #753's census: 64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector ops, 256
-  scalar, 64 libm calls, 128 stack refs). Three traps in reasoning about it, each of which cost this
+  opaque call cannot be vectorized, so the loop around it can degrade badly — issue #753's census
+  has it fully scalarized at `-O3` (64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector
+  ops, 256 scalar, 64 libm calls, 128 stack refs). That census is GCC's, and the amplifier is not
+  universal: clang measured here keeps the surrounding loop packed at both `-O2` and `-O3` (26
+  packed ops, 0 scalar) while still emitting the per-lane calls. Three traps in reasoning about it, each of which cost this
   note a review round. **Do not name a feature macro as the condition. The condition is whether the
   compiler can lower `fmaf` to SOME fused instruction the target has** — two successive proxies were
   written here and both were wrong, each failing on a real part and each failing the same way, by
@@ -803,8 +805,9 @@ files.
   worse, since the shell reads `<` and `>` as redirection and would truncate the very file you are
   inspecting. Match both NAMES and both dialects.
   Double-precision kernels call `fma`, not `fmaf` (`Ops.ternop_c_syntax` emits `fma(` for
-  `Double_prec`), so the symbols are `call fma@PLT` / `call fmaf@PLT` on gcc+ELF and `callq _fma` /
-  `callq _fmaf` on clang+Mach-O — the double-precision one has no `f`; an `fmaf`-only pattern finds
+  `Double_prec`), so the symbols are `callq _fma` / `callq _fmaf` on clang+Mach-O (measured here)
+  and `call fma@PLT` / `call fmaf@PLT` on gcc+ELF (review-reported, no GNU gcc here) — the
+  double-precision one has no `f`; an `fmaf`-only pattern finds
   none of a double kernel's calls — measured 0 of 5,
   against 5 of 5 for `fmaf?\b`, on the same `-march=x86-64` object whose calls are `callq _fma`.
   That is the same dialect trap that cost `Asm_census` 72 rows of silent absence in gh-ocannl-650,
@@ -813,10 +816,15 @@ files.
   finding the calls IS the answer about those kernels; what a low-`-O` result cannot support is
   extrapolation to a different level.
   (`-march=<t> -E -dM` prints which macros a target defines: an input to the question, not the
-  answer to it.) **Everything in this bullet that is called measured was executed on arm64 macOS
-  with Apple clang cross-targeting x86_64**; the two gcc behaviors (calls kept at `-O0`,
-  `-ffast-math` not expanding them) are from review on gh-ocannl-753 and have no GNU gcc here to
-  check against. To skip the flag reconstruction entirely and read the backend's own logged compile
+  answer to it.) **Every claim here carries its source class, and that is the discipline this bullet
+  cost the most to learn.** Measured = executed on arm64 macOS with Apple clang cross-targeting
+  x86_64. Code = read off the expression named, never off its comment — after
+  `c_syntax.ml`'s "promises to equal bit for bit" was restated here as a whole-result guarantee the
+  renderer does not make (see the rationale below), the rule is that **a comment is a claim by a
+  past author, not a specification: cite the code or a transcript, never the comment**. Everything
+  gcc-sourced — calls kept at `-O0`, `-ffast-math` not expanding them, the `@PLT` spellings, the
+  three-operand `vfmadd132ps`, the fully scalarized `-O3` loop — is from review on gh-ocannl-753 or
+  that issue's census, unreproducible here for want of a GNU gcc, and is flagged at each use. To skip the flag reconstruction entirely and read the backend's own logged compile
   command, see the bullet below — it works, at `OCANNL_LOG_LEVEL_CC_BACKEND=9` with a text backend.
   **It is a property
   of the TARGET, not of which arm of the `#if` chain is taken**:
@@ -848,10 +856,12 @@ files.
   For FLOATING-POINT precisions the cliff is a cost of CORRECTNESS and the fix is not obvious — but
   **state the promise as per-UPDATE rounding, not as path-level bit equality**, or the rationale
   claims something the renderer does not deliver. A vectorized reduction reassociates by
-  construction: lanes accumulate independently and fold at the end, a different summation order from
-  the serial fallback's, which is why `cc_vector_bytes=0` is what the `reproducible` profile pins to
-  keep the serial order, and why the width-ladder bullet below calls a newly-vectorized loop a
-  numerics change. What IS guaranteed is that every update is the same single-rounded operation in
+  construction — read it off the emission, not off a comment: `vec_acc_grid_fold` folds the register
+  grid into one accumulator and `vec_acc_lane_fold` then chains that vector's lanes into a scalar, so
+  lanes accumulate independently and combine at the end, a different summation order from the serial
+  fallback's. (Consistent with `cc_vector_bytes=0` being what the `reproducible` profile pins to keep
+  the serial order, and with the width-ladder bullet below calling a newly-vectorized loop a numerics
+  change.) What IS guaranteed is that every update is the same single-rounded operation in
   the vector body, its scalar peel and the serial fallback, so those differ by summation order
   alone; `dst = a * b + dst` on a machine without the instruction rounds each update twice, which is
   a second and independent numerics change stacked on the reassociation. (`c_syntax.ml`'s own
