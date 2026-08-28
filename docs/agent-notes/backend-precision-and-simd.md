@@ -795,7 +795,24 @@ files.
   `OCANNL_CC_BACKEND_COMPILER_COMMAND=<prefix>/usr/bin/gcc-13` on the census exe. Neither compiler
   substitutes for the other here, and a clang x86 host still reports 14 unfound rows (the `dot`
   reductions on v2/v3/v4): the census is a gcc-hosted measurement plus whatever the `native` column
-  lands on, and a host it cannot read says so loudly rather than passing quietly.
+  lands on, and a host it cannot read says so loudly rather than passing quietly. (c) **How the
+  assembler SPELLS a packed instruction.** Apple's arm64 assembler carries a NEON instruction's
+  arrangement on the MNEMONIC (`fmla.4s v0, v1, v2`) where GAS carries it on the registers (`fmla
+  v0.4s, v1.4s, v2.4s`), so `Asm_census`'s operand rules saw three plain `v` names and classified 34
+  of the bf16 tile k-loop's 49 instructions as neither vector nor scalar. Unlike the three earlier
+  Mach-O details — dot-less `LBB` labels, the checksummed `.file`, the `;` loop-header annotation —
+  this one does not make rows go missing: the loop is found, its span and instruction total are
+  right, and only the vector/scalar SPLIT reads zero. So it surfaced as ONE claim failing `0 > 0` on
+  `mma/bf16`, the only tile row with no `ldr q0` or `fcvtl v2.4s, v0.4h` for the operand rules to
+  catch by accident — `mma/f32` and `mma/f16w` PASSED the same claim on 3 and 10 accidental counts
+  out of 28 and 78 real ones. Fixed by reading an arrangement suffix on the mnemonic too (`b.ne` is
+  a dot that is not an arrangement, so the suffix is matched against the arrangement list rather
+  than merely detected), and the dialect probes now claim the COUNTS of one loop in both spellings,
+  not just that it is found — the earlier probe already carried `fmax.4s` and asserted only
+  found-ness, which is why the blindness shipped. Reproduce without a Mac: the clang prefix above
+  plus `-mllvm -aarch64-neon-syntax=apple`, which reproduces CI's row byte for byte (`insns=49
+  vector=0 scalar_fp=0`). The lesson generalizes past this census: a fixture for a foreign dialect
+  owes a claim about what was MEASURED, not only about what was found.
 - **`Max`/`Min` SIMD reductions were a libm call per lane, on every x86 target** (gh-ocannl-649,
   fixed). The `Vectorized` accumulation loop rendered them as a fixed-trip per-lane loop calling the
   scalar `fmaxf`/`fminf`, on the reasoning that the packed-max builtins have the wrong NaN semantics

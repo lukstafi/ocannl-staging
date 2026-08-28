@@ -1,4 +1,5 @@
 the census reads both assembler dialects, not only this host's: true
+both arm64 dialects' instructions are classified, not only their loops found: true
 a libm call spelled the Mach-O way is still counted as one: true
 every requested vector width emitted a kernel: true
 every fp16 numerics setting emitted a kernel: true

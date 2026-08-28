@@ -86,10 +86,16 @@
    can move.
    - {b whether a whole-vector builtin is lowered whole-vector}, which is what the sharp
    scalarization claim reads -- see {!packed_half_widen}.
+   - {b how the assembler SPELLS a packed instruction}, which is what every count reads. Apple's
+   arm64 dialect carries the arrangement on the mnemonic ([fmla.4s v0, v1, v2]) rather than on the
+   registers, and a census blind to that spelling reports a fully packed k-loop as [vector=0
+   scalar_fp=0] -- 34 of its 49 instructions invisible -- which is how macos-latest failed the
+   vector-majority claim on [0 > 0] over a tile nothing was wrong with. See {!dialect_probes}.
 
    The lesson for a new row: anchor it on a line the compiler cannot attribute elsewhere (a macro
    use or a builtin, not a call and not a bare load an optimizer can fold into its use), and before
-   claiming a count is zero, ask whether the zero is the emission's or the compiler's. The aarch64 columns need a cross gcc,
+   claiming a count is zero, ask whether the zero is the emission's, the compiler's, or the
+   reader's. The aarch64 columns need a cross gcc,
    which installs without root -- [apt-get download gcc-<n>-aarch64-linux-gnu cpp-<n>-... binutils-
    aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross libgcc-<n>-dev-arm64-cross]
    then [dpkg-deb -x] each into one prefix. Point [AARCH64_CROSS_GCC] at the resulting
@@ -724,15 +730,23 @@ let emit_all ~exe ~root =
 
 (* {2 Assembler dialects this host cannot produce}
 
-   Two review findings in a row were about assembly shapes a Linux/gcc box never emits, each of
-   which silenced the census WHOLESALE rather than skewing a number -- Apple's dot-less [LBB0_9]
-   labels, which made every branch target unrecognizable, and clang's [.file 0 "dir" "name" md5
-   0x...], whose checksum reads as the path and leaves no file number matched. Both fail the same
-   way: every row reports "no loop", on a platform CI actually builds.
+   Finding after finding here has been about an assembly shape a Linux/gcc box never emits, on a
+   platform CI actually builds. Three silenced the census WHOLESALE rather than skewing a number --
+   Apple's dot-less [LBB0_9] labels, which made every branch target unrecognizable; clang's [.file 0
+   "dir" "name" md5 0x...], whose checksum reads as the path and leaves no file number matched; and
+   the [; =>This Inner Loop Header] annotation, which stops a label line from ending in a colon.
+   All three fail the same way, every row reporting "no loop", which is loud.
 
-   Neither is reachable from a fixture compiled here, so they are pinned against SYNTHETIC assembly
-   instead. That is not a weaker check for this particular property -- what is being tested is the
-   parser's handling of a documented directive shape, and the shape is what is written down. *)
+   The fourth is quieter and is the one to learn from: Apple's arm64 assembler writes a NEON
+   instruction's arrangement on the MNEMONIC ([fmla.4s v0, v1, v2]), so the loops were found, their
+   spans and instruction totals were right, and only the vector/scalar SPLIT read zero. A claim
+   asking for more vector than scalar work then reads [0 > 0] on a perfectly rendered tile, while
+   its neighbours pass on whatever few instructions the operand rules still caught. So a dialect
+   fixture owes a claim about the COUNTS and not only about the loop being found.
+
+   None of the four is reachable from a fixture compiled here, so they are pinned against SYNTHETIC
+   assembly instead. That is not a weaker check for these properties -- what is being tested is the
+   parser's handling of a documented syntax, and the syntax is what is written down. *)
 
 let dialect_probes () =
   (* Line 3 carries the anchor; the [.loc] directives below point at it. *)
@@ -785,10 +799,54 @@ let dialect_probes () =
         "\tretq";
       ]
   in
+  (* {b The same aarch64 loop in the two dialects that assemble it.} GAS puts a NEON instruction's
+     arrangement on the REGISTERS ([fmla v2.4s, v3.4s, v4.4s]) and Apple's assembler puts it on the
+     MNEMONIC ([fmla.4s v2, v3, v4]), and the counts have to read the same either way: an
+     instruction's class is a fact about the instruction, not about how a listing spells it.
+
+     This is the fourth Mach-O detail to have silenced the census (gh-ocannl-752), and the first to
+     silence only the COUNTS: the dot-less labels, the checksummed [.file] and the [;] annotation
+     each made every loop go missing, which every "found" claim reports at once. Here the loops were
+     found, the spans and instruction totals were right, and only the vector/scalar split read zero
+     -- so the tile rows on CI's macos-latest leg were being judged on the handful of instructions
+     the operand rules happened to catch ([ldr q0], [fcvtl v2.4s, v0.4h], which have no Apple alias)
+     out of the 28 to 78 real ones. That is why these two fixtures carry the counting claim below
+     and not merely the "is it found" one the probe started with: the found-ness was never in
+     question on this dialect. *)
+  let arm64_body spelling =
+    String.concat ~sep:"\n"
+      ([
+         "\t.file 1 \"/build/census_kernel.c\"";
+         "f:";
+         ".L2:";
+         "\t.loc 1 3 12";
+       ]
+      @ spelling
+      @ [ "\tfmax\ts5, s5, s6"; "\tb.ne\t.L2"; "\tret" ])
+  in
+  let arm64_gnu = arm64_body [ "\tfmax\tv0.4s, v0.4s, v1.4s"; "\tfmla\tv2.4s, v3.4s, v4.4s" ] in
+  let arm64_apple = arm64_body [ "\tfmax.4s\tv0, v0, v1"; "\tfmla.4s\tv2, v3, v4" ] in
   let censused asm = Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor in
   Verdict.p_all "the census reads both assembler dialects, not only this host's"
-    [ ("gnu/elf", elf); ("apple-clang", darwin_clang); ("apple-clang+libm", darwin_with_libm) ]
+    [
+      ("gnu/elf", elf);
+      ("apple-clang", darwin_clang);
+      ("apple-clang+libm", darwin_with_libm);
+      ("arm64/gas", arm64_gnu);
+      ("arm64/apple", arm64_apple);
+    ]
     ~f:(fun (_, asm) -> Census.loop_edges ~asm > 0 && Option.is_some (censused asm));
+  (* Exact counts rather than "the two agree": agreement alone is what the blind reading also
+     satisfied, both dialects having answered [vector=0 scalar_fp=0] before the arrangement
+     mnemonics were read. Two packed instructions and one scalar one, in a fixture of three, so the
+     claim fails if either dialect's packed forms stop counting AND if a packed form starts counting
+     as scalar work (or the [fmax s5] scalar one as packed). *)
+  Verdict.p_all "both arm64 dialects' instructions are classified, not only their loops found"
+    [ ("arm64/gas", arm64_gnu); ("arm64/apple", arm64_apple) ]
+    ~f:(fun (_, asm) ->
+      match censused asm with
+      | Some c -> c.Census.counts.Census.vector_ops = 2 && c.Census.counts.Census.scalar_fp_ops = 1
+      | None -> false);
   Verdict.p "a libm call spelled the Mach-O way is still counted as one"
     (match censused darwin_with_libm with
     | Some c -> c.Census.counts.Census.libm_calls > 0

@@ -40,8 +40,9 @@
     Classification is by mnemonic, from GAS output for x86-64 and aarch64:
 
     - {b vector_ops}: packed-SIMD instructions -- an x86 mnemonic ending in [ps]/[pd]/[ph], a packed
-      integer mnemonic, an operand naming [%ymm]/[%zmm], or an aarch64 operand in vector-lane form
-      ([v0.2d], [q0]).
+      integer mnemonic, an operand naming [%ymm]/[%zmm], an aarch64 operand in vector-lane form
+      ([v0.2d], [q0]), or an aarch64 mnemonic carrying the arrangement instead ([fmla.4s]), which is
+      how Apple's assembler spells the same instruction.
     - {b scalar_fp_ops}: an x86 mnemonic ending in [ss]/[sd]/[sh], or an aarch64 [f...] instruction
       on a scalar FP register. This is the count that gives away SLP scalarization, which leaves no
       stack traffic behind.
@@ -50,6 +51,10 @@
       cannot be vectorized at any optimization level or grid size.
     - {b stack_refs}: instructions addressing through the stack or frame pointer -- the spill signal
       gh-ocannl-614 measured.
+
+    Both aarch64 spellings are read, because both are compiled in CI and a dialect must not change
+    the reading: a count is a fact about the instruction, and the same loop assembled two ways has
+    to census the same. Both are exercised in [test/operations/cc_march_census]'s dialect probes.
 
     Moves are the fuzzy edge (an [%xmm] operand does not by itself say whether a [movq] moved a lane
     or a vector), so the mnemonic rule below is deliberately narrow and the counts are reported as a
@@ -248,6 +253,27 @@ let aarch64_vector_operand rest =
   in
   scan 0
 
+(* Apple's arm64 assembler writes a NEON instruction's ARRANGEMENT on the mnemonic ([fmla.4s v0,
+   v1, v2]) where GAS writes it on the registers ([fmla v0.4s, v1.4s, v2.4s]), so on that dialect
+   {!aarch64_vector_operand} sees three plain [v] names and reports nothing. That silences the
+   COUNTERS -- not the selection, and not the loop edges, which is why it survived the three earlier
+   Mach-O rounds: the loop was found, its span and instruction total were right, and only the
+   vector/scalar split read zero. CI's macos-latest leg censused a register-tiled bf16 k-loop of 24
+   [fmla.4s], 6 [shll.4s] and 4 [dup.4s] as [vector=0 scalar_fp=0] and failed the vector-majority
+   claim on [0 > 0]; the two tile rows beside it PASSED that claim on 3 and 10 instructions the
+   [q<n>] and [v<n>.<arr>] rules happened to catch out of 28 and 78 real ones -- a pass arrived at
+   from the same blindness (gh-ocannl-752).
+
+   The suffix has to be an arrangement and not merely a dot: aarch64 spells its conditional branches
+   [b.ne], and counting those as vector work would make every loop in every listing report at least
+   one. *)
+let aarch64_arrangements = [ "8b"; "16b"; "4h"; "8h"; "2s"; "4s"; "1d"; "2d" ]
+
+let aarch64_arrangement_mnemonic m =
+  match String.rsplit2 m ~on:'.' with
+  | Some (_, suffix) -> List.mem aarch64_arrangements suffix ~equal:String.equal
+  | None -> false
+
 let aarch64_scalar_fp rest =
   let n = String.length rest in
   let rec scan i =
@@ -270,6 +296,7 @@ let is_vector_insn ~mnemonic ~rest =
   | Some (`Scalar, _) -> false
   | None ->
       packed_integer_mnemonic mnemonic || has_substr rest ~sub:"%ymm" || has_substr rest ~sub:"%zmm"
+      || aarch64_arrangement_mnemonic mnemonic
       || aarch64_vector_operand rest
 
 let is_scalar_fp_insn ~mnemonic ~rest =
@@ -278,8 +305,11 @@ let is_scalar_fp_insn ~mnemonic ~rest =
   | Some (`Packed, _) -> false
   | None ->
       (* aarch64: an [f...] instruction whose operands are scalar FP registers. [fcmp s0, s0] and
-         [fcsel s1, s2, s3, ne] are what a scalarized lane loop leaves behind. *)
+         [fcsel s1, s2, s3, ne] are what a scalarized lane loop leaves behind. An Apple-dialect
+         [fmla.4s v0, v1, v2] is excluded by the mnemonic, the way its GAS spelling is excluded by
+         the operands: neither count may claim it twice, and it is the packed one. *)
       String.is_prefix mnemonic ~prefix:"f"
+      && (not (aarch64_arrangement_mnemonic mnemonic))
       && (not (aarch64_vector_operand rest))
       && aarch64_scalar_fp rest
 
