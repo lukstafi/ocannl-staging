@@ -41,6 +41,9 @@ git -C "$main" push -q -u origin master
 cat >"$fake_bin/opam" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$SWEEP_TEST_CALLS"
+# Stands in for what a failing dune run writes to the unit's log, so a test can
+# put a chosen failure text in front of `fingerprint` without a GPU.
+[ -n "${SWEEP_TEST_OPAM_OUT:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT"
 if [ -n "${SWEEP_TEST_WAIT_PREFIX:-}" ]; then
   : >"$SWEEP_TEST_WAIT_PREFIX.ready"
   waited=0
@@ -67,6 +70,7 @@ run_sweep_backend() {
   SWEEP_TEST_CALLS=$calls \
   SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-} \
   SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0} \
+  SWEEP_TEST_OPAM_OUT=${SWEEP_TEST_OPAM_OUT:-} \
   OCANNL_TOOL_SWEEP_REPO=$main \
   OCANNL_TOOL_SWEEP_STATE=$state \
     "$sweep" --only "$backend" "$@"
@@ -129,7 +133,17 @@ holder_pid=
 #
 # A red unit, not a green one: this is diagnosis, and emitting it on a pass would
 # run dune a second time on every sweep.
-SWEEP_TEST_OPAM_RC=1 run_sweep_backend metal >"$tmp/metal.out" 2>&1
+# The failure text the fake dune writes. Its second line is the shape
+# `cuda_to_ptx` appends to nvrtc's message when a compile fails -- the one
+# PRODUCTION option vector a sweep can ever hold, as opposed to the sentinel
+# policy vectors the context block prints. `fingerprint` is backend-blind, so the
+# local metal unit is enough to pin that the line survives extraction; what would
+# need a GPU is producing it, and that half was checked against a real rejected
+# nvrtc compile on rog-nv (Codex P2 on PR #510).
+nvrtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
+nvrtc options: -I/usr/local/cuda/include --use_fast_math'
+SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$nvrtc_failure \
+  run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"
 # The recorded outcome is the column the collection must not be able to corrupt.
 # Folded into the unit, the diagnostic shares the unit's CAP, and a red suite that
@@ -145,6 +159,12 @@ grep -q 'MSL options are still assembled in metal_backend.ml' "$metal_log"
 # The fingerprint is what a caller diffs against yesterday's, so the block has to
 # reach it and not merely the log.
 grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
+# And so does the effective vector of a failed compile, which reaches the log as
+# an ordinary line of the exception message: it begins neither at an error site
+# nor at `Error`/`Fatal error`/`Exception`, so before its own selector existed it
+# stopped at the log and never reached the file callers diff.
+grep -q '^nvrtc options: -I/usr/local/cuda/include --use_fast_math$' \
+  "${metal_log%.log}.fingerprint"
 
 # And a GREEN unit must NOT pay for it -- the same backend, so the only thing
 # that differs is the outcome. The log path is derived from the sweep's timestamp

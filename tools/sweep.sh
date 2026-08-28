@@ -602,6 +602,15 @@ fingerprint() {
   {
     grep -hoE '^File "[^"]+", line [0-9]+' "$1"
     grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$1"
+    # The one PRODUCTION option vector a sweep can ever hold: `cuda_to_ptx`
+    # appends it to the nvrtc message it re-raises, so a CUDA compile failure --
+    # and only a compile failure -- carries the flags it was compiled under on its
+    # own line. The selectors above cannot reach it (it starts neither at an error
+    # site nor at `Error`/`Fatal error`/`Exception`), so it stopped at the log and
+    # never reached the file callers actually diff (Codex P2 on PR #510). Matched
+    # by the prefix the backend writes, not by the rendered vector, so a changed
+    # option set shows up as a fingerprint diff rather than as a missing line.
+    grep -hoE '^nvrtc options: .*' "$1"
   } 2>/dev/null | sort -u | head -60
   # The rtc-context block a failing GPU unit appended (see rtc_context_cmd),
   # verbatim and unsorted: it is a small fixed-size report whose ORDER is what
