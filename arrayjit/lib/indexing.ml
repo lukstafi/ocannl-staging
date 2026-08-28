@@ -233,10 +233,6 @@ type projections = {
 
 let iterated dim = dim > 1
 
-(** The iterator symbols of each product component, in [components] order. *)
-let component_iterators (p : projections) : symbol list array =
-  Array.map p.components ~f:(List.map ~f:snd)
-
 (** Every product iterator of [p], across all components and all their segments. *)
 let all_iterators (p : projections) : symbol list =
   Array.to_list p.components |> List.concat_map ~f:(List.map ~f:snd)
@@ -325,12 +321,6 @@ let affine_injective ~symbol_range (project_lhs : axis_index array) : bool =
   in
   Set.equal (fixpoint (Set.empty (module Symbol))) all_syms
 
-(** The extents of the product-space components of [p]: one entry per component, in [components]
-    order. A concatenation component's extent is the sum of its segment extents. Non-iterated
-    (dimension-1) axes do not appear. *)
-let prod_dims (p : projections) : int array =
-  Array.map p.components ~f:(List.fold ~init:0 ~f:(fun acc (d, _) -> acc + d))
-
 (** The identity projection of a tensor laid out over the full product space of [p] (e.g. the
     (output x kernel) pair space of a windowed reduction): the tensor's axes are the product
     components, possibly interleaved with non-iterated (dimension-1) axes, which the product space
@@ -352,8 +342,15 @@ let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
             (dims_to_string dims)
             (Sexp.to_string_hum ([%sexp_of: component array] p.components)))
   in
+  (* One (extent, iterators) entry per product component, in [components] order. A concatenation
+     component's extent is the sum of its segment extents; non-iterated (dimension-1) axes do not
+     appear as components at all. *)
   let comps =
-    ref (Array.to_list (Array.zip_exn (prod_dims p) (component_iterators p)))
+    ref
+      (Array.to_list p.components
+      |> List.map ~f:(fun segments ->
+             ( List.fold segments ~init:0 ~f:(fun acc (d, _) -> acc + d),
+               List.map segments ~f:snd )))
   in
   let take_first_by_extent d =
     let rec go acc = function
