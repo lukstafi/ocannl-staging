@@ -107,18 +107,34 @@ let composite_case () =
   Verdict.p "the composite loss's zero_grads zeroes the backprop's gradients plus its own seed"
     (Set.equal written (Set.add bprop_written (grad_of loss)));
   (* The parameters' gradients are among them: that is why a routine compiled from the loss's
-     zeroing code alone can allocate what the backprop later accumulates into. *)
-  Verdict.p_all "the composite loss's zero_grads embeds each parameter's gradient" [ w; b ]
-    ~f:(fun p -> Set.mem embedded (grad_of p));
+     zeroing code alone can allocate what the backprop later accumulates into. The population comes
+     from [loss.params] rather than from the two names bound above, which would be the same
+     restatement the derived sets exist to avoid. *)
+  let param_grads =
+    Set.of_list (module Tn) (List.map (Set.to_list loss.Tensor.params) ~f:grad_of)
+  in
+  Verdict.p_all "the composite loss's zero_grads embeds each parameter's gradient"
+    (Set.to_list param_grads) ~f:(Set.mem embedded);
   (* The lost-recursion-step control, which is the reason the backprop witness is here. Shrinking
-     both sets by the same interior gradient is precisely what a dropped operand recursion does to
-     them; the first claim records that field agreement survives it (so the inclusions above are
-     genuinely blind to it), the second that backprop coverage does not. *)
-  let victim = Set.min_elt_exn bprop_written in
-  Verdict.p "field agreement alone cannot see a lost recursion step"
-    (Set.equal (Set.remove embedded victim) (Set.remove written victim));
-  Verdict.p "backprop coverage does see a lost recursion step"
-    (not (Set.for_all bprop_written ~f:(Set.mem (Set.remove written victim))));
+     both sets by the same gradient is precisely what a dropped operand recursion does to them; the
+     first claim records that field agreement survives it (so the inclusions above are genuinely
+     blind to it), the second that backprop coverage does not.
+
+     The victims must be INTERIOR gradients, and they are derived as such (Codex round 2, P2):
+     [Tnode.compare] orders by monotonically assigned uid, so picking the minimum of
+     [bprop_written] deterministically lands on the earliest-created node -- a PARAMETER gradient,
+     already covered by the claim just above. A control that only re-drops a parameter gradient
+     never shows what it is here to show: that the witness catches an omitted intermediate while
+     both parameter endpoints stay present. Excluding [param_grads] leaves exactly the interior
+     ones, and quantifying over all of them beats picking one -- the guard then also asserts this
+     graph HAS an interior gradient to drop, which is what makes the control meaningful at all. *)
+  let interior_grads = Set.to_list (Set.diff bprop_written param_grads) in
+  Stdio.eprintf "composite interior gradients: %s\n"
+    (names (Set.diff bprop_written param_grads));
+  Verdict.p_all "field agreement alone cannot see any lost interior recursion step" interior_grads
+    ~f:(fun g -> Set.equal (Set.remove embedded g) (Set.remove written g));
+  Verdict.p_all "backprop coverage sees every lost interior recursion step" interior_grads
+    ~f:(fun g -> not (Set.for_all bprop_written ~f:(Set.mem (Set.remove written g))));
   (* The field-agreement control: both directions of that check must be able to fail on this very
      tree, or the two inclusions above could be passing for a reason that has nothing to do with
      the derivation. *)
