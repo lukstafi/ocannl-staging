@@ -40,13 +40,17 @@
    every batch does not do this: rotate-then-reverse leaves each arm at the same position in both
    halves.) An even batch count balances the pairs exactly, which is why the default is even. Timing
    one site to completion before the next puts the drift straight into the difference under test,
-   and reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches
+   and reversing the site order only moves that bias. Three statistics per arm: [repeats] dispatches
    queued back-to-back with one sync -- the sync only, never a device-to-host readback, which would
    put a transfer and a host allocation inside the timed region (what a kernel sustains inside a
-   step, and the summary's statistic, taken at the MEDIAN batch), and the tuner's own
-   one-dispatch-one-sync minimum, which reads up to 2.6x higher.
+   step, and the summary's statistic, taken at the MEDIAN batch), and [Autotune.time_routine] in
+   each of its two modes ([Isolated], one dispatch and one sync, which reads up to 2.6x higher; and
+   [Queued], its gh-ocannl-755 companion), minimized over the same interleaved passes. The last two
+   are the TUNER'S instrument rather than a re-derivation of it, which is what makes the closing
+   gh-ocannl-755 table a comparison of the ranking a search would produce against the ranking
+   steady-state throughput produces, and not of two lookalikes.
 
-   Which of the three numbers on a line to believe depends on what the noise is. The median is the
+   Which of the numbers on a line to believe depends on what the noise is. The median is the
    right summary when the noise is symmetric, which is why it is the summary. On a CONTENDED box it
    is not: interference only ever makes a batch slower, so the median wanders (20% between the two
    arms of a duplicated site on one measured run) while the two minima stay put (5% and 0.5% across
@@ -151,6 +155,12 @@ let geom_label (q : Autotune.sketch_params) =
    and the winner directly. Same clock [Autotune.time_routine] measures with. *)
 let elapsed c = Mtime.Span.to_float_ns (Mtime_clock.count c) /. 1e9
 
+(* The [autotune_repeats] default, pinned rather than read: the gh-ocannl-755 columns are meant to
+   be the measurement a DEFAULT search takes of each arm, so an ambient OCANNL_AUTOTUNE_REPEATS
+   would silently change what they are a comparison of. *)
+let tuner_repeats = 3
+let fst4 (a, _, _, _) = a
+
 (* One site: a batched matmul [d[bs.., m, j] += a[bs.., m, kk..] * w[j, kk..]]. [ks] is the weight's
    input-axis list -- a singleton for the q/k/v shape, a pair for the out projection's multi-axis
    contraction. *)
@@ -214,7 +224,8 @@ type live = {
   lv_launch : string;
   lv_parity : bool;
   lv_times : float list ref;
-  lv_single : float ref;
+  lv_iso : float ref;
+  lv_queued : float ref;
   lv_failed : bool ref;
       (** Set when a timed dispatch raises: the arm stops being visited, is not reported, and its
           cell is counted -- a recoverable per-candidate failure must not abort a run that still has
@@ -464,7 +475,8 @@ let () =
         lv_launch = launch;
         lv_parity = parity;
         lv_times = ref [];
-        lv_single = ref Float.infinity;
+        lv_iso = ref Float.infinity;
+        lv_queued = ref Float.infinity;
         lv_failed = ref false;
       }
     with
@@ -499,6 +511,12 @@ let () =
     let idx = Array.init n ~f:(fun i -> (i + (b / 2)) % n) in
     if b % 2 = 1 then Array.rev_inplace idx;
     idx
+  in
+  (* gh-ocannl-755's deliverable: per site, each arm's batched median beside the tuner's own two
+     metrics, in seconds, so the closing table can rank the same population three ways. Filled by
+     [report], which is the one place that has already decided an arm was measured. *)
+  let instrument : (string, (string * float * float * float) list) Hashtbl.t =
+    Hashtbl.create (module String)
   in
   let time_round lives =
     let arr = Array.of_list lives in
@@ -542,24 +560,34 @@ let () =
               lv.lv_times := (elapsed c /. Float.of_int repeats) :: !(lv.lv_times))
         done
       done;
-      (* An independently sampled diagnostic, not a reproduction of [Autotune.time_routine]: one
-         dispatch, one sync, minimum over exactly [repeats] samples, where the tuner keeps sampling
-         past its repeat count until ~25 ms have accumulated (up to 64 runs) and its minimum
-         therefore improves with a sample count this loop does not match. What it is FOR is the
-         shape of the statistic -- a min over single sync'd launches, which is what a min-of-N
-         per-kernel profile reports, and which reads up to 2.6x from the steady-state figure on the
-         same routine. Interleaved for the same reason as the batches. *)
-      for b = 0 to repeats - 1 do
+      (* gh-ocannl-755: the TUNER'S OWN instrument, in both of its modes, on the same arms in the
+         same round -- not a re-derivation of it. This used to be a hand-rolled min-over-single-
+         launches loop that resembled [Autotune.time_routine] without being it (a different sample
+         count, no top-up), which is exactly the shape a ranking comparison must not have: the
+         question is whether the tuner's metric crowns a different candidate than the batched one,
+         so the isolated column has to be the metric a search actually ranks by. [tuner_repeats] is
+         the [autotune_repeats] default, so each call is the measurement a default search would
+         take; the min over [nbatches] such calls is this bench's usual defence against a batch that
+         drew contention, and it is interleaved for the same reason the batches are.
+
+         The returned context is dropped as the tuner drops it: [time_routine] threads its own
+         [Context.run] chain internally and never hands the last one back, and the arm's [lv_ctx] is
+         still the lineage every later dispatch continues from. *)
+      for b = 0 to nbatches - 1 do
         let ord = visit_order n b in
         for i = 0 to n - 1 do
           let lv = arr.(ord.(i)) in
-          attempt lv (fun () ->
-              let c = Mtime_clock.counter () in
-              Outcome.tag Outcome.Launch (fun () ->
-                  lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine);
-              Outcome.tag Outcome.Sync (fun () -> Context.sync !(lv.lv_ctx));
-              let dt = elapsed c in
-              if Float.(dt < !(lv.lv_single)) then lv.lv_single := dt)
+          let sample slot timing =
+            attempt lv (fun () ->
+                let ms =
+                  Autotune.time_routine ~tag_failures:true ~timing ~repeats:tuner_repeats
+                    !(lv.lv_ctx) lv.lv_routine
+                in
+                let dt = ms /. 1000. in
+                if Float.(dt < !slot) then slot := dt)
+          in
+          sample lv.lv_iso Autotune.Isolated;
+          sample lv.lv_queued Autotune.Queued
         done
       done
     end
@@ -576,10 +604,17 @@ let () =
       if n % 2 = 1 then sorted.(n / 2) else (sorted.((n / 2) - 1) +. sorted.(n / 2)) /. 2.
     in
     let g t = lv.lv_flops /. t /. 1e9 in
-    p "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f, min1 %7.1f)  spread %4.1f%%  %s\n" lv.lv_tag
-      lv.lv_label (g median) (g best) (g !(lv.lv_single))
+    p
+      "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f)  tuner iso %8.1f q %8.1f  spread %4.1f%%  %s\n"
+      lv.lv_tag lv.lv_label (g median) (g best)
+      (g !(lv.lv_iso))
+      (g !(lv.lv_queued))
       ((worst -. best) /. best *. 100.)
       lv.lv_launch;
+    Hashtbl.update instrument ~f:(function
+      | None -> [ (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) ]
+      | Some l -> (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) :: l)
+      lv.lv_tag;
     g median
   in
   (* On the success path a release failure is a failed cell, not something to swallow: the arm's
@@ -751,6 +786,58 @@ let () =
     String.chop_prefix_if_exists ~prefix:"cpu " (String.chop_prefix_if_exists ~prefix:"gpu " c)
     |> String.split ~on:'/' |> List.hd_exn
   in
+  (* gh-ocannl-755: does the tuner's objective rank the candidates the way steady-state throughput
+     does? One table per site over the SEED arms only -- the untuned default and a crowned search
+     compile their own lowering, so they are not members of the population a tuning round ranks.
+     Ranks are printed rather than left to the reader because the whole question is whether two
+     orderings differ, and a crown that moves is a rank-1 disagreement specifically. *)
+  p "\n\n== gh-ocannl-755: candidate ranking under the two timing instruments ==\n";
+  p
+    "   batched = this bench's median batch (%d dispatches queued, one sync); iso/queued = \
+     Autotune.time_routine ~repeats:%d in each mode, min over %d interleaved calls\n"
+    repeats tuner_repeats nbatches;
+  List.iter sites ~f:(fun s ->
+      let arms =
+        Option.value (Hashtbl.find instrument s.tag) ~default:[]
+        |> List.filter ~f:(fun (l, _, _, _) ->
+            (not (String.is_prefix l ~prefix:"default")) && not (String.is_prefix l ~prefix:"TUNED"))
+      in
+      if List.is_empty arms then p "\n   %s: no seed arm was measured\n" s.tag
+      else begin
+        (* Rank by a projection: position of each arm's label in that projection's ascending order
+           of time. Derived from the same list all three columns come from, so a rank can never
+           describe a different population than the number beside it. *)
+        let rank_of key =
+          let ordered =
+            List.sort arms ~compare:(fun a b -> Float.compare (key a) (key b))
+            |> List.mapi ~f:(fun i (l, _, _, _) -> (l, i + 1))
+          in
+          fun label -> List.Assoc.find_exn ordered label ~equal:String.equal
+        in
+        let batched (_, m, _, _) = m and iso (_, _, i, _) = i and queued (_, _, _, q) = q in
+        let r_b = rank_of batched and r_i = rank_of iso and r_q = rank_of queued in
+        let crown key = fst4 (List.hd_exn (List.sort arms ~compare:(fun a b -> Float.compare (key a) (key b)))) in
+        p "\n   %s (%.1f MFLOP)\n" s.tag (flops s /. 1e6);
+        (* The last two columns subtract the two TUNER columns from each other, never the batched
+           one: iso and queued are the same statistic (a min over the same interleaved passes) of
+           the same instrument, so their difference is the per-launch round trip and nothing else,
+           whereas batched is a median of noisy batches and differencing against it would mix the
+           instrument offset with the choice of summary. *)
+        p "   %-26s %10s %10s %10s   %5s %5s %5s   %9s %7s\n" "candidate" "batched" "iso" "queued"
+          "rank" "rank" "rank" "iso-queued" "iso/";
+        p "   %-26s %10s %10s %10s   %5s %5s %5s   %9s %7s\n" "" "ms" "ms" "ms" "bat" "iso" "que"
+          "us" "queued";
+        List.iter (List.sort arms ~compare:(fun a b -> Float.compare (batched a) (batched b)))
+          ~f:(fun ((l, m, i, q) as a) ->
+            p "   %-26s %10.4f %10.4f %10.4f   %5d %5d %5d   %9.1f %7.2f\n" l (m *. 1e3) (i *. 1e3)
+              (q *. 1e3) (r_b l) (r_i l) (r_q l)
+              ((iso a -. queued a) *. 1e6)
+              (iso a /. queued a));
+        let cb = crown batched and ci = crown iso and cq = crown queued in
+        p "   crown: batched %S | iso %S | queued %S -- %s\n" cb ci cq
+          (if String.equal cb ci then "the isolated instrument crowns the batched winner"
+           else "THE CROWN MOVES between the two instruments")
+      end);
   p "\n\n== summary (GFLOP/s, median timing batch) ==\n";
   p
     "   the named-geometry columns compare arms measured in ONE interleaved round; bestseed ranks \

@@ -993,6 +993,53 @@ val set_test_bindings : Context.routine -> unit
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
+type timing_mode =
+  | Isolated
+      (** One launch followed by a host synchronization: the number is the latency of a lone
+          dispatch, kernel plus one submit/sync round trip. What every schedule crowned before
+          gh-ocannl-755 was ranked by, and the right objective for a workload that really does
+          dispatch one kernel and wait for it. *)
+  | Queued
+      (** A calibrated number of launches dispatched back to back with one synchronization, divided
+          by the count: the round trip is amortized and the number is what the kernel sustains
+          inside a stream that already has work in it. The default, because that is what a training
+          step presents — it queues every kernel of a layer and synchronizes at the end, so no
+          kernel in it pays a round trip of its own. *)
+
+(** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
+    [autotune_timing].
+
+    The two are different objectives and they do not crown the same candidate. On gfx1151 the
+    submit/sync round trip is ~50-60 us while the fastest candidates at the gpt2_mini out-projection
+    shape run in 60-70 us, so {!Isolated} reads about 2x the steady-state cost there — and the
+    offset varies from candidate to candidate with the block count and the per-launch queue work
+    (41-74 us over that site's ten seeded geometries), which is what lets two candidates 10% apart
+    in steady state swap places. Consequently a [best_ms] measured under {!Isolated} is not a
+    throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
+    is, up to the batch's residual ~1% of round trip. *)
+
+val timing_of_setting : string -> timing_mode
+(** Parses the [autotune_timing] spelling ([isolated] / [queued], case- and space-insensitive);
+    raises [Invalid_argument] on anything else. *)
+
+val time_routine :
+  ?tag_failures:bool -> ?timing:timing_mode -> repeats:int -> Context.t -> Context.routine -> float
+(** The tuner's own instrument, exposed so a harness can rank candidates by exactly what a search
+    ranks them by (gh-ocannl-755) rather than by a re-derivation of it. Binds test values
+    ({!set_test_bindings}) and restores the routine's bindings afterwards, runs one warmup, then
+    minimizes the per-launch time over at least [repeats] timed runs, topping up until ~25 ms of
+    wall time has accumulated (at most 64 runs) so that a sub-millisecond candidate is not crowned
+    by one lucky sample. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth
+    is calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
+    than that target is measured identically in both modes.
+
+    With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
+    wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
+    {!Ir.Schedule_outcome.protect} attribute a failure to the phase it happened in; without it they
+    propagate raw. Timing dispatches the routine repeatedly against live buffers, so an accumulating
+    routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
+    afterwards. *)
+
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's
     label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533);
@@ -1042,7 +1089,11 @@ val tune :
      search also stops when a round improves the incumbent by less than 1%. *)
   ?repeats:int ->
   (* Timed runs per candidate (after one warmup), min taken; default from config [autotune_repeats]
-     (3). *)
+     (3). In [Queued] timing each such run is a whole batch of dispatches, so this is a floor on
+     batches rather than on launches. *)
+  ?timing:timing_mode ->
+  (* What a candidate's time is a measurement of; default from config [autotune_timing]
+     ([queued]). See {!timing_mode}. *)
   ?seed_block_sizes:int list ->
   (* Workgroup sizes swept through {!Ir.Schedule.default_gpu} as seed candidates on GPU backends
      (default [[64; 128; 256; 512]]), both whole-routine and per-fission-segment, in addition to the

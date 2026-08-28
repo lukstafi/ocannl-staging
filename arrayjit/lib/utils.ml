@@ -146,6 +146,7 @@ let known_config_keys =
       "autotune_beam_width";
       "autotune_rounds";
       "autotune_repeats";
+      "autotune_timing";
       "autotune_cache_dir";
       "autotune_split_reduce_max_sites";
       "autotune_log";
@@ -319,6 +320,16 @@ let config_key_classification : (config_key_class * string * string list) list =
         "model_peak_memory_bandwidth";
         "strict_failure_classification";
       ] );
+    ( Search_shaping,
+      "it picks the objective a candidate is timed against -- the latency of a lone dispatch, or \
+       what the kernel sustains under queue depth -- and the two do not crown the same candidate \
+       (gh-ocannl-755). Search_shaping and not Keyed all the same, for the reason the class names: \
+       the schedule a search under either setting crowns is a legal schedule that replays to the \
+       same kernels and runs at the same speed, and replay consults nothing here. Two processes \
+       differing only in it may find different winners, and each winner is a valid winner for the \
+       other -- exactly as for autotune_repeats, which also changes which candidate wins by \
+       changing how it is measured",
+      [ "autotune_timing" ] );
     ( Search_shaping,
       "it makes the tuner try alternative inlining decisions; each alternative is a different \
        program and keys on its own digest",

@@ -217,6 +217,52 @@ let set_test_bindings routine =
 let min_timing_ms = 25.
 let max_timing_runs = 64
 
+(* gh-ocannl-755: what a timed candidate's number is a measurement OF. [Isolated] times one launch
+   followed by a host synchronization, so the number is the latency of a lone dispatch — the kernel
+   plus one submit/sync round trip. [Queued] dispatches a calibrated number of launches back to back
+   and synchronizes once, dividing by the count, so the round trip is amortized and what is left is
+   what the kernel sustains inside a stream that already has work in it.
+
+   They are not the same objective and they do not crown the same candidate. On gfx1151 the round
+   trip is ~50-60 us; at the gpt2_mini out-projection shape (134 MFLOP) the fastest candidates run
+   in 60-70 us, so [Isolated] reads about 2x their steady-state cost — and the offset is not a
+   constant the ranking could ignore: measured per candidate over that site's ten seeded geometries
+   it ranges from 41 us to 74 us, varying with the block count and the per-launch queue work. Two
+   candidates 10% apart in steady state can therefore swap places once each has ~55 us of host round
+   trip added to it, and at that site they do. See the tables in gh-ocannl-755.
+
+   [Queued] is the default because it is the objective the workload presents: a training step queues
+   every kernel of a layer into one stream and synchronizes at the end, so no kernel in it pays a
+   round trip of its own. [Isolated] remains selectable for a workload that really does dispatch one
+   kernel and wait — and because it is what every schedule crowned before gh-ocannl-755 was ranked
+   by. *)
+type timing_mode = Isolated | Queued
+
+(* Queued mode's batch depth is calibrated per candidate rather than fixed. A fixed depth is either
+   too shallow to amortize the round trip on a fast kernel, or minutes of uninterruptible dispatches
+   on a slow one — and the tuner meets both within one search. [queued_batch_ms] is the wall time
+   one batch aims for: at a ~60 us round trip it keeps the overhead under 1% of the reading, and it
+   makes a queued candidate cost the same wall time as an isolated one, since [min_timing_ms] bounds
+   the accumulated wall in both modes. [max_queue_depth] stops a microsecond kernel from minting an
+   unbounded batch. A routine slower than the target gets depth 1 and is then measured exactly as
+   [Isolated] measures it, which is the right degeneracy: there is nothing left to amortize. *)
+let queued_batch_ms = 10.
+let max_queue_depth = 200
+
+(* The depth is calibrated from timed single launches, not from the warmup: the warmup absorbs lazy
+   initialization and module loading, so on a fast kernel it can overestimate by enough to collapse
+   the depth to 1 and silently turn a queued search into an isolated one. Min over a handful, for
+   the same reason the measurement itself is a min — an overestimate only shortens the batch, but a
+   badly overestimating single sample shortens it a lot. *)
+let queue_calibration_runs = 3
+
+let timing_of_setting s =
+  match String.lowercase (String.strip s) with
+  | "isolated" -> Isolated
+  | "queued" -> Queued
+  | other ->
+      invalid_arg ("ocannl_autotune_timing setting should be isolated or queued; found: " ^ other)
+
 (* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
    rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
    Needed because the causes this phase contains — an unsatisfied dependency, an out-of-range
@@ -226,7 +272,7 @@ let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ()
 
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
-let time_routine ?(tag_failures = false) ~repeats cctx routine =
+let time_routine ?(tag_failures = false) ?(timing = Isolated) ~repeats cctx routine =
   let saved_bindings = List.map routine.Context.bindings ~f:(fun (_ss, r) -> (r, !r)) in
   let run ctx =
     if tag_failures then Outcome.tag Outcome.Launch (fun () -> Context.run ctx routine)
@@ -255,20 +301,46 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
       (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
       let ctx = ref (run cctx) in
       sync !ctx;
+      (* Monotonic high-resolution clock: on Windows, [Unix.gettimeofday] ticks at ~1 ms, which
+         makes sub-millisecond candidates indistinguishable (they all measure 0). *)
+      let batch depth =
+        let c0 = Mtime_clock.counter () in
+        for _ = 1 to depth do
+          ctx := run !ctx
+        done;
+        sync !ctx;
+        Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6
+      in
+      let depth =
+        match timing with
+        | Isolated -> 1
+        | Queued ->
+            let est = ref Float.infinity in
+            for _ = 1 to queue_calibration_runs do
+              let dt = batch 1 in
+              if Float.(dt < !est) then est := dt
+            done;
+            (* A non-positive or non-finite estimate is a clock that resolved nothing, not a
+               zero-cost kernel: batch as deeply as the cap allows rather than degenerating to
+               isolated timing on the very routines queueing exists for. *)
+            if Float.(is_positive !est) && Float.is_finite !est then
+              Int.max 1 (Int.min max_queue_depth (Float.iround_up_exn (queued_batch_ms /. !est)))
+            else max_queue_depth
+      in
       let best = ref Float.infinity in
       let total = ref 0. in
       let count = ref 0 in
       while
         !count < max 1 repeats || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
       do
-        (* Monotonic high-resolution clock: on Windows, [Unix.gettimeofday] ticks at ~1 ms, which
-           makes sub-millisecond candidates indistinguishable (they all measure 0). *)
-        let c0 = Mtime_clock.counter () in
-        ctx := run !ctx;
-        sync !ctx;
-        let dt = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
-        total := !total +. dt;
+        (* [total] accumulates WALL time in both modes, so the top-up bounds how long timing a
+           candidate takes rather than how many launches it makes; [best] minimizes the PER-LAUNCH
+           time, which is the number the two modes disagree about. At [depth = 1] the two are the
+           same quantity and this loop is byte-for-byte the pre-gh-755 one. *)
+        let wall = batch depth in
+        total := !total +. wall;
         Int.incr count;
+        let dt = wall /. Float.of_int depth in
         if Float.(dt < !best) then best := dt
       done;
       !best)
@@ -2381,8 +2453,8 @@ let model_default ?name ?report ctx comp bindings =
    [Train.tune_placements] exists for. *)
 let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
 
-let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
-    ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
+let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?cache_dir
+    ?keep_fraction ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
      pinned schedule is deterministic, and committing one is how a reproducible run keeps a tuned
      schedule -- but never times candidates, whose crowning is the largest cross-machine determinism
@@ -2407,6 +2479,12 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
     Option.value repeats
       ~default:
         (int_setting ~default:3 @@ Utils.get_global_arg ~arg_name:"autotune_repeats" ~default:"3")
+  in
+  let timing =
+    Option.value timing
+      ~default:
+        (timing_of_setting
+        @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued")
   in
   let max_split_reduce_sites =
     max 0
@@ -2921,7 +2999,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                    and never reaches it (gh-ocannl-569). *)
                 Outcome.tag Outcome.Preflight (fun () ->
                     Context.check_lineage_runnable b.cctx b.routine);
-                time_routine ~tag_failures:true ~repeats b.cctx b.routine
+                time_routine ~tag_failures:true ~timing ~repeats b.cctx b.routine
               with
               | ms -> ms
               | exception Outcome.Raised_at (phase, exn, backtrace) ->
@@ -3269,7 +3347,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                       Outcome.protect ~classify_backend:(Context.failure_classifier c.cctx)
                         ~provenance:Outcome.Candidate ~phase:Outcome.Launch
                         ~candidate:(spec_label spec) (fun () ->
-                          time_routine ~tag_failures:true ~repeats c.cctx c.routine)
+                          time_routine ~tag_failures:true ~timing ~repeats c.cctx c.routine)
                     with
                     | Ok ms ->
                         Int.incr n_timed;
@@ -3769,7 +3847,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
           (if Lazy.force log_enabled then
              match Context.compile ?name search_ctx comp bindings with
              | cctx, croutine ->
-                 (match time_routine ~repeats cctx croutine with
+                 (match time_routine ~timing ~repeats cctx croutine with
                  | ms -> logf "untuned-default in-process control: %.4f ms" ms
                  | exception exn ->
                      logf "untuned-default control run failed: %s" (Exn.to_string exn));
