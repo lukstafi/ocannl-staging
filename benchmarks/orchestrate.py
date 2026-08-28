@@ -268,48 +268,127 @@ def _own_group_kwargs():
     return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
 
 
-def _signal_group(proc, sig):
-    """Send `sig` to the whole group led by `proc`, tolerating a group that is already gone."""
+def _signal_group(proc, force):
+    """Ask the whole group led by `proc` to stop (`force=False`) or kill it (`force=True`).
+
+    The escalation is a BOOLEAN rather than a signal number because the two platforms spell the
+    two steps in different vocabularies, and passing a POSIX signal through decides the Windows
+    branch by accident: `signal.SIGKILL` does not exist on Windows at all, so the obvious
+    "SIGKILL if posix else SIGTERM" hands the console-control branch its own SIGTERM and sends a
+    second CTRL_BREAK where the force kill was due — a cell that ignores CTRL_BREAK would then
+    never be killed while the sweep reports that it was (gh-ocannl-760 review).
+    """
     try:
         if os.name == "posix":
-            os.killpg(proc.pid, sig)
-        elif sig == signal.SIGTERM:
-            # The Windows console-control route: only a group leader spawned with
-            # CREATE_NEW_PROCESS_GROUP can be reached this way, and only with CTRL_BREAK.
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
             # /T walks the tree the group anchors, which is the point — see _own_group_kwargs.
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+        else:
+            # The Windows console-control route: only a group leader spawned with
+            # CREATE_NEW_PROCESS_GROUP can be reached this way, and only with CTRL_BREAK.
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
     except (ProcessLookupError, OSError):
         pass
 
 
+def _group_alive(pid):
+    """Whether the process group led by `pid` still has members.
+
+    Signal 0 tests for members without signalling them. An unreaped zombie leader counts, which is
+    why every caller reaps as it polls. On Windows there is no cheap equivalent — `taskkill /T` is
+    the enumeration — so the answer there is "assume gone" and the escalation is driven by the
+    pipe, as it was before.
+    """
+    if os.name != "posix":
+        return False
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Members exist; they are just not ours to signal (a setuid child). Not "gone".
+        return True
+    except OSError:
+        return False
+
+
 def kill_cell_group(proc):
-    """Kill a cell and everything it spawned; return the output it had produced.
+    """Kill a cell and everything it spawned; return `(output, survived)`.
 
     SIGTERM the group, give it `CELL_KILL_GRACE_S` to unwind, then SIGKILL it. The output read is
     what the run had already written: a wedged cell's log up to the point it stopped making
     progress is the only evidence about it the sweep will ever have, so it is kept rather than
     discarded with the process.
+
+    The escalation is decided by the GROUP and not by the cell's pipes (the discipline
+    `gh675_cells.kill_group` already runs on, for the same reason): a descendant that ignores
+    SIGTERM but does not hold stdout lets `communicate` return promptly, so keying the SIGKILL on
+    the pipe closing skips it exactly when it is needed — and the survivor keeps the GPU while the
+    sweep walks into the next cell and stamps its timing valid (gh-ocannl-760 review).
+
+    `survived` says a member outlived SIGKILL, which means it is stuck in the kernel (an
+    uninterruptible driver ioctl) and still holds the device. Unlike that standalone driver this
+    one does not stop the sweep over it — losing the run to a wedge is the cost gh-ocannl-760
+    exists to remove — but the caller says so in the cell's failure note, because every later cell
+    in the run was then measured against it.
     """
-    _signal_group(proc, signal.SIGTERM)
+    out = ""
+    reaped = False
+
+    def reap(timeout):
+        nonlocal out, reaped
+        if reaped:
+            return
+        try:
+            got, _ = proc.communicate(timeout=timeout)
+            out = got or out
+            reaped = True
+        except subprocess.TimeoutExpired:
+            pass
+        except ValueError:  # pipes already closed by an earlier communicate
+            reaped = True
+
+    for force in (False, True):
+        _signal_group(proc, force)
+        deadline = time.monotonic() + CELL_KILL_GRACE_S
+        while time.monotonic() < deadline:
+            reap(0.5)
+            if reaped and not _group_alive(proc.pid):
+                return out, False
+            time.sleep(0.05)
+    reap(1)
+    return out, _group_alive(proc.pid)
+
+
+def install_termination_handler():
+    """Make a SIGTERM to the sweep reach the cell the sweep is running (gh-ocannl-760 review).
+
+    The same `start_new_session` that lets the cap reach a cell's descendants detaches them from
+    the sweep's own signals, and Python's default SIGTERM action exits the interpreter without
+    unwinding — so a job cancellation, a scheduler's time limit or a plain `kill` on the sweep
+    would leave the runner and its whole worker pool orphaned, holding the GPU, with nobody left
+    to reap them. The handler turns the signal into an ordinary exception, which is all `run_cell`
+    needs: its `except BaseException` already kills the group and re-raises.
+
+    Installed from `main` rather than at import, since a process that merely imports this module
+    (the unit tests, a notebook) has its own idea of what SIGTERM should mean.
+    """
+
+    def handler(signum, _frame):
+        raise SystemExit(f"orchestrate: terminated by signal {signum}; killed the running cell")
+
     try:
-        out, _ = proc.communicate(timeout=CELL_KILL_GRACE_S)
-        return out or ""
-    except subprocess.TimeoutExpired:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):
+        # Not the main thread, or a platform without it: the cap still works, only the sweep's
+        # own cancellation goes back to being the caller's problem.
         pass
-    _signal_group(proc, signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
-    try:
-        # Bounded: with the group dead nothing holds the pipe, so this returns at once — but a
-        # sweep must not be able to hang in its own kill path either.
-        out, _ = proc.communicate(timeout=CELL_KILL_GRACE_S)
-        return out or ""
-    except subprocess.TimeoutExpired:
-        return ""
 
 
 def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
@@ -332,15 +411,22 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
         **_own_group_kwargs(),
     )
     timed_out = False
+    survived = False
     try:
         stdout, _ = proc.communicate(timeout=timeout or None)
     except subprocess.TimeoutExpired:
         timed_out = True
-        stdout = kill_cell_group(proc)
+        stdout, survived = kill_cell_group(proc)
     except BaseException:
         # An operator's Ctrl-C reaches the sweep alone once the cell is in its own group, so the
-        # cell would keep running (and keep the GPU) after the sweep is gone. Take it with us.
+        # cell would keep running (and keep the GPU) after the sweep is gone. Take it with us —
+        # and a cell killed here was killed midway just as surely as one over the cap, so the
+        # cache it was writing gets the same treatment. Ctrl-C on a wedged beam cell is the
+        # likeliest way anyone meets this bug by hand, and a retry over the cache that kill left
+        # behind is not the pass it claims to be (gh-ocannl-760 review).
         kill_cell_group(proc)
+        if on_timeout:
+            print(f"!!! {label} interrupted; {on_timeout()}", flush=True)
         raise
     stdout = stdout or ""
     if CELL_LOG_DIR:
@@ -362,6 +448,15 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_timeout=None):
             f"TIMED OUT after {timeout:.0f}s (cap; --cell-timeout raises it, 0 disables) — "
             "killed the cell's whole process group"
         )
+        if survived:
+            # A member outlived SIGKILL: it is stuck in the kernel and still holds the device, so
+            # every cell measured after it in this run was measured against it. The sweep goes on
+            # (that is the point of the cap) but no later row from this run is quotable until
+            # someone has cleared the survivor and re-run them.
+            note += (
+                "; A MEMBER SURVIVED SIGKILL and still holds the device — every later cell in "
+                "this run was measured against it, so clear the survivors and re-run them"
+            )
         cache_note = on_timeout() if on_timeout else ""
         if cache_note:
             note += f"; {cache_note}"
@@ -428,8 +523,8 @@ def quarantine_tinygrad_cache(env=None, enabled=True):
 
     OCANNL's tuned cell needs no equivalent: its schedule cache is a directory whose entries are
     written through `Utils.Atomic_file` (staged, then committed by rename), so a killed search
-    leaves complete entries and at most a staging file the next writer sweeps — a retry replays
-    the arms that finished, which the report's `search pass verdict` already states.
+    leaves complete entries and at most a staging file the next writer sweeps. Nothing there is
+    torn; what a retry over it costs is a mixed pass, which `ocannl_cache_note` states.
     """
     db = tinygrad_cachedb(env)
     if not db.exists():
@@ -441,11 +536,18 @@ def quarantine_tinygrad_cache(env=None, enabled=True):
     if not enabled:
         return f"CACHE AT RISK: {risk} (--no-cache-quarantine: left in place)"
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    quarantined = db.with_name(f"{db.name}.wedged-{stamp}")
     moved = []
-    for path in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+    # The sidecars are renamed UNDER the quarantined database's name, not beside their own:
+    # sqlite finds a write-ahead log only at `<database>-wal` (and its index at `-shm`), so
+    # `cache.db-wal.wedged-<stamp>` next to `cache.db.wedged-<stamp>` is a database that opens
+    # without the very writes the killed search had not checkpointed — the evidence this move
+    # exists to preserve, silently dropped (gh-ocannl-760 review).
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(f"{db}{suffix}")
         if not path.exists():
             continue
-        dest = path.with_name(f"{path.name}.wedged-{stamp}")
+        dest = Path(f"{quarantined}{suffix}")
         try:
             os.replace(path, dest)
         except OSError as exc:
@@ -460,11 +562,19 @@ def ocannl_cache_note():
     Nothing to undo — see `quarantine_tinygrad_cache` for why the two caches differ — but the
     retry's provenance is still not a from-scratch search's, and saying so where the failure is
     read is cheaper than rediscovering it from a `(cached)` compile cost.
+
+    What it must NOT claim is that the retry reports REPLAY. A kill lands mid-search, so the
+    retry's arms are mixed: those that finished replay, those that did not are searched again —
+    and `search_provenance` reads `searched`, which is true whenever ANY arm searched, so the
+    mixed pass reports SEARCHED. Its compile cost is then neither a from-scratch search's nor a
+    replay's while wearing the from-scratch label, which is precisely the misreading this note
+    exists to prevent (gh-ocannl-760 review).
     """
     return (
         "autotune_cache/ keeps the arms that finished before the kill (entries are committed "
-        "atomically, so none of them is torn); a retry replays those, and its search pass reports "
-        "REPLAY rather than a from-scratch search cost"
+        "atomically, so none of them is torn); a retry replays those and searches the rest, and "
+        "since the pass reports SEARCHED whenever any arm searched, its search cost is a partial "
+        "one wearing a from-scratch label — wipe autotune_cache/ for a comparable search timing"
     )
 
 
@@ -1048,6 +1158,7 @@ def main():
         help="frameworks to run",
     )
     args = ap.parse_args()
+    install_termination_handler()
     gpu_ocannl, gpu_torch, gpu_tiny = GPU_DEVICES[args.gpu]
     if args.gpu == "hip" and gpu_torch and "pytorch" in args.only:
         # "cuda" only reaches the AMD GPU when torch is a ROCm/HIP build (a stock CPU or

@@ -214,12 +214,19 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
   complete result nor searches from scratch, while `searched` reports one of the two, so a retry
   over that cache is not the pass it claims to be. tinygrad's cache is a single sqlite file, so
-  the kill path renames it (with its `-wal`/`-shm` siblings) to `cache.db.wedged-<timestamp>` —
-  the retry starts cold and the torn cache is still there to inspect. `--no-cache-quarantine`
-  leaves it in place and still names the risk in the failure. OCANNL's `autotune_cache/` needs no
-  equivalent: entries are committed by rename (`Utils.Atomic_file`), so a killed search leaves
-  complete entries and the only consequence — a retry replaying the arms that finished — is what
-  the `search pass verdict` line already reports.
+  the kill path renames it to `cache.db.wedged-<timestamp>`, its `-wal`/`-shm` siblings following
+  it *under that name* (sqlite looks for a write-ahead log only at `<database>-wal`, so parking
+  them under their own names would leave a quarantined database that opens without the killed
+  search's uncheckpointed writes) — the retry starts cold and the torn cache is still there to
+  inspect. `--no-cache-quarantine` leaves it in place and still names the risk in the failure. A
+  cell interrupted with Ctrl-C takes the same path: it was killed midway just as surely.
+
+  OCANNL's `autotune_cache/` needs no equivalent — entries are committed by rename
+  (`Utils.Atomic_file`), so a killed search leaves complete entries and nothing torn — but the
+  failure still says what a retry over it costs, because that is not a from-scratch search either:
+  the arms that finished replay and the rest are searched again, and since a pass reports
+  `SEARCHED` whenever *any* arm searched, the mixed retry's compile cost wears a from-scratch
+  label. Wipe `autotune_cache/` for a search timing comparable with the others.
 
   `--beam-parallel N` passes tinygrad's own `PARALLEL` knob through to the beam cells. Its
   default is one candidate-compile worker per logical core on a GPU device — 24 on the box the
