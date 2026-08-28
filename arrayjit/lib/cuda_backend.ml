@@ -346,11 +346,26 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        [Utils.with_runtime_debug ()] via [--device-debug] below. *)
     let with_debug = Utils.settings.output_debug_files_in_build_directory in
     let cuda_include_opt = cuda_include_options () in
+    (* gh-ocannl-784: assembled by [Compiler_options.nvrtc], the pure module the HIP backend already
+       shares, so the exact vector -- semantic state for fast-math numerics -- is pinned by a
+       GPU-free test (arrayjit/test/test_cuda_compile_options.ml) instead of only by whichever box
+       happens to have a device. Its header carries the measured reassociation boundary. *)
     let options =
-      cuda_include_opt @ arch_opts
-      @ ("--use_fast_math" :: (if Utils.with_runtime_debug () then [ "--device-debug" ] else []))
+      Compiler_options.nvrtc ~cuda_include_options:cuda_include_opt ~arch_options:arch_opts
+        ~with_device_debug:(Utils.with_runtime_debug ())
     in
-    let ptx = Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug in
+    [%log "nvrtc options", (options : string list)];
+    let ptx =
+      try Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug with
+      | Nvrtc.Nvrtc_error { status; message } ->
+          (* Re-raise the SAME constructor and status -- [classify_failure] dispatches on them --
+             with the effective option vector appended to the log nvrtc put in [message]. A compile
+             failure that travels to a sweep's fingerprint then carries the flags it was compiled
+             under, which is the diagnostic gh-ocannl-784 exists to add. *)
+          raise
+            (Nvrtc.Nvrtc_error
+               { status; message = message ^ "\nnvrtc options: " ^ Compiler_options.render options })
+    in
     if Utils.settings.output_debug_files_in_build_directory then (
       let oc = Out_channel.open_text @@ Utils.build_file @@ name ^ ".ptx" in
       Stdio.Out_channel.output_string oc @@ Nvrtc.string_from_ptx ptx;
