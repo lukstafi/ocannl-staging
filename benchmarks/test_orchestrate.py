@@ -1080,10 +1080,13 @@ class CellTimeoutTest(unittest.TestCase):
             self.run_cell(
                 "interrupted",
                 self.python("import time; time.sleep(300)"),
-                on_timeout=lambda: called.append("quarantined") or "quarantined the cache",
+                on_incomplete=lambda killed: called.append(("killed", killed))
+                or "quarantined the cache",
             )
 
-        self.assertEqual(called, ["quarantined"])
+        # ... and told that this cell was KILLED, which is what decides whether the cache may
+        # be moved aside at all.
+        self.assertEqual(called, [("killed", True)])
 
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_sigterm_to_the_sweep_takes_the_running_cell_with_it(self):
@@ -1212,33 +1215,32 @@ class CellTimeoutTest(unittest.TestCase):
         self.addCleanup(signal.signal, signal.SIGTERM, previous_term)
         self.addCleanup(signal.signal, signal.SIGINT, previous_int)
         orchestrate.install_termination_handler()
-        pidfile = self.dir / "spawn_window.pid"
-        cell = self.python(
-            "import sys, time\n"
-            "open(sys.argv[1], 'w').write(str(__import__('os').getpid()))\n"
-            "time.sleep(300)\n",
-            pidfile,
-        )
+        cell = self.python("import time; time.sleep(300)")
         real_popen = orchestrate.subprocess.Popen
+        spawned = []
 
         def popen_then_cancel(*args, **kwargs):
             proc = real_popen(*args, **kwargs)
+            # The child's pid is taken HERE rather than from a file it writes: at this point it
+            # may not have run a line of its own yet, and a cancellation that works kills it
+            # before it does.
+            spawned.append(proc.pid)
             os.kill(os.getpid(), signal.SIGTERM)  # lands inside the window
             return proc
 
+        started = time.monotonic()
         with unittest.mock.patch.object(
             orchestrate.subprocess, "Popen", side_effect=popen_then_cancel
         ):
             with self.assertRaises(SystemExit):
                 self.run_cell("cancelled mid-spawn", cell, timeout=60)
+        elapsed = time.monotonic() - started
 
-        end = time.monotonic() + 10
-        while time.monotonic() < end and not pidfile.exists():
-            time.sleep(0.05)
-        if pidfile.exists():  # it got far enough to say who it was
-            self.assertTrue(
-                self.wait_gone(int(pidfile.read_text())), "the cell outlived the cancellation"
-            )
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(self.wait_gone(spawned[0]), "the cell outlived the cancellation")
+        # And it was killed on the way out of the spawn window, not left running until the cell's
+        # own cap noticed: a held signal is delivered at the first point where raising is safe.
+        self.assertLess(elapsed, orchestrate.CELL_KILL_GRACE_S + 5)
 
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_finished_cell_that_left_workers_behind_has_them_collected(self):
@@ -1329,6 +1331,39 @@ class CellTimeoutTest(unittest.TestCase):
             f"pid {stubborn} outlived a sweep cancelled mid-kill",
         )
 
+    def test_a_search_that_failed_partway_names_its_cache_too(self):
+        # A search that exits nonzero partway leaves the same partial cache a killed one does --
+        # some arms committed, the rest never run -- and the next attempt over it reports a
+        # provenance nobody wrote. So the cell is asked on this path too, with killed=False: the
+        # risk is the same, what may be DONE about it is not (the cache is shared with every later
+        # cell of the sweep, and the failure may have been a pre-search one).
+        seen = []
+
+        result, note, _ = self.run_cell(
+            "failed search",
+            self.python("import sys; sys.exit(3)"),
+            timeout=60,
+            on_incomplete=lambda killed: seen.append(killed) or "CACHE AT RISK: partial search",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(seen, [False])
+        self.assertIn("exit 3", note)
+        self.assertIn("CACHE AT RISK", note)
+
+    def test_the_failed_path_leaves_the_shared_cache_alone(self):
+        # ... and "asked" must not mean "moved": a cell that exited on its own may never have
+        # searched at all, while the cache is shared with every later cell of the sweep.
+        db = self.dir / "cache.db"
+        db.write_bytes(b"the sweep's warm kernels")
+
+        note = orchestrate.quarantine_tinygrad_cache({"CACHEDB": str(db)}, killed=False)
+
+        self.assertTrue(db.exists())
+        self.assertEqual(db.read_bytes(), b"the sweep's warm kernels")
+        self.assertIn("CACHE AT RISK", note)
+        self.assertIn("exited rather than being killed", note)
+
     def test_the_leftover_probe_itself_runs_deferred(self):
         # A cancellation landing on the probe -- or between it reading the group as alive and the
         # kill starting -- would leave exactly the worker the probe just found, in a session
@@ -1396,11 +1431,14 @@ class CellTimeoutTest(unittest.TestCase):
                 "wedged with a broken log dir",
                 self.python("import time; time.sleep(300)"),
                 timeout=1.0,
-                on_timeout=lambda: called.append("quarantined") or "quarantined the cache",
+                on_incomplete=lambda killed: called.append(("killed", killed))
+                or "quarantined the cache",
             )
 
         self.assertIsNone(result)
-        self.assertEqual(called, ["quarantined"])
+        # ... and told that this cell was KILLED, which is what decides whether the cache may
+        # be moved aside at all.
+        self.assertEqual(called, [("killed", True)])
         self.assertIn("quarantined the cache", note)
 
     def test_a_killed_beam_cell_quarantines_the_cache_it_was_writing(self):
