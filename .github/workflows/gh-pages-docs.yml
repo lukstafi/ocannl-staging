@@ -8,6 +8,10 @@ on:
       - "docs/**"
       - ".github/workflows/gh-pages-docs.yml"
 
+concurrency:
+  group: gh-pages-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
