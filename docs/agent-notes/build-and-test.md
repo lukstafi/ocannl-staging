@@ -692,7 +692,10 @@ that they earn a lookup rather than always-loaded space.
   so `ocannl_backend=metal` decided the backend while invalidating nothing. gh-ocannl-652 closed it
   from the other end: the environment has ONE spelling, `OCANNL_<KEY>`, and setting a lowercase or
   dashed spelling of a known key aborts the run with a message naming the spelling that works, so
-  the variable cannot quietly decide nothing either.
+  the variable cannot quietly decide nothing either — on case-sensitive environments, that is:
+  native Windows's case-insensitive environment makes the lowercase spelling the SAME variable,
+  read normally (`Utils.env_names_case_insensitive`; `test/operations/config_var_spellings` pins
+  both readings on every host), while a dashed spelling differs on every platform and stays fatal.
 - `env_spelling_gate` is one gate per DIRECTORY because dune aliases are per directory, and it
   depends on `(universe)` so it reruns on every invocation — no suite comes back green with a
   rejected lowercase spelling ambient. `runtest` and `slow` are gated separately; a gate in a file

@@ -23,7 +23,10 @@ files.
   never be the empty string either: empty means "unset" at every source.
 - A configuration key has exactly ONE environment spelling, `OCANNL_<KEY>` — gh-ocannl-605 dropped
   the dash-prefixed pair, and gh-ocannl-652 the lowercase `ocannl_<key>`, whose setting is now a
-  fatal startup error rather than a silent no-op. A dune rule whose output depends on an ambient
+  fatal startup error rather than a silent no-op on case-sensitive environments; native Windows's
+  case-INSENSITIVE environment makes `ocannl_backend` the same variable as `OCANNL_BACKEND`, read
+  normally (`Utils.env_names_case_insensitive`), while a dashed spelling differs on every platform
+  and stays fatal. A dune rule whose output depends on an ambient
   OCANNL setting must declare it as an `(env_var …)` dep — dune tracks nothing a stanza does not
   declare, so an undeclared one leaves a stale target in place and the test green without having
   run. The commandline is the permissive side and always has
