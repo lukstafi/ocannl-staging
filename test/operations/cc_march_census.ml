@@ -613,21 +613,24 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
    probed identity, [-march], and [-O]. Cache exactly that tuple. Width, fp16 policy and row names
    do not belong in the key: they matter only insofar as they change the generated source. Likewise,
    the compiler command's path or package alone does not identify a toolchain --
-   {!Census.toolchain_identity} asks the compiler, and the identity component combines that opaque
-   answer with the complete configured command so wrapper flags cannot alias one another.
+   {!Census.toolchain_identity} asks the compiler, and the identity component combines its opaque
+   [-v] and preprocessed-header answers with the complete configured command so wrapper flags,
+   resolved SDK/header contents and include-search changes cannot alias one another.
 
    Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
    them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
-   and unusual hosts. Entries older than 30 days are expired and the remaining newest entries are
-   capped at 512 MiB, so source/toolchain generations cannot accumulate indefinitely. A missing,
-   unwritable or malformed cache is only a cache miss: the census still compiles and measures the
-   same listing it did before this memoization existed.
+   and unusual hosts. If neither it nor a per-user XDG/HOME root exists, persistent caching is
+   disabled rather than using a predictable shared temporary directory. Entries older than 30 days
+   are expired and the remaining newest entries are capped at 512 MiB, so source/toolchain
+   generations cannot accumulate indefinitely. A missing, unwritable or malformed cache is only a
+   cache miss: the census still compiles and measures the same listing it did before this
+   memoization existed.
 
    Several dune processes can miss the same entry together. They may all compile it; publication is
    through [Utils.Atomic_file], so a reader sees one whole listing and never a mixture. The
    generated source has the same basename in every worktree, which is all the DWARF parser relies
    on; absolute source-directory differences inside a cached listing do not change the census. *)
-let cache_marker = "ocannl-cc-march-census-v2\n"
+let cache_marker = "ocannl-cc-march-census-v3\n"
 let cache_max_age_seconds = 30. *. 24. *. 60. *. 60.
 let cache_max_bytes = 512 * 1024 * 1024
 let cache_hits = ref 0
@@ -637,21 +640,19 @@ let cache_bypasses = ref 0
 let cache_dir =
   lazy
     (match Stdlib.Sys.getenv_opt "OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR" with
-    | Some dir when not (String.is_empty (String.strip dir)) -> String.strip dir
+    | Some dir when not (String.is_empty (String.strip dir)) -> Some (String.strip dir)
     | _ ->
         let base =
           match Stdlib.Sys.getenv_opt "XDG_CACHE_HOME" with
-          | Some dir when not (String.is_empty (String.strip dir)) -> String.strip dir
+          | Some dir when not (String.is_empty (String.strip dir)) -> Some (String.strip dir)
           | _ -> (
               match Stdlib.Sys.getenv_opt "HOME" with
               | Some home when not (String.is_empty (String.strip home)) ->
-                  Stdlib.Filename.concat (String.strip home) ".cache"
-              | _ ->
-                  Stdlib.Filename.concat
-                    (Stdlib.Filename.get_temp_dir_name ())
-                    (Printf.sprintf "ocannl-%d" (Unix.getuid ())))
+                  Some (Stdlib.Filename.concat (String.strip home) ".cache")
+              | _ -> None)
         in
-        Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census")
+        Option.map base ~f:(fun base ->
+            Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census"))
 
 (* Length-prefix the tuple fields before digesting them: separators inside the toolchain's opaque
    answer or a future [-march] spelling cannot make two distinct tuples serialize alike. *)
@@ -666,10 +667,10 @@ let cache_tuple ~source ~toolchain_identity ~march ~opt_level =
       tuple_field (Int.to_string opt_level);
     ]
 
-let toolchain_identities : (string, string option) Hashtbl.t = Hashtbl.create (module String)
+let probed_toolchains : (string, string option) Hashtbl.t = Hashtbl.create (module String)
 
-let toolchain_identity (t : Census.toolchain) =
-  Hashtbl.find_or_add toolchain_identities t.command ~default:(fun () ->
+let probed_toolchain (t : Census.toolchain) =
+  Hashtbl.find_or_add probed_toolchains t.command ~default:(fun () ->
       match Census.toolchain_identity t with
       | Ok probed -> Some (tuple_field t.command ^ tuple_field probed)
       | Error out ->
@@ -679,6 +680,41 @@ let toolchain_identity (t : Census.toolchain) =
              %s\n"
             t.label out;
           None)
+
+let toolchain_identities : (string * string * int * string, string option) Hashtbl.t =
+  Hashtbl.Poly.create ()
+
+(* Sources with the same preprocessor directives resolve the same external inputs. The emitted
+   kernels differ in their routine bodies but deliberately share this signature, so one exact-source
+   probe per target/level covers them all instead of launching a preprocessor for every listing. A
+   newly added include, condition or definition makes a new signature and therefore a new probe. *)
+let preprocessing_signature source =
+  let rec collect continued acc = function
+    | [] -> List.rev acc
+    | line :: rest ->
+        let directive = String.is_prefix (String.strip line) ~prefix:"#" in
+        let keep = continued || directive in
+        let continued = keep && String.is_suffix (String.rstrip line) ~suffix:"\\" in
+        collect continued (if keep then line :: acc else acc) rest
+  in
+  collect false [] (String.split_lines source) |> String.concat ~sep:"\n"
+
+let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
+  let signature = Stdlib.Digest.to_hex (Stdlib.Digest.string (preprocessing_signature source)) in
+  Hashtbl.find_or_add toolchain_identities (t.command, t.march, opt_level, signature)
+    ~default:(fun () ->
+      match probed_toolchain t with
+      | None -> None
+      | Some probed -> (
+          match Census.preprocessed_source t ~opt_level ~source with
+          | Ok resolved -> Some (probed ^ tuple_field resolved)
+          | Error out ->
+              Stdio.eprintf
+                "cc census cache bypassed: source-input probe failed for %s -O%d (not part of the \
+                 golden):\n\
+                 %s\n"
+                t.label opt_level out;
+              None))
 
 type cache_file = { path : string; size : int; mtime : float }
 
@@ -775,45 +811,50 @@ let cache_format_probes () =
        (decode_cache_data ~header ~validate:(String.is_substring ~substring:"other_function") data))
 
 let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path ~validate =
-  match toolchain_identity t with
+  match Lazy.force cache_dir with
   | None ->
       Int.incr cache_bypasses;
       Census.compile t ~opt_level ~src_path ~asm_path
-  | Some toolchain_identity -> (
-      let tuple = cache_tuple ~source ~toolchain_identity ~march:t.march ~opt_level in
-      let dir = Lazy.force cache_dir in
-      let path =
-        Stdlib.Filename.concat dir
-          (Printf.sprintf "listing-%s.s" (Stdlib.Digest.to_hex (Stdlib.Digest.string tuple)))
-      in
-      let header = cache_marker ^ tuple ^ "\n" in
-      prune_cache_once dir;
-      (try Utils.Atomic_file.cleanup_stale_once dir with _ -> ());
-      let cached =
-        try
-          let data = Stdio.In_channel.read_all path in
-          decode_cache_data ~header ~validate data
-        with _ -> None
-      in
-      match cached with
-      | Some asm ->
-          Int.incr cache_hits;
-          Stdio.Out_channel.write_all asm_path ~data:asm;
-          Ok ()
-      | None -> (
-          Int.incr cache_misses;
-          match Census.compile t ~opt_level ~src_path ~asm_path with
-          | Error _ as error -> error
-          | Ok () as ok ->
-              let asm = Stdio.In_channel.read_all asm_path in
-              (* This is memoization, never a prerequisite for the measurement: inability to create
-                 or publish in the chosen directory leaves the successful compile authoritative. *)
-              (try
-                 Utils.Atomic_file.ensure_dir dir;
-                 Utils.Atomic_file.cleanup_stale_once dir;
-                 Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ()
-               with _ -> ());
-              ok))
+  | Some dir -> (
+      match toolchain_identity t ~opt_level ~source with
+      | None ->
+          Int.incr cache_bypasses;
+          Census.compile t ~opt_level ~src_path ~asm_path
+      | Some toolchain_identity -> (
+          let tuple = cache_tuple ~source ~toolchain_identity ~march:t.march ~opt_level in
+          let path =
+            Stdlib.Filename.concat dir
+              (Printf.sprintf "listing-%s.s" (Stdlib.Digest.to_hex (Stdlib.Digest.string tuple)))
+          in
+          let header = cache_marker ^ tuple ^ "\n" in
+          prune_cache_once dir;
+          (try Utils.Atomic_file.cleanup_stale_once dir with _ -> ());
+          let cached =
+            try
+              let data = Stdio.In_channel.read_all path in
+              decode_cache_data ~header ~validate data
+            with _ -> None
+          in
+          match cached with
+          | Some asm ->
+              Int.incr cache_hits;
+              Stdio.Out_channel.write_all asm_path ~data:asm;
+              Ok ()
+          | None -> (
+              Int.incr cache_misses;
+              match Census.compile t ~opt_level ~src_path ~asm_path with
+              | Error _ as error -> error
+              | Ok () as ok ->
+                  let asm = Stdio.In_channel.read_all asm_path in
+                  (* This is memoization, never a prerequisite for the measurement: inability to
+                     create or publish in the chosen directory leaves the successful compile
+                     authoritative. *)
+                  (try
+                     Utils.Atomic_file.ensure_dir dir;
+                     Utils.Atomic_file.cleanup_stale_once dir;
+                     Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ()
+                   with _ -> ());
+                  ok)))
 
 let half_widen_cache : (string * int * int, bool) Hashtbl.t = Hashtbl.Poly.create ()
 
@@ -1234,10 +1275,13 @@ let () =
                             }))))
       in
       Stdio.eprintf "=== end census ===\n\n";
-      prune_cache (Lazy.force cache_dir);
+      Option.iter (Lazy.force cache_dir) ~f:prune_cache;
       Stdio.eprintf
-        "cc census cache: %d hit(s), %d miss(es), %d bypass(es) in %s (not part of the golden)\n\n"
-        !cache_hits !cache_misses !cache_bypasses (Lazy.force cache_dir);
+        "cc census cache: %d hit(s), %d miss(es), %d bypass(es)%s (not part of the golden)\n\n"
+        !cache_hits !cache_misses !cache_bypasses
+        (match Lazy.force cache_dir with
+        | Some dir -> " in " ^ dir
+        | None -> " (disabled: no per-user cache root)");
       let describe r = Printf.sprintf "%s w%d -O%d %s" r.toolchain r.width r.opt r.loop.what in
       (* One line per COLUMN, always -- printed by {!Verdict.skipped} where the toolchain is absent,
          which prints exactly the line the verified case prints. Without this the golden would have

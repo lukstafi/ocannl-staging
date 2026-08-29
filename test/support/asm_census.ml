@@ -94,6 +94,24 @@ let toolchain_identity t =
   let rc, out = run_capture (Printf.sprintf "%s -v" t.command) in
   if rc = 0 then Ok out else Error out
 
+(** [preprocessed_source t ~opt_level ~source] asks the toolchain for its complete resolved view of
+    a translation unit under the target and optimization flags the measured compile uses. This
+    includes the exact SDK/header inputs selected by conditional compilation and include-search
+    environment, without parsing their versions or paths. *)
+let preprocessed_source t ~opt_level ~source =
+  let src = Stdlib.Filename.temp_file "ocannl_census_preprocess_" ".c" in
+  Stdio.Out_channel.write_all src ~data:source;
+  (* [-dD] retains macro definitions as well as declarations: a header or predefined macro can
+     change generated assembly without changing any declaration text that survives ordinary
+     preprocessing. [-P] removes temp-file line markers, so the probe is stable across runs. *)
+  let rc, out =
+    run_capture
+      (Printf.sprintf "%s %s -O%d -E -P -dD %s" t.command (flags t) opt_level
+         (Stdlib.Filename.quote src))
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  if rc = 0 then Ok out else Error out
+
 (** [accepts t] is whether this toolchain exists and accepts its [-march]. A column that answers
     [false] must be reported (see [Verdict.skipped]) rather than dropped: a silently missing column
     is indistinguishable from a passing one. *)
