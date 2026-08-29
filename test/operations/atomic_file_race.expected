@@ -47,7 +47,10 @@ a failed streamed publish leaves the previous payload: true
 a failed streamed publish removes its own staging file: true
 a privately built directory tree publishes as one path: true
 the planted leftovers are what an interrupted run leaves behind: true
-the reset clears an interrupted run's directory fixtures, not only its files: true
+a fresh process starts over the leftovers and exits cleanly: true
+the fresh process ran in this test's own scratch directory: true
+a fresh process's startup clears an interrupted run's directory fixtures: true
+the rerun's clearing is visible to this process too: true
 a rerun over an interrupted run's leftovers publishes its directory tree: true
 the rerun left the scratch directory as it found it: true
 every filesystem refusal reaches the caller as Sys_error: true

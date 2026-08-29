@@ -65,6 +65,46 @@ let reset_dir () =
    RUN independent of the last one. *)
 let () = reset_dir ()
 
+(* The child half of the rerun control below. What recovers a rerun is the initialization directly
+   above -- what happens when the PROCESS starts -- and a control that calls [reset_dir] itself
+   pins the HELPER instead: it would stay green with that startup call deleted, or moved after the
+   first leg, because the per-leg resets mask its absence (Codex P2, round 1). So the control
+   plants leftovers and starts a fresh process, which lands here: this argument makes a run do its
+   startup and nothing else, reporting where it ran and what the scratch directory held once the
+   startup reset had run.
+
+   An argv marker rather than an environment variable, so nothing ambient can put a run into this
+   mode -- OCANNL's commandline scan leaves an argument it is not addressed by alone, and there is
+   no undeclared variable for dune to serve a stale result across. It must sit immediately after
+   the startup reset and before every leg, or what it reports would be some later leg's reset. *)
+let startup_probe_arg = "--startup-probe"
+
+let () =
+  if Array.exists Stdlib.Sys.argv ~f:(String.equal startup_probe_arg) then (
+    (* The cwd first: it is what lets the parent claim this process cleared ITS scratch directory,
+       so that "the leftovers are gone" cannot be satisfied by a child that ran somewhere else and
+       truthfully saw nothing. *)
+    Stdio.printf "%s\n" (Unix.getcwd ());
+    List.iter (listing ()) ~f:(Stdio.printf "%s\n");
+    Stdio.Out_channel.flush Stdio.stdout;
+    Stdlib.exit 0)
+
+(* Start a fresh process over whatever the scratch directory currently holds, and report what its
+   startup made of it. The child inherits this process's working directory, so it resolves [dir] to
+   the same place -- which it says out loud, above. *)
+let run_startup_probe () =
+  let read_fd, write_fd = Unix.pipe () in
+  let exe = Stdlib.Sys.executable_name in
+  let pid = Unix.create_process exe [| exe; startup_probe_arg |] Unix.stdin write_fd Unix.stderr in
+  Unix.close write_fd;
+  let ic = Unix.in_channel_of_descr read_fd in
+  let output = Stdio.In_channel.input_all ic in
+  Stdlib.close_in ic;
+  let _, status = Unix.waitpid [] pid in
+  match String.split_lines output with
+  | cwd :: entries -> (status, Some cwd, List.filter entries ~f:(Fn.non String.is_empty))
+  | [] -> (status, None, [])
+
 (* A payload is SELF-DESCRIBING: it names its writer, its round and its own body length, and ends
    with a terminator. Length alone is not enough — a run of one character truncated by a multiple of
    the step is a shorter round's payload exactly (Codex P2, round 2) — but a body that disagrees
@@ -451,9 +491,11 @@ let () =
    directory not yet rmdir'd, and a stale published file. Each tree gets a nested subtree, so that
    clearing them is claimed to RECURSE rather than merely to try [rmdir] once.
 
-   Then start a run the way the process does and re-run the sequence that the leftovers obstruct.
-   Under a file-only reset the directories survive, [Unix.mkdir] raises EEXIST and
-   [publish_staged] renames into a non-empty target: both claims below read [false]. *)
+   Then hand that state to an ACTUAL rerun -- a fresh process, whose startup is the thing under
+   test -- and re-run the sequence the leftovers obstruct. Under a file-only reset the directories
+   survive the child's startup, [Unix.mkdir] raises EEXIST and [publish_staged] renames into a
+   non-empty target; with the startup reset gone, the child reports the leftovers it was supposed
+   to have cleared. *)
 let () =
   AF.ensure_dir dir;
   let plant_tree name =
@@ -469,9 +511,14 @@ let () =
   Verdict.p "the planted leftovers are what an interrupted run leaves behind"
     (List.equal String.equal (listing ())
        [ "not_created_yet"; "published-directory"; "published.bin"; "staged-directory" ]);
-  reset_dir ();
-  Verdict.p "the reset clears an interrupted run's directory fixtures, not only its files"
-    (List.is_empty (listing ()));
+  let status, probe_cwd, seen_after_startup = run_startup_probe () in
+  Verdict.p "a fresh process starts over the leftovers and exits cleanly"
+    (match status with Unix.WEXITED 0 -> true | _ -> false);
+  Verdict.p "the fresh process ran in this test's own scratch directory"
+    (Option.value_map probe_cwd ~default:false ~f:(String.equal (Unix.getcwd ())));
+  Verdict.p "a fresh process's startup clears an interrupted run's directory fixtures"
+    (List.is_empty seen_after_startup);
+  Verdict.p "the rerun's clearing is visible to this process too" (List.is_empty (listing ()));
   Verdict.p "a rerun over an interrupted run's leftovers publishes its directory tree"
     (publish_directory_tree ());
   Verdict.p "the rerun left the scratch directory as it found it" (List.is_empty (listing ()))
