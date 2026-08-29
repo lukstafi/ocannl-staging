@@ -1,6 +1,9 @@
-# CLAUDE.md
+# OCANNL Agent Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file guides coding agents working in this repository. It is the single authoritative copy:
+Claude Code loads it through CLAUDE.md's `@AGENTS.md` include, other agents read it directly, and
+edits go here — CLAUDE.md carries only the include and notes that apply to Claude Code alone
+(gh-ocannl-653).
 
 ## Project Overview
 
@@ -8,6 +11,24 @@ OCANNL (OCaml Compiles Algorithms for Neural Networks Learning) is a from-scratc
 
 - `arrayjit`: The low-level optimizing compiler with multiple backends (CPU, CUDA, Metal)
 - `neural_nets_lib`: The high-level deep learning framework with syntax extensions, shape inference, and backpropagation
+
+## Structure and Ownership
+
+- `lib/`: user-facing recipes (training utilities, nn blocks, re-exports).
+- `tensor/`: core framework internals (Tensor, Shape, Operation, ppx_%op/%cd).
+- `arrayjit/`: compiler + backends (`assignments.ml`, `low_level.ml`, `indexing.ml`, `schedule.ml`, `context.ml`, and the `*_backend.ml` implementations).
+- `bin/`: runnable benchmarks and demos.
+- `test/`: tutorials and tests (ppx_expect and standalone `.expected` tests).
+- `docs/`: slides and reference docs.
+- `build_files/` and `log_files/`: generated artifacts when debug settings are enabled.
+
+Key reference files:
+
+- `docs/syntax_extensions.md` (authoritative for %op/%cd)
+- `docs/shape_inference.md` (shape/projection inference pipeline)
+- `arrayjit/lib/context.mli` (context-based runtime API)
+- `ocannl_config.reference` (all configuration keys and defaults)
+- `docs/agent-notes.md` (index) and `docs/agent-notes/` (distilled cross-session agent knowledge)
 
 ## Build Commands
 
@@ -30,7 +51,7 @@ dune runtest
 # Run tests for a specific backend (bash syntax)
 OCANNL_BACKEND=cuda dune runtest
 
-# Install dependencies
+# Install dependencies (OCaml >= 5.3)
 opam install . --deps-only
 
 # Install with optional backends  
@@ -42,7 +63,7 @@ opam install hipjit   # for AMD HIP backend
 
 **Windows shells**: `opam env --shell=sh` emits cygwin-style paths that break under Git Bash (MSYS), so a Git Bash session without a primed environment gets a half-working toolchain (dune found but linking fails with `cygpath: error converting ... -lpthread`). Source `tools/opam-env.sh` first — it rewrites the paths for MSYS and works from any POSIX shell. On Windows, link steps also flood stderr with benign binutils warnings (`Warning: corrupt .drectve at end of def file`, from MSVC-produced import libraries like ROCm's/CUDA's); `tools/dune-quiet.sh <dune args>` runs dune with exactly those lines filtered, preserving the exit status. Use **Git Bash** specifically, not a Cygwin bash (opam's, or whatever `bash` resolves to once opam's cygwin is on PATH): the two are told apart by `uname -o` (`Msys` vs `Cygwin`, since both bashes report `OSTYPE=cygwin`), only the MSYS one gets `opam-env.sh`'s path rewrite, and Cygwin ships no `perl` — which `tools/test-run.sh` needs for its lock, cap and `last` pointer, and refuses without (gh-ocannl-662).
 
-**New ppx-expectation files** (`test/ppx/*_expected.ml`, compared against pretty-printed ppx output) must stay unformatted — add them to `.ocamlformat-ignore`.
+**New ppx-expectation files** (`test/ppx/*_expected.ml`, compared against pretty-printed ppx output) must stay unformatted — add them to `.ocamlformat-ignore`, or the unattended formatting sweep fails to converge and aborts.
 
 ## Architecture Overview
 
@@ -63,7 +84,8 @@ design history) that is not derivable from the code alone.
    - Row variables (`..d..`) enable flexible axis handling and broadcasting
    - Einsum notation supports convolutions, reductions, and arbitrary permutations
    - "Principle of least commitment": use row variables where axis count doesn't matter
-   - Shape inference completion is forced by lowering: via `Context.compile`, or wrappers such as `Train.to_routine`, `Train.run_once` or `Train.forward_once`
+   - Shape inference completion is forced by lowering: via `Context.compile`, or wrappers such as `Train.to_routine`, `Train.run_once` or `Train.forward_once`; `finish_inference` closes still-unsolved dims (GLB where known, otherwise 1/broadcast)
+   - Projection inference is re-derived per operation (`derive_projections`, fresh projection ids) to avoid cross-op contamination
    - Operations in `Operation`, `TDSL`, `NTDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
    -  Operations in `TDSL.O` (opened for `%op`), `NTDSL.O` (opened for `%cd`) hide this so that shapes have to be inferred
    
@@ -92,6 +114,8 @@ design history) that is not derivable from the code alone.
 - Two focused aggregates sit beside `scans`, built the same way (gh-ocannl-783): `dune build @metal-codegen` runs the Metal-pinned tests — the executed Metal-only guards and the emitted-MSL structural ones — and `dune build @lifecycle` runs the resource-lifecycle probes, the tests that drive `Ir.Resource_fault_injection` or read `Ir.Alloc_census`. Each is spelled identically in `test/operations/dune` and `arrayjit/test/dune`, so the root-level `@<family>` runs both halves. Membership is derived and not written down twice — the backend marker for Metal, the modules' use of the instrumentation for lifecycle — so a member the family stanza omits fails `env_var_deps`; the derivation is a floor, and a family may list more (`arrayjit/test`'s `test_slab_free_on_grow`). A new family owes the same: a derivation from something the member stanza declares for an independent reason, a dependency on `(alias runtest-env_spelling_gate)` since a family alias is a build entry point, and an arm in the `env_var_deps --control` tree. `docs/agent-notes/build-and-test.md` has the shapes
 - Dune's OWN `runtest-<name>` (per `(test)`/`(tests)` name and per inline-test library) needs **dune >= 3.20**, which is the project's declared floor (`dune-project`, so the generated opam files too): the targeted-test workflow and the focused aggregate families are built on those aliases, so promising 3.18 promised a toolchain on which they reach nothing. The hand-written aliases above are ordinary rule fields and work on any dune. For a target with no alias at all, build it instead: `dune build test/operations/<name>.exe.output` (or `<name>.actual`), inspect it under `_build/default/<dir>/`, then `dune runtest <dir>` to register the diff and promote. For `bin/` executables (same cwd trap), pin `OCANNL_BACKEND=...` explicitly
 - Pinning a variable on such a probe (`OCANNL_BACKEND=cuda dune build @test/operations/runtest-<name>`) reaches the run only for variables the stanza DECLARES: dune tracks no environment variable it was not told about, so an undeclared one leaves the target up to date and the previous run's result in place. Every test stanza that can select a backend declares `(env_var OCANNL_BACKEND)` — one spelling, uppercase, since gh-ocannl-652 dropped the lowercase `ocannl_<key>` the environment used to be read under. A stanza that names its backend, or links none, declares nothing and instead carries a marker comment INSIDE its own parentheses saying which and why: `; ocannl-backend: none -- links arrayjit.ir alone and calls only pure arithmetic`, `; ocannl-backend: metal -- pins MSL emission`. Exactly one of the two, over every stanza that runs an executable — neither is the hole gh-ocannl-659 closed (dune then serves the previous backend's output as a pass), and both is contradictory intent. The words are `none`, `cc`, `multidev_cc`, `cuda`, `hip`, `metal`, comma-separated where a stanza honestly names two; the reason is required and must be more than one word. For an `(executable)` plus a `(rule)`, the marker goes on the rule — same placement as the `ocannl_config` dep. For any other key add `OCANNL_<KEY>` to that stanza's `(deps ...)` first — `test/operations/env_var_deps` checks all of this, that every `(env_var ...)` addressed to OCANNL names a spelling a run reads, and that a stanza whose modules call `Test_utils.Generated.init` declares `(env_var OCANNL_BUILD_FILES_PREFIX)` where dune runs it — in its own `(deps ...)`, or, for an `(executable)`, in the rule that runs it — with a declaration nothing calls for reported too (gh-ocannl-628, gh-ocannl-659, gh-ocannl-723). A test that GUARDS on the ambient environment — refusing to run when a variable that would rewrite its golden is set, which is how `startup_streams`, `profile_precedence` and `config_profiles` protect theirs — owes the same declaration for every key its guard names: the guard only runs when dune reruns the rule, so an undeclared key is one it never sees, and `env_var_deps` derives the keys from the source and pairs them with the deps rather than trusting the two lists to agree (gh-ocannl-749; a variable the rule pins with `(setenv …)` is exempt, and pinning is the better option where it is available). Setting the dropped lowercase form is a fatal startup error, not a silent no-op
+- `env_var_deps` also checks that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates its modules read (gh-ocannl-628), and that every alias with test actions in a directory carries that directory's `env_spelling_gate` — an action depending on `(universe)`, so it reruns every invocation and no suite can come back green with a rejected lowercase spelling (`ocannl_backend=…`) ambient. `runtest` and `slow` are gated separately, and a gate in a file that serializes on `ocannl_training_test` must take the lock (the gate starts no pool; an unlocked action in a locked file is what the next training test gets copied from). Hand-written per-test aliases depend on the gate explicitly — `(deps (alias runtest-env_spelling_gate) …)` — while dune's GENERATED `runtest-<name>` alias for a `(test)` stanza does not, so such a targeted run can still be served stale under a rejected spelling
+- Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and `.expected` goldens (dune captures stdout) never see it. The sourcing trace is off by default; pass `--ocannl_log_config_sourcing=true` (or set it in the config file) to see where each setting a run reads comes from
 - Confirming WHICH backend a probe ran on cannot come from a backend-uniform golden: a test that announces `SKIPPED on <backend>` writes that to stderr and still prints `<claim>: true` on stdout, precisely so the golden stays backend-uniform — so a GPU run's `.exe.output` can be byte-identical to the cc one. Read the run's stderr, or have the test print the backend (gh-ocannl-622)
 - When probing that way, do NOT discard the build's stderr (`2>/dev/null`) without checking its exit status: a FAILED build (e.g. a warning-as-error from a temporary edit) leaves the previous `_build/default/<dir>/<name>.exe.output` untouched, so the stale file reads as a green probe — this turned a negative control into a false positive during gh-554
 - `(copy_files ../config/ocannl_config)` only materializes the config for rules that DEPEND on it: every `(test)`/`(tests)` stanza must list `ocannl_config` in its `(deps ...)`, and so must every `(rule ...)` that runs a test executable (an `(executable)` stanza has no `deps` field, so its companion rule is where the dep goes). Nothing is sandboxed, so a stanza missing it does not fail on its own — it reads whatever is in `_build/default/<test dir>` when it happens to run, which makes both the `.exe.output` probe and the test itself order-dependent (gh-ocannl-586). "Pure" tests are no exception: without the dep they also get default `print_decimals_precision`/`fixed_state_for_init` and a config-sourcing trace on stderr. `test/operations/config_dep_completeness` checks this over every `dune` file in the repository, including new directories, so an omission fails the suite rather than drifting (gh-ocannl-597); an executable that no rule runs is not a site, and a rule running something that reads no configuration goes on that test's named exemption list
@@ -100,7 +124,7 @@ design history) that is not derivable from the code alone.
 - From PowerShell, QUOTE dune alias targets: PowerShell parses an unquoted `@word` argument as a splatting variable (undefined here → expands to nothing), so `dune build @runtest @slow` silently degrades to a plain `dune build` that exits 0 having run no tests — a false green. Use `dune build "@runtest" "@slow"` (bash/cmd are unaffected)
 - Inline tests (like those in `test_threefry4x32.ml`) are part of library modules and run via `dune runtest`, not `dune exec`
 - Scope test runs to the code and configuration paths a change can reach. Start with affected directory aliases such as `dune build @test/operations/runtest`, `@test/einsum/runtest`, `@test/ppx/runtest`, `@arrayjit/runtest`, or `@test/training/runtest`, then run `dune build @check`. Before broad testing of a config-gated path, grep whether any test or test config enables the gate; reserve the full regular/slow suites for cross-cutting changes
-- Never write a sleep/`pgrep` waiter loop around a test run: `pgrep` waiters match the editor's immortal `dune ocaml-merlin` daemons (or the waiter itself) and spin forever, stranding shells. For a long run, launch `tools/test-run.sh run ...` through the Bash tool's background mode and act on its completion notification — no polling needed. Only for a run that must outlive the session, use `tools/test-run.sh start ...`, then the non-blocking `status last` or the hard-bounded `wait last`; both read the run's recorded verdict file rather than probing processes
+- Never write a sleep/`pgrep` waiter loop around a test run: `pgrep` waiters match the editor's immortal `dune ocaml-merlin` daemons (or the waiter itself) and spin forever, stranding shells. For a long run, launch `tools/test-run.sh run ...` through your harness's background execution (e.g. Claude Code's Bash background mode) and act on its completion notification — no polling needed. Only for a run that must outlive the session, use `tools/test-run.sh start ...`, then the non-blocking `status last` or the hard-bounded `wait last`; both read the run's recorded verdict file rather than probing processes
 - Keep library sources unchanged while Dune is running; edits invalidate in-flight rules and can repeat expensive work
 
 **Training integration runs (the `train` alias)**:
@@ -167,13 +191,14 @@ design history) that is not derivable from the code alone.
 - **Do NOT touch `CHANGES.md` in feature work** (gh-ocannl-807). The changelog is written in editorial passes — at release prep, or an occasional explicitly-requested batch catch-up — from the durable records the work already leaves: merge commits (`git log --first-parent`), PR bodies, and issue closing comments. A per-PR entry duplicates the PR body you just wrote, and the shared `## [Unreleased]` anchor made every concurrent PR conflict there, each collision costing a full CI cycle. When the editorial pass runs: bullets are user-facing (what changed for someone using the library — internal test/tooling plumbing usually earns no bullet), one to three lines each, citing `gh-ocannl-NNN`; the mechanism, rationale, and measured numbers stay in the PR, the issue, and `docs/agent-notes/`
 - When you notice unrelated code smells or design problems, file separate issues
 - Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
-- Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
+- When creating commits, include the work summary in the commit message and credit yourself as a co-author
+- Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is typically unavailable in agent harnesses)
 - **Bring the base in before opening the PR and again before merging**: GitHub builds the pull request's MERGE commit, so a check that scans the whole repository can be red on the tree CI builds while green on your branch. Fetch the STAGING remote (resolve which name points there per the next bullet — it need not be `origin`) and rebase onto its `master`, or merge it in where the branch is shared and rewriting is not yours to do — `docs/agent-notes/build-and-test.md` explains the mechanism and how to validate against the merged tree
 - **Two repositories, and remote names are not the contract**: development — branches, PRs, and the `master` they land on — happens in `lukstafi/ocannl-staging`, while `ahrefs/ocannl` is the public repo that owns the ISSUES this codebase cites as `gh-ocannl-NNN`, the milestones and the GitHub releases, and receives release-relevant changes. Which remote name points where is local: a clone has whatever names it was given, a clone of the public repo calls IT `origin`, and a fresh clone has no second remote at all. So check `git remote -v` before trusting a name, add the other repo explicitly when you need it (`git remote add upstream https://github.com/ahrefs/ocannl.git`), and pass `--repo <owner>/<name>` to every `gh` command rather than letting it infer: issues to `ahrefs/ocannl`, PRs to `lukstafi/ocannl-staging`
 
 ### Configuration
 
-- See `ocannl_config.reference` for documentation of all settings
+- See `ocannl_config.reference` for documentation of all settings. It ships with every setting COMMENTED OUT (`#key=…`, no space; prose comments use `# `), so copying it verbatim states nothing
 - Key configs: backend selection, debug logging, optimization levels
 - **Adding a config key touches two places**, enforced by `test/operations/test_config_consistency`: document it in `ocannl_config.reference` and register it in `Utils.known_config_keys`. A new source file needs no registration — the consistency tests glob every directory that can read configuration: `arrayjit/lib/*.ml`, `tensor/*.ml`, `lib/*.ml`, `bin/*.ml`, `tools/*.ml`, `benchmarks/runners/ocannl/*.ml` (gh-ocannl-592). A new source file also owes those tests no promote round: their goldens name the scanned roots and hold a per-root floor under each, with the exact counts on stderr (gh-ocannl-701). A key read only from a test is out of scope, deliberately: tests are not user-facing configuration. What the scan does need is the key spelled as a string literal at the call site (`~arg_name:"the_key"`): a helper taking the key as a parameter hides every key routed through it, so the same test fails any non-literal use outside the named lookup functions
 - **Classify the key too**: `test/operations/digest_completeness` fails on a key with no entry in `Utils.config_key_classification` (gh-ocannl-572) — say whether it reaches the schedule cache's identity, and which component
@@ -206,6 +231,7 @@ known and documented, and the reference file's verbatim quote of each payload is
 - `debug_log_from_routines=true` - enables runtime logging from kernels aka. routines
 - `debug_log_to_stream_files=true` - writes logs from kernels/routines to `log_files/<exe-name>/<backend>-<device>-<stream>.log`
 - `clean_up_artifacts_on_startup=false` - preserves debug files between runs
+- CUDA routine logs may require `Utils.capture_stdout_logs` (see README)
 
 **Available Backends**:
 - `cc` (the default) combines the implementation cc_backend.ml with the scheduler `Sync` in schedulers.ml; kernel-level CPU parallelism is automatic (pool-rendered Grid loops)
@@ -213,6 +239,8 @@ known and documented, and the reference file's verbatim quote of each payload is
 - `cuda` with implementation in cuda_backend.ml
 - `hip` (AMD ROCm/HIP) with implementation in hip_backend.ml, mirroring the CUDA backend
 - `metal` with implementation in metal_backend.ml
+
+Backends are process-wide singletons: use `Backends.get_backend ()` or the Context API (`arrayjit/lib/context.mli`); `fresh_backend` is retired. Merge buffers (`.merge`) support stream-to-stream reductions in `%cd`.
 
 ### Backend Development
 
@@ -241,6 +269,7 @@ known and documented, and the reference file's verbatim quote of each payload is
 **Key differences between %op and %cd**:
 - `%op` allows initialization expressions (`{ x = uniform () }`), used for model parameters
 - `%cd` is self-referential only (`{ x }`), used in computation graphs where tensors are defined by operations
+- Inline parameter init in `%op` is forward-only and uses NTDSL internally; `TDSL.param` adds the final parameter gradient
 - See `docs/syntax_extensions.md` for comprehensive documentation
 
 **Record syntax features**:
@@ -259,6 +288,8 @@ known and documented, and the reference file's verbatim quote of each payload is
 
 **Common gotchas and idioms**:
 - `*` is tensor/matrix multiply, `*.` is pointwise multiply (no `/`, use `/.` for pointwise division)
+- `**.` is pointwise power with a numeric exponent (specialized gradients)
+- Use `_rhs1`/`_rhs2`/`_lhs` suffixes in `%cd` for intermediate tensors when projection slots matter
 - `stretch 1.0` creates a shape-inferred constant 1 whose shape resolves at the use site; `1.0` alone is a fixed scalar. Operation results otherwise close down to their arguments' shapes — a use site broadcasts them in but cannot widen them (gh-544; the old `0.5 + 0.5` idiom relied on the pre-544 widening default)
 - Einsum spec must be a literal string when capturing dimensions: `x ++ "a,b" ["a"]` works, `let s = "a,b" in x ++ s ["a"]` fails
 - Single-char vs multi-char mode: `"abc"` = 3 axes; `"abc,"` = 1 axis named `abc` (comma triggers multi-char)
@@ -270,8 +301,14 @@ known and documented, and the reference file's verbatim quote of each payload is
 
 Touch-lists for adding a primitive operation, extending a backend, extending shape
 inference, and diagnosing backend output discrepancies live in the `extending-ocannl`
-skill. Debug-artifact and ppx_minidebug tracing recipes live in the
-`ocannl-debug-tracing` skill.
+skill (`.claude/skills/extending-ocannl/SKILL.md`). Debug-artifact and ppx_minidebug
+tracing recipes live in the `ocannl-debug-tracing` skill
+(`.claude/skills/ocannl-debug-tracing/SKILL.md`). Agents without skill support read
+the files directly. In brief:
+
+- New primitive ops: `arrayjit/lib/ops.ml` (+ `Ir.Ops`), wired into `tensor/operation.ml`
+- New tensor convenience functions: `tensor/operation.ml` (use `%cd` for forward/backprop)
+- Shape/projection changes: `tensor/shape.ml`, `tensor/row.ml`, `arrayjit/lib/indexing.ml`
 
 ## Performance Considerations
 
