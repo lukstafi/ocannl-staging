@@ -896,6 +896,14 @@ that they earn a lookup rather than always-loaded space.
   sweep's GPU boxes, so a codegen change that moves the trajectory leaves those two stale until the
   daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
   multidev_cc leg exists.
+- Every per-backend golden family covers the backend vocabulary derived from
+  `Backends.all_of_backend`; `backend_golden_family_scan` finds a backend token in each expected
+  filename and fails with the derived and present lists before dune can report a raw missing-rule
+  error on the absent backend (gh-ocannl-802). A member copied from a shared golden rather than
+  recorded on its own backend carries a marker in the directory's dune file beside the family rule:
+  `; ocannl-golden-recorded-on: <member>.expected <- <backend> -- <reason>`. The scan validates the
+  marker and prints the member into its golden without failing on it; remove the marker after a run
+  on the member's own backend re-records it.
 - Gating a new slow test is the same conversion with `slow-` names: replace the `(test)` stanza
   with an `(executable)` plus a `(rule (alias slow-<name>) …)` that runs the exe and diffs
   `<name>.expected`, put `(alias slow-env_spelling_gate)` first in the rule's `(deps …)` so the

@@ -101,6 +101,7 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
@@ -181,6 +182,7 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-backend_golden_family_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
   (alias runtest-autotune_bound_pruning)
@@ -1918,6 +1920,38 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
+
+; gh-ocannl-802: a per-backend golden family covers the backend vocabulary derived from
+; `Backends.all_of_backend`, and goldens copied from another backend carry a visible provenance
+; marker beside their family rule. The recursive expected/dune globs make both new families and new
+; markers join without another list to maintain.
+
+(executable
+ (name backend_golden_family_scan)
+ (modules backend_golden_family_scan)
+ (libraries base stdio arrayjit.context test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links the backend closure only to enumerate its derived constant; it
+ ; opens no device, compiles nothing, and scans expected filenames and dune comments as text.
+ (target backend_golden_family_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../*.expected)
+  (glob_files_rec ../../dune))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:backend_golden_family_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-backend_golden_family_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff backend_golden_family_scan.expected backend_golden_family_scan.actual)))
 
 (executable
  (name config_dep_completeness)

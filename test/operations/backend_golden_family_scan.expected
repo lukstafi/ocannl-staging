@@ -1,0 +1,9 @@
+Backend golden families:
+  test/operations/micrograd_demo_logging-<backend>-0-0.log.expected
+  test/training/transformer_names-<backend>.expected
+
+Members not yet recorded on their own backend:
+  test/training/transformer_names-cuda.expected <- cc -- copied from the shared cc golden
+  test/training/transformer_names-hip.expected <- cc -- copied from the shared cc golden
+
+backend golden families are complete and provenance markers are valid: true
