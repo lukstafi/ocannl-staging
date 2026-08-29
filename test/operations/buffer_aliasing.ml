@@ -31,7 +31,7 @@ module IDX = Train.IDX
 open Nn_blocks.DSL_modules
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
-module Backends = Context.Backends_deprecated
+module Backends = Context.Backends
 
 let p = Verdict.p
 

@@ -733,6 +733,16 @@ type optimized = {
 }
 [@@deriving sexp_of]
 
+type footprint = {
+  fp_total : int;
+  fp_working : int;
+  fp_constants : int;
+  fp_dedicated : int;
+  fp_planned : int;
+  fp_nodes : int;
+}
+[@@deriving sexp_of, equal]
+
 let get_node store tn =
   Hashtbl.find_or_add store tn ~default:(fun () ->
       {

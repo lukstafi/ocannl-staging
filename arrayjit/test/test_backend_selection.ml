@@ -34,7 +34,7 @@ let () =
     ];
   (* An unknown configured name is a spelling mistake and says so, naming the offender. It is not
      [Backend_unavailable]: falling through to another backend would run the wrong thing. *)
-  (match Context.Backends_deprecated.get_backend ~backend_name:"no_such_backend" () with
+  (match Context.Backends.get_backend ~backend_name:"no_such_backend" () with
   | _ -> failwith "expected an unknown-backend rejection"
   | exception exn ->
       assert (not (Context.advances_to_next_backend exn));

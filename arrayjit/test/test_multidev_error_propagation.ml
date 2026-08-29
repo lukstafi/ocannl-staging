@@ -31,7 +31,7 @@ module Mock_raw = struct
   let buffer_to_host _nd ~src:_ = ()
 end
 
-module Sched = Context.Backends_deprecated.Schedulers.Multidev (Mock_raw)
+module Sched = Context.Backends.Schedulers.Multidev (Mock_raw)
 
 let raised_boom f =
   try

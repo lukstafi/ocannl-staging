@@ -5,11 +5,6 @@
     needs nothing of the context beyond {!Context.lowered_for_decisions}, {!Context.hardware_limits}
     and {!Context.decide_inline}. *)
 
-module Backends := Context.Backends_deprecated
-(** Local substitution, not an export: [Backends] is a hidden module of the [arrayjit.context]
-    library, and [Context] re-exports it so a signature like this one can name
-    {!Context.Backends_deprecated.footprint}. *)
-
 (** A memory budget: what {!fit} plans the routine's placements against. *)
 type t =
   | Bytes of int  (** Fit the routine's scored footprint under this many bytes. *)
@@ -17,8 +12,8 @@ type t =
 [@@deriving sexp_of]
 
 type plan = {
-  bp_baseline : Backends.footprint;  (** The default-policy placement vector's score. *)
-  bp_final : Backends.footprint;  (** The score after the accepted flips. *)
+  bp_baseline : Ir.Low_level.footprint;  (** The default-policy placement vector's score. *)
+  bp_final : Ir.Low_level.footprint;  (** The score after the accepted flips. *)
   bp_flips : (Ir.Tnode.t * int * int) list;
       (** The accepted flips in acceptance order: the node demoted to recompute-at-use, the
           {e marginal} bytes it relieved on top of the flips accepted before it, and its
@@ -48,11 +43,11 @@ val footprint :
   Context.t ->
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
-  Backends.footprint
+  Ir.Low_level.footprint
 (** The byte footprint {!Context.compile} of this routine from this context would imply under the
-    default placement policy ({!Backends.score_footprint}). Analyze-only and hermetic, exactly like
-    {!Context.decision_surface}: lowering and optimization, no backend codegen, no linking, no
-    effect on the context. *)
+    default placement policy ({!Context.Backends.score_footprint}). Analyze-only and hermetic,
+    exactly like {!Context.decision_surface}: lowering and optimization, no backend codegen, no
+    linking, no effect on the context. *)
 
 val fit :
   ?name:string ->

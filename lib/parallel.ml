@@ -4,7 +4,7 @@ module Nd = Ir.Ndarray
 module Asgns = Ir.Assignments
 module Idx = Ir.Indexing
 module Task = Ir.Task
-module Backends = Context.Backends_deprecated
+module Backends = Context.Backends
 open Ocannl_tensor.Operation.DSL_modules
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime

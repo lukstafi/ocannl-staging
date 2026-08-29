@@ -5,16 +5,13 @@ open Base
 module Tn = Ir.Tnode
 module Idx = Ir.Indexing
 module LL = Ir.Low_level
-
-(* [Backends] is a hidden module of the [arrayjit.context] library ([Context] is that library's
-   interface module), re-exported by [Context] for exactly this kind of use. *)
-module Backends = Context.Backends_deprecated
+module Backends = Context.Backends
 
 type t = Bytes of int | Minimize [@@deriving sexp_of]
 
 type plan = {
-  bp_baseline : Backends.footprint;
-  bp_final : Backends.footprint;
+  bp_baseline : LL.footprint;
+  bp_final : LL.footprint;
   bp_flips : (Tn.t * int * int) list;
   bp_considered : int;
   bp_dropped : int;
@@ -61,7 +58,7 @@ let log_memory_budget () = Utils.get_global_flag ~default:false ~arg_name:"log_m
    {!Context.lowered_for_decisions} forks the lineage state, so nothing here reaches [ctx] -- and
    the gh-560 analysis cache makes every call after the first one a specialization replay. *)
 let analyze_footprint ?name ~(inline : Tn.t list) ctx comp bindings :
-    Backends.footprint * LL.flip_candidate list =
+    LL.footprint * LL.flip_candidate list =
   let lowered = Context.lowered_for_decisions ?name ~inline ctx comp bindings in
   ( Backends.score_footprint ~backend_name:(Context.backend_name ctx)
       ~limits:(Context.hardware_limits ctx) ~static_indices:(Idx.bound_symbols bindings) lowered,
@@ -99,11 +96,11 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
     (* The acceptance-stopping predicate: [Minimize] is never satisfied, so it keeps taking flips
        that still help. [within] is the reported outcome, where a target-less [Minimize] trivially
        holds -- there is no budget for it to miss. *)
-    let met (fp : Backends.footprint) =
-      match budget with Minimize -> false | Bytes b -> fp.Backends.fp_total <= b
+    let met (fp : LL.footprint) =
+      match budget with Minimize -> false | Bytes b -> fp.LL.fp_total <= b
     in
-    let within (fp : Backends.footprint) =
-      match budget with Minimize -> true | Bytes b -> fp.Backends.fp_total <= b
+    let within (fp : LL.footprint) =
+      match budget with Minimize -> true | Bytes b -> fp.LL.fp_total <= b
     in
     let done_ () =
       {
@@ -116,7 +113,7 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
       }
     in
     if met bp_baseline then (
-      logf "baseline %d bytes is already within budget; no flips" bp_baseline.Backends.fp_total;
+      logf "baseline %d bytes is already within budget; no flips" bp_baseline.LL.fp_total;
       (ctx, done_ ()))
     else
       (* Only the [`Inline] direction: demoting a materialized intermediate to recompute-at-use is
@@ -150,7 +147,7 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
       let scored =
         List.map considered ~f:(fun fc ->
             let fp = score [ fc.LL.fc_tn ] in
-            let relief = bp_baseline.Backends.fp_total - fp.Backends.fp_total in
+            let relief = bp_baseline.LL.fp_total - fp.LL.fp_total in
             logf "candidate %s: recompute cost %d, solo relief %d bytes" (Tn.debug_name fc.LL.fc_tn)
               fc.LL.fc_recompute_cost relief;
             (fc, relief))
@@ -204,14 +201,14 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
                 (c, score c)
             in
             let verdict =
-              match compare_int fp_joint.Backends.fp_total fp_alone.Backends.fp_total with
+              match compare_int fp_joint.LL.fp_total fp_alone.LL.fp_total with
               | c when c < 0 -> `Load_bearing
               | 0 -> `Neutral
               | _ -> `Harmful
             in
             let cand = match verdict with `Load_bearing -> cand_joint | _ -> cand_alone in
             let fp = match verdict with `Load_bearing -> fp_joint | _ -> fp_alone in
-            let marginal = !cur.Backends.fp_total - fp.Backends.fp_total in
+            let marginal = !cur.LL.fp_total - fp.LL.fp_total in
             if marginal > 0 then (
               logf "accept %s: %d bytes (solo %d), cost %d%s, footprint now %d" (Tn.debug_name tn)
                 marginal solo cost
@@ -220,7 +217,7 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
                 | `Load_bearing, _ -> Printf.sprintf " jointly with %s" (names held)
                 | `Neutral, _ -> Printf.sprintf " alone, still holding %s" (names held)
                 | `Harmful, _ -> Printf.sprintf " alone, dropping harmful held %s" (names held))
-                fp.Backends.fp_total;
+                fp.LL.fp_total;
               (* [flips] is reverse-chronological until the final [List.rev]. A joint commit's held
                  flips carry 0 and the group's relief lands on the flip that made it pay. *)
               flips :=
@@ -248,11 +245,11 @@ let fit ?name ?max_candidates ~budget ctx comp bindings =
       let bp_within_budget = within bp_final in
       (match budget with
       | Minimize ->
-          logf "minimized: %d -> %d bytes with %d flip(s)" bp_baseline.Backends.fp_total
-            bp_final.Backends.fp_total (List.length !flips)
+          logf "minimized: %d -> %d bytes with %d flip(s)" bp_baseline.LL.fp_total
+            bp_final.LL.fp_total (List.length !flips)
       | Bytes b ->
-          logf "budget %d bytes: %d -> %d bytes with %d flip(s), %s" b bp_baseline.Backends.fp_total
-            bp_final.Backends.fp_total (List.length !flips)
+          logf "budget %d bytes: %d -> %d bytes with %d flip(s), %s" b bp_baseline.LL.fp_total
+            bp_final.LL.fp_total (List.length !flips)
             (if bp_within_budget then "within budget" else "STILL OVER BUDGET"));
       let ctx = if List.is_empty !accepted then ctx else Context.decide_inline ctx !accepted in
       ( ctx,

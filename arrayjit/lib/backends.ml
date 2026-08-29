@@ -233,16 +233,6 @@ let arena_items ~spans group =
       let size, align = layout_item key in
       (size, align, Ops.prec_string (Lazy.force key.Tn.storage_prec), Hashtbl.find spans key))
 
-type footprint = {
-  fp_total : int;
-  fp_working : int;
-  fp_constants : int;
-  fp_dedicated : int;
-  fp_planned : int;
-  fp_nodes : int;
-}
-[@@deriving sexp_of, equal]
-
 (* gh-ocannl-498: the byte footprint a routine's placement vector implies, scored with the same
    liveness/arena machinery the allocator uses ([plan_alias_spans] + [plan_arena_offsets]) but
    without a device or a context. This is the cost side [Low_level.flip_candidates] does not carry:
@@ -258,7 +248,8 @@ type footprint = {
    Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout head
    above), so scorer/allocator agreement is structural rather than by comment. *)
 let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
-    ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) : footprint =
+    ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) :
+    Low_level.footprint =
   let lowered = maybe_sink_zeros lowered in
   let segments = Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered in
   let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in

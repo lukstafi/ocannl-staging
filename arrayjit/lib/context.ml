@@ -4,7 +4,7 @@ module Tn = Ir.Tnode
 module Nd = Ir.Ndarray
 module Idx = Ir.Indexing
 module BI = Ir.Backend_intf
-module Backends_deprecated = Backends
+module Backends = Backends
 module Cc_backend = Cc_backend
 module Builtins_cc = Builtins_cc
 

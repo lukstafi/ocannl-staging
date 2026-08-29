@@ -10,7 +10,7 @@
    single segment; if it dropped the over-cap error, the last claim would fail. *)
 
 open Base
-module B = Context.Backends_deprecated
+module B = Context.Backends
 
 let show label (assignments, sizes) =
   Stdio.printf "%s: assignments=[%s] sizes=[%s]\n" label

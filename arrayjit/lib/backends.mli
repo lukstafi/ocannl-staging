@@ -26,26 +26,12 @@ val plan_arena_offsets :
     total size, or [None] when the layout exceeds [cap] (callers fall back to
     {!plan_pool_segments}). Exposed for unit testing the coloring with synthetic sizes. *)
 
-type footprint = {
-  fp_total : int;  (** [fp_working + fp_constants]: the number a memory budget is compared to. *)
-  fp_working : int;
-      (** Bytes of the working (non-constant) pool as the arena planner would lay it out. Equals
-          [fp_dedicated] when there is no liveness plan (config [buffer_aliasing] off, code opaque
-          to the liveness fold, or a layout over the per-pool cap). *)
-  fp_constants : int;  (** Bytes of the constant / read-only pool, always bump-packed. *)
-  fp_dedicated : int;  (** What [fp_working] would be with every node on its own bytes. *)
-  fp_planned : int;  (** How many working nodes carried a live span, i.e. were arena-eligible. *)
-  fp_nodes : int;  (** In-context nodes scored (working + constants). *)
-}
-[@@deriving sexp_of, equal]
-(** gh-ocannl-498: the byte footprint implied by a routine's placement vector. *)
-
 val score_footprint :
   backend_name:string ->
   limits:Ir.Backend_intf.hardware_limits ->
   static_indices:Ir.Indexing.static_symbol list ->
   Ir.Low_level.optimized ->
-  footprint
+  Ir.Low_level.footprint
 (** gh-ocannl-498: score the peak footprint of a lowered routine under its own placements, with the
     same machinery the allocator uses — the default schedule and fission, the gh-ocannl-489 live
     spans, and {!plan_arena_offsets} over the working group. This is the cost side

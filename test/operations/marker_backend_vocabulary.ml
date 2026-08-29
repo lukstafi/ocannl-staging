@@ -22,7 +22,7 @@
    the second one below relates the backends to [Ir.Schedule]'s CPU/GPU predicates. *)
 
 open Base
-module Backends = Context.Backends_deprecated
+module Backends = Context.Backends
 module Scan = Test_utils.Dune_stanza_scan
 module Sched = Ir.Schedule
 

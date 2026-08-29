@@ -1,7 +1,7 @@
 open Base
 open Ocannl
 open Operation.DSL_modules
-module Backends = Context.Backends_deprecated
+module Backends = Context.Backends
 module Idx = Ir.Indexing
 module Task = Ir.Task
 module Tn = Ir.Tnode

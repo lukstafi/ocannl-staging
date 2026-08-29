@@ -1,7 +1,11 @@
 (** Simplified context-based interface for backend operations *)
 
 open Base
-module Backends_deprecated = Backends
+
+module Backends = Backends
+(** The backend registry and raw backend entry points. This is the supported path for consumers that
+    genuinely need backend-level operations, such as [Parallel] and allocator/backend tests.
+    Backend-independent interfaces should name their types through {!Ir} instead. *)
 
 module Cc_backend = Cc_backend
 (** The cc backend's own module, re-exported because the library's interface module is this one and
@@ -411,11 +415,11 @@ val release : t -> unit
     {e from} this one inherits its buffer locations while keeping it as their backend parent, so
     releasing an ancestor leaves the descendant resolving a dropped pool id (or reading a freed
     pointer). Release leaves, not interior nodes. This is the pre-existing contract of the
-    underlying {!Backends_deprecated.finalize} — what is new is that it is reachable from here — and
-    it is deliberately left as a precondition rather than enforced: tracking live descendants would
-    mean refcounting persistent context values, whose whole point is that a child can be derived at
-    any time and outlive the expression that made it. The one caller in-tree ({!Autotune.tune})
-    releases only leaf siblings of one search context, which is the shape this is for.
+    underlying {!Backends.finalize} — what is new is that it is reachable from here — and it is
+    deliberately left as a precondition rather than enforced: tracking live descendants would mean
+    refcounting persistent context values, whose whole point is that a child can be derived at any
+    time and outlive the expression that made it. The one caller in-tree ({!Autotune.tune}) releases
+    only leaf siblings of one search context, which is the shape this is for.
 
     A context whose buffers were released must not be run or read again; it is a dead handle,
     exactly as after the finalizer had reclaimed it. Nothing in the context is invalidated for
