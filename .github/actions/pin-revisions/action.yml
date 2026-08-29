@@ -61,7 +61,7 @@ runs:
           | sed 's#^\./##; s#\.opam$##' \
           | LC_ALL=C sort -u)
         request=$(printf '%s\n' "$package_names" | paste -sd, -)
-        solution=$(opam --cli=2.1 list --safe --resolve="$request" \
+        solution=$(opam --cli=2.1 list --safe --color=never --resolve="$request" \
           --with-test --with-doc --columns=package --short \
           | LC_ALL=C sort -u)
         [ -n "$solution" ] \
@@ -75,7 +75,7 @@ runs:
         solution_digest=$(
           {
             printf '%s\n' "$solution"
-            opam --cli=2.1 show --safe --raw --sort "${solution_packages[@]}"
+            opam --cli=2.1 show --safe --color=never --raw --sort "${solution_packages[@]}"
           } | hash12
         )
         echo "solution-digest=$solution_digest" >>"$GITHUB_OUTPUT"
@@ -87,7 +87,7 @@ runs:
         # git pin, whether explicit or introduced by pin-depends, comes from the
         # registry populated by the caller's preceding `opam pin -n` steps.
         # LC_ALL=C keeps the digest stable across runner locales.
-        specs=$(opam --cli=2.1 pin list --safe \
+        specs=$(opam --cli=2.1 pin list --safe --color=never \
           | sed -n 's/.* \(git+[^[:space:]]*\).*/\1/p' \
           | sed '/^git+file:\/\//d' \
           | LC_ALL=C sort -u)
