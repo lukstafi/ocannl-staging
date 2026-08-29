@@ -184,13 +184,14 @@ jobs:
     # setup-ocaml's own cache covers opam and the bare compiler switch, which is
     # why switch creation is ~70s rather than ten minutes; it does not cover these.
     #
-    # The key must follow every remote git pin that can move while the opam files
-    # stay byte-identical, or a hit serves stale dependency revisions
-    # indefinitely. The action derives that set from the registry populated by
-    # the pin steps above, so a new pin joins the key without a second list to
-    # update. It carries the rest of the reasoning; `gh-pages-api.yml` calls the
-    # same one, keeping the workflows from diverging again (gh-ocannl-732).
-    - name: Resolve pinned dependency revisions
+    # The key must follow both the ordinary-package solution and every remote git
+    # pin that can move while the project opam files stay byte-identical, or a hit
+    # serves stale dependency revisions indefinitely. The action derives both
+    # from live solver state, so a new compatible release and a new pin join the
+    # key without caller-owned lists. It carries the rest of the
+    # reasoning; `gh-pages-api.yml` calls the same one, keeping the workflows
+    # from diverging again (gh-ocannl-732, gh-ocannl-809).
+    - name: Resolve opam dependency source revisions
       id: pins
       uses: ./.github/actions/pin-revisions
     - name: Cache opam dependencies
@@ -204,7 +205,7 @@ jobs:
         path: |
           _opam
           ${{ runner.os == 'Windows' && 'C:\.opam\.cygwin' || '' }}
-        key: opam-deps-${{ matrix.os }}-${{ matrix.ocaml-compiler }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.digest }}
+        key: opam-deps-${{ matrix.os }}-${{ matrix.ocaml-compiler }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.solution-digest }}-${{ steps.pins.outputs.digest }}
     # FIXME: cygwin's pkgconf 3.0.4-1 (published 2026-07-26) breaks
     # `pkgconf --personality=<triplet>`, so every conf-mingw-w64-* package (gmp,
     # zlib, openssl, sqlite3, pcre2, curl, libffi) fails its existence check and
