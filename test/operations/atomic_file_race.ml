@@ -510,8 +510,9 @@ let () =
     Printf.sprintf "?*%s%s.%s.%s" AF.staging_infix (field_glob AF.field_width)
       (field_glob AF.field_width) (field_glob AF.nonce_width)
   in
+  let gitignore = Stdio.In_channel.read_all "../../.gitignore" in
   let committed =
-    Stdio.In_channel.read_lines "../../.gitignore"
+    String.split_lines gitignore
     |> List.filter ~f:(fun line ->
         (not (String.is_prefix line ~prefix:"#"))
         && String.is_substring line ~substring:AF.staging_infix)
@@ -520,17 +521,23 @@ let () =
     (List.length committed = 1);
   Verdict.p_all "the committed staging rule equals the scheme derived from Atomic_file" committed
     ~f:(String.equal expected);
-  let ignored name = List.exists committed ~f:(fun pattern -> Ignore.glob_matches pattern name) in
+  let matches_committed_rule name =
+    List.exists committed ~f:(fun pattern -> Ignore.glob_matches pattern name)
+  in
+  let effectively_ignored name =
+    Ignore.effectively_ignored (Ignore.ignore_patterns gitignore) name
+  in
   (* The generator is the authority on separators and field layout. These are actual names captured
      while [with_channel] held them in the commit window, so changing [staging_path] and its
      recognizer together cannot leave this relationship green against an old ignore rule. *)
-  Verdict.p_all ~min:50 "the committed rule matches every actual staging_path output"
-    !generated_staging_names ~f:ignored;
+  Verdict.p_all ~min:50 "Git effectively ignores every actual staging_path output"
+    !generated_staging_names ~f:effectively_ignored;
   Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
     (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
-    ~f:ignored;
+    ~f:matches_committed_rule;
   Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
-    [ overlong_stem_near_miss ] ~f:(fun name -> ignored name && not (AF.is_staging_file name))
+    [ overlong_stem_near_miss ] ~f:(fun name ->
+      effectively_ignored name && not (AF.is_staging_file name))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in

@@ -51,7 +51,7 @@ an exception from the commit hook is not converted: true
 a refused publish leaves no staging file: true
 the ignore file carries exactly one Atomic_file staging rule: true
 the committed staging rule equals the scheme derived from Atomic_file: true
-the committed rule matches every actual staging_path output: true
+Git effectively ignores every actual staging_path output: true
 the committed rule rejects every expressible generated near-miss: true
 the glob-only overlong-stem residue is hidden but never recognized for deletion: true
 every planted staging file is recognized as one: true

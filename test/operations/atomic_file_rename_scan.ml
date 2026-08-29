@@ -22,16 +22,21 @@ open Stdio
 module Read = Test_utils.Config_key_scan
 module Ast_traverse = Ppxlib.Ast_traverse
 
-type reference = { source : string; line : int }
+type reference = { source : string; line : int; identifier : string list }
+type exemption = { source : string; identifier : string list; reason : string }
 
-(* A source-level exemption is intentionally conspicuous and carries its reviewable reason. The
-   staleness claim below requires every row to cover a reference still present in that source, so a
-   migrated or removed site cannot leave a permanent hole. *)
-let exempt_sources =
+(* Each row exempts one occurrence with one exact identifier, not its whole source. The staleness
+   claim below requires every row to be consumed exactly once, so another [rename] in the same file
+   is an offender even when it uses the commit primitive's spelling (Codex P2, round 3). *)
+let exempt_references =
   [
-    ( "arrayjit/lib/atomic_file.ml",
-      "implements Atomic_file's single commit primitive; every other OCaml publisher routes \
-       through this module" );
+    {
+      source = "arrayjit/lib/atomic_file.ml";
+      identifier = [ "Stdlib"; "Sys"; "rename" ];
+      reason =
+        "implements Atomic_file's single commit primitive; every other OCaml publisher routes \
+         through this module";
+    };
   ]
 
 let rename_references ~source content =
@@ -41,9 +46,10 @@ let rename_references ~source content =
       inherit Ast_traverse.iter as super
 
       method! expression expression =
-        (match Option.bind (Read.longident_of expression) ~f:List.last with
-        | Some "rename" ->
-            found := { source; line = expression.pexp_loc.loc_start.pos_lnum } :: !found
+        (match Read.longident_of expression with
+        | Some identifier
+          when Option.value_map (List.last identifier) ~default:false ~f:(String.equal "rename") ->
+            found := { source; line = expression.pexp_loc.loc_start.pos_lnum; identifier } :: !found
         | _ -> ());
         super#expression expression
     end
@@ -76,17 +82,25 @@ let () =
                  source (Exn.to_string exn));
             [])
   in
-  let exemptions = Map.of_alist_exn (module String) exempt_sources in
-  let exercised = ref (Set.empty (module String)) in
+  let exemption_key ({ source; identifier; _ } : exemption) = (source, identifier) in
+  let reference_key ({ source; identifier; _ } : reference) = (source, identifier) in
+  let remaining =
+    ref
+      (List.fold exempt_references ~init:Map.Poly.empty ~f:(fun counts exemption ->
+           Map.Poly.update counts (exemption_key exemption) ~f:(function
+             | None -> 1
+             | Some count -> count + 1)))
+  in
   let offenders =
     List.filter references ~f:(fun reference ->
-        match Map.find exemptions reference.source with
-        | Some _ ->
-            exercised := Set.add !exercised reference.source;
+        let key = reference_key reference in
+        match Map.Poly.find !remaining key with
+        | Some count when count > 0 ->
+            remaining := Map.Poly.set !remaining ~key ~data:(count - 1);
             false
-        | None -> true)
+        | _ -> true)
   in
-  List.iter offenders ~f:(fun { source; line } ->
+  List.iter offenders ~f:(fun { source; line; _ } ->
       eprintf
         "%s:%d: raw rename reference bypasses Utils.Atomic_file -- route publication through \
          Atomic_file, or add a named exemption with the reason this rename is unrelated\n"
@@ -94,10 +108,12 @@ let () =
   eprintf "Scanned %d OCaml sources; found %d raw rename reference(s).\n" (List.length sources)
     (List.length references);
   printf "Named raw rename exemptions:\n";
-  Map.iteri exemptions ~f:(fun ~key:source ~data:reason -> printf "  %s -- %s\n" source reason);
+  List.iter exempt_references ~f:(fun { source; identifier; reason } ->
+      printf "  %s: %s -- %s\n" source (String.concat ~sep:"." identifier) reason);
   printf "\n";
   Verdict.p_empty "no raw rename reference exists outside Atomic_file" ~over:references offenders;
-  Verdict.p_all "every named raw rename exemption has a reason" exempt_sources
-    ~f:(fun (_, reason) -> not (String.is_empty (String.strip reason)));
-  Verdict.p_all "every named raw rename exemption is exercised" exempt_sources
-    ~f:(fun (source, _) -> Set.mem !exercised source)
+  Verdict.p_all "every named raw rename exemption has a reason" exempt_references
+    ~f:(fun { reason; _ } -> not (String.is_empty (String.strip reason)));
+  Verdict.p_all "every named raw rename exemption matches exactly one live reference"
+    exempt_references ~f:(fun exemption ->
+      Map.Poly.find !remaining (exemption_key exemption) |> Option.value ~default:0 |> Int.equal 0)

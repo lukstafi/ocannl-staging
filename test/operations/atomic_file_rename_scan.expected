@@ -1,6 +1,6 @@
 Named raw rename exemptions:
-  arrayjit/lib/atomic_file.ml -- implements Atomic_file's single commit primitive; every other OCaml publisher routes through this module
+  arrayjit/lib/atomic_file.ml: Stdlib.Sys.rename -- implements Atomic_file's single commit primitive; every other OCaml publisher routes through this module
 
 no raw rename reference exists outside Atomic_file: true
 every named raw rename exemption has a reason: true
-every named raw rename exemption is exercised: true
+every named raw rename exemption matches exactly one live reference: true
