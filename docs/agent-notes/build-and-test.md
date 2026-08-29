@@ -1014,23 +1014,24 @@ that they earn a lookup rather than always-loaded space.
   serialized lock chain (what remains of it) against an otherwise idle runner after every file
   target finished, and the quotes are for PowerShell on the Windows leg, which splats unquoted
   `@` tokens to nothing.
-- The two opam caches are not one cache seen twice. `ci.yml` caches the built dependency switch
-  `_opam`, where its ~180 compiled packages live; `gh-pages-api.yml` caches opam's ROOT `~/.opam`
-  while its switch is a LOCAL `_opam` that nothing caches, so that job recompiles the dependencies
-  on every run and its entry buys only the download cache and the repository index. Both keys are
-  built by `.github/actions/pin-revisions`, run after the workflows' `opam pin -n` steps; it derives
-  every remote git pin from opam's live registry, resolves it with `git ls-remote`, and digests the
-  shas. A key over `hashFiles('*.opam')` alone is blind to the branch-tracking pins
+- Both `ci.yml` and `gh-pages-api.yml` cache the built local dependency switch `_opam`, where the
+  ~180 compiled packages live; setup-ocaml separately caches opam's root and bare compiler switch.
+  Their entries stay separate because the CI matrix and the fixed docs runner have different key
+  shapes, but both keys include the platform, compiler, project opam files and the digest from
+  `.github/actions/pin-revisions`. That action runs after the workflows' `opam pin -n` steps,
+  derives every remote git pin from opam's live registry, resolves it with `git ls-remote`, and
+  digests the shas. A key over `hashFiles('*.opam')` alone is blind to the branch-tracking pins
   (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move while the opam files
   stay byte-identical. Deriving from the registry matters: a newly added explicit pin enters the key
-  without a second caller-owned list to update. A LITERAL key is worse still — an exact hit means
-  actions/cache does not SAVE, so the entry is frozen from the day it was first written until the
-  7-day read eviction retires it, and the workflow's verdict becomes a fact about the calendar
-  (gh-ocannl-732: one tree, two different failing steps, decided by cache state).
-- `gh-pages-api.yml` triggers only on a push to master, so no change to it can be tried on a pull
-  request first: it is the one workflow whose edits land untested. Prefer changes there whose worst
-  case is a slower run, and prefer pieces `ci.yml` shares, since the PR's own `ci` run is then what
-  exercises them.
+  without a second caller-owned list to update. Both workflows use exact-key restores only: cache
+  lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
+  older switch. And both install non-Windows depexts unconditionally after restore, because those
+  are system packages absent from `_opam` (gh-ocannl-809).
+- `gh-pages-api.yml` runs for pull requests and `workflow_dispatch` as well as pushes to master, but
+  only a push deploys; validation runs receive their own concurrency group and exercise the build
+  and cache topology without publishing. Publishing pushes share `gh-pages-deploy` with the other
+  Pages workflow, so the two deploys cannot race over the same branch (gh-ocannl-808,
+  gh-ocannl-825).
 - Windows is off the per-PR matrix (62-74min against 20 on macOS and 29 on ubuntu) and runs on a
   twice-weekly schedule, together with an ubuntu job on the OCaml floor the opam files claim
   (`>= 5.3.0`, against 5.5 everywhere else). Both are reachable on demand through
