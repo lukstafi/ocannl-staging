@@ -614,9 +614,10 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
    do not belong in the key: they matter only insofar as they change the generated source. Likewise,
    the compiler command's path or package alone does not identify a toolchain --
    {!Census.toolchain_identity} asks the compiler, and the identity component combines its opaque
-   [-v] and preprocessed-header answers with the complete configured command and resolved executable
-   fingerprint so wrapper flags, an in-place compiler replacement, resolved SDK/header contents and
-   include-search changes cannot alias one another.
+   [-v], preprocessed-header and effective-compilation-plan answers with the complete configured
+   command and resolved executable fingerprint so wrapper flags, mutable specs/response files, an
+   in-place compiler replacement, resolved SDK/header contents and include-search changes cannot
+   alias one another.
 
    Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
    them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
@@ -669,6 +670,7 @@ let cache_dir =
    owner/mode checks below. *)
 let secure_owner_only_dir ~root path =
   try
+    let root_was_present = match Unix.lstat root with _ -> true | exception _ -> false in
     Utils.Atomic_file.ensure_dir path;
     let secure_one dir =
       match Unix.lstat dir with
@@ -681,10 +683,31 @@ let secure_owner_only_dir ~root path =
           | _ -> false)
       | _ -> false
     in
+    let parent_protects child =
+      (* Follow a parent symlink: macOS's standard [/tmp] is one, and it is the resolved directory's
+         write/sticky policy that governs whether a child can be renamed. The cache root itself is
+         still checked with [lstat] and cannot be a symlink. *)
+      match Unix.stat (Stdlib.Filename.dirname child) with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
+      | { Unix.st_kind = Unix.S_DIR; st_perm; _ } ->
+          st_perm land 0o022 = 0 || st_perm land 0o1000 <> 0
+      | _ -> false
+    in
+    let existing_root_is_safe dir =
+      match Unix.lstat dir with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
+      | { Unix.st_kind = Unix.S_DIR; st_uid; st_perm; _ } ->
+          st_uid = Unix.getuid () && st_perm land 0o022 = 0 && parent_protects dir
+      | _ -> false
+    in
     (* Secure from the implicit XDG/HOME root down. [ensure_dir] may just have created that root
        under a permissive umask; protecting only its descendants would still let another account
-       rename the OCANNL parent through the writable root after this check. *)
-    secure_one root && secure_one (Stdlib.Filename.dirname path) && secure_one path
+       rename the OCANNL parent through the writable root after this check. A PRE-EXISTING root is
+       user-owned policy, however: validate it and its parent but never rewrite its permissions. *)
+    (if root_was_present then existing_root_is_safe root
+     else secure_one root && parent_protects root)
+    && secure_one (Stdlib.Filename.dirname path)
+    && secure_one path
   with _ -> false
 
 let secure_owner_only_file path =
@@ -749,6 +772,48 @@ let preprocessing_signature source =
   in
   collect false [] (String.split_lines source) |> String.concat ~sep:"\n"
 
+let contains_text text pattern =
+  let text_len = String.length text in
+  let pattern_len = String.length pattern in
+  let rec matches_at at i =
+    i = pattern_len || (Char.equal text.[at + i] pattern.[i] && matches_at at (i + 1))
+  in
+  let rec search at =
+    pattern_len = 0 || (at + pattern_len <= text_len && (matches_at at 0 || search (at + 1)))
+  in
+  search 0
+
+(* These compiler modes consume mutable code-generation inputs whose CONTENTS are not represented by
+   preprocessing or the driver's [-###] expansion. Persisting their assembly would require parsing
+   compiler-specific option grammars and recursively fingerprinting profiles, plugins, PCHs or
+   module graphs. Bypass instead: this test still compiles and measures exactly as before, only
+   without memoization. Deliberately match option families, including their [=path] forms. *)
+let plan_has_mutable_codegen_inputs plan =
+  List.exists
+    [
+      "-fprofile-use";
+      "-fauto-profile";
+      "-fbranch-probabilities";
+      "-fprofile-instr-use";
+      "-fprofile-instrument-use-path";
+      "-fprofile-sample-use";
+      "-fprofile-sample-use-path";
+      "-fprofile-remapping-file";
+      "-fprofile-list";
+      "-fplugin";
+      "-fpass-plugin";
+      "-fsanitize-blacklist";
+      "-fsanitize-ignorelist";
+      "-fsanitize-coverage-ignorelist";
+      "-fsanitize-coverage-allowlist";
+      "-include-pch";
+      "-include-pth";
+      "-fmodule-file";
+      "-fmodule-map-file";
+      "-load";
+    ]
+    ~f:(contains_text plan)
+
 let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
   let signature = Stdlib.Digest.to_hex (Stdlib.Digest.string (preprocessing_signature source)) in
   Hashtbl.find_or_add toolchain_identities (t.command, t.march, opt_level, signature)
@@ -757,7 +822,25 @@ let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
       | None -> None
       | Some probed -> (
           match Census.preprocessed_source t ~opt_level ~source with
-          | Ok resolved -> Some (probed ^ tuple_field resolved)
+          | Ok resolved -> (
+              match Census.compilation_plan t ~opt_level ~source with
+              | Ok plan when plan_has_mutable_codegen_inputs plan ->
+                  Stdio.eprintf
+                    "cc census cache bypassed: %s -O%d uses mutable code-generation inputs (not \
+                     part of the golden)\n"
+                    t.label opt_level;
+                  None
+              | Ok plan ->
+                  Some
+                    (probed ^ tuple_field resolved ^ tuple_field plan
+                    ^ tuple_field (Cc_backend.compiler_executable_identity plan))
+              | Error out ->
+                  Stdio.eprintf
+                    "cc census cache bypassed: compilation-plan probe failed for %s -O%d (not part \
+                     of the golden):\n\
+                     %s\n"
+                    t.label opt_level out;
+                  None)
           | Error out ->
               Stdio.eprintf
                 "cc census cache bypassed: source-input probe failed for %s -O%d (not part of the \

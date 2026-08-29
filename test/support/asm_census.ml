@@ -112,6 +112,39 @@ let preprocessed_source t ~opt_level ~source =
   (try Stdlib.Sys.remove src with _ -> ());
   if rc = 0 then Ok out else Error out
 
+(** [compilation_plan t ~opt_level ~source] asks the compiler driver to expand the effective
+    compilation it would run, including response files, GCC specs, wrapper-injected options and
+    target subtools. Probe-local paths are normalized out; they name scratch files rather than an
+    input to code generation. *)
+let compilation_plan t ~opt_level ~source =
+  let src = Stdlib.Filename.temp_file "ocannl_census_plan_" ".c" in
+  let asm = Stdlib.Filename.temp_file "ocannl_census_plan_" ".s" in
+  Stdio.Out_channel.write_all src ~data:source;
+  let rc, out =
+    run_capture
+      (Printf.sprintf "%s %s -O%d -g -S -### -o %s %s" t.command (flags t) opt_level
+         (Stdlib.Filename.quote asm) (Stdlib.Filename.quote src))
+  in
+  let normalize_path out path marker =
+    let variants =
+      [
+        path; Stdlib.Filename.basename path; String.substr_replace_all path ~pattern:"\\" ~with_:"/";
+      ]
+      |> List.dedup_and_sort ~compare:String.compare
+      |> List.filter ~f:(fun path -> not (String.is_empty path))
+    in
+    List.fold variants ~init:out ~f:(fun out pattern ->
+        String.substr_replace_all out ~pattern ~with_:marker)
+  in
+  let out =
+    normalize_path out src "<SOURCE>" |> fun out ->
+    normalize_path out asm "<ASSEMBLY>" |> fun out ->
+    normalize_path out (Stdlib.Sys.getcwd ()) "<CWD>"
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  (try Stdlib.Sys.remove asm with _ -> ());
+  if rc = 0 then Ok out else Error out
+
 (** [accepts t] is whether this toolchain exists and accepts its [-march]. A column that answers
     [false] must be reported (see [Verdict.skipped]) rather than dropped: a silently missing column
     is indistinguishable from a passing one. *)
