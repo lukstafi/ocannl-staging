@@ -394,8 +394,6 @@
 ; previously shared golden verbatim, which is the content they were passing against in the daily
 ; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/train-transformer_names`
 ; and `dune promote`.
-; ocannl-golden-recorded-on: transformer_names-cuda.expected <- cc -- copied from the shared cc golden
-; ocannl-golden-recorded-on: transformer_names-hip.expected <- cc -- copied from the shared cc golden
 ;
 ; `../config/ocannl_backend.txt` is the resolved backend name, built by the shared rule in
 ; `test/config/dune`: it reads the same configuration this run will -- config file, environment,
@@ -411,6 +409,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-golden-recorded-on: transformer_names-cuda.expected <- cc -- copied from the shared cc golden
+ ; ocannl-golden-recorded-on: transformer_names-hip.expected <- cc -- copied from the shared cc golden
  (alias train-transformer_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)

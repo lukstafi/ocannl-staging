@@ -897,10 +897,11 @@ that they earn a lookup rather than always-loaded space.
   daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
   multidev_cc leg exists.
 - Every per-backend golden family covers the backend vocabulary derived from
-  `Backends.all_of_backend`; `backend_golden_family_scan` finds a backend token in each expected
-  filename and fails with the derived and present lists before dune can report a raw missing-rule
-  error on the absent backend (gh-ocannl-802). A member copied from a shared golden rather than
-  recorded on its own backend carries a marker in the directory's dune file beside the family rule:
+  `Backends.all_of_backend`; `backend_golden_family_scan` derives active family templates from the
+  dune rules that read `ocannl_backend.txt`, relates them to the expected-file census, and fails
+  with the derived and present lists before dune can report a raw missing-rule error on the absent
+  backend (gh-ocannl-802). A member copied from a shared golden rather than recorded on its own
+  backend carries a marker inside the dune rule that references its family:
   `; ocannl-golden-recorded-on: <member>.expected <- <backend> -- <reason>`. The scan validates the
   marker and prints the member into its golden without failing on it; remove the marker after a run
   on the member's own backend re-records it.
