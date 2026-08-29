@@ -327,21 +327,6 @@ let idents_in expr =
 let qualifier_of path =
   match List.rev path with _last :: qualifier :: _ -> Some qualifier | _ -> None
 
-(** The names [target] goes by in this file: itself, plus every module alias that resolves to it.
-
-    Resolved rather than assumed, because [module G = Test_utils.Generated] followed by [G.read "r"]
-    is ordinary OCaml, and a scan matching the literal component [Generated] would not merely
-    mis-attribute such a file -- it would drop it from the inventory entirely, which is the silent
-    direction (Codex P2, round 1). An alias of an alias is an alias, and structure items are visited
-    in order, so a name already recognised is available to the binding that borrows it. The
-    expression-position spelling ([let module G = ... in]) is matched on ppxlib's tree, where 5.4's
-    [Pexp_letmodule] and 5.5's structure-item-inside-an-expression have the one spelling.
-
-    What this does NOT reach is an alias in another FILE: this scan decides one source at a time, so
-    a wrapper module that some other file defines around the reader would leave its callers
-    unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated], IS
-    the target -- and a scan of one file cannot see it; a shared helper of that shape would have to
-    be added to the seeds here. *)
 (** The name a module expression ultimately reaches, by its last component.
 
     Four spellings, all of them the same module as far as any call site is concerned: the path
@@ -358,6 +343,21 @@ let rec module_source_name = function
   | { pmod_desc = Pmod_apply_unit functor_; _ } -> module_source_name functor_
   | _ -> None
 
+(** The names [target] goes by in this file: itself, plus every module alias that resolves to it.
+
+    Resolved rather than assumed, because [module G = Test_utils.Generated] followed by [G.read "r"]
+    is ordinary OCaml, and a scan matching the literal component [Generated] would not merely
+    mis-attribute such a file -- it would drop it from the inventory entirely, which is the silent
+    direction (Codex P2, round 1). An alias of an alias is an alias, and structure items are visited
+    in order, so a name already recognised is available to the binding that borrows it. The
+    expression-position spelling ([let module G = ... in]) is matched on ppxlib's tree, where 5.4's
+    [Pexp_letmodule] and 5.5's structure-item-inside-an-expression have the one spelling.
+
+    What this does NOT reach is an alias in another FILE: this scan decides one source at a time, so
+    a wrapper module that some other file defines around the reader would leave its callers
+    unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated], IS
+    the target -- and a scan of one file cannot see it; a shared helper of that shape would have to
+    be added to the seeds here. *)
 let module_aliases ~target structure =
   let aliases = Hash_set.of_list (module String) [ target ] in
   (* Through the same spellings {!module_source_name} reads, so a constrained alias
@@ -486,20 +486,6 @@ let renders_generated_text ~emitters ~aliases expr =
   iterator#expression expr;
   !found
 
-(** The names an emitter call deposits generated text INTO: the arguments at an emitter's buffer
-    labels.
-
-    [Canonical_render.emit] writes into its [~buf] rather than returning a document, and a caller
-    can split the write from the read across bindings --
-    [let () = CR.emit ~buf policy llc] and [let source = Buffer.contents buf] later. Neither binding
-    carries taint on its own: the first binds no name, the second calls no emitter. So the
-    DESTINATION is seeded directly, and [buf] is generated source for the rest of the file, exactly
-    as a returned document would be (gh-ocannl-748, from Codex round 5 on gh-ocannl-712).
-
-    An emitter whose buffer argument is unlabelled takes every positional argument of the call as a
-    destination. Nothing in the tree has that shape; over-taint costs an inventory line, and the
-    alternative -- matching by argument position -- would need the position to survive optional
-    arguments the call site omits. *)
 (** Each parameter with its position among the parameters that carry no label, which is how a call
     site addresses it. A labelled parameter keeps its label and takes no position. *)
 let positional_params params =
@@ -523,6 +509,20 @@ let argument_at ~destination args =
           | _ -> None)
   | At_position position -> List.nth (positional args) position
 
+(** The names an emitter call deposits generated text INTO: the arguments at an emitter's buffer
+    labels.
+
+    [Canonical_render.emit] writes into its [~buf] rather than returning a document, and a caller
+    can split the write from the read across bindings --
+    [let () = CR.emit ~buf policy llc] and [let source = Buffer.contents buf] later. Neither binding
+    carries taint on its own: the first binds no name, the second calls no emitter. So the
+    DESTINATION is seeded directly, and [buf] is generated source for the rest of the file, exactly
+    as a returned document would be (gh-ocannl-748, from Codex round 5 on gh-ocannl-712).
+
+    An emitter whose buffer argument is unlabelled takes every positional argument of the call as a
+    destination. Nothing in the tree has that shape; over-taint costs an inventory line, and the
+    alternative -- matching by argument position -- would need the position to survive optional
+    arguments the call site omits. *)
 let buffer_destinations ~emitters ~aliases structure =
   let names = ref [] in
   let iterator =
