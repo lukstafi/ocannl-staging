@@ -1,6 +1,11 @@
 name: github pages api
 
 on:
+  workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "test/**"
   push:
     branches:
       - master  # Set a branch name to trigger deployment
@@ -8,8 +13,10 @@ on:
       - "docs/**"
       - "test/**"
 
+# Only publishing pushes share the deployment queue. Pull-request and manual
+# builds get run-specific groups so validation never waits behind a publish.
 concurrency:
-  group: gh-pages-deploy
+  group: ${{ github.event_name == 'push' && 'gh-pages-deploy' || format('gh-pages-build-{0}', github.run_id) }}
   cancel-in-progress: false
   queue: max
 
@@ -86,6 +93,7 @@ jobs:
         run: opam exec -- dune build @doc
 
       - name: Deploy
+        if: github.event_name == 'push'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
