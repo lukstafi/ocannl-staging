@@ -119,14 +119,28 @@ let ensure_cifar10_binary () =
         else "curl"
       in
       let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
-      Utils.Atomic_file.with_channel ~path:tar_path () ~f:(fun oc ->
-          let argv = Array.of_list ([ curl_exe; "-fL" ] @ revoke_args @ [ url ]) in
-          let pid =
-            Unix.create_process curl_exe argv Unix.stdin (Unix.descr_of_out_channel oc) Unix.stderr
-          in
-          match snd (Unix.waitpid [] pid) with
-          | Unix.WEXITED 0 -> ()
-          | _ -> failwith "Failed to download CIFAR-10 binary dataset")
+      let exception Published_by_sibling in
+      match
+        Utils.Atomic_file.with_channel ~path:tar_path
+          ~before_commit:(fun () -> if Sys.file_exists tar_path then raise Published_by_sibling)
+          ()
+          ~f:(fun oc ->
+            let argv = Array.of_list ([ curl_exe; "-fL" ] @ revoke_args @ [ url ]) in
+            let pid =
+              Unix.create_process curl_exe argv Unix.stdin (Unix.descr_of_out_channel oc)
+                Unix.stderr
+            in
+            match snd (Unix.waitpid [] pid) with
+            | Unix.WEXITED 0 -> ()
+            | _ -> failwith "Failed to download CIFAR-10 binary dataset")
+      with
+      | () -> ()
+      | exception Published_by_sibling -> ()
+      (* Between the existence check and rename, a sibling can publish and begin extraction. On
+         Windows its open tar handle can then make replacement fail beyond Atomic_file's bounded
+         retry. The sibling's target is already a fully downloaded atomic publication, so it is the
+         successful result of this race; other filesystem errors still propagate. *)
+      | exception (Sys_error _ as exn) -> if Sys.file_exists tar_path then () else raise exn
     end;
     (* Extract; a failure invalidates the cached tarball, so the next run re-downloads instead of
        failing forever on a corrupt archive. *)

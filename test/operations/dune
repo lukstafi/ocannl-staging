@@ -1887,9 +1887,10 @@
 
 ; gh-ocannl-803: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
 ; recursive over the whole repository, so a new top-level directory joins the scan without another
-; list to maintain. The one raw rename that implements Atomic_file is a named exemption in the
-; scanner, carrying its reason and a staleness check. tools/test-run.sh's shell twin is outside an
-; OCaml parse by design and remains tracked through gh-ocannl-607.
+; list to maintain; the generated lexer/parser outputs add the compiled OCaml actions from .mll/.mly
+; inputs. The one raw rename that implements Atomic_file is a named exemption in the scanner,
+; carrying its reason and a staleness check. tools/test-run.sh's shell twin is outside an OCaml parse
+; by design and remains tracked through gh-ocannl-607.
 
 (executable
  (name atomic_file_rename_scan)
@@ -1902,6 +1903,8 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  ../../tensor/lexer.ml
+  ../../tensor/parser.ml
   (glob_files_rec ../../*.ml))
  (action
   (with-stdout-to

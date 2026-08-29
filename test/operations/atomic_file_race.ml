@@ -39,6 +39,31 @@ let listing () =
 let staging_leftovers () = List.filter (listing ()) ~f:AF.is_staging_file
 let generated_staging_names = ref []
 
+let git_root =
+  let argv = [| "git"; "rev-parse"; "--show-toplevel" |] in
+  let ic = Unix.open_process_args_in "git" argv in
+  let root = Stdlib.input_line ic in
+  match Unix.close_process_in ic with
+  | Unix.WEXITED 0 -> root
+  | _ ->
+      Verdict.fail "git rev-parse could not locate the source checkout for ignore testing";
+      "."
+
+let git_ignores path =
+  let argv = [| "git"; "-C"; git_root; "check-ignore"; "--no-index"; "--quiet"; "--"; path |] in
+  let pid = Unix.create_process "git" argv Unix.stdin Unix.stdout Unix.stderr in
+  match snd (Unix.waitpid [] pid) with
+  | Unix.WEXITED 0 -> true
+  | Unix.WEXITED 1 -> false
+  | status ->
+      Verdict.fail
+        (Printf.sprintf "git check-ignore failed for %S: %s" path
+           (match status with
+           | Unix.WEXITED code -> Printf.sprintf "exit %d" code
+           | Unix.WSIGNALED signal -> Printf.sprintf "signal %d" signal
+           | Unix.WSTOPPED signal -> Printf.sprintf "stopped by signal %d" signal));
+      false
+
 let reset_dir () =
   AF.ensure_dir dir;
   List.iter (listing ()) ~f:(fun name ->
@@ -524,20 +549,23 @@ let () =
   let matches_committed_rule name =
     List.exists committed ~f:(fun pattern -> Ignore.glob_matches pattern name)
   in
-  let effectively_ignored name =
-    Ignore.effectively_ignored (Ignore.ignore_patterns gitignore) name
-  in
   (* The generator is the authority on separators and field layout. These are actual names captured
      while [with_channel] held them in the commit window, so changing [staging_path] and its
-     recognizer together cannot leave this relationship green against an old ignore rule. *)
-  Verdict.p_all ~min:50 "Git effectively ignores every actual staging_path output"
-    !generated_staging_names ~f:effectively_ignored;
+     recognizer together cannot leave this relationship green against an old ignore rule. Ask Git
+     itself at the root and below representative source directories: unlike the small glob helper,
+     this preserves path-specific rules and the complete ordered, last-match-wins semantics. *)
+  let generated_paths =
+    List.concat_map !generated_staging_names ~f:(fun name ->
+        [ name; "test/" ^ name; "test/training/" ^ name ])
+  in
+  Verdict.p_all ~min:150 "Git effectively ignores every actual staging_path output at every depth"
+    generated_paths ~f:git_ignores;
   Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
     (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
     ~f:matches_committed_rule;
   Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
     [ overlong_stem_near_miss ] ~f:(fun name ->
-      effectively_ignored name && not (AF.is_staging_file name))
+      git_ignores ("test/training/" ^ name) && not (AF.is_staging_file name))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
