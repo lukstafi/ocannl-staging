@@ -46,6 +46,10 @@ a streamed publish that raises mid-write raises: true
 a failed streamed publish leaves the previous payload: true
 a failed streamed publish removes its own staging file: true
 a privately built directory tree publishes as one path: true
+the planted leftovers are what an interrupted run leaves behind: true
+the reset clears an interrupted run's directory fixtures, not only its files: true
+a rerun over an interrupted run's leftovers publishes its directory tree: true
+the rerun left the scratch directory as it found it: true
 every filesystem refusal reaches the caller as Sys_error: true
 an exception from the caller's own writer is not converted: true
 an exception from the commit hook is not converted: true
