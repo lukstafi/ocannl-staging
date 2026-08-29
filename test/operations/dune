@@ -4069,7 +4069,7 @@
  ; ocannl-backend: none -- links arrayjit.utils and races the filesystem helper; it compiles nothing.
  (name atomic_file_race)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps ocannl_config ../../.gitignore)
  (modules atomic_file_race)
  (libraries base stdio unix arrayjit.utils arrayjit.verdict))
 

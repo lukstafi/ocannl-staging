@@ -70,8 +70,8 @@ build_files/
 # A glob has no way to say "one or more digits", so the staging name's fields are fixed-width hex
 # (8, 8, 16) precisely so this rule can be EXACT over them. The leading `?*` is one-or-more: a bare
 # `*` also matches the EMPTY stem, and `.ocannl-stage.<fields>` is a name the helper never generates
-# and so somebody else's file. The pairing with atomic_file.ml's recognizer is pinned in
-# test/operations/cache_dir_scan_cases.
+# and so somebody else's file. test/operations/atomic_file_race derives this whole line from
+# atomic_file.ml's infix and field widths, then checks it against the recognizer.
 #
 # One dimension this rule CANNOT reach, and it is the language's limit rather than an oversight: a
 # generated stem is at most 191 bytes (longer basenames are truncated and digested), and a glob has

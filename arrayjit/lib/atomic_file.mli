@@ -49,6 +49,14 @@ val staging_infix : string
     has no way to spell "one or more digits", can describe exactly this set and no ordinary file
     besides. *)
 
+val field_width : int
+(** Width of the pid and counter fields in a staging name. Exposed with {!nonce_width} so the test
+    can derive the repository's [.gitignore] rule from the generator's constants rather than
+    restating them. *)
+
+val nonce_width : int
+(** Width of the nonce field in a staging name. See {!field_width}. *)
+
 val is_staging_file : string -> bool
 (** Whether a file NAME (not necessarily a path) is one of this module's staging artifacts. The
     predicate to be checked against, rather than a second spelling of the naming scheme.
