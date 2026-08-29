@@ -169,7 +169,7 @@ let remove_quietly path =
 let commit_attempts = 8
 let commit_backoff_seconds = 0.002
 
-let commit ~staging ~path =
+let publish_staged ~staging ~path =
   let rec attempt n =
     match Stdlib.Sys.rename staging path with
     | () -> ()
@@ -192,7 +192,7 @@ let with_channel ?before_commit ?(binary = true) ~path ~f () =
        and an unflushed buffer would commit a truncated payload on every platform. *)
     Stdlib.close_out oc;
     Option.iter before_commit ~f:(fun hook -> hook ());
-    commit ~staging ~path;
+    publish_staged ~staging ~path;
     result
   with
   | result -> result

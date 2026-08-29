@@ -100,6 +100,15 @@ val ensure_dir : string -> unit
 (** Creates the directory and its missing parents, tolerating concurrent creators. A no-op for
     ["."], ["/"] and the empty string, so a bare filename's [Filename.dirname] is safe to pass. *)
 
+val publish_staged : staging:string -> path:string -> unit
+(** [publish_staged ~staging ~path] atomically renames a complete, closed staging path over [path],
+    using the same bounded Windows retry as file publication. It also accepts a staged directory
+    tree, which lets callers build a multi-file artifact privately before exposing the whole tree.
+
+    The caller owns staging-name uniqueness, ensures both paths are on the same filesystem, and
+    removes [staging] after a failed publication. Prefer {!with_channel} for one file: it provides
+    all three automatically. *)
+
 val with_channel :
   ?before_commit:(unit -> unit) ->
   ?binary:bool ->

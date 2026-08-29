@@ -39,30 +39,25 @@ let listing () =
 let staging_leftovers () = List.filter (listing ()) ~f:AF.is_staging_file
 let generated_staging_names = ref []
 
-let git_root =
-  let argv = [| "git"; "rev-parse"; "--show-toplevel" |] in
-  let ic = Unix.open_process_args_in "git" argv in
-  let root = Stdlib.input_line ic in
-  match Unix.close_process_in ic with
-  | Unix.WEXITED 0 -> root
-  | _ ->
-      Verdict.fail "git rev-parse could not locate the source checkout for ignore testing";
-      "."
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (Stdlib.Sys.readdir path) ~f:(fun entry ->
+          remove_tree (Stdlib.Filename.concat path entry));
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
 
-let git_ignores path =
-  let argv = [| "git"; "-C"; git_root; "check-ignore"; "--no-index"; "--quiet"; "--"; path |] in
+let run_git repo args =
+  let argv = Array.of_list ([ "git"; "-C"; repo ] @ args) in
   let pid = Unix.create_process "git" argv Unix.stdin Unix.stdout Unix.stderr in
-  match snd (Unix.waitpid [] pid) with
+  snd (Unix.waitpid [] pid)
+
+let git_ignores repo path =
+  match run_git repo [ "check-ignore"; "--no-index"; "--quiet"; "--"; path ] with
   | Unix.WEXITED 0 -> true
   | Unix.WEXITED 1 -> false
-  | status ->
-      Verdict.fail
-        (Printf.sprintf "git check-ignore failed for %S: %s" path
-           (match status with
-           | Unix.WEXITED code -> Printf.sprintf "exit %d" code
-           | Unix.WSIGNALED signal -> Printf.sprintf "signal %d" signal
-           | Unix.WSTOPPED signal -> Printf.sprintf "stopped by signal %d" signal));
-      false
+  | _ -> false
 
 let reset_dir () =
   AF.ensure_dir dir;
@@ -423,7 +418,15 @@ let () =
   Verdict.p "a failed streamed publish leaves the previous payload"
     (Option.equal String.equal (read_published ()) (Some streamed));
   Verdict.p "a failed streamed publish removes its own staging file"
-    (List.is_empty (staging_leftovers ()))
+    (List.is_empty (staging_leftovers ()));
+  let staged_dir = Stdlib.Filename.concat dir "staged-directory" in
+  let published_dir = Stdlib.Filename.concat dir "published-directory" in
+  Unix.mkdir staged_dir 0o755;
+  Stdio.Out_channel.write_all (Stdlib.Filename.concat staged_dir "complete") ~data:"tree";
+  AF.publish_staged ~staging:staged_dir ~path:published_dir;
+  Verdict.p "a privately built directory tree publishes as one path"
+    (Stdlib.Sys.file_exists (Stdlib.Filename.concat published_dir "complete"));
+  remove_tree published_dir
 
 (* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the
    schedule cache treats a refusal as a future miss rather than a failed tuning run -- needs one
@@ -558,14 +561,29 @@ let () =
     List.concat_map !generated_staging_names ~f:(fun name ->
         [ name; "test/" ^ name; "test/training/" ^ name ])
   in
-  Verdict.p_all ~min:150 "Git effectively ignores every actual staging_path output at every depth"
-    generated_paths ~f:git_ignores;
-  Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
-    (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
-    ~f:matches_committed_rule;
-  Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
-    [ overlong_stem_near_miss ] ~f:(fun name ->
-      git_ignores ("test/training/" ^ name) && not (AF.is_staging_file name))
+  (* A package source archive has no [.git] metadata. Give Git a private repository containing the
+     committed ignore file, so these semantics are tested in checkouts and exported sources
+     alike. *)
+  let ignore_repo = Stdlib.Filename.temp_dir "atomic_file_ignore" "" in
+  Stdlib.Fun.protect
+    ~finally:(fun () -> remove_tree ignore_repo)
+    (fun () ->
+      Stdio.Out_channel.write_all (Stdlib.Filename.concat ignore_repo ".gitignore") ~data:gitignore;
+      let initialized = Poly.equal (run_git ignore_repo [ "init"; "--quiet" ]) (Unix.WEXITED 0) in
+      Verdict.p "the isolated Git ignore probe initializes" initialized;
+      Verdict.p_all ~min:150
+        "Git effectively ignores every actual staging_path output at every depth" generated_paths
+        ~f:(fun path -> initialized && git_ignores ignore_repo path);
+      Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
+        (field_near_misses
+        @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
+        ~f:matches_committed_rule;
+      Verdict.p_all
+        "the glob-only overlong-stem residue is hidden but never recognized for deletion"
+        [ overlong_stem_near_miss ] ~f:(fun name ->
+          initialized
+          && git_ignores ignore_repo ("test/training/" ^ name)
+          && not (AF.is_staging_file name)))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in

@@ -45,12 +45,14 @@ a streamed publish commits its whole payload: true
 a streamed publish that raises mid-write raises: true
 a failed streamed publish leaves the previous payload: true
 a failed streamed publish removes its own staging file: true
+a privately built directory tree publishes as one path: true
 every filesystem refusal reaches the caller as Sys_error: true
 an exception from the caller's own writer is not converted: true
 an exception from the commit hook is not converted: true
 a refused publish leaves no staging file: true
 the ignore file carries exactly one Atomic_file staging rule: true
 the committed staging rule equals the scheme derived from Atomic_file: true
+the isolated Git ignore probe initializes: true
 Git effectively ignores every actual staging_path output at every depth: true
 the committed rule rejects every expressible generated near-miss: true
 the glob-only overlong-stem residue is hidden but never recognized for deletion: true

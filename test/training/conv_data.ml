@@ -83,6 +83,14 @@ let cifar10_cache_dir () =
 
 let cifar10_data_dir () = cifar10_cache_dir () ^ "cifar-10-batches-bin/"
 
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (fun entry -> remove_tree (Filename.concat path entry)) (Sys.readdir path);
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
+
 let ensure_cifar10_binary () =
   let cache_dir = cifar10_cache_dir () in
   let data_dir = cifar10_data_dir () in
@@ -142,16 +150,33 @@ let ensure_cifar10_binary () =
          successful result of this race; other filesystem errors still propagate. *)
       | exception (Sys_error _ as exn) -> if Sys.file_exists tar_path then () else raise exn
     end;
-    (* Extract; a failure invalidates the cached tarball, so the next run re-downloads instead of
-       failing forever on a corrupt archive. *)
-    Printf.printf "Extracting CIFAR-10...\n%!";
-    (match Unix.system (Filename.quote_command "tar" [ "xzf"; tar_path; "-C"; cache_dir ]) with
-    | Unix.WEXITED 0 -> ()
-    | _ ->
-        (try Sys.remove tar_path with Sys_error _ -> ());
-        failwith "Failed to extract CIFAR-10 archive (cached tarball removed; rerun to re-download)");
-    if not (Sys.file_exists check_file) then
-      failwith ("Extraction succeeded but check file not found: " ^ check_file)
+    (* Extract into a private sibling tree, then publish the whole directory at once. Readers can
+       therefore observe no batch file until every batch is complete, and concurrent downloaders
+       never extract over one another. *)
+    if not (Sys.file_exists check_file) then begin
+      Printf.printf "Extracting CIFAR-10...\n%!";
+      let extraction_root = Filename.temp_dir ~temp_dir:cache_dir "cifar-extract-" "" in
+      Fun.protect
+        ~finally:(fun () -> remove_tree extraction_root)
+        (fun () ->
+          match
+            Unix.system (Filename.quote_command "tar" [ "xzf"; tar_path; "-C"; extraction_root ])
+          with
+          | Unix.WEXITED 0 -> (
+              let staged_data = Filename.concat extraction_root "cifar-10-batches-bin" in
+              let staged_check = Filename.concat staged_data "test_batch.bin" in
+              if not (Sys.file_exists staged_check) then
+                failwith ("Extraction succeeded but check file not found: " ^ staged_check);
+              let data_path = Filename.dirname (data_dir ^ ".") in
+              match Utils.Atomic_file.publish_staged ~staging:staged_data ~path:data_path with
+              | () -> ()
+              | exception (Sys_error _ as exn) ->
+                  if Sys.file_exists check_file then () else raise exn)
+          | _ ->
+              (try Sys.remove tar_path with Sys_error _ -> ());
+              failwith
+                "Failed to extract CIFAR-10 archive (cached tarball removed; rerun to re-download)")
+    end
   end
 
 (** Read a single CIFAR-10 binary batch file. Each record is 1 label byte + 3072 pixel bytes
