@@ -468,7 +468,9 @@ that they earn a lookup rather than always-loaded space.
   decimal ties away from zero where glibc rounds to even (`%.1f` of `2.25` prints `2.3` there,
   `2.2` on Linux). `Ir.Ndarray.concise_float ~prec` normalizes the exponents, OCaml's `%h`
   hex-float format sidesteps decimal rounding entirely, and tie-free test data sidesteps it too;
-  `test/support/test_utils.ml`'s printers package the rules as portable-by-construction.
+  `test/support/test_utils.ml` packages the rules — `hex_float` and `set_binary_stdout` are
+  portable by construction, while `print_float`/`print_floats` delegate to `concise_float` and so
+  still need tie-free inputs.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
