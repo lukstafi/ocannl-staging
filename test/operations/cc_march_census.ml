@@ -620,12 +620,13 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
 
    Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
    them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
-   and unusual hosts. If neither it nor a per-user XDG/HOME root exists, persistent caching is
-   disabled rather than using a predictable shared temporary directory. Entries older than 30 days
-   are expired and the remaining newest entries are capped at 512 MiB, so source/toolchain
-   generations cannot accumulate indefinitely. A missing, unwritable or malformed cache is only a
-   cache miss: the census still compiles and measures the same listing it did before this
-   memoization existed.
+   and unusual hosts. The implicit per-user directory and its files are made owner-only; an explicit
+   override is treated as a caller-chosen sharing policy. If neither the override nor a per-user
+   XDG/HOME root exists, persistent caching is disabled rather than using a predictable shared
+   temporary directory. Entries older than 30 days are expired and the remaining newest entries are
+   capped at 512 MiB, so source/toolchain generations cannot accumulate indefinitely. A missing,
+   insecure, unwritable or malformed cache is only a cache miss: the census still compiles and
+   measures the same listing it did before this memoization existed.
 
    Several dune processes can miss the same entry together. They may all compile it; publication is
    through [Utils.Atomic_file], so a reader sees one whole listing and never a mixture. The
@@ -637,11 +638,15 @@ let cache_max_bytes = 512 * 1024 * 1024
 let cache_hits = ref 0
 let cache_misses = ref 0
 let cache_bypasses = ref 0
+let cache_active = ref false
+
+type cache_location = { path : string; owner_only : bool }
 
 let cache_dir =
   lazy
     (match Stdlib.Sys.getenv_opt "OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR" with
-    | Some dir when not (String.is_empty (String.strip dir)) -> Some (String.strip dir)
+    | Some dir when not (String.is_empty (String.strip dir)) ->
+        Some { path = String.strip dir; owner_only = false }
     | _ ->
         let base =
           match Stdlib.Sys.getenv_opt "XDG_CACHE_HOME" with
@@ -653,7 +658,41 @@ let cache_dir =
               | _ -> None)
         in
         Option.map base ~f:(fun base ->
-            Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census"))
+            {
+              path = Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census";
+              owner_only = true;
+            }))
+
+let secure_owner_only_dir path =
+  try
+    Utils.Atomic_file.ensure_dir path;
+    let secure_one dir =
+      match Unix.lstat dir with
+      | { Unix.st_kind = Unix.S_DIR; st_uid; _ } when st_uid = Unix.getuid () -> (
+          Unix.chmod dir 0o700;
+          match Unix.lstat dir with
+          | { Unix.st_kind = Unix.S_DIR; st_uid; st_perm; _ } ->
+              st_uid = Unix.getuid () && st_perm land 0o077 = 0
+          | _ -> false)
+      | _ -> false
+    in
+    (* Securing the OCANNL parent too prevents another account from replacing the private leaf by
+       renaming it through a permissively-created parent. The XDG/HOME cache root remains the user's
+       own policy and is not chmodded by this test. *)
+    secure_one (Stdlib.Filename.dirname path) && secure_one path
+  with _ -> false
+
+let secure_owner_only_file path =
+  try
+    match Unix.lstat path with
+    | { Unix.st_kind = Unix.S_REG; st_uid; _ } when st_uid = Unix.getuid () -> (
+        Unix.chmod path 0o600;
+        match Unix.lstat path with
+        | { Unix.st_kind = Unix.S_REG; st_uid; st_perm; _ } ->
+            st_uid = Unix.getuid () && st_perm land 0o077 = 0
+        | _ -> false)
+    | _ -> false
+  with _ -> false
 
 (* Length-prefix the tuple fields before digesting them: separators inside the toolchain's opaque
    answer or a future [-march] spelling cannot make two distinct tuples serialize alike. *)
@@ -832,7 +871,11 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
   | None ->
       Int.incr cache_bypasses;
       Census.compile t ~opt_level ~src_path ~asm_path
-  | Some dir -> (
+  | Some { path = dir; owner_only = true } when not (secure_owner_only_dir dir) ->
+      Int.incr cache_bypasses;
+      Census.compile t ~opt_level ~src_path ~asm_path
+  | Some { path = dir; owner_only } -> (
+      cache_active := true;
       match toolchain_identity t ~opt_level ~source with
       | None ->
           Int.incr cache_bypasses;
@@ -847,10 +890,12 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
           prune_cache_once dir;
           (try Utils.Atomic_file.cleanup_stale_once dir with _ -> ());
           let cached =
-            try
-              let data = Stdio.In_channel.read_all path in
-              decode_cache_data ~header ~validate data
-            with _ -> None
+            if owner_only && not (secure_owner_only_file path) then None
+            else
+              try
+                let data = Stdio.In_channel.read_all path in
+                decode_cache_data ~header ~validate data
+              with _ -> None
           in
           match cached with
           | Some asm ->
@@ -869,7 +914,8 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
                   (try
                      Utils.Atomic_file.ensure_dir dir;
                      Utils.Atomic_file.cleanup_stale_once dir;
-                     Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ()
+                     Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ();
+                     if owner_only then Unix.chmod path 0o600
                    with _ -> ());
                   ok)))
 
@@ -1292,12 +1338,13 @@ let () =
                             }))))
       in
       Stdio.eprintf "=== end census ===\n\n";
-      Option.iter (Lazy.force cache_dir) ~f:prune_cache;
+      if !cache_active then
+        Option.iter (Lazy.force cache_dir) ~f:(fun cache -> prune_cache cache.path);
       Stdio.eprintf
         "cc census cache: %d hit(s), %d miss(es), %d bypass(es)%s (not part of the golden)\n\n"
         !cache_hits !cache_misses !cache_bypasses
         (match Lazy.force cache_dir with
-        | Some dir -> " in " ^ dir
+        | Some cache -> " in " ^ cache.path
         | None -> " (disabled: no per-user cache root)");
       let describe r = Printf.sprintf "%s w%d -O%d %s" r.toolchain r.width r.opt r.loop.what in
       (* One line per COLUMN, always -- printed by {!Verdict.skipped} where the toolchain is absent,
