@@ -127,13 +127,41 @@ let () =
     let wall_ms = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
     { ms; wall_ms; dispatches = count () - before; depth = !depth_seen }
   in
+  (* The anchor the low side of the per-launch envelope below is written against: one launch plus
+     one host synchronization, hand-rolled off the same two primitives the instrument uses and
+     minimized over [ref_launch_samples]. This is the quantity [Isolated] is DEFINED as, so it is
+     what a reading of it owes agreement with -- and, being a minimum, it is not the call's wall
+     mean, which is where contention lands. Taken three times, on either side of each reading, so
+     the anchor is a minimum over the whole window the two readings were taken in rather than a
+     snapshot of whatever the host was doing before them. *)
+  let ref_launch_samples = 16 in
+  let ref_ctx = ref ctx in
+  let ref_round_trip () =
+    let best = ref Float.infinity in
+    for _ = 1 to ref_launch_samples do
+      let c0 = Mtime_clock.counter () in
+      ref_ctx := Context.run !ref_ctx routine;
+      Context.sync !ref_ctx;
+      let dt = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
+      if Float.(dt < !best) then best := dt
+    done;
+    !best
+  in
+  let before = ref_round_trip () in
   let iso = measure Autotune.Isolated in
   let que = measure Autotune.Queued in
+  let between = ref_round_trip () in
+  let que2 = measure Autotune.Queued in
+  let iso2 = measure Autotune.Isolated in
+  let after = ref_round_trip () in
+  let floor_ms = Float.min before (Float.min between after) in
   Stdio.eprintf
     "  (not part of the golden) isolated %.6f ms over %d dispatches in %.1f ms wall; queued %.6f ms \
-     over %d dispatches (batch depth %d) in %.1f ms wall\n\
+     over %d dispatches (batch depth %d) in %.1f ms wall; second round isolated %.6f ms, queued \
+     %.6f ms (batch depth %d); round trip %.6f ms (%.6f/%.6f/%.6f)\n\
      %!"
-    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.depth que.wall_ms;
+    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.depth que.wall_ms iso2.ms que2.ms
+    que2.depth floor_ms before between after;
   let finite r = Float.is_finite r.ms && Float.is_positive r.ms in
   p "both modes returned a positive finite per-launch time" (finite iso && finite que);
   (* One launch per timed run, at least [repeats] runs and at most the 64-run top-up cap, plus the
@@ -157,36 +185,63 @@ let () =
   let claim = "queued timing dispatched more launches than isolated timing did" in
   if batches_here then p claim (que.dispatches > iso.dispatches)
   else Verdict.skipped ~backend:(backend ()) claim;
-  (* Per launch, not per batch. A reading that forgot to divide by the depth would be about [depth]
-     times the mean cost of a launch in that call -- up to 200x -- which the upper factor of 3
-     refuses. The low side refuses the mirror error, a reading divided by the depth twice, which
-     sits at about [mean / depth] -- so its divisor must stay BELOW the depth the call actually
-     used (the seam-reported one, cross-checked against the dispatch counter above) while
-     absorbing what the upper side never faces: [ms] is a min over up to 64 batches, [mean] the
-     whole call's average, and on a busy runner the average sits severalfold above the minimum
-     (4.3x observed on CI, gh-ocannl-851). The divisor scales with that depth: at the cap
-     (microsecond launches, the jitter-dominated regime) the envelope is 16, and at small depths
-     -- millisecond launches, batches of tens of milliseconds, the jitter amortized -- it is half
-     the depth, refusing [mean / depth] with a factor-2 margin. The floor of 3 keeps the claim
-     meaningful at depth <= 3, where a double division is a <= 3x under-read inside the noise
-     floor and out of this instrument's reach -- as it already was under the pre-widening factor
-     of 3. Isolated timing has depth 1 and no division to get wrong, so its low side is
-     two-sidedness alone, at 16. *)
+  (* Per launch, not per batch. The two sides refuse mirror errors, and they are anchored on
+     different quantities because of it.
+
+     The upper side refuses a reading that forgot to divide by the depth: such a reading is about
+     [depth] times the mean cost of a launch in that call -- up to 200x -- which the whole call's
+     wall mean bounds with a factor of 3. Contention only inflates that mean, so a busy runner makes
+     this side stricter rather than looser, and it stays written against it.
+
+     The low side refuses the reading divided by the depth TWICE, and it cannot use that mean,
+     because the mean is exactly where contention lands. [ms] is a MINIMUM over the call's batches;
+     the mean is the call's average with the warmup, the calibration and every host stall folded in.
+     On a busy runner the two part company without either being wrong -- gh-ocannl-851 widened this
+     divisor for the 4.3x gap CI showed, and the HIP sweep then produced 22x (a 0.342 ms launch
+     against a 7.48 ms mean, the call cut to 6 dispatches by stalls). No fraction of a mean survives
+     that, so the fix is not a wider fraction: it is an anchor that is a minimum too, [floor_ms], so
+     that both sides of the comparison face the same noise.
+
+     [Isolated] IS that round trip, so its reading and the anchor are two minima of the SAME
+     quantity: the factor of 3 is a bound rather than an envelope, and from an idle box to one at 6x
+     oversubscription the measured ratio stayed above 0.86. What it refuses is the low-side error a
+     depth-1 mode can still make -- a reading divided by the run count on top of the launch count.
+     [Queued] amortizes the round trip away, so its reading sits legitimately BELOW the anchor (6x
+     below on an idle HIP box, 0.16 of it at worst across the same sweep of loads), and its divisor
+     is 16: clear of that worst legitimate ratio by 2.6x, while a twice-divided reading, sitting at
+     [1/depth] of a correct one, is refused across the deep-batch regime the divisor exists for. At
+     small depths a double division is a small under-read inside the noise floor and out of this
+     instrument's reach, as it already was under the pre-widening factor of 3. *)
   let mean r = r.wall_ms /. Float.of_int (max 1 r.dispatches) in
-  let per_launch ~low_div r = Float.(r.ms <= 3. * mean r && r.ms >= mean r / low_div) in
-  let que_low_div = Float.(max 3. (min 16. (of_int que.depth / 2.))) in
-  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch ~low_div:16. iso)
-    ~detail:(fun () -> Printf.sprintf "%.6f ms vs mean %.6f ms" iso.ms (mean iso));
-  Verdict.pass_fail "queued reading is a per-launch time" (per_launch ~low_div:que_low_div que)
+  let per_launch ~low_div r = Float.(r.ms <= 3. * mean r && r.ms >= floor_ms / low_div) in
+  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch ~low_div:3. iso)
     ~detail:(fun () ->
-      Printf.sprintf "%.6f ms vs mean %.6f ms (depth %d, low divisor %.0f)" que.ms (mean que)
-        que.depth que_low_div);
+      Printf.sprintf "%.6f ms vs mean %.6f ms, round trip %.6f ms" iso.ms (mean iso) floor_ms);
+  Verdict.pass_fail "queued reading is a per-launch time" (per_launch ~low_div:16. que)
+    ~detail:(fun () ->
+      Printf.sprintf "%.6f ms vs mean %.6f ms, round trip %.6f ms (depth %d)" que.ms (mean que)
+        floor_ms que.depth);
   (* Amortizing a round trip can only remove time, so a queued reading above the isolated one is the
      instrument reporting the wrong quantity, not a slow machine. The factor absorbs the noise a
-     min-of-N leaves; the point of the claim is the direction. *)
+     min-of-N leaves; the point of the claim is the direction.
+
+     Both sides are minima, and a minimum only means what it says if one of the samples under it was
+     taken while the host was not stalling. One reading each cannot promise that: the two calls
+     occupy DISJOINT windows, so a burst landing in the queued one inverts the direction with
+     neither reading wrong -- 6 of 28 runs at 3-4x oversubscription. Normalizing each reading by the
+     round trip measured beside it does not repair it (the worst inversions survive at 99x, 3.5x and
+     2.7x), because the stall is inside the batch rather than in the anchor. What does repair it is
+     giving each mode more than one window: each is read twice and the claim is made on the min of
+     its two, with the four calls ordered as a palindrome -- isolated, queued, queued, isolated --
+     so that the two modes have the SAME mean sample time and no ordering bias is left for the
+     direction to inherit. The other claims stay on the first round: they are about one call's own
+     decomposition, not about a quantity two calls can be minimized over. *)
+  let iso_min = Float.min iso.ms iso2.ms and que_min = Float.min que.ms que2.ms in
   Verdict.pass_fail "queued timing does not read above isolated timing"
-    Float.(que.ms <= iso.ms * 2.)
-    ~detail:(fun () -> Printf.sprintf "queued %.6f ms vs isolated %.6f ms" que.ms iso.ms);
+    Float.(que_min <= iso_min * 2.)
+    ~detail:(fun () ->
+      Printf.sprintf "queued %.6f ms (%.6f, %.6f) vs isolated %.6f ms (%.6f, %.6f)" que_min que.ms
+        que2.ms iso_min iso.ms iso2.ms);
   (* Queued timing costs MORE than isolated timing on a fast routine -- isolated stops at the
      64-run cap, queued runs to the wall budget -- but it is bounded by that budget rather than
      scaling with the batch depth. A loop that counted launches instead of wall time would spend up
