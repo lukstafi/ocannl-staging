@@ -1281,7 +1281,7 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
       link code.bindings kparams Ctypes.(void @-> returning void)]
   in
   let%diagn_sexp work () : unit =
-    [%log_result name];
+    [%log_result _name];
     (* Stdio.printf "launching %s\n" name; *)
     Indexing.apply run_variadic ();
     if Utils.debug_log_from_routines () then
