@@ -389,11 +389,14 @@
 ; canary that the model learned name structure -- the loss thresholds are their quantitative proxy,
 ; not their replacement -- and they are exact by construction only PER SCHEDULER: `Multidev` is free
 ; to differ from `Sync` in execution order and device split, so its training trajectory and the
-; sampling RNG state legitimately diverge and no single promotion serves both. Recorded on this
-; repository's reference Mac for cc, multidev_cc and metal; the cuda and hip goldens carry the
-; previously shared golden verbatim, which is the content they were passing against in the daily
-; sweep. Re-record one with `OCANNL_BACKEND=<b> dune build @test/training/train-transformer_names`
-; and `dune promote`.
+; sampling RNG state legitimately diverge and no single promotion serves both. Every member is
+; recorded on its own backend: cc, multidev_cc and metal on this repository's reference Mac, cuda on
+; `rog-nv-wsl` and hip on `minix-amd-wsl`. The scheduler really is the only axis that splits them --
+; all four `Sync` backends agree byte for byte across three vendors' hardware, and `multidev_cc`
+; alone differs, in exactly the three sampled names. Re-record one with
+; `OCANNL_BACKEND=<b> dune build @test/training/train-transformer_names` and `dune promote`; on a
+; backend-uniform golden, confirm which backend actually ran from `ocannl_backend.txt` rather than
+; from the diff passing, since a wrong backend would pass against an identical member.
 ;
 ; `../config/ocannl_backend.txt` is the resolved backend name, built by the shared rule in
 ; `test/config/dune`: it reads the same configuration this run will -- config file, environment,
@@ -409,8 +412,6 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- ; ocannl-golden-recorded-on: transformer_names-cuda.expected <- cc -- copied from the shared cc golden
- ; ocannl-golden-recorded-on: transformer_names-hip.expected <- cc -- copied from the shared cc golden
  (alias train-transformer_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)

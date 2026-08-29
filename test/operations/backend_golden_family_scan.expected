@@ -3,8 +3,6 @@ Backend golden families:
   test/training/transformer_names-<backend>.expected
 
 Members not yet recorded on their own backend:
-  test/training/transformer_names-cuda.expected <- cc -- copied from the shared cc golden
-  test/training/transformer_names-hip.expected <- cc -- copied from the shared cc golden
 
 Synthetic controls:
   a complete synthesized family and valid contained marker are accepted
