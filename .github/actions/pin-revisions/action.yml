@@ -1,6 +1,6 @@
 name: Resolve opam dependency source revisions
 description: >-
-  Resolve the live opam-repository state and every remote git pin in the
+  Resolve the ordinary-package solution and every remote git pin in the
   current switch, and emit short digests to mix into an opam cache key.
 
 # Why this exists at all: an opam cache key built from `hashFiles('*.opam')`
@@ -13,14 +13,14 @@ description: >-
 # costs one rebuild; under-invalidating is silent staleness, so the trade is not
 # close.
 #
-# Why it is an action rather than a copy per workflow: repository and pin
+# Why it is an action rather than a copy per workflow: ordinary-package and pin
 # resolution are one cohesive question ("which dependency sources will the
-# solver see right now?") and drift between two copies of the answer is
+# switch contain right now?") and drift between two copies of the answer is
 # precisely the failure gh-ocannl-732 recorded. Both `ci.yml` and
 # `gh-pages-api.yml` cache `_opam` and exercise this action on pull requests;
 # their entries stay separate because their runner matrices and key shapes
 # differ. Callers run this after setup-ocaml has updated the repositories and
-# after all `opam pin -n` steps, so both live registries are the source of truth.
+# after all `opam pin -n` steps, so the live solver state is the source of truth.
 
 outputs:
   digest:
@@ -28,11 +28,11 @@ outputs:
       Twelve hex characters standing for the resolved revisions; changes iff any
       pin moved.
     value: ${{ steps.resolve.outputs.digest }}
-  repository-digest:
+  solution-digest:
     description: >-
-      Twelve hex characters standing for the selected opam repositories and
-      their live stamps; changes when their order or state changes.
-    value: ${{ steps.resolve.outputs.repository-digest }}
+      Twelve hex characters standing for the solved ordinary-package set and
+      its package definitions.
+    value: ${{ steps.resolve.outputs.solution-digest }}
 
 runs:
   using: composite
@@ -49,31 +49,36 @@ runs:
           fi
         }
 
-        # setup-ocaml updates the selected repositories before this action.
-        # Opam records the exact fetched state in each repository's `stamp`;
-        # include the repository names in priority order because that order is
-        # itself solver input. Hashing only the project opam files would miss a
-        # new compatible release or changed metadata in opam-repository.
-        root=$(opam var root)
-        case "$root" in
-          [A-Za-z]:\\*)
-            command -v cygpath >/dev/null 2>&1 \
-              || { echo "cannot translate Windows opam root: $root" >&2; exit 1; }
-            root=$(cygpath -u "$root")
-            ;;
-        esac
-        repos=$(opam --cli=2.1 repository list --safe --short)
-        [ -n "$repos" ] || { echo "no selected opam repositories found" >&2; exit 1; }
-        repository_states=
-        while IFS= read -r repo; do
-          repo_file="$root/repo/$repo/repo"
-          [ -f "$repo_file" ] || { echo "repository metadata not found: $repo_file" >&2; exit 1; }
-          stamp=$(sed -n 's/^stamp:[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_file")
-          [ -n "$stamp" ] || { echo "repository stamp not found: $repo_file" >&2; exit 1; }
-          echo "$repo -> $stamp"
-          repository_states=$repository_states$repo:$stamp$'\n'
-        done <<< "$repos"
-        echo "repository-digest=$(printf %s "$repository_states" | hash12)" >>"$GITHUB_OUTPUT"
+        # setup-ocaml updates opam-repository before this action. Ask opam's
+        # solver for the self-contained package set selected for every project
+        # package with the same test/doc dependency flags as the install steps.
+        # This keys the actual ordinary-package versions rather than a
+        # version-specific detail of opam's repository storage.
+        opam_files=(./*.opam)
+        [ -e "${opam_files[0]}" ] \
+          || { echo "no project opam files found for dependency solution" >&2; exit 1; }
+        package_names=$(printf '%s\n' "${opam_files[@]}" \
+          | sed 's#^\./##; s#\.opam$##' \
+          | LC_ALL=C sort -u)
+        request=$(printf '%s\n' "$package_names" | paste -sd, -)
+        solution=$(opam --cli=2.1 list --safe --resolve="$request" \
+          --with-test --with-doc --columns=package --short \
+          | LC_ALL=C sort -u)
+        [ -n "$solution" ] \
+          || { echo "opam dependency solution was empty" >&2; exit 1; }
+        echo "Resolved opam package solution:"
+        printf '%s\n' "$solution" | sed 's/^/  /'
+        solution_packages=()
+        while IFS= read -r package; do
+          solution_packages+=("$package")
+        done <<< "$solution"
+        solution_digest=$(
+          {
+            printf '%s\n' "$solution"
+            opam --cli=2.1 show --safe --raw --sort "${solution_packages[@]}"
+          } | hash12
+        )
+        echo "solution-digest=$solution_digest" >>"$GITHUB_OUTPUT"
 
         # `--cli=2.1` fixes the table format this parser consumes across opam
         # upgrades. Local project pins are reported as git+file:// URLs; omit
