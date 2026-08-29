@@ -1,4 +1,4 @@
-open Ocannl.Nn_blocks.DSL_modules
+open Ocannl.Operation.DSL_modules
 let test_raw_unop a =
   let r =
     (NTDSL.term ~label:("r" :: ((a.Tensor.value).Ir.Tnode.label))

@@ -1,4 +1,4 @@
-open Ocannl.Nn_blocks.DSL_modules
+open Ocannl.Operation.DSL_modules
 
 (* Fixtures pinning the call shapes the raw %cd accumulation path expands to. "Raw" means no
    [~projections:] is in scope, so ppx_cd's single [process_raw_accum] path constructs the shape
