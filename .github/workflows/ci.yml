@@ -184,27 +184,15 @@ jobs:
     # setup-ocaml's own cache covers opam and the bare compiler switch, which is
     # why switch creation is ~70s rather than ten minutes; it does not cover these.
     #
-    # The key must follow every VCS pin that can move while the opam files stay
-    # byte-identical, or a hit serves stale dependency revisions indefinitely.
-    # That is the two pins above plus each branch-tracking pin-depends entry
-    # (ppx_minidebug#main, notty-community#master, dataprep#main, and the
-    # cudajit/hipjit pins) -- `opam pin -n .` honours those, so they are as live
-    # as the explicit ones. Over-invalidating (cudajit/hipjit are not installed
-    # on these runners) costs one rebuild; under-invalidating is silent
-    # staleness. The action reads pin-depends out of the opam files so the key
-    # cannot drift out of step with them, and carries the rest of the reasoning;
-    # `gh-pages-api.yml` calls the same one, which is what keeps the two
-    # workflows' keys from diverging again (gh-ocannl-732).
+    # The key must follow every remote git pin that can move while the opam files
+    # stay byte-identical, or a hit serves stale dependency revisions
+    # indefinitely. The action derives that set from the registry populated by
+    # the pin steps above, so a new pin joins the key without a second list to
+    # update. It carries the rest of the reasoning; `gh-pages-api.yml` calls the
+    # same one, keeping the workflows from diverging again (gh-ocannl-732).
     - name: Resolve pinned dependency revisions
       id: pins
       uses: ./.github/actions/pin-revisions
-      with:
-        # The pins this workflow declares above, beyond what pin-depends already
-        # names. (A comment cannot live inside the folded scalar below; YAML
-        # reads anything indented under it as content.)
-        extra-specs: >-
-          https://github.com/c-cube/printbox.git#HEAD
-          https://github.com/mmottl/pcre-ocaml.git#HEAD
     - name: Cache opam dependencies
       id: opam-cache
       uses: actions/cache@v6

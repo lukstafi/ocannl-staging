@@ -1015,10 +1015,12 @@ that they earn a lookup rather than always-loaded space.
   `_opam`, where its ~180 compiled packages live; `gh-pages-api.yml` caches opam's ROOT `~/.opam`
   while its switch is a LOCAL `_opam` that nothing caches, so that job recompiles the dependencies
   on every run and its entry buys only the download cache and the repository index. Both keys are
-  built by `.github/actions/pin-revisions`, which resolves every `pin-depends` entry with
-  `git ls-remote` and digests the shas: a key over `hashFiles('*.opam')` alone is blind to the
-  branch-tracking pins (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move
-  while the opam files stay byte-identical. A LITERAL key is worse still — an exact hit means
+  built by `.github/actions/pin-revisions`, run after the workflows' `opam pin -n` steps; it derives
+  every remote git pin from opam's live registry, resolves it with `git ls-remote`, and digests the
+  shas. A key over `hashFiles('*.opam')` alone is blind to the branch-tracking pins
+  (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move while the opam files
+  stay byte-identical. Deriving from the registry matters: a newly added explicit pin enters the key
+  without a second caller-owned list to update. A LITERAL key is worse still — an exact hit means
   actions/cache does not SAVE, so the entry is frozen from the day it was first written until the
   7-day read eviction retires it, and the workflow's verdict becomes a fact about the calendar
   (gh-ocannl-732: one tree, two different failing steps, decided by cache state).
