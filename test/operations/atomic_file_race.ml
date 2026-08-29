@@ -48,10 +48,62 @@ let rec remove_tree path =
   | _ -> Unix.unlink path
   | exception Unix.Unix_error _ -> ()
 
+(* Recursively, because not every fixture here is a file: the publication leg builds a staging TREE
+   and publishes it as one, and the sweep leg creates a directory of its own. A run interrupted
+   between planting one of those and removing it leaves a DIRECTORY behind, and a file-only reset
+   walked past it -- so the next run died at [Unix.mkdir] with EEXIST, or at [publish_staged]'s
+   rename into a non-empty target, instead of starting from the empty directory every leg here
+   assumes (gh-ocannl-803). Removal is best-effort per entry, so one entry the filesystem refuses
+   does not leave the rest of the leftovers in place. *)
 let reset_dir () =
   AF.ensure_dir dir;
   List.iter (listing ()) ~f:(fun name ->
-      try Stdlib.Sys.remove (Stdlib.Filename.concat dir name) with _ -> ())
+      try remove_tree (Stdlib.Filename.concat dir name) with _ -> ())
+
+(* At startup, before any leg runs: whatever the previous run left, this one begins from an empty
+   directory. The per-leg resets below keep the legs independent of each other; this one keeps the
+   RUN independent of the last one. *)
+let () = reset_dir ()
+
+(* The child half of the rerun control below. What recovers a rerun is the initialization directly
+   above -- what happens when the PROCESS starts -- and a control that calls [reset_dir] itself pins
+   the HELPER instead: it would stay green with that startup call deleted, or moved after the first
+   leg, because the per-leg resets mask its absence (Codex P2, round 1). So the control plants
+   leftovers and starts a fresh process, which lands here: this argument makes a run do its startup
+   and nothing else, reporting where it ran and what the scratch directory held once the startup
+   reset had run.
+
+   An argv marker rather than an environment variable, so nothing ambient can put a run into this
+   mode -- OCANNL's commandline scan leaves an argument it is not addressed by alone, and there is
+   no undeclared variable for dune to serve a stale result across. It must sit immediately after the
+   startup reset and before every leg, or what it reports would be some later leg's reset. *)
+let startup_probe_arg = "--startup-probe"
+
+let () =
+  if Array.exists Stdlib.Sys.argv ~f:(String.equal startup_probe_arg) then (
+    (* The cwd first: it is what lets the parent claim this process cleared ITS scratch directory,
+       so that "the leftovers are gone" cannot be satisfied by a child that ran somewhere else and
+       truthfully saw nothing. *)
+    Stdio.printf "%s\n" (Unix.getcwd ());
+    List.iter (listing ()) ~f:(Stdio.printf "%s\n");
+    Stdio.Out_channel.flush Stdio.stdout;
+    Stdlib.exit 0)
+
+(* Start a fresh process over whatever the scratch directory currently holds, and report what its
+   startup made of it. The child inherits this process's working directory, so it resolves [dir] to
+   the same place -- which it says out loud, above. *)
+let run_startup_probe () =
+  let read_fd, write_fd = Unix.pipe () in
+  let exe = Stdlib.Sys.executable_name in
+  let pid = Unix.create_process exe [| exe; startup_probe_arg |] Unix.stdin write_fd Unix.stderr in
+  Unix.close write_fd;
+  let ic = Unix.in_channel_of_descr read_fd in
+  let output = Stdio.In_channel.input_all ic in
+  Stdlib.close_in ic;
+  let _, status = Unix.waitpid [] pid in
+  match String.split_lines output with
+  | cwd :: entries -> (status, Some cwd, List.filter entries ~f:(Fn.non String.is_empty))
+  | [] -> (status, None, [])
 
 (* A payload is SELF-DESCRIBING: it names its writer, its round and its own body length, and ends
    with a terminator. Length alone is not enough — a run of one character truncated by a multiple of
@@ -370,6 +422,28 @@ let () =
   Verdict.p "the repeated publishing left only the published file"
     (List.equal String.equal (listing ()) [ "published.bin" ])
 
+(* Publishing a privately built TREE: the caller assembles a directory under a staging name and
+   commits the whole thing with one rename. Factored out because the rerun control below runs the
+   very same sequence a second time -- what an interrupted run leaves behind must not change what
+   this sequence does. *)
+let publish_directory_tree () =
+  let staged_dir = Stdlib.Filename.concat dir "staged-directory" in
+  let published_dir = Stdlib.Filename.concat dir "published-directory" in
+  match
+    Unix.mkdir staged_dir 0o755;
+    Stdio.Out_channel.write_all (Stdlib.Filename.concat staged_dir "complete") ~data:"tree";
+    AF.publish_staged ~staging:staged_dir ~path:published_dir;
+    Stdlib.Sys.file_exists (Stdlib.Filename.concat published_dir "complete")
+  with
+  | published ->
+      remove_tree published_dir;
+      published
+  | exception exn ->
+      (* Reported rather than propagated, so the claim that wanted this sequence to work says
+         [false] on its own line -- with the refusal named on stderr for whoever reads why. *)
+      Stdio.eprintf "directory publication refused: %s\n%!" (Stdlib.Printexc.to_string exn);
+      false
+
 (* A writer that fails in its commit window leaves the previous entry and no artifact — for a
    payload held in memory and for one streamed through a channel alike. *)
 let () =
@@ -408,14 +482,46 @@ let () =
     (Option.equal String.equal (read_published ()) (Some streamed));
   Verdict.p "a failed streamed publish removes its own staging file"
     (List.is_empty (staging_leftovers ()));
-  let staged_dir = Stdlib.Filename.concat dir "staged-directory" in
-  let published_dir = Stdlib.Filename.concat dir "published-directory" in
-  Unix.mkdir staged_dir 0o755;
-  Stdio.Out_channel.write_all (Stdlib.Filename.concat staged_dir "complete") ~data:"tree";
-  AF.publish_staged ~staging:staged_dir ~path:published_dir;
-  Verdict.p "a privately built directory tree publishes as one path"
-    (Stdlib.Sys.file_exists (Stdlib.Filename.concat published_dir "complete"));
-  remove_tree published_dir
+  Verdict.p "a privately built directory tree publishes as one path" (publish_directory_tree ())
+
+(* The rerun control (gh-ocannl-803). Every leg above starts from an empty scratch directory, and a
+   run cut short -- Ctrl-C, a failed claim's exit, a killed suite -- does not get to finish its own
+   cleanup. So plant, by hand, exactly what an interruption in this file can leave behind: the
+   staging tree built but not yet published, the published tree not yet removed, the sweep leg's
+   directory not yet rmdir'd, and a stale published file. Each tree gets a nested subtree, so that
+   clearing them is claimed to RECURSE rather than merely to try [rmdir] once.
+
+   Then hand that state to an ACTUAL rerun -- a fresh process, whose startup is the thing under test
+   -- and re-run the sequence the leftovers obstruct. Under a file-only reset the directories
+   survive the child's startup, [Unix.mkdir] raises EEXIST and [publish_staged] renames into a
+   non-empty target; with the startup reset gone, the child reports the leftovers it was supposed to
+   have cleared. *)
+let () =
+  AF.ensure_dir dir;
+  let plant_tree name =
+    let path = Stdlib.Filename.concat dir name in
+    AF.ensure_dir path;
+    Stdio.Out_channel.write_all (Stdlib.Filename.concat path "complete") ~data:"tree";
+    let nested = Stdlib.Filename.concat path "nested" in
+    AF.ensure_dir nested;
+    Stdio.Out_channel.write_all (Stdlib.Filename.concat nested "deep") ~data:"deep"
+  in
+  List.iter [ "staged-directory"; "published-directory"; "not_created_yet" ] ~f:plant_tree;
+  Stdio.Out_channel.write_all target ~data:"leftover from an interrupted run";
+  Verdict.p "the planted leftovers are what an interrupted run leaves behind"
+    (List.equal String.equal (listing ())
+       [ "not_created_yet"; "published-directory"; "published.bin"; "staged-directory" ]);
+  let status, probe_cwd, seen_after_startup = run_startup_probe () in
+  Verdict.p "a fresh process starts over the leftovers and exits cleanly"
+    (match status with Unix.WEXITED 0 -> true | _ -> false);
+  Verdict.p "the fresh process ran in this test's own scratch directory"
+    (Option.value_map probe_cwd ~default:false ~f:(String.equal (Unix.getcwd ())));
+  Verdict.p "a fresh process's startup clears an interrupted run's directory fixtures"
+    (List.is_empty seen_after_startup);
+  Verdict.p "the rerun's clearing is visible to this process too" (List.is_empty (listing ()));
+  Verdict.p "a rerun over an interrupted run's leftovers publishes its directory tree"
+    (publish_directory_tree ());
+  Verdict.p "the rerun left the scratch directory as it found it" (List.is_empty (listing ()))
 
 (* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the
    schedule cache treats a refusal as a future miss rather than a failed tuning run -- needs one
