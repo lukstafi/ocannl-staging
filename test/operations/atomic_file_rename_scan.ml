@@ -57,6 +57,22 @@ let rename_references ~source content =
   iterator#structure (Read.structure_of content);
   List.rev !found
 
+(* Permanent controls for every spelling the terminal-name policy deliberately catches. The live
+   repository currently exercises only the exempt [Stdlib.Sys.rename]; without these snippets the
+   alias/open arms could disappear and shrink the census to a still-green singleton. The unrelated
+   module is intentional too: terminal [rename] is conservative, whatever module owns it. *)
+let matcher_cases =
+  [
+    ("Sys", "let publish a b = Sys.rename a b", [ "Sys"; "rename" ]);
+    ("Stdlib.Sys", "let publish a b = Stdlib.Sys.rename a b", [ "Stdlib"; "Sys"; "rename" ]);
+    ("Unix", "let publish a b = Unix.rename a b", [ "Unix"; "rename" ]);
+    ("Stdlib.Unix", "let publish a b = Stdlib.Unix.rename a b", [ "Stdlib"; "Unix"; "rename" ]);
+    ("module alias", "module FS = Sys\nlet publish a b = FS.rename a b", [ "FS"; "rename" ]);
+    ("opened module", "open Sys\nlet publish a b = rename a b", [ "rename" ]);
+    ("local open", "let publish a b = let open Sys in rename a b", [ "rename" ]);
+    ("unrelated API", "let publish a b = Other.rename a b", [ "Other"; "rename" ]);
+  ]
+
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <source...>\n" Stdlib.Sys.argv.(0);
@@ -111,6 +127,11 @@ let () =
   List.iter exempt_references ~f:(fun { source; identifier; reason } ->
       printf "  %s: %s -- %s\n" source (String.concat ~sep:"." identifier) reason);
   printf "\n";
+  Verdict.p_all ~min:8 "every qualified, aliased, opened, and unrelated rename spelling is detected"
+    matcher_cases ~f:(fun (label, content, expected) ->
+      match rename_references ~source:("synthetic " ^ label) content with
+      | [ { identifier; _ } ] -> List.equal String.equal identifier expected
+      | _ -> false);
   Verdict.p_empty "no raw rename reference exists outside Atomic_file" ~over:references offenders;
   Verdict.p_all "every named raw rename exemption has a reason" exempt_references
     ~f:(fun { reason; _ } -> not (String.is_empty (String.strip reason)));

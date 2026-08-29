@@ -516,6 +516,18 @@ let structural_near_misses =
 
 let near_misses = field_near_misses @ structural_near_misses
 
+let rec gitignore_files dir =
+  Array.to_list (Stdlib.Sys.readdir dir)
+  |> List.concat_map ~f:(fun entry ->
+      let path = Stdlib.Filename.concat dir entry in
+      if String.equal entry ".gitignore" then [ path ]
+      else if String.equal entry ".git" || String.equal entry "_build" then []
+      else
+        match Stdlib.Sys.is_directory path with
+        | true -> gitignore_files path
+        | false -> []
+        | exception Stdlib.Sys_error _ -> [])
+
 (* The ignore rule is the third description of the name scheme. Derive it from the generator's
    constants, then compare against the one committed line instead of pinning another copy. The one
    known bound remains: a glob cannot express the recognizer's MAXIMUM stem length. It can therefore
@@ -567,6 +579,19 @@ let () =
   in
   Verdict.p_none "no later Git negation can match an Atomic_file staging path"
     (after_committed_rule patterns) ~f:could_expose_staging;
+  let ignore_root = Stdlib.Filename.concat ".." ".." in
+  let nested_ignores =
+    gitignore_files ignore_root
+    |> List.filter ~f:(fun path -> not (String.equal (Stdlib.Filename.dirname path) ignore_root))
+  in
+  let nested_patterns =
+    List.concat_map nested_ignores ~f:(fun path ->
+        Ignore.ignore_patterns (Stdio.In_channel.read_all path)
+        |> List.map ~f:(fun pattern -> (path, pattern)))
+  in
+  Verdict.p_exists "the nested ignore corpus is present" nested_ignores ~f:(fun _ -> true);
+  Verdict.p_none "no nested Git negation can match an Atomic_file staging path" nested_patterns
+    ~f:(fun (_, pattern) -> could_expose_staging pattern);
   Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
     (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
     ~f:matches_committed_rule;

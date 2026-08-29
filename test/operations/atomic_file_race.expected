@@ -54,6 +54,8 @@ the ignore file carries exactly one Atomic_file staging rule: true
 the committed staging rule equals the scheme derived from Atomic_file: true
 the committed basename rule matches every actual staging_path output: true
 no later Git negation can match an Atomic_file staging path: true
+the nested ignore corpus is present: true
+no nested Git negation can match an Atomic_file staging path: true
 the committed rule rejects every expressible generated near-miss: true
 the glob-only overlong-stem residue is hidden but never recognized for deletion: true
 every planted staging file is recognized as one: true
