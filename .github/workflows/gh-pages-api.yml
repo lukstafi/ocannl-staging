@@ -20,6 +20,9 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
+env:
+  OCAML_COMPILER: '5.5.0'
+
 jobs:
   deploy:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
@@ -37,7 +40,7 @@ jobs:
 
       - uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: '5.5.0'
+          ocaml-compiler: ${{ env.OCAML_COMPILER }}
 
       - name: Pin
         run: opam pin -n .
@@ -48,46 +51,39 @@ jobs:
         id: pins
         uses: ./.github/actions/pin-revisions
 
-      # This caches opam's ROOT, not a built switch: setup-ocaml above makes a
-      # LOCAL switch (`_opam` in the workspace, per `current-switch` in the run
-      # log), which nothing here caches, so `Deps` compiles the ~180 dependencies
-      # from source on every run and what this entry buys is the download cache
-      # and the repository index. `ci.yml` caches `_opam` instead, and the two do
-      # not converge in this commit: caching a switch brings the depext trap with
-      # it (depexts are SYSTEM packages, so they live on the runner and not in
-      # `_opam`, and a hit yields a switch whose OCaml bindings have no libraries
-      # to link against -- `ci.yml` carries an unconditional depext step for
-      # exactly that), and this workflow triggers only on push to master, so no
-      # change to it can be tried on a pull request first. Converging on `_opam`
-      # is worth doing -- it is where this job's three minutes go -- but as its
-      # own change, deliberately; the key, whose worst case is one cold run, is
-      # what lands here.
+      # Cache the built local switch, where the ~180 compiled dependencies live.
+      # The key covers every input that can make its contents runner-specific or
+      # dependency-specific: OS, architecture, exact compiler, all project opam
+      # files, and every resolved remote pin. Over-invalidating costs one rebuild;
+      # under-invalidating silently serves stale code.
       #
-      # The key must still move with the dependencies. It was the literal
-      # `opam-ubuntu-22.04-5.5.0`: an exact hit every run, and an exact hit means
-      # actions/cache does not SAVE ("Cache hit occurred on the primary key ...,
-      # not saving cache"), so whatever root was captured the day the entry was
-      # first written was served back until the 7-day read eviction retired it --
-      # freshness as a function of the calendar rather than of the dependencies,
-      # which is what made gh-ocannl-698's runs fail in two different steps on
-      # one tree (gh-ocannl-732). Keyed on the opam files and the resolved pin revisions
-      # it moves when they do, and `restore-keys` keeps the miss warm: the
-      # previous root is restored, this run refreshes it, and the post step
-      # writes it back under the new key. Restore happens after pin derivation
-      # because that derivation reads the live local switch; the switch is in
-      # `_opam`, outside the cached root, so restoring the root cannot replace
-      # its registry.
-      - name: Cache opam
-        id: cache-opam
+      # Deliberately use exact-key restores only. Pin resolution above reads the
+      # live `_opam` registry before cache lookup; a broad restore key could then
+      # replace it with a switch carrying older pins. An exact hit has the same
+      # opam-file and resolved-pin identity, so restoring that registry is safe.
+      - name: Cache opam dependencies
+        id: opam-cache
         uses: actions/cache@v6
         with:
-          path: ~/.opam
-          key: opam-root-ubuntu-22.04-5.5.0-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.digest }}
-          restore-keys: |
-            opam-root-ubuntu-22.04-5.5.0-
+          path: _opam
+          key: opam-deps-${{ runner.os }}-${{ runner.arch }}-${{ env.OCAML_COMPILER }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.digest }}
 
-      - name: Deps
+      # Depexts are system packages: a restored `_opam` records their opam
+      # packages, but the fresh runner still lacks the libraries themselves.
+      # Keep this unconditional, as ci.yml does, or a hit can restore OCaml curl
+      # bindings with no system libcurl to link against.
+      - name: Install system dependencies
+        run: opam install -ydt . --deps-only --depext-only
+
+      - name: Install opam dependencies
+        if: steps.opam-cache.outputs.cache-hit != 'true'
         run: opam install -ydt . --deps-only
+
+      # These sources/build trees dominate the archive's file count and are not
+      # needed after installation. The cache post-step saves the pruned switch.
+      - name: Prune sources from the switch before caching
+        if: steps.opam-cache.outputs.cache-hit != 'true'
+        run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
 
       - name: Build
         run: opam exec -- dune build @doc
