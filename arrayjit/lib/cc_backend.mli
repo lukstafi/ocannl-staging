@@ -7,6 +7,11 @@ val compiler_command : unit -> string
     toolchain that will build them for real -- a census run against a different compiler would
     describe guarded arms nothing here selects. *)
 
+val compiler_executable_identity : string -> string
+(** Resolves every executable token in a compiler command and fingerprints its path, size and
+    modification time. Exposed for the generated-kernel census's persistent listing identity: an
+    in-place toolchain replacement must not replay assembly from the previous executable. *)
+
 val vector_bytes_setting : unit -> int
 (** The vector register width in bytes for the explicit SIMD renderings (config [cc_vector_bytes];
     auto-probed when unset). Exposed for [Schedulers.cpu_mma_limits]'s [simd_vector_bytes]. *)

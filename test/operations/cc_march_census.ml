@@ -614,8 +614,9 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
    do not belong in the key: they matter only insofar as they change the generated source. Likewise,
    the compiler command's path or package alone does not identify a toolchain --
    {!Census.toolchain_identity} asks the compiler, and the identity component combines its opaque
-   [-v] and preprocessed-header answers with the complete configured command so wrapper flags,
-   resolved SDK/header contents and include-search changes cannot alias one another.
+   [-v] and preprocessed-header answers with the complete configured command and resolved executable
+   fingerprint so wrapper flags, an in-place compiler replacement, resolved SDK/header contents and
+   include-search changes cannot alias one another.
 
    Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
    them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
@@ -672,7 +673,11 @@ let probed_toolchains : (string, string option) Hashtbl.t = Hashtbl.create (modu
 let probed_toolchain (t : Census.toolchain) =
   Hashtbl.find_or_add probed_toolchains t.command ~default:(fun () ->
       match Census.toolchain_identity t with
-      | Ok probed -> Some (tuple_field t.command ^ tuple_field probed)
+      | Ok probed ->
+          Some
+            (tuple_field t.command
+            ^ tuple_field (Cc_backend.compiler_executable_identity t.command)
+            ^ tuple_field probed)
       | Error out ->
           Stdio.eprintf
             "cc census cache bypassed: toolchain identity probe failed for %s (not part of the \
@@ -716,7 +721,7 @@ let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
                 t.label opt_level out;
               None))
 
-type cache_file = { path : string; size : int; mtime : float }
+type cache_file = { path : string; mtime : float }
 
 let is_cache_entry name =
   match
@@ -739,8 +744,8 @@ let prune_cache dir =
           else
             let path = Stdlib.Filename.concat dir name in
             match Unix.lstat path with
-            | { Unix.st_kind = Unix.S_REG; st_size = size; st_mtime = mtime; _ } ->
-                let file = { path; size; mtime } in
+            | { Unix.st_kind = Unix.S_REG; st_mtime = mtime; _ } ->
+                let file = { path; mtime } in
                 if Float.(now -. mtime > cache_max_age_seconds) then
                   try
                     Stdlib.Sys.remove path;
@@ -750,20 +755,32 @@ let prune_cache dir =
             | _ -> None
             | exception _ -> None)
     in
-    let total = List.fold retained ~init:0L ~f:(fun n f -> Int64.(n + of_int f.size)) in
-    let rec trim total = function
-      | [] -> ()
-      | _ when Int64.(total <= of_int cache_max_bytes) -> ()
-      | f :: rest ->
-          let removed =
-            try
-              Stdlib.Sys.remove f.path;
-              true
-            with _ -> false
-          in
-          trim (if removed then Int64.(total - of_int f.size) else total) rest
+    let current_bytes () =
+      Stdlib.Sys.readdir dir |> Array.to_list
+      |> List.filter_map ~f:(fun name ->
+          if not (is_cache_entry name) then None
+          else
+            match Unix.lstat (Stdlib.Filename.concat dir name) with
+            | { Unix.st_kind = Unix.S_REG; st_size; _ } -> Some (Int64.of_int st_size)
+            | _ -> None
+            | exception _ -> None)
+      |> List.fold ~init:0L ~f:Int64.( + )
     in
-    trim total (List.sort retained ~compare:(fun a b -> Float.compare a.mtime b.mtime))
+    (* Re-read the live total before every removal, and give tied mtimes a deterministic path order.
+       Concurrent pruners therefore target the same oldest file; after one wins, the others observe
+       its removal before deciding whether another file still needs eviction. *)
+    let rec trim = function
+      | [] -> ()
+      | _ when Int64.(current_bytes () <= of_int cache_max_bytes) -> ()
+      | f :: rest ->
+          (try Stdlib.Sys.remove f.path with _ -> ());
+          trim rest
+    in
+    trim
+      (List.sort retained ~compare:(fun a b ->
+           match Float.compare a.mtime b.mtime with
+           | 0 -> String.compare a.path b.path
+           | by_mtime -> by_mtime))
   with _ -> ()
 
 let cache_pruned = ref false
