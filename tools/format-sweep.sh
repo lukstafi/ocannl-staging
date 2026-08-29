@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Automated repo-wide formatting sweep (the CLAUDE.md "Formatting" policy).
+# Automated repo-wide formatting sweep.
 #
-# Agents and humans type in their own style during feature work; this script
-# periodically reformats the whole repository in standalone commits, so feature
-# diffs stay free of style hunks. A repo-wide formatting commit conflicts with
+# This script periodically reformats the whole repository in standalone
+# commits, so feature diffs stay free of style hunks. A repo-wide formatting commit conflicts with
 # every branch in flight, so the sweep only proceeds during a quiet period:
 #   - run from the main checkout, on master, clean, fast-forwardable to
 #     origin/master (the script ff-pulls);
