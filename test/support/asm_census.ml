@@ -85,6 +85,66 @@ let run_capture cmdline =
   (try Stdlib.Sys.remove log with _ -> ());
   (rc, out)
 
+(** [toolchain_identity t] asks the compiler to identify the whole toolchain it will run: compiler
+    build and version, configured target, and installation/configuration details. The result is
+    deliberately the complete [-v] response rather than a version parsed from [t.command] or from a
+    package name. A caller may digest it, but should not reinterpret it: the toolchain owns the
+    identity and a changed answer is what invalidates compiler-derived data. *)
+let toolchain_identity t =
+  let rc, out = run_capture (Printf.sprintf "%s -v" t.command) in
+  if rc = 0 then Ok out else Error out
+
+(** [preprocessed_source t ~opt_level ~source] asks the toolchain for its complete resolved view of
+    a translation unit under the target and optimization flags the measured compile uses. This
+    includes the exact SDK/header inputs selected by conditional compilation and include-search
+    environment, without parsing their versions or paths. *)
+let preprocessed_source t ~opt_level ~source =
+  let src = Stdlib.Filename.temp_file "ocannl_census_preprocess_" ".c" in
+  Stdio.Out_channel.write_all src ~data:source;
+  (* [-dD] retains macro definitions as well as declarations: a header or predefined macro can
+     change generated assembly without changing any declaration text that survives ordinary
+     preprocessing. [-P] removes temp-file line markers, so the probe is stable across runs. *)
+  let rc, out =
+    run_capture
+      (Printf.sprintf "%s %s -O%d -E -P -dD %s" t.command (flags t) opt_level
+         (Stdlib.Filename.quote src))
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  if rc = 0 then Ok out else Error out
+
+(** [compilation_plan t ~opt_level ~source] asks the compiler driver to expand the effective
+    compilation it would run, including response files, GCC specs, wrapper-injected options and
+    target subtools. Probe-local paths are normalized out; they name scratch files rather than an
+    input to code generation. *)
+let compilation_plan t ~opt_level ~source =
+  let src = Stdlib.Filename.temp_file "ocannl_census_plan_" ".c" in
+  let asm = Stdlib.Filename.temp_file "ocannl_census_plan_" ".s" in
+  Stdio.Out_channel.write_all src ~data:source;
+  let rc, out =
+    run_capture
+      (Printf.sprintf "%s %s -O%d -g -S -### -o %s %s" t.command (flags t) opt_level
+         (Stdlib.Filename.quote asm) (Stdlib.Filename.quote src))
+  in
+  let normalize_path out path marker =
+    let variants =
+      [
+        path; Stdlib.Filename.basename path; String.substr_replace_all path ~pattern:"\\" ~with_:"/";
+      ]
+      |> List.dedup_and_sort ~compare:String.compare
+      |> List.filter ~f:(fun path -> not (String.is_empty path))
+    in
+    List.fold variants ~init:out ~f:(fun out pattern ->
+        String.substr_replace_all out ~pattern ~with_:marker)
+  in
+  let out =
+    normalize_path out src "<SOURCE>" |> fun out ->
+    normalize_path out asm "<ASSEMBLY>" |> fun out ->
+    normalize_path out (Stdlib.Sys.getcwd ()) "<CWD>"
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  (try Stdlib.Sys.remove asm with _ -> ());
+  if rc = 0 then Ok out else Error out
+
 (** [accepts t] is whether this toolchain exists and accepts its [-march]. A column that answers
     [false] must be reported (see [Verdict.skipped]) rather than dropped: a silently missing column
     is indistinguishable from a passing one. *)

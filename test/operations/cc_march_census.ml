@@ -607,6 +607,408 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
 |}
     (lanes * 2) (lanes * 4)
 
+(* {2 Persistent compile cache (gh-ocannl-847)}
+
+   A listing is a pure function of four inputs: the GENERATED source bytes, the toolchain's own
+   probed identity, [-march], and [-O]. Cache exactly that tuple. Width, fp16 policy and row names
+   do not belong in the key: they matter only insofar as they change the generated source. Likewise,
+   the compiler command's path or package alone does not identify a toolchain --
+   {!Census.toolchain_identity} asks the compiler, and the identity component combines its opaque
+   [-v], preprocessed-header and effective-compilation-plan answers with the complete configured
+   command and resolved executable fingerprint so wrapper flags, mutable specs/response files, an
+   in-place compiler replacement, resolved SDK/header contents and include-search changes cannot
+   alias one another.
+
+   Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
+   them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
+   and unusual hosts. The implicit per-user directory and its files are made owner-only; an explicit
+   override is treated as a caller-chosen sharing policy. If neither the override nor a per-user
+   XDG/HOME root exists, persistent caching is disabled rather than using a predictable shared
+   temporary directory. Entries older than 30 days are expired and the remaining newest entries are
+   capped at 512 MiB, so source/toolchain generations cannot accumulate indefinitely. A missing,
+   insecure, unwritable or malformed cache is only a cache miss: the census still compiles and
+   measures the same listing it did before this memoization existed.
+
+   Several dune processes can miss the same entry together. They may all compile it; publication is
+   through [Utils.Atomic_file], so a reader sees one whole listing and never a mixture. The
+   generated source has the same basename in every worktree, which is all the DWARF parser relies
+   on; absolute source-directory differences inside a cached listing do not change the census. *)
+let cache_marker = "ocannl-cc-march-census-v3\n"
+let cache_max_age_seconds = 30. *. 24. *. 60. *. 60.
+let cache_max_bytes = 512 * 1024 * 1024
+let cache_hits = ref 0
+let cache_misses = ref 0
+let cache_bypasses = ref 0
+let cache_active = ref false
+
+type cache_location = { path : string; owner_only_root : string option }
+
+let cache_dir =
+  lazy
+    (match Stdlib.Sys.getenv_opt "OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR" with
+    | Some dir when not (String.is_empty (String.strip dir)) ->
+        Some { path = String.strip dir; owner_only_root = None }
+    | _ ->
+        let base =
+          match Stdlib.Sys.getenv_opt "XDG_CACHE_HOME" with
+          | Some dir when not (String.is_empty (String.strip dir)) -> Some (String.strip dir)
+          | _ -> (
+              match Stdlib.Sys.getenv_opt "HOME" with
+              | Some home when not (String.is_empty (String.strip home)) ->
+                  Some (Stdlib.Filename.concat (String.strip home) ".cache")
+              | _ -> None)
+        in
+        Option.map base ~f:(fun base ->
+            {
+              path = Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census";
+              owner_only_root = Some base;
+            }))
+
+(* Native Windows reports synthetic uid/mode values (uid 0 here versus [getuid () = 1], mode 0777),
+   so its proof is the real file kind plus the user-cache directory's inherited Windows ACL. This is
+   the same boundary as [Cc_backend]'s persistent probe cache. POSIX additionally enforces the
+   owner/mode checks below. *)
+let secure_owner_only_dir ~root path =
+  try
+    let root_was_present = match Unix.lstat root with _ -> true | exception _ -> false in
+    Utils.Atomic_file.ensure_dir path;
+    let secure_one dir =
+      match Unix.lstat dir with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
+      | { Unix.st_kind = Unix.S_DIR; st_uid; _ } when st_uid = Unix.getuid () -> (
+          Unix.chmod dir 0o700;
+          match Unix.lstat dir with
+          | { Unix.st_kind = Unix.S_DIR; st_uid; st_perm; _ } ->
+              st_uid = Unix.getuid () && st_perm land 0o077 = 0
+          | _ -> false)
+      | _ -> false
+    in
+    let parent_protects child =
+      (* Follow a parent symlink: macOS's standard [/tmp] is one, and it is the resolved directory's
+         write/sticky policy that governs whether a child can be renamed. The cache root itself is
+         still checked with [lstat] and cannot be a symlink. *)
+      match Unix.stat (Stdlib.Filename.dirname child) with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
+      | { Unix.st_kind = Unix.S_DIR; st_perm; _ } ->
+          st_perm land 0o022 = 0 || st_perm land 0o1000 <> 0
+      | _ -> false
+    in
+    let existing_root_is_safe dir =
+      match Unix.lstat dir with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
+      | { Unix.st_kind = Unix.S_DIR; st_uid; st_perm; _ } ->
+          st_uid = Unix.getuid () && st_perm land 0o022 = 0 && parent_protects dir
+      | _ -> false
+    in
+    (* Secure from the implicit XDG/HOME root down. [ensure_dir] may just have created that root
+       under a permissive umask; protecting only its descendants would still let another account
+       rename the OCANNL parent through the writable root after this check. A PRE-EXISTING root is
+       user-owned policy, however: validate it and its parent but never rewrite its permissions. *)
+    (if root_was_present then existing_root_is_safe root
+     else secure_one root && parent_protects root)
+    && secure_one (Stdlib.Filename.dirname path)
+    && secure_one path
+  with _ -> false
+
+let secure_owner_only_file path =
+  try
+    match Unix.lstat path with
+    | { Unix.st_kind = Unix.S_REG; _ } when Sys.win32 -> true
+    | { Unix.st_kind = Unix.S_REG; st_uid; _ } when st_uid = Unix.getuid () -> (
+        Unix.chmod path 0o600;
+        match Unix.lstat path with
+        | { Unix.st_kind = Unix.S_REG; st_uid; st_perm; _ } ->
+            st_uid = Unix.getuid () && st_perm land 0o077 = 0
+        | _ -> false)
+    | _ -> false
+  with _ -> false
+
+(* Length-prefix the tuple fields before digesting them: separators inside the toolchain's opaque
+   answer or a future [-march] spelling cannot make two distinct tuples serialize alike. *)
+let tuple_field s = Printf.sprintf "%d:%s" (String.length s) s
+
+let cache_tuple ~source ~toolchain_identity ~march ~opt_level =
+  String.concat
+    [
+      tuple_field (Stdlib.Digest.to_hex (Stdlib.Digest.string source));
+      tuple_field (Stdlib.Digest.to_hex (Stdlib.Digest.string toolchain_identity));
+      tuple_field march;
+      tuple_field (Int.to_string opt_level);
+    ]
+
+let probed_toolchains : (string, string option) Hashtbl.t = Hashtbl.create (module String)
+
+let probed_toolchain (t : Census.toolchain) =
+  Hashtbl.find_or_add probed_toolchains t.command ~default:(fun () ->
+      match Census.toolchain_identity t with
+      | Ok probed ->
+          Some
+            (tuple_field t.command
+            ^ tuple_field (Cc_backend.compiler_executable_identity t.command)
+            ^ tuple_field probed)
+      | Error out ->
+          Stdio.eprintf
+            "cc census cache bypassed: toolchain identity probe failed for %s (not part of the \
+             golden):\n\
+             %s\n"
+            t.label out;
+          None)
+
+let toolchain_identities : (string * string * int * string, string option) Hashtbl.t =
+  Hashtbl.Poly.create ()
+
+(* Sources with the same preprocessor directives resolve the same external inputs. The emitted
+   kernels differ in their routine bodies but deliberately share this signature, so one exact-source
+   probe per target/level covers them all instead of launching a preprocessor for every listing. A
+   newly added include, condition or definition makes a new signature and therefore a new probe. *)
+let preprocessing_signature source =
+  let rec collect continued acc = function
+    | [] -> List.rev acc
+    | line :: rest ->
+        let directive = String.is_prefix (String.strip line) ~prefix:"#" in
+        let keep = continued || directive in
+        let continued = keep && String.is_suffix (String.rstrip line) ~suffix:"\\" in
+        collect continued (if keep then line :: acc else acc) rest
+  in
+  collect false [] (String.split_lines source) |> String.concat ~sep:"\n"
+
+let contains_text text pattern =
+  let text_len = String.length text in
+  let pattern_len = String.length pattern in
+  let rec matches_at at i =
+    i = pattern_len || (Char.equal text.[at + i] pattern.[i] && matches_at at (i + 1))
+  in
+  let rec search at =
+    pattern_len = 0 || (at + pattern_len <= text_len && (matches_at at 0 || search (at + 1)))
+  in
+  search 0
+
+(* These compiler modes consume mutable code-generation inputs whose CONTENTS are not represented by
+   preprocessing or the driver's [-###] expansion. Persisting their assembly would require parsing
+   compiler-specific option grammars and recursively fingerprinting profiles, plugins, PCHs or
+   module graphs. Bypass instead: this test still compiles and measures exactly as before, only
+   without memoization. Deliberately match option families, including their [=path] forms. *)
+let plan_has_mutable_codegen_inputs plan =
+  List.exists
+    [
+      "-fprofile-use";
+      "-fauto-profile";
+      "-fbranch-probabilities";
+      "-fprofile-instr-use";
+      "-fprofile-instrument-use-path";
+      "-fprofile-sample-use";
+      "-fprofile-sample-use-path";
+      "-fprofile-remapping-file";
+      "-fprofile-list";
+      "-fplugin";
+      "-fpass-plugin";
+      "-fsanitize-blacklist";
+      "-fsanitize-ignorelist";
+      "-fsanitize-coverage-ignorelist";
+      "-fsanitize-coverage-allowlist";
+      "-include-pch";
+      "-include-pth";
+      "-fmodule-file";
+      "-fmodule-map-file";
+      "-load";
+    ]
+    ~f:(contains_text plan)
+
+let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
+  let signature = Stdlib.Digest.to_hex (Stdlib.Digest.string (preprocessing_signature source)) in
+  Hashtbl.find_or_add toolchain_identities (t.command, t.march, opt_level, signature)
+    ~default:(fun () ->
+      match probed_toolchain t with
+      | None -> None
+      | Some probed -> (
+          match Census.preprocessed_source t ~opt_level ~source with
+          | Ok resolved -> (
+              match Census.compilation_plan t ~opt_level ~source with
+              | Ok plan when plan_has_mutable_codegen_inputs plan ->
+                  Stdio.eprintf
+                    "cc census cache bypassed: %s -O%d uses mutable code-generation inputs (not \
+                     part of the golden)\n"
+                    t.label opt_level;
+                  None
+              | Ok plan ->
+                  Some
+                    (probed ^ tuple_field resolved ^ tuple_field plan
+                    ^ tuple_field (Cc_backend.compiler_executable_identity plan))
+              | Error out ->
+                  Stdio.eprintf
+                    "cc census cache bypassed: compilation-plan probe failed for %s -O%d (not part \
+                     of the golden):\n\
+                     %s\n"
+                    t.label opt_level out;
+                  None)
+          | Error out ->
+              Stdio.eprintf
+                "cc census cache bypassed: source-input probe failed for %s -O%d (not part of the \
+                 golden):\n\
+                 %s\n"
+                t.label opt_level out;
+              None))
+
+type cache_file = { path : string; mtime : float }
+
+let is_cache_entry name =
+  match
+    String.chop_prefix name ~prefix:"listing-" |> Option.bind ~f:(String.chop_suffix ~suffix:".s")
+  with
+  | Some digest ->
+      String.length digest = 32
+      && String.for_all digest ~f:(fun c -> Char.is_digit c || Char.between c ~low:'a' ~high:'f')
+  | None -> false
+
+(* The directory is dedicated to this cache. Still recognize the complete filename before deleting:
+   an override may point at a directory containing something else, and eviction does not own it. *)
+let prune_cache dir =
+  try
+    let now = Unix.time () in
+    let retained =
+      Stdlib.Sys.readdir dir |> Array.to_list
+      |> List.filter_map ~f:(fun name ->
+          if not (is_cache_entry name) then None
+          else
+            let path = Stdlib.Filename.concat dir name in
+            match Unix.lstat path with
+            | { Unix.st_kind = Unix.S_REG; st_mtime = mtime; _ } ->
+                let file = { path; mtime } in
+                if Float.(now -. mtime > cache_max_age_seconds) then
+                  try
+                    Stdlib.Sys.remove path;
+                    None
+                  with _ -> Some file
+                else Some file
+            | _ -> None
+            | exception _ -> None)
+    in
+    let current_bytes () =
+      Stdlib.Sys.readdir dir |> Array.to_list
+      |> List.filter_map ~f:(fun name ->
+          if not (is_cache_entry name) then None
+          else
+            match Unix.lstat (Stdlib.Filename.concat dir name) with
+            | { Unix.st_kind = Unix.S_REG; st_size; _ } -> Some (Int64.of_int st_size)
+            | _ -> None
+            | exception _ -> None)
+      |> List.fold ~init:0L ~f:Int64.( + )
+    in
+    (* Re-read the live total before every removal, and give tied mtimes a deterministic path order.
+       Concurrent pruners therefore target the same oldest file; after one wins, the others observe
+       its removal before deciding whether another file still needs eviction. *)
+    let rec trim = function
+      | [] -> ()
+      | _ when Int64.(current_bytes () <= of_int cache_max_bytes) -> ()
+      | f :: rest ->
+          (try Stdlib.Sys.remove f.path with _ -> ());
+          trim rest
+    in
+    trim
+      (List.sort retained ~compare:(fun a b ->
+           match Float.compare a.mtime b.mtime with
+           | 0 -> String.compare a.path b.path
+           | by_mtime -> by_mtime))
+  with _ -> ()
+
+let cache_pruned = ref false
+
+let prune_cache_once dir =
+  if not !cache_pruned then (
+    cache_pruned := true;
+    prune_cache dir)
+
+let cache_data ~header asm =
+  Printf.sprintf "%s%s\n%d\n%s" header
+    (Stdlib.Digest.to_hex (Stdlib.Digest.string asm))
+    (String.length asm) asm
+
+let decode_cache_data ~header ~validate data =
+  match String.chop_prefix data ~prefix:header with
+  | None -> None
+  | Some data -> (
+      match String.lsplit2 data ~on:'\n' with
+      | None -> None
+      | Some (digest, data) -> (
+          match String.lsplit2 data ~on:'\n' with
+          | None -> None
+          | Some (length, asm) ->
+              Option.bind (Int.of_string_opt length) ~f:(fun length ->
+                  Option.some_if
+                    (length = String.length asm
+                    && String.equal digest (Stdlib.Digest.to_hex (Stdlib.Digest.string asm))
+                    && validate asm)
+                    asm)))
+
+let cache_format_probes () =
+  let header = "synthetic-header\n" in
+  let asm = "synthetic listing for expected_function\n" in
+  let data = cache_data ~header asm in
+  let valid data =
+    decode_cache_data ~header ~validate:(String.is_substring ~substring:"expected_function") data
+  in
+  Verdict.claim "a complete cache payload validates"
+    (Option.equal String.equal (valid data) (Some asm));
+  Verdict.claim "a truncated cache payload is rejected"
+    (Option.is_none (valid (String.drop_suffix data 1)));
+  Verdict.claim "a cache payload for the wrong listing is rejected"
+    (Option.is_none
+       (decode_cache_data ~header ~validate:(String.is_substring ~substring:"other_function") data))
+
+let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path ~validate =
+  match Lazy.force cache_dir with
+  | None ->
+      Int.incr cache_bypasses;
+      Census.compile t ~opt_level ~src_path ~asm_path
+  | Some { path = dir; owner_only_root = Some root } when not (secure_owner_only_dir ~root dir) ->
+      Int.incr cache_bypasses;
+      Census.compile t ~opt_level ~src_path ~asm_path
+  | Some { path = dir; owner_only_root } -> (
+      let owner_only = Option.is_some owner_only_root in
+      cache_active := true;
+      match toolchain_identity t ~opt_level ~source with
+      | None ->
+          Int.incr cache_bypasses;
+          Census.compile t ~opt_level ~src_path ~asm_path
+      | Some toolchain_identity -> (
+          let tuple = cache_tuple ~source ~toolchain_identity ~march:t.march ~opt_level in
+          let path =
+            Stdlib.Filename.concat dir
+              (Printf.sprintf "listing-%s.s" (Stdlib.Digest.to_hex (Stdlib.Digest.string tuple)))
+          in
+          let header = cache_marker ^ tuple ^ "\n" in
+          prune_cache_once dir;
+          (try Utils.Atomic_file.cleanup_stale_once dir with _ -> ());
+          let cached =
+            if owner_only && not (secure_owner_only_file path) then None
+            else
+              try
+                let data = Stdio.In_channel.read_all path in
+                decode_cache_data ~header ~validate data
+              with _ -> None
+          in
+          match cached with
+          | Some asm ->
+              Int.incr cache_hits;
+              Stdio.Out_channel.write_all asm_path ~data:asm;
+              Ok ()
+          | None -> (
+              Int.incr cache_misses;
+              match Census.compile t ~opt_level ~src_path ~asm_path with
+              | Error _ as error -> error
+              | Ok () as ok ->
+                  let asm = Stdio.In_channel.read_all asm_path in
+                  (* This is memoization, never a prerequisite for the measurement: inability to
+                     create or publish in the chosen directory leaves the successful compile
+                     authoritative. *)
+                  (try
+                     Utils.Atomic_file.ensure_dir dir;
+                     Utils.Atomic_file.cleanup_stale_once dir;
+                     Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ();
+                     if owner_only then Unix.chmod path 0o600
+                   with _ -> ());
+                  ok)))
+
 let half_widen_cache : (string * int * int, bool) Hashtbl.t = Hashtbl.Poly.create ()
 
 (* [packed_half_widen t ~width ~opt_level] is whether [t] lowers the emitted fp16 widening bridge to
@@ -625,9 +1027,13 @@ let packed_half_widen t ~width ~opt_level =
   Hashtbl.find_or_add half_widen_cache (t.Census.label, width, opt_level) ~default:(fun () ->
       let src = Stdlib.Filename.temp_file "ocannl_census_widen_" ".c" in
       let asm = Stdlib.Filename.temp_file "ocannl_census_widen_" ".s" in
-      Stdio.Out_channel.write_all src ~data:(half_widen_probe_source ~lanes:(width / 4));
+      let source = half_widen_probe_source ~lanes:(width / 4) in
+      Stdio.Out_channel.write_all src ~data:source;
       let verdict =
-        match Census.compile t ~opt_level ~src_path:src ~asm_path:asm with
+        match
+          compile_cached t ~opt_level ~source ~src_path:src ~asm_path:asm ~validate:(fun asm ->
+              String.is_substring asm ~substring:"ocannl_probe_widen")
+        with
         | Error _ -> false
         | Ok () ->
             let p = Census.profile_all Census.Fma ~asm:(Stdio.In_channel.read_all asm) in
@@ -852,6 +1258,7 @@ let () =
       let root = Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) "cc_march_census_kernels" in
       rm_rf root;
       mkdir_p root;
+      cache_format_probes ();
       dialect_probes ();
       let emitted = emit_all ~exe ~root in
       Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->
@@ -963,7 +1370,11 @@ let () =
                                 if Char.is_alphanum c then c else '_'))
                            kernel opt)
                     in
-                    match Census.compile t ~opt_level:opt ~src_path:e.src_path ~asm_path with
+                    match
+                      compile_cached t ~opt_level:opt ~source:e.source ~src_path:e.src_path
+                        ~asm_path ~validate:(fun asm ->
+                          String.is_substring asm ~substring:(routine ^ ".c"))
+                    with
                     | Error out ->
                         failed_compiles :=
                           Printf.sprintf "%s -O%d %s" t.Census.label opt kernel :: !failed_compiles;
@@ -1017,6 +1428,14 @@ let () =
                             }))))
       in
       Stdio.eprintf "=== end census ===\n\n";
+      if !cache_active then
+        Option.iter (Lazy.force cache_dir) ~f:(fun cache -> prune_cache cache.path);
+      Stdio.eprintf
+        "cc census cache: %d hit(s), %d miss(es), %d bypass(es)%s (not part of the golden)\n\n"
+        !cache_hits !cache_misses !cache_bypasses
+        (match Lazy.force cache_dir with
+        | Some cache -> " in " ^ cache.path
+        | None -> " (disabled: no per-user cache root)");
       let describe r = Printf.sprintf "%s w%d -O%d %s" r.toolchain r.width r.opt r.loop.what in
       (* One line per COLUMN, always -- printed by {!Verdict.skipped} where the toolchain is absent,
          which prints exactly the line the verified case prints. Without this the golden would have
