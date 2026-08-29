@@ -30,12 +30,22 @@ let test_div_compose a b =
             };
           {
             Ir.Assignments.asgns =
-              (Tensor.raw_binop ~initialize_neutral:true ~accum:Ir.Ops.Add
-                 ~t:r ~lhs_is_grad:false ~op:Ir.Ops.Div ~t1:a
-                 ~rhs1_is_grad:false ~rhs1_is_merge:false ~t2:b
-                 ~rhs2_is_grad:false ~rhs2_is_merge:false
-                 ~logic:([%ocaml.error
-                           "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `/` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `/`, or einsum notation for a custom contraction"]));
+              (Tensor.raw_accum ~initialize_neutral:true ~accum:Ir.Ops.Add
+                 ~t:r ~lhs_is_grad:false
+                 ~shape_logic:(Shape.Broadcast
+                                 (([%ocaml.error
+                                     "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `/` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `/`, or einsum notation for a custom contraction"]),
+                                   (a.Tensor.shape), (b.Tensor.shape)))
+                 ~rhs:(Ir.Assignments.Binop
+                         {
+                           op = Ir.Ops.Div;
+                           rhs1 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                a);
+                           rhs2 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                b)
+                         }));
             embedded_nodes = (Base.Set.empty (module Ir.Tnode))
           }] in
       {
@@ -75,12 +85,22 @@ let test_pow_compose a b =
             };
           {
             Ir.Assignments.asgns =
-              (Tensor.raw_binop ~initialize_neutral:true ~accum:Ir.Ops.Add
-                 ~t:r ~lhs_is_grad:false ~op:Ir.Ops.ToPowOf ~t1:a
-                 ~rhs1_is_grad:false ~rhs1_is_merge:false ~t2:b
-                 ~rhs2_is_grad:false ~rhs2_is_merge:false
-                 ~logic:([%ocaml.error
-                           "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `**` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `**`, or einsum notation for a custom contraction"]));
+              (Tensor.raw_accum ~initialize_neutral:true ~accum:Ir.Ops.Add
+                 ~t:r ~lhs_is_grad:false
+                 ~shape_logic:(Shape.Broadcast
+                                 (([%ocaml.error
+                                     "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `**` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `**`, or einsum notation for a custom contraction"]),
+                                   (a.Tensor.shape), (b.Tensor.shape)))
+                 ~rhs:(Ir.Assignments.Binop
+                         {
+                           op = Ir.Ops.ToPowOf;
+                           rhs1 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                a);
+                           rhs2 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                b)
+                         }));
             embedded_nodes = (Base.Set.empty (module Ir.Tnode))
           }] in
       {
@@ -120,12 +140,22 @@ let test_div_alias_compose a b =
             };
           {
             Ir.Assignments.asgns =
-              (Tensor.raw_binop ~initialize_neutral:true ~accum:Ir.Ops.Add
-                 ~t:r ~lhs_is_grad:false ~op:Ir.Ops.Div ~t1:a
-                 ~rhs1_is_grad:false ~rhs1_is_merge:false ~t2:b
-                 ~rhs2_is_grad:false ~rhs2_is_merge:false
-                 ~logic:([%ocaml.error
-                           "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `div` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `div`, or einsum notation for a custom contraction"]));
+              (Tensor.raw_accum ~initialize_neutral:true ~accum:Ir.Ops.Add
+                 ~t:r ~lhs_is_grad:false
+                 ~shape_logic:(Shape.Broadcast
+                                 (([%ocaml.error
+                                     "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `div` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `div`, or einsum notation for a custom contraction"]),
+                                   (a.Tensor.shape), (b.Tensor.shape)))
+                 ~rhs:(Ir.Assignments.Binop
+                         {
+                           op = Ir.Ops.Div;
+                           rhs1 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                a);
+                           rhs2 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                b)
+                         }));
             embedded_nodes = (Base.Set.empty (module Ir.Tnode))
           }] in
       {
@@ -165,12 +195,22 @@ let test_pow_alias_compose a b =
             };
           {
             Ir.Assignments.asgns =
-              (Tensor.raw_binop ~initialize_neutral:true ~accum:Ir.Ops.Add
-                 ~t:r ~lhs_is_grad:false ~op:Ir.Ops.ToPowOf ~t1:a
-                 ~rhs1_is_grad:false ~rhs1_is_merge:false ~t2:b
-                 ~rhs2_is_grad:false ~rhs2_is_merge:false
-                 ~logic:([%ocaml.error
-                           "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `pow` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `pow`, or einsum notation for a custom contraction"]));
+              (Tensor.raw_accum ~initialize_neutral:true ~accum:Ir.Ops.Add
+                 ~t:r ~lhs_is_grad:false
+                 ~shape_logic:(Shape.Broadcast
+                                 (([%ocaml.error
+                                     "ppx_ocannl %cd: `~logic:\"@\"` (Compose) with `pow` looks like matrix inverse/power but computes neither; use `~logic:\".\"` for pointwise `pow`, or einsum notation for a custom contraction"]),
+                                   (a.Tensor.shape), (b.Tensor.shape)))
+                 ~rhs:(Ir.Assignments.Binop
+                         {
+                           op = Ir.Ops.ToPowOf;
+                           rhs1 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                a);
+                           rhs2 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                b)
+                         }));
             embedded_nodes = (Base.Set.empty (module Ir.Tnode))
           }] in
       {
@@ -210,11 +250,21 @@ let test_add_compose_accepted a b =
             };
           {
             Ir.Assignments.asgns =
-              (Tensor.raw_binop ~initialize_neutral:true ~accum:Ir.Ops.Add
-                 ~t:r ~lhs_is_grad:false ~op:Ir.Ops.Add ~t1:a
-                 ~rhs1_is_grad:false ~rhs1_is_merge:false ~t2:b
-                 ~rhs2_is_grad:false ~rhs2_is_merge:false
-                 ~logic:Shape.Compose);
+              (Tensor.raw_accum ~initialize_neutral:true ~accum:Ir.Ops.Add
+                 ~t:r ~lhs_is_grad:false
+                 ~shape_logic:(Shape.Broadcast
+                                 (Shape.Compose, (a.Tensor.shape),
+                                   (b.Tensor.shape)))
+                 ~rhs:(Ir.Assignments.Binop
+                         {
+                           op = Ir.Ops.Add;
+                           rhs1 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                a);
+                           rhs2 =
+                             (Tensor.buffer_of ~is_grad:false ~is_merge:false
+                                b)
+                         }));
             embedded_nodes = (Base.Set.empty (module Ir.Tnode))
           }] in
       {

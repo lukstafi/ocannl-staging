@@ -196,8 +196,8 @@ let max_sublabel_length = ref 25
     [neutral_elem] {e after} the operation's assignments are built: the field is read only when the
     [projections] thunk is forced (during lowering), so the late mutation is observed — an implicit
     invariant this seam makes explicit, and which {!op} enforces by refusing to mutate once
-    [unsafe_projections] is set. The [raw_*] accumulations know their neutral element up-front and
-    pass it here. *)
+    [unsafe_projections] is set. Raw accumulations know their neutral element up-front and pass it
+    here. *)
 let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
   let update_step =
     Shape.
@@ -218,8 +218,6 @@ let buffer_of ~is_grad ~is_merge (t : t) : Asgns.buffer =
   let tn = if is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   if is_merge then Asgns.Merge_buffer tn else Asgns.Node tn
 
-(** The shared body of {!raw_unop}, {!raw_binop} and {!raw_ternop}: they differ only in the
-    [shape_logic] constructor and in the [rhs] built out of their operand triples. *)
 let raw_accum ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~shape_logic
     ~(rhs : Asgns.accum_rhs) : Asgns.t =
   let projections, _ =
@@ -235,39 +233,6 @@ let raw_accum ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~shape_l
       projections = projections.projections;
       projections_debug = projections.projections_debug;
     }
-
-let raw_binop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
-    ~(rhs1_is_grad : bool) ~(rhs1_is_merge : bool) ~(t2 : t) ~rhs2_is_grad ~rhs2_is_merge ~logic :
-    Asgns.t =
-  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
-    ~shape_logic:(Shape.Broadcast (logic, t1.shape, t2.shape))
-    ~rhs:
-      (Binop
-         {
-           op;
-           rhs1 = buffer_of ~is_grad:rhs1_is_grad ~is_merge:rhs1_is_merge t1;
-           rhs2 = buffer_of ~is_grad:rhs2_is_grad ~is_merge:rhs2_is_merge t2;
-         })
-
-let raw_ternop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
-    ~(rhs1_is_grad : bool) ~(rhs1_is_merge : bool) ~(t2 : t) ~rhs2_is_grad ~rhs2_is_merge ~(t3 : t)
-    ~rhs3_is_grad ~rhs3_is_merge ~logic : Asgns.t =
-  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
-    ~shape_logic:(Shape.Broadcast_tern (logic, t1.shape, t2.shape, t3.shape))
-    ~rhs:
-      (Ternop
-         {
-           op;
-           rhs1 = buffer_of ~is_grad:rhs1_is_grad ~is_merge:rhs1_is_merge t1;
-           rhs2 = buffer_of ~is_grad:rhs2_is_grad ~is_merge:rhs2_is_merge t2;
-           rhs3 = buffer_of ~is_grad:rhs3_is_grad ~is_merge:rhs3_is_merge t3;
-         })
-
-let raw_unop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 : t)
-    ~(rhs_is_grad : bool) ~(rhs_is_merge : bool) ~logic =
-  raw_accum ~initialize_neutral ~accum ~t ~lhs_is_grad
-    ~shape_logic:(Shape.Transpose (logic, t1.shape))
-    ~rhs:(Unop { op; rhs = buffer_of ~is_grad:rhs_is_grad ~is_merge:rhs_is_merge t1 })
 
 (** Kahn-style topological layering of code fragments (gh-461). Each item comes tagged with the
     nodes it [needs] from its siblings and the nodes it [provides] to them; an item stays blocked

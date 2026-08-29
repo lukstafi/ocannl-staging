@@ -870,69 +870,60 @@ let translate ?ident_label (expr : expression) : result =
       in
       assignment ~punned ~lhs:setup_l ~rhses:[ setup_r ] ~body_for_lhs ()
     in
-    let process_raw_ternop ~accu_op ~lhs ~tern_op ~rhs1 ~rhs2 ~rhs3 ~logic =
-      let initialize_neutral, accu_op = assignment_op accu_op in
-      let setup_l = setup_array ~punned ~bad_pun_hints ~for_slot:LHS @@ loop ~proj_in_scope lhs in
-      let setup_r1 =
-        setup_array ~punned ~bad_pun_hints ~for_slot:RHS1 @@ loop ~proj_in_scope rhs1
-      in
-      let setup_r2 =
-        setup_array ~punned ~bad_pun_hints ~for_slot:RHS2 @@ loop ~proj_in_scope rhs2
-      in
-      let setup_r3 =
-        setup_array ~punned ~bad_pun_hints ~for_slot:RHS3 @@ loop ~proj_in_scope rhs3
-      in
-      let initialize_neutral = if initialize_neutral then [%expr true] else [%expr false] in
-      let t_expr, lhs_is_grad, _ = args_for ~loc setup_l in
-      let t1_expr, rhs1_is_grad, rhs1_is_merge = args_for ~loc setup_r1 in
-      let t2_expr, rhs2_is_grad, rhs2_is_merge = args_for ~loc setup_r2 in
-      let t3_expr, rhs3_is_grad, rhs3_is_merge = args_for ~loc setup_r3 in
-      let raw_body =
-        [%expr
-          Tensor.raw_ternop ~initialize_neutral:[%e initialize_neutral] ~accum:[%e accu_op]
-            ~t:[%e t_expr] ~lhs_is_grad:[%e lhs_is_grad] ~op:[%e tern_op] ~t1:[%e t1_expr]
-            ~rhs1_is_grad:[%e rhs1_is_grad] ~rhs1_is_merge:[%e rhs1_is_merge] ~t2:[%e t2_expr]
-            ~rhs2_is_grad:[%e rhs2_is_grad] ~rhs2_is_merge:[%e rhs2_is_merge] ~t3:[%e t3_expr]
-            ~rhs3_is_grad:[%e rhs3_is_grad] ~rhs3_is_merge:[%e rhs3_is_merge] ~logic:[%e logic]]
-      in
-      assignment ~punned ~lhs:setup_l ~rhses:[ setup_r1; setup_r2; setup_r3 ] ~raw_body ()
+    let unop_of_buffers op = function
+      | [ rhs ] -> [%expr Ir.Assignments.Unop { op = [%e op]; rhs = [%e rhs] }]
+      | _ -> assert false
     in
-    let process_raw_binop ~accu_op ~lhs ~bin_op ~rhs1 ~rhs2 ~logic =
-      let initialize_neutral, accu_op = assignment_op accu_op in
-      let setup_l = setup_array ~punned ~bad_pun_hints ~for_slot:LHS @@ loop ~proj_in_scope lhs in
-      let setup_r1 =
-        setup_array ~punned ~bad_pun_hints ~for_slot:RHS1 @@ loop ~proj_in_scope rhs1
-      in
-      let setup_r2 =
-        setup_array ~punned ~bad_pun_hints ~for_slot:RHS2 @@ loop ~proj_in_scope rhs2
-      in
-      let initialize_neutral = if initialize_neutral then [%expr true] else [%expr false] in
-      let t_expr, lhs_is_grad, _ = args_for ~loc setup_l in
-      let t1_expr, rhs1_is_grad, rhs1_is_merge = args_for ~loc setup_r1 in
-      let t2_expr, rhs2_is_grad, rhs2_is_merge = args_for ~loc setup_r2 in
-      let raw_body =
-        [%expr
-          Tensor.raw_binop ~initialize_neutral:[%e initialize_neutral] ~accum:[%e accu_op]
-            ~t:[%e t_expr] ~lhs_is_grad:[%e lhs_is_grad] ~op:[%e bin_op] ~t1:[%e t1_expr]
-            ~rhs1_is_grad:[%e rhs1_is_grad] ~rhs1_is_merge:[%e rhs1_is_merge] ~t2:[%e t2_expr]
-            ~rhs2_is_grad:[%e rhs2_is_grad] ~rhs2_is_merge:[%e rhs2_is_merge] ~logic:[%e logic]]
-      in
-      assignment ~punned ~lhs:setup_l ~rhses:[ setup_r1; setup_r2 ] ~raw_body ()
+    let binop_of_buffers op = function
+      | [ rhs1; rhs2 ] ->
+          [%expr Ir.Assignments.Binop { op = [%e op]; rhs1 = [%e rhs1]; rhs2 = [%e rhs2] }]
+      | _ -> assert false
     in
-    let process_raw_unop ~accu_op ~lhs ~un_op ~rhs ~logic =
+    let ternop_of_buffers op = function
+      | [ rhs1; rhs2; rhs3 ] ->
+          [%expr
+            Ir.Assignments.Ternop
+              { op = [%e op]; rhs1 = [%e rhs1]; rhs2 = [%e rhs2]; rhs3 = [%e rhs3] }]
+      | _ -> assert false
+    in
+    let transpose_of_tensors logic = function
+      | [ t1 ] -> [%expr Shape.Transpose ([%e logic], [%e t1].Tensor.shape)]
+      | _ -> assert false
+    in
+    let broadcast_of_tensors logic = function
+      | [ t1; t2 ] ->
+          [%expr Shape.Broadcast ([%e logic], [%e t1].Tensor.shape, [%e t2].Tensor.shape)]
+      | _ -> assert false
+    in
+    let broadcast_tern_of_tensors logic = function
+      | [ t1; t2; t3 ] ->
+          [%expr
+            Shape.Broadcast_tern
+              ([%e logic], [%e t1].Tensor.shape, [%e t2].Tensor.shape, [%e t3].Tensor.shape)]
+      | _ -> assert false
+    in
+    let process_raw_accum ~accu_op ~lhs ~rhses ~rhs_of_buffers ~logic =
       let initialize_neutral, accu_op = assignment_op accu_op in
       let setup_l = setup_array ~punned ~bad_pun_hints ~for_slot:LHS @@ loop ~proj_in_scope lhs in
-      let setup_r = setup_array ~punned ~bad_pun_hints ~for_slot:RHS1 @@ loop ~proj_in_scope rhs in
+      let setup_rs =
+        List.map rhses ~f:(fun (slot, rhs) ->
+            setup_array ~punned ~bad_pun_hints ~for_slot:slot @@ loop ~proj_in_scope rhs)
+      in
       let initialize_neutral = if initialize_neutral then [%expr true] else [%expr false] in
       let t_expr, lhs_is_grad, _ = args_for ~loc setup_l in
-      let t1_expr, rhs_is_grad, rhs_is_merge = args_for ~loc setup_r in
+      let rhs_tensors, rhs_buffers =
+        List.unzip
+        @@ List.map setup_rs ~f:(fun setup ->
+            let t, is_grad, is_merge = args_for ~loc setup in
+            (t, [%expr Tensor.buffer_of ~is_grad:[%e is_grad] ~is_merge:[%e is_merge] [%e t]]))
+      in
       let raw_body =
         [%expr
-          Tensor.raw_unop ~initialize_neutral:[%e initialize_neutral] ~accum:[%e accu_op]
-            ~t:[%e t_expr] ~lhs_is_grad:[%e lhs_is_grad] ~op:[%e un_op] ~t1:[%e t1_expr]
-            ~rhs_is_grad:[%e rhs_is_grad] ~rhs_is_merge:[%e rhs_is_merge] ~logic:[%e logic]]
+          Tensor.raw_accum ~initialize_neutral:[%e initialize_neutral] ~accum:[%e accu_op]
+            ~t:[%e t_expr] ~lhs_is_grad:[%e lhs_is_grad] ~shape_logic:[%e logic rhs_tensors]
+            ~rhs:[%e rhs_of_buffers rhs_buffers]]
       in
-      assignment ~punned ~lhs:setup_l ~rhses:[ setup_r ] ~raw_body ()
+      assignment ~punned ~lhs:setup_l ~rhses:setup_rs ~raw_body ()
     in
     match expr with
     (* %oc anti-quotation: preserve the expression without transformation *)
@@ -1586,7 +1577,9 @@ let translate ?ident_label (expr : expression) : result =
           else [%expr Shape.Einsum ([%e logic], [])]
         in
         let _, bin_op = binary_op bin_op in
-        process_raw_binop ~accu_op ~lhs ~bin_op ~rhs1 ~rhs2 ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs1); (RHS2, rhs2) ]
+          ~rhs_of_buffers:(binop_of_buffers bin_op) ~logic:(broadcast_of_tensors logic)
     | [%expr
         [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }]
           [%e? lhs]
@@ -1617,7 +1610,9 @@ let translate ?ident_label (expr : expression) : result =
             [%expr Shape.Einsum_tern ([%e spec_expr], [])]
         in
         let _, tern_op = ternary_op tern_op in
-        process_raw_ternop ~accu_op ~lhs ~tern_op ~rhs1 ~rhs2 ~rhs3 ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs1); (RHS2, rhs2); (RHS3, rhs3) ]
+          ~rhs_of_buffers:(ternop_of_buffers tern_op) ~logic:(broadcast_tern_of_tensors logic)
     | [%expr
         [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }]
           [%e? lhs]
@@ -1646,7 +1641,9 @@ let translate ?ident_label (expr : expression) : result =
           else [%expr Shape.Permute ([%e logic], [])]
         in
         let _, un_op = Hashtbl.find_exn unary_ops unop_ident loc in
-        process_raw_unop ~accu_op ~lhs ~un_op ~rhs ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs) ]
+          ~rhs_of_buffers:(unop_of_buffers un_op) ~logic:(transpose_of_tensors logic)
     | [%expr
         [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }]
           [%e? lhs]
@@ -1694,7 +1691,9 @@ let translate ?ident_label (expr : expression) : result =
           ([%e? { pexp_desc = Pexp_ident { txt = Lident bin_op; _ }; _ }] [%e? rhs1] [%e? rhs2])]
       when is_assignment accu_op && Hashtbl.mem binary_ops bin_op ->
         let logic, bin_op = binary_op bin_op in
-        process_raw_binop ~accu_op ~lhs ~bin_op ~rhs1 ~rhs2 ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs1); (RHS2, rhs2) ]
+          ~rhs_of_buffers:(binop_of_buffers bin_op) ~logic:(broadcast_of_tensors logic)
     | [%expr
         [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }]
           [%e? lhs]
@@ -1709,18 +1708,24 @@ let translate ?ident_label (expr : expression) : result =
              [%e? rhs3])]
       when is_assignment accu_op && Hashtbl.mem ternary_ops tern_op ->
         let logic, tern_op = ternary_op tern_op in
-        process_raw_ternop ~accu_op ~lhs ~tern_op ~rhs1 ~rhs2 ~rhs3 ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs1); (RHS2, rhs2); (RHS3, rhs3) ]
+          ~rhs_of_buffers:(ternop_of_buffers tern_op) ~logic:(broadcast_tern_of_tensors logic)
     | [%expr
         [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }]
           [%e? lhs]
           ([%e? { pexp_desc = Pexp_ident { txt = Lident un_op; _ }; _ }] [%e? rhs])]
       when is_assignment accu_op && Hashtbl.mem unary_ops un_op ->
         let logic, un_op = Hashtbl.find_exn unary_ops un_op loc in
-        process_raw_unop ~accu_op ~lhs ~un_op ~rhs ~logic
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs) ]
+          ~rhs_of_buffers:(unop_of_buffers un_op) ~logic:(transpose_of_tensors logic)
     | [%expr [%e? { pexp_desc = Pexp_ident { txt = Lident accu_op; _ }; _ }] [%e? lhs] [%e? rhs]]
       when is_assignment accu_op ->
-        process_raw_unop ~accu_op ~lhs ~un_op:[%expr Ir.Ops.Identity] ~rhs
-          ~logic:[%expr Shape.Pointwise_un]
+        process_raw_accum ~accu_op ~lhs
+          ~rhses:[ (RHS1, rhs) ]
+          ~rhs_of_buffers:(unop_of_buffers [%expr Ir.Ops.Identity])
+          ~logic:(transpose_of_tensors [%expr Shape.Pointwise_un])
     | [%expr [%e? expr1] [%e? expr2] [%e? expr3]] ->
         let res1 = loop ~proj_in_scope expr1 in
         let res2 = loop ~proj_in_scope expr2 in
