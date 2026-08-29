@@ -1,7 +1,7 @@
 (* Regression test for the ternary ~logic branch of ppx_cd: [fma ... ~logic:"."] and [fma ...
-   ~logic:"@"] inside [%cd] used to expand to [Shape.Pointwise_bin] / [Shape.Compose] (compose_type
-   constructors) where [Tensor.raw_ternop] expects [Shape.ternary_type], i.e. [Shape.Pointwise_tern]
-   / [Shape.Compose_accumulate] -- producing ill-typed OCaml code. *)
+   ~logic:"@"] inside [%cd] used to build [Shape.Pointwise_bin] / [Shape.Compose] (compose_type
+   constructors) instead of [Shape.Pointwise_tern] / [Shape.Compose_accumulate] -- producing an
+   ill-typed [Shape.logic]. *)
 
 open Base
 module Train = Ocannl.Train

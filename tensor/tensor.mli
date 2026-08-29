@@ -94,50 +94,15 @@ val default_grad_prec : Ir.Ops.prec ref
 exception Session_error of string * t option
 
 val max_sublabel_length : int ref
+val buffer_of : is_grad:bool -> is_merge:bool -> t -> Ir.Assignments.buffer
 
-val raw_ternop :
+val raw_accum :
   initialize_neutral:bool ->
   accum:Ir.Ops.binop ->
   t:t ->
   lhs_is_grad:bool ->
-  op:Ir.Ops.ternop ->
-  t1:t ->
-  rhs1_is_grad:bool ->
-  rhs1_is_merge:bool ->
-  t2:t ->
-  rhs2_is_grad:bool ->
-  rhs2_is_merge:bool ->
-  t3:t ->
-  rhs3_is_grad:bool ->
-  rhs3_is_merge:bool ->
-  logic:Shape.ternary_type ->
-  asgns
-
-val raw_binop :
-  initialize_neutral:bool ->
-  accum:Ir.Ops.binop ->
-  t:t ->
-  lhs_is_grad:bool ->
-  op:Ir.Ops.binop ->
-  t1:t ->
-  rhs1_is_grad:bool ->
-  rhs1_is_merge:bool ->
-  t2:t ->
-  rhs2_is_grad:bool ->
-  rhs2_is_merge:bool ->
-  logic:Shape.compose_type ->
-  asgns
-
-val raw_unop :
-  initialize_neutral:bool ->
-  accum:Ir.Ops.binop ->
-  t:t ->
-  lhs_is_grad:bool ->
-  op:Ir.Ops.unop ->
-  t1:t ->
-  rhs_is_grad:bool ->
-  rhs_is_merge:bool ->
-  logic:Shape.transpose_type ->
+  shape_logic:Shape.logic ->
+  rhs:Ir.Assignments.accum_rhs ->
   asgns
 
 type grad_spec = Require_grad | Prohibit_grad | If_needed [@@deriving sexp_of]
