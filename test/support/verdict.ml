@@ -142,7 +142,7 @@ let p_all ?min name xs ~f = quantified ?min name xs (fun () -> List.for_all xs ~
     run whose own setup collapsed, or a readback of a virtualized node answers with NOTHING ON BOTH
     SIDES AT ONCE — the reference does not discriminate, because it went through the same path.
     [Array.for_all2_exn [||] [||]] is [true], so the line that reports the strongest kind of check
-    CLAUDE.md asks for is byte-identical to one a real readback passed.
+    AGENTS.md asks for is byte-identical to one a real readback passed.
 
     A LENGTH MISMATCH is reported as a failed claim, [<claim> (length 12 vs 16): false], rather than
     as the [Invalid_argument] [Array.for_all2_exn] raises: an exception fails the run too, but it

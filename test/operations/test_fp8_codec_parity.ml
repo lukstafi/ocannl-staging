@@ -120,7 +120,7 @@ let () =
      above run the SAME software codec, so a tie rule changed in both would keep the comparison
      green. The golden is what pins the rule, and it is backend-uniform — every entry here was
      checked against [__nv_fp8_e5m2] and [__hip_fp8_e5m2] on real hardware. Hex float notation keeps
-     it platform-independent (CLAUDE.md). *)
+     it platform-independent (AGENTS.md). *)
   Stdio.printf "narrowed (input -> e5m2):\n";
   Array.iteri decisive ~f:(fun i v -> Stdio.printf "  %h -> %h\n" v device.(i));
   let same a b = Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b) in
@@ -189,7 +189,7 @@ let () =
         Ir.Tnode.update_prec t.Tensor.value Ir.Ops.fp8;
         Train.set_materialized t.Tensor.value);
     (* Named, so its debug artifacts do not collide with the narrowing routine's: a same-named
-       routine silently overwrites the earlier one's .c/.ll (CLAUDE.md), and reading the emitted
+       routine silently overwrites the earlier one's .c/.ll (AGENTS.md), and reading the emitted
        kernel is how this leg was checked to be non-vacuous. *)
     let%cd fp8pow_asn = { fp8pow } =: base ** expo in
     Ir.Tnode.update_prec fp8pow.Tensor.value Ir.Ops.fp8;

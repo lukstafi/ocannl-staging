@@ -1,11 +1,11 @@
 # Build and test mechanics
 
-The dune/OCaml mechanics behind CLAUDE.md's workflow rules, and what CI actually covers.
+The dune/OCaml mechanics behind AGENTS.md's workflow rules, and what CI actually covers.
 
 Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
 files.
 
-CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
+AGENTS.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
 that they earn a lookup rather than always-loaded space.
 
 - A repository-wide scanning check (`config_dep_completeness`, `env_var_deps`, `cache_dir_ignores`)
@@ -52,7 +52,7 @@ that they earn a lookup rather than always-loaded space.
   test fails when its own subject regresses, and its subject is in the diff, whereas a scan fails
   when anyone, anywhere, writes something it did not anticipate — and the population it scans keeps
   growing under it for as long as the PR is open. So fetch the STAGING remote — whose name is local
-  and need not be `origin` (CLAUDE.md, Pull Requests) — rebase onto its `master`, or merge it in
+  and need not be `origin` (AGENTS.md, Pull Requests) — rebase onto its `master`, or merge it in
   where the branch is shared and rewriting is not yours to do (as #413 did), and re-run the scan
   BEFORE opening such a PR and again before merging it; where neither is welcome, build the merge
   commit on a scratch branch and run it there. What the omission buys is a false failure on a
@@ -687,7 +687,7 @@ that they earn a lookup rather than always-loaded space.
   re-runs actions attached to ALIASES. Either force the alias (`dune build --force
   @<dir>/runtest`), or run the built exe directly with its cwd set to `_build/default/<dir>`, which
   is exactly the environment dune gives it — the same cwd, hence the same `ocannl_config` search
-  root, that makes `dune exec` unusable (CLAUDE.md). The cause is that dune trusts its own digest
+  root, that makes `dune exec` unusable (AGENTS.md). The cause is that dune trusts its own digest
   database and never stats a rule's targets, so a hand-deleted one is recorded as built forever;
   that also rules out the two other reflexes, since touching a source changes no CONTENT digest and
   deleting `_build/.digest-db` does not restore the memo either. Every golden-diff rule now has an

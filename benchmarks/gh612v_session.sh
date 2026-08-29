@@ -260,7 +260,7 @@ validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot b
   # nothing when the tree is already current.
   #
   # `--root .` is not decoration: dune resolves its root by walking UP, so an invocation inside a
-  # checkout nested under another dune project builds the PARENT (the trap CLAUDE.md documents for
+  # checkout nested under another dune project builds the PARENT (the trap AGENTS.md documents for
   # .claude/worktrees). Pinning the root makes "built from this tree" mean this tree.
   local exe="$t/_build/default/benchmarks/runners/ocannl/bench_gpt.exe"
   ( cd "$t" && dune build --root . benchmarks/runners/ocannl/bench_gpt.exe ) >/dev/null 2>&1 || {

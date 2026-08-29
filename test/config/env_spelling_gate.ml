@@ -17,7 +17,7 @@
 
    ONE gate per directory rather than one for the repository, because dune aliases are per
    directory: `@test/einsum/runtest` does not build anything under `test/operations`, and scoping a
-   run to a directory alias is what CLAUDE.md tells people to do. A gate in the wrong directory
+   run to a directory alias is what AGENTS.md tells people to do. A gate in the wrong directory
    protects nothing.
 
    `(universe)` rather than redeclaring the spellings: the honest dependency is the environment

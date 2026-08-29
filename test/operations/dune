@@ -3990,7 +3990,7 @@
   ; PATH decides WHICH shell each name resolves to, so it decides what grammar a script was held
   ; to -- a host whose `sh` is dash and one whose `sh` is bash are running different checks, and a
   ; missing `dash` changes whether a stand-in was substituted at all. Undeclared, dune would serve
-  ; the previous PATH's result unchanged (Codex review round 3 on PR #454; the same rule CLAUDE.md
+  ; the previous PATH's result unchanged (Codex review round 3 on PR #454; the same rule AGENTS.md
   ; states for OCANNL_* spellings applies to any variable a run reads).
   ;
   ; BASH_ENV and friends are deliberately NOT declared: the executable clears them for the child

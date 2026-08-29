@@ -351,7 +351,7 @@ landing gh-ocannl-509 task 5):
    variable-solved, GLB-resolved), which arm consumes it, and at which stage?
 
 A practical debugging note: the per-module tracing gates (`OCANNL_LOG_LEVEL_ROW=9` at preprocessing
-time, `--ocannl_log_level=9 --ocannl_debug_backend=flushing` at run time — see CLAUDE.md) remain
+time, `--ocannl_log_level=9 --ocannl_debug_backend=flushing` at run time — see AGENTS.md) remain
 the fastest way to find which arm consumed, deferred, or dropped a constraint; grepping the trace
 for the constraint's `dim_var` id reconstructs its lifecycle.
 

@@ -25,7 +25,7 @@
 
    Usage: build it and run the executable directly rather than through [dune exec] -- the
    configuration search walks up from the invocation cwd, so [dune exec] finds no [ocannl_config]
-   (CLAUDE.md's bin/ cwd trap). Pin the backend explicitly, since with none configured
+   (AGENTS.md's bin/ cwd trap). Pin the backend explicitly, since with none configured
    [Context.auto] silently walks metal -> cuda -> hip -> cc and would report a different device than
    the one being asked about:
 

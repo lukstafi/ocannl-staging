@@ -146,7 +146,7 @@ label collides with a newly added entry (none plausible for keywords).
    names from `builtins.c` not reachable via op-syntax probing.
 4. **Add a falsifier test.** The acceptance criteria currently only require
    "existing tests pass", which cannot detect the gap being fixed. Add a
-   standalone test (per CLAUDE.md, under `test/operations` with an
+   standalone test (per AGENTS.md, under `test/operations` with an
    `.expected` file) that builds tensors labeled e.g. `return`, `int`,
    `kernel`, `half` (via explicit `~label` or let-bound names) and compiles
    a routine on the configured backend — failing today on Metal for

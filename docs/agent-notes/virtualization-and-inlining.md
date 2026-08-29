@@ -6,7 +6,7 @@ value-rewriting pass on hand-built IR.
 Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
 files.
 
-- Value-rewriting passes need executed parity tests, not just structural pins (see CLAUDE.md).
+- Value-rewriting passes need executed parity tests, not just structural pins (see AGENTS.md).
   To exercise a virtualized affine-LHS producer end-to-end, hand-build an `Assignments.comp`
   (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
   `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set

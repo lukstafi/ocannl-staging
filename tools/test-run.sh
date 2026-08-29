@@ -757,7 +757,7 @@ case $sub in
     # On MSYS/Cygwin the environment helper runs UNCONDITIONALLY: a dune
     # already on PATH proves nothing there, because `opam env` emits
     # cygwin-style paths that leave linking broken until opam-env.sh
-    # rewrites them (CLAUDE.md).
+    # rewrites them (AGENTS.md).
     # Fatal on failure: the rewrite is REQUIRED there even when a dune is
     # already discoverable, so continuing would run a mismatched toolchain.
     case ${OSTYPE:-} in
@@ -770,7 +770,7 @@ case $sub in
     command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
     # On Windows every link step floods stderr with benign binutils warnings
     # that would drown the digest's log tail; dune-quiet.sh filters exactly
-    # those while preserving dune's exit status (CLAUDE.md).
+    # those while preserving dune's exit status (AGENTS.md).
     case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
     take_lock
     new_run "$@"

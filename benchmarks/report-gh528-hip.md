@@ -249,7 +249,7 @@ With `output_debug_files_in_build_directory=true`, replaying the crowned schedul
 | fragment element type | `rocwmma::bfloat16_t` throughout (accumulator, matrix_a, matrix_b) |
 
 *Caveat on this artifact:* the fissioned segments share the routine name `cross_entropy_loss_fwd__seg`,
-so each overwrites the previous one's debug files (the collision CLAUDE.md warns about) and the
+so each overwrites the previous one's debug files (the collision AGENTS.md warns about) and the
 inspected file is the last segment written, not all 58. It is sufficient to establish that real
 rocWMMA is emitted and no fallback is; it is not a census of every segment.
 

@@ -12,7 +12,7 @@ description: How to get debug output out of OCANNL: kernel/routine runtime logs,
 - Runtime logs from kernel execution are written to `<backend>-<device>-<stream>.log` (e.g., `cuda-0-0.log`) inside that subdirectory
 - Generated code files in `build_files/<exe-name>/` show high-level `.cd`, intermediate `.ll`, and backend-specific `.c`/`.cu` files
 
-See the `Important Debug Settings` list in `CLAUDE.md` for the config keys that enable these artifacts.
+See the `Important Debug Settings` list in `AGENTS.md` for the config keys that enable these artifacts.
 
 ## Tracing library internals with ppx_minidebug (e.g. the shape/row solver)
 

@@ -7,7 +7,7 @@
    then gets default `print_decimals_precision`/`fixed_state_for_init` and a config-sourcing trace
    on stderr, or not, depending on run order.
 
-   gh-ocannl-586 fixed seven stanzas that had drifted that way and left a sentence in CLAUDE.md
+   gh-ocannl-586 fixed seven stanzas that had drifted that way and left a sentence in AGENTS.md
    standing between the project and the eighth -- which is the same guarantee the seven had, none.
    Seventeen candidates had accumulated unnoticed, which is the measure of how quiet the failure is.
    This test is the forcing function instead.
