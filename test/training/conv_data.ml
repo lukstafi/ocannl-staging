@@ -91,13 +91,19 @@ let rec remove_tree path =
   | _ -> Unix.unlink path
   | exception Unix.Unix_error _ -> ()
 
+let cifar_prepare_mutex = Mutex.create ()
+
 let with_file_lock path f =
-  let fd = Unix.openfile path [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+  Mutex.lock cifar_prepare_mutex;
   Fun.protect
-    ~finally:(fun () -> Unix.close fd)
+    ~finally:(fun () -> Mutex.unlock cifar_prepare_mutex)
     (fun () ->
-      Unix.lockf fd Unix.F_LOCK 0;
-      f ())
+      let fd = Unix.openfile path [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.lockf fd Unix.F_LOCK 0;
+          f ()))
 
 let cleanup_abandoned_extractions cache_dir =
   if Sys.file_exists cache_dir then
@@ -128,10 +134,11 @@ let ensure_cifar10_binary () =
       end
     in
     mkdir_p (Filename.dirname (cache_dir ^ "."));
-    (* A record lock is released by the OS when its process dies. Keeping the lock file permanently
-       avoids the POSIX unlink/recreate inode race: every process always locks the same object. Once
-       held, no private extraction directory can still belong to a live peer, so crash leftovers and
-       a legacy direct-extraction target are safe to reclaim immediately. *)
+    (* The mutex covers Domains in this process; the record lock covers other processes and is
+       released by the OS when its owner dies. Keeping the lock file permanently avoids the POSIX
+       unlink/recreate inode race: every process always locks the same object. Once both are held,
+       no private extraction directory can still belong to a live peer, so crash leftovers and a
+       legacy direct-extraction target are safe to reclaim immediately. *)
     with_file_lock (Filename.concat cache_dir ".cifar-10.prepare.lock") (fun () ->
         if not (Sys.file_exists check_file) then begin
           cleanup_abandoned_extractions cache_dir;
