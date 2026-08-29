@@ -7,6 +7,12 @@ Part of the agent notes; the [index](../agent-notes.md) carries the scope discip
 files.
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).
+- The changelog is written in editorial passes, never in feature PRs (gh-ocannl-807): at release
+  prep, or an explicitly-requested batch catch-up, derive `CHANGES.md` entries from the records the
+  work already left — merge commits (`git log --first-parent`), PR bodies, issue closing comments.
+  Bullets are user-facing (what changed for someone using the library; internal test/tooling
+  plumbing usually earns none), one to three lines each, citing `gh-ocannl-NNN`; the mechanism,
+  rationale and measured numbers stay in the PR, the issue and these notes.
 - `ocannl_config.reference` ships with every setting COMMENTED OUT, and the two forms are
   load-bearing: a commented-out setting is `#key=value` with NO space after the `#`, while prose
   (and the verbatim profile-payload blocks at the end of the file) always uses `# `. That is how
@@ -15,12 +21,12 @@ files.
   on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
   setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
   never be the empty string either: empty means "unset" at every source.
-- A configuration key has exactly TWO environment spellings, `ocannl_<key>` and `OCANNL_<KEY>`
-  (gh-ocannl-605 dropped the dash-prefixed pair). A dune rule whose output depends on an ambient
-  OCANNL setting must declare both as `(env_var …)` deps — dune tracks none but `OCANNL_BACKEND`,
-  so an undeclared one leaves a stale target in place and the test green without having run. The
-  lowercase spelling is not the redundant one: `Utils.read_env_var` consults it FIRST, so
-  `ocannl_profile` beats `OCANNL_PROFILE`. The commandline is the permissive side and always has
+- A configuration key has exactly ONE environment spelling, `OCANNL_<KEY>` — gh-ocannl-605 dropped
+  the dash-prefixed pair, and gh-ocannl-652 the lowercase `ocannl_<key>`, whose setting is now a
+  fatal startup error rather than a silent no-op. A dune rule whose output depends on an ambient
+  OCANNL setting must declare it as an `(env_var …)` dep — dune tracks nothing a stanza does not
+  declare, so an undeclared one leaves a stale target in place and the test green without having
+  run. The commandline is the permissive side and always has
   been (`Utils.cmdline_var_names`), but along fixed axes rather than per separator: prefixed or
   not, either case, one leading dash or two (never zero — a bare argument is the host's
   positional), value separator `=`, `_`, `-` or nothing, and the dashing is TWO choices — the
