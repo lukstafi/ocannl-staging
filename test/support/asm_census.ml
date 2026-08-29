@@ -85,6 +85,15 @@ let run_capture cmdline =
   (try Stdlib.Sys.remove log with _ -> ());
   (rc, out)
 
+(** [toolchain_identity t] asks the compiler to identify the whole toolchain it will run: compiler
+    build and version, configured target, and installation/configuration details. The result is
+    deliberately the complete [-v] response rather than a version parsed from [t.command] or from a
+    package name. A caller may digest it, but should not reinterpret it: the toolchain owns the
+    identity and a changed answer is what invalidates compiler-derived data. *)
+let toolchain_identity t =
+  let rc, out = run_capture (Printf.sprintf "%s -v" t.command) in
+  if rc = 0 then Ok out else Error out
+
 (** [accepts t] is whether this toolchain exists and accepts its [-march]. A column that answers
     [false] must be reported (see [Verdict.skipped]) rather than dropped: a silently missing column
     is indistinguishable from a passing one. *)
