@@ -3,8 +3,8 @@
    The fourth hand-rolled temp-then-rename in the repository used a fixed [<tar>.part] staging path,
    so concurrent dune runs streamed into one file. The first three copies had already moved behind
    [Atomic_file], but nothing kept a fifth from appearing. This source scan is that ratchet: every
-   reference to [Sys.rename] or [Stdlib.Sys.rename] must live in a named exemption carrying the
-   reason it cannot use the helper.
+   reference to [Sys.rename], [Stdlib.Sys.rename] or [Unix.rename] must live in a named exemption
+   carrying the reason it cannot use the helper.
 
    This is deliberately an OCaml scan. [tools/test-run.sh] has the shell twin (the publication of
    its [last] pointer, near line 710 when this check was written); an OCaml parse cannot reach it,
@@ -39,7 +39,10 @@ let rename_references ~source content =
 
       method! expression expression =
         (match Read.longident_of expression with
-        | Some [ "Sys"; "rename" ] | Some [ "Stdlib"; "Sys"; "rename" ] ->
+        | Some [ "Sys"; "rename" ]
+        | Some [ "Stdlib"; "Sys"; "rename" ]
+        | Some [ "Unix"; "rename" ]
+        | Some [ "Stdlib"; "Unix"; "rename" ] ->
             found := { source; line = expression.pexp_loc.loc_start.pos_lnum } :: !found
         | _ -> ());
         super#expression expression
@@ -85,15 +88,16 @@ let () =
   in
   List.iter offenders ~f:(fun { source; line } ->
       eprintf
-        "%s:%d: raw Sys.rename publication bypasses Utils.Atomic_file -- route the write through \
-         Atomic_file, or add a named exemption with the reason this rename is not publication\n"
+        "%s:%d: raw Sys/Unix rename publication bypasses Utils.Atomic_file -- route the write \
+         through Atomic_file, or add a named exemption with the reason this rename is not \
+         publication\n"
         source line);
   eprintf "Scanned %d OCaml sources; found %d raw rename reference(s).\n" (List.length sources)
     (List.length references);
   printf "Named raw rename exemptions:\n";
   Map.iteri exemptions ~f:(fun ~key:source ~data:reason -> printf "  %s -- %s\n" source reason);
   printf "\n";
-  Verdict.p_empty "no raw Sys.rename reference exists outside Atomic_file" ~over:references
+  Verdict.p_empty "no raw Sys/Unix rename reference exists outside Atomic_file" ~over:references
     offenders;
   Verdict.p_all "every named raw rename exemption has a reason" exempt_sources
     ~f:(fun (_, reason) -> not (String.is_empty (String.strip reason)));
