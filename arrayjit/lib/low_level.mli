@@ -769,6 +769,21 @@ type optimized = {
 }
 [@@deriving sexp_of]
 
+type footprint = {
+  fp_total : int;  (** [fp_working + fp_constants]: the number a memory budget is compared to. *)
+  fp_working : int;
+      (** Bytes of the working (non-constant) pool as the arena planner would lay it out. Equals
+          [fp_dedicated] when there is no liveness plan (config [buffer_aliasing] off, code opaque
+          to the liveness fold, or a layout over the per-pool cap). *)
+  fp_constants : int;  (** Bytes of the constant / read-only pool, always bump-packed. *)
+  fp_dedicated : int;  (** What [fp_working] would be with every node on its own bytes. *)
+  fp_planned : int;  (** How many working nodes carried a live span, i.e. were arena-eligible. *)
+  fp_nodes : int;  (** In-context nodes scored (working + constants). *)
+}
+[@@deriving sexp_of, equal]
+(** gh-ocannl-498: the backend-agnostic byte footprint implied by an {!optimized} routine's
+    placement vector. The allocator-side scorer lives in [Backends.score_footprint]. *)
+
 val optimize :
   optimize_ctx ->
   unoptim_ll_source:(PPrint.document -> unit) option ->

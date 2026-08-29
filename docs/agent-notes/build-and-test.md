@@ -947,14 +947,17 @@ that they earn a lookup rather than always-loaded space.
 - A library whose name matches one of its own modules makes that module the library's INTERFACE:
   `arrayjit.context` is `(library (name context) (modules ... backends context))`, so `Context` is
   what the outside sees and `Backends`, `Schedulers`, `Cc_backend` are `Context__Backends` and
-  friends — unnameable. That is why `context.mli` carries `module Backends_deprecated = Backends`
-  and `module Cc_backend = Cc_backend`: re-exports are the only way an outside signature can name
-  `Backends.footprint`. It also settles where a new `Context`-consuming pass goes: NOT a module in
+  friends — unnameable. `context.mli` therefore re-exports backend entry points honestly as
+  `Context.Backends` for the raw-backend consumers that need them, and re-exports
+  `module Cc_backend = Cc_backend` for the compiler-command census. Backend-independent types do
+  not use that escape hatch: the footprint summary of a low-level optimized routine is
+  `Ir.Low_level.footprint` (gh-ocannl-810). This also settles where a new `Context`-consuming pass
+  goes: NOT a module in
   the `context` library, because `Context` would have to alias it to expose it and the alias is a
   cycle — it gets its own library on top (`arrayjit.autotune`, `arrayjit.memory_budget`). Two
-  consequences when adding one. Its `.mli` reaches the hidden modules only through `Context`'s
-  re-exports, and `module Backends := Context.Backends_deprecated` (a local substitution in the
-  signature) keeps it readable without exporting the alias. And a test executable's module must not
+  consequences when adding one. Its `.mli` should name backend-independent types through `Ir`, not
+  through a `Context` re-export; an implementation that genuinely needs raw backend machinery uses
+  the supported `Context.Backends` path. And a test executable's module must not
   share the new library's main module name, or it shadows the very library it tests — which is why
   `test/operations/memory_budget` became `memory_budget_planner` when `Memory_budget` moved out of
   `Context` (gh-ocannl-776).
