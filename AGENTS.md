@@ -118,7 +118,7 @@ design history) that is not derivable from the code alone.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and `.expected` goldens (dune captures stdout) never see it. The sourcing trace is off by default; pass `--ocannl_log_config_sourcing=true` (or set it in the config file) to see where each setting a run reads comes from
 - Confirming WHICH backend a probe ran on cannot come from a backend-uniform golden: a test that announces `SKIPPED on <backend>` writes that to stderr and still prints `<claim>: true` on stdout, precisely so the golden stays backend-uniform — so a GPU run's `.exe.output` can be byte-identical to the cc one. Read the run's stderr, or have the test print the backend (gh-ocannl-622)
 - When probing that way, do NOT discard the build's stderr (`2>/dev/null`) without checking its exit status: a FAILED build (e.g. a warning-as-error from a temporary edit) leaves the previous `_build/default/<dir>/<name>.exe.output` untouched, so the stale file reads as a green probe — this turned a negative control into a false positive during gh-554
-- `(copy_files ../config/ocannl_config)` only materializes the config for rules that DEPEND on it: every `(test)`/`(tests)` stanza must list `ocannl_config` in its `(deps ...)`, and so must every `(rule ...)` that runs a test executable (an `(executable)` stanza has no `deps` field, so its companion rule is where the dep goes). Nothing is sandboxed, so a stanza missing it does not fail on its own — it reads whatever is in `_build/default/<test dir>` when it happens to run, which makes both the `.exe.output` probe and the test itself order-dependent (gh-ocannl-586). "Pure" tests are no exception: without the dep they also get default `print_decimals_precision`/`fixed_state_for_init` and a config-sourcing trace on stderr. `test/operations/config_dep_completeness` checks this over every `dune` file in the repository, including new directories, so an omission fails the suite rather than drifting (gh-ocannl-597); an executable that no rule runs is not a site, and a rule running something that reads no configuration goes on that test's named exemption list
+- `(copy_files ../config/ocannl_config)` only materializes the config for rules that DEPEND on it: every `(test)`/`(tests)` stanza and every `(library)` with `(inline_tests)` must list `ocannl_config` in its `(deps ...)`, and so must every `(rule ...)` that runs a test executable (an `(executable)` stanza has no `deps` field, so its companion rule is where the dep goes). Nothing is sandboxed, so a stanza missing it does not fail on its own — it reads whatever is in `_build/default/<test dir>` when it happens to run, which makes both the `.exe.output` probe and the test itself order-dependent (gh-ocannl-586). "Pure" tests are no exception: without the dep they also get default `print_decimals_precision`/`fixed_state_for_init` and a config-sourcing trace on stderr. `test/operations/config_dep_completeness` checks this over every `dune` file in the repository, including new directories, so an omission fails the suite rather than drifting (gh-ocannl-597); an executable that no rule runs is not a site, and a rule running something that reads no configuration goes on that test's named exemption list
 - A `(test)` stanza automatically diffs a `<name>.expected` sitting next to it against the test's output on `dune runtest`; no extra stanza is needed to "assert" the golden. The explicit `rule` + `diff` pattern (as in `test_config_consistency`) is only for tests not run by a `(test)` stanza, such as the `@slow` rules
 - Run suites through `tools/test-run.sh` rather than hand-rolling shell around dune: `tools/test-run.sh run runtest test/operations`, `tools/test-run.sh run build @slow` (arguments after the options are dune's argv; default `runtest`). It runs dune unpiped (piping dune to anything reports the pipe's status, so a promotion diff reads as green), caps wall-clock time (default 3600s, `--cap N`, raise for `@slow`), logs to a file ending in an `exit: N` sentinel, prints a compact digest (verdict, promotion diffs, error fingerprint), and exits with dune's status. The script header documents the other shell traps it absorbs
 - From PowerShell, QUOTE dune alias targets: PowerShell parses an unquoted `@word` argument as a splatting variable (undefined here → expands to nothing), so `dune build @runtest @slow` silently degrades to a plain `dune build` that exits 0 having run no tests — a false green. Use `dune build "@runtest" "@slow"` (bash/cmd are unaffected)
@@ -218,19 +218,15 @@ known and documented, and the reference file's verbatim quote of each payload is
 
 **Testing with Different Configurations**:
 
-- When using environment variables for test configuration other than OCANNL_BACKEND, Dune won't detect changes and may skip tests
+- Dune re-runs a test for an environment variable only where the stanza declares it as an `(env_var OCANNL_<KEY>)` dependency — so for a key a test should react to, add the declaration (see the testing section above), rather than working around the stale run
 - **Warning**: `dune test --force` does NOT re-run expect tests (only rules with alias fields)
-- Reliable ways to ensure tests run with new configuration:
-  1. Modify `test/config/ocannl_config` directly
-  2. Run `dune clean` before testing
-  3. Touch/modify test source files
-  4. OCANNL_BACKEND environment variable is an exception (explicit dependency)
+- For a one-off configuration change no stanza declares (notably for inline `%expect` tests): modify `test/config/ocannl_config` directly, run `dune clean`, or touch the affected test sources
 
 **Important Debug Settings**:
 - `output_debug_files_in_build_directory=true` - enables `build_files/` generation; files go to `build_files/<exe-name>/` (per-executable subdirectory, override with `build_files_prefix`; `build_files_prefix=.` for a flat layout)
 - `debug_log_from_routines=true` - enables runtime logging from kernels aka. routines
 - `debug_log_to_stream_files=true` - writes logs from kernels/routines to `log_files/<exe-name>/<backend>-<device>-<stream>.log`
-- `clean_up_artifacts_on_startup=false` - preserves debug files between runs
+- `clean_up_build_files_on_startup=false` and `clean_up_log_files_on_startup=false` - preserve debug files between runs
 - CUDA routine logs may require `Utils.capture_stdout_logs` (see README)
 
 **Available Backends**:
@@ -254,9 +250,7 @@ Backends are process-wide singletons: use `Backends.get_backend ()` or the Conte
 - `cuda_backend.ml` overrides more functions for CUDA-specific syntax (e.g., `__float2half`)
 - `metal_backend.ml` overrides using MSL-specific syntax
 - Backends must provide `convert_precision` for type conversions
-- Builtin functions (e.g., type conversions) must be implemented in:
-  - `builtins.c` for C backends
-  - `builtins_cuda.ml` for CUDA backend, `builtins_metal.ml` form Metal backend
+- Builtin functions (e.g., type conversions) must be implemented in the per-backend builtin modules prepended to generated code: `builtins_cc.ml` for the C backends, `builtins_cuda.ml` (CUDA), `builtins_hip.ml` (HIP), `builtins_metal.ml` (Metal). `builtins.c` provides the host-side FFI stubs compiled into the library
 - When adding new precision types, ensure conversion functions exist in all backend builtins
 
 ### Syntax Extensions
