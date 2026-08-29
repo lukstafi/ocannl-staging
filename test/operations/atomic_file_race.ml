@@ -546,10 +546,11 @@ let () =
      recognizer together cannot leave this relationship green against an old ignore rule. The exact
      derived rule contains no slash, so Git applies it to the basename at every depth. Under Git's
      ordered last-match-wins semantics, reject every later negation that has a wildcard/class or
-     literally names the staging infix. Exact unrelated re-inclusions (the committed file has two
-     for [.claude]) cannot match a generated staging basename; any general negation is refused
+     literally names the staging infix. A backslash is refused too: it can hide an escaped literal
+     from the raw spelling. Exact unrelated re-inclusions (the committed file has two for [.claude])
+     cannot match a generated staging basename; any general or escaped negation is refused
      conservatively. This needs neither a [.git] directory nor a Git executable in package builds
-     (Codex P2, rounds 4-6). *)
+     (Codex P2, rounds 4-6 and 8). *)
   Verdict.p_all ~min:50 "the committed basename rule matches every actual staging_path output"
     !generated_staging_names ~f:matches_committed_rule;
   let patterns = Ignore.ignore_patterns gitignore in
@@ -560,7 +561,8 @@ let () =
   in
   let could_expose_staging { Ignore.pattern; negated } =
     negated
-    && (String.exists pattern ~f:(fun c -> Char.equal c '*' || Char.equal c '?' || Char.equal c '[')
+    && (String.exists pattern ~f:(fun c ->
+            Char.equal c '*' || Char.equal c '?' || Char.equal c '[' || Char.equal c '\\')
        || String.is_substring pattern ~substring:AF.staging_infix)
   in
   Verdict.p_none "no later Git negation can match an Atomic_file staging path"
