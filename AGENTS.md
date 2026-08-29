@@ -1,15 +1,12 @@
 # OCANNL Agent Guide
 
-This file guides coding agents working in this repository. It is the single authoritative copy:
-Claude Code loads it through CLAUDE.md's `@AGENTS.md` include, other agents read it directly, and
-edits go here — CLAUDE.md carries only the include and notes that apply to Claude Code alone
-(gh-ocannl-653).
+This file guides coding agents working in this repository.
 
 ## Project Overview
 
 OCANNL (OCaml Compiles Algorithms for Neural Networks Learning) is a from-scratch compiled Deep Learning framework with an optimizing compiler. The project consists of two main packages:
 
-- `arrayjit`: The low-level optimizing compiler with multiple backends (CPU, CUDA, Metal)
+- `arrayjit`: The low-level optimizing compiler with multiple backends (CPU, CUDA, Metal, HIP)
 - `neural_nets_lib`: The high-level deep learning framework with syntax extensions, shape inference, and backpropagation
 
 ## Structure and Ownership
@@ -91,7 +88,7 @@ design history) that is not derivable from the code alone.
    
 3. **Backend Architecture**: Unified interface supporting CPU (multicore), CUDA, HIP, and Metal backends
 
-4. **Memory Management**: Tensor node memory modes are `Virtual`, `Local`, and `On_device`.
+4. **Memory Management**: Tensor node memory modes are `Virtual` (inlined computations), `Local`, and `On_device`.
    CPU-side reads and writes are explicit, context-mediated operations
    (`Context.to_host`/`from_host`, `get_values`/`set_values`).
 
@@ -303,9 +300,3 @@ the files directly. In brief:
 - New primitive ops: `arrayjit/lib/ops.ml` (+ `Ir.Ops`), wired into `tensor/operation.ml`
 - New tensor convenience functions: `tensor/operation.ml` (use `%cd` for forward/backprop)
 - Shape/projection changes: `tensor/shape.ml`, `tensor/row.ml`, `arrayjit/lib/indexing.ml`
-
-## Performance Considerations
-
-- Virtual nodes are inlined automatically (controlled by `virtualize_max_visits`)
-- Scalar constants can be inlined via `inline_scalar_constexprs=true`
-- Memory sharing optimizations through cross-stream tensor nodes
