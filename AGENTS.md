@@ -150,7 +150,7 @@ design history) that is not derivable from the code alone.
 - There is no `PDSL` (Require_grad DSL). To build a differentiable leaf tensor with concrete values (e.g. in tests), pass the grad spec explicitly: `Operation.init ~l ~prec ~b ~o ~f ~grad_spec:Tensor.Require_grad ()` or `Tensor.term_init values ~grad_spec:Require_grad ()` (1-D); see `test/training/fused_classifier.ml`, `test/operations/primitive_ops.ml`
 - Precision values: `Ir.Ops.single`, `Ir.Ops.double`, `Ir.Ops.half` (lowercase)
 - Tensor printing in expect tests: `Tensor.print ~here:[%here] ~force:false ~with_code:false ~with_grad:false \`Inline tensor`
-- For simple test executables, use `(libraries base ocannl stdio)` in dune file
+- Library sets in `dune` are per stanza, declared to match what the module actually references: a test that computes and prints typically wants `(libraries base ocannl stdio)`, but that is a starting point, not a fixed triple — a module with no `open Base` that prints nothing declares `(libraries ocannl)` alone, and a test that asserts a verdict adds `arrayjit.verdict` (required by the testing section above). An unused `open` is a fatal warning here, and unused libraries are noise
 
 ### Pull Requests
 
