@@ -75,10 +75,13 @@ files.
   by any of this: `git push origin HEAD:master` — after `git fetch origin && git rebase
   origin/master`, since the push has to fast-forward — lands a commit straight on master from a
   worktree. What that leaves behind is local: the main checkout's `master` is now stale, and only
-  that checkout can advance it (`git -C <main> merge --ff-only origin/master`). Either do so, or
-  give every later branch an EXPLICIT start point — `git worktree add -b next <path> origin/master`,
-  `git checkout -b next origin/master` — because an omitted start point takes the current HEAD, and
-  from a stale main checkout that silently drops the commits just landed.
+  that checkout should normally advance it. If NO worktree has `master` checked out, the primary
+  form is `git -C <main> fetch origin master:master`; if the main checkout has it checked out, the
+  exact complement is `git -C <main> merge --ff-only origin/master` (Git refuses the fetch form
+  while any worktree owns `master`). If another worktree owns it, run the merge there instead.
+  Either update it, or give every later branch an EXPLICIT start point — `git worktree add -b next
+  <path> origin/master`, `git checkout -b next origin/master` — because an omitted start point takes
+  the current HEAD, and from a stale main checkout that silently drops the commits just landed.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
   exits nonzero over an already-merged PR — check the PR's state over REST (`gh api
@@ -91,18 +94,28 @@ files.
   required checks or a merge queue, enabling auto-merge instead, and the steps below would then tear
   down a PR still waiting to land. This repo has neither, so here the flag's own cleanup failure is
   the only way that command misleads.
-  Merge without the flag and clean up in this order, every command anchored with `git -C <main>` so
-  that none of them depends on the current directory: `push origin --delete <branch>`; `fetch
-  --prune origin`; `merge --ff-only origin/master`; `worktree remove <path>`; `branch -d <branch>`
-  (`-D` after a squash or rebase merge, whose commits are not ancestors of `master`). The sequence
-  runs green from inside the worktree it deletes, verified end to end in a scratch repo, and both
-  ordering constraints are load-bearing. `-d` tests the branch's UPSTREAM, falling back to HEAD only
-  when there is none, so deleting the remote branch FIRST is what makes it a real "merged into
-  master" check instead of a tautology about `origin/<branch>` — left in place, it deletes an
-  unmerged topic with only a warning. With the upstream gone the check lands on the main checkout's
-  `master`, which the merge commit on `origin` does not advance, hence the fast-forward before it.
-  Anchoring matters because `worktree remove` deletes the current directory when run from inside it,
-  and any later unanchored command dies with "fatal: Unable to read current working directory".
+  Merge without the flag and clean up in this order, anchoring each command as named: `git -C
+  <main> push origin --delete <branch>`; `git -C <main> fetch --prune origin`; inspect `git -C <main>
+  worktree list --porcelain` for `branch refs/heads/master`, then use the primary `git -C <main>
+  fetch origin master:master` if NONE has it checked out, or the exact complement `git -C
+  <master-owner> merge --ff-only origin/master` if one does; when the main checkout is off `master`,
+  require `git -C <main> merge-base --is-ancestor <branch> master` to pass; `git -C <main> worktree
+  remove <path>`; then `git -C <main> branch -d <branch>` when the main checkout is on `master`, or
+  `git -C <main> branch -D <branch>` after that explicit ancestry check when it is not (`-D` also
+  follows an independently confirmed squash or rebase merge, whose commits are not ancestors of
+  `master`). Git refuses the fetch refspec while any worktree owns `master`; the merge form is safe
+  because it is anchored to that owner rather than to whichever branch happens to be in `<main>`.
+  `git -C <main>` anchors the working directory only; it says nothing about the checked-out branch,
+  which is the volatile part during a wave.
+  The sequence runs green from inside the worktree it deletes, verified end to end in a scratch
+  repo, and both ordering constraints are load-bearing. `-d` tests the branch's UPSTREAM, falling
+  back to HEAD only when there is none, so deleting the remote branch FIRST avoids a tautology about
+  `origin/<branch>` — left in place, it deletes an unmerged topic with only a warning. With the
+  upstream gone it is a real "merged into master" check only when the main checkout's HEAD is
+  `master`; off `master`, the explicit `merge-base` command is that safety check and `-D` only
+  performs the deletion. Anchoring matters because `worktree remove` deletes the current directory
+  when run from inside it, and any later unanchored command dies with "fatal: Unable to read current
+  working directory".
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
