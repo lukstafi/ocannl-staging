@@ -31,6 +31,7 @@ let benchmark_overhead _backend_name () =
      outside the measured region; then start every step from this same post-[f_routine] context so
      the update routines remain fresh sibling compiles rather than a growing compile chain. *)
   let step_ctx = Context.run f_ctx f_routine in
+  Context.sync step_ctx;
   let init_time = Time_now.nanoseconds_since_unix_epoch () in
   let ys =
     Array.map xs ~f:(fun v ->
