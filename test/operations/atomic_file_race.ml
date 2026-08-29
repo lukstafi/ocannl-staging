@@ -48,17 +48,6 @@ let rec remove_tree path =
   | _ -> Unix.unlink path
   | exception Unix.Unix_error _ -> ()
 
-let run_git repo args =
-  let argv = Array.of_list ([ "git"; "-C"; repo ] @ args) in
-  let pid = Unix.create_process "git" argv Unix.stdin Unix.stdout Unix.stderr in
-  snd (Unix.waitpid [] pid)
-
-let git_ignores repo path =
-  match run_git repo [ "check-ignore"; "--no-index"; "--quiet"; "--"; path ] with
-  | Unix.WEXITED 0 -> true
-  | Unix.WEXITED 1 -> false
-  | _ -> false
-
 let reset_dir () =
   AF.ensure_dir dir;
   List.iter (listing ()) ~f:(fun name ->
@@ -554,36 +543,34 @@ let () =
   in
   (* The generator is the authority on separators and field layout. These are actual names captured
      while [with_channel] held them in the commit window, so changing [staging_path] and its
-     recognizer together cannot leave this relationship green against an old ignore rule. Ask Git
-     itself at the root and below representative source directories: unlike the small glob helper,
-     this preserves path-specific rules and the complete ordered, last-match-wins semantics. *)
-  let generated_paths =
-    List.concat_map !generated_staging_names ~f:(fun name ->
-        [ name; "test/" ^ name; "test/training/" ^ name ])
+     recognizer together cannot leave this relationship green against an old ignore rule. The exact
+     derived rule contains no slash, so Git applies it to the basename at every depth. Under Git's
+     ordered last-match-wins semantics, reject every later negation that has a wildcard/class or
+     literally names the staging infix. Exact unrelated re-inclusions (the committed file has two
+     for [.claude]) cannot match a generated staging basename; any general negation is refused
+     conservatively. This needs neither a [.git] directory nor a Git executable in package builds
+     (Codex P2, rounds 4-6). *)
+  Verdict.p_all ~min:50 "the committed basename rule matches every actual staging_path output"
+    !generated_staging_names ~f:matches_committed_rule;
+  let patterns = Ignore.ignore_patterns gitignore in
+  let rec after_committed_rule = function
+    | [] -> []
+    | { Ignore.pattern; negated = false } :: rest when String.equal pattern expected -> rest
+    | _ :: rest -> after_committed_rule rest
   in
-  (* A package source archive has no [.git] metadata. Give Git a private repository containing the
-     committed ignore file, so these semantics are tested in checkouts and exported sources
-     alike. *)
-  let ignore_repo = Stdlib.Filename.temp_dir "atomic_file_ignore" "" in
-  Stdlib.Fun.protect
-    ~finally:(fun () -> remove_tree ignore_repo)
-    (fun () ->
-      Stdio.Out_channel.write_all (Stdlib.Filename.concat ignore_repo ".gitignore") ~data:gitignore;
-      let initialized = Poly.equal (run_git ignore_repo [ "init"; "--quiet" ]) (Unix.WEXITED 0) in
-      Verdict.p "the isolated Git ignore probe initializes" initialized;
-      Verdict.p_all ~min:150
-        "Git effectively ignores every actual staging_path output at every depth" generated_paths
-        ~f:(fun path -> initialized && git_ignores ignore_repo path);
-      Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
-        (field_near_misses
-        @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
-        ~f:matches_committed_rule;
-      Verdict.p_all
-        "the glob-only overlong-stem residue is hidden but never recognized for deletion"
-        [ overlong_stem_near_miss ] ~f:(fun name ->
-          initialized
-          && git_ignores ignore_repo ("test/training/" ^ name)
-          && not (AF.is_staging_file name)))
+  let could_expose_staging { Ignore.pattern; negated } =
+    negated
+    && (String.exists pattern ~f:(fun c -> Char.equal c '*' || Char.equal c '?' || Char.equal c '[')
+       || String.is_substring pattern ~substring:AF.staging_infix)
+  in
+  Verdict.p_none "no later Git negation can match an Atomic_file staging path"
+    (after_committed_rule patterns) ~f:could_expose_staging;
+  Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
+    (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
+    ~f:matches_committed_rule;
+  Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
+    [ overlong_stem_near_miss ] ~f:(fun name ->
+      matches_committed_rule name && not (AF.is_staging_file name))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
