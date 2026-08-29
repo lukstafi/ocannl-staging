@@ -66,12 +66,12 @@ let materialize tn =
 (** Declares [tn] virtual — the standing of the scope-local scalars a virtualizer-emitted
     [Local_scope] owns.
 
-    This and {!materialize} write the tnode's DECLARED INTENT
-    ([Tn.update_memory_mode], the [memory_mode_intent] field), not a lineage decision. Placement
-    decisions live on the [optimize_ctx]'s placements table, and [Tn.Placements.get] falls back to
-    the declared intent for a node the lineage has not decided — which is the whole reason a test can
-    hand [optimize] a node that is ALREADY virtual (or already materialized) before the analyses run,
-    and the reason the passes read it back as such. *)
+    This and {!materialize} write the tnode's DECLARED INTENT ([Tn.update_memory_mode], the
+    [memory_mode_intent] field), not a lineage decision. Placement decisions live on the
+    [optimize_ctx]'s placements table, and [Tn.Placements.get] falls back to the declared intent for
+    a node the lineage has not decided — which is the whole reason a test can hand [optimize] a node
+    that is ALREADY virtual (or already materialized) before the analyses run, and the reason the
+    passes read it back as such. *)
 let virtualize tn = Tn.update_memory_mode tn Tn.Virtual 99
 
 (** {1 Index and statement builders} *)
@@ -110,9 +110,10 @@ let set_at tn idx llsc : LL.t = set tn [| idx |] llsc
 
     The gather/scatter pair ({!Ir.Low_level.Get_dynamic} / {!Ir.Low_level.Set_dynamic}): a read or
     write whose row along ONE axis is a runtime value rather than an index expression. The ordinary
-    pipeline never hands these to [optimize] — [Assignments] lowering emits neither, and the ones the
-    pipeline does mint come from [rewrite_one_hot_reductions], which runs after both virtualization
-    arms — so hand-built IR is the only way to put one in front of the analyses (gh-ocannl-734).
+    pipeline never hands these to [optimize] — [Assignments] lowering emits neither, and the ones
+    the pipeline does mint come from [rewrite_one_hot_reductions], which runs after both
+    virtualization arms — so hand-built IR is the only way to put one in front of the analyses
+    (gh-ocannl-734).
 
     Their [idcs] array is static everywhere except [dyn_axis], where the type's contract asks for a
     [Fixed_idx 0] placeholder standing in for the runtime row. The builders below PLANT that
@@ -146,8 +147,8 @@ let scatter ~tn ~idcs ~dyn_axis ~(dyn_value : LL.scalar_arg) llsc : LL.t =
   LL.Set_dynamic { tn; idcs = dyn_idcs ~idcs ~dyn_axis; dyn_axis; dyn_value; llsc; debug = "" }
 
 (** [scatter_add ~tn ~idcs ~dyn_axis ~dyn_value addend] is the accumulating form
-    [tn[.., dyn_value, ..] += addend] — the shape [rewrite_one_hot_reductions] actually mints for the
-    embedding-table gradient. The read-back is an explicit {!gather} of the written cell at the
+    [tn[.., dyn_value, ..] += addend] — the shape [rewrite_one_hot_reductions] actually mints for
+    the embedding-table gradient. The read-back is an explicit {!gather} of the written cell at the
     node's storage precision, which is what makes the accumulation visible to read-tracking and to
     [has_accumulation]; [addend] carries its OWN precision, as the matched gradient argument does
     there — a mixed-precision accumulation (an [f32] gradient into a [bf16] table) is a shape worth

@@ -31,8 +31,8 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 
-(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
-   the process exits, which on a slow leg reads as a hang. *)
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until the
+   process exits, which on a slow leg reads as a hang. *)
 let p fmt = Bench_out.p fmt
 
 let () =

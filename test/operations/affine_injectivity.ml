@@ -16,8 +16,8 @@ let ranges pairs s = List.Assoc.find pairs s ~equal:Idx.equal_symbol |> Option.v
 let p = Verdict.p
 
 (* Minimal projections: one single-symbol product axis per [product_axes] entry, [project_lhs] over
-   those symbols. [is_injective] reads only [components] and [project_lhs];
-   [is_surjective] additionally reads [lhs_dims] (length must match [project_lhs]). *)
+   those symbols. [is_injective] reads only [components] and [project_lhs]; [is_surjective]
+   additionally reads [lhs_dims] (length must match [project_lhs]). *)
 let mk_proj ?(lhs_dims = [||]) product_axes project_lhs : Idx.projections =
   {
     components = Array.of_list_map product_axes ~f:(fun (s, d) -> [ (d, s) ]);

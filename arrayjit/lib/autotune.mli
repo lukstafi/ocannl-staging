@@ -567,9 +567,9 @@ type timing_mode =
     offset varies from candidate to candidate with the block count and the per-launch queue work
     (39-86 us over that site's ten seeded geometries, and up to 45 us of spread within a single
     run), which is what lets two candidates 5-8 us apart in steady state swap places — measured, in
-    2 of 8 runs. Consequently a [best_ms] measured under {!Isolated} is not a
-    throughput number and must not be compared with a batched per-kernel figure; under {!Queued} it
-    is, up to the batch's residual ~1% of round trip. *)
+    2 of 8 runs. Consequently a [best_ms] measured under {!Isolated} is not a throughput number and
+    must not be compared with a batched per-kernel figure; under {!Queued} it is, up to the batch's
+    residual ~1% of round trip. *)
 
 type report = {
   outcome : outcome;
@@ -686,13 +686,12 @@ type report = {
           the cache entry, so a number carried across processes is only comparable to another taken
           under the same setting. Under the default [Queued] it is a per-launch steady-state time
           and can be compared with a batched per-kernel figure (up to the batch's residual ~1% of
-          round trip). Under [Isolated] it is a lone dispatch's latency, kernel plus one
-          submit/sync round trip: on gfx1151 that is a 26-105% inflation over the same candidate's
-          steady-state cost at the gpt2_mini projection shapes, varying per candidate, and the
-          number must NOT be read as a throughput figure (gh-ocannl-755). The same caution applies
-          to [baseline_ms], [default_ms] and [mma_best_ms], which are the same instrument's
-          readings; ratios between them are safe, since all four were taken under one setting within
-          one search. *)
+          round trip). Under [Isolated] it is a lone dispatch's latency, kernel plus one submit/sync
+          round trip: on gfx1151 that is a 26-105% inflation over the same candidate's steady-state
+          cost at the gpt2_mini projection shapes, varying per candidate, and the number must NOT be
+          read as a throughput figure (gh-ocannl-755). The same caution applies to [baseline_ms],
+          [default_ms] and [mma_best_ms], which are the same instrument's readings; ratios between
+          them are safe, since all four were taken under one setting within one search. *)
   timing : timing_mode;
       (** The {!timing_mode} every time in this report was measured under (gh-ocannl-755), including
           the times a [Cache_replay] carries: the objective is a cache-key component, so an entry
@@ -1055,8 +1054,9 @@ val queued_batch_depth : est_ms:float -> int
     {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
     non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel,
     and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
-    the target). Total, over every float: a subnormal estimate saturates rather than raising. Exposed because those two boundaries are what a regression would
-    cross silently: a depth stuck at 1 turns a queued search back into an isolated one. *)
+    the target). Total, over every float: a subnormal estimate saturates rather than raising.
+    Exposed because those two boundaries are what a regression would cross silently: a depth stuck
+    at 1 turns a queued search back into an isolated one. *)
 
 val timing_string : timing_mode -> string
 (** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component
@@ -1152,8 +1152,8 @@ val tune :
      (3). In [Queued] timing each such run is a whole batch of dispatches, so this is a floor on
      batches rather than on launches. *)
   ?timing:timing_mode ->
-  (* What a candidate's time is a measurement of; default from config [autotune_timing]
-     ([queued]). See {!timing_mode}. *)
+  (* What a candidate's time is a measurement of; default from config [autotune_timing] ([queued]).
+     See {!timing_mode}. *)
   ?seed_block_sizes:int list ->
   (* Workgroup sizes swept through {!Ir.Schedule.default_gpu} as seed candidates on GPU backends
      (default [[64; 128; 256; 512]]), both whole-routine and per-fission-segment, in addition to the

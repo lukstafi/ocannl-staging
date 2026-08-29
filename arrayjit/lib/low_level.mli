@@ -332,6 +332,10 @@ val has_accumulating_cell : t -> bool
     and censusing on it recorded every non-reduction virtualized scope as a declined reduction site.
 *)
 
+(** What {!peel_accum_nest} decided about one [If] it peeled through (gh-ocannl-733). Two shapes
+    that render identically can earn different verdicts here, which is the whole point of reporting
+    them: a test pinning the rendered FORM cannot tell "the guard was confined to the peeled levels"
+    from "the guard mentioned an enclosing lane and the cell separated it". *)
 type peel_guard_verdict =
   | Guard_confined  (** [Affine.Confined_to_peel]: the guard mentions no enclosing loop symbol. *)
   | Guard_lane_private
@@ -346,11 +350,8 @@ type peel_guard_verdict =
           {!Guard_lane_private} so that a refusing report cannot read as an admitted guard beside
           its own refusal. *)
 [@@deriving sexp, equal, compare]
-(** What {!peel_accum_nest} decided about one [If] it peeled through (gh-ocannl-733). Two shapes
-    that render identically can earn different verdicts here, which is the whole point of reporting
-    them: a test pinning the rendered FORM cannot tell "the guard was confined to the peeled levels"
-    from "the guard mentioned an enclosing lane and the cell separated it". *)
 
+(** Why {!peel_accum_nest} stopped, when it did (gh-ocannl-733). *)
 type peel_refusal =
   | Refused_not_a_nest
       (** The level's body is neither a single peelable loop, nor a pure-index-guarded [If], nor an
@@ -366,7 +367,6 @@ type peel_refusal =
       (** An admitted [Affine.Lane_private_if_separated] guard whose cell does not separate the
           enclosing symbols, or does not stay inside the node's box over their full ranges. *)
 [@@deriving sexp, equal, compare]
-(** Why {!peel_accum_nest} stopped, when it did (gh-ocannl-733). *)
 
 type peel_report = {
   levels : int;  (** Loop levels peeled before the outcome. *)
@@ -376,8 +376,8 @@ type peel_report = {
           {!Guard_lane_private_unresolved}, since separation is decided at the base the peel did not
           reach. *)
   refusal : peel_refusal option;
-      (** [None] exactly when the peel reached an accumulation base, i.e. when
-          {!peel_accum_nest} returned [Some]. *)
+      (** [None] exactly when the peel reached an accumulation base, i.e. when {!peel_accum_nest}
+          returned [Some]. *)
 }
 [@@deriving sexp_of]
 (** What one {!peel_accum_nest} call decided, beyond whether it succeeded (gh-ocannl-733). Reported

@@ -6,7 +6,7 @@
    virtualization arms. Hand-built IR reaches it through [Ll_test], a supported input class for the
    analysis probes -- and used to die inside cleanup with
 
-     Tnode.update_memory_mode: update 152 -> 17 for <table> is already virtual
+   Tnode.update_memory_mode: update 152 -> 17 for <table> is already virtual
 
    because [virtual_llc]'s [Get_dynamic] arm asserted, in a comment, that a local table materializes
    without ever deciding it. The table stayed a virtualization candidate, cleanup's [Set] arm
@@ -40,7 +40,9 @@ let () =
      row, or a dropped setter leaving the zero-init behind, changes the value read back. *)
   let filled i = Float.of_int (i + 1) in
   let row = 2 in
-  let setter table k = Ll_test.loop_n k 4 (Ll_test.set_at table (Ll_test.iter k) (Ll_test.tick k)) in
+  let setter table k =
+    Ll_test.loop_n k 4 (Ll_test.set_at table (Ll_test.iter k) (Ll_test.tick k))
+  in
 
   (* === leg 1: the gather is the table's only reader === *)
   let tbl = node "gtp_tbl" in
@@ -50,8 +52,7 @@ let () =
   Ll_test.materialize out;
   let k = Ll_test.sym () in
   let prog =
-    Ll_test.seq (setter tbl k)
-      (Ll_test.set_at out (Ll_test.fixed 0) (gather ~table:tbl ~idx))
+    Ll_test.seq (setter tbl k) (Ll_test.set_at out (Ll_test.fixed 0) (gather ~table:tbl ~idx))
   in
   let o = Ll_test.optimize ~materialized:[ idx; out ] ~name:"gtp_only" prog in
   p "a gather table left undecided is materialized by the gather" (Ll_test.known_non_virtual o tbl);
@@ -60,8 +61,7 @@ let () =
       ~seed:[ (idx, [| Float.of_int row |]); (out, [| Ll_test.sentinel |]) ]
       ~read:[ out ]
   in
-  p "the gather reads the table row the runtime index names"
-    (Ll_test.same got [ [| filled row |] ]);
+  p "the gather reads the table row the runtime index names" (Ll_test.same got [ [| filled row |] ]);
 
   (* === leg 2: the same node read BOTH ways -- the shape the issue reported ===
 
@@ -79,9 +79,7 @@ let () =
   let prog2 =
     Ll_test.seq (setter tbl2 k2)
       (Ll_test.set_at out2 (Ll_test.fixed 0)
-         (Ll_test.add
-            (Ll_test.get tbl2 [| Ll_test.fixed 1 |])
-            (gather ~table:tbl2 ~idx:idx2)))
+         (Ll_test.add (Ll_test.get tbl2 [| Ll_test.fixed 1 |]) (gather ~table:tbl2 ~idx:idx2)))
   in
   let o2 = Ll_test.optimize ~materialized:[ idx2; out2 ] ~name:"gtp_both" prog2 in
   p "a table read both plainly and as a gather table is materialized"

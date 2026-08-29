@@ -50,13 +50,13 @@
    gh-ocannl-755 table a comparison of the ranking a search would produce against the ranking
    steady-state throughput produces, and not of two lookalikes.
 
-   Which of the numbers on a line to believe depends on what the noise is. The median is the
-   right summary when the noise is symmetric, which is why it is the summary. On a CONTENDED box it
-   is not: interference only ever makes a batch slower, so the median wanders (20% between the two
-   arms of a duplicated site on one measured run) while the two minima stay put (5% and 0.5% across
-   every arm of the same geometry in that same run). The duplicated sites are the arbiter — when
-   they disagree by more than the effect under test, the effect is not resolvable in that run,
-   whichever statistic is read.
+   Which of the numbers on a line to believe depends on what the noise is. The median is the right
+   summary when the noise is symmetric, which is why it is the summary. On a CONTENDED box it is
+   not: interference only ever makes a batch slower, so the median wanders (20% between the two arms
+   of a duplicated site on one measured run) while the two minima stay put (5% and 0.5% across every
+   arm of the same geometry in that same run). The duplicated sites are the arbiter — when they
+   disagree by more than the effect under test, the effect is not resolvable in that run, whichever
+   statistic is read.
 
    Every candidate's whole output is compared cell by cell against a host-computed oracle -- built
    straight from the input formulas, so it is independent of the compiler under test -- and the
@@ -604,16 +604,14 @@ let () =
       if n % 2 = 1 then sorted.(n / 2) else (sorted.((n / 2) - 1) +. sorted.(n / 2)) /. 2.
     in
     let g t = lv.lv_flops /. t /. 1e9 in
-    p
-      "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f)  tuner iso %8.1f q %8.1f  spread %4.1f%%  %s\n"
-      lv.lv_tag lv.lv_label (g median) (g best)
-      (g !(lv.lv_iso))
-      (g !(lv.lv_queued))
+    p "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f)  tuner iso %8.1f q %8.1f  spread %4.1f%%  %s\n"
+      lv.lv_tag lv.lv_label (g median) (g best) (g !(lv.lv_iso)) (g !(lv.lv_queued))
       ((worst -. best) /. best *. 100.)
       lv.lv_launch;
-    Hashtbl.update instrument ~f:(function
-      | None -> [ (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) ]
-      | Some l -> (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) :: l)
+    Hashtbl.update instrument
+      ~f:(function
+        | None -> [ (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) ]
+        | Some l -> (lv.lv_label, median, !(lv.lv_iso), !(lv.lv_queued)) :: l)
       lv.lv_tag;
     g median
   in
@@ -817,7 +815,9 @@ let () =
         in
         let batched (_, m, _, _) = m and iso (_, _, i, _) = i and queued (_, _, _, q) = q in
         let r_b = rank_of batched and r_i = rank_of iso and r_q = rank_of queued in
-        let crown key = fst4 (List.hd_exn (List.sort arms ~compare:(fun a b -> Float.compare (key a) (key b)))) in
+        let crown key =
+          fst4 (List.hd_exn (List.sort arms ~compare:(fun a b -> Float.compare (key a) (key b))))
+        in
         p "\n   %s (%.1f MFLOP)\n" s.tag (flops s /. 1e6);
         (* The last two columns subtract the two TUNER columns from each other, never the batched
            one: iso and queued are the same statistic (a min over the same interleaved passes) of
@@ -828,7 +828,8 @@ let () =
           "rank" "rank" "rank" "iso-queued" "iso/";
         p "   %-26s %10s %10s %10s   %5s %5s %5s   %9s %7s\n" "" "ms" "ms" "ms" "bat" "iso" "que"
           "us" "queued";
-        List.iter (List.sort arms ~compare:(fun a b -> Float.compare (batched a) (batched b)))
+        List.iter
+          (List.sort arms ~compare:(fun a b -> Float.compare (batched a) (batched b)))
           ~f:(fun ((l, m, i, q) as a) ->
             p "   %-26s %10.4f %10.4f %10.4f   %5d %5d %5d   %9.1f %7.2f\n" l (m *. 1e3) (i *. 1e3)
               (q *. 1e3) (r_b l) (r_i l) (r_q l)

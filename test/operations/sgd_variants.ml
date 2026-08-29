@@ -58,7 +58,7 @@ let device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
       ~f:(function [| i |] -> coeffs.(i) | _ -> assert false)
       ()
   in
-  let%op loss = p *. c ++ "...|... => |->0" in
+  let%op loss = (p *. c) ++ "...|... => |->0" in
   let%op learning_rate = 0.1 in
   Train.set_materialized p.Tensor.value;
   Train.set_materialized learning_rate.Tensor.value;
@@ -88,8 +88,7 @@ let case label ~momentum ?(nesterov = false) ?(weight_decay = 0.0) ?grad_scale ?
   let expected = oracle ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step in
   let actual = device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step in
   let err =
-    Array.foldi actual ~init:0.0 ~f:(fun i acc v ->
-        Float.max acc (Float.abs (v -. expected.(i))))
+    Array.foldi actual ~init:0.0 ~f:(fun i acc v -> Float.max acc (Float.abs (v -. expected.(i))))
   in
   (* Device-produced floats: the digits stay off stdout, the claim about them goes on it. *)
   Stdio.eprintf "%s (not part of the golden): expected %s; got %s; max abs err %.3e\n%!" label
@@ -98,10 +97,10 @@ let case label ~momentum ?(nesterov = false) ?(weight_decay = 0.0) ?grad_scale ?
     err;
   (* Two-sided: the parameters must both match the oracle and have actually moved, so an optimizer
      that emitted nothing at all cannot pass by leaving [p] where a wrong oracle also put it. *)
-  let moved =
-    Array.existsi actual ~f:(fun i v -> Float.(abs (v -. p_init.(i)) > 1e-4))
-  in
-  Verdict.pass_fail (label ^ ": matches the host oracle") Float.(err < 1e-4)
+  let moved = Array.existsi actual ~f:(fun i v -> Float.(abs (v -. p_init.(i)) > 1e-4)) in
+  Verdict.pass_fail
+    (label ^ ": matches the host oracle")
+    Float.(err < 1e-4)
     ~detail:(fun () -> Printf.sprintf "max abs err %.3e" err);
   Verdict.p (label ^ ": the step moved the parameter") moved
 

@@ -37,11 +37,10 @@ let nvrtc_reassociation_opt_in = "--fassociative-math"
 
 (* nvrtc (CUDA). The left-to-right override discipline [clang_fast_math_options] documents does NOT
    apply here, because nvrtc has no umbrella-plus-overrides shape to defend against:
-   [--use_fast_math] is a fixed expansion of four independent switches
-   ([--ftz=true --prec-div=false --prec-sqrt=false --fmad=true]) and none of them concerns
-   reassociation. The order is still pinned -- it is the state a compile is reproducible against --
-   but what this function actually guarantees is the absence of
-   [nvrtc_reassociation_opt_in].
+   [--use_fast_math] is a fixed expansion of four independent switches ([--ftz=true --prec-div=false
+   --prec-sqrt=false --fmad=true]) and none of them concerns reassociation. The order is still
+   pinned -- it is the state a compile is reproducible against -- but what this function actually
+   guarantees is the absence of [nvrtc_reassociation_opt_in].
 
    Measured on the project's CUDA box for gh-ocannl-784 (nvrtc 13.3, driver 13030, GeForce RTX 5070
    Ti, sm_120) by compiling a 128-term float reduction through nvrtc and EXECUTING it: under

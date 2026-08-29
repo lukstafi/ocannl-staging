@@ -182,10 +182,10 @@ type entry = {
           self-description as [numerics]. Optional so entries written before this field existed stay
           readable. *)
   objective : string option; [@sexp.option]
-      (** The autotuner's timing objective ([autotune_timing]) the search ran under
-          (gh-ocannl-755): the same self-description as [numerics] and [codegen], beside the key's
-          own ["timing"] component. Optional so entries written before this field existed stay
-          readable — they key differently, so nothing looks them up. *)
+      (** The autotuner's timing objective ([autotune_timing]) the search ran under (gh-ocannl-755):
+          the same self-description as [numerics] and [codegen], beside the key's own ["timing"]
+          component. Optional so entries written before this field existed stay readable — they key
+          differently, so nothing looks them up. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -240,17 +240,13 @@ val objective_tag : unit -> string
 
 val key_components : string list
 (** The named components a {!cache_key} is built from, in order: ["digest"], ["backend"],
-    ["numerics"], ["codegen"], ["pool"], ["timing"]. The list drives {!cache_key} rather than describing it, so
-    it is a complete and current enumeration of the cache's identity — which is what the
-    digest-completeness registry classifies configuration keys against (gh-ocannl-572,
+    ["numerics"], ["codegen"], ["pool"], ["timing"]. The list drives {!cache_key} rather than
+    describing it, so it is a complete and current enumeration of the cache's identity — which is
+    what the digest-completeness registry classifies configuration keys against (gh-ocannl-572,
     [test/operations/digest_completeness]). *)
 
 val cache_key :
-  ?objective:string ->
-  limits:Backend_intf.hardware_limits ->
-  canonical ->
-  backend:string ->
-  string
+  ?objective:string -> limits:Backend_intf.hardware_limits -> canonical -> backend:string -> string
 (** Filename-safe cache key: the digest, the backend name, {!numerics_tag} of the current numerics
     policy, {!codegen_tag} of the codegen configuration (including [limits.codegen_tag], the
     compiling backend's own contribution), the worker-pool signature ([limits.worker_pool_tag],
@@ -262,11 +258,11 @@ val cache_key :
     asking about queued timing, and the times it stores are readings of a different quantity, which
     a replay would copy into the reading process's report under its own label. [objective] is for
     the caller that resolved a mode explicitly rather than from configuration ({!Autotune.tune}'s
-    [?timing]); everyone else wants the default. The backend-supplied components arrive
-    as the whole [limits] record rather than one optional argument each, so a component added there
-    reaches every call site instead of defaulting to absent at the ones that were not updated
-    (gh-ocannl-572). Callers time kernels on a concrete device, so include anything else that
-    distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
+    [?timing]); everyone else wants the default. The backend-supplied components arrive as the whole
+    [limits] record rather than one optional argument each, so a component added there reaches every
+    call site instead of defaulting to absent at the ones that were not updated (gh-ocannl-572).
+    Callers time kernels on a concrete device, so include anything else that distinguishes
+    performance environments in [backend] (e.g. a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Publication goes

@@ -589,9 +589,9 @@ let rec commands_in ?(cwd = "") ?(pinned = Set.empty (module String)) sexp =
             inner_pinned,
             Unnameable (Printf.sprintf "%s, under `(setenv PATH %s ...)`" named value, command) ))
   (* Any other `setenv` pins that variable over WHAT IT WRAPS, and nothing else: a `progn` that pins
-     one branch has not pinned the run in another (gh-ocannl-749, Codex P1 round 1), and a pin around
-     a helper does not protect the subject beside it (Codex P2, round 4). Carried per run site rather
-     than per stanza, so both directions fall out of the same traversal. *)
+     one branch has not pinned the run in another (gh-ocannl-749, Codex P1 round 1), and a pin
+     around a helper does not protect the subject beside it (Codex P2, round 4). Carried per run
+     site rather than per stanza, so both directions fall out of the same traversal. *)
   | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: _value :: rest) ->
       List.concat_map rest ~f:(commands_in ~cwd ~pinned:(Set.add pinned name))
   | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest)
@@ -1247,8 +1247,8 @@ let sites_of_stanza subdir stanza =
             (* In a test stanza, `%{test}` is the test binary itself, reported as the Test site
                rather than as something the action also runs. *)
             | Runs name when is_test && String.equal name test_pform -> None
-            (* A public-name run launches a program exactly as a path does; only a CONSUMER
-               matching it against a declared executable has to tell the two apart. *)
+            (* A public-name run launches a program exactly as a path does; only a CONSUMER matching
+               it against a declared executable has to tell the two apart. *)
             | Runs name | Runs_public name -> Some name
             | _ -> None)
         in
@@ -1739,28 +1739,26 @@ let normalize_path path =
   List.fold parts ~init:[] ~f:(fun acc part ->
       match part with
       | "" | "." -> acc
-      | ".." -> (
-          match acc with ".." :: _ | [] -> ".." :: acc | _ :: rest -> rest)
+      | ".." -> ( match acc with ".." :: _ | [] -> ".." :: acc | _ :: rest -> rest)
       | part -> part :: acc)
-  |> List.rev
-  |> String.concat ~sep:"/"
+  |> List.rev |> String.concat ~sep:"/"
 
 (** Every program a stanza runs, resolved to a workspace-relative path, with the variables pinned
     around THAT run.
 
     The working directory is part of the identity: [(chdir ../a (run probe.exe))] in a rule under
-    [b] runs [a]'s program, not [b]'s, so resolving only the rule's own subdirectory would report the
-    real program as unrun and credit a same-named local one with this rule's declarations (Codex P2,
-    round 4 of PR #484). [commands_in] already tracked the directory for the configuration search;
-    this is the same fact answering a second question. *)
+    [b] runs [a]'s program, not [b]'s, so resolving only the rule's own subdirectory would report
+    the real program as unrun and credit a same-named local one with this rule's declarations (Codex
+    P2, round 4 of PR #484). [commands_in] already tracked the directory for the configuration
+    search; this is the same fact answering a second question. *)
 let runs_of ~subdir stanza =
   List.filter_map (executables_run_with_pins stanza) ~f:(fun (cwd, pinned, command) ->
       match command with
       (* A FILE is resolved to a workspace-relative path -- the working directory is part of its
          identity, since `(chdir ../a (run probe.exe))` in a rule under `b` runs `a`'s program. A
          PUBLIC name is not a path and is carried as written: `%{bin:pkg.probe}` names the same
-         program from anywhere, and `classify_command` keeps the two apart precisely so a
-         `(run ./pkg.probe)` here is not credited to the executable installed under that name
+         program from anywhere, and `classify_command` keeps the two apart precisely so a `(run
+         ./pkg.probe)` here is not credited to the executable installed under that name
          (gh-ocannl-783). *)
       | Runs path -> Some (`File (normalize_path (in_subdir subdir (in_subdir cwd path))), pinned)
       | Runs_public name -> Some (`Public name, pinned)
@@ -1775,8 +1773,8 @@ let public_names stanza =
   | None -> ( match field stanza "public_name" with Some [ Sexp.Atom p ] -> [ p ] | _ -> [])
 
 (* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and the
-   public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
-   `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and its
+   public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as `Runs
+   "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and its
    executable reported as though nothing ran it (Codex P2, round 3 of PR #457).
 
    A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`, so
@@ -1830,9 +1828,9 @@ let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
             | first :: rest -> Some (s, List.fold rest ~init:first ~f:Set.inter)) ))
 
 (** Dune's own main-module rule (gh-ocannl-747): the executable named [a] is built from the module
-    [a] of the stanza's module set, and every module that is no name's main module is linked into all
-    of them. Matched case-insensitively, since a module name is the capitalized source basename and
-    the [(names …)] field spells the file's.
+    [a] of the stanza's module set, and every module that is no name's main module is linked into
+    all of them. Matched case-insensitively, since a module name is the capitalized source basename
+    and the [(names …)] field spells the file's.
 
     What it decides is attribution. Before it, an [(executables (names a b) (modules a b))] stanza
     combined both programs into one subject, so a rule running EITHER counted as a runner of both:
@@ -1841,8 +1839,8 @@ let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
 let main_module_of modules name =
   List.find modules ~f:(fun m -> String.equal (String.lowercase m) (String.lowercase name))
 
-(** The modules of [stanza] that belong to the program called [name]: its own main module, plus every
-    module that is no name's main module and so is linked into all of them. *)
+(** The modules of [stanza] that belong to the program called [name]: its own main module, plus
+    every module that is no name's main module and so is linked into all of them. *)
 let program_modules stanza ~modules ~name =
   let mains = List.filter_map (names_of stanza) ~f:(main_module_of modules) in
   Option.to_list (main_module_of modules name)
@@ -1873,9 +1871,9 @@ type module_set =
    `\` is a binary difference between what stands to its left and what stands to its right, WITHIN
    the parentheses that hold it -- so `(modules (:standard \ helper) guard)` subtracts `helper` from
    the default set and then adds `guard`, and flattening the whole field to `:standard \ helper
-   guard` subtracted `guard` as well (Codex P2, round 6 of PR #484). A module wrongly subtracted is a
-   module no stanza claims, which takes its reads out of every check phrased over a stanza's modules
-   -- silently.
+   guard` subtracted `guard` as well (Codex P2, round 6 of PR #484). A module wrongly subtracted is
+   a module no stanza claims, which takes its reads out of every check phrased over a stanza's
+   modules -- silently.
 
    The result of evaluating a set is what it includes, what it subtracts, and whether `:standard` is
    among its terms; a nested set contributes all three to the one that holds it. Over-subtracting
@@ -1885,9 +1883,9 @@ type ordered_set = { standard : bool; included : string list; excluded : string 
 
 let empty_set = { standard = false; included = []; excluded = [] }
 
-(* A term that INCLUDES a name cancels an exclusion of it made elsewhere in the same set:
-   `(modules (main guard \ guard) guard)` links `guard`, the nested difference having been undone by
-   the term beside it. Keeping both and subtracting at the end dropped it (Codex P2, round 8). *)
+(* A term that INCLUDES a name cancels an exclusion of it made elsewhere in the same set: `(modules
+   (main guard \ guard) guard)` links `guard`, the nested difference having been undone by the term
+   beside it. Keeping both and subtracting at the end dropped it (Codex P2, round 8). *)
 let union a b =
   {
     standard = a.standard || b.standard;
@@ -1900,8 +1898,8 @@ let union a b =
 let difference left right =
   {
     standard = left.standard;
-    (* What the right-hand side would have ADDED is what the left loses; what it subtracts in turn is
-       a nesting this language admits and dune resolves the same way. *)
+    (* What the right-hand side would have ADDED is what the left loses; what it subtracts in turn
+       is a nesting this language admits and dune resolves the same way. *)
     included =
       List.filter left.included ~f:(fun m -> not (List.mem right.included m ~equal:String.equal));
     (* An exclusion is only meaningful against `:standard`, whose members are not known here. Where
@@ -1927,7 +1925,8 @@ let explicit_modules stanza =
   | Some args ->
       let set = eval_ordered_set args in
       (* A subtraction has already removed what it removes, so what is left is the set. Under
-         `:standard` the exclusions are what a caller needs, the default set not being known here. *)
+         `:standard` the exclusions are what a caller needs, the default set not being known
+         here. *)
       if set.standard then Default_less set.excluded
       else Named (List.dedup_and_sort set.included ~compare:String.compare)
 
@@ -2050,7 +2049,7 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
             in
             let declares args = declares_env_var args artifact_env_var in
             match h with
-            | "library" ->
+            | "library" -> (
                 Option.to_list
                 @@
                 if
@@ -2063,7 +2062,7 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                      where the library's own tests run, and not judged at all where it has none. *)
                   not (List.is_empty callers)
                 then subject Artifact_in_library "-"
-                else (
+                else
                   match field stanza "inline_tests" with
                   | None -> None
                   | Some inline ->
@@ -2071,9 +2070,10 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                       decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
             | "executable" | "executables" ->
                 (* One subject per NAME, since one name is one program: its own main module plus
-                   every module no name claims, judged against the rules that run IT (gh-ocannl-747).
-                   For the single-name shape -- everything in this repository -- that is the same
-                   partition as before, the whole module set against every runner. *)
+                   every module no name claims, judged against the rules that run IT
+                   (gh-ocannl-747). For the single-name shape -- everything in this repository --
+                   that is the same partition as before, the whole module set against every
+                   runner. *)
                 let programs =
                   List.map (program_runners ~subdir ~runner_stanzas stanzas stanza)
                     ~f:(fun (name, name_runners) ->
@@ -2087,13 +2087,14 @@ let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas s
                 (* A declaration belongs to the RULE, so whether it is stale is the rule's question
                    and not the program's: a rule running both `a` and `b` where only `a` reads the
                    key is justified, and neither program is carrying a stale declaration. Judged per
-                   runner against every program of the stanza it launches, rather than by asking each
-                   program whether ALL of its runners are justified -- which reported `b` stale as
-                   soon as it also had a dedicated undeclared rule of its own (Codex P2, rounds 2 and
-                   4 of PR #484). *)
-                let needed_by_some = List.concat_map programs ~f:(fun (_, runners, callers, readers) ->
-                    if List.is_empty callers && List.is_empty readers then []
-                    else List.map runners ~f:fst)
+                   runner against every program of the stanza it launches, rather than by asking
+                   each program whether ALL of its runners are justified -- which reported `b` stale
+                   as soon as it also had a dedicated undeclared rule of its own (Codex P2, rounds 2
+                   and 4 of PR #484). *)
+                let needed_by_some =
+                  List.concat_map programs ~f:(fun (_, runners, callers, readers) ->
+                      if List.is_empty callers && List.is_empty readers then []
+                      else List.map runners ~f:fst)
                 in
                 let unjustified (runner, _) =
                   declares (field runner "deps")

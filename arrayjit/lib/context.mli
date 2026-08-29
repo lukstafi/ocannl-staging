@@ -86,8 +86,8 @@ type routine = private {
           asking how many of its accumulators are pinned to memory, and a residency test needs to
           know what the compile DECIDED rather than re-deriving it from the backend's name. On a
           backend that requests no workaround the accumulator sites are still reported, as
-          {!Ir.C_syntax.Plain_accumulator}, with
-          {!Ir.C_syntax.volatility_summary.requested} [= false]. *)
+          {!Ir.C_syntax.Plain_accumulator}, with {!Ir.C_syntax.volatility_summary.requested}
+          [= false]. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every

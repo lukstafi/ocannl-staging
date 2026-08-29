@@ -366,11 +366,10 @@ module type Lowered_backend = sig
       {!field:Backend_intf.schedule} of {!Backend_intf.routine}. *)
 
   val link_batch : context -> code_batch -> ctx_buffers -> Indexing.lowered_bindings * Task.t array
-  (** [context] is the prior context, while [ctx_buffers] are the locations of the resulting
-      context -- ONE buffers delta shared by the whole batch, since the batch is the segment kernels
-      of one fissioned routine. Returns the schedule tasks of the batch's procedures, in order,
-      sharing one set of static-index refs (so setting a binding through the routine reaches every
-      kernel). *)
+  (** [context] is the prior context, while [ctx_buffers] are the locations of the resulting context
+      -- ONE buffers delta shared by the whole batch, since the batch is the segment kernels of one
+      fissioned routine. Returns the schedule tasks of the batch's procedures, in order, sharing one
+      set of static-index refs (so setting a binding through the routine reaches every kernel). *)
 
   val sequence_segments :
     context ->

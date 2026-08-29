@@ -110,8 +110,7 @@ let () =
       ];
   let declared = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.declared) in
   let read = List.concat_map derived.F.interfaces ~f:(fun i -> i.F.read) in
-  same "every module the fixture's wrapper interface declares was read" ~derived:read
-    ~declared;
+  same "every module the fixture's wrapper interface declares was read" ~derived:read ~declared;
   (* The tripwire's control. A wrapper alone in a directory of its own is the shape a broken
      hand-over takes -- a glob that stopped matching, a library resolved from somewhere its members
      are not. The derivation must report the modules it could not read; reporting a frontier without

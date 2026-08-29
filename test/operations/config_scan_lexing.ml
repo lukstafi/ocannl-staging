@@ -362,13 +362,15 @@ let () = Generated.init ~backend_name|ocaml},
    The shape that matters is a guard: a list of key names and an iteration handing each to
    `Utils.read_env_var`. Its keys never sit next to the call, so a scan that reported only what the
    call site spells would answer "none" for the very sources the rule is about -- and answering
-   "none" is what an unread guard looks like. The dynamic flag is the answer instead, and the
-   caller falls back to the file's string literals, intersected with the configuration registry.
+   "none" is what an unread guard looks like. The dynamic flag is the answer instead, and the caller
+   falls back to the file's string literals, intersected with the configuration registry.
 
    Each case is the pair: the keys named literally, and whether some reach is dynamic. *)
 let env_reader_cases =
   [
-    ("a literal argument names its key", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, ([ "profile" ], false));
+    ( "a literal argument names its key",
+      {ocaml|let x = Utils.read_env_var "profile"|ocaml},
+      ([ "profile" ], false) );
     ( "the receiver is matched by its last component, so an alias counts",
       {ocaml|module U = Utils
 let x = U.read_env_var "profile"|ocaml},
@@ -430,7 +432,8 @@ let x = V.read_env_var "profile"|ocaml},
       ([ "profile" ], false) );
     (* And both halves are LEXICAL, not file-wide. An `open Utils` that a local binding shadows does
        not make the shadowed call the library's -- which for a check that asks for a declaration is
-       the difference between a correct stanza passing and failing (Codex P2, round 3 of PR #484). *)
+       the difference between a correct stanza passing and failing (Codex P2, round 3 of PR
+       #484). *)
     ( "a local binding shadows the opened name",
       {ocaml|open Utils
 let read_env_var _ = None
@@ -624,7 +627,9 @@ let elsewhere k = Utils.read_env_var k|ocaml},
 let could_read_cases =
   [
     ("names the reader", {ocaml|let x = Utils.read_env_var "profile"|ocaml}, true);
-    ("does not name it at all", {ocaml|let x = Utils.get_global_arg ~arg_name:"profile"|ocaml}, false);
+    ( "does not name it at all",
+      {ocaml|let x = Utils.get_global_arg ~arg_name:"profile"|ocaml},
+      false );
   ]
 
 (* And the textual filter the census narrows with, which is only safe while naming the module is a
@@ -734,12 +739,12 @@ let () =
           if List.equal String.equal keys expected_keys && Bool.equal dynamic expected_dynamic then
             printf "ok: environment read -- %s\n" name
           else
-            fail "environment read -- %s: expected dynamic %b with keys [%s], found dynamic %b \
-                  with keys [%s]"
+            fail
+              "environment read -- %s: expected dynamic %b with keys [%s], found dynamic %b with \
+               keys [%s]"
               name expected_dynamic
               (String.concat ~sep:"; " expected_keys)
-              dynamic
-              (String.concat ~sep:"; " keys)));
+              dynamic (String.concat ~sep:"; " keys)));
   List.iter key_list_cases ~f:(fun (name, source, (expected_keys, expected_unresolved)) ->
       let found = Scan.env_reader_reads_in_source source in
       let unresolved = not (List.is_empty found.Scan.reader_unresolved) in
@@ -749,8 +754,9 @@ let () =
         && Bool.equal unresolved expected_unresolved
       then printf "ok: key list -- %s\n" name
       else
-        fail "key list -- %s: expected unresolved %b with keys [%s], found unresolved %b with \
-              keys [%s]"
+        fail
+          "key list -- %s: expected unresolved %b with keys [%s], found unresolved %b with keys \
+           [%s]"
           name expected_unresolved
           (String.concat ~sep:"; " expected_keys)
           unresolved

@@ -929,7 +929,6 @@ end) =
 struct
   include C_syntax.Pure_C_config (struct
     let procs = Procs.procs
-
     let full_printf_support = C_syntax.printf_support_unless_uniform ()
   end)
 
@@ -1210,7 +1209,8 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized arr
   let base_name = String.(strip ~drop:(equal_char '_') @@ common_prefix (Array.to_list names)) in
   let build_file = Utils.open_build_file ~base_name ~extension:".c" in
   let params_and_docs =
-    Array.map2_exn names lowereds ~f:(fun name lowered -> Syntax.compile_proc ~name idx_params lowered)
+    Array.map2_exn names lowereds ~f:(fun name lowered ->
+        Syntax.compile_proc ~name idx_params lowered)
   in
   let all_proc_docs = List.map (Array.to_list params_and_docs) ~f:(fun (_, doc, _) -> doc) in
   let combined_proc_doc = PPrint.separate PPrint.hardline all_proc_docs in

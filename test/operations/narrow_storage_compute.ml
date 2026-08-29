@@ -183,7 +183,9 @@ let () =
     Ir.Numerics.set_policy policy;
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:(fun o -> [ serial o ]) ctx
+      Context.compile
+        ~lowered_transform:(fun o -> [ serial o ])
+        ctx
         (named "nsc_ovf" (Train.forward y))
         Ir.Indexing.Empty
     in
@@ -191,7 +193,9 @@ let () =
     Ir.Numerics.set_policy base;
     v
   in
-  let ovf_wide = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_auto } in
+  let ovf_wide =
+    overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_auto }
+  in
   let ovf_native =
     overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = Fp16_narrow }
   in
@@ -221,7 +225,9 @@ let () =
     Ir.Numerics.set_policy { base with narrow_compute_f32 = false; fp16_arithmetic = Fp16_auto };
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:(fun o -> [ serial o ]) ctx
+      Context.compile
+        ~lowered_transform:(fun o -> [ serial o ])
+        ctx
         (named "nsc_half_fma" (Train.forward y))
         Ir.Indexing.Empty
     in

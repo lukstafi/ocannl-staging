@@ -11,19 +11,19 @@
    recursion:
 
    - the base case, {!Tensor.force_param_diff}: a [Tensor.param] mints one fresh gradient and zeroes
-     only it, so its [embedded_nodes] must be exactly the singleton [{ p.diff.grad }]. That equality
-     is what makes {!Train.zero_params_grads} -- which sequences one parameter's [zero_grads] per
-     trained parameter -- mean what its name says;
-   - the inductive case, {!Tensor.op}: a composite loss sequences its operands' [zero_grads] and
-     appends the zeroing of its own gradient, so its [embedded_nodes] must equal the set of nodes
-     its zeroing [Fetch]es actually write. That set is DERIVED from the tree through
-     [Asgns.collect_written] rather than written down here: a restatement of the expected gradients
-     would pin this test's idea of the graph, not the relationship between the two fields.
+   only it, so its [embedded_nodes] must be exactly the singleton [{ p.diff.grad }]. That equality
+   is what makes {!Train.zero_params_grads} -- which sequences one parameter's [zero_grads] per
+   trained parameter -- mean what its name says; - the inductive case, {!Tensor.op}: a composite
+   loss sequences its operands' [zero_grads] and appends the zeroing of its own gradient, so its
+   [embedded_nodes] must equal the set of nodes its zeroing [Fetch]es actually write. That set is
+   DERIVED from the tree through [Asgns.collect_written] rather than written down here: a
+   restatement of the expected gradients would pin this test's idea of the graph, not the
+   relationship between the two fields.
 
    Field agreement is not by itself enough for the inductive case, because both fields come off the
    SAME tree: an operand's [zero_grads] that stopped being folded in shrinks the two together, and
-   their equality survives (Codex round 1, P2) while the gradient goes unzeroed across backprop
-   runs -- the "missing zero_grads" bug {!Tensor.diff} warns about. Recursion DEPTH therefore gets a
+   their equality survives (Codex round 1, P2) while the gradient goes unzeroed across backprop runs
+   -- the "missing zero_grads" bug {!Tensor.diff} warns about. Recursion DEPTH therefore gets a
    witness derived from somewhere else: [diff.backprop], an independently built tree over the same
    graph, whose written set is the gradients backprop accumulates into. Every one of them must be
    zeroed, and [zero_grads] must zero nothing beyond them but the loss's own seed gradient. Both
@@ -90,8 +90,8 @@ let composite_case () =
      matters most here (Codex round 1, P2): if [Tensor.op] stopped folding one operand's
      [zero_grads] into its own, [embedded] and [written] would shrink TOGETHER -- both are derived
      from the same tree -- so their equality would still hold while a gradient the backprop
-     accumulates into went unzeroed across runs. That is the "missing zero_grads" bug
-     {!Tensor.diff} warns about, and recursion DEPTH is a different fact from field agreement.
+     accumulates into went unzeroed across runs. That is the "missing zero_grads" bug {!Tensor.diff}
+     warns about, and recursion DEPTH is a different fact from field agreement.
 
      It needs a witness derived from somewhere else, and [diff.backprop] is exactly that: an
      independently built tree over the same graph, whose written set is the gradients backprop
@@ -102,8 +102,8 @@ let composite_case () =
   Verdict.p_all "every gradient the composite loss's backprop accumulates into is zeroed"
     (Set.to_list bprop_written) ~f:(Set.mem written);
   (* And nothing beyond them: the loss's own gradient (the backprop seed, which backprop reads
-     rather than writes) is the single documented extra, so the two fields are characterized
-     exactly against each other rather than bounded from one side. *)
+     rather than writes) is the single documented extra, so the two fields are characterized exactly
+     against each other rather than bounded from one side. *)
   Verdict.p "the composite loss's zero_grads zeroes the backprop's gradients plus its own seed"
     (Set.equal written (Set.add bprop_written (grad_of loss)));
   (* The parameters' gradients are among them: that is why a routine compiled from the loss's
@@ -121,28 +121,26 @@ let composite_case () =
      blind to it), the second that backprop coverage does not.
 
      The victims must be INTERIOR gradients, and they are derived as such (Codex round 2, P2):
-     [Tnode.compare] orders by monotonically assigned uid, so picking the minimum of
-     [bprop_written] deterministically lands on the earliest-created node -- a PARAMETER gradient,
-     already covered by the claim just above. A control that only re-drops a parameter gradient
-     never shows what it is here to show: that the witness catches an omitted intermediate while
-     both parameter endpoints stay present. Excluding [param_grads] leaves exactly the interior
-     ones, and quantifying over all of them beats picking one -- the guard then also asserts this
-     graph HAS an interior gradient to drop, which is what makes the control meaningful at all. *)
+     [Tnode.compare] orders by monotonically assigned uid, so picking the minimum of [bprop_written]
+     deterministically lands on the earliest-created node -- a PARAMETER gradient, already covered
+     by the claim just above. A control that only re-drops a parameter gradient never shows what it
+     is here to show: that the witness catches an omitted intermediate while both parameter
+     endpoints stay present. Excluding [param_grads] leaves exactly the interior ones, and
+     quantifying over all of them beats picking one -- the guard then also asserts this graph HAS an
+     interior gradient to drop, which is what makes the control meaningful at all. *)
   let interior_grads = Set.to_list (Set.diff bprop_written param_grads) in
-  Stdio.eprintf "composite interior gradients: %s\n"
-    (names (Set.diff bprop_written param_grads));
+  Stdio.eprintf "composite interior gradients: %s\n" (names (Set.diff bprop_written param_grads));
   Verdict.p_all "field agreement alone cannot see any lost interior recursion step" interior_grads
     ~f:(fun g -> Set.equal (Set.remove embedded g) (Set.remove written g));
   Verdict.p_all "backprop coverage sees every lost interior recursion step" interior_grads
     ~f:(fun g -> not (Set.for_all bprop_written ~f:(Set.mem (Set.remove written g))));
   (* The field-agreement control: both directions of that check must be able to fail on this very
-     tree, or the two inclusions above could be passing for a reason that has nothing to do with
-     the derivation. *)
+     tree, or the two inclusions above could be passing for a reason that has nothing to do with the
+     derivation. *)
   let stranger = x.Tensor.value in
   Verdict.p "the exactness check rejects an extra embedded node"
     (not
-       (embeds_exactly_what_it_writes
-          { z with Asgns.embedded_nodes = Set.add embedded stranger }));
+       (embeds_exactly_what_it_writes { z with Asgns.embedded_nodes = Set.add embedded stranger }));
   Verdict.p "the exactness check rejects a dropped embedded node"
     (not
        (embeds_exactly_what_it_writes

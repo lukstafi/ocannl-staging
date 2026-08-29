@@ -349,8 +349,7 @@ let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
     ref
       (Array.to_list p.components
       |> List.map ~f:(fun segments ->
-             ( List.fold segments ~init:0 ~f:(fun acc (d, _) -> acc + d),
-               List.map segments ~f:snd )))
+          (List.fold segments ~init:0 ~f:(fun acc (d, _) -> acc + d), List.map segments ~f:snd)))
   in
   let take_first_by_extent d =
     let rec go acc = function

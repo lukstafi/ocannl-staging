@@ -93,7 +93,9 @@ let run ~name ?schedule (out : Tensor.t) =
   in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform o ])
+      ctx
       (named name (Train.forward out))
       Ir.Indexing.Empty
   in
@@ -265,7 +267,8 @@ let claim_f16_default =
   "the default-policy f16 reduction takes the backend's declared residency (2048 + 1x8: wide 2056 \
    on CPU, per-step 2048 on GPU)"
 
-let claim_f16_wide = "Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056)"
+let claim_f16_wide =
+  "Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056)"
 
 let claim_f16_wide_ncf32_off =
   "Fp16_wide holds the f32 residency even under narrow_compute_f32=false (2048 + 1x8 gives 2056)"
@@ -316,20 +319,21 @@ let () =
      PR #477). *)
   Numerics.set_policy
     { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
-  p claim_f16_wide_ncf32_off (Float.equal (f16_sum ~name:"aw_f16_wide_nco" ~first_id:9780 ()) 2056.0);
+  p claim_f16_wide_ncf32_off
+    (Float.equal (f16_sum ~name:"aw_f16_wide_nco" ~first_id:9780 ()) 2056.0);
   (* The [Vectorized] retype's direct-cell SIMD form holds its register chains at COMPUTE precision
      — half, in this policy corner on a native-fp16 target — so it must decline rather than round
      narrowly while the serial schedule localizes at f32 (Codex P1 round 2 on staging PR #477). The
-     localizer then wraps the nest at [accum_prec]; the SIMD rendering is attempted again inside
-     the scope but [vec_expr]'s compute-width gates decline the half-compute contribution there
-     too, so the honest outcome this leg pins is: no vector chains, the localized serial form at
-     f32. The value claim discriminates against BOTH failure shapes by comparing to a host-side
-     once-narrowed wide reference: half chains (the reported bug) and per-step RMW narrowing each
-     diverge from it — cells are f16-exact ({!Ll_test.drift}, bf16-exact hence f16-exact) while
-     the running sums (~25) sit past 16, where f16 cannot represent the 1/64 increments — and the
-     whole reduction is exact in f32, so the comparison is bitwise. On a promoted-fp16 target the
-     vector-capability gate declines the same candidates and the leg still holds. cc-only: the
-     SIMD reduction rendering is a CPU form. *)
+     localizer then wraps the nest at [accum_prec]; the SIMD rendering is attempted again inside the
+     scope but [vec_expr]'s compute-width gates decline the half-compute contribution there too, so
+     the honest outcome this leg pins is: no vector chains, the localized serial form at f32. The
+     value claim discriminates against BOTH failure shapes by comparing to a host-side once-narrowed
+     wide reference: half chains (the reported bug) and per-step RMW narrowing each diverge from it
+     — cells are f16-exact ({!Ll_test.drift}, bf16-exact hence f16-exact) while the running sums
+     (~25) sit past 16, where f16 cannot represent the 1/64 increments — and the whole reduction is
+     exact in f32, so the comparison is bitwise. On a promoted-fp16 target the vector-capability
+     gate declines the same candidates and the leg still holds. cc-only: the SIMD reduction
+     rendering is a CPU form. *)
   cc_only claim_f16_vec_wide (fun () ->
       let rows, cols = (4, 67) in
       let fv = Ll_test.drift ~dims:[| rows; cols |] in
@@ -366,7 +370,9 @@ let () =
             !acc)
       in
       let vref =
-        NTDSL.init ~l:"aw_f16v_ref" ~prec:Ir.Ops.half ~o:[ rows ] ~f:(fun idcs -> wide_v.(idcs.(0))) ()
+        NTDSL.init ~l:"aw_f16v_ref" ~prec:Ir.Ops.half ~o:[ rows ]
+          ~f:(fun idcs -> wide_v.(idcs.(0)))
+          ()
       in
       let want_v = run ~name:"aw_f16v_refc" vref in
       let vec_fired =

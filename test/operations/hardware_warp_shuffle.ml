@@ -363,10 +363,10 @@ let () =
   (* The other half of the gate: under the default [fp16_arithmetic] policy f16 resolves to itself
      on every GPU backend (CUDA's seeded wmma triple accumulates f16 natively, RDNA has genuine f16
      accumulator variants, MSL's [half] is a native scalar), so there is no wider value to shuffle
-     and the rendering must keep refusing — loudly, since binding the index like a plain
-     [Workgroup] axis would race the accumulator. On the C backends [warp_size = 0] and the loop is
-     simply serial, which is its correct meaning. This pins what [Fp16_auto] resolves to TODAY, not
-     a contract that it always will (gh-ocannl-680 keeps latitude to resolve wide on hardware where
+     and the rendering must keep refusing — loudly, since binding the index like a plain [Workgroup]
+     axis would race the accumulator. On the C backends [warp_size = 0] and the loop is simply
+     serial, which is its correct meaning. This pins what [Fp16_auto] resolves to TODAY, not a
+     contract that it always will (gh-ocannl-680 keeps latitude to resolve wide on hardware where
      wide f16 accumulate is free); the wide policy's twin legs are at the end of this file. *)
   let n = 32 in
   let hv = Array.init n ~f:(fun k -> Float.of_int (k % 5) *. 0.5) in
@@ -463,8 +463,8 @@ let () =
    f16 reduction accumulators f32 residency on EVERY backend, so an f16 [Workgroup_reduce] passes
    the residency gate the leg above pins the refusal of, and shuffles float exactly as bf16 does on
    CUDA. The policy is what changes; the rendering is unchanged, which is the point — the same
-   residency staging, the same once-narrowed value, on backends where f16 is the storage precision
-   a model actually trains in.
+   residency staging, the same once-narrowed value, on backends where f16 is the storage precision a
+   model actually trains in.
 
    The terms [1 + (k mod 11)/1024] are the f16 analogue of the bf16 legs' [1 + (k mod 7)/128]:
    1/1024 is ulp(1) at f16's 10 stored mantissa bits as 1/128 is at bf16's 7, so each term is exact

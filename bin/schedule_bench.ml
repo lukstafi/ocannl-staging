@@ -32,8 +32,8 @@
    compiled without a [lowered_transform] so that the backend's default schedule applies, which is
    why 0 costs milliseconds on the GPU backends and the naive leg costs seconds. Output is flushed
    per line and every leg slow enough to be worth waiting for — that reference run included —
-   announces itself BEFORE it runs and reports what it cost, so a run in progress is
-   distinguishable from a hang.
+   announces itself BEFORE it runs and reports what it cost, so a run in progress is distinguishable
+   from a hang.
 
    Each scheduled variant needs its own [Sched.split] factors to divide the extents they split (i
    over m, j over n, k over k), and every one of them needs a non-degenerate nest to address; a
@@ -77,6 +77,7 @@ module Numerics = Ir.Numerics
    control to re-run before raising the granularity again, or when porting the claim to a backend
    whose mma input format is narrower than tf32. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
+
 (* Flushed per line ([Bench_out]): an unflushed table reaches the reader only when the process
    exits, which on a leg that is seconds to minutes per run reads as a hang (gh-ocannl-829). *)
 let p fmt = Bench_out.p fmt
@@ -587,8 +588,12 @@ let () =
        positional exists cannot tell a long naive leg from a hang. Keyed on [schedule = None], which
        is what makes the leg unscheduled, so it cannot drift from which leg is the slow one. *)
     if Option.is_none schedule then
-      p "%-10s 1x1 launch over m*n*k = %d — one thread, 1 warmup + %d timed run(s); cap with the \
-         5th argument (0 skips the timing)\n" variant (m * n * k) repeats;
+      p
+        "%-10s 1x1 launch over m*n*k = %d — one thread, 1 warmup + %d timed run(s); cap with the \
+         5th argument (0 skips the timing)\n"
+        variant
+        (m * n * k)
+        repeats;
     (* Warmup (includes any lazy initialization and host transfers). Timed, so that a leg whose cost
        only shows up at run time can still announce it before the timed loop multiplies it. *)
     let warm_start = Time_now.nanoseconds_since_unix_epoch () in

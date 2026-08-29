@@ -106,9 +106,9 @@ let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
 
    [converted_d] names HIP's wide-f16 arm (gh-ocannl-789), where the accumulator array's element
    type is not the destination's: there rocWMMA loads a STAGING fragment and the accumulator array
-   is populated by the elementwise copy, so the "populated once before the body" anchor is that
-   copy rather than a [load_matrix_sync] naming the array. The store anchor is unchanged — the
-   staging fragment is still stored to [__mma_dp] once, after the body. *)
+   is populated by the elementwise copy, so the "populated once before the body" anchor is that copy
+   rather than a [load_matrix_sync] naming the array. The store anchor is unchanged — the staging
+   fragment is still stored to [__mma_dp] once, after the body. *)
 let staged_half_resident ?(converted_d = false) src =
   if on_metal then
     residency_holds src ~frag_load:"simdgroup_load(__mma_fragment_"
@@ -195,7 +195,9 @@ let () =
         inspect opt;
         Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt
       in
-      Context.compile ~lowered_transform:(fun o -> [ transform o ]) (Context.auto ())
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform o ])
+        (Context.auto ())
         (named name (Train.forward tensor))
         Ir.Indexing.Empty
     in
@@ -405,7 +407,9 @@ let () =
   let transform_h opt = Sched.apply (mma_schedule ~out:mch1.Tensor.value opt) opt in
   let ctx_h = Context.auto () in
   let ctx_h, routine_h =
-    Context.compile ~lowered_transform:(fun o -> [ transform_h o ]) ctx_h
+    Context.compile
+      ~lowered_transform:(fun o -> [ transform_h o ])
+      ctx_h
       (named "mm_h_mma" (Train.forward mch1))
       Ir.Indexing.Empty
   in
@@ -435,20 +439,20 @@ let () =
 
   (* --- Fp16_wide (gh-ocannl-680): the uniform-f16 combination under the wide policy. CUDA sm_80+
      routes it to the f32-accumulate inline-PTX m16n8k16 arm (the bf16 uniform arm's body over the
-     shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not
-     render while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the
-     CPU register tiling renders as under the default policy (its accumulator is f32 either way).
+     shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not render
+     while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the CPU
+     register tiling renders as under the default policy (its accumulator is f32 either way).
 
-     The inputs are WIDTH-SENSITIVE, unlike [mah]/[mbh] above (Codex P1 round 3 on staging PR
-     #477: f16-exact inputs cannot tell a wide arm that accidentally accumulates narrow from a
-     correct one). Cells are f16-exact (multiples of 1/8, magnitudes below 4), products are
-     multiples of 1/64 with mean ~2.4, so the 32-term k-sums drift past 64 — where f16's spacing
-     (1/16 and coarser) can no longer represent them and per-step f16 narrowing visibly diverges —
-     while every product and partial sum stays exact in f32 (multiples of 1/64, magnitude below
-     2^8), so ANY accumulation association gives the identical f32 value: the comparison against
-     the host-side once-narrowed wide reference is bitwise for the serial rendering, the PTX arm's
-     whole-k f32 registers, and the recorded fallbacks alike, and a half-resident accumulator in
-     any of them fails it. --- *)
+     The inputs are WIDTH-SENSITIVE, unlike [mah]/[mbh] above (Codex P1 round 3 on staging PR #477:
+     f16-exact inputs cannot tell a wide arm that accidentally accumulates narrow from a correct
+     one). Cells are f16-exact (multiples of 1/8, magnitudes below 4), products are multiples of
+     1/64 with mean ~2.4, so the 32-term k-sums drift past 64 — where f16's spacing (1/16 and
+     coarser) can no longer represent them and per-step f16 narrowing visibly diverges — while every
+     product and partial sum stays exact in f32 (multiples of 1/64, magnitude below 2^8), so ANY
+     accumulation association gives the identical f32 value: the comparison against the host-side
+     once-narrowed wide reference is bitwise for the serial rendering, the PTX arm's whole-k f32
+     registers, and the recorded fallbacks alike, and a half-resident accumulator in any of them
+     fails it. --- *)
   let fwa = Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375 in
   let fwb = Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0.5 ~stride:0.625 in
   let mwa = NTDSL.init ~l:"mwa" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:fwa () in
@@ -499,9 +503,9 @@ let () =
    let ok =
      if on_metal then fallback && (not (has "simdgroup_half8x8")) && has "== 0)"
      else if String.is_substring backend_name ~substring:"hip" then
-       (* HIP: the rocWMMA uniform-f16 arm swapped to an f32 accumulator fragment over the same
-          f16 STORAGE destination, converting elementwise at the [d] boundary (gh-ocannl-789).
-          Both halves are pinned, because either alone would also match the f16-accumulate arm this
+       (* HIP: the rocWMMA uniform-f16 arm swapped to an f32 accumulator fragment over the same f16
+          STORAGE destination, converting elementwise at the [d] boundary (gh-ocannl-789). Both
+          halves are pinned, because either alone would also match the f16-accumulate arm this
           replaces: that one declares [accumulator, 16, 16, 16, rocwmma::float16_t] throughout and
           has no staging fragment, so the [float] accumulator declaration AND [__mma_dstage] are
           what say the accumulation is wide. The default-policy leg above asserts the complement. *)
@@ -520,8 +524,7 @@ let () =
          | None -> false
        in
        if wide_arm then
-         intrinsics
-         && has "(mma-f16)"
+         intrinsics && has "(mma-f16)"
          && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
          && not (has "nvcuda::wmma")
        else fallback && (not (has "nvcuda::wmma")) && has "== 0)"
@@ -529,11 +532,11 @@ let () =
    in
    p "Fp16_wide half tensorized structure as expected" ok);
 
-  (* --- The wide contract survives [narrow_compute_f32 = false] on the CPU backends (Codex P1
-     round 1 on staging PR #477): compute stays half there, the accumulator residency is f32, and
-     the register-tiled C-tile — which accumulates at COMPUTE precision — cannot honor that, so it
-     must decline to the serial fallback (whose localized accumulator follows [accum_prec]) rather
-     than accumulate narrowly under a tensorized label. On a native-fp16 machine the new
+  (* --- The wide contract survives [narrow_compute_f32 = false] on the CPU backends (Codex P1 round
+     1 on staging PR #477): compute stays half there, the accumulator residency is f32, and the
+     register-tiled C-tile — which accumulates at COMPUTE precision — cannot honor that, so it must
+     decline to the serial fallback (whose localized accumulator follows [accum_prec]) rather than
+     accumulate narrowly under a tensorized label. On a native-fp16 machine the new
      residency-divergence decline is what fires; elsewhere the vector-capability decline already
      covered it — either way, no register tiling and a recorded fallback. CPU-only: on the GPU
      backends [narrow_compute_f32] does not touch f16 compute and the leg above already pins the
@@ -613,7 +616,9 @@ let () =
     let transform_b opt = Sched.apply (mma_schedule ?bm ~out:mcb1.Tensor.value opt) opt in
     let ctx_b = Context.auto () in
     let ctx_b, routine_b =
-      Context.compile ~lowered_transform:(fun o -> [ transform_b o ]) ctx_b
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_b o ])
+        ctx_b
         (named ("mm_" ^ tag ^ "_mma") (Train.forward mcb1))
         Ir.Indexing.Empty
     in
@@ -755,7 +760,9 @@ let () =
      let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
      let ctx_f8 = Context.auto () in
      let ctx_f8, routine_f8 =
-       Context.compile ~lowered_transform:(fun o -> [ transform_f8 o ]) ctx_f8
+       Context.compile
+         ~lowered_transform:(fun o -> [ transform_f8 o ])
+         ctx_f8
          (named ("mm_" ^ tag ^ "_mma") (Train.forward mcf1))
          Ir.Indexing.Empty
      in
@@ -840,7 +847,9 @@ let () =
     let transform_e opt = Sched.apply (edge_schedule opt) opt in
     let ctx_e = Context.auto () in
     let ctx_e, routine_e =
-      Context.compile ~lowered_transform:(fun o -> [ transform_e o ]) ctx_e
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_e o ])
+        ctx_e
         (named "mm_edge_mma" (Train.forward ec1))
         Ir.Indexing.Empty
     in
@@ -910,7 +919,9 @@ let () =
     let transform_w opt = Sched.apply (width_schedule opt) opt in
     let ctx_w = Context.auto () in
     let ctx_w, routine_w =
-      Context.compile ~lowered_transform:(fun o -> [ transform_w o ]) ctx_w
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_w o ])
+        ctx_w
         (named "mm_width_mma" (Train.forward wc1))
         Ir.Indexing.Empty
     in
@@ -975,7 +986,9 @@ let () =
     let transform_f opt = Sched.apply (fused_schedule opt) opt in
     let ctx_f = Context.auto () in
     let ctx_f, routine_f =
-      Context.compile ~lowered_transform:(fun o -> [ transform_f o ]) ctx_f
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_f o ])
+        ctx_f
         (named "mm_fused_mma" (Train.forward fc1))
         Ir.Indexing.Empty
     in
@@ -1166,7 +1179,9 @@ let () =
     in
     let ctx_d = Context.auto () in
     let ctx_d, routine_d =
-      Context.compile ~lowered_transform:(fun o -> [ transform_hs o ]) ctx_d
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_hs o ])
+        ctx_d
         (named "mm_h_staged_mma" (Train.forward mchs))
         Ir.Indexing.Empty
     in
@@ -1215,7 +1230,9 @@ let () =
     in
     let ctx_u = Context.auto () in
     let ctx_u, routine_u =
-      Context.compile ~lowered_transform:(fun o -> [ transform_hu o ]) ctx_u
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_hu o ])
+        ctx_u
         (named "mm_hu_staged_mma" (Train.forward mchu))
         Ir.Indexing.Empty
     in
@@ -1237,13 +1254,13 @@ let () =
     skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
     skipped "staged+tensorized uniform-f16 fragment residency");
 
-  (* --- The same staged uniform-f16 composition under [Numerics.Fp16_wide] (gh-ocannl-789): the
-     leg that EXECUTES HIP's converted [d] boundary in the FRAGMENT scope, which the [mm_h_wide_mma]
-     leg above cannot reach — its schedule keeps no accumulator across [k_o], so it takes
-     [mma_syntax]'s own load/store instead of [mma_fragment_syntax]'s. On the width-sensitive
-     inputs against the once-narrowed wide reference, so the parity is not a formality: a boundary
-     that converted per [k_o] instead of once would narrow the partial sums, which is precisely
-     what these inputs separate, and a mis-mapped elementwise copy moves values by O(1).
+  (* --- The same staged uniform-f16 composition under [Numerics.Fp16_wide] (gh-ocannl-789): the leg
+     that EXECUTES HIP's converted [d] boundary in the FRAGMENT scope, which the [mm_h_wide_mma] leg
+     above cannot reach — its schedule keeps no accumulator across [k_o], so it takes [mma_syntax]'s
+     own load/store instead of [mma_fragment_syntax]'s. On the width-sensitive inputs against the
+     once-narrowed wide reference, so the parity is not a formality: a boundary that converted per
+     [k_o] instead of once would narrow the partial sums, which is precisely what these inputs
+     separate, and a mis-mapped elementwise copy moves values by O(1).
 
      HIP-only, deliberately. Under this policy Metal withholds the uniform-f16 arm outright and
      CUDA's wide uniform-f16 arm is inline-PTX with no fragment-scope counterpart, so what the other
@@ -1264,7 +1281,9 @@ let () =
     in
     let ctx_fw = Context.auto () in
     let ctx_fw, routine_fw =
-      Context.compile ~lowered_transform:(fun o -> [ transform_fw o ]) ctx_fw
+      Context.compile
+        ~lowered_transform:(fun o -> [ transform_fw o ])
+        ctx_fw
         (named "mm_huw_staged_mma" (Train.forward mchfw))
         Ir.Indexing.Empty
     in

@@ -206,10 +206,9 @@ let with_census f =
    [Set] reading the very cell it writes): a loop with no such recurrence was never a candidate, and
    censusing it would bury the reductions in noise. Not [has_accumulation], which counts every
    [Local_scope] conservatively and so records an ordinary virtualized computation inside a loop as
-   a declined reduction site.
-   The refs are bracketed by {!with_peel_census}, which {!Context.compile} calls around every
-   routine's codegen, so the summary is a field of the compiled routine rather than something a
-   caller must remember to collect. *)
+   a declined reduction site. The refs are bracketed by {!with_peel_census}, which
+   {!Context.compile} calls around every routine's codegen, so the summary is a field of the
+   compiled routine rather than something a caller must remember to collect. *)
 
 type peel_skip =
   | Skip_debug_logging
@@ -311,10 +310,10 @@ let with_peel_census f =
    performance investigation asks, because the qualifier is what stops an accumulator being
    register-resident.
 
-   Collected where each decision is made ([scope_decl_type] for the localized form,
-   [pp_ll]'s [Set] case for the read-modify-write pointer shadow) and bracketed by
-   {!with_volatility_census}, which {!Context.compile} calls around every routine's codegen, so the
-   summary is a field of the compiled routine.
+   Collected where each decision is made ([scope_decl_type] for the localized form, [pp_ll]'s [Set]
+   case for the read-modify-write pointer shadow) and bracketed by {!with_volatility_census}, which
+   {!Context.compile} calls around every routine's codegen, so the summary is a field of the
+   compiled routine.
 
    The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
    recorded on EVERY backend — the classification it needs is computed anyway, so a routine compiled
@@ -355,7 +354,6 @@ type volatility_summary = {
    same reason the census refs are: compiles are sequential on the main domain, and a census
    collected around one compile must name the kernels of whichever backend ran it. *)
 let current_kernel_name = ref ""
-
 let volatility_census_enabled = ref false
 let volatility_census : (string * volatility_site) list ref = ref []
 
@@ -400,7 +398,7 @@ let with_volatility_census f =
   let restore () =
     let inner = !volatility_census in
     volatility_census_enabled := saved_enabled;
-    volatility_census := (if saved_enabled then inner @ saved_census else saved_census);
+    volatility_census := if saved_enabled then inner @ saved_census else saved_census;
     volatility_requested := saved_requested
   in
   let result =
@@ -1744,8 +1742,7 @@ module C_syntax (B : C_syntax_config) = struct
         ~convert_precision:B.convert_precision
 
   let get_ident =
-    Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
-    @@ B.procs
+    Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist @@ B.procs
 
   (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
      standard-library functions and types the preludes' unconditional includes declare. The extra
@@ -2600,12 +2597,12 @@ module C_syntax (B : C_syntax_config) = struct
      once, and all three spell that same single-rounded operation, so they differ by summation order
      alone and not by the semantics of each step. Every builtin here is fused by definition, so that
      per-update promise holds under every flag; each was checked to render exactly one fused
-     instruction at [-ffp-contract=off], computing [a * b + dst]. The masked forms are
-     spelled the way gcc's own [<immintrin.h>] spells them: with an all-ones mask and
-     [_MM_FROUND_CUR_DIRECTION] (= 4, i.e. obey MXCSR rather than an embedded rounding mode) these
-     calls are character for character what [_mm512_fmadd_ps], [_mm512_fmadd_pd], [_mm_fmadd_ph],
-     [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather than
-     something inferred here.
+     instruction at [-ffp-contract=off], computing [a * b + dst]. The masked forms are spelled the
+     way gcc's own [<immintrin.h>] spells them: with an all-ones mask and [_MM_FROUND_CUR_DIRECTION]
+     (= 4, i.e. obey MXCSR rather than an embedded rounding mode) these calls are character for
+     character what [_mm512_fmadd_ps], [_mm512_fmadd_pd], [_mm_fmadd_ph], [_mm256_fmadd_ph] and
+     [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather than something inferred
+     here.
 
      The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN on the machine they were added from
      (an Arrow Lake-HX part, where AVX-512 is fused off entirely; QEMU's TCG implements neither
@@ -3339,8 +3336,8 @@ module C_syntax (B : C_syntax_config) = struct
   let zero_out_seen : int Hash_set.t = Hash_set.create (module Int)
 
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
-     first): maintained by [serial_loop] below, consulted by the [Set] case's [volatile_serial_accumulation]
-     rule and by [pp_pipelined_rotation]. *)
+     first): maintained by [serial_loop] below, consulted by the [Set] case's
+     [volatile_serial_accumulation] rule and by [pp_pipelined_rotation]. *)
   let serial_loop_stack : Indexing.symbol list ref = ref []
 
   (* gh-487: the buffer-selection term of a software-pipelined tile, prepended to the intra-copy
@@ -4205,17 +4202,16 @@ module C_syntax (B : C_syntax_config) = struct
                   let p = comp_prec store_prec in
                   (* The chains and the direct-cell fold hold the accumulator at [p], so the
                      direct-cell form honors the accumulator-width contract only where [p] IS the
-                     residency. Under [Fp16_wide] with [narrow_compute_f32 = false] on a
-                     native-fp16 target, [acc_prec] resolves an f16 cell to f32 while [comp_prec]
-                     stays half — half register chains would round narrowly while the serial
-                     schedule localizes at f32 (Codex P1 round 2 on staging PR #477). Bail: the
-                     dispatch then reaches [try_localize_serial_reduce], whose scope carries
-                     [acc_prec]. The [Vectorized] level rides into the scope and this rendering is
-                     attempted again on the [`Local] target at the residency, but [vec_expr]'s
-                     compute-width gates decline the contribution there too (its operands' own
-                     compute width is half), so this policy corner renders the localized SERIAL
-                     form — width-correct, SIMD forfeited; [accum_width.ml]'s vec leg pins that
-                     outcome. *)
+                     residency. Under [Fp16_wide] with [narrow_compute_f32 = false] on a native-fp16
+                     target, [acc_prec] resolves an f16 cell to f32 while [comp_prec] stays half —
+                     half register chains would round narrowly while the serial schedule localizes
+                     at f32 (Codex P1 round 2 on staging PR #477). Bail: the dispatch then reaches
+                     [try_localize_serial_reduce], whose scope carries [acc_prec]. The [Vectorized]
+                     level rides into the scope and this rendering is attempted again on the
+                     [`Local] target at the residency, but [vec_expr]'s compute-width gates decline
+                     the contribution there too (its operands' own compute width is half), so this
+                     policy corner renders the localized SERIAL form — width-correct, SIMD
+                     forfeited; [accum_width.ml]'s vec leg pins that outcome. *)
                   if not (Ops.equal_prec (acc_prec store_prec) p) then raise Bail;
                   p
               | `Local id -> scope_prec_of id
@@ -4634,8 +4630,8 @@ module C_syntax (B : C_syntax_config) = struct
            storage width. At those the widening half is vacuous (the local's precision IS the
            storage precision) and the rewrite is exactly value-neutral, which is why it is
            unconditional: leaving it precision-gated made residency "whichever schedule happened to
-           place it" at f32, and on Metal [volatile_serial_accumulation] pinned the resulting RMW to device
-           memory by construction.
+           place it" at f32, and on Metal [volatile_serial_accumulation] pinned the resulting RMW to
+           device memory by construction.
 
            Implemented as a local rewrite into exactly the [Local_scope] form virtualization gives
            virtual accumulators, rendered recursively: [scope_prec_of] (the minted scope is
@@ -4659,13 +4655,13 @@ module C_syntax (B : C_syntax_config) = struct
            carve-out, [renders_at_store_prec]), so rendering it inside a scope's precision would
            change the draw, not just move it.
 
-           Interaction with [volatile_serial_accumulation] (Metal) has two forms. Localization lifts the node
-           [Set] out of exactly the invariant-address loops, so the volatile POINTER shadow's
-           predicate is false at a fully localized site. But gh-ocannl-731 showed the same shader
-           compiler pass corrupting the replacement scope-local accumulation when its contribution
-           reads through a pooled pointer; [scope_decl_type] therefore makes that accumulator local
-           volatile. Where the peel is blocked at an outer level, the device-memory RMW remains and
-           the original pointer shadow still fires. *)
+           Interaction with [volatile_serial_accumulation] (Metal) has two forms. Localization lifts
+           the node [Set] out of exactly the invariant-address loops, so the volatile POINTER
+           shadow's predicate is false at a fully localized site. But gh-ocannl-731 showed the same
+           shader compiler pass corrupting the replacement scope-local accumulation when its
+           contribution reads through a pooled pointer; [scope_decl_type] therefore makes that
+           accumulator local volatile. Where the peel is blocked at an outer level, the
+           device-memory RMW remains and the original pointer shadow still fires. *)
         let try_localize_serial_reduce () : PPrint.document option =
           (* The peel census (gh-ocannl-733) records what this site DECIDED, not merely what it
              rendered. Only accumulating levels are censused: elsewhere localization was never a
@@ -4915,16 +4911,16 @@ module C_syntax (B : C_syntax_config) = struct
             let offset_doc =
               pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims)
             in
-            (* See {!C_syntax_config.volatile_serial_accumulation}: pin the per-iteration read-modify-write
-               of loop-invariant-address accumulators by shadowing the node's pointer with a
-               volatile-qualified alias for the whole statement (the shadow also covers reads inside
-               [local_defs]). The rule keys on the miscompiling pass's precondition — a
-               read-modify-write whose address is invariant across at least one enclosing serial
-               [for] loop (a scalar loss reduction's constant index, a gradient accumulated over an
-               outer batch loop, a matmul/conv accumulator indexed only by loops outside its
-               reduction) — because no finer syntactic discriminator survived the observed cases:
-               plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
-               byte-alike statements in others compiled fine. *)
+            (* See {!C_syntax_config.volatile_serial_accumulation}: pin the per-iteration
+               read-modify-write of loop-invariant-address accumulators by shadowing the node's
+               pointer with a volatile-qualified alias for the whole statement (the shadow also
+               covers reads inside [local_defs]). The rule keys on the miscompiling pass's
+               precondition — a read-modify-write whose address is invariant across at least one
+               enclosing serial [for] loop (a scalar loss reduction's constant index, a gradient
+               accumulated over an outer batch loop, a matmul/conv accumulator indexed only by loops
+               outside its reduction) — because no finer syntactic discriminator survived the
+               observed cases: plain-FMA and Local-scope-bearing statements both miscompiled in some
+               kernels while byte-alike statements in others compiled fine. *)
             let rmw_volatile =
               B.volatile_serial_accumulation
               && List.exists !serial_loop_stack ~f:(fun s ->
@@ -4959,8 +4955,8 @@ module C_syntax (B : C_syntax_config) = struct
             in
             (* The volatility census (gh-ocannl-782) records this arm only where it fires. Unlike
                the accumulator arm, its predicate is not evaluated at all on a backend that requests
-               nothing — the capability short-circuits it — so there is no decision there to
-               report, and [volatility_summary.requested] is what says so. *)
+               nothing — the capability short-circuits it — so there is no decision there to report,
+               and [volatility_summary.requested] is what says so. *)
             if rmw_volatile && !volatility_census_enabled then
               volatility_census :=
                 (!current_kernel_name, Volatile_rmw_shadow (get_ident tn)) :: !volatility_census;

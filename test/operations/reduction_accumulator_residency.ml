@@ -15,16 +15,16 @@
    reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop; - the
    accumulator's volatility agrees with what the compile REPORTED (gh-ocannl-782): the routine's
    volatility census names the local, says whether the workaround qualified it, and says whether
-   this backend asked for the workaround at all — so the expectation is read off the compile
-   instead of off the backend's name, and the emitted text is checked against it. On a backend that
-   requests the workaround the accumulator is [volatile] (gh-ocannl-731), because the same
-   shader-compiler pass can corrupt the localized form too; on one that does not, it stays
-   register-resident. Either way the kernel carries no volatile POINTER shadow: localization lifted
-   the device-memory RMW that shadow pins, and the census's shadow count says so independently of
-   the text; - the values match a host reference computed in the same summation order. The producers
-   discriminate: every element is [1 + 10*i + j], so it varies with BOTH loop symbols and is clear
-   of the zero the accumulator is initialized to — a constant producer would survive a dropped or
-   replayed iteration, and a value omitting a symbol would survive a wrong substitution.
+   this backend asked for the workaround at all — so the expectation is read off the compile instead
+   of off the backend's name, and the emitted text is checked against it. On a backend that requests
+   the workaround the accumulator is [volatile] (gh-ocannl-731), because the same shader-compiler
+   pass can corrupt the localized form too; on one that does not, it stays register-resident. Either
+   way the kernel carries no volatile POINTER shadow: localization lifted the device-memory RMW that
+   shadow pins, and the census's shadow count says so independently of the text; - the values match
+   a host reference computed in the same summation order. The producers discriminate: every element
+   is [1 + 10*i + j], so it varies with BOTH loop symbols and is clear of the zero the accumulator
+   is initialized to — a constant producer would survive a dropped or replayed iteration, and a
+   value omitting a symbol would survive a wrong substitution.
 
    Two nest shapes, because they exercise different placements of the localized store: a scalar
    reduction over both axes (the loss shape — the store lands above every loop, at function scope)
@@ -39,7 +39,6 @@ module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let () = Test_utils.Generated.init ~backend_name
 let rows = 6
 let cols = 7
@@ -201,17 +200,13 @@ let () =
         Verdict.p
           (label ^ ": the census names the accumulator the kernel declares")
           (List.mem (List.map accumulators ~f:fst) local ~equal:String.equal);
-        Verdict.p_all
-          (label ^ ": the declaration's volatility is the one the census reports")
-          accumulators
-          ~f:(fun (name, volatile) ->
+        Verdict.p_all (label ^ ": the declaration's volatility is the one the census reports")
+          accumulators ~f:(fun (name, volatile) ->
             match declared_volatile source name with
             | Some declared -> Bool.equal declared volatile
             | None -> false);
-        Verdict.p_all
-          (label ^ ": the accumulator is volatile exactly when the backend requests it")
-          accumulators
-          ~f:(fun (_, volatile) -> Bool.equal volatile v.Ir.C_syntax.requested);
+        Verdict.p_all (label ^ ": the accumulator is volatile exactly when the backend requests it")
+          accumulators ~f:(fun (_, volatile) -> Bool.equal volatile v.Ir.C_syntax.requested);
         (* Localization lifted the device-memory read-modify-write the pointer shadow pins, so this
            routine has none — asserted twice over, from the census and from the emitted text, which
            is what makes either one a check rather than a restatement. *)
@@ -233,8 +228,7 @@ let () =
 let () =
   let module Cs = Ir.C_syntax in
   let entries_equal =
-    List.equal (fun (n1, s1) (n2, s2) ->
-        String.equal n1 n2 && Cs.equal_volatility_site s1 s2)
+    List.equal (fun (n1, s1) (n2, s2) -> String.equal n1 n2 && Cs.equal_volatility_site s1 s2)
   in
   let outer = Cs.Volatile_accumulator "v1_outer" and inner = Cs.Plain_accumulator "v2_inner" in
   let inner_summary, outer_summary =
@@ -252,8 +246,7 @@ let () =
   (* Additively, not shadowing: an enclosing collection still sees what an inner compile censused,
      or wrapping the compile path in the bracket would silently empty every outer one. *)
   Verdict.p "the enclosing bracket sees both, in emission order"
-    (entries_equal outer_summary.Cs.entries
-       [ ("outer_kernel", outer); ("inner_kernel", inner) ]);
+    (entries_equal outer_summary.Cs.entries [ ("outer_kernel", outer); ("inner_kernel", inner) ]);
   Verdict.p "an inner bracket reports the capability of the compile it bracketed"
     (not inner_summary.Cs.requested);
   Verdict.p "the enclosing bracket keeps its own capability across the nested one"

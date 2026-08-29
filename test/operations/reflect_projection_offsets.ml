@@ -29,8 +29,7 @@ let eval (env : Idx.symbol -> int) (idx : Idx.axis_index) : int =
   | Idx.Iterator s -> env s
   | Idx.Affine { symbols; offset } ->
       List.fold symbols ~init:offset ~f:(fun acc (c, s) -> acc + (c * env s))
-  | Idx.Sub_axis | Idx.Concat _ ->
-      failwith "reflect_projection returned a non-affine index"
+  | Idx.Sub_axis | Idx.Concat _ -> failwith "reflect_projection returned a non-affine index"
 
 let env_of alist s =
   match List.Assoc.find alist s ~equal:Idx.equal_symbol with
@@ -52,8 +51,7 @@ let () =
     Idx.reflect_projection ~dims ~projection:[| Idx.Iterator i; Idx.Iterator j; Idx.Iterator k |]
   in
   p_all "the all-iterator offset is row-major at every point" (points dims) ~f:(function
-    | [ a; b; c ] ->
-        eval (env_of [ (i, a); (j, b); (k, c) ]) reflected = (((a * 3) + b) * 4) + c
+    | [ a; b; c ] -> eval (env_of [ (i, a); (j, b); (k, c) ]) reflected = (((a * 3) + b) * 4) + c
     | _ -> false);
 
   (* --- Mixed projection: a [Fixed_idx] contributes its own stride-scaled constant, an [Affine]

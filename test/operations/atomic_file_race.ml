@@ -11,15 +11,14 @@
    hanging it. Two things make the stress leg able to fail rather than merely pass:
 
    - Its readers are compared against the EXACT set of payloads the writers published, not against a
-     shape. A shape check accepted a torn read whose truncation happened to land on the length
-     lattice (Codex P2, round 2); the payloads are self-describing now, and the shape check is kept
-     only to control that counterexample explicitly.
-   - Readers and writers are made to overlap by a rendezvous rather than by hoping the scheduler
-     interleaves them. On one core the readers could otherwise finish every read against the seeded
-     file before a writer ran at all, and pass while publication truncated the target in place
-     (Codex P2, round 2). Each reader now reads once before any writer proceeds past its first
-     round, and keeps reading until the writers are done; every reader is claimed to have observed
-     the file mid-run.
+   shape. A shape check accepted a torn read whose truncation happened to land on the length lattice
+   (Codex P2, round 2); the payloads are self-describing now, and the shape check is kept only to
+   control that counterexample explicitly. - Readers and writers are made to overlap by a rendezvous
+   rather than by hoping the scheduler interleaves them. On one core the readers could otherwise
+   finish every read against the seeded file before a writer ran at all, and pass while publication
+   truncated the target in place (Codex P2, round 2). Each reader now reads once before any writer
+   proceeds past its first round, and keeps reading until the writers are done; every reader is
+   claimed to have observed the file mid-run.
 
    The stress leg was controlled by hand in the other direction too: replacing its writers'
    [AF.write_all] with a direct [Out_channel.write_all] onto the published path makes "every read
@@ -104,8 +103,7 @@ let () =
     (not (is_well_formed (String.drop_suffix good 4)));
   Verdict.p "the completeness test rejects a payload whose body mixes two writers"
     (not
-       (is_well_formed
-          (String.prefix good (String.length good - 8) ^ String.make 4 'b' ^ "|END")));
+       (is_well_formed (String.prefix good (String.length good - 8) ^ String.make 4 'b' ^ "|END")));
   Verdict.p "the completeness test rejects an empty file" (not (is_well_formed ""))
 
 (* A staged-but-uncommitted writer is invisible, and it obstructs nobody: while one publish sits in
@@ -160,7 +158,6 @@ let reads_per_reader = 400
    finish" into an unbounded run. Far above [reads_per_reader]: reaching it is a pathology, and the
    overlap claim below is what would then fail. *)
 let max_reads = 20_000
-
 let total_publications = writers * rounds
 
 let await ?(limit = spin_limit) predicate =
@@ -206,8 +203,8 @@ let () =
   in
   (* The gate. One writer stops HALFWAY THROUGH ITS PAYLOAD -- not between two publications -- and
      every reader takes a read before it continues. Pausing between publications was not enough
-     (Codex P2, round 5): on one core the readers could take every read while the writers waited,
-     so nothing was read during a mutation and a truncate-in-place implementation would have passed.
+     (Codex P2, round 5): on one core the readers could take every read while the writers waited, so
+     nothing was read during a mutation and a truncate-in-place implementation would have passed.
      Stopped here, the bytes of a partial payload exist on disk; an implementation that wrote them
      into the target would be caught by the exact-set claim below, on any number of cores. *)
   let publish_gated i writer round =
@@ -269,12 +266,11 @@ let () =
     (Array.to_list readers_met) ~f:Fn.id;
   (* The overlap claim, and the one that makes this leg independent of how many cores run it: the
      read below was taken while a writer sat inside its payload with half of it already on disk. *)
-  Verdict.p_all ~min:readers "every reader's gated read saw a whole payload while one was half-written"
-    per_reader
+  Verdict.p_all ~min:readers
+    "every reader's gated read saw a whole payload while one was half-written" per_reader
     ~f:(fun ((data, _), _) -> Option.value_map data ~default:false ~f:(Hash_set.mem published));
   Verdict.p_all ~min:readers "every reader kept reading until the writers were done" per_reader
-    ~f:(fun (_, obs) ->
-      List.exists obs ~f:(fun (_, at) -> at = total_publications));
+    ~f:(fun (_, obs) -> List.exists obs ~f:(fun (_, at) -> at = total_publications));
   Verdict.p_all ~min:(readers * reads_per_reader)
     "every read under concurrent publication observes a payload some writer published" seen
     ~f:(function
@@ -312,11 +308,11 @@ let () =
     ~f:(AF.is_staging_file_for ~path:long_target);
   (* A long name whose characters are multibyte: a byte-wise cut can land inside one, and the
      malformed name that results is refused by Windows and by APFS alike (Codex P2, round 4). The
-     3-byte character makes the budget's cut fall mid-character.
-     70 of them, not 90: a component limit is 255 BYTES on ext4 while macOS counts UTF-16 units, so
-     90 snowmen are a legal target name here and an illegal one on Linux, where this leg would have
-     failed before reaching an assertion (Codex P1, round 7). The claim below is what pins that -- a
-     fixture has to be a name every filesystem accepts, or it tests the filesystem instead. *)
+     3-byte character makes the budget's cut fall mid-character. 70 of them, not 90: a component
+     limit is 255 BYTES on ext4 while macOS counts UTF-16 units, so 90 snowmen are a legal target
+     name here and an illegal one on Linux, where this leg would have failed before reaching an
+     assertion (Codex P1, round 7). The claim below is what pins that -- a fixture has to be a name
+     every filesystem accepts, or it tests the filesystem instead. *)
   let utf8_name = String.concat (List.init 70 ~f:(fun _ -> "\xe2\x98\x83")) ^ ".bin" in
   let utf8_target = Stdlib.Filename.concat dir utf8_name in
   let utf8_staged = ref [] in
@@ -324,8 +320,7 @@ let () =
     ~before_commit:(fun () -> utf8_staged := staging_leftovers () @ !utf8_staged)
     ();
   Verdict.p_all "every fixture name is a valid component on a 255-byte filesystem"
-    [ long_name; utf8_name ]
-    ~f:(fun name -> String.length name <= 255);
+    [ long_name; utf8_name ] ~f:(fun name -> String.length name <= 255);
   (* Both fixtures must actually reach the truncating path, or they test the short-name branch under
      a long-looking name: a stem that fit would appear in the staging name verbatim. *)
   Verdict.p_all "the long fixtures exercise the truncating stem" (!staged @ !utf8_staged)
@@ -400,11 +395,12 @@ let () =
   Verdict.p "a failed streamed publish removes its own staging file"
     (List.is_empty (staging_leftovers ()))
 
-(* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the schedule
-   cache treats a refusal as a future miss rather than a failed tuning run -- needs one handler, not
-   a taxonomy of the operations the helper happens to use internally; the exclusive open raises
-   [Unix_error], and letting that escape would have walked straight past such a handler (Codex P2,
-   round 3). What [f] and [before_commit] raise is the caller's own and must NOT be converted. *)
+(* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the
+   schedule cache treats a refusal as a future miss rather than a failed tuning run -- needs one
+   handler, not a taxonomy of the operations the helper happens to use internally; the exclusive
+   open raises [Unix_error], and letting that escape would have walked straight past such a handler
+   (Codex P2, round 3). What [f] and [before_commit] raise is the caller's own and must NOT be
+   converted. *)
 let classify f =
   match f () with
   | () -> `Returned
@@ -428,8 +424,7 @@ let () =
   Verdict.p "an exception from the caller's own writer is not converted"
     (Poly.equal `Caller
        (classify (fun () ->
-            AF.with_channel ~path:target () ~f:(fun _oc ->
-                (failwith "gh780 caller failure" : unit)))));
+            AF.with_channel ~path:target () ~f:(fun _oc -> (failwith "gh780 caller failure" : unit)))));
   Verdict.p "an exception from the commit hook is not converted"
     (Poly.equal `Caller
        (classify (fun () ->
@@ -487,16 +482,14 @@ let () =
     ]
   in
   let planted_impostors = List.map impostors ~f:(fun name -> plant_staging ~name ~age:7200.) in
-  Verdict.p_all "every planted staging file is recognized as one"
-    [ stale; fresh ]
-    ~f:(fun path -> AF.is_staging_file (Stdlib.Filename.basename path));
+  Verdict.p_all "every planted staging file is recognized as one" [ stale; fresh ] ~f:(fun path ->
+      AF.is_staging_file (Stdlib.Filename.basename path));
   Verdict.p "the bystander is not recognized as a staging file"
     (not (AF.is_staging_file (Stdlib.Filename.basename bystander)));
   Verdict.p_none "no name that merely contains the infix is recognized as a staging file" impostors
     ~f:AF.is_staging_file;
   (* The narrow scope: whose staging file it is, not merely that it is one. *)
-  Verdict.p_all "the published file's own staging files are recognized as its"
-    [ stale; fresh ]
+  Verdict.p_all "the published file's own staging files are recognized as its" [ stale; fresh ]
     ~f:(fun path -> AF.is_staging_file_for ~path:target (Stdlib.Filename.basename path));
   let other_target = plant_staging ~name:(staged_name ~target:"other.bin" ~counter:9) ~age:7200. in
   Verdict.p "another target's staging file is not recognized as this one's"
@@ -539,7 +532,9 @@ let () =
   (* The once-per-process form sweeps this directory exactly once, however many writers call it: a
      staging file abandoned after that first sweep survives until the next process. *)
   AF.cleanup_stale_once ~max_age_seconds:age_seconds dir;
-  let after_once = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:2) ~age:7200. in
+  let after_once =
+    plant_staging ~name:(staged_name ~target:"published.bin" ~counter:2) ~age:7200.
+  in
   AF.cleanup_stale_once ~max_age_seconds:age_seconds dir;
   Verdict.p "the once-per-process sweep does not run a second time"
     (Stdlib.Sys.file_exists after_once);

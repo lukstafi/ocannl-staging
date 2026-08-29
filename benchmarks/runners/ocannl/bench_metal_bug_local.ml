@@ -12,26 +12,25 @@
    This program has two halves, and no OCANNL dependency at all:
 
    - the REPRODUCER MATRIX: the emitted kernel of [test/operations/scalar_rmw_accumulation.ml]'s
-     localized leg, verbatim, rendered from one template under the variations that isolate what the
-     miscompiling pass keys on, each checked against the host oracle. That is the report an upstream
-     bug filing needs, and it is what says which shapes a narrowed predicate would still have to
-     cover.
-   - the TAX: three localized-reduction kernel shapes (a streaming per-thread reduction, an
-     accumulator-bound dependency chain, one long single-thread reduction — the scalar-loss shape),
-     each rendered with and without the qualifier and timed on the GPU's own clock, interleaved,
-     best of N repeats whose arm order rotates. That is what says whether the wide predicate is
-     worth narrowing.
+   localized leg, verbatim, rendered from one template under the variations that isolate what the
+   miscompiling pass keys on, each checked against the host oracle. That is the report an upstream
+   bug filing needs, and it is what says which shapes a narrowed predicate would still have to
+   cover. - the TAX: three localized-reduction kernel shapes (a streaming per-thread reduction, an
+   accumulator-bound dependency chain, one long single-thread reduction — the scalar-loss shape),
+   each rendered with and without the qualifier and timed on the GPU's own clock, interleaved, best
+   of N repeats whose arm order rotates. That is what says whether the wide predicate is worth
+   narrowing.
 
    Run it as [dune exec benchmarks/runners/ocannl/bench_metal_bug_local.exe]; it links [metal] and
    [ctypes] only, so it keeps working across OCANNL refactorings and can be handed to Apple. *)
 
 module Me = Metal
 
-(* The pooled binding preamble, verbatim as the Metal backend emits it (arrayjit/lib/metal_backend.ml
-   — 16 slab pointers plus the dynamically-loaded [__pool_slots] offset table). It is kept
-   byte-faithful because the emitted kernel is what the reproduction is OF; the matrix below shows
-   it is not what the defect keys on — the [pools-literal] and [param-literal] rows drop every
-   dynamic load and miscompile identically. *)
+(* The pooled binding preamble, verbatim as the Metal backend emits it
+   (arrayjit/lib/metal_backend.ml — 16 slab pointers plus the dynamically-loaded [__pool_slots]
+   offset table). It is kept byte-faithful because the emitted kernel is what the reproduction is
+   OF; the matrix below shows it is not what the defect keys on — the [pools-literal] and
+   [param-literal] rows drop every dynamic load and miscompile identically. *)
 let pool_preamble =
   {|    device char* __pool0 [[buffer(0)]],
     device char* __pool1 [[buffer(1)]],
@@ -87,23 +86,21 @@ let slot_values = [| 3; 5; 7; 11 |]
    is what an upstream report needs and what decides whether a narrower or cheaper workaround than
    [volatile] exists:
 
-   - [qualifier]: the shipped workaround, on the accumulator's declaration.
-   - [restrict]: whether the pooled pointers carry [__restrict] (the Metal backend emits it).
-   - [pointers]: how a per-node pointer is formed. [`Slots] is what the backend emits — a slab base
-     chosen by a value LOADED from the slot table, offset by another. [`Slots_in_locals] performs
-     the same two loads into named locals first. [`Pools_literal] indexes the pool array with a
-     literal and offsets by a literal, so nothing is loaded. [`Param_literal] skips the pool array
-     as well, offsetting the kernel parameter directly.
-   - [prezero]: where the device store that precedes the nest lands — the accumulated cell (what
-     codegen emits, a [Zero_out]), a neighbouring cell, a cell of the READ node, or nowhere.
-   - [opening]: whether the accumulator opens by reading its cell (what the localizer emits) or from
-     a literal.
-   - [fence]: a device memory barrier between that store and the nest.
-   - [src_volatile]: the qualifier on the READ pointer rather than on the accumulator — a candidate
-     workaround that would leave the accumulator register-resident.
-   - [contribution]: what the loop body reads. [`Pooled_read] reads the pooled input node;
-     [`Slots_read] reads only the (device, dynamically indexed) slot table, so the accumulation
-     depends on device memory without dereferencing any slot-DERIVED pointer. *)
+   - [qualifier]: the shipped workaround, on the accumulator's declaration. - [restrict]: whether
+   the pooled pointers carry [__restrict] (the Metal backend emits it). - [pointers]: how a per-node
+   pointer is formed. [`Slots] is what the backend emits — a slab base chosen by a value LOADED from
+   the slot table, offset by another. [`Slots_in_locals] performs the same two loads into named
+   locals first. [`Pools_literal] indexes the pool array with a literal and offsets by a literal, so
+   nothing is loaded. [`Param_literal] skips the pool array as well, offsetting the kernel parameter
+   directly. - [prezero]: where the device store that precedes the nest lands — the accumulated cell
+   (what codegen emits, a [Zero_out]), a neighbouring cell, a cell of the READ node, or nowhere. -
+   [opening]: whether the accumulator opens by reading its cell (what the localizer emits) or from a
+   literal. - [fence]: a device memory barrier between that store and the nest. - [src_volatile]:
+   the qualifier on the READ pointer rather than on the accumulator — a candidate workaround that
+   would leave the accumulator register-resident. - [contribution]: what the loop body reads.
+   [`Pooled_read] reads the pooled input node; [`Slots_read] reads only the (device, dynamically
+   indexed) slot table, so the accumulation depends on device memory without dereferencing any
+   slot-DERIVED pointer. *)
 let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots)
     ?(src_volatile = false) ?(contribution = `Pooled_read) ?(opening = `Read_cell)
     ?(prezero = `Accumulated_cell) ?(fence = false) () =
@@ -111,8 +108,9 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
     let typ = qual ^ "float" in
     match pointers with
     | `Slots ->
-        Printf.sprintf "  device %s*%s %s = (device %s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);\n"
-          typ restrict name typ slot_base slot_off
+        Printf.sprintf
+          "  device %s*%s %s = (device %s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);\n" typ
+          restrict name typ slot_base slot_off
     | `Slots_in_locals ->
         Printf.sprintf
           "  const uint %s_pool = __pool_slots[%d];\n\
@@ -154,10 +152,10 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
     \  /* end */\n"
     decls
     ((match prezero with
-     | `Accumulated_cell -> "  total[0] = (float)(0.0);\n"
-     | `Other_cell -> "  total[1] = (float)(0.0);\n"
-     | `Read_node_cell -> Printf.sprintf "  produced[%d] = (float)(0.0);\n" (seq_len * width)
-     | `None -> "")
+       | `Accumulated_cell -> "  total[0] = (float)(0.0);\n"
+       | `Other_cell -> "  total[1] = (float)(0.0);\n"
+       | `Read_node_cell -> Printf.sprintf "  produced[%d] = (float)(0.0);\n" (seq_len * width)
+       | `None -> "")
     ^ if fence then "  threadgroup_barrier(mem_flags::mem_device);\n" else "")
     qualifier
     (match opening with `Read_cell -> "total[0]" | `Literal_zero -> "(float)(0.0)")
@@ -288,8 +286,7 @@ let timing_decls src =
   Printf.sprintf
     "  device %sfloat* __restrict src = (device %sfloat*)(__pools[__pool_slots[0]] + \
      __pool_slots[1]);\n\
-    \  device float* __restrict out = (device float*)(__pools[__pool_slots[2]] + \
-     __pool_slots[3]);\n"
+    \  device float* __restrict out = (device float*)(__pools[__pool_slots[2]] + __pool_slots[3]);\n"
     src src
 
 let stream_body ~acc ~src =
@@ -342,16 +339,12 @@ let scalar_body ~acc ~src =
 
 (* The three renderings compared: none, the shipped one, and the matrix's cheaper candidate. *)
 let arms =
-  [
-    ("plain", ("", ""));
-    ("volatile-acc", ("volatile ", ""));
-    ("volatile-src", ("", "volatile "));
-  ]
+  [ ("plain", ("", "")); ("volatile-acc", ("volatile ", "")); ("volatile-src", ("", "volatile ")) ]
 
 (* Every kernel is compiled as its own single-kernel library. One library holding the whole matrix
-   would leave every verdict open to the objection that a neighbouring kernel steered the
-   optimizer; separate libraries make each row a self-contained translation unit, which is also the
-   form an upstream report wants. *)
+   would leave every verdict open to the objection that a neighbouring kernel steered the optimizer;
+   separate libraries make each row a self-contained translation unit, which is also the form an
+   upstream report wants. *)
 let translation_unit ~name ~body =
   "#include <metal_stdlib>\nusing namespace metal;\n\n" ^ kernel ~name ~body
 
@@ -390,7 +383,8 @@ let () =
       let source = mangle (translation_unit ~name ~body) in
       let library = Me.Library.on_device device ~source options in
       let func = Me.Library.new_function_with_name library name in
-      Hashtbl.replace states name (fst (Me.ComputePipelineState.on_device_with_function device func)))
+      Hashtbl.replace states name
+        (fst (Me.ComputePipelineState.on_device_with_function device func)))
     all_units;
   let pso name = Hashtbl.find states (mangle name) in
   let ropts =
@@ -420,8 +414,7 @@ let () =
   in
   (* (pool index, byte offset) pairs, in the order the kernel's preamble consumes them, then the
      four scalars the [`Slots_read] contribution sums. *)
-  set_slots slots_repro
-    ([ 0; produced_off; 0; total_off ] @ Array.to_list slot_values);
+  set_slots slots_repro ([ 0; produced_off; 0; total_off ] @ Array.to_list slot_values);
   set_slots slots_bench [ 0; src_off; 0; out_off ];
   let dispatch ~name ~slots ~groups ~threads =
     let pso = pso name in
@@ -467,7 +460,7 @@ let () =
   List.iter
     (fun scale ->
       for i = 0 to (seq_len * width) - 1 do
-        at produced_off +@ i <-@ (scale *. produced i)
+        at produced_off +@ i <-@ scale *. produced i
       done;
       at total_off <-@ 0.0;
       ignore (dispatch ~name:"repro_emitted-plain" ~slots:slots_repro ~groups:1 ~threads:1 : float);
@@ -520,8 +513,8 @@ let () =
       (* Interleaving alone would leave each arm pinned to a position within the cycle, so a clock
          or thermal drift ACROSS a cycle would be read as a property of whichever qualifier sits
          last (Codex P2, round 1). Rotating the order each repeat gives every arm each position an
-         equal number of times over a multiple of three repeats, so position averages out of the
-         the reported floors instead of loading onto one treatment. *)
+         equal number of times over a multiple of three repeats, so position averages out of the the
+         reported floors instead of loading onto one treatment. *)
       for r = 1 to repeats do
         List.iter
           (fun (arm, _) ->

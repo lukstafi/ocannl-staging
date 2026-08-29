@@ -335,9 +335,8 @@ let check_lineage_runnable ctx routine =
      correct identity for read-only accumulators (e.g. gradients). NOTE (Codex P1): this does not
      distinguish a forgotten non-zero data input from a zero-valid accumulator — both are read-only
      buffers allocated with [~zero_init:true] — so a forgotten data input reads zeros rather than
-     failing.
-     Catching that precisely needs per-node "needs-nonzero-init" metadata OCANNL does not currently
-     carry; a stricter check produces false positives on read-only accumulator gradients
+     failing. Catching that precisely needs per-node "needs-nonzero-init" metadata OCANNL does not
+     currently carry; a stricter check produces false positives on read-only accumulator gradients
      (zero2hero_1of7, primitive_ops). *)
   let ctx_buffers = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.ctx_buffers) } in
   let in_backend tn = Map.mem ctx_buffers tn in

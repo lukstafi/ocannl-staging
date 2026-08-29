@@ -1,6 +1,6 @@
 (* Regression for the Metal shader-compiler miscompilation of constant-indexed scalar
-   read-modify-write accumulations (the [volatile_serial_accumulation] workaround in c_syntax.ml; the raw
-   compiler bug is reproduced standalone in benchmarks/runners/ocannl/bench_metal_bug.ml): a
+   read-modify-write accumulations (the [volatile_serial_accumulation] workaround in c_syntax.ml;
+   the raw compiler bug is reproduced standalone in benchmarks/runners/ocannl/bench_metal_bug.ml): a
    cross-entropy-style loss — per-sample log-sum-exp reduced into a scalar — must match the host
    oracle. Before the workaround, under the default GPU schedule the fissioned Metal kernel's [ce[0]
    = ce[0] + f(s)] loop kept only the last sample's contribution. *)

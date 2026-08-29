@@ -138,9 +138,9 @@ let () =
   let final_avg = ref Float.infinity in
   (* Two-sided, because an upper bound alone is one-sided: if `neg (log correct_prob)` lost its
      negation, or a backend emitted the wrong sign, the trajectory would still fall and still land
-     under the threshold, and only the digits this commit removed would have caught it (Codex
-     round 1, P2).
-     Checked on EVERY epoch, not just the logged ones -- the golden used to show a tenth of them. *)
+     under the threshold, and only the digits this commit removed would have caught it (Codex round
+     1, P2). Checked on EVERY epoch, not just the logged ones -- the golden used to show a tenth of
+     them. *)
   let all_valid = ref true in
   for epoch = 1 to epochs do
     Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
@@ -172,11 +172,12 @@ let () =
      0.3 left it no headroom on either kind of backend. The deterministic backends (cc, metal, cuda,
      hip) descend smoothly and land on exactly 0.29 -- three hundredths under the old bound, which
      their own epoch-650 value of 0.32 was still above, so they crossed 0.3 only in the last fifty
-     epochs. multidev_cc converges lower but jitters epoch to epoch: five daily sweeps landed 0.18 / 0.13 / 0.13 / 0.11 / 0.32, the last of them a
-     single-epoch excursion off a 0.14-0.19 tail (an equally large one at epoch 680 of an earlier
-     run went unnoticed only because it was not the epoch sampled). 0.5 clears the worst observed
-     sample by half again and still discriminates by a wide margin: an untrained or broken run sits
-     near chance, and even epoch 100 is at 0.95 (cc) / 0.81 (multidev_cc). *)
+     epochs. multidev_cc converges lower but jitters epoch to epoch: five daily sweeps landed 0.18 /
+     0.13 / 0.13 / 0.11 / 0.32, the last of them a single-epoch excursion off a 0.14-0.19 tail (an
+     equally large one at epoch 680 of an earlier run went unnoticed only because it was not the
+     epoch sampled). 0.5 clears the worst observed sample by half again and still discriminates by a
+     wide margin: an untrained or broken run sits near chance, and even epoch 100 is at 0.95 (cc) /
+     0.81 (multidev_cc). *)
   Verdict.p "Final avg loss below threshold" Float.(!final_avg < 0.5);
 
   printf "\nTraining complete!\n%!"

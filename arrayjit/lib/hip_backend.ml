@@ -484,7 +484,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   struct
     include C_syntax.Pure_C_config (struct
       let procs = Input.procs
-
       let full_printf_support = C_syntax.printf_support_unless_uniform ()
     end)
 
@@ -599,10 +598,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Hip_backend.vec_typ_of_prec: invalid combination"
 
-    (* --- Shared rocWMMA tile-MMA vocabulary, used by both [mma_syntax] and
-       [mma_fragment_syntax]. The combination table lived in both hooks verbatim before
-       gh-ocannl-789 added an arm to it; one copy is what keeps a new arm from reaching only
-       half the emission (the two hooks' guards are required to accept together). *)
+    (* --- Shared rocWMMA tile-MMA vocabulary, used by both [mma_syntax] and [mma_fragment_syntax].
+       The combination table lived in both hooks verbatim before gh-ocannl-789 added an arm to it;
+       one copy is what keeps a new arm from reaching only half the emission (the two hooks' guards
+       are required to accept together). *)
     let mma_tile = 16
 
     let mma_frag_typ kind typ layout =
@@ -613,13 +612,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* (a/b fragment element type, accumulator fragment element type, [d] STORAGE element type, ld
        multiple for a/b, ld multiple for d). rocWMMA element types [rocwmma::float16_t] /
        [rocwmma::bfloat16_t] / [float] need not be textually identical to the node's own C type
-       ([__half] / [__hip_bfloat16]), so the operand pointers are [reinterpret_cast] to them at
-       each call site. The accumulator and the destination storage types coincide on every arm but
-       the wide-f16 one; where they differ, [mma_d_boundary] carries the conversion. *)
+       ([__half] / [__hip_bfloat16]), so the operand pointers are [reinterpret_cast] to them at each
+       call site. The accumulator and the destination storage types coincide on every arm but the
+       wide-f16 one; where they differ, [mma_d_boundary] carries the conversion. *)
     let mma_combo ~a_prec ~b_prec ~d_prec ~d_layout ~a_layout ~b_layout =
-      (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware fragment
-         load here, so a swizzled operand layout declines to the caller's scalar fallback
-         (gh-ocannl-481 item 3, D2). *)
+      (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware fragment load
+         here, so a swizzled operand layout declines to the caller's scalar fallback (gh-ocannl-481
+         item 3, D2). *)
       let plain = function `Plain -> true | `Swizzled_b128 -> false in
       if not (plain d_layout && plain a_layout && plain b_layout) then None
       else
@@ -648,21 +647,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        gh-ocannl-789.
 
        Where they differ -- the wide-f16 arm, a [float] accumulator over an f16-storage destination
-       -- neither rocWMMA call is type-correct, so the conversion stages through a
-       DESTINATION-TYPED accumulator fragment that rocWMMA does load and store, and copies
-       element-for-element with [num_elements] / [x[]], the surface rocWMMA documents as
-       "compatibility with nvcuda::wmma". This is legitimate despite fragments being opaque,
-       because it never assumes WHICH matrix cell an element index names: it only assumes that two
-       accumulator fragments of the same 16x16x16 shape name the SAME cell at the same index,
-       whatever that cell is. That holds by rocWMMA's construction (the accumulator's IO layout is
-       derived from the fragment shape and the wave size, not from its element type) and is
-       verified on gfx1151: loading a 16x16 tile of distinct values through a [float] and a
-       [float16_t] accumulator fragment and dumping every lane's elements gives identical
-       per-(lane, index) values, 8 elements each. Deliberately not the warp-staged float tile in
-       LDS that was the fallback design (gh-ocannl-789): this adds no memory traffic at all.
+       -- neither rocWMMA call is type-correct, so the conversion stages through a DESTINATION-TYPED
+       accumulator fragment that rocWMMA does load and store, and copies element-for-element with
+       [num_elements] / [x[]], the surface rocWMMA documents as "compatibility with nvcuda::wmma".
+       This is legitimate despite fragments being opaque, because it never assumes WHICH matrix cell
+       an element index names: it only assumes that two accumulator fragments of the same 16x16x16
+       shape name the SAME cell at the same index, whatever that cell is. That holds by rocWMMA's
+       construction (the accumulator's IO layout is derived from the fragment shape and the wave
+       size, not from its element type) and is verified on gfx1151: loading a 16x16 tile of distinct
+       values through a [float] and a [float16_t] accumulator fragment and dumping every lane's
+       elements gives identical per-(lane, index) values, 8 elements each. Deliberately not the
+       warp-staged float tile in LDS that was the fallback design (gh-ocannl-789): this adds no
+       memory traffic at all.
 
-       [acc] and [ptr] are C expressions for one block ([__mma_acc[__mi][__ni]] and the block's
-       base pointer), so the caller keeps ownership of the block indexing. *)
+       [acc] and [ptr] are C expressions for one block ([__mma_acc[__mi][__ni]] and the block's base
+       pointer), so the caller keeps ownership of the block indexing. *)
     let mma_d_boundary ~dir ~acc_typ ~d_typ ~acc ~ptr ~ldd =
       let load frag =
         Printf.sprintf "rocwmma::load_matrix_sync(%s, %s, %d, rocwmma::mem_row_major);" frag ptr ldd
@@ -690,11 +689,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             "  for (int __ei = 0; __ei < (int)%s.num_elements; ++__ei) %s.x[__ei] = (%s)%s.x[__ei];"
             src dst cast src
         in
-        ("{" :: Printf.sprintf "  %s __mma_dstage;" stage :: guard
+        "{"
+        :: Printf.sprintf "  %s __mma_dstage;" stage
+        :: guard
         ::
         (match dir with
         | `Load -> [ "  " ^ load "__mma_dstage"; copy ~src:"__mma_dstage" ~dst:acc ~cast:acc_typ ]
-        | `Store -> [ copy ~src:acc ~dst:"__mma_dstage" ~cast:d_typ; "  " ^ store "__mma_dstage" ]))
+        | `Store -> [ copy ~src:acc ~dst:"__mma_dstage" ~cast:d_typ; "  " ^ store "__mma_dstage" ])
         @ [ "}" ]
 
     (* DRAFT (tensorize-mma T3, HIP counterpart of the CUDA wmma draft): cooperative tile-MMA
@@ -855,57 +856,60 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                       Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                     ]
-                    @ List.map ~f:(fun l -> "  " ^ l) (mma_d_boundary ~dir:`Load ~acc_typ ~d_typ
-                          ~acc:"__mma_acc[__mi][__ni]" ~ldd
-                          ~ptr:
-                            (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
+                    @ List.map
+                        ~f:(fun l -> "  " ^ l)
+                        (mma_d_boundary ~dir:`Load ~acc_typ ~d_typ ~acc:"__mma_acc[__mi][__ni]" ~ldd
+                           ~ptr:
+                             (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
                     @ [
-                      "  }";
-                      "}";
-                      Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                      Printf.sprintf "  %s __mma_bf[%d];"
-                        (frag "matrix_b" ab_typ (Some b_layout))
-                        nt;
-                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      (* Transposed storage ([tb]): the stored matrix is the role's transpose --
-                         index it at (col, row) and declare the fragment [col_major]; the leading
-                         dimension stays the operand's own. Same for [ta] below. *)
-                      (if tb then
-                         Printf.sprintf
-                           "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * \
-                            %d + __ki * %d, %d);"
-                           tile ldb tile ldb
-                       else
-                         Printf.sprintf
-                           "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * \
-                            %d + __ni * %d, %d);"
-                           tile ldb tile ldb);
-                      "  }";
-                      Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
-                      (if ta then
-                         Printf.sprintf
-                           "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
-                            __mi * %d, %d);"
-                           tile lda tile lda
-                       else
-                         Printf.sprintf
-                           "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
-                            __ki * %d, %d);"
-                           tile lda tile lda);
-                      Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      "      rocwmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
-                       __mma_acc[__mi][__ni]);";
-                      "    }";
-                      "  }";
-                      "}";
-                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                    ]
-                    @ List.map ~f:(fun l -> "  " ^ l) (mma_d_boundary ~dir:`Store ~acc_typ ~d_typ
-                          ~acc:"__mma_acc[__mi][__ni]" ~ldd
-                          ~ptr:
-                            (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
+                        "  }";
+                        "}";
+                        Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                        Printf.sprintf "  %s __mma_bf[%d];"
+                          (frag "matrix_b" ab_typ (Some b_layout))
+                          nt;
+                        Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                        (* Transposed storage ([tb]): the stored matrix is the role's transpose --
+                           index it at (col, row) and declare the fragment [col_major]; the leading
+                           dimension stays the operand's own. Same for [ta] below. *)
+                        (if tb then
+                           Printf.sprintf
+                             "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * \
+                              %d + __ki * %d, %d);"
+                             tile ldb tile ldb
+                         else
+                           Printf.sprintf
+                             "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * \
+                              %d + __ni * %d, %d);"
+                             tile ldb tile ldb);
+                        "  }";
+                        Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                        Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                        (if ta then
+                           Printf.sprintf
+                             "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
+                              __mi * %d, %d);"
+                             tile lda tile lda
+                         else
+                           Printf.sprintf
+                             "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
+                              __ki * %d, %d);"
+                             tile lda tile lda);
+                        Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                        "      rocwmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                         __mma_acc[__mi][__ni]);";
+                        "    }";
+                        "  }";
+                        "}";
+                        Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                        Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      ]
+                    @ List.map
+                        ~f:(fun l -> "  " ^ l)
+                        (mma_d_boundary ~dir:`Store ~acc_typ ~d_typ ~acc:"__mma_acc[__mi][__ni]"
+                           ~ldd
+                           ~ptr:
+                             (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
                     @ [ "  }"; "}"; barrier ]
                   in
                   let body ~a_ptr ~b_ptr =
@@ -972,9 +976,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                 ]
-                @ List.map ~f:(fun l -> "  " ^ l)
-                    (mma_d_boundary ~dir:`Load ~acc_typ ~d_typ
-                       ~acc:(fragment ^ "[__mi][__ni]") ~ldd
+                @ List.map
+                    ~f:(fun l -> "  " ^ l)
+                    (mma_d_boundary ~dir:`Load ~acc_typ ~d_typ ~acc:(fragment ^ "[__mi][__ni]") ~ldd
                        ~ptr:(Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
                 @ [ "  }"; "}"; "/* rocwmma fragment reduction body begins */" ]
               in
@@ -984,9 +988,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                 ]
-                @ List.map ~f:(fun l -> "  " ^ l)
-                    (mma_d_boundary ~dir:`Store ~acc_typ ~d_typ
-                       ~acc:(fragment ^ "[__mi][__ni]") ~ldd
+                @ List.map
+                    ~f:(fun l -> "  " ^ l)
+                    (mma_d_boundary ~dir:`Store ~acc_typ ~d_typ ~acc:(fragment ^ "[__mi][__ni]")
+                       ~ldd
                        ~ptr:(Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile))
                 @ [ "  }"; "}"; barrier ]
               in
@@ -1642,8 +1647,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let all_proc_docs = List.map (Array.to_list kparams_and_docs) ~f:snd in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
     let source =
-      Syntax.filter_and_prepend_builtins ~routine_names:(Array.to_list names)
-        ~includes:hip_includes ~builtins:Builtins_hip.builtins ~proc_doc:final_doc
+      Syntax.filter_and_prepend_builtins ~routine_names:(Array.to_list names) ~includes:hip_includes
+        ~builtins:Builtins_hip.builtins ~proc_doc:final_doc
     in
     let name : string =
       String.(strip ~drop:(equal_char '_') @@ common_prefix (Array.to_list names))
@@ -2043,8 +2048,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     (* gh-ocannl-789: rocWMMA's [(f16, f16, f32)] fragments now carry the
                        uniform-f16 arm under [Numerics.Fp16_wide] too — [mma_combo] pairs a [float]
                        accumulator with the f16 STORAGE destination and [mma_d_boundary] converts
-                       elementwise at each end — so the wide policy no longer costs this backend
-                       its f16 tensor-unit legs (gh-ocannl-680's stated remainder). *)
+                       elementwise at each end — so the wide policy no longer costs this backend its
+                       f16 tensor-unit legs (gh-ocannl-680's stated remainder). *)
                     mma_f16_wide_acc = true;
                     (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load here
                        (gh-ocannl-481 item 3, D3). *)

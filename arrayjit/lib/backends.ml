@@ -185,10 +185,10 @@ let maybe_sink_zeros (lowered : Low_level.optimized) : Low_level.optimized =
   else lowered
 
 (* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen -- a
-   hoisted [Stage] registers its packed-constant tile in the segment's filtered store (its
-   placement lands in the shared lineage fork, but the allocator enumerates the traced store) -- so
-   fold segment-added entries back into [into]. Pre-existing keys are shared mutable records
-   (filtered slices alias them), so only genuinely new keys need adding. *)
+   hoisted [Stage] registers its packed-constant tile in the segment's filtered store (its placement
+   lands in the shared lineage fork, but the allocator enumerates the traced store) -- so fold
+   segment-added entries back into [into]. Pre-existing keys are shared mutable records (filtered
+   slices alias them), so only genuinely new keys need adding. *)
 let fold_segment_stores ~(into : Low_level.traced_store) (segments : Low_level.optimized list) :
     unit =
   List.iter segments ~f:(fun seg ->
@@ -199,9 +199,9 @@ let fold_segment_stores ~(into : Low_level.traced_store) (segments : Low_level.o
    CANONICAL ([Tn.compare], i.e. uid) order -- the one order both the allocator and the scorer lay
    out (gh-ocannl-498): the planners are order-sensitive (the arena's greedy coloring breaks
    equal-size ties by input order, and bump packing's alignment padding and cap segmentation depend
-   on the running offset -- sizes 4 then 64 at alignment 32 occupy 96 bytes, reversed 68). Uid
-   order is deterministic and shared; pool ids are minted per segment before any placement, so
-   nothing else depends on enumeration order. [skip] excludes nodes the caller already holds (the
+   on the running offset -- sizes 4 then 64 at alignment 32 occupy 96 bytes, reversed 68). Uid order
+   is deterministic and shared; pool ids are minted per segment before any placement, so nothing
+   else depends on enumeration order. [skip] excludes nodes the caller already holds (the
    allocator's prior context); slice-alias views own no buffer and are excluded automatically
    ([is_in_context_force] returns false for them, gh-ocannl-293 293a) -- their materialized parent
    is laid out like any other node. *)
@@ -218,10 +218,11 @@ let partition_layout_groups ~(plc : Tn.Placements.t) ?(skip = fun (_ : Tn.t) -> 
   (canonical working, canonical constants)
 
 (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so that
-   every node's buffer -- not only each pool's base -- is SIMD-aligned (gh-ocannl-164); ≤31 bytes
-   of padding per node. *)
+   every node's buffer -- not only each pool's base -- is SIMD-aligned (gh-ocannl-164); ≤31 bytes of
+   padding per node. *)
 let layout_item (key : Tn.t) : int * int =
-  (size_in_bytes_of key, max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment)
+  ( size_in_bytes_of key,
+    max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment )
 
 let layout_items group = List.map group ~f:(fun (key, _) -> layout_item key)
 
@@ -249,13 +250,13 @@ type footprint = {
 
    Scored over the routine's whole in-context node set, not a context's allocation delta, so the
    number depends only on the code and the placements -- the precondition for a deterministic budget
-   selector ([Memory_budget.fit]) whose choices do not drift with how much of the graph a
-   particular context has already allocated. It is therefore a MODEL of the peak, not a prediction
-   of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
-   pool bases are page-rounded by the driver.
+   selector ([Memory_budget.fit]) whose choices do not drift with how much of the graph a particular
+   context has already allocated. It is therefore a MODEL of the peak, not a prediction of
+   [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and pool
+   bases are page-rounded by the driver.
 
-   Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout
-   head above), so scorer/allocator agreement is structural rather than by comment. *)
+   Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout head
+   above), so scorer/allocator agreement is structural rather than by comment. *)
 let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
     ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) : footprint =
   let lowered = maybe_sink_zeros lowered in
@@ -364,9 +365,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   (* Shared allocator seam: mints a deterministic per-device [pool_id] (advancing
      [device.next_pool_id] in the caller's tnode-iteration order), allocates the slab through the
      backend's int-in/int-out API, and returns the [buffer_loc]. Phase-1 policy is one pool per
-     tnode at offset 0 -- byte-for-byte equivalent to the old per-tnode allocation. [zero_init]
-     asks for the slab to be zero-filled after it is minted (see the [memset_zero] below); a node
-     the code first-touches ([zero_initialized_by_code]) does not need it. *)
+     tnode at offset 0 -- byte-for-byte equivalent to the old per-tnode allocation. [zero_init] asks
+     for the slab to be zero-filled after it is minted (see the [memset_zero] below); a node the
+     code first-touches ([zero_initialized_by_code]) does not need it. *)
   let allocate (device : _ Backend_intf.device) (tn : Tn.t) ~zero_init : Backend_intf.buffer_loc =
     let pool_id = device.next_pool_id in
     device.next_pool_id <- pool_id + 1;
@@ -647,14 +648,14 @@ let free_and_forget_pool device ~free_pool pool_id =
    (gh-ocannl-767, unifying gh-ocannl-550's cleanup sites): frees the pools reachable through
    [ctx_buffers] that this context/delta owns. Deduped by [pool_id] -- one pool holds several nodes
    (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the same id is reached through several
-   keys, and a second visit would free an already-freed slab. Skips keys for which
-   [owned_elsewhere] holds (the enclosing scope's buffers), and per-device constants -- compared by
-   LOCATION, not key presence: a host upload may give a tnode a context-owned working location even
-   when an earlier compile cached a CONSTANT location for the same key, and mistaking the working
-   pool for that constant leaks it (gh-ocannl-571's transfer negative control). [skip_pool] lets
-   [finalize] honor its retry ledger; [before_free]/[after_free] bracket each successful backend
-   free (fault injection, ledger recording -- [after_free] runs only when [free_pool] returned, so
-   a raising free is not recorded as done). *)
+   keys, and a second visit would free an already-freed slab. Skips keys for which [owned_elsewhere]
+   holds (the enclosing scope's buffers), and per-device constants -- compared by LOCATION, not key
+   presence: a host upload may give a tnode a context-owned working location even when an earlier
+   compile cached a CONSTANT location for the same key, and mistaking the working pool for that
+   constant leaks it (gh-ocannl-571's transfer negative control). [skip_pool] lets [finalize] honor
+   its retry ledger; [before_free]/[after_free] bracket each successful backend free (fault
+   injection, ledger recording -- [after_free] runs only when [free_pool] returned, so a raising
+   free is not recorded as done). *)
 let free_owned_pools ~device ~free_pool ~owned_elsewhere ?(skip_pool = fun _ -> false)
     ?(before_free = fun _ -> ()) ?(after_free = fun _ -> ()) (ctx_buffers : ctx_buffers) : unit =
   Map.fold ctx_buffers

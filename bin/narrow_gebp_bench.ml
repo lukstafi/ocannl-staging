@@ -34,8 +34,8 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
-(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
-   the process exits, which on a slow leg reads as a hang. *)
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until the
+   process exits, which on a slow leg reads as a hang. *)
 let p fmt = Bench_out.p fmt
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =

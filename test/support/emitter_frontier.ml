@@ -51,10 +51,12 @@
 
 open Base
 
-type destination = At_label of string | At_position of int
-(** Where a call to a buffer-writing emitter leaves its text: an argument named by its label, or the
-    n-th of the arguments that carry none. Positions count only the unlabelled arguments, which is
-    what makes them survive an optional argument the call site omits. *)
+type destination =
+  | At_label of string
+  | At_position of int
+      (** Where a call to a buffer-writing emitter leaves its text: an argument named by its label,
+          or the n-th of the arguments that carry none. Positions count only the unlabelled
+          arguments, which is what makes them survive an optional argument the call site omits. *)
 
 type emitter = {
   name : string;  (** The value's name, which is what a call site spells behind its qualifier. *)
@@ -68,8 +70,7 @@ let render_destination = function
   | At_label label -> "~" ^ label
   | At_position position -> Printf.sprintf "argument %d" position
 
-let compare_destination a b =
-  String.compare (render_destination a) (render_destination b)
+let compare_destination a b = String.compare (render_destination a) (render_destination b)
 
 type interface = {
   library : string;  (** The wrapper module's name, [Ir] for [arrayjit.ir]. *)
@@ -97,16 +98,16 @@ type aliases = { documents : Set.M(String).t; buffers : Set.M(String).t }
     [type rendered = PPrint.document] and [val emit : ir -> rendered]. Held as the QUALIFIED keys
     {!transparent_aliases} builds, never as bare names: [t] is declared in every module of every
     library, so a bare-name table makes one module's transparent [t] speak for all of them. That is
-    not a small over-inclusion -- it made emitters of 400 values returning some [t] or other, and
-    of `Tree_map.add`. *)
+    not a small over-inclusion -- it made emitters of 400 values returning some [t] or other, and of
+    `Tree_map.add`. *)
 
 let no_aliases = { documents = Set.empty (module String); buffers = Set.empty (module String) }
 
 (** The keys a type path could name, innermost scope first.
 
     [scope] is where the type is USED, as a path prefix ["Ir__Low_level.Canonical_render."]. A path
-    with a dot in it already says which module it came from and is looked up as it stands; a bare one
-    is a type in scope, so every enclosing module is a candidate -- [policy] inside
+    with a dot in it already says which module it came from and is looked up as it stands; a bare
+    one is a type in scope, so every enclosing module is a candidate -- [policy] inside
     [Canonical_render] and [t] inside [Low_level] are both spelled bare where they are used.
 
     What this cannot resolve is a path through a local module alias: [C_syntax] binds
@@ -127,23 +128,23 @@ let alias_keys ~scope path_name =
     | components -> List.rev (enclosing components [])
   in
   (* The enclosing scopes first, innermost outwards, then the path as it stands. A dotted path can
-     be either: [Ir__Low_level.rendered] starts at a module this scan reads, while [Outer.NESTED]
-     is relative to the interface it appears in, and only trying both places them both. *)
+     be either: [Ir__Low_level.rendered] starts at a module this scan reads, while [Outer.NESTED] is
+     relative to the interface it appears in, and only trying both places them both. *)
   scoped @ [ path_name ]
 
 (** The type every renderer in this tree produces. Matched on the path's shape rather than on one
     spelling of it: the same type prints as [PPrint.document] and as [PPrint.ToBuffer.document]
-    depending on which alias the interface reached for -- or under a name of the library's own, if it
-    declared one transparently. *)
+    depending on which alias the interface reached for -- or under a name of the library's own, if
+    it declared one transparently. *)
 let is_document ~aliases ~scope path =
   (match List.rev (path_components path) with
-  | "document" :: _ -> List.exists (path_components path) ~f:(String.equal "PPrint")
-  | _ -> false)
+    | "document" :: _ -> List.exists (path_components path) ~f:(String.equal "PPrint")
+    | _ -> false)
   || List.exists (alias_keys ~scope (Path.name path)) ~f:(Set.mem aliases.documents)
 
 (** A buffer the caller supplies for the text to land in. [Buffer.t] arrives under whichever module
-    the defining file had open -- [Stdlib.Buffer.t], [Base.Buffer.t], bare [Buffer.t] -- so the
-    last two components are what identifies it, and a transparent alias of it counts as well. *)
+    the defining file had open -- [Stdlib.Buffer.t], [Base.Buffer.t], bare [Buffer.t] -- so the last
+    two components are what identifies it, and a transparent alias of it counts as well. *)
 let is_buffer ~aliases ~scope path =
   (match List.rev (path_components path) with "t" :: "Buffer" :: _ -> true | _ -> false)
   || List.exists (alias_keys ~scope (Path.name path)) ~f:(Set.mem aliases.buffers)
@@ -207,11 +208,11 @@ let rec produces_document ~aliases ~scope ty =
 
     A library may export [type rendered = PPrint.document] and then [val emit : ir -> rendered], and
     the interface records the declared path, not what it abbreviates -- so a rule reading the path
-    alone would find no document, and the renderer would be silently absent from both lists
-    (Codex round 1 on lukstafi/ocannl-staging#487). Resolving abbreviations properly wants a typing
-    environment; what is needed here is narrower and needs none, since the declarations arrive in the
-    same interfaces the values do: take every manifest that is a document (or a buffer), then repeat
-    until nothing new is found, so a chain of abbreviations resolves like a single one.
+    alone would find no document, and the renderer would be silently absent from both lists (Codex
+    round 1 on lukstafi/ocannl-staging#487). Resolving abbreviations properly wants a typing
+    environment; what is needed here is narrower and needs none, since the declarations arrive in
+    the same interfaces the values do: take every manifest that is a document (or a buffer), then
+    repeat until nothing new is found, so a chain of abbreviations resolves like a single one.
 
     Keyed by the declared NAME rather than by its full path, which is the one place this errs: two
     libraries could declare that name for different types, and the second would be read as an alias
@@ -230,14 +231,13 @@ let transparent_aliases manifests =
             { acc with buffers = Set.add acc.buffers key }
           else acc)
     in
-    if Set.equal next.documents aliases.documents && Set.equal next.buffers aliases.buffers then next
+    if Set.equal next.documents aliases.documents && Set.equal next.buffers aliases.buffers then
+      next
     else settle next
   in
   settle no_aliases
 
-let label_name = function
-  | Asttypes.Nolabel -> ""
-  | Asttypes.Labelled l | Asttypes.Optional l -> l
+let label_name = function Asttypes.Nolabel -> "" | Asttypes.Labelled l | Asttypes.Optional l -> l
 
 (** Where a type comes from when it comes from outside the code being rendered: the compiler's
     predefined types and the general-purpose libraries every module here has open. Written down
@@ -246,7 +246,8 @@ let label_name = function
     its function look like a renderer, which costs an inventory line, where naming the libraries'
     OWN modules instead would silently miss any type reached through a local alias ([Tn.t] for
     [Tnode.t], as [C_syntax] spells it throughout). *)
-let foreign_roots = [ "Stdlib"; "Base"; "Caml"; "PPrint"; "Sexplib"; "Sexplib0"; "Ppx_sexp_conv_lib" ]
+let foreign_roots =
+  [ "Stdlib"; "Base"; "Caml"; "PPrint"; "Sexplib"; "Sexplib0"; "Ppx_sexp_conv_lib" ]
 
 (** Whether the type is one of the values being RENDERED rather than a general-purpose one: an IR
     node, a precision, an operator. Anything not predefined and not from {!foreign_roots}, including
@@ -347,7 +348,8 @@ let rec walk_signature ~prefix ~scope ~into items =
       | Types.Sig_module (id, _, md, _, _) ->
           walk_module_type
             ~prefix:(prefix ^ Ident.name id ^ ".")
-            ~scope:(scope ^ Ident.name id ^ ".") ~into md.Types.md_type
+            ~scope:(scope ^ Ident.name id ^ ".")
+            ~into md.Types.md_type
       | Types.Sig_modtype (id, md, _) ->
           into.modtypes <-
             (scope ^ Ident.name id, Option.value md.Types.mtd_type ~default:(Types.Mty_signature []))
@@ -356,7 +358,8 @@ let rec walk_signature ~prefix ~scope ~into items =
             ~f:
               (walk_module_type
                  ~prefix:(prefix ^ Ident.name id ^ ".")
-                 ~scope:(scope ^ Ident.name id ^ ".") ~into)
+                 ~scope:(scope ^ Ident.name id ^ ".")
+                 ~into)
       | Types.Sig_typext _ | Types.Sig_class _ | Types.Sig_class_type _ -> ())
 
 and walk_module_type ~prefix ~scope ~into = function
@@ -366,8 +369,8 @@ and walk_module_type ~prefix ~scope ~into = function
   | Types.Mty_functor (_, body) -> walk_module_type ~prefix ~scope ~into body
   (* [module M : S] exports S's values under M's OWN name, which is the name a call site spells and
      an [open] brings into scope -- so the module type is walked again under this module's prefix
-     rather than only where it was declared (Codex round 3 on lukstafi/ocannl-staging#487). It may be
-     declared in an interface not yet read, so the resolution waits until they all are. *)
+     rather than only where it was declared (Codex round 3 on lukstafi/ocannl-staging#487). It may
+     be declared in an interface not yet read, so the resolution waits until they all are. *)
   | Types.Mty_ident path -> into.pending <- (prefix, scope, Path.name path) :: into.pending
   (* An alias points at a module of the library, walked in its own right; its values are on the
      frontier under the name they are declared with. Open for the same reason the type match above
@@ -386,9 +389,9 @@ let top_level_aliases items =
 
 (** The member module an alias target names, or [None] for an alias that leaves the library.
 
-    Dune prefixes a wrapped library's modules with the library's own name --
-    [Ir__C_syntax], [Utils__Datatypes] -- and an alias may reach past the module to something inside
-    it ([module Tree_map = Utils__Datatypes.Tree_map], [module Cpu_topology = Utils__.Cpu_topology],
+    Dune prefixes a wrapped library's modules with the library's own name -- [Ir__C_syntax],
+    [Utils__Datatypes] -- and an alias may reach past the module to something inside it
+    ([module Tree_map = Utils__Datatypes.Tree_map], [module Cpu_topology = Utils__.Cpu_topology],
     where [Utils__] is dune's own alias module). What identifies the member is the head of the path
     under the library's prefix, so both spellings answer the same module, and an alias to another
     library answers nothing. *)
@@ -449,7 +452,7 @@ let derive paths =
     |> Map.of_alist_reduce (module String) ~f:(fun first _ -> first)
     |> Map.to_alist
     |> List.sort_and_group ~compare:(fun (a, _) (b, _) ->
-           String.compare (library_of_module a) (library_of_module b))
+        String.compare (library_of_module a) (library_of_module b))
   in
   let interfaces =
     List.map wrappers ~f:(fun group ->
@@ -457,8 +460,8 @@ let derive paths =
         let declared =
           List.concat_map group ~f:(fun (wrapper_module, wrapper) ->
               let items = read_signature wrapper in
-              walk_signature ~prefix:(prefix_of wrapper_module) ~scope:(wrapper_module ^ ".")
-                ~into items;
+              walk_signature ~prefix:(prefix_of wrapper_module) ~scope:(wrapper_module ^ ".") ~into
+                items;
               List.filter_map (top_level_aliases items) ~f:(member_of ~library))
           |> List.dedup_and_sort ~compare:String.compare
         in
@@ -483,9 +486,9 @@ let derive paths =
         { library; declared; read = List.map read ~f:fst; missing })
   in
   (* Every interface has been read before anything is resolved or classified: a module type, like an
-     abbreviation, may be declared in one interface and used in another. Each round of resolution can
-     expose modules declared as a further module type, so it repeats until it stops finding any --
-     and never resolves the same module type under the same prefix twice, which is what makes a
+     abbreviation, may be declared in one interface and used in another. Each round of resolution
+     can expose modules declared as a further module type, so it repeats until it stops finding any
+     -- and never resolves the same module type under the same prefix twice, which is what makes a
      signature that mentions itself terminate. *)
   let resolved = Hash_set.create (module String) in
   let rec resolve_pending () =
@@ -503,9 +506,9 @@ let derive paths =
             with
             (* Kept rather than dropped: a module type can be exposed by resolving ANOTHER pending
                module ([module Outer : OUTER] declaring [NESTED], and [module M : Outer.NESTED]
-               reached first), so an entry that finds nothing this round may find it the next
-               (Codex round 4 on lukstafi/ocannl-staging#487). Requeued only when some other entry
-               made progress, since a round that resolved nothing will not resolve it either. *)
+               reached first), so an entry that finds nothing this round may find it the next (Codex
+               round 4 on lukstafi/ocannl-staging#487). Requeued only when some other entry made
+               progress, since a round that resolved nothing will not resolve it either. *)
             | None -> (entry :: unresolved, progressed)
             | Some module_type ->
                 Hash_set.add resolved key;
@@ -518,7 +521,9 @@ let derive paths =
   in
   resolve_pending ();
   let aliases = transparent_aliases into.manifests in
-  let buckets = { renders = Hashtbl.create (module String); combines = Hashtbl.create (module String) } in
+  let buckets =
+    { renders = Hashtbl.create (module String); combines = Hashtbl.create (module String) }
+  in
   List.iter (List.rev into.values) ~f:(fun (origin, scope, name, val_type) ->
       match classify_value ~aliases ~scope ~origin ~name val_type with
       | None -> ()
@@ -541,11 +546,11 @@ let derive paths =
   let collect table =
     Hashtbl.data table
     |> List.map ~f:(fun e ->
-           {
-             e with
-             origins = List.dedup_and_sort e.origins ~compare:String.compare;
-             destinations = List.dedup_and_sort e.destinations ~compare:compare_destination;
-           })
+        {
+          e with
+          origins = List.dedup_and_sort e.origins ~compare:String.compare;
+          destinations = List.dedup_and_sort e.destinations ~compare:compare_destination;
+        })
     |> List.sort ~compare:(fun a b -> String.compare a.name b.name)
   in
   let emitters = collect buckets.renders in

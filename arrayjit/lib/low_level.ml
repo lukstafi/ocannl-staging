@@ -5345,7 +5345,9 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    are what a consumer re-wraps. Factored out so that the census's notion of a reduction site
    (gh-ocannl-733) is the peel's own, and cannot drift from it. *)
 let scope_accum_updates ~tn ~idcs ~id sbody =
-  match List.filter (flat_lines [ sbody ]) ~f:(function Noop | Comment _ -> false | _ -> true) with
+  match
+    List.filter (flat_lines [ sbody ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+  with
   | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
     when Scope_id.equal id id' && Tn.equal tn tn'
          && Array.length idcs = Array.length idcs'
@@ -5373,8 +5375,8 @@ let has_accumulating_cell (llc : t) : bool =
         && Array.length idcs = Array.length idcs'
         && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
     (* A scope NESTED inside a larger value — [a[i] = f(scope { … a[i] … })] — is a recurrence like
-       any other read; the scope that IS the written value is the case above, judged by its shape.
-    *)
+       any other read; the scope that IS the written value is the case above, judged by its
+       shape. *)
     | Local_scope { body; _ } -> stmt_reads_cell ~tn ~idcs body
     | Get_dynamic { dyn_value; _ } -> arg dyn_value
     | Ternop (_, a, b, c) -> arg a || arg b || arg c
@@ -5415,11 +5417,7 @@ type peel_refusal =
   | Refused_cell_shared
 [@@deriving sexp, equal, compare]
 
-type peel_report = {
-  levels : int;
-  guards : peel_guard_verdict list;
-  refusal : peel_refusal option;
-}
+type peel_report = { levels : int; guards : peel_guard_verdict list; refusal : peel_refusal option }
 [@@deriving sexp_of]
 
 let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free_of body :
@@ -5522,7 +5520,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free
     let reached result = (Some result, { levels; guards = List.rev guards; refusal = None }) in
     match strip (flat_lines [ body ]) with
     | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
-      when (match axis with Serial | Unrolled | Vectorized -> true | _ -> extra_level index axis) ->
+      when match axis with Serial | Unrolled | Vectorized -> true | _ -> extra_level index axis ->
         (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
            [Set_local] update form and folds its chains into the scope local, so the whole nest
            keeps one accumulator residency even when an inner reduction axis is vectorized (autotune
@@ -5549,19 +5547,16 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?report ~loop_bounds ~free
         | Affine.Confined_to_peel ->
             peel ~free_of ~pending ~levels ~guards:(Guard_confined :: guards) ~rebuild gbody
         | Affine.Lane_private_if_separated enclosing ->
-            peel ~free_of
-              ~pending:(enclosing @ pending)
-              ~levels
-              ~guards:(Guard_lane_private :: guards)
-              ~rebuild gbody)
+            peel ~free_of ~pending:(enclosing @ pending) ~levels
+              ~guards:(Guard_lane_private :: guards) ~rebuild gbody)
     | [ Set { tn; idcs; llsc; debug } ] -> (
         (* The base's SHAPE is settled first, and only then the cell (Codex P2, round 2). The cell
            refusals describe an accumulation base — a cell that varies across the peeled levels, a
            cell the lanes an admitted guard selects among share — and a statement that is not an
-           accumulation at all has neither property: reporting [Refused_cell_varies] for an
-           ordinary [out[k] = x[k]] would hand a [~report] consumer a reason its own contract
-           denies. Which of the three it was is precisely what a form claim cannot see
-           (gh-ocannl-733), so the three stay distinct once the shape admits them. *)
+           accumulation at all has neither property: reporting [Refused_cell_varies] for an ordinary
+           [out[k] = x[k]] would hand a [~report] consumer a reason its own contract denies. Which
+           of the three it was is precisely what a form claim cannot see (gh-ocannl-733), so the
+           three stay distinct once the shape admits them. *)
         let base =
           match llsc with
           | Local_scope { id; body = sbody; orig_indices = _; mint = _ } ->

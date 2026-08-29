@@ -6,17 +6,17 @@
    the reduction peel it cannot answer which decision produced it, because two different decisions
    produce the SAME form:
 
-   - A nest whose accumulated cell is free of the enclosing index ([tot[0] += x[r,k]] under
-   [If (k < s)]) is peeled at the OUTER level: both levels join the peel, and the guard is
-   [Confined_to_peel] — every symbol it mentions is peeled or bound outside every loop. - A nest
-   whose cell mentions the enclosing index ([out[r] += x[r,k]] under [If (r + k < s)]) cannot be
-   peeled there ([out[r]] varies with [r]), so the reduction level peels alone and the guard is
-   admitted as [Lane_private_if_separated]: it mentions the enclosing [r], and the hoist is legal
-   only because [out[r]] gives each lane its own cell (gh-ocannl-721).
+   - A nest whose accumulated cell is free of the enclosing index ([tot[0] += x[r,k]] under [If (k <
+   s)]) is peeled at the OUTER level: both levels join the peel, and the guard is [Confined_to_peel]
+   — every symbol it mentions is peeled or bound outside every loop. - A nest whose cell mentions
+   the enclosing index ([out[r] += x[r,k]] under [If (r + k < s)]) cannot be peeled there ([out[r]]
+   varies with [r]), so the reduction level peels alone and the guard is admitted as
+   [Lane_private_if_separated]: it mentions the enclosing [r], and the hoist is legal only because
+   [out[r]] gives each lane its own cell (gh-ocannl-721).
 
    Both emit one localized scope with one closing store. A form claim passes over either, which is
-   how a test can be green over a kernel the code path it is named for never touched. This file
-   pins the instrument that tells them apart: [Low_level.peel_accum_nest] reporting its verdicts,
+   how a test can be green over a kernel the code path it is named for never touched. This file pins
+   the instrument that tells them apart: [Low_level.peel_accum_nest] reporting its verdicts,
    [C_syntax] accumulating them per routine, and [Context.routine.peel] carrying the summary.
 
    Hand-built {!Ir.Low_level} (via [ll_test]) so the nest shape is the test's rather than shape
@@ -107,8 +107,7 @@ let make shape : prog =
       {
         tn;
         idcs;
-        llsc =
-          LL.Binop (Ops.Add, (LL.Get (tn, idcs), prec), (LL.Get (x, [| ri; ki |]), prec));
+        llsc = LL.Binop (Ops.Add, (LL.Get (tn, idcs), prec), (LL.Get (x, [| ri; ki |]), prec));
         debug = "";
       }
   in
@@ -151,9 +150,7 @@ let make shape : prog =
       }
   | Confined_guard ->
       let s, bindings = extent_symbol () in
-      let total =
-        Array.fold (row_sums ~terms:(fun _ -> guard_terms)) ~init:0. ~f:( +. )
-      in
+      let total = Array.fold (row_sums ~terms:(fun _ -> guard_terms)) ~init:0. ~f:( +. ) in
       {
         llc = nest (guard (lt ki s) shared);
         materialized = [ tot; x ];
@@ -166,8 +163,7 @@ let make shape : prog =
   | Lane_private_guard ->
       let s, bindings = extent_symbol () in
       {
-        llc =
-          nest (guard (lt (Idx.Affine { symbols = [ (1, r); (1, k) ]; offset = 0 }) s) per_row);
+        llc = nest (guard (lt (Idx.Affine { symbols = [ (1, r); (1, k) ]; offset = 0 }) s) per_row);
         materialized = [ out; x ];
         seed = seed_x;
         out;
@@ -197,8 +193,7 @@ let make shape : prog =
       {
         llc = nest (LL.If { cond = (cond, prec); body = per_row });
         materialized = [ out; x; mask ];
-        seed =
-          (mask, Array.init cols ~f:(fun k -> if k < guard_terms then 0.0 else 1.0)) :: seed_x;
+        seed = (mask, Array.init cols ~f:(fun k -> if k < guard_terms then 0.0 else 1.0)) :: seed_x;
         out;
         want = row_sums ~terms:(fun _ -> guard_terms);
         bindings = Idx.Empty;
@@ -283,7 +278,7 @@ let () =
         (Printf.sprintf "%s: the nest computes its reference sum" (shape_name shape))
         (Array.length run.values = Array.length run.want
         && Array.for_all2_exn run.values run.want ~f:(fun got want ->
-               Float.(abs (got - want) < 1e-4)));
+            Float.(abs (got - want) < 1e-4)));
       p
         (Printf.sprintf "%s: the routine's census equals the one a bracket around it collects"
            (shape_name shape))
@@ -309,20 +304,16 @@ let () =
 let () =
   let plain = run_of Plain in
   Verdict.p_all "every localized site of the plain nest peels the reduction level alone, unguarded"
-    (localized_verdicts plain.summary)
-    ~f:(fun v -> v.Cs.levels = 1 && List.is_empty v.Cs.guards);
+    (localized_verdicts plain.summary) ~f:(fun v -> v.Cs.levels = 1 && List.is_empty v.Cs.guards);
   let confined = run_of Confined_guard in
   Verdict.p_all
     "every localized site of the shared-cell nest peels BOTH levels through a confined guard"
-    (localized_verdicts confined.summary)
-    ~f:(fun v ->
+    (localized_verdicts confined.summary) ~f:(fun v ->
       v.Cs.levels = 2 && List.equal LL.equal_peel_guard_verdict v.Cs.guards [ LL.Guard_confined ]);
   let lane_private = run_of Lane_private_guard in
   Verdict.p_all
     "every localized site of the per-row nest peels the reduction level alone through a \
-     lane-private guard"
-    (localized_verdicts lane_private.summary)
-    ~f:(fun v ->
+     lane-private guard" (localized_verdicts lane_private.summary) ~f:(fun v ->
       v.Cs.levels = 1
       && List.equal LL.equal_peel_guard_verdict v.Cs.guards [ LL.Guard_lane_private ]);
   (* The point of the instrument, stated as a claim: the two guarded nests localize alike — so no
@@ -341,17 +332,16 @@ let () =
    shapes — or refused it on another ground — fails rather than passing on "it did not localize". *)
 let () =
   let enclosing = run_of Enclosing_guard in
-  p "the nest-fixed guard localizes nowhere"
-    (List.is_empty (localized_verdicts enclosing.summary));
+  p "the nest-fixed guard localizes nowhere" (List.is_empty (localized_verdicts enclosing.summary));
   Verdict.p_exists "the nest-fixed guard is refused as a guard whose truth is fixed for the nest"
-    (refusals enclosing.summary)
-    ~f:(function LL.Refused_guard_fixed _ -> true | _ -> false);
+    (refusals enclosing.summary) ~f:(function
+    | LL.Refused_guard_fixed _ -> true
+    | _ -> false);
   (* And the enclosing level of that same nest refuses for the OTHER reason: it is the accumulated
      cell that varies there, not the guard. Two refusal kinds from one kernel is what says the
      report distinguishes them rather than labelling every decline alike. *)
   Verdict.p_exists "its enclosing level is refused because the accumulated cell varies"
-    (refusals enclosing.summary)
-    ~f:(fun why -> LL.equal_peel_refusal why LL.Refused_cell_varies);
+    (refusals enclosing.summary) ~f:(fun why -> LL.equal_peel_refusal why LL.Refused_cell_varies);
   let data = run_of Data_guard in
   p "the data-dependent guard localizes nowhere" (List.is_empty (localized_verdicts data.summary));
   Verdict.p_all "every peel site of the data-guarded nest refused" data.summary.Cs.sites
@@ -367,17 +357,20 @@ let () =
    nests that differ ONLY in the accumulated cell: per-lane, so separation holds; shared, so it does
    not. *)
 let () =
-  let src = Tn.create (Tn.Specified prec) ~id:733_900_001 ~label:[ "pcsrc" ]
+  let src =
+    Tn.create (Tn.Specified prec) ~id:733_900_001 ~label:[ "pcsrc" ]
       ~unpadded_dims:(lazy [| 4 |])
       ~padding:(lazy None)
       ()
   in
-  let lanes = Tn.create (Tn.Specified prec) ~id:733_900_002 ~label:[ "pclanes" ]
+  let lanes =
+    Tn.create (Tn.Specified prec) ~id:733_900_002 ~label:[ "pclanes" ]
       ~unpadded_dims:(lazy [| 4 |])
       ~padding:(lazy None)
       ()
   in
-  let shared = Tn.create (Tn.Specified prec) ~id:733_900_003 ~label:[ "pcshared" ]
+  let shared =
+    Tn.create (Tn.Specified prec) ~id:733_900_003 ~label:[ "pcshared" ]
       ~unpadded_dims:(lazy [| 1 |])
       ~padding:(lazy None)
       ()
@@ -428,7 +421,8 @@ let () =
     let peeled =
       LL.peel_accum_nest
         ~report:(fun r -> report := Some r)
-        ~loop_bounds:[ (w, (0, 3)) ] ~free_of:[] nest
+        ~loop_bounds:[ (w, (0, 3)) ]
+        ~free_of:[] nest
     in
     (Option.is_some peeled, Option.value_exn !report)
   in
@@ -446,8 +440,7 @@ let () =
     && Option.equal LL.equal_peel_refusal shared_report.LL.refusal (Some LL.Refused_cell_shared)
     && List.equal LL.equal_peel_guard_verdict shared_report.LL.guards
          [ LL.Guard_lane_private_unresolved ]);
-  Verdict.p_none "no refusing report claims an admitted lane-private guard"
-    [ shared_report ]
+  Verdict.p_none "no refusing report claims an admitted lane-private guard" [ shared_report ]
     ~f:(fun r ->
       Option.is_some r.LL.refusal
       && List.mem r.LL.guards LL.Guard_lane_private ~equal:LL.equal_peel_guard_verdict)
@@ -468,7 +461,9 @@ let () =
         in
         inner)
   in
-  let entries = List.equal (fun (n1, s1) (n2, s2) -> String.equal n1 n2 && Cs.equal_peel_site s1 s2) in
+  let entries =
+    List.equal (fun (n1, s1) (n2, s2) -> String.equal n1 n2 && Cs.equal_peel_site s1 s2)
+  in
   p "an inner bracket summarizes only its own sites"
     (entries inner_summary.Cs.sites [ ("inner_kernel", site 2) ]);
   (* Additively, not shadowing: an enclosing collection still sees what an inner compile censused,

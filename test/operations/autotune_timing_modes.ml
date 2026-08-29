@@ -22,7 +22,6 @@ module Idx = Ir.Indexing
 module SC = Ir.Schedule_cache
 
 let p = Verdict.p
-
 let backend () = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* {1 The calibration policy, without a device} *)
@@ -68,9 +67,7 @@ let () =
 let () =
   Stdio.printf "\n== autotune_timing spelling ==\n";
   let reads s want =
-    match Autotune.timing_of_setting s with
-    | got -> Poly.equal got want
-    | exception _ -> false
+    match Autotune.timing_of_setting s with got -> Poly.equal got want | exception _ -> false
   in
   p "\"queued\" selects the queued objective" (reads "queued" Autotune.Queued);
   p "\"isolated\" selects the isolated objective" (reads "isolated" Autotune.Isolated);
@@ -156,8 +153,8 @@ let () =
   let after = ref_round_trip () in
   let floor_ms = Float.min before (Float.min between after) in
   Stdio.eprintf
-    "  (not part of the golden) isolated %.6f ms over %d dispatches in %.1f ms wall; queued %.6f ms \
-     over %d dispatches (batch depth %d) in %.1f ms wall; second round isolated %.6f ms, queued \
+    "  (not part of the golden) isolated %.6f ms over %d dispatches in %.1f ms wall; queued %.6f \
+     ms over %d dispatches (batch depth %d) in %.1f ms wall; second round isolated %.6f ms, queued \
      %.6f ms (batch depth %d); round trip %.6f ms (%.6f/%.6f/%.6f)\n\
      %!"
     iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.depth que.wall_ms iso2.ms que2.ms
@@ -169,8 +166,8 @@ let () =
   p "isolated timing dispatched one launch per timed run, warmup included"
     (iso.dispatches >= 4 && iso.dispatches <= 65);
   p "isolated timing reports batch depth 1" (iso.depth = 1);
-  (* The seam's report is not taken on faith: past the warmup (1) and the calibration runs (3),
-     the dispatch counter must decompose into whole batches of the reported depth, between the 3
+  (* The seam's report is not taken on faith: past the warmup (1) and the calibration runs (3), the
+     dispatch counter must decompose into whole batches of the reported depth, between the 3
      guaranteed timed runs and the 64-run top-up cap. A loop batching at some depth other than the
      one it reported fails this on any count the reported depth does not divide. *)
   p "queued timing's dispatches decompose into whole batches of the reported depth"
@@ -242,13 +239,14 @@ let () =
     ~detail:(fun () ->
       Printf.sprintf "queued %.6f ms (%.6f, %.6f) vs isolated %.6f ms (%.6f, %.6f)" que_min que.ms
         que2.ms iso_min iso.ms iso2.ms);
-  (* Queued timing costs MORE than isolated timing on a fast routine -- isolated stops at the
-     64-run cap, queued runs to the wall budget -- but it is bounded by that budget rather than
-     scaling with the batch depth. A loop that counted launches instead of wall time would spend up
-     to [max_queue_depth] times longer, which is what this refuses. *)
+  (* Queued timing costs MORE than isolated timing on a fast routine -- isolated stops at the 64-run
+     cap, queued runs to the wall budget -- but it is bounded by that budget rather than scaling
+     with the batch depth. A loop that counted launches instead of wall time would spend up to
+     [max_queue_depth] times longer, which is what this refuses. *)
   Verdict.pass_fail "queued timing's wall cost is bounded by the budget, not by the batch depth"
     Float.(que.wall_ms <= (iso.wall_ms * 3.) + 100.)
-    ~detail:(fun () -> Printf.sprintf "queued %.1f ms vs isolated %.1f ms wall" que.wall_ms iso.wall_ms)
+    ~detail:(fun () ->
+      Printf.sprintf "queued %.1f ms vs isolated %.1f ms wall" que.wall_ms iso.wall_ms)
 
 (* {1 The objective is part of the cache identity} *)
 
@@ -265,8 +263,7 @@ let () =
   let canon = SC.canonicalize ~static_indices:[] opt in
   let limits = Context.hardware_limits ctx and backend = Context.backend_name ctx in
   let key objective = SC.cache_key ~objective ~limits canon ~backend in
-  p "the cache key is stable within one objective"
-    (String.equal (key "queued") (key "queued"));
+  p "the cache key is stable within one objective" (String.equal (key "queued") (key "queued"));
   p "the cache key separates the two timing objectives"
     (not (String.equal (key "isolated") (key "queued")));
   (* Derived, not restated: a caller that resolved no mode of its own must key exactly as one that

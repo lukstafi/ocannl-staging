@@ -16,14 +16,15 @@
     spell directly; separate from {!Bench_args} because the tools that print are not the tools that
     take positional geometry ([device_props] prints and parses nothing). Depends on stdio alone. *)
 
-(** [flush ()] pushes whatever is buffered on stdout out now. For the writers that do not go
-    through {!p}: [Train.printf_tree], [PrintBox_text.output Stdio.stdout] and friends render
-    straight to the channel, so a tool that prints a tree or a table and then compiles for a minute
-    needs this after the write, or that output waits for exit exactly as an unflushed row would. *)
+(** [flush ()] pushes whatever is buffered on stdout out now. For the writers that do not go through
+    {!p}: [Train.printf_tree], [PrintBox_text.output Stdio.stdout] and friends render straight to
+    the channel, so a tool that prints a tree or a table and then compiles for a minute needs this
+    after the write, or that output waits for exit exactly as an unflushed row would. *)
 let flush () = Stdio.Out_channel.flush Stdio.stdout
 
-(** [p fmt] is [Stdio.printf fmt] followed by a flush. Bind it eta-expanded -- [let p fmt =
-    Bench_out.p fmt] -- so the format type stays polymorphic across a tool's several formats. *)
+(** [p fmt] is [Stdio.printf fmt] followed by a flush. Bind it eta-expanded --
+    [let p fmt = Bench_out.p fmt] -- so the format type stays polymorphic across a tool's several
+    formats. *)
 let p fmt =
   Printf.ksprintf
     (fun s ->

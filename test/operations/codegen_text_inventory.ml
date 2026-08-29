@@ -216,18 +216,17 @@ let () =
         | [] -> ""
         | destinations ->
             " writes into "
-            ^ String.concat ~sep:" "
-                (List.map destinations ~f:Emitter_frontier.render_destination))
+            ^ String.concat ~sep:" " (List.map destinations ~f:Emitter_frontier.render_destination))
         (String.concat ~sep:" " e.Emitter_frontier.origins));
   (* The other half of the derivation, printed rather than dropped. These produce a document out of
      strings, numbers and other documents -- nothing the libraries define -- so they render no
      program, and matching such a name behind any qualifier would make a member of every test that
      calls `Bench_args.int`. A renderer that lands here is a miss, and listing them is what makes
      that miss a line in a diff rather than an absence (gh-ocannl-748). *)
-  printf "\ndocument combinators, given nothing of the libraries to render, so not on the frontier:\n";
+  printf
+    "\ndocument combinators, given nothing of the libraries to render, so not on the frontier:\n";
   List.iter frontier.Emitter_frontier.combinators ~f:(fun c ->
-      printf "%s [%s]\n" c.Emitter_frontier.name
-        (String.concat ~sep:" " c.Emitter_frontier.origins));
+      printf "%s [%s]\n" c.Emitter_frontier.name (String.concat ~sep:" " c.Emitter_frontier.origins));
   printf "\n== goldens holding emitted kernel or IR text ==\n";
   printf "roots scanned: %s\n"
     (String.concat ~sep:", " (Floors.roots ~floors:golden_floors golden_paths));
@@ -300,5 +299,4 @@ let () =
     (List.equal String.equal declared read_interfaces);
   Verdict.p_all "every scanned library declares modules" frontier.Emitter_frontier.interfaces
     ~f:(fun i -> not (List.is_empty i.Emitter_frontier.declared));
-  Verdict.p "no source hides a route to generated text behind an open"
-    (List.is_empty !rejected)
+  Verdict.p "no source hides a route to generated text behind an open" (List.is_empty !rejected)

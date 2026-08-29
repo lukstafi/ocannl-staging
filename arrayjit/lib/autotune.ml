@@ -267,8 +267,9 @@ let max_timing_runs = 64
    about 6 ms isolated and about 30 ms queued, so a search over microsecond kernels spends a few
    milliseconds more per candidate -- immaterial beside the compile each candidate already costs,
    and it buys a measurement that is not half host round trip. [max_queue_depth] stops a microsecond
-   kernel from minting an unbounded batch. A routine slower than the target gets depth 1 and is then measured exactly as
-   [Isolated] measures it, which is the right degeneracy: there is nothing left to amortize. *)
+   kernel from minting an unbounded batch. A routine slower than the target gets depth 1 and is then
+   measured exactly as [Isolated] measures it, which is the right degeneracy: there is nothing left
+   to amortize. *)
 let queued_batch_ms = 10.
 let max_queue_depth = 200
 
@@ -470,8 +471,8 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial reduction
     loop. A routine-local accumulator beats a device-memory RMW on every backend, and on Metal it
     additionally sidesteps the volatile-RMW miscompile workaround tax (c_syntax.ml
-    [volatile_serial_accumulation]). Detection is permissive: each proposal is validated by try-applying
-    against the segment (Privatize's own preconditions — single index vector, uniform
+    [volatile_serial_accumulation]). Detection is permissive: each proposal is validated by
+    try-applying against the segment (Privatize's own preconditions — single index vector, uniform
     iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
 
 let rec subtree_has_hardware_loop (llc : LL.t) =
@@ -2526,7 +2527,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
   let timing =
     match timing with
     | Some t -> t
-    | None -> timing_of_setting @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued"
+    | None ->
+        timing_of_setting @@ Utils.get_global_arg ~arg_name:"autotune_timing" ~default:"queued"
   in
   (* Every report this call emits starts here, so the objective its times were taken under travels
      with them (gh-ocannl-755): a consumer comparing a [best_ms] across processes, or storing one in
@@ -2661,8 +2663,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
   if (not search) && String.is_empty cache_dir then (
     logf
       "search disabled (autotune_search=false) and no chosen cache: compiling the untuned default";
-    (* Report AFTER the fallback compile: a report is a record of what this call achieved, and
-       the base report says the untuned default shipped. Emitting it first would leave a consumer
+    (* Report AFTER the fallback compile: a report is a record of what this call achieved, and the
+       base report says the untuned default shipped. Emitting it first would leave a consumer
        holding a clean, non-partial report for a call that then raised (Codex P2 on PR #291); a
        compile that raises reports its own failure instead (gh-ocannl-550). *)
     let result = compile_untuned_default () in
@@ -2892,9 +2894,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                 emit_report
                   {
                     outcome = Cache_replay;
-                    (* The entry's times are the storing search's, but the objective is this
-                       call's: since gh-ocannl-755 the objective is a cache-key component, so an
-                       entry under this key was measured under this objective. *)
+                    (* The entry's times are the storing search's, but the objective is this call's:
+                       since gh-ocannl-755 the objective is a cache-key component, so an entry under
+                       this key was measured under this objective. *)
                     timing;
                     candidates_timed = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)

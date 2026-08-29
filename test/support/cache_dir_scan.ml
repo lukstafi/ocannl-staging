@@ -334,8 +334,8 @@ let parse_class pattern at =
     else if Char.equal pattern.[k] ']' && not first then Some (negated, List.rev acc, k + 1)
     else if Char.equal pattern.[k] '\\' && k + 1 < n then
       scan (k + 2) (`Char pattern.[k + 1] :: acc) ~first:false
-    else if k + 2 < n && Char.equal pattern.[k + 1] '-' && not (Char.equal pattern.[k + 2] ']')
-    then scan (k + 3) (`Range (pattern.[k], pattern.[k + 2]) :: acc) ~first:false
+    else if k + 2 < n && Char.equal pattern.[k + 1] '-' && not (Char.equal pattern.[k + 2] ']') then
+      scan (k + 3) (`Range (pattern.[k], pattern.[k + 2]) :: acc) ~first:false
     else scan (k + 1) (`Char pattern.[k] :: acc) ~first:false
   in
   scan start [] ~first:true
@@ -357,9 +357,7 @@ let glob_matches pattern name =
       | '[' -> (
           match parse_class pattern i with
           | Some (negated, members, next) ->
-              j < nn
-              && Bool.equal negated (not (class_matches members name.[j]))
-              && go next (j + 1)
+              j < nn && Bool.equal negated (not (class_matches members name.[j])) && go next (j + 1)
           | None -> false)
       | c -> j < nn && Char.equal name.[j] c && go (i + 1) (j + 1)
   in
@@ -405,8 +403,7 @@ let root_directory_glob pattern =
 let unreadable_patterns content =
   List.filter_map content ~f:(fun { pattern; negated = _ } ->
       match root_directory_glob pattern with
-      | Some glob when String.is_substring glob ~substring:"**" ->
-          Some pattern
+      | Some glob when String.is_substring glob ~substring:"**" -> Some pattern
       | _ -> None)
 
 (** Whether git ignores a root-level directory of this name, by gitignore's own rule: every pattern

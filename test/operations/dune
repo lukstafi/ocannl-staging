@@ -1418,7 +1418,10 @@
  ; initialization -- and a guard only RUNS when dune reruns the rule, which happens only for a
  ; variable it declares (gh-ocannl-749). `env_var_deps` pairs the key the guard reads with this
  ; declaration.
- (deps ocannl_config config_profiles.expected (env_var OCANNL_PROFILE))
+ (deps
+  ocannl_config
+  config_profiles.expected
+  (env_var OCANNL_PROFILE))
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 
@@ -2485,6 +2488,7 @@
 
 ; A one-element counting routine that runs on whatever backend is selected, plus two pure legs, so
 ; the stanza declares the variable rather than naming a backend.
+
 (test
  (name autotune_timing_modes)
  (package neural_nets_lib)

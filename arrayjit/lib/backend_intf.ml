@@ -81,17 +81,17 @@ type mma_capability = {
           operands alone made the autotuner seed — and time, and rank — 36 candidates per arm on a
           uniformly-bf16 network that every one of them rendered as the lane-0 scalar fallback. *)
   mma_f16_wide_acc : bool;
-      (** Whether the backend's uniform-f16 arm — an f16-storage destination with f16 operands —
-          can hold the accumulator in f32 and convert once at the [d] boundary, which is what the
+      (** Whether the backend's uniform-f16 arm — an f16-storage destination with f16 operands — can
+          hold the accumulator in f32 and convert once at the [d] boundary, which is what the
           {!Numerics.Fp16_wide} policy requires of every rendering (gh-ocannl-680). CUDA's
           inline-PTX [mma.sync.m16n8k16] arm can (sm_80+, the architecturally-defined fragment
           layouts are shared by .f16 and .bf16); HIP can since gh-ocannl-789 (rocWMMA's
           [(f16, f16, f32)] fragments, the boundary converted elementwise through a
           destination-typed accumulator fragment); Metal cannot ([simdgroup_matrix] is
-          uniform-precision only, structurally). Where false, the
-          seeding gate in [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds
-          under the wide policy — the serial legs then carry the f32 residency via [accum_prec],
-          keeping the width schedule-uniform per the gh-ocannl-545/663 discipline. *)
+          uniform-precision only, structurally). Where false, the seeding gate in
+          [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds under the wide
+          policy — the serial legs then carry the f32 residency via [accum_prec], keeping the width
+          schedule-uniform per the gh-ocannl-545/663 discipline. *)
   mma_staged_layouts :
     ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
       (** Format triples whose cooperatively staged operand tiles the backend can read in a
@@ -417,8 +417,7 @@ type kparam_source =
     by pooled codegen, so a backend whose {!C_syntax_config.ptr_param_style} is [`Per_param] can
     never be handed one. Named here, once, next to the constructors whose invariant it states. *)
 let unexpected_pooled_kparam ~backend =
-  invalid_arg
-    (backend ^ ".link: unexpected pooled kparam (" ^ backend ^ " uses per-tnode pointers)")
+  invalid_arg (backend ^ ".link: unexpected pooled kparam (" ^ backend ^ " uses per-tnode pointers)")
 
 type 'context routine = {
   context : 'context;

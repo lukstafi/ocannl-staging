@@ -14,8 +14,8 @@ open Ocannl.Operation.DSL_modules
    padded window consults the clamping flag, a finite one whose margins are touched. All are
    rejected, and this test is what a future narrowing has to argue with: the reasoning is at the
    guard in tensor.ml, and it turns on the cost of the call being non-local (forcing the projections
-   runs [Shape.finish_inference] over every active update step in the session) rather than on any
-   of these cases being individually harmful.
+   runs [Shape.finish_inference] over every active update step in the session) rather than on any of
+   these cases being individually harmful.
 
    The control leg is what keeps that honest: the same padded operation, built without the early
    derivation, constructs fine. *)
@@ -80,8 +80,8 @@ let () =
     ~expect_rejected:false (fun () -> padded_conv ~op_asn:conv_op_asn);
   verdict ~claim:"an early derivation is rejected when there is no neutral element to install"
     ~expect_rejected:true (fun () -> unop ~op_asn:no_neutral_op_asn (vec 4) ());
-  verdict ~claim:"an early derivation is rejected for a finite pointwise neutral" ~expect_rejected:true
-    (fun () -> unop ~op_asn:finite_neutral_op_asn (vec 4) ());
+  verdict ~claim:"an early derivation is rejected for a finite pointwise neutral"
+    ~expect_rejected:true (fun () -> unop ~op_asn:finite_neutral_op_asn (vec 4) ());
   verdict ~claim:"an early derivation is rejected for a non-finite neutral without a padded window"
     ~expect_rejected:true (fun () -> unop ~op_asn:nonfinite_neutral_op_asn (vec 4) ());
   verdict ~claim:"an early derivation is rejected for a padded window that reads margins"

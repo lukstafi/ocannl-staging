@@ -514,11 +514,11 @@ type entry = {
           self-description as [numerics] and with the same belt-and-braces role. Optional so that
           entries written before this field existed stay readable. *)
   objective : string option; [@sexp.option]
-      (** The autotuner's timing objective ([autotune_timing]) the search ran under
-          (gh-ocannl-755), the same self-description as [numerics] and [codegen] and with the same
-          belt-and-braces role beside the key's own [timing] component. Optional so entries written
-          before this field existed stay readable — they are under a different key anyway, so
-          nothing looks them up. *)
+      (** The autotuner's timing objective ([autotune_timing]) the search ran under (gh-ocannl-755),
+          the same self-description as [numerics] and [codegen] and with the same belt-and-braces
+          role beside the key's own [timing] component. Optional so entries written before this
+          field existed stay readable — they are under a different key anyway, so nothing looks them
+          up. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]

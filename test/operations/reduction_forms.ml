@@ -30,10 +30,10 @@
    the enclosing index is peeled at the enclosing level under a confined guard, while one whose cell
    mentions it peels the reduction level alone under a lane-private guard the cell separates — and
    both emit one localized scope with one closing store. So each member also declares what codegen's
-   reduction peel decided, checked against the routine's own peel census
-   ({!Context.routine.peel}) rather than against emitted text. Without it a member can be green over
-   a kernel the code path it is named for never touched, which is the same false green one level
-   down: agreement between two decisions is worthless if they produce the same rendering.
+   reduction peel decided, checked against the routine's own peel census ({!Context.routine.peel})
+   rather than against emitted text. Without it a member can be green over a kernel the code path it
+   is named for never touched, which is the same false green one level down: agreement between two
+   decisions is worthless if they produce the same rendering.
 
    The member list itself is printed, so a form added to codegen without a table entry shows up as a
    golden diff rather than as silence. Members a backend cannot evaluate (SIMD grids off the C
@@ -1103,8 +1103,7 @@ let members =
        already spans the whole reduction. The form is the same localized scope [serial] renders
        (gh-ocannl-733). *)
     member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~peel:Minted_upstream
-      ~sched:(fun g ->
-        [ Sched.Unroll { axis = g.k; materialize = true } ]);
+      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = true } ]);
     (* The output loop is gone, so each of its [rows] copies closes its own cell -- which is not a
        seam but the whole of that cell's reduction. *)
     member "unroll-outer-mat" "Unroll ~materialize of the OUTPUT axis" ~store_sites:rows
@@ -1170,7 +1169,8 @@ let members =
     member "split-then-vectorize-inner" "Split, then Retype the INNER half to Vectorized"
       ~expect:simd_or_localized ~claimed:simd_claimed
       ~peel:(Peeled { Cs.levels = 2; guards = [] })
-      ~expect_axis:LL.Vectorized ~sched:(fun g ->
+      ~expect_axis:LL.Vectorized
+      ~sched:(fun g ->
         (* 32 wide, which every lane ladder a real target has can cover; see {!cols}. *)
         let sp, _outer, inner =
           Sched.split ~axis:g.k ~factor:32 ~outer:LL.Serial ~inner:LL.Serial
@@ -1249,8 +1249,8 @@ let members =
     member "mixed-guard-workgroup" "the same guard with the output axis bound to a workgroup"
       ~shape:Mixed_guard
       ~peel:(Peeled { Cs.levels = 1; guards = [ LL.Guard_lane_private ] })
-      ~reference:Mixed_baseline ~expect_axis:LL.Workgroup ~sched:(fun g ->
-        [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
+      ~reference:Mixed_baseline ~expect_axis:LL.Workgroup
+      ~sched:(fun g -> [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
     (* The one member with no peel site at all: virtualization gives the accumulator its own scope
        and opens it from a zero-init, so nothing here reads the cell it writes and localization was
@@ -1273,8 +1273,8 @@ let members =
       ~expect:Rmw ~peel:No_localization ~reference:Per_step;
     member "decline-sibling-unrolled" "the same level Unrolled: one read-modify-write per copy"
       ~shape:Side_write ~expect:Rmw ~peel:No_localization ~reference:Per_step ~rmw_sites:cols
-      ~expect_axis:LL.Unrolled
-      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
+      ~expect_axis:LL.Unrolled ~sched:(fun g ->
+        [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
 (* {1 Coverage ratchets}
@@ -1426,10 +1426,10 @@ let constructor_name sexp =
 
 let same_form a b = String.equal (form_name a) (form_name b)
 
-(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two
-   empty arrays, and a readback and the reference it is compared against go empty TOGETHER --
-   the reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the
-   sites reached through this helper keep a boolean, so the guard lives here. *)
+(* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
+   arrays, and a readback and the reference it is compared against go empty TOGETHER -- the
+   reference went through the same path. {!Verdict.p_all2} is the claim-shaped form; the sites
+   reached through this helper keep a boolean, so the guard lives here. *)
 let agrees got want =
   (not (Array.is_empty got))
   && Array.length got = Array.length want
@@ -1521,10 +1521,10 @@ let () =
 (* The two declarations are not independent, and pinning the relation is what keeps the peel claim
    from being a free-floating label: a member whose peel localizes nothing must render its
    accumulator somewhere else — a decline, a SIMD grid, a shuffle tree — unless the scope reached
-   codegen already built, which is exactly what {!Minted_upstream} says and {!No_localization} denies.
-   So the pair (form, decision) is checked for coherence over the whole table, and a member that
-   declares "localized" beside "nothing localized" without saying where the scope came from fails
-   here rather than on some backend. *)
+   codegen already built, which is exactly what {!Minted_upstream} says and {!No_localization}
+   denies. So the pair (form, decision) is checked for coherence over the whole table, and a member
+   that declares "localized" beside "nothing localized" without saying where the scope came from
+   fails here rather than on some backend. *)
 let () =
   Verdict.p_all "every member's peel claim is coherent with the form it claims" members ~f:(fun m ->
       match m.peel with
@@ -1827,8 +1827,7 @@ let () =
               | Peeled want ->
                   if not (List.for_all localized_sites ~f:(Cs.equal_peel_verdict want)) then
                     Stdio.eprintf "  %s: localized sites decided [%s], declared [%s]\n" name
-                      (verdicts localized_sites)
-                      (verdicts [ want ]);
+                      (verdicts localized_sites) (verdicts [ want ]);
                   Verdict.p_all peel_claim localized_sites ~f:(Cs.equal_peel_verdict want)
               | Minted_upstream | No_localization ->
                   (* Over the whole census, so an EMPTY one fails too: "nothing localized" says

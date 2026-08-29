@@ -23,9 +23,9 @@ let benchmark_overhead _backend_name () =
   (* [printf_tree] renders straight to stdout, and the loop below compiles 20 fresh routines before
      anything else is printed. Unflushed, that tree waits for process exit and the run looks like it
      produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the end.
-     Note that the loop itself is currently broken — [Context.run] refuses [update_x] for
-     unexecuted dependencies (gh-ocannl-831) — so this tree is in practice the only output the tool
-     produces, which is the more reason for it to reach the reader. *)
+     Note that the loop itself is currently broken — [Context.run] refuses [update_x] for unexecuted
+     dependencies (gh-ocannl-831) — so this tree is in practice the only output the tool produces,
+     which is the more reason for it to reach the reader. *)
   Bench_out.flush ();
 
   let xs = Array.init n_data ~f:Float.(fun i -> of_int i - (of_int n_data /. 2.)) in

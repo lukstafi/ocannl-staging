@@ -3,15 +3,15 @@
    every segment, so the emitted nest bound the same symbol twice at two different widths.
    [Low_level]'s per-branch [loop_ranges] threading reads such a nest correctly, but every FLAT
    scanner keyed by symbol misreads it: [def_loop_ranges] (the inlining path) keeps only the last
-   segment's width, [affine_accesses] collects two ranges for one symbol, and the canonical
-   renderer -- the walk both digests share -- reports the second binder as shadowed, which makes
-   the analysis cache decline the routine and the schedule cache call its rendering incomplete.
+   segment's width, [affine_accesses] collects two ranges for one symbol, and the canonical renderer
+   -- the walk both digests share -- reports the second binder as shadowed, which makes the analysis
+   cache decline the routine and the schedule cache call its rendering incomplete.
 
    The fix is a fresh symbol per SEGMENT loop, which costs nothing at lowering time and removes the
    hazard class. This test pins the emitted shape (distinct binders over the concat's segment
-   widths), the canonical renderer's verdict on it, and -- since a symbol change is exactly the
-   kind of rewrite that can lower to something structurally pretty and numerically wrong -- the
-   executed values of both the forward concatenation and the [Rev_sides] gradient scatter. *)
+   widths), the canonical renderer's verdict on it, and -- since a symbol change is exactly the kind
+   of rewrite that can lower to something structurally pretty and numerically wrong -- the executed
+   values of both the forward concatenation and the [Rev_sides] gradient scatter. *)
 
 open Base
 open Ocannl
@@ -119,8 +119,8 @@ let () =
     ~f:snd;
 
   (* The segment loops no longer share a binder, but a symbol can still index writes to SEVERAL
-     tensor nodes -- an ENCLOSING product level's iterator appears in every segment's store. That
-     is the shape `Low_level.reverse_node_map` is list-valued for and the virtualizer's shared-loop
+     tensor nodes -- an ENCLOSING product level's iterator appears in every segment's store. That is
+     the shape `Low_level.reverse_node_map` is list-valued for and the virtualizer's shared-loop
      candidate list handles, so it is worth knowing it is still reachable from the DSL. A batched
      concatenation's gradient is the witness: one batch axis outside the concat component. *)
   let z1 =
@@ -142,16 +142,15 @@ let () =
   in
   let write_syms = List.map zwrites ~f:snd |> List.dedup_and_sort ~compare:Idx.compare_symbol in
   Verdict.p_exists "a batched concat gradient still indexes writes to several nodes by one symbol"
-    write_syms
-    ~f:(fun s -> List.length (nodes_indexed_by s) > 1);
+    write_syms ~f:(fun s -> List.length (nodes_indexed_by s) > 1);
 
-  (* Executed parity: the values, not just the shape of the nest. The oracle has to DISCRIMINATE
-     the loop indices, which a plain sum-of-the-concatenation loss does not: its derivative is 1.0
+  (* Executed parity: the values, not just the shape of the nest. The oracle has to DISCRIMINATE the
+     loop indices, which a plain sum-of-the-concatenation loss does not: its derivative is 1.0
      everywhere, so a scatter that wrote the right cells for the wrong reason -- a swapped segment,
      a dropped enclosing batch index, a duplicated store -- still lands all-ones gradients. So the
-     loss is weighted by a tensor of pairwise-distinct constants over BOTH the concatenated axis
-     and the batch axis: every gradient cell then has its own value, and the expected arrays below
-     fail under any permutation, duplication or omission of an index. Fresh tensors, because the
+     loss is weighted by a tensor of pairwise-distinct constants over BOTH the concatenated axis and
+     the batch axis: every gradient cell then has its own value, and the expected arrays below fail
+     under any permutation, duplication or omission of an index. Fresh tensors, because the
      inspections above already consumed the forward and backprop code of the ones they lowered. *)
   let y1 =
     Tensor.ndarray ~grad_spec:Tensor.Require_grad
@@ -170,7 +169,7 @@ let () =
       ~batch_dims:[ 2 ] ~input_dims:[] ~output_dims:[ 5 ] ()
   in
   let%op cat2 = (y1, y2) ++^ "...|a; ...|b => ...|a^b" in
-  let%op loss2 = cat2 *. w ++ "...|... => |->0" in
+  let%op loss2 = (cat2 *. w) ++ "...|... => |->0" in
   let ctx = Context.auto () in
   Train.set_materialized cat2.value;
   Train.set_materialized (Option.value_exn ~here:[%here] y1.diff).grad;
@@ -179,8 +178,8 @@ let () =
   let cat_v = Context.get_values ctx cat2.value in
   let g1 = Context.get_values ctx (Option.value_exn ~here:[%here] y1.diff).grad in
   let g2 = Context.get_values ctx (Option.value_exn ~here:[%here] y2.diff).grad in
-  (* Row-major over (batch, concatenated axis): each batch row is the first segment then the
-     second, so a swapped segment or a lost batch index changes the array. *)
+  (* Row-major over (batch, concatenated axis): each batch row is the first segment then the second,
+     so a swapped segment or a lost batch index changes the array. *)
   p "batched concat forward interleaves the segments within each batch row"
     (Array.equal Float.equal cat_v [| 1.0; 2.0; 3.0; 7.0; 8.0; 4.0; 5.0; 6.0; 9.0; 10.0 |]);
   (* d(sum(cat *. w))/d(y1) is w restricted to the first segment's cells, batch row by batch row --

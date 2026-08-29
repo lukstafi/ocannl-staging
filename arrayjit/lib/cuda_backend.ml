@@ -125,18 +125,17 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
      covers the entire range above it. The [(wmma-bf16)] and [(wmma-tf32)] markers are emitted by
      [mma_syntax] for bf16 resp. tf32 fragments (both sm_80+); [(mma-fp8)], [(mma-bf16)] and
      [(mma-f16)] for the inline-PTX [mma.sync] paths (sm_89+ resp. sm_80+ for both 16-bit forms, no
-     header needed). - A FAMILY target
-     ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific arch, which only the device
-     family it names can load. Blackwell's block-scaled [kind::mxf8f6f4] forms exist ONLY under such
-     a target, so this is the one case where forward-JIT portability has to be given up — and
-     therefore the one marker gated on the attached devices' own family. Family PTX is never
-     produced for a device that could not load it; a marked kernel reaching a mismatched device
-     falls back to floor targeting, which is defense in depth rather than a recovery path (an arm
-     emitting the marker is gated on the same family, so it should have declined already). No arm
-     emits it yet: block scaling itself is blocked on OCANNL having microscaling storage at all (the
-     e8m0 per-32-element scale factors are extra mma OPERANDS with their own layout, and [Tile_mma]
-     has no slot for them), and a unit-scale arm would be numerically identical to the plain fp8
-     path while forfeiting forward-JIT. *)
+     header needed). - A FAMILY target ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific
+     arch, which only the device family it names can load. Blackwell's block-scaled [kind::mxf8f6f4]
+     forms exist ONLY under such a target, so this is the one case where forward-JIT portability has
+     to be given up — and therefore the one marker gated on the attached devices' own family. Family
+     PTX is never produced for a device that could not load it; a marked kernel reaching a
+     mismatched device falls back to floor targeting, which is defense in depth rather than a
+     recovery path (an arm emitting the marker is gated on the same family, so it should have
+     declined already). No arm emits it yet: block scaling itself is blocked on OCANNL having
+     microscaling storage at all (the e8m0 per-32-element scale factors are extra mma OPERANDS with
+     their own layout, and [Tile_mma] has no slot for them), and a unit-scale arm would be
+     numerically identical to the plain fp8 path while forfeiting forward-JIT. *)
   let has s = String.is_substring cu_src ~substring:s in
   if has "(mma-mxfp8)" && device_cc / 10 = mxfp8_family_cc / 10 then (
     [%log "family-arch target", (device_cc : int)];
@@ -356,15 +355,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     [%log "nvrtc options", (options : string list)];
     let ptx =
-      try Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug with
-      | Nvrtc.Nvrtc_error { status; message } ->
-          (* Re-raise the SAME constructor and status -- [classify_failure] dispatches on them --
-             with the effective option vector appended to the log nvrtc put in [message]. A compile
-             failure that travels to a sweep's fingerprint then carries the flags it was compiled
-             under, which is the diagnostic gh-ocannl-784 exists to add. *)
-          raise
-            (Nvrtc.Nvrtc_error
-               { status; message = message ^ "\nnvrtc options: " ^ Compiler_options.render options })
+      try Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug
+      with Nvrtc.Nvrtc_error { status; message } ->
+        (* Re-raise the SAME constructor and status -- [classify_failure] dispatches on them -- with
+           the effective option vector appended to the log nvrtc put in [message]. A compile failure
+           that travels to a sweep's fingerprint then carries the flags it was compiled under, which
+           is the diagnostic gh-ocannl-784 exists to add. *)
+        raise
+          (Nvrtc.Nvrtc_error
+             { status; message = message ^ "\nnvrtc options: " ^ Compiler_options.render options })
     in
     if Utils.settings.output_debug_files_in_build_directory then (
       let oc = Out_channel.open_text @@ Utils.build_file @@ name ^ ".ptx" in
@@ -530,7 +529,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   struct
     include C_syntax.Pure_C_config (struct
       let procs = Input.procs
-
       let full_printf_support = C_syntax.printf_support_unless_uniform ()
     end)
 
@@ -722,10 +720,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       in
       match (a_prec, b_prec, d_prec) with
       | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ -> mk "__half" "float" 8 4 70
-      (* The f16-accumulate wmma triple must not render under [Numerics.Fp16_wide]
-         (gh-ocannl-680): the uniform-f16 combination then goes through the f32-accumulate
-         inline-PTX m16n8k16 arm instead, or declines to the scalar fallback, whose accumulator
-         follows [accum_prec] — width-uniform either way. *)
+      (* The f16-accumulate wmma triple must not render under [Numerics.Fp16_wide] (gh-ocannl-680):
+         the uniform-f16 combination then goes through the f32-accumulate inline-PTX m16n8k16 arm
+         instead, or declines to the scalar fallback, whose accumulator follows [accum_prec] —
+         width-uniform either way. *)
       | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) ->
           mk "__half" "__half" 8 8 70
       | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
@@ -880,8 +878,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           (* The element-type spellings of the m16n8k16 arm, shared by its two 16-bit forms: the C
              type, the bits-as-ushort intrinsic, the widening and narrowing conversions, the
-             instruction's element infix, and the marker [gpu_arch_options] greps for the arch
-             floor (sm_80 for both). *)
+             instruction's element infix, and the marker [gpu_arch_options] greps for the arch floor
+             (sm_80 for both). *)
           let mma16_spellings =
             if is_bf16_uniform then
               Some
@@ -1050,8 +1048,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                orientation: the fragment registers hold 16-bit element PAIRS, and the pair a lane
                needs is contiguous under one of the two forms — [.trans] transposes each 8x8 tile on
                distribution, which is exactly the difference between the two orientations. *)
-            Option.is_some mma16_spellings
-            && plain d_layout
+            Option.is_some mma16_spellings && plain d_layout
             && (plain a_layout || a_swz)
             && (plain b_layout || b_swz)
             && m % 16 = 0
@@ -1063,12 +1060,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             (* Raw [mma.sync] with the architecturally-defined per-lane fragment layouts of m16n8k16
                (PTX ISA "Matrix Fragments for mma.m16n8k16", shared by .f16 and .bf16 — which is
                what lets [mma16_spellings] parameterize this one body over both element types).
-               Thread
-               [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A (16x16)
-               regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8}; B (16x8,
-               column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g; accumulator D
-               (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The lower-indexed
-               element of each pair sits in the low half of its .b32 register.
+               Thread [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A
+               (16x16) regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8}; B
+               (16x8, column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g;
+               accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The
+               lower-indexed element of each pair sits in the low half of its .b32 register.
 
                Unlike the fp8 arm, transposed operand storage ([ta]/[tb]) is supported: every gather
                goes through [a_at]/[b_at], which index the STORED matrix at (col, row) under the
@@ -1079,9 +1075,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
                The accumulator is read from and written back to the 16-bit [d] once per statement,
                with the whole [k] extent accumulated in f32 registers in between. For bf16 that is
-               strictly better rounding than the scalar fallback this replaces, which rounds to
-               bf16 per term; for f16 it is the [Numerics.Fp16_wide] residency [accum_prec] gives
-               every serial rendering (gh-ocannl-680). *)
+               strictly better rounding than the scalar fallback this replaces, which rounds to bf16
+               per term; for f16 it is the [Numerics.Fp16_wide] residency [accum_prec] gives every
+               serial rendering (gh-ocannl-680). *)
             let open PPrint in
             let elt_typ, as_ushort, to_float, from_float, instr_elt, marker =
               Option.value_exn mma16_spellings
@@ -1199,8 +1195,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
             in
             let body ~a_ptr ~b_ptr =
-              ptr_decl "__mma_dp" elt_typ d_ptr
-              ^^ hardline
+              ptr_decl "__mma_dp" elt_typ d_ptr ^^ hardline
               ^^ ptr_decl "__mma_ap" ("const " ^ elt_typ) a_ptr
               ^^ hardline
               ^^ ptr_decl "__mma_bp" ("const " ^ elt_typ) b_ptr

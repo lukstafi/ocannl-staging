@@ -141,7 +141,7 @@ let golden_cases =
     text a buffer-writing emitter deposits travels. *)
 let emitters =
   let emitter ?(destinations = []) name origin =
-    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.destinations = destinations }
+    { Scan.emitter_name = name; Scan.origins = [ origin ]; Scan.destinations }
   in
   [
     emitter "compile_proc" "Ir.C_syntax.C_syntax.compile_proc";

@@ -20,10 +20,10 @@ val save :
     Each tensor's data is retrieved on demand from its device buffer in [ctx] via {!Context.to_host}
     (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx].
 
-    The file is published through {!Utils.Atomic_file}: written to a staging sibling of [path]
-    and renamed over it, so a failed save leaves the previous checkpoint intact and leaves no
-    staging artifact, and -- because the rename replaces the directory entry rather than the inode
-    -- mappings taken by an earlier {!load} of the same path keep seeing the data they were mapped
+    The file is published through {!Utils.Atomic_file}: written to a staging sibling of [path] and
+    renamed over it, so a failed save leaves the previous checkpoint intact and leaves no staging
+    artifact, and -- because the rename replaces the directory entry rather than the inode --
+    mappings taken by an earlier {!load} of the same path keep seeing the data they were mapped
     from. The staging name is unique per writer, so two processes checkpointing the same path do not
     stream into one file. A save also reclaims the staging files of THIS checkpoint left by an
     earlier save that was killed mid-stream — nothing else would, and an abandoned one is the size

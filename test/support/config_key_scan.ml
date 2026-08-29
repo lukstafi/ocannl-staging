@@ -139,15 +139,14 @@ let tracing_gates_in_source content =
 
 (** {1 Resolving a receiver} *)
 
-(** The simple name a pattern binds, where it has one. Best-effort by design: a pattern this does not
-    recognise yields no name, and every client of it treats a nameless binding as the answer that
-    costs least. *)
+(** The simple name a pattern binds, where it has one. Best-effort by design: a pattern this does
+    not recognise yields no name, and every client of it treats a nameless binding as the answer
+    that costs least. *)
 let rec pattern_name pattern =
   match pattern.ppat_desc with
   | Ppat_var { txt; _ } -> Some txt
   | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> pattern_name inner
   | _ -> None
-
 
 (* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
    where a functor application is a shape the language admits, and a scan that raised on one would
@@ -162,15 +161,15 @@ let path_ends_in name txt =
 (** Every local name under which the module called [wanted] is reachable in [structure], and whether
     its contents were put in scope unqualified by an [open] or an [include].
 
-    Every way a module's contents can be given a local name, in BOTH the structure and the expression
-    grammar. OCaml spells each of binding, opening and including twice — [module G = M] against
-    [let module G = M in …], [open M] against [let open M in …], [include M] against nothing — and a
-    pass that knew only the structure spellings would read [let open Test_utils.Generated in init …]
-    as a call to somebody else's [init] (Codex P2, round 1 of PR #457). Which is the shape a scan
-    must not get wrong quietly.
+    Every way a module's contents can be given a local name, in BOTH the structure and the
+    expression grammar. OCaml spells each of binding, opening and including twice — [module G = M]
+    against [let module G = M in …], [open M] against [let open M in …], [include M] against nothing
+    — and a pass that knew only the structure spellings would read
+    [let open Test_utils.Generated in init …] as a call to somebody else's [init] (Codex P2, round 1
+    of PR #457). Which is the shape a scan must not get wrong quietly.
 
-    The aliases are collected in this pass and the call sites matched against them in a second — OCaml
-    lets neither be used before it is bound, so two passes cost nothing and save the walk from
+    The aliases are collected in this pass and the call sites matched against them in a second —
+    OCaml lets neither be used before it is bound, so two passes cost nothing and save the walk from
     depending on that.
 
     Two answers about the [open]s, because the two clients want opposite defaults. [opened] says one
@@ -239,14 +238,14 @@ let module_bindings_of structure ~wanted =
         | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } ->
             bind_module_expr alias pmb_expr
         | Pstr_open { popen_expr; _ } ->
-            bind_module_expr ~scope:(fun () ->
-                (item.pstr_loc.loc_end.pos_cnum, !structure_end))
+            bind_module_expr
+              ~scope:(fun () -> (item.pstr_loc.loc_end.pos_cnum, !structure_end))
               None popen_expr
         (* `include Test_utils.Generated` puts the contents in scope under no name of their own,
            which is the same situation an `open` leaves. *)
         | Pstr_include { pincl_mod; _ } ->
-            bind_module_expr ~scope:(fun () ->
-                (item.pstr_loc.loc_end.pos_cnum, !structure_end))
+            bind_module_expr
+              ~scope:(fun () -> (item.pstr_loc.loc_end.pos_cnum, !structure_end))
               None pincl_mod
         | _ -> ());
         super#structure_item item
@@ -256,8 +255,7 @@ let module_bindings_of structure ~wanted =
         | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
         | Pexp_open ({ popen_expr; _ }, body) ->
             bind_module_expr
-              ~scope:(fun () ->
-                (body.pexp_loc.loc_start.pos_cnum, body.pexp_loc.loc_end.pos_cnum))
+              ~scope:(fun () -> (body.pexp_loc.loc_start.pos_cnum, body.pexp_loc.loc_end.pos_cnum))
               None popen_expr
         | _ -> ());
         super#expression expr
@@ -267,7 +265,8 @@ let module_bindings_of structure ~wanted =
   (!aliases, !opened, List.rev !open_ranges)
 
 (** Whether an offset falls inside any of [ranges]. *)
-let within ranges offset = List.exists ranges ~f:(fun (start, stop) -> start <= offset && offset < stop)
+let within ranges offset =
+  List.exists ranges ~f:(fun (start, stop) -> start <= offset && offset < stop)
 
 (** Where a binding of the simple name [fn] is in scope in [structure]: a [let fn = …] at structure
     level reaching to the end of the structure that holds it, a [let fn = … in body] reaching over
@@ -326,8 +325,8 @@ let shadow_ranges_of structure ~fn =
   iterator#structure structure;
   List.rev !ranges
 
-(** Whether [path] names [fn] of the module [wanted], given that module's local bindings: written out
-    or reached through an alias, or spelled bare under an [open]/[include] of it. *)
+(** Whether [path] names [fn] of the module [wanted], given that module's local bindings: written
+    out or reached through an alias, or spelled bare under an [open]/[include] of it. *)
 let names_function_of ~wanted ~aliases ~opened ~fn path =
   match List.rev path with
   | last :: receivers when String.equal last fn -> (
@@ -361,31 +360,32 @@ type env_reader_reads = {
 
 (** {2 What this resolver is for, and what it is not}
 
-    It exists to catch a guard whose DECLARATIONS DRIFTED from its key list — a key added to the list
-    and not to the rule's [(env_var …)], which is how the three guards in this tree were built and
-    how the next one will be maintained. Against that it is exact: it resolves the list or refuses,
-    and every construct it follows is named and every name it trusts is checked for rebinding.
+    It exists to catch a guard whose DECLARATIONS DRIFTED from its key list — a key added to the
+    list and not to the rule's [(env_var …)], which is how the three guards in this tree were built
+    and how the next one will be maintained. Against that it is exact: it resolves the list or
+    refuses, and every construct it follows is named and every name it trusts is checked for
+    rebinding.
 
-    It is NOT robust against a source written to deceive it, and that is a deliberate boundary rather
-    than an unfinished edge. A guard can always put its keys behind an abstraction this scan cannot
-    see through — an [open] of a module exporting its own [List], a combinator that ignores its list
-    argument, a key computed at run time — and each such shape is closed only by trusting one fewer
-    name, which the next shape reopens. The line is that a test author is not an adversary: nobody
-    writes [open Shared] over a custom [List] to slip a configuration read past a scanner, and a
-    scanner that spent its complexity on that possibility would be harder to trust than the
-    convention it replaced.
+    It is NOT robust against a source written to deceive it, and that is a deliberate boundary
+    rather than an unfinished edge. A guard can always put its keys behind an abstraction this scan
+    cannot see through — an [open] of a module exporting its own [List], a combinator that ignores
+    its list argument, a key computed at run time — and each such shape is closed only by trusting
+    one fewer name, which the next shape reopens. The line is that a test author is not an
+    adversary: nobody writes [open Shared] over a custom [List] to slip a configuration read past a
+    scanner, and a scanner that spent its complexity on that possibility would be harder to trust
+    than the convention it replaced.
 
     What keeps that boundary honest is the direction the residual falls in. Where this scan cannot
-    follow a construct it REFUSES, so the failure is loud and at the site; the shapes it can still be
-    fooled by all require the source to name something standard and mean something else. If that
+    follow a construct it REFUSES, so the failure is loud and at the site; the shapes it can still
+    be fooled by all require the source to name something standard and mean something else. If that
     trade stops being the right one, the answer is a structural contract — a guard's keys spelled as
     one literal list in a fixed shape, matched rather than inferred — not another name added to the
     tables below.
 
     {2 Resolving a list of keys}
 
-    A guard hands the reader its keys one at a time out of a list, so what the scan has to resolve is
-    the LIST — and resolving it is what lets the check refuse everything else. The alternative it
+    A guard hands the reader its keys one at a time out of a list, so what the scan has to resolve
+    is the LIST — and resolving it is what lets the check refuse everything else. The alternative it
     replaces was to take the source's string literals as candidates, which is a superset when the
     list is written there and says nothing at all when it is not: one incidental literal naming a
     real key made the reach look answered.
@@ -417,43 +417,45 @@ let is_named name expr =
   | None -> false
 
 (** The higher-order functions whose argument semantics this scan knows: each applies its function
-    argument to every element of its list argument, so a lambda handed to one is reached with exactly
-    the elements of that list.
+    argument to every element of its list argument, so a lambda handed to one is reached with
+    exactly the elements of that list.
 
     Named, and qualified by their container. Recording an iteration for ANY call that happened to
-    carry a resolvable list and a one-parameter lambda let a wrapper's decoy argument supply the keys
-    -- the reader was then blessed with a list it is never handed, and the reach that should have
-    been refused was reported as answered (Codex P2, round 6 of PR #484). A call outside this table
-    establishes nothing, so the reader's parameter stays unbound and the reach is refused. *)
+    carry a resolvable list and a one-parameter lambda let a wrapper's decoy argument supply the
+    keys -- the reader was then blessed with a list it is never handed, and the reach that should
+    have been refused was reported as answered (Codex P2, round 6 of PR #484). A call outside this
+    table establishes nothing, so the reader's parameter stays unbound and the reach is refused. *)
 let iteration_combinators =
   [
     (* `List` only, and `iteri` deliberately absent. Both omissions are the same rule: this table
-       must advertise nothing {!resolve_elements} and {!lambda_body} cannot actually read, or a guard
-       written to it is refused though correct. `iteri`'s callback takes the index AND the element
-       (Codex P2, round 9); `Array`'s literals are `Pexp_array`, which the element resolver does not
-       read (Codex P2, round 12). Fewer names trusted is the direction this table moves in, and an
-       entry earns its place by being resolvable end to end. *)
+       must advertise nothing {!resolve_elements} and {!lambda_body} cannot actually read, or a
+       guard written to it is refused though correct. `iteri`'s callback takes the index AND the
+       element (Codex P2, round 9); `Array`'s literals are `Pexp_array`, which the element resolver
+       does not read (Codex P2, round 12). Fewer names trusted is the direction this table moves in,
+       and an entry earns its place by being resolvable end to end. *)
     ("List", [ "iter"; "map"; "concat_map"; "filter_map"; "for_all"; "exists" ]);
   ]
 
-(** Whether [expr] names [fn] of [container] — [List.map] and not any callee whose basename is
-    [map]. Every construct {!resolve_elements} follows is named this way, and anything it cannot name
-    refuses: a local [map] that ignores its argument otherwise had its input projected as though it
-    were the standard one (Codex P2, round 7 of PR #484). *)
 (* The roots a standard container may legitimately be reached under. Anything else in front of it is
    somebody's own module: `Other.List.iter` is not `List.iter`, and a custom iterator may call the
    callback with keys the list does not hold -- so accepting it on the penultimate component blessed
    the callback with a list it is never handed (Codex P2, round 8 of PR #484). *)
+
+(** Whether [expr] names [fn] of [container] — [List.map] and not any callee whose basename is
+    [map]. Every construct {!resolve_elements} follows is named this way, and anything it cannot
+    name refuses: a local [map] that ignores its argument otherwise had its input projected as
+    though it were the standard one (Codex P2, round 7 of PR #484). *)
 let standard_roots = [ "Stdlib"; "Base"; "Core" ]
 
 let names_standard ~container ~fn path =
   match List.rev path with
-  | last :: owner :: rest ->
+  | last :: owner :: rest -> (
       String.equal last fn && String.equal owner container
-      && (match rest with
-         | [] -> true
-         | [ root ] -> List.mem standard_roots root ~equal:String.equal
-         | _ -> false)
+      &&
+      match rest with
+      | [] -> true
+      | [ root ] -> List.mem standard_roots root ~equal:String.equal
+      | _ -> false)
   | _ -> false
 
 let is_qualified ~container ~fn expr =
@@ -467,20 +469,22 @@ let is_standard_value name expr =
       String.equal last name && List.mem standard_roots root ~equal:String.equal
   | _ -> false
 
-(** The names the resolver reads as meaning what they usually mean: the containers whose combinators
-    it knows, and the values it projects a table with.
-
-    They are matched by name, which is sound only while the file has not taken the name for something
-    else. That residual is the one direction a whitelist does not close by itself — [List.map] MATCHED
-    is [List.map] believed — and it is silent, so it is checked rather than assumed: a source that
-    rebinds any of these gets no resolution at all, and every reach needing one is refused. An [open]
-    is not a rebinding ([Base.List.map] is [List.map]); a [module List = …] is.
-
-    Which restores the property the rest of this section rests on: everything the resolver follows is
-    named, and everything it cannot name refuses. *)
 (* The approved ROOTS are trusted names as much as the containers are: `module Base = Shared` leaves
    `Base.List.iter` a whitelisted path whose meaning has changed underneath it (Codex P2, round 9 of
    PR #484). *)
+
+(** The names the resolver reads as meaning what they usually mean: the containers whose combinators
+    it knows, and the values it projects a table with.
+
+    They are matched by name, which is sound only while the file has not taken the name for
+    something else. That residual is the one direction a whitelist does not close by itself —
+    [List.map] MATCHED is [List.map] believed — and it is silent, so it is checked rather than
+    assumed: a source that rebinds any of these gets no resolution at all, and every reach needing
+    one is refused. An [open] is not a rebinding ([Base.List.map] is [List.map]); a
+    [module List = …] is.
+
+    Which restores the property the rest of this section rests on: everything the resolver follows
+    is named, and everything it cannot name refuses. *)
 let trusted_modules = [ "List" ] @ standard_roots
 
 let trusted_values = [ "fst"; "snd"; "@" ]
@@ -523,24 +527,24 @@ let is_iteration expr =
 
 (** The elements of the list [expr] denotes, where this scan can say.
 
-    [bindings] carries each top-level name with the offset its binding ENDS at, and [before] is where
-    the use sits: the binding a name resolves to is the latest one that precedes the use, which is
-    what OCaml's sequential shadowing says it is. Taking the file-wide last binding instead read
-    [let guarded = […] … let guarded = []] as the empty list, so a guard that really iterates keys
-    was answered with none and its declarations went unasked for — the silent direction (Codex P2,
-    round 5 of PR #484). *)
+    [bindings] carries each top-level name with the offset its binding ENDS at, and [before] is
+    where the use sits: the binding a name resolves to is the latest one that precedes the use,
+    which is what OCaml's sequential shadowing says it is. Taking the file-wide last binding instead
+    read [let guarded = […] … let guarded = []] as the empty list, so a guard that really iterates
+    keys was answered with none and its declarations went unasked for — the silent direction (Codex
+    P2, round 5 of PR #484). *)
 let rec resolve_elements ~bindings ~before expr =
   match list_literal expr with
   | Some elements -> Some elements
   | None -> (
       match expr.pexp_desc with
-      (* UNQUALIFIED only. A qualified path names a list in another compilation unit, which this scan
-         has not read: resolving `Shared.guarded` through a local `guarded` of the same basename
-         answers with the wrong keys AND suppresses the unresolved-reach failure that would have
-         reported it, which is the silent direction twice over (Codex P2, round 6 of PR #484). *)
+      (* UNQUALIFIED only. A qualified path names a list in another compilation unit, which this
+         scan has not read: resolving `Shared.guarded` through a local `guarded` of the same
+         basename answers with the wrong keys AND suppresses the unresolved-reach failure that would
+         have reported it, which is the silent direction twice over (Codex P2, round 6 of PR
+         #484). *)
       | Pexp_ident { txt = Lident name; _ } ->
-          List.filter bindings ~f:(fun (bound, at, _) ->
-              String.equal bound name && at <= before)
+          List.filter bindings ~f:(fun (bound, at, _) -> String.equal bound name && at <= before)
           |> List.max_elt ~compare:(fun (_, a, _) (_, b, _) -> Int.compare a b)
           (* The latest binding decides, INCLUDING a tombstone: a rebinding this scan could not
              resolve refuses the use rather than letting it reach past to an older list that no
@@ -637,12 +641,13 @@ let list_bindings_of structure =
 
     Every reach is resolved to a finite set of keys or REPORTED in [reader_unresolved]. A literal at
     the call names its key; a parameter names the keys of the list an iteration binds it from, which
-    is the guard shape; the reader handed straight to such an iteration names them too. Anything else
-    -- a list from another compilation unit, an element that is not a literal, an argument computed
-    at run time, the function handed on somewhere this scan cannot follow -- is a refusal and not an
-    approximation. The earlier fallback took the source's string literals as candidates, which is a
-    superset where the list is written in the file and says nothing where it is not: one incidental
-    literal naming a real key made an unresolved reach look answered (Codex P2, round 4 of PR #484).
+    is the guard shape; the reader handed straight to such an iteration names them too. Anything
+    else -- a list from another compilation unit, an element that is not a literal, an argument
+    computed at run time, the function handed on somewhere this scan cannot follow -- is a refusal
+    and not an approximation. The earlier fallback took the source's string literals as candidates,
+    which is a superset where the list is written in the file and says nothing where it is not: one
+    incidental literal naming a real key made an unresolved reach look answered (Codex P2, round 4
+    of PR #484).
 
     Parsed rather than grepped, for the reason the rest of this module is: this file's own doc
     comments name the function, and the checks built on it quote its name in their diagnostics. *)
@@ -688,8 +693,8 @@ let env_reader_reads_in_source content =
     | None -> (
         match expr.pexp_desc with
         | Pexp_apply (f, _) ->
-            Option.value_map (longident_of f) ~default:"an expression"
-              ~f:(fun path -> String.concat ~sep:"." path ^ " …")
+            Option.value_map (longident_of f) ~default:"an expression" ~f:(fun path ->
+                String.concat ~sep:"." path ^ " …")
         | _ -> "an expression")
   in
   let lambda_body expr =
@@ -883,9 +888,9 @@ let generated_init_calls_in_source content =
     source in the tree. *)
 let could_call_generated_init content = String.is_substring content ~substring:generated_module
 
-(** Which of [paths] the source actually REFERS TO, deduplicated and in the order they first
-    appear. Each path is spelled in components — [[ "Ir"; "Alloc_census" ]] — and matches wherever
-    those components appear CONSECUTIVELY inside a real identifier's module path:
+(** Which of [paths] the source actually REFERS TO, deduplicated and in the order they first appear.
+    Each path is spelled in components — [[ "Ir"; "Alloc_census" ]] — and matches wherever those
+    components appear CONSECUTIVELY inside a real identifier's module path:
     [Ir.Alloc_census.snapshot ()], [module AC = Ir.Alloc_census], a type [Ir.Alloc_census.t].
 
     Parsed rather than grepped, for the reason the rest of this module is parsed: a source that
@@ -928,7 +933,9 @@ let module_references_in_source content ~paths =
      demanding a test that has nothing to do with it. *)
   let qualifiers =
     List.filter_map paths ~f:(fun path ->
-        match List.rev path with _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier) | _ -> None)
+        match List.rev path with
+        | _ :: (_ :: _ as rev_qualifier) -> Some (List.rev rev_qualifier)
+        | _ -> None)
     |> List.dedup_and_sort ~compare:(List.compare String.compare)
   in
   let aliases = ref [] and opened = ref [] and shadowed = ref [] in
@@ -942,8 +949,7 @@ let module_references_in_source content ~paths =
      instrumentation (Codex P2, round 9). A binding is a WIDE claim -- it decides what a whole scope
      of unqualified names mean -- so it is the place to be exact. *)
   let names_qualifier qualifier components =
-    (List.equal String.equal components qualifier
-    && not (List.exists qualifier ~f:is_shadowed))
+    (List.equal String.equal components qualifier && not (List.exists qualifier ~f:is_shadowed))
     ||
     match components with
     | [ single ] ->
@@ -951,8 +957,8 @@ let module_references_in_source content ~paths =
             String.equal alias single && List.equal String.equal of_qualifier qualifier)
     | _ -> false
   in
-  (* A name bound to something that is not the qualifier stops denoting it for the rest of its
-     scope -- whether it was bound by a module binding or introduced as a functor's parameter. *)
+  (* A name bound to something that is not the qualifier stops denoting it for the rest of its scope
+     -- whether it was bound by a module binding or introduced as a functor's parameter. *)
   let shadow_name name =
     aliases := List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a name));
     if not (is_shadowed name) then shadowed := name :: !shadowed
@@ -1009,11 +1015,11 @@ let module_references_in_source content ~paths =
                      wrapper is reported as no member rather than credited. *)
                   ignore paths;
                   exports inner
-              | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
-                  (paths, name :: overridden)
+              | Pstr_module { pmb_name = { txt = Some name; _ }; _ } -> (paths, name :: overridden)
               | Pstr_recmodule bindings ->
                   ( paths,
-                    List.filter_map bindings ~f:(fun binding -> binding.pmb_name.txt) @ overridden )
+                    List.filter_map bindings ~f:(fun binding -> binding.pmb_name.txt) @ overridden
+                  )
               | _ -> (paths, overridden))
       | _ -> ([], [])
     in
@@ -1034,7 +1040,9 @@ let module_references_in_source content ~paths =
                     :: List.filter !aliases ~f:(fun (a, _, _) -> not (String.equal a alias))
               | None -> opened := (qualifier, overridden) :: !opened)));
     (* Whatever else it was bound to, the NAME now denotes that instead. *)
-    match alias with Some alias when not !names_any -> shadow_name alias | _ -> ()
+    match alias with
+    | Some alias when not !names_any -> shadow_name alias
+    | _ -> ()
   in
   let found = ref [] in
   let matches components path =
@@ -1052,17 +1060,17 @@ let module_references_in_source content ~paths =
        `Vendor.I.Alloc_census` resolves from `Vendor`, whatever `I` means here (Codex P2, round
        12). *)
     || List.exists !aliases ~f:(fun (alias, of_qualifier, overridden) ->
-           List.equal String.equal of_qualifier qualifier
-           && (not (List.mem overridden name ~equal:String.equal))
-           && starts_with components [ alias; name ])
+        List.equal String.equal of_qualifier qualifier
+        && (not (List.mem overridden name ~equal:String.equal))
+        && starts_with components [ alias; name ])
     (* Under an `open`, the reference begins with the module's own name -- and only while that name
        still means the opened module: `open Ir` followed by `module Alloc_census = Foo.Alloc_census`
        rebinds the leaf, and what follows is Foo's (Codex P2, round 11). *)
-    || (List.exists !opened ~f:(fun (of_qualifier, overridden) ->
-            List.equal String.equal of_qualifier qualifier
-            && not (List.mem overridden name ~equal:String.equal))
+    || List.exists !opened ~f:(fun (of_qualifier, overridden) ->
+           List.equal String.equal of_qualifier qualifier
+           && not (List.mem overridden name ~equal:String.equal))
        && starts_with components [ name ]
-       && not (is_shadowed name))
+       && not (is_shadowed name)
   in
   let walk =
     object (self)
@@ -1103,9 +1111,7 @@ let module_references_in_source content ~paths =
       method! expression expr =
         let scoped ~bind ~body visit =
           visit ();
-          let saved_aliases = !aliases
-          and saved_opened = !opened
-          and saved_shadowed = !shadowed in
+          let saved_aliases = !aliases and saved_opened = !opened and saved_shadowed = !shadowed in
           bind ();
           self#expression body;
           aliases := saved_aliases;
@@ -1183,8 +1189,11 @@ let module_references_in_source content ~paths =
                structure's `module I = Ir` does; only a declaration with no manifest is an opaque
                module that merely takes the name (Codex P2, round 17). *)
             | Psig_module
-                { pmd_name = { txt = Some name; _ }; pmd_type = { pmty_desc = Pmty_alias { txt; _ }; _ }; _ }
-              ->
+                {
+                  pmd_name = { txt = Some name; _ };
+                  pmd_type = { pmty_desc = Pmty_alias { txt; _ }; _ };
+                  _;
+                } ->
                 Option.iter (flatten_module_path txt) ~f:(bind_path (Some name))
             | Psig_module { pmd_name = { txt = Some name; _ }; _ }
             | Psig_modsubst { pms_name = { txt = name; _ }; _ } ->
@@ -1491,9 +1500,9 @@ let settings_predicate_keys path =
 
 (** The other spelling of a configuration read: a field of the startup-resolved [Utils.settings]
     record, whose field names {e are} the config keys, and the predicates over it that fold in the
-    [log_level > 1] threshold ({!settings_predicates}). A census built from [arg_name] literals alone
-    would miss every one of these — [large_models] is read as [Utils.settings.large_models] in the
-    codegen, so a future misclassification of it could pass unchallenged (Codex P2 on PR #337).
+    [log_level > 1] threshold ({!settings_predicates}). A census built from [arg_name] literals
+    alone would miss every one of these — [large_models] is read as [Utils.settings.large_models] in
+    the codegen, so a future misclassification of it could pass unchallenged (Codex P2 on PR #337).
 
     A field {e read} and a predicate {e call}: naming either in prose is not a use of it. *)
 let settings_keys_in_source content =

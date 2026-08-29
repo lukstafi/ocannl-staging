@@ -555,8 +555,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
       (* The zeroed gradients are embedded: a routine built out of this code alone (as
          {!Train.zero_params_grads} does) must be able to allocate them rather than require them of
          a prior context. *)
-      Asgns.sequence
-      @@ zeros
+      Asgns.sequence @@ zeros
       @ [ { Asgns.asgns = fetch_zeros g shape; embedded_nodes = Set.singleton (module Tn) g } ]
     in
     let embedded_nodes = ref @@ Set.singleton (module Tn) g in

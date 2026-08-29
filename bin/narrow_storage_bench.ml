@@ -59,8 +59,8 @@ module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Tn = Ir.Tnode
 
-(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until
-   the process exits, which on a slow leg reads as a hang. *)
+(* Flushed per line ([Bench_out]): see gh-ocannl-829 -- a buffered table is invisible until the
+   process exits, which on a slow leg reads as a hang. *)
 let p fmt = Bench_out.p fmt
 
 (* The innermost loop of the first top-level nest. *)

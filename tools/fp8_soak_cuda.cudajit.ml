@@ -18,7 +18,6 @@ module Cu = Cuda
 (* Update this whenever you compile this file on a box that has cudajit -- the run header prints it,
    and it is what tells the next editor whether they are editing blind (gh-ocannl-758). *)
 let last_compiled = "on rog-nv-wsl (RTX 5070 Ti Laptop, CUDA 13.3), 2026-08-27, staging PR #490"
-
 let built = true
 
 type bytes_buf =
@@ -98,7 +97,6 @@ type state = {
    default is [`Device], is documented on [Fp8_soak.ARM.set_arch_policy]; here they are two option
    lists. Must be set before the first sweep: the module is compiled once, on first use. *)
 let arch_policy : [ `Device | `Backend ] ref = ref `Device
-
 let set_arch_policy p = arch_policy := p
 let state = ref None
 

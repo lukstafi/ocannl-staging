@@ -23,10 +23,10 @@ open Base
       [accum_prec]/seeding instead.
     - [Fp16_wide] (config [false]): f16 reduction accumulators reside in f32 on every backend,
       narrowing once per nest — the strict cross-backend-uniform semantics. Backends whose
-      tensor-unit f16 legs cannot accumulate f32 ({!Backend_intf.mma_capability.mma_f16_wide_acc}
-      is false: Metal's [simdgroup_matrix] is uniform-precision only) have their uniform-f16 mma
-      seeds withheld, per the gh-ocannl-545 seeding-vs-emission discipline — widening only the
-      serial legs would restore the schedule-dependent width gh-ocannl-663 removed.
+      tensor-unit f16 legs cannot accumulate f32 ({!Backend_intf.mma_capability.mma_f16_wide_acc} is
+      false: Metal's [simdgroup_matrix] is uniform-precision only) have their uniform-f16 mma seeds
+      withheld, per the gh-ocannl-545 seeding-vs-emission discipline — widening only the serial legs
+      would restore the schedule-dependent width gh-ocannl-663 removed.
     - [Fp16_narrow] (config [true]): compute fp16 in fp16 on CPU targets that have native 16-bit
       arithmetic (ARMv8.2-FP16, AVX512-FP16) — gh-ocannl-516's opt-in, trading fp16's 10-bit
       mantissa and 65504 range for a doubled lane count. On targets that merely promote to float it
@@ -70,12 +70,12 @@ type t = {
           and fp8 — which has an accumulator format on no backend — takes f32 residency everywhere;
           bf16 on HIP/Metal (whose tiles accumulate in storage-width fragments) keeps storage
           residency so serial and tensorized legs stay width-uniform per backend. f16 residency is
-          {!field-fp16_arithmetic}'s question, not this knob's (gh-ocannl-680). This knob
-          reaches the GPU accumulators only where per-step narrowing can be restored
-          SCHEDULE-UNIFORMLY: fp8 on CUDA and HIP (nothing tensorizes fp8 destinations). CUDA's bf16
-          residency is structural — the mma accumulate is hardware-f32, so narrowing only the serial
-          legs would resurrect the schedule-dependent width — and so is Metal's fp8 one: MSL has no
-          fp8 type, every fp8 computation there runs in f32 ([Metal_backend]'s [compute_prec]). *)
+          {!field-fp16_arithmetic}'s question, not this knob's (gh-ocannl-680). This knob reaches
+          the GPU accumulators only where per-step narrowing can be restored SCHEDULE-UNIFORMLY: fp8
+          on CUDA and HIP (nothing tensorizes fp8 destinations). CUDA's bf16 residency is structural
+          — the mma accumulate is hardware-f32, so narrowing only the serial legs would resurrect
+          the schedule-dependent width — and so is Metal's fp8 one: MSL has no fp8 type, every fp8
+          computation there runs in f32 ([Metal_backend]'s [compute_prec]). *)
   fp16_arithmetic : fp16_mode;
       (** How f16 computes and accumulates, per {!fp16_mode} (gh-ocannl-680). The narrow request is
           fp16-specific because fp16 is the one narrow format a CPU can execute natively — bf16 has
@@ -152,9 +152,8 @@ let cpu_compute_prec ~native_fp16_arithmetic (prec : Ops.prec) : Ops.prec =
     holds even where [narrow_compute_f32 = false] leaves the f16 {e compute} at storage width
     (gh-ocannl-680). Like {!cpu_compute_prec} this is the single source of truth shared by
     [Cc_backend.accum_prec] (emission) and autotune's sketch seeding: where the two diverge, a
-    C-tile rendering cannot honor the residency and both the emission
-    ([C_syntax.try_register_tile]) and the seeding pre-filter must decline (Codex P1 round 1 on
-    staging PR #477). *)
+    C-tile rendering cannot honor the residency and both the emission ([C_syntax.try_register_tile])
+    and the seeding pre-filter must decline (Codex P1 round 1 on staging PR #477). *)
 let cpu_accum_prec ~native_fp16_arithmetic (prec : Ops.prec) : Ops.prec =
   match prec with
   | Ops.Half_prec _ when fp16_accum_wide () -> Ops.single

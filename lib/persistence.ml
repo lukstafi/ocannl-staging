@@ -379,8 +379,8 @@ let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
      only over ITS OWN staging files: a checkpoint sits among the user's other files, where another
      process's publication is none of this call's business. *)
   Utils.Atomic_file.cleanup_stale_for path;
-  (* Stream into a staging sibling, then rename over [path]. [Atomic_file] owns the whole dance:
-     the staging name is unique per writer, so two processes checkpointing the same path no longer
+  (* Stream into a staging sibling, then rename over [path]. [Atomic_file] owns the whole dance: the
+     staging name is unique per writer, so two processes checkpointing the same path no longer
      stream into one file, and the staging artifact is removed on every failing path — including a
      rename a filesystem refuses because this process still has the target mapped. *)
   Utils.Atomic_file.with_channel ~path () ~f:(fun oc ->

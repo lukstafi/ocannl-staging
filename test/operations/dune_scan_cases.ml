@@ -1321,8 +1321,8 @@ let artifact_subdir_cases =
       [ "executable probe: undeclared (probe)" ] );
     (* A rule's path is relative to where the RULE lives, so a same-named executable in a sibling
        subdirectory is a different program. Comparing the written path against an unqualified
-       `probe.exe` made `b`'s rule a runner of `a`'s program, which let an unrun executable inherit a
-       declaration made elsewhere -- the shape the basename rule was already rejected for, one
+       `probe.exe` made `b`'s rule a runner of `a`'s program, which let an unrun executable inherit
+       a declaration made elsewhere -- the shape the basename rule was already rejected for, one
        directory over (Codex P2, round 3). *)
     ( "a rule in a sibling subdirectory is not this program's runner",
       {dune|(subdir a (executable (name probe) (modules probe)))
@@ -1364,8 +1364,8 @@ let artifact_default_modules_cases =
       [ "test t: undeclared (t)" ] );
     (* Grouping is semantics: `\\` is a difference between what stands to its left and right INSIDE
        the parentheses that hold it, so a nested difference does not reach the terms beside it.
-       Flattening the field subtracted `guard` as well, which unclaims its source silently (Codex P2,
-       round 6). *)
+       Flattening the field subtracted `guard` as well, which unclaims its source silently (Codex
+       P2, round 6). *)
     ( "a nested difference does not subtract the terms beside it",
       {dune|(test (name t) (modules (:standard \ helper) guard) (deps ocannl_config))|dune},
       [ "t"; "helper"; "guard" ],

@@ -172,7 +172,9 @@ let () =
   List.iter glob_cases ~f:(fun (name, pattern, candidate, expected) ->
       let found = Scan.glob_matches pattern candidate in
       if Bool.equal found expected then printf "ok: glob -- %s\n" name
-      else fail "glob -- %s: `%s` against %s expected %b, found %b" name pattern candidate expected found);
+      else
+        fail "glob -- %s: `%s` against %s expected %b, found %b" name pattern candidate expected
+          found);
   List.iter default_cases ~f:(fun (name, source, expected) ->
       let found = (Scan.read source).Scan.builtin_defaults in
       if List.equal String.equal found expected then printf "ok: built-in default -- %s\n" name

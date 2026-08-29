@@ -95,11 +95,11 @@ type comp = {
 let to_comp asgns = { asgns; embedded_nodes = Set.empty (module Tnode) }
 let empty_comp = to_comp Noop
 
-(** The buffers an [accum_rhs] mentions, in argument order. For [Rev_sides] these are the
-    WRITTEN-TO buffers -- the constructor reverses the assignment's roles -- so a caller that cares
-    about the direction still matches [Rev_sides], but only for the direction. Destructuring the
-    arities lives here and nowhere else: before, four traversals each repeated it, so a new
-    [accum_rhs] constructor meant four silent omissions waiting to happen. *)
+(** The buffers an [accum_rhs] mentions, in argument order. For [Rev_sides] these are the WRITTEN-TO
+    buffers -- the constructor reverses the assignment's roles -- so a caller that cares about the
+    direction still matches [Rev_sides], but only for the direction. Destructuring the arities lives
+    here and nowhere else: before, four traversals each repeated it, so a new [accum_rhs]
+    constructor meant four silent omissions waiting to happen. *)
 let buffers_of_accum_rhs : accum_rhs -> buffer list = function
   | Ternop { rhs1; rhs2; rhs3; _ } -> [ rhs1; rhs2; rhs3 ]
   | Binop { rhs1; rhs2; _ } -> [ rhs1; rhs2 ]
@@ -107,8 +107,8 @@ let buffers_of_accum_rhs : accum_rhs -> buffer list = function
   | Block { rhses; _ } -> Array.to_list rhses
   | Rev_sides { lhses; _ } -> Array.to_list lhses
 
-(** Whether the assignment's roles are reversed: [Rev_sides]' buffers are written and its
-    enclosing [Accum_op]'s [lhs] is read. *)
+(** Whether the assignment's roles are reversed: [Rev_sides]' buffers are written and its enclosing
+    [Accum_op]'s [lhs] is read. *)
 let is_rev_sides = function Rev_sides _ -> true | _ -> false
 
 (** Folds [f] over the LEAF statements ([Accum_op], [Set_vec_unop], [Fetch]) in execution order,
@@ -146,11 +146,12 @@ let%debug3_sexp context_nodes ~(plc : Tn.Placements.t) (asgns : t) : Tn.t_set =
   fold_leaves asgns ~init:empty ~f:(fun acc leaf ->
       match leaf with
       | Accum_op { lhs; rhs; _ } ->
-          Set.union_list (module Tn)
+          Set.union_list
+            (module Tn)
             (acc :: one lhs :: List.map (buffers_of_accum_rhs rhs) ~f:of_node)
       | Set_vec_unop { lhs; rhs; _ } -> acc + one lhs + of_node rhs
-      (* A slice-alias view's parent must be in context too (it backs the view); the alias itself
-         is dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
+      (* A slice-alias view's parent must be in context too (it backs the view); the alias itself is
+         dropped by [one] via [is_in_context_force] (gh-ocannl-293 293a). *)
       | Fetch { array; fetch_op = Slice { sliced; _ }; _ } -> acc + one array + one sliced
       | Fetch { array; _ } -> acc + one array
       | Noop | Seq _ | Block_comment _ -> acc)
@@ -490,8 +491,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     let subst_index = function
       | (Indexing.Fixed_idx _ | Indexing.Sub_axis) as idx -> idx
       | Indexing.Iterator s
-        when Set.mem all_prod_iters s
-             && not (Array.mem ~equal:Indexing.equal_symbol block_iters s) ->
+        when Set.mem all_prod_iters s && not (Array.mem ~equal:Indexing.equal_symbol block_iters s)
+        ->
           raise Empty_block
       | Indexing.Iterator s as idx -> Option.value ~default:idx (Map.find subst_map s)
       | Indexing.Affine { symbols; offset } ->
@@ -513,8 +514,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
           match on_concat with
           | `Reject who -> raise @@ Utils.User_error ("Concat indexing not supported in " ^ who)
           | `Resolve role -> (
-              (* Find the active segment (the one this block descended into) and resolve to its
-                 loop symbol, shifted by the segment's offset within the concatenated axis. *)
+              (* Find the active segment (the one this block descended into) and resolve to its loop
+                 symbol, shifted by the segment's offset within the concatenated axis. *)
               let active =
                 List.find_map syms ~f:(fun s ->
                     if Array.mem ~equal:Indexing.equal_symbol block_iters s then
@@ -583,9 +584,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
               (* One fresh symbol per SEGMENT, not per component: a concatenation component's
                  segments become sibling loops with DIFFERENT bounds, and a shared binder makes
                  every flat symbol-keyed scanner misread them -- [def_loop_ranges] keeps only the
-                 last segment's width, [affine_accesses] collects two ranges for one symbol, and
-                 the canonical render reports the second binder as shadowed, declining the routine
-                 for both digest caches (gh-ocannl-765). *)
+                 last segment's width, [affine_accesses] collects two ranges for one symbol, and the
+                 canonical render reports the second binder as shadowed, declining the routine for
+                 both digest caches (gh-ocannl-765). *)
               let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
@@ -815,20 +816,18 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
            four ways it differs from [with_product_loops] are decisions, not drift:
 
            1. The nest is SPLIT, not uniform: the counter axis's last iteration is peeled into its
-              own loop so the tail store writes only [rem] lanes. A shared walker would have to
-              take a per-component split policy to express that, which is the whole of what is
-              specific here.
+           own loop so the tail store writes only [rem] lanes. A shared walker would have to take a
+           per-component split policy to express that, which is the whole of what is specific here.
            2. [Concat] is REJECTED, not resolved ([`Reject]): [Set_from_vec] stores [length] lanes
-              at flat consecutive offsets from one base index, which a segment offset would make
-              straddle two segments. The non-singleton component is refused by [for_loop] below,
-              and this refuses a [Concat] index arriving by any other route.
-           3. [Empty_block] cannot fire here: every component is a singleton (2) and every level is
-              entered, so [block_iters] covers all product iterators. Going through the shared
-              policy anyway means an iterator that somehow escaped that would fail the lowering
-              rather than survive as a silently unsubstituted symbol.
-           4. No [extent_guard] and no gh-504 clamp: symbolic extents and padded-window clamping
-              reach the accumulation walkers only. Wiring either in here would be a behavior
-              change, not a dedup, so this refactor leaves them out. *)
+           at flat consecutive offsets from one base index, which a segment offset would make
+           straddle two segments. The non-singleton component is refused by [for_loop] below, and
+           this refuses a [Concat] index arriving by any other route. 3. [Empty_block] cannot fire
+           here: every component is a singleton (2) and every level is entered, so [block_iters]
+           covers all product iterators. Going through the shared policy anyway means an iterator
+           that somehow escaped that would fail the lowering rather than survive as a silently
+           unsubstituted symbol. 4. No [extent_guard] and no gh-504 clamp: symbolic extents and
+           padded-window clamping reach the accumulation walkers only. Wiring either in here would
+           be a behavior change, not a dedup, so this refactor leaves them out. *)
         let all_prod_iters =
           Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
         in
@@ -887,8 +886,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                    counter axis: every other product axis must be degenerate. *)
                 let others_product =
                   Array.foldi projections.components ~init:1 ~f:(fun j acc comp ->
-                      if j = i then acc
-                      else List.fold comp ~init:acc ~f:(fun acc (d, _) -> acc * d))
+                      if j = i then acc else List.fold comp ~init:acc ~f:(fun acc (d, _) -> acc * d))
                 in
                 if others_product <> 1 then
                   raise
@@ -1054,16 +1052,16 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
   in
   let mark_aliases (c : t) : unit =
     iter_leaves c ~f:(function
-    | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
-        if slice_alias_eligible ~array ~sliced then (
-          (* The view's write semantics (a write through [array] is a write to [sliced]'s sub-range,
-             potentially observed by a later routine) require the parent to own a persistent buffer
-             in EVERY lineage that lowers this alias. Declare the intent globally, like the alias
-             mark itself -- monotone and idempotent; mirrors [collect_nodes_guess_output]'s
-             materialization of slice parents. Provenance 27. *)
-          Tn.update_memory_mode sliced On_device 27;
-          Tn.set_alias_of array ~parent:sliced ~batch_idx)
-    | Fetch _ | Accum_op _ | Set_vec_unop _ | Noop | Seq _ | Block_comment _ -> ())
+      | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
+          if slice_alias_eligible ~array ~sliced then (
+            (* The view's write semantics (a write through [array] is a write to [sliced]'s
+               sub-range, potentially observed by a later routine) require the parent to own a
+               persistent buffer in EVERY lineage that lowers this alias. Declare the intent
+               globally, like the alias mark itself -- monotone and idempotent; mirrors
+               [collect_nodes_guess_output]'s materialization of slice parents. Provenance 27. *)
+            Tn.update_memory_mode sliced On_device 27;
+            Tn.set_alias_of array ~parent:sliced ~batch_idx)
+      | Fetch _ | Accum_op _ | Set_vec_unop _ | Noop | Seq _ | Block_comment _ -> ())
   in
   mark_aliases code;
   loop code

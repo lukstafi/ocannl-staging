@@ -1,8 +1,8 @@
 (** Interfaces built to break the emitter derivation, rather than whatever the compiler libraries
     happen to export today (gh-ocannl-748).
 
-    Every value here is a shape {!Emitter_frontier} has to answer for, and half of them are the
-    NEAR MISSES: a document combinator, a sink that takes documents, a function of the same shape
+    Every value here is a shape {!Emitter_frontier} has to answer for, and half of them are the NEAR
+    MISSES: a document combinator, a sink that takes documents, a function of the same shape
     returning something else. Those decide the rule as much as the renderers do -- the frontier is
     matched by name behind any qualifier, so a rule that admits [combines_documents] admits every
     test calling something of that name.
@@ -45,6 +45,7 @@ val renders_through_an_alias : ir -> rendered
 val renders_through_a_chain : ir -> rendered_again
 val writes_into_an_aliased_buffer : buf:destination -> ir -> unit
 val describes_through_an_alias : ir -> described
+
 val writes_into_an_unlabelled_buffer : ir -> Buffer.t -> unit
 (** A destination with no label, which a call site can only address by position. The position counts
     the arguments that carry no label, so an optional one the caller omits does not move it. *)

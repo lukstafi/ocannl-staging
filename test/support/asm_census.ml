@@ -253,8 +253,8 @@ let aarch64_vector_operand rest =
   in
   scan 0
 
-(* Apple's arm64 assembler writes a NEON instruction's ARRANGEMENT on the mnemonic ([fmla.4s v0,
-   v1, v2]) where GAS writes it on the registers ([fmla v0.4s, v1.4s, v2.4s]), so on that dialect
+(* Apple's arm64 assembler writes a NEON instruction's ARRANGEMENT on the mnemonic ([fmla.4s v0, v1,
+   v2]) where GAS writes it on the registers ([fmla v0.4s, v1.4s, v2.4s]), so on that dialect
    {!aarch64_vector_operand} sees three plain [v] names and reports nothing. That silences the
    COUNTERS -- not the selection, and not the loop edges, which is why it survived the three earlier
    Mach-O rounds: the loop was found, its span and instruction total were right, and only the
@@ -450,6 +450,11 @@ let backward_edges lines =
         | None -> acc)
     | _ -> acc)
 
+type parsed = {
+  lines : line option array;
+  edges : (string * int * int) list;  (** (label, body start, backward branch) *)
+  files : Set.M(Int).t;  (** the DWARF file numbers naming the censused source *)
+}
 (** One assembly file, classified once.
 
     Everything below the line classification -- the loop edges, and the DWARF file numbers standing
@@ -458,11 +463,6 @@ let backward_edges lines =
     re-scan every one of a 40000-line listing's lines once per anchor, which was the larger half of
     [test/operations/cc_march_census]'s wall clock once gh-ocannl-752 raised the loop count. Hence
     the split: {!parse} once per compiled file, {!census_in} once per anchor. *)
-type parsed = {
-  lines : line option array;
-  edges : (string * int * int) list;  (** (label, body start, backward branch) *)
-  files : Set.M(Int).t;  (** the DWARF file numbers naming the censused source *)
-}
 
 let parse ~asm ~source_basename =
   let lines = classify_asm asm in
@@ -473,10 +473,10 @@ let parse ~asm ~source_basename =
   }
 
 (** [edge_count p] is how many loop edges the branch vocabulary recognized in [p] at all, which is
-    what separates the two readings of a {!census_in} answering [None]: this construct was hoisted or
-    folded away (some other loop was still found), or {!is_branch} does not know this ISA's spelling
-    and no loop in the file was found. The second is a defect in this module and reports every anchor
-    missing at once, so it is worth a claim of its own. *)
+    what separates the two readings of a {!census_in} answering [None]: this construct was hoisted
+    or folded away (some other loop was still found), or {!is_branch} does not know this ISA's
+    spelling and no loop in the file was found. The second is a defect in this module and reports
+    every anchor missing at once, so it is worth a claim of its own. *)
 let edge_count p = List.length p.edges
 
 let loop_edges ~asm = List.length (backward_edges (classify_asm asm))

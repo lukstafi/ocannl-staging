@@ -42,13 +42,12 @@ let cases =
   ]
 
 let () =
-  (* Both lists on stderr for every case, per the pinning guidance: a bare [false] on a list-equality
-     claim says nothing about WHICH element moved, and the option vector is exactly the state a
-     numeric mismatch has to be read against. *)
+  (* Both lists on stderr for every case, per the pinning guidance: a bare [false] on a
+     list-equality claim says nothing about WHICH element moved, and the option vector is exactly
+     the state a numeric mismatch has to be read against. *)
   List.iter cases ~f:(fun (label, arch_options, with_device_debug, want) ->
       let got = build ~arch_options ~with_device_debug in
-      Stdio.eprintf "%s:\n  got:  %s\n  want: %s\n" label
-        (Ir.Compiler_options.render got)
+      Stdio.eprintf "%s:\n  got:  %s\n  want: %s\n" label (Ir.Compiler_options.render got)
         (Ir.Compiler_options.render want));
   Verdict.p_all "every nvrtc variant pins the discovered slots, fast math and debug in order" cases
     ~f:(fun (_label, arch_options, with_device_debug, want) ->

@@ -101,9 +101,9 @@ let exempt_declarations =
       "the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than \
        read, so both write to the stream the golden holds" );
     ( "test/operations/dune:OCANNL_DEMO_KEY",
-      "a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot be \
-       declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one drawing \
-       the unknown-key warning onto the stream those goldens capture" );
+      "a synthetic key `config_var_spellings` looks up by name: no key OCANNL reads, so it cannot \
+       be declared for its value -- but the run depends on it (gh-ocannl-749), an ambient one \
+       drawing the unknown-key warning onto the stream those goldens capture" );
     ( "test/operations/dune:OCANNL_DASHED_ONLY_KEY",
       "the same fixture's second synthetic key, tracked for the same reason" );
     ( "test/operations/dune:ocannl-log_level",
@@ -226,15 +226,15 @@ let aliases_reached_from stanzas alias =
 (* The suite a per-test alias belongs to, by the naming convention: `<suite>-<name>` is one test and
    `<suite>` the suite, an `(alias (name <suite>) (deps …))` stanza listing its members -- so a
    member the list omits is one `dune build @<suite>` skips, silently. Three suites are built this
-   way. `slow` is the one gh-ocannl-667 introduced. `train` carries the training integration runs
-   -- toy problems by intent, but serialized on the training lock, so on their own entry point (a
-   macOS CI shard, a daily-sweep unit) rather than in `runtest` where they set every full
-   run's wall-clock tail. `runtest` is the same arrangement for the golden-diff rules (gh-ocannl-726):
-   dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries only,
-   so an `(executable)` plus a `(rule)` that diffs has to be given one -- and it has to be given it
-   ALONE, since a rule attached to two aliases makes building either build both, which would put
-   the whole directory behind every per-test alias. Aggregating the members here is then the only
-   thing that keeps them in `dune runtest`. *)
+   way. `slow` is the one gh-ocannl-667 introduced. `train` carries the training integration runs --
+   toy problems by intent, but serialized on the training lock, so on their own entry point (a macOS
+   CI shard, a daily-sweep unit) rather than in `runtest` where they set every full run's wall-clock
+   tail. `runtest` is the same arrangement for the golden-diff rules (gh-ocannl-726): dune generates
+   `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries only, so an
+   `(executable)` plus a `(rule)` that diffs has to be given one -- and it has to be given it ALONE,
+   since a rule attached to two aliases makes building either build both, which would put the whole
+   directory behind every per-test alias. Aggregating the members here is then the only thing that
+   keeps them in `dune runtest`. *)
 let suites = [ "slow"; "train"; "runtest" ]
 let member_of suite alias = String.is_prefix alias ~prefix:(suite ^ "-")
 
@@ -319,17 +319,14 @@ let metal_family =
    the implementation reaches these -- `open Ocannl.Operation.DSL_modules` binds it -- and a test
    that aliases the path (`module AC = Ir.Alloc_census`) names it in the binding, which is what the
    derivation sees. *)
-let lifecycle_modules =
-  [ [ "Ir"; "Resource_fault_injection" ]; [ "Ir"; "Alloc_census" ] ]
-
+let lifecycle_modules = [ [ "Ir"; "Resource_fault_injection" ]; [ "Ir"; "Alloc_census" ] ]
 let lifecycle_module_names = List.map lifecycle_modules ~f:(String.concat ~sep:".")
 
 (* What a source has to SPELL for any reference to reach the instrumentation: the module's own name.
    The qualifier is not part of that -- `open Ir` then `Alloc_census.snapshot` writes a real
    reference and no `Ir.Alloc_census` anywhere (Codex P2, round 6) -- so the textual filter narrows
    on the last component alone and the parse decides. *)
-let lifecycle_module_leaves =
-  List.filter_map lifecycle_modules ~f:(fun path -> List.last path)
+let lifecycle_module_leaves = List.filter_map lifecycle_modules ~f:(fun path -> List.last path)
 
 let lifecycle_family =
   {
@@ -462,8 +459,7 @@ let runner_aliases file_stanzas ~identities:(file, public) =
 let family_units file_stanzas ~subdir stanza =
   let head = Option.value (Scan.head stanza) ~default:"<not a stanza>" in
   let focused aliases =
-    List.filter aliases ~f:(fun (_, alias) ->
-        not (List.mem suites alias ~equal:String.equal))
+    List.filter aliases ~f:(fun (_, alias) -> not (List.mem suites alias ~equal:String.equal))
   in
   let unit ?name aliases =
     {
@@ -476,9 +472,9 @@ let family_units file_stanzas ~subdir stanza =
   in
   let generated name = unit ~name [ (subdir, "runtest-" ^ name) ] in
   match Scan.head stanza with
-  (* dune >= 3.20 generates `runtest-<name>` per `(test)`/`(tests)` name AND per inline-test
-     library -- the namespace `generated_runtest_names` already knows. A Metal-marked inline-test
-     library reaches its family through exactly that alias (Codex P2, round 2). *)
+  (* dune >= 3.20 generates `runtest-<name>` per `(test)`/`(tests)` name AND per inline-test library
+     -- the namespace `generated_runtest_names` already knows. A Metal-marked inline-test library
+     reaches its family through exactly that alias (Codex P2, round 2). *)
   | Some ("test" | "tests") -> List.map (Scan.names_of stanza) ~f:generated
   | Some "library" when Option.is_some (Scan.field stanza "inline_tests") ->
       List.map (Scan.names_of stanza) ~f:generated
@@ -654,10 +650,11 @@ let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 (* The module that DEFINES the environment reader, and so names every configuration key there is
    while passing them to it. Every other library module reaching the reader is reported
    (gh-ocannl-749, Codex P2 round 6): a guard in a plain library is run by whatever links it, which
-   puts the declaration on every such stanza -- a relationship nothing follows, and the same argument
-   `Artifact_in_library` makes for the initializer. Named rather than derived, being one file with
-   one reason -- and by its repository PATH, since a basename match would extend the exemption to any
-   `utils.ml` a test directory adds, silently skipping its reads (Codex P2, round 8). *)
+   puts the declaration on every such stanza -- a relationship nothing follows, and the same
+   argument `Artifact_in_library` makes for the initializer. Named rather than derived, being one
+   file with one reason -- and by its repository PATH, since a basename match would extend the
+   exemption to any `utils.ml` a test directory adds, silently skipping its reads (Codex P2, round
+   8). *)
 let env_reader_home = "arrayjit/lib/utils.ml"
 
 let main () =
@@ -1115,9 +1112,9 @@ let main () =
                     every stanza that links the library, where nothing follows it"
                    where what Scan.artifact_env_var));
       artifact_by_file := (dune_file, List.map subjects ~f:snd) :: !artifact_by_file;
-      (* The stanzas as dune applies them, each with the `(subdir …)` it sits under. `marked_stanzas`
-         makes the same descent and carries the same pairing, so the two readings of one file agree
-         about which stanzas it holds and where. *)
+      (* The stanzas as dune applies them, each with the `(subdir …)` it sits under.
+         `marked_stanzas` makes the same descent and carries the same pairing, so the two readings
+         of one file agree about which stanzas it holds and where. *)
       let file_stanzas = List.map marked ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp)) in
       (* Dune resolves both a default module set and an ALIAS within one directory, so the stanzas
          that answer for either are that subdirectory's (Codex P2, round 1; P1, round 4). *)
@@ -1136,8 +1133,7 @@ let main () =
       let in_directory subdir alias = subdir ^ "\t" ^ alias in
       let gated_here =
         List.concat_map subdirs ~f:(fun subdir ->
-            Set.to_list (gated_aliases (stanzas_in subdir))
-            |> List.map ~f:(in_directory subdir))
+            Set.to_list (gated_aliases (stanzas_in subdir)) |> List.map ~f:(in_directory subdir))
         |> Set.of_list (module String)
       in
       let entry_points =
@@ -1170,8 +1166,7 @@ let main () =
             if String.is_empty subdir then dune_file
             else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir
           in
-          if Set.mem gated_here (in_directory subdir alias) then
-            gated := (where, alias) :: !gated
+          if Set.mem gated_here (in_directory subdir alias) then gated := (where, alias) :: !gated
             (* The exemption is a statement about ONE directory -- `benchmarks/dune` runs python3
                over the orchestrator's own tests and links no OCANNL executable -- and a `(subdir
                …)` group of that file is a different directory, whose stanzas the recorded reason
@@ -1299,12 +1294,12 @@ let main () =
         |> List.map ~f:(fun module_name ->
             String.lowercase (Scan.in_subdir here (module_name ^ ".ml")))
       in
-      (* The Metal derivation reads the MARKED stanza, whatever kind it is. For an `(executable)` the
-         marker's required placement is the rule that runs it (gh-ocannl-659), so a Metal test in
-         that form carries its marker on an unnamed `(rule …)`: asking the question of the executable
-         stanza instead would find no marker and let the family omit the test while this scan passed
-         (Codex P2, round 1). Whatever stanza carries the marker is the member -- every unit of it,
-         since a marker is a statement about the stanza. *)
+      (* The Metal derivation reads the MARKED stanza, whatever kind it is. For an `(executable)`
+         the marker's required placement is the rule that runs it (gh-ocannl-659), so a Metal test
+         in that form carries its marker on an unnamed `(rule …)`: asking the question of the
+         executable stanza instead would find no marker and let the family omit the test while this
+         scan passed (Codex P2, round 1). Whatever stanza carries the marker is the member -- every
+         unit of it, since a marker is a statement about the stanza. *)
       let metal_stanzas =
         List.filter marked ~f:(fun stanza ->
             match Scan.backend_rule_of stanza with
@@ -1332,12 +1327,12 @@ let main () =
         [ (metal_family, metal_members); (lifecycle_family, lifecycle_members) ]
         ~f:(fun (family, members) ->
           (* Reachability PER DIRECTORY, from the stanzas dune applies there: a `(subdir child …)`
-             group may carry its own `(alias (name <family>) …)`, and the root recursive
-             `@<family>` build reaches it, so a member there is correctly wired (Codex P2, round
-             2). Which directory is asked comes from the ALIAS, not from the member: an executable
-             in a subdirectory run by a top-level rule is aggregated by a top-level family stanza
-             (Codex P2, round 3). What is never right is reaching an alias from a directory that
-             does not define it, which is what asking the file as a whole would have allowed. *)
+             group may carry its own `(alias (name <family>) …)`, and the root recursive `@<family>`
+             build reaches it, so a member there is correctly wired (Codex P2, round 2). Which
+             directory is asked comes from the ALIAS, not from the member: an executable in a
+             subdirectory run by a top-level rule is aggregated by a top-level family stanza (Codex
+             P2, round 3). What is never right is reaching an alias from a directory that does not
+             define it, which is what asking the file as a whole would have allowed. *)
           let reaches =
             Hashtbl.of_alist_exn
               (module String)
@@ -1373,8 +1368,7 @@ let main () =
                      | aliases ->
                          String.concat ~sep:" or "
                            (List.map aliases ~f:(fun (subdir, alias) ->
-                                if String.is_empty subdir then
-                                  Printf.sprintf "`(alias %s)`" alias
+                                if String.is_empty subdir then Printf.sprintf "`(alias %s)`" alias
                                 else Printf.sprintf "`(alias %s)` in `(subdir %s …)`" alias subdir)))
                      family.family_alias)));
       (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
@@ -1386,47 +1380,49 @@ let main () =
          group sees neither the group's `(test)` names nor the rules that could collide with them
          (Codex P2, round 10). *)
       List.iter subdirs ~f:(fun subdir ->
-      let here = stanzas_in subdir in
-      let generated = generated_runtest_names here in
-      let gate_names = gate_generated_names here in
-      List.iter here ~f:(fun stanza ->
-          List.iter (aliases_of stanza) ~f:(fun alias ->
-              match String.chop_prefix alias ~prefix:"runtest-" with
-              (* The one deliberate collision: a rule sharing the alias dune generates for a
-                 `(test)` stanza BECAUSE IT RUNS THE SAME BINARY -- the ambient gate, whose rule
-                 exists so that every per-test alias can depend on it. Three things have to hold,
-                 and the third is what the earlier rounds were missing: the rule is a gate, the name
-                 belongs to a gate `(test)` stanza, and the rule's action runs that stanza's
-                 executable, so the merged alias runs one program either way (Codex P2, rounds 6 to
-                 8). *)
-              | Some name
-                when is_gate stanza && Set.mem gate_names name
-                     && List.exists (Scan.executables_run stanza) ~f:(fun (cwd, command) ->
-                         match command with
-                         (* Resolved, not by basename: `(chdir other (run ./gate.exe))` runs
-                            another directory's binary, and granting the exemption to it would let
-                            the merged alias run the generated test AND something unrelated (Codex
-                            P2, round 11). The same resolution the family's runner matching makes. *)
-                         | Scan.Runs path ->
-                             String.equal
-                               (normalize_path (Scan.in_subdir subdir (Scan.in_subdir cwd path)))
-                               (normalize_path (Scan.in_subdir subdir (name ^ ".exe")))
-                         | _ -> false) ->
-                  ()
-              | Some name when Set.mem generated name ->
-                  fail
-                    (Printf.sprintf
-                       "%s attaches a rule to `%s`, the alias dune generates for the `%s` stanza \
-                        in this directory -- the two merge, so `dune build @%s/%s` would run that \
-                        test as well as this rule, and naming `runtest` beside it is a dependency \
-                        cycle. Name the alias after the GOLDEN this rule checks, qualified where a \
-                        run writes several"
-                       (if String.is_empty subdir then dune_file
-                        else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir)
-                       alias name
-                       (Scan.in_subdir (Stdlib.Filename.dirname dune_file) subdir)
-                       alias)
-              | _ -> ())));
+          let here = stanzas_in subdir in
+          let generated = generated_runtest_names here in
+          let gate_names = gate_generated_names here in
+          List.iter here ~f:(fun stanza ->
+              List.iter (aliases_of stanza) ~f:(fun alias ->
+                  match String.chop_prefix alias ~prefix:"runtest-" with
+                  (* The one deliberate collision: a rule sharing the alias dune generates for a
+                     `(test)` stanza BECAUSE IT RUNS THE SAME BINARY -- the ambient gate, whose rule
+                     exists so that every per-test alias can depend on it. Three things have to
+                     hold, and the third is what the earlier rounds were missing: the rule is a
+                     gate, the name belongs to a gate `(test)` stanza, and the rule's action runs
+                     that stanza's executable, so the merged alias runs one program either way
+                     (Codex P2, rounds 6 to 8). *)
+                  | Some name
+                    when is_gate stanza && Set.mem gate_names name
+                         && List.exists (Scan.executables_run stanza) ~f:(fun (cwd, command) ->
+                             match command with
+                             (* Resolved, not by basename: `(chdir other (run ./gate.exe))` runs
+                                another directory's binary, and granting the exemption to it would
+                                let the merged alias run the generated test AND something unrelated
+                                (Codex P2, round 11). The same resolution the family's runner
+                                matching makes. *)
+                             | Scan.Runs path ->
+                                 String.equal
+                                   (normalize_path
+                                      (Scan.in_subdir subdir (Scan.in_subdir cwd path)))
+                                   (normalize_path (Scan.in_subdir subdir (name ^ ".exe")))
+                             | _ -> false) ->
+                      ()
+                  | Some name when Set.mem generated name ->
+                      fail
+                        (Printf.sprintf
+                           "%s attaches a rule to `%s`, the alias dune generates for the `%s` \
+                            stanza in this directory -- the two merge, so `dune build @%s/%s` \
+                            would run that test as well as this rule, and naming `runtest` beside \
+                            it is a dependency cycle. Name the alias after the GOLDEN this rule \
+                            checks, qualified where a run writes several"
+                           (if String.is_empty subdir then dune_file
+                            else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir)
+                           alias name
+                           (Scan.in_subdir (Stdlib.Filename.dirname dune_file) subdir)
+                           alias)
+                  | _ -> ())));
       (* And one alias checks one golden: two golden diffs sharing an alias make the targeted run
          two tests, which is the isolation this arrangement is for -- and the prefix relation above
          admits the pair, since `foo.expected` and `foo-extension.expected` both accept
@@ -1709,11 +1705,11 @@ let main () =
             when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
               fail
                 (Printf.sprintf
-                   "%s declares `(include_subdirs %s)`, which puts a descendant directory's modules \
-                    into its stanzas' module sets -- this check derives a stanza's modules from its \
-                    own directory, so it cannot say which modules those stanzas own, nor which \
-                    environment reads go with them. Teach it the mode, or keep the guard's modules \
-                    beside their dune file"
+                   "%s declares `(include_subdirs %s)`, which puts a descendant directory's \
+                    modules into its stanzas' module sets -- this check derives a stanza's modules \
+                    from its own directory, so it cannot say which modules those stanzas own, nor \
+                    which environment reads go with them. Teach it the mode, or keep the guard's \
+                    modules beside their dune file"
                    dune_file
                    (String.concat ~sep:" " (List.concat_map args ~f:Scan.atoms)))
           | _ -> ());
@@ -1780,17 +1776,17 @@ let main () =
                               Scan.program_modules stanza ~modules ~name,
                               name ^ ".exe",
                               (* The pins come with the runner, scoped to the runs of THIS program:
-                                 a `setenv` around a helper beside the subject pins nothing here, and
-                                 one around the subject is not undone by an unpinned helper (Codex
-                                 P1 round 1, P2 round 4). *)
-                              List.map runners ~f:(fun (r, pins) ->
-                                  (Scan.field r "deps", pins)) ))
+                                 a `setenv` around a helper beside the subject pins nothing here,
+                                 and one around the subject is not undone by an unpinned helper
+                                 (Codex P1 round 1, P2 round 4). *)
+                              List.map runners ~f:(fun (r, pins) -> (Scan.field r "deps", pins)) ))
                     (* Against an EMPTY runner list, which is the same shape an executable nothing
                        runs gets and says the same thing: there is no `deps` field in reach that a
                        change of the variable could invalidate for every process that links it. *)
                     | "library" -> [ (named (), modules, "whatever links it", []) ]
                     | _ ->
-                        [ (named (), modules, "it", [ (Scan.field stanza "deps", own_pins stanza) ])
+                        [
+                          (named (), modules, "it", [ (Scan.field stanza "deps", own_pins stanza) ]);
                         ]
                   in
                   List.iter programs ~f:(fun (name, own_modules, program, runners) ->
@@ -1809,8 +1805,7 @@ let main () =
                          `.mli` performs no run-time read, so there is nothing for this check to
                          look at (Codex P2, round 9). *)
                       let without_implementation =
-                        List.concat_map
-                          [ "modules_without_implementation"; "virtual_modules" ]
+                        List.concat_map [ "modules_without_implementation"; "virtual_modules" ]
                           ~f:(fun field ->
                             match Scan.field stanza field with
                             | Some args ->
@@ -1832,8 +1827,8 @@ let main () =
                                  "%s names the module `%s`, and this check was handed no `%s.ml` \
                                   from %s to read -- a module it cannot see is one whose \
                                   environment reads it cannot check, which looks exactly like a \
-                                  module that makes none. Add the directory to the rule's globs, or \
-                                  name the generated source among them"
+                                  module that makes none. Add the directory to the rule's globs, \
+                                  or name the generated source among them"
                                  where module_name (String.lowercase module_name) directory));
                       let sources =
                         List.filter_map own_modules ~f:source_of_module
@@ -1865,11 +1860,11 @@ let main () =
                                     spell the key at the call"
                                    where directory source what)));
                       (* Normalized before the registry is consulted: `read_env_var` builds its
-                         variable through `Utils.env_var_name`, which UPPERCASES, so
-                         `read_env_var "PROFILE"` reads the same `OCANNL_PROFILE` as the lowercase
-                         spelling. A case-sensitive membership test dropped it as an unknown key and
-                         asked for no declaration -- a silent pass over a variable the guard does
-                         observe (Codex P2, round 5).
+                         variable through `Utils.env_var_name`, which UPPERCASES, so `read_env_var
+                         "PROFILE"` reads the same `OCANNL_PROFILE` as the lowercase spelling. A
+                         case-sensitive membership test dropped it as an unknown key and asked for
+                         no declaration -- a silent pass over a variable the guard does observe
+                         (Codex P2, round 5).
 
                          Every resolved key is asked for, KNOWN OR NOT: the reader builds and
                          consults `OCANNL_<KEY>` whatever the registry says, so a misspelled key is
@@ -2063,8 +2058,7 @@ let main () =
      gh-ocannl-665):\n\
      %s\n"
     (String.concat ~sep:"\n"
-       (List.map
-          (List.sort !family_table ~compare:Poly.compare)
+       (List.map (List.sort !family_table ~compare:Poly.compare)
           ~f:(fun (dune_file, family, identity, aggregated) ->
             Printf.sprintf "  %-24s %-40s the %s%s" ("@" ^ family) dune_file identity
               (if aggregated then "" else " -- NOT AGGREGATED"))));
@@ -2569,7 +2563,8 @@ type family_shape =
   | Subdir_exe_top_runner  (** the executable in a group, the rule that runs it at the top level *)
   | Runtest_only_rule  (** a marked rule whose only alias is the directory-wide `runtest` *)
   | Subdir_ungated  (** the member and its family alias in a group with no gate of its own *)
-  | Subdir_unlocked_gate  (** a group whose actions take the training lock and whose gate does not *)
+  | Subdir_unlocked_gate
+      (** a group whose actions take the training lock and whose gate does not *)
   | Subdir_alias_collision
       (** a group with a `(test (name probe))` and a hand-written rule on `runtest-probe` *)
   | Gate_elsewhere
@@ -2592,13 +2587,20 @@ let family_member_stanza ~shape ~metal =
         marker
   | Plural_tests ->
       Printf.sprintf
-        "(tests\n%s (names probe probe2)\n (modules probe probe2)\n (deps ocannl_config)\n \
-         (libraries base))\n"
+        "(tests\n\
+         %s (names probe probe2)\n\
+        \ (modules probe probe2)\n\
+        \ (deps ocannl_config)\n\
+        \ (libraries base))\n"
         marker
   | Inline_library ->
       Printf.sprintf
-        "(library\n%s (name probelib)\n (modules probe)\n (inline_tests\n  (deps \
-         ocannl_config))\n (libraries base))\n"
+        "(library\n\
+         %s (name probelib)\n\
+        \ (modules probe)\n\
+        \ (inline_tests\n\
+        \  (deps ocannl_config))\n\
+        \ (libraries base))\n"
         marker
   | Subdir_member | Subdir_ungated | Subdir_unlocked_gate | Subdir_alias_collision ->
       (* Dune lets a `(subdir …)` group carry its own alias stanza, and the recursive `@<family>`
@@ -2610,38 +2612,53 @@ let family_member_stanza ~shape ~metal =
         match shape with
         | Subdir_ungated -> ""
         | _ ->
-            " (test\n  ; ocannl-backend: none -- this group's ambient gate; it runs on no \
-             device.\n  (name childgate)\n  (modules childgate)\n  (deps ocannl_config \
-             (universe))\n  (libraries base))\n (rule\n  ; ocannl-backend: none -- the same gate, \
-             on the alias the group's aliases depend on.\n  (alias runtest-childgate)\n  (deps \
-             ocannl_config (universe))\n  (action\n   (run %{dep:childgate.exe})))\n (alias\n  \
-             (name runtest)\n  (deps (alias runtest-childgate)))\n"
+            " (test\n\
+            \  ; ocannl-backend: none -- this group's ambient gate; it runs on no device.\n\
+            \  (name childgate)\n\
+            \  (modules childgate)\n\
+            \  (deps ocannl_config (universe))\n\
+            \  (libraries base))\n\
+            \ (rule\n\
+            \  ; ocannl-backend: none -- the same gate, on the alias the group's aliases depend on.\n\
+            \  (alias runtest-childgate)\n\
+            \  (deps ocannl_config (universe))\n\
+            \  (action\n\
+            \   (run %{dep:childgate.exe})))\n\
+            \ (alias\n\
+            \  (name runtest)\n\
+            \  (deps (alias runtest-childgate)))\n"
       in
-      let gate_dep =
-        match shape with Subdir_ungated -> "" | _ -> "(alias runtest-childgate) "
-      in
+      let gate_dep = match shape with Subdir_ungated -> "" | _ -> "(alias runtest-childgate) " in
       (* The lock the training tests serialize on. Taken by the member and by nothing else in the
          `Subdir_unlocked_gate` variant, which is the arrangement the repository's own rule forbids:
          one unlocked action in a directory of locked ones. *)
       let locks =
-        match shape with
-        | Subdir_unlocked_gate -> "  (locks ocannl_training_test)\n"
-        | _ -> ""
+        match shape with Subdir_unlocked_gate -> "  (locks ocannl_training_test)\n" | _ -> ""
       in
       (* The collision: a hand-written rule on the alias dune generates for the group's own `(test)`
          stanza. Building that alias would run both. *)
       let collision =
         match shape with
         | Subdir_alias_collision ->
-            " (rule\n  ; ocannl-backend: none -- a synthetic control fixture, judged on this \
-             marker alone.\n  (alias runtest-probe)\n  (deps ocannl_config (alias \
-             runtest-childgate))\n  (action\n   (run %{dep:childgate.exe})))\n"
+            " (rule\n\
+            \  ; ocannl-backend: none -- a synthetic control fixture, judged on this marker alone.\n\
+            \  (alias runtest-probe)\n\
+            \  (deps ocannl_config (alias runtest-childgate))\n\
+            \  (action\n\
+            \   (run %{dep:childgate.exe})))\n"
         | _ -> ""
       in
       Printf.sprintf
-        "(subdir\n child\n%s (test\n%s  (name probe)\n  (modules probe)\n%s  (deps \
-         ocannl_config)\n  (libraries base))\n%s (alias\n  (name %s)\n  (deps %s(alias \
-         runtest-probe))))\n"
+        "(subdir\n\
+        \ child\n\
+         %s (test\n\
+         %s  (name probe)\n\
+        \  (modules probe)\n\
+         %s  (deps ocannl_config)\n\
+        \  (libraries base))\n\
+         %s (alias\n\
+        \  (name %s)\n\
+        \  (deps %s(alias runtest-probe))))\n"
         gate
         (String.substr_replace_all marker ~pattern:" ; " ~with_:"  ; ")
         locks collision metal_family.family_alias gate_dep
@@ -2650,70 +2667,132 @@ let family_member_stanza ~shape ~metal =
          name. Nothing here runs `probe`, so a family listing that rule aggregates `probe2` and
          nothing else. *)
       Printf.sprintf
-        "(executables\n (names probe probe2)\n (public_names pkg.probe pkg.probe2)\n (modules \
-         probe probe2)\n (libraries base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config \
-         (alias runtest-gate))\n (action\n  (run %%{bin:pkg.probe2})))\n"
+        "(executables\n\
+        \ (names probe probe2)\n\
+        \ (public_names pkg.probe pkg.probe2)\n\
+        \ (modules probe probe2)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate))\n\
+        \ (action\n\
+        \  (run %%{bin:pkg.probe2})))\n"
         marker
   | Test_stanza_runner ->
       (* A `(test)` with a custom action as the runner: dune's focused entry point for it is the
          `runtest-harness` alias it generates. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(test\n%s (name \
-         harness)\n (modules harness)\n (deps ocannl_config %%{dep:probe.exe})\n (libraries \
-         base)\n (action\n  (run ./probe.exe)))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (test\n\
+         %s (name harness)\n\
+        \ (modules harness)\n\
+        \ (deps ocannl_config %%{dep:probe.exe})\n\
+        \ (libraries base)\n\
+        \ (action\n\
+        \  (run ./probe.exe)))\n"
         marker
   | Sibling_defaults ->
       (* Two tests, neither naming its modules: dune gives each its own main and shares the rest, so
          only the one whose main reads the instrumentation is a member. *)
       Printf.sprintf
-        "(test\n%s (name probe)\n (deps ocannl_config)\n (libraries base))\n\n(test\n%s (name \
-         probe2)\n (deps ocannl_config)\n (libraries base))\n"
+        "(test\n\
+         %s (name probe)\n\
+        \ (deps ocannl_config)\n\
+        \ (libraries base))\n\n\
+         (test\n\
+         %s (name probe2)\n\
+        \ (deps ocannl_config)\n\
+        \ (libraries base))\n"
         marker marker
   | Runner_absolute ->
       (* The same basename, reached by an absolute path: `/probe.exe` is the system's, not ours. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(rule\n%s (alias \
-         probe_run)\n (deps ocannl_config (alias runtest-gate))\n (action\n  (run \
-         /probe.exe)))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate))\n\
+        \ (action\n\
+        \  (run /probe.exe)))\n"
         marker
   | Public_name_by_path ->
       (* The same public name, run as a path: `(run ./pkg.probe)` names a file in this directory,
          not the installed program, and `classify_command` reports both as the same string. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (public_name pkg.probe)\n (modules probe)\n (libraries \
-         base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config (alias runtest-gate))\n \
-         (action\n  (run ./pkg.probe)))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (public_name pkg.probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate))\n\
+        \ (action\n\
+        \  (run ./pkg.probe)))\n"
         marker
   | Public_name_runner ->
       (* An installed executable, whose companion rule runs it by the name it installs under --
          which is what `Scan.executables_run` reports, and not the `.exe` file. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (public_name pkg.probe)\n (modules probe)\n (libraries \
-         base))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config (alias runtest-gate))\n \
-         (action\n  (run %%{bin:pkg.probe})))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (public_name pkg.probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate))\n\
+        \ (action\n\
+        \  (run %%{bin:pkg.probe})))\n"
         marker
   | Subdir_exe_top_runner ->
       (* The executable in a group, the rule that runs it at the top level -- so the family stanza
          that aggregates it belongs at the top level too, where the rule is. *)
       Printf.sprintf
-        "(subdir\n child\n (executable\n  (name probe)\n  (modules probe)\n  (libraries \
-         base)))\n\n(rule\n%s (alias probe_run)\n (deps ocannl_config (alias runtest-gate) \
-         %%{dep:child/probe.exe})\n (action\n  (run ./child/probe.exe)))\n"
+        "(subdir\n\
+        \ child\n\
+        \ (executable\n\
+        \  (name probe)\n\
+        \  (modules probe)\n\
+        \  (libraries base)))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate) %%{dep:child/probe.exe})\n\
+        \ (action\n\
+        \  (run ./child/probe.exe)))\n"
         marker
   | Runtest_only_rule ->
       (* A marked rule whose only alias is the directory-wide suite: it has no focused alias for a
          family to list, and a family listing `runtest` would run the directory. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(rule\n%s (alias \
-         runtest)\n (deps ocannl_config %%{dep:probe.exe})\n (action\n  (run ./probe.exe)))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias runtest)\n\
+        \ (deps ocannl_config %%{dep:probe.exe})\n\
+        \ (action\n\
+        \  (run ./probe.exe)))\n"
         marker
   | Exe_with_runner | Runner_elsewhere ->
       (* The runner depends on the gate's alias, since its own alias is a build entry point like any
          other -- the same reason the family stanzas below do. *)
       Printf.sprintf
-        "(executable\n (name probe)\n (modules probe)\n (libraries base))\n\n(rule\n%s (alias \
-         probe_run)\n (deps ocannl_config (alias runtest-gate) %%{dep:probe.exe})\n (action\n  \
-         %s))\n"
+        "(executable\n\
+        \ (name probe)\n\
+        \ (modules probe)\n\
+        \ (libraries base))\n\n\
+         (rule\n\
+         %s (alias probe_run)\n\
+        \ (deps ocannl_config (alias runtest-gate) %%{dep:probe.exe})\n\
+        \ (action\n\
+        \  %s))\n"
         marker
         (match shape with
         | Runner_elsewhere -> "(chdir nested (run ./probe.exe))"
@@ -2772,7 +2851,8 @@ type family_probe_source =
   | Alias_nested  (** the qualifier aliased, and the alias then reached through another module *)
   | Functor_parameter  (** the qualifier's name introduced as a functor's parameter *)
   | Include_wrapper  (** the qualifier re-exported by a structure, then used through it *)
-  | Include_with_definition  (** the same wrapper, with an unrelated definition beside the include *)
+  | Include_with_definition
+      (** the same wrapper, with an unrelated definition beside the include *)
   | Open_not_export  (** the qualifier OPENED in a wrapper that includes somebody else *)
   | Module_type_functor  (** the qualifier's name as a MODULE TYPE functor's parameter *)
   | Include_then_override  (** the qualifier included, and then one of its leaves redefined *)
@@ -2800,14 +2880,19 @@ let family_probe = function
       (* And with the qualifier itself bound to a name of the source's choosing. *)
       "module I = Ir\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
   | Qualifier_shadowed ->
-      (* The qualifier's name rebound: what `Ir.Alloc_census` names after this is Other's (Codex
-         P2, round 8). *)
+      (* The qualifier's name rebound: what `Ir.Alloc_census` names after this is Other's (Codex P2,
+         round 8). *)
       "module Ir = Other\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n"
   | Nested_qualifier ->
       (* `Vendor.Ir` is Vendor's, whatever it is called. Both spellings that would bind it: opened,
          so a bare `Alloc_census` would be in scope, and aliased under the qualifier's own name
          (Codex P2, round 9). *)
-      "module Ir = Vendor.Ir\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n\nmodule Also = struct\n  open Vendor.Ir\n\n  let () = ignore (Alloc_census.snapshot ())\nend\n"
+      "module Ir = Vendor.Ir\n\n\
+       let () = ignore (Ir.Alloc_census.snapshot ())\n\n\
+       module Also = struct\n\
+      \  open Vendor.Ir\n\n\
+      \  let () = ignore (Alloc_census.snapshot ())\n\
+       end\n"
   | Nested_path ->
       (* And written out rather than bound: the path names Vendor's module, and our components sit
          inside it (Codex P2, round 10). *)
@@ -2815,57 +2900,99 @@ let family_probe = function
   | Leaf_shadowed ->
       (* The open is ours and the leaf is not: after the rebinding, `Alloc_census` is Foo's (Codex
          P2, round 11). *)
-      "open Ir\n\nmodule Alloc_census = Foo.Alloc_census\n\nlet () = ignore (Alloc_census.snapshot ())\n"
+      "open Ir\n\n\
+       module Alloc_census = Foo.Alloc_census\n\n\
+       let () = ignore (Alloc_census.snapshot ())\n"
   | Alias_nested ->
-      (* The alias is ours and the path is not: `Vendor.I.Alloc_census` resolves from Vendor
-         (Codex P2, round 12). *)
+      (* The alias is ours and the path is not: `Vendor.I.Alloc_census` resolves from Vendor (Codex
+         P2, round 12). *)
       "module I = Ir\n\nlet () = ignore (Vendor.I.Alloc_census.snapshot ())\n"
   | Functor_parameter ->
       (* The qualifier's NAME as a functor parameter: inside the body it is the parameter. *)
       "module M (Ir : S) = struct\n  let () = ignore (Ir.Alloc_census.snapshot ())\nend\n"
   | Include_wrapper ->
-      (* A structure that only re-exports the qualifier IS the qualifier for this purpose (Codex
-         P2, round 13). *)
+      (* A structure that only re-exports the qualifier IS the qualifier for this purpose (Codex P2,
+         round 13). *)
       "module I = struct\n  include Ir\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
   | Include_with_definition ->
       (* An include exports its contents whatever sits next to it (Codex P2, round 14). *)
-      "module I = struct\n  include Ir\n\n  let helper = ()\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\nlet () = I.helper\n"
+      "module I = struct\n\
+      \  include Ir\n\n\
+      \  let helper = ()\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n\
+       let () = I.helper\n"
   | Open_not_export ->
       (* An `open` changes lookup inside the structure and exports nothing, so what `I` re-exports
          is Vendor's (Codex P2, round 14). *)
-      "module I = struct\n  open Ir\n\n  include Vendor\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module I = struct\n\
+      \  open Ir\n\n\
+      \  include Vendor\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Module_type_functor ->
-      (* The module-type spelling of a functor: the `Ir` in the result signature is the parameter. *)
+      (* The module-type spelling of a functor: the `Ir` in the result signature is the
+         parameter. *)
       "module type F = functor (Ir : S) -> sig\n  val x : Ir.Alloc_census.t\nend\n"
   | Include_then_override ->
       (* The wrapper re-exports the qualifier and then overrides the leaf, so a reference through
          the wrapper to THAT leaf is Vendor's (Codex P2, round 15). *)
-      "module I = struct\n  include Ir\n\n  module Alloc_census = Vendor.Alloc_census\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module I = struct\n\
+      \  include Ir\n\n\
+      \  module Alloc_census = Vendor.Alloc_census\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Signature_module ->
       (* A signature binds module names for the items after it. *)
       "module type S = sig\n  module Ir : X\n\n  val x : Ir.Alloc_census.t\nend\n"
   | Override_then_include ->
       (* The include comes LAST, so what `I.Alloc_census` names is the qualifier's (Codex P2, round
          16). A member. *)
-      "module I = struct\n  module Alloc_census = Vendor.Alloc_census\n\n  include Ir\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module I = struct\n\
+      \  module Alloc_census = Vendor.Alloc_census\n\n\
+      \  include Ir\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Signature_open ->
       (* A signature's open reaches the items after it, so `AC` is `Ir.Alloc_census`. A member. *)
       "module type S = sig\n  open Ir\n\n  module AC = Alloc_census\nend\n"
   | Recursive_module ->
       (* The recursive group's name is in scope throughout it and after it. *)
-      "module rec Ir : sig\n  val x : int\nend = struct\n  let x = 0\nend\n\nlet () = ignore (Ir.Alloc_census.snapshot ())\n"
+      "module rec Ir : sig\n\
+      \  val x : int\n\
+       end = struct\n\
+      \  let x = 0\n\
+       end\n\n\
+       let () = ignore (Ir.Alloc_census.snapshot ())\n"
   | Rebound_wrapper ->
       (* The name first aliases the qualifier and is then rebound to a wrapper that overrides the
          leaf: the second binding is what stands. *)
-      "module I = Ir\n\nmodule I = struct\n  include Ir\n\n  module Alloc_census = Vendor.Alloc_census\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module I = Ir\n\n\
+       module I = struct\n\
+      \  include Ir\n\n\
+      \  module Alloc_census = Vendor.Alloc_census\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Recursive_group ->
       (* Every name of the group is in scope in every body, so `I` here is bound to the group's own
          `Ir`, not to the qualifier (Codex P2, round 17). *)
-      "module rec I : sig\n  val x : int\nend = Ir\n\nand Ir : sig\n  val x : int\nend = struct\n  let x = 0\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module rec I : sig\n\
+      \  val x : int\n\
+       end = Ir\n\n\
+       and Ir : sig\n\
+      \  val x : int\n\
+       end = struct\n\
+      \  let x = 0\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Include_then_include ->
       (* The later include decides the leaf, and which leaves it brings cannot be read off the tree
          -- so the wrapper stops naming the qualifier (Codex P2, round 17). *)
-      "module I = struct\n  include Ir\n\n  include Vendor\nend\n\nlet () = ignore (I.Alloc_census.snapshot ())\n"
+      "module I = struct\n\
+      \  include Ir\n\n\
+      \  include Vendor\n\
+       end\n\n\
+       let () = ignore (I.Alloc_census.snapshot ())\n"
   | Signature_alias ->
       (* A manifest alias binds, so the later declaration is a real reference. *)
       "module type S = sig\n  module I = Ir\n\n  val x : I.Alloc_census.t\nend\n"
@@ -2877,8 +3004,9 @@ let family_probe = function
       (* The module NAMED where naming it reads nothing -- the shape a substring derivation calls a
          probe (Codex P2, round 4). Also as a longer identifier, since that is the third way a text
          scan mistakes a mention for a use. *)
-      "(* See Ir.Alloc_census for what this test does NOT do. *)\nlet alloc_census_note = \
-       \"Ir.Alloc_census\"\nlet () = ignore alloc_census_note\n"
+      "(* See Ir.Alloc_census for what this test does NOT do. *)\n\
+       let alloc_census_note = \"Ir.Alloc_census\"\n\
+       let () = ignore alloc_census_note\n"
   | Neither -> "let () = ()\n"
 
 let family_control () =
@@ -2902,12 +3030,15 @@ let family_control () =
   write_file (Stdlib.Filename.concat root "t/harness.ml") "let () = ()\n";
   write_file (Stdlib.Filename.concat root "t/child/childgate.ml") "let () = ()\n";
   let paths =
-    "t/dune" :: "t/gate.ml" :: "t/probe.ml" :: "t/probe2.ml" :: "t/child/probe.ml"
-    :: "t/harness.ml" :: "t/child/childgate.ml" :: List.map context ~f:fst
+    "t/dune" :: "t/gate.ml" :: "t/probe.ml" :: "t/probe2.ml" :: "t/child/probe.ml" :: "t/harness.ml"
+    :: "t/child/childgate.ml" :: List.map context ~f:fst
   in
   let run ?(shape = Single_test) ?(listing = Every) ?probe ~metal ~lifecycle ~family () =
-    let probe = match probe with Some probe -> probe | None -> if lifecycle then Reads else Neither in
-    write_file (Stdlib.Filename.concat root "t/dune")
+    let probe =
+      match probe with Some probe -> probe | None -> if lifecycle then Reads else Neither
+    in
+    write_file
+      (Stdlib.Filename.concat root "t/dune")
       (family_subject ~shape ~metal ~family ~listing);
     (* The same source in both directories, so that a shape putting the member in `(subdir child …)`
        is put the same question as one at the top level. *)
@@ -2956,7 +3087,9 @@ let family_control () =
   let runner_here = run ~shape:Exe_with_runner ~metal:false ~lifecycle:true ~family:lifecycle () in
   (* An installed executable run by its public name, and one declared in a group whose runner sits
      at the top level: both are correct wirings whose runner link the earlier readings dropped. *)
-  let public_runner = run ~shape:Public_name_runner ~metal:false ~lifecycle:true ~family:lifecycle () in
+  let public_runner =
+    run ~shape:Public_name_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
+  in
   let cross_group_runner =
     run ~shape:Subdir_exe_top_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
   in
@@ -2969,14 +3102,12 @@ let family_control () =
   in
   (* Naming the instrumentation is not reading it: a doc comment, a string literal and a longer
      identifier put the name in the source and put nothing in the family. *)
-  let mention_only =
-    run ~probe:Mentions_only ~metal:false ~lifecycle:true ~family:None ()
-  in
+  let mention_only = run ~probe:Mentions_only ~metal:false ~lifecycle:true ~family:None () in
   (* The group's own ambient gate: an alias defined inside `(subdir child …)` is `child`'s, and a
      gate at the top level does not reach it. *)
   let subdir_ungated = run ~shape:Subdir_ungated ~metal:true ~lifecycle:false ~family:None () in
-  (* Nor does a top-level reading see a group's training lock: `is_gate` is false of the `(subdir …)`
-     form, so the group's unlocked gate passed unseen. *)
+  (* Nor does a top-level reading see a group's training lock: `is_gate` is false of the `(subdir
+     …)` form, so the group's unlocked gate passed unseen. *)
   let subdir_unlocked =
     run ~shape:Subdir_unlocked_gate ~metal:true ~lifecycle:false ~family:None ()
   in
@@ -3048,8 +3179,8 @@ let family_control () =
   let runner_absolute =
     run ~shape:Runner_absolute ~metal:false ~lifecycle:true ~family:lifecycle ()
   in
-  (* And a rule on the gate's generated alias that runs another directory's binary: not the gate,
-     so the collision is not the deliberate one. *)
+  (* And a rule on the gate's generated alias that runs another directory's binary: not the gate, so
+     the collision is not the deliberate one. *)
   let gate_elsewhere = run ~shape:Gate_elsewhere ~metal:true ~lifecycle:false ~family:metal () in
   (* And the alias collision one directory down: dune generates a `(test)` stanza's alias in the
      directory it applies the stanza to, so a rule in the same group can merge with it. *)
@@ -3174,7 +3305,8 @@ let family_control () =
   if not nested_path_ok then report "that module's path written out" nested_path;
   if not leaf_shadowed_ok then report "the opened module's leaf rebound" leaf_shadowed;
   if not alias_nested_ok then report "the alias reached through another module" alias_nested;
-  if not functor_parameter_ok then report "the qualifier's name as a functor parameter" functor_parameter;
+  if not functor_parameter_ok then
+    report "the qualifier's name as a functor parameter" functor_parameter;
   if not include_wrapper_ok then report "the qualifier re-exported by a structure" include_wrapper;
   if not include_with_definition_ok then
     report "a re-export beside a definition" include_with_definition;
@@ -3184,9 +3316,11 @@ let family_control () =
   if not signature_module_ok then report "a module bound inside a signature" signature_module;
   if not override_then_include_ok then report "an include after a definition" override_then_include;
   if not signature_open_ok then report "an open inside a signature" signature_open;
-  if not recursive_module_ok then report "a recursive module of the qualifier's name" recursive_module;
+  if not recursive_module_ok then
+    report "a recursive module of the qualifier's name" recursive_module;
   if not rebound_wrapper_ok then report "an alias rebound to a wrapper" rebound_wrapper;
-  if not recursive_group_ok then report "a recursive group taking the qualifier's name" recursive_group;
+  if not recursive_group_ok then
+    report "a recursive group taking the qualifier's name" recursive_group;
   if not include_then_include_ok then report "an include after the qualifier's" include_then_include;
   if not signature_alias_ok then report "a manifest alias in a signature" signature_alias;
   if not test_stanza_runner_ok then report "a test stanza as the runner" test_stanza_runner;
@@ -3278,8 +3412,8 @@ let family_control () =
     opened_probe_ok;
   Verdict.p "so is `module I = Ir` and then `I.Alloc_census.snapshot`" aliased_probe_ok;
   Verdict.p
-    "an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a reference \
-     to the instrumentation"
+    "an `open Ir` inside a nested module does not make a bare `Alloc_census` outside it a \
+     reference to the instrumentation"
     scoped_open_ok;
   Verdict.p
     "`module Ir = Other` rebinds the qualifier, so a later `Ir.Alloc_census` is not the \
@@ -3304,15 +3438,13 @@ let family_control () =
     "`module I = Ir` does not make `Vendor.I.Alloc_census` ours: an alias-qualified path resolves \
      from where it starts"
     alias_nested_ok;
-  Verdict.p
-    "a functor parameter named `Ir` shadows the qualifier inside the functor's body"
+  Verdict.p "a functor parameter named `Ir` shadows the qualifier inside the functor's body"
     functor_parameter_ok;
   Verdict.p
     "`module I = struct include Ir end` re-exports the qualifier, so `I.Alloc_census` is a \
      reference to the instrumentation"
     include_wrapper_ok;
-  Verdict.p
-    "and goes on doing so when the structure defines something beside the include"
+  Verdict.p "and goes on doing so when the structure defines something beside the include"
     include_with_definition_ok;
   Verdict.p
     "`open Ir` inside a wrapper that includes somebody else re-exports the somebody else, so its \
@@ -3350,8 +3482,7 @@ let family_control () =
     "a wrapper that includes the qualifier and then includes somebody else stops naming it, since \
      which leaves the second include brings cannot be read off the tree"
     include_then_include_ok;
-  Verdict.p
-    "`module I = Ir` inside a signature binds, so a later `I.Alloc_census.t` is a reference"
+  Verdict.p "`module I = Ir` inside a signature binds, so a later `I.Alloc_census.t` is a reference"
     signature_alias_ok;
   Verdict.p
     "an executable run by a `(test)` stanza's custom action is aggregated through the \
@@ -3361,8 +3492,7 @@ let family_control () =
     "two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the \
      instrumentation is a member"
     sibling_defaults_ok;
-  Verdict.p
-    "an absolute path ending in the local executable's name is not the local executable"
+  Verdict.p "an absolute path ending in the local executable's name is not the local executable"
     runner_absolute_ok;
   Verdict.p
     "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
@@ -3378,15 +3508,15 @@ let family_control () =
 (* gh-ocannl-749's control, and why it is a third tree.
 
    The rule is that a key a module reads straight from the environment is one the stanza running it
-   declares. Every guard in this repository now declares its keys -- which is what this change did --
-   so a control drawn from the corpus would pass whether the rule has teeth or has stopped deciding.
-   Put to a tree of its own it is the rule that is claimed about: the same source, once under a rule
-   that declares the key, once under one that does not, and once under one that pins the variable
-   with `setenv` instead.
+   declares. Every guard in this repository now declares its keys -- which is what this change did
+   -- so a control drawn from the corpus would pass whether the rule has teeth or has stopped
+   deciding. Put to a tree of its own it is the rule that is claimed about: the same source, once
+   under a rule that declares the key, once under one that does not, and once under one that pins
+   the variable with `setenv` instead.
 
    The source is a GUARD, not a literal read: the key reaches the reader through a list, which is
-   the shape the hand-written lists took and the shape the earlier check could not see. One key is
-   a configuration key and one is not, so the tree also says that the candidate set is intersected
+   the shape the hand-written lists took and the shape the earlier check could not see. One key is a
+   configuration key and one is not, so the tree also says that the candidate set is intersected
    with the registry rather than taken whole -- a scan demanding `OCANNL_NOT_A_CONFIG_KEY` would
    fail the legitimate run, and the declaration it asked for would then be reported by the sibling
    check as naming no key OCANNL reads. *)
@@ -3484,18 +3614,21 @@ let guard_subject ~arm =
   | `Pins_elsewhere -> executable named ^ one ~declares:false ~pins:`Elsewhere_in_the_action
   | `Neither -> executable named ^ one ~declares:false ~pins:`No
   (* An `(executable)` reaching for dune's DEFAULT module set: the same tree with the `(modules …)`
-     field left off, which is the common shape and the one the check skipped entirely while it was
-     a clause of a walk guarded on that field being written down (Codex P2, round 1). *)
+     field left off, which is the common shape and the one the check skipped entirely while it was a
+     clause of a walk guarded on that field being written down (Codex P2, round 1). *)
   | `Implicit_modules -> executable "" ^ one ~declares:false ~pins:`No
   (* A module the stanza NAMES and the scan was handed no source for. Reading it as a module with no
      reads is the silent direction (Codex P2, round 8). *)
   | `Module_without_source ->
-      Printf.sprintf "(executable\n (name guard)\n (modules guard helper)\n (libraries arrayjit.utils))\n\n%s"
+      Printf.sprintf
+        "(executable\n (name guard)\n (modules guard helper)\n (libraries arrayjit.utils))\n\n%s"
         (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
   (* A test directory's own `utils.ml`: the exemption belongs to the module that DEFINES the reader,
-     at its repository path, and a basename match would extend it to this one (Codex P2, round 8). *)
+     at its repository path, and a basename match would extend it to this one (Codex P2, round
+     8). *)
   | `Utils_lookalike ->
-      Printf.sprintf "(executable\n (name guard)\n (modules guard utils)\n (libraries arrayjit.utils))\n\n%s"
+      Printf.sprintf
+        "(executable\n (name guard)\n (modules guard utils)\n (libraries arrayjit.utils))\n\n%s"
         (guard_rule ~target:"guard.actual" ~declares:false ~pins:`No)
   (* The same program one directory down. A `(subdir …)` applies its stanzas to another directory,
      so the modules live there and the runner may sit at either level -- and a walk over the
@@ -3531,8 +3664,7 @@ let guard_subject ~arm =
         \ (libraries arrayjit.utils)\n\
         \ (action\n\
         \  (setenv %s 1\n\
-        \   (run %%{test}))))\n\
-         \n\
+        \   (run %%{test}))))\n\n\
          (rule\n\
         \ (alias runtest)\n\
         \ (deps ocannl_config (universe))\n\
@@ -3542,17 +3674,15 @@ let guard_subject ~arm =
   (* The same directive one level down, which the top-level loop did not reach. *)
   | `Include_subdirs_nested ->
       "(subdir gen\n (include_subdirs unqualified))\n\n"
-      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+      ^ Printf.sprintf
+          "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
           (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
   | `Include_subdirs ->
       "(include_subdirs unqualified)\n\n"
-      ^ Printf.sprintf "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
+      ^ Printf.sprintf
+          "(executable\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n\n%s"
           (guard_rule ~target:"guard.actual" ~declares:true ~pins:`No)
-  | `Plain_library ->
-      "(library\n\
-      \ (name guard)\n\
-      \ (modules guard)\n\
-      \ (libraries arrayjit.utils))\n"
+  | `Plain_library -> "(library\n (name guard)\n (modules guard)\n (libraries arrayjit.utils))\n"
   | `Inline_tests_library ->
       "(library\n\
        ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.\n\
@@ -3597,10 +3727,10 @@ let guard_control () =
   let paths =
     "t/dune" :: "t/guard.ml" :: "t/gen/guard.ml" :: "t/utils.ml" :: List.map context ~f:fst
   in
-  (* The probe goes where the stanza's modules live, which for the subdir arm is one level down. Both
-     places are handed to the checker on every run, and the arm that is not using one writes an inert
-     source there, so the argument list -- and hence which globs the checker believes it was given --
-     is the same in every arm. *)
+  (* The probe goes where the stanza's modules live, which for the subdir arm is one level down.
+     Both places are handed to the checker on every run, and the arm that is not using one writes an
+     inert source there, so the argument list -- and hence which globs the checker believes it was
+     given -- is the same in every arm. *)
   let run ?(probe = guard_probe) ?(at = "t/guard.ml") arm =
     List.iter [ "t/guard.ml"; "t/gen/guard.ml"; "t/utils.ml" ] ~f:(fun path ->
         write_file
@@ -3646,19 +3776,14 @@ let guard_control () =
     exited 1 result && says (snd result) fragment
   in
   let passes result fragment = exited 0 result && not (says (snd result) fragment) in
-  let undeclared_ok =
-    reports undeclared diagnostic
-    && names_the_key (snd undeclared)
-  in
+  let undeclared_ok = reports undeclared diagnostic && names_the_key (snd undeclared) in
   let declared_ok = passes declared diagnostic in
   let pinned_ok = passes pinned diagnostic in
   let pinned_elsewhere_ok = reports pinned_elsewhere diagnostic in
   let pinned_beside_helper_ok = passes pinned_beside_helper diagnostic in
   let implicit_ok = reports implicit diagnostic && names_the_key (snd implicit) in
   let in_a_subdir_ok = reports in_a_subdir diagnostic && names_the_key (snd in_a_subdir) in
-  let module_without_source_ok =
-    reports module_without_source "handed no `helper.ml`"
-  in
+  let module_without_source_ok = reports module_without_source "handed no `helper.ml`" in
   let utils_lookalike_ok =
     reports utils_lookalike diagnostic && names_the_key (snd utils_lookalike)
   in
@@ -3669,9 +3794,7 @@ let guard_control () =
   let unknown_key_pinned_ok = passes unknown_key_pinned diagnostic in
   let self_running_pin_ok = passes self_running_pin diagnostic in
   let include_subdirs_ok = reports include_subdirs "include_subdirs unqualified" in
-  let include_subdirs_nested_ok =
-    reports include_subdirs_nested "include_subdirs unqualified"
-  in
+  let include_subdirs_nested_ok = reports include_subdirs_nested "include_subdirs unqualified" in
   let plain_library_ok =
     reports plain_library "from a library module" && names_the_key (snd plain_library)
   in
@@ -3703,8 +3826,7 @@ let guard_control () =
   if not unknown_key_pinned_ok then report "unknown-key-pinned" unknown_key_pinned;
   if not self_running_pin_ok then report "self-running-pin" self_running_pin;
   if not include_subdirs_ok then report "include-subdirs" include_subdirs;
-  if not include_subdirs_nested_ok then
-    report "include-subdirs-nested" include_subdirs_nested;
+  if not include_subdirs_nested_ok then report "include-subdirs-nested" include_subdirs_nested;
   if not plain_library_ok then report "plain-library" plain_library;
   if not inline_library_ok then report "inline-tests-library" inline_library;
   if not inline_library_declares_ok then
@@ -3729,8 +3851,7 @@ let guard_control () =
   Verdict.p
     "a `setenv` over a SIBLING branch of the same action does not pin this run, and is reported"
     pinned_elsewhere_ok;
-  Verdict.p
-    "and an unpinned run of a HELPER beside a pinned guard does not un-pin it"
+  Verdict.p "and an unpinned run of a HELPER beside a pinned guard does not un-pin it"
     pinned_beside_helper_ok;
   Verdict.p
     "a stanza reaching for dune's default module set is judged too, not skipped for lack of a \
@@ -3740,21 +3861,19 @@ let guard_control () =
     "a program declared inside a `(subdir …)` is reached, not read as a stanza with no modules"
     in_a_subdir_ok;
   Verdict.p
-    "a module the stanza names and this check was handed no source for is reported, not read as one \
-     that makes no reads"
+    "a module the stanza names and this check was handed no source for is reported, not read as \
+     one that makes no reads"
     module_without_source_ok;
   Verdict.p
     "a test directory's own `utils.ml` is not the module that defines the reader, and is not exempt"
     utils_lookalike_ok;
-  Verdict.p
-    "a key the registry does not know is still asked for, and is reported as undeclarable"
+  Verdict.p "a key the registry does not know is still asked for, and is reported as undeclarable"
     unknown_key_ok;
   Verdict.p "and pinning it is the way to answer for one" unknown_key_pinned_ok;
   Verdict.p
     "a stanza dune runs itself pins through its own action, and is not asked to declare besides"
     self_running_pin_ok;
-  Verdict.p
-    "a dune file whose module sets this scan cannot place is refused, not approximated"
+  Verdict.p "a dune file whose module sets this scan cannot place is refused, not approximated"
     include_subdirs_ok;
   Verdict.p "and the same directive inside a `(subdir …)` does not slip past the refusal"
     include_subdirs_nested_ok;

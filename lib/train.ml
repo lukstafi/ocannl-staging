@@ -134,8 +134,8 @@ let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
     invalid_arg @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
     ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
     ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
-  (* The parameter gradients stay embedded: the surrounding {!grad_update} backprop accumulates
-     into them regardless, and they are materialized so they persist across micro-steps. *)
+  (* The parameter gradients stay embedded: the surrounding {!grad_update} backprop accumulates into
+     them regardless, and they are materialized so they persist across micro-steps. *)
   { comp with Asgns.asgns = result }
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
@@ -281,9 +281,9 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
   if Option.is_none p.Tensor.diff then
     raise @@ Tensor.Session_error ("Train.sgd_one: not differentiable", Some p);
   (* The [%cd] payload is written once and the [update_gate] arms differ only where the gating
-     actually changes the emitted assignment. Inline declarations ([{ sgd_delta }],
-     [{ sgd_momentum }]) are hoisted by the ppx above the enclosing [match]/[if], so an arm that
-     declares a tensor and an arm that only reads it name the same tensor. *)
+     actually changes the emitted assignment. Inline declarations ([{ sgd_delta }], [{ sgd_momentum
+     }]) are hoisted by the ppx above the enclosing [match]/[if], so an arm that declares a tensor
+     and an arm that only reads it name the same tensor. *)
   [%cd
     ~~(p "param sgd step";
        (match grad_unscale with
@@ -315,10 +315,10 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
   (* The momentum buffer is optimizer state: it is read before it is written, and the value it
      carries into the next step is the whole point of it. Left undetermined it is a virtualization
      candidate, and inlining a node whose defining computation is in a PREVIOUS invocation of the
-     routine has no meaning -- lowering fails outright ("No computations found for
-     #N: sgd_momentum_..."), which is why [~momentum] was unusable until gh-ocannl-772 covered it.
-     The label's head is the inline declaration's identifier, so this names exactly the node the
-     [%cd] payload above declared. *)
+     routine has no meaning -- lowering fails outright ("No computations found for #N:
+     sgd_momentum_..."), which is why [~momentum] was unusable until gh-ocannl-772 covered it. The
+     label's head is the inline declaration's identifier, so this names exactly the node the [%cd]
+     payload above declared. *)
   if Float.(momentum > 0.0) then
     Set.iter comp.Asgns.embedded_nodes ~f:(fun tn ->
         match tn.Tn.label with "sgd_momentum" :: _ -> set_materialized tn | _ -> ());

@@ -2,11 +2,11 @@ open Base
 
 let staging_infix = ".ocannl-stage."
 
-(* A staging name has to satisfy three things at once, and the first two pull against each other:
-   it must be recognizable (the sweep DELETES what it recognizes), it must stay inside the
-   filesystem's per-component limit however long the target's name is, and it must be unique among
-   every writer that can reach this directory. So the target's contribution is a bounded STEM
-   derived from its basename, and everything after the infix is the writer's identity. *)
+(* A staging name has to satisfy three things at once, and the first two pull against each other: it
+   must be recognizable (the sweep DELETES what it recognizes), it must stay inside the filesystem's
+   per-component limit however long the target's name is, and it must be unique among every writer
+   that can reach this directory. So the target's contribution is a bounded STEM derived from its
+   basename, and everything after the infix is the writer's identity. *)
 let max_component_bytes = 255
 
 (* Everything after the infix is FIXED-WIDTH lowercase hex: the pid, the counter, the nonce. Named
@@ -35,9 +35,9 @@ let utf8_prefix s at =
   String.prefix s (back (Int.min at (String.length s)))
 
 (* Bounded, and a function of the basename alone — which is what lets the recognizer below rebuild
-   it from the target instead of storing it. A long checkpoint name used to fit only because the
-   old suffix was four characters (Codex P2, round 2); now it is truncated and disambiguated by a
-   digest of the whole name, so two long names that share a prefix still get distinct stems. *)
+   it from the target instead of storing it. A long checkpoint name used to fit only because the old
+   suffix was four characters (Codex P2, round 2); now it is truncated and disambiguated by a digest
+   of the whole name, so two long names that share a prefix still get distinct stems. *)
 let staging_stem basename =
   if String.length basename <= stem_budget then basename
   else
@@ -49,8 +49,8 @@ let staging_stem basename =
 (* [<stem>] ^ [staging_infix] ^ [<pid>] ^ "." ^ [<counter>] ^ "." ^ [<nonce>]. Recognition is the
    whole shape rather than a search for the infix: `report.ocannl-stage.backup` is somebody's file,
    and answering "staging" on it would make the sweep destructive over names it was never promised
-   (Codex P2, round 1). Returns the stem exactly when [name] is a staging name — which is also how
-   a caller asks about ONE published file rather than about a whole directory. *)
+   (Codex P2, round 1). Returns the stem exactly when [name] is a staging name — which is also how a
+   caller asks about ONE published file rather than about a whole directory. *)
 let staging_stem_of name =
   (* Every component is recognized at its GENERATED width and alphabet, not as "some hexadecimal": a
      sweep that accepts `report.ocannl-stage.1.2.a` deletes a file this module never wrote. *)
@@ -60,16 +60,16 @@ let staging_stem_of name =
   in
   match List.last (String.substr_index_all name ~may_overlap:false ~pattern:staging_infix) with
   | None -> None
-  | Some at ->
+  | Some at -> (
       let stem = String.prefix name at in
       let stamp = String.drop_prefix name (at + String.length staging_infix) in
-      (* Bounded as well as non-empty. [staging_stem] never emits more than [stem_budget] bytes, so a
-         longer stem is a name this module cannot have written — and the sweep deletes by this
+      (* Bounded as well as non-empty. [staging_stem] never emits more than [stem_budget] bytes, so
+         a longer stem is a name this module cannot have written — and the sweep deletes by this
          predicate (Codex P2, round 8). The bound is the whole of what is checkable: a stem at or
-         under the budget is emitted verbatim, and a truncated one is a prefix plus [~] and a digest,
-         which a short basename could also happen to spell. *)
+         under the budget is emitted verbatim, and a truncated one is a prefix plus [~] and a
+         digest, which a short basename could also happen to spell. *)
       if String.is_empty stem || String.length stem > stem_budget then None
-      else (
+      else
         match String.split stamp ~on:'.' with
         | [ pid; counter; nonce ]
           when hex_field field_width pid && hex_field field_width counter
@@ -84,7 +84,8 @@ let is_staging_file_for ~path name =
      ARE the same target, so a case-sensitive comparison would leave a model-sized artifact
      unreclaimed there (Codex P2, round 2). Where paths really are case-sensitive the only effect is
      that one target's save also reclaims a case-twin's staging file — which is an OCANNL staging
-     file, abandoned for over an hour, and something the directory-wide sweep would remove anyway. *)
+     file, abandoned for over an hour, and something the directory-wide sweep would remove
+     anyway. *)
   Option.exists (staging_stem_of name)
     ~f:(String.Caseless.equal (staging_stem (Stdlib.Filename.basename path)))
 
@@ -99,8 +100,8 @@ let rec ensure_dir dir =
 (* The counter distinguishes the staging files of two writers inside ONE process; the pid
    distinguishes processes on one host. Neither is enough on a filesystem shared between hosts or
    pid namespaces, where two writers can hold the same pid and both counters start at zero (Codex
-   P1, round 2) — so a nonce joins them, and, because a nonce only makes a collision unlikely,
-   the file is CREATED EXCLUSIVELY: a name already taken is retried rather than opened. *)
+   P1, round 2) — so a nonce joins them, and, because a nonce only makes a collision unlikely, the
+   file is CREATED EXCLUSIVELY: a name already taken is retried rather than opened. *)
 let next_staging_id : int Atomic.t = Atomic.make 0
 
 (* One 64-bit draw, so every value the recognizer accepts is one the generator can produce. Two
@@ -115,9 +116,9 @@ let fresh_nonce () =
 
 let staging_path path =
   (* Masked to the field's width rather than trusted to fit: a pid or a counter that overflowed it
-     would render wider and produce a name the recognizer -- and the ignore glob -- would not accept.
-     Wrapping costs nothing, since it is the nonce and the exclusive creation that carry uniqueness.
-  *)
+     would render wider and produce a name the recognizer -- and the ignore glob -- would not
+     accept. Wrapping costs nothing, since it is the nonce and the exclusive creation that carry
+     uniqueness. *)
   let field value = Printf.sprintf "%0*x" field_width (value land 0xFFFFFFFF) in
   let name =
     Printf.sprintf "%s%s%s.%s.%s"
@@ -240,9 +241,7 @@ let cleanup_stale ?(max_age_seconds = default_max_age_seconds) dir =
   sweep ~max_age_seconds ~dir ~selects:is_staging_file
 
 let cleanup_stale_for ?(max_age_seconds = default_max_age_seconds) path =
-  sweep ~max_age_seconds
-    ~dir:(Stdlib.Filename.dirname path)
-    ~selects:(is_staging_file_for ~path)
+  sweep ~max_age_seconds ~dir:(Stdlib.Filename.dirname path) ~selects:(is_staging_file_for ~path)
 
 let swept : (string, unit) Hashtbl.t = Hashtbl.create (module String)
 let swept_mutex = Stdlib.Mutex.create ()

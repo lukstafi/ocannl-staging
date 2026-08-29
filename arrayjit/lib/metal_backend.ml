@@ -677,11 +677,11 @@ module Impl = struct
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments
-                 accumulate at f16 while every serial rendering holds f32 residency
-                 (gh-ocannl-680). Seeding already withholds such candidates ([mma_f16_wide_acc]);
-                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
-                 rendering whose accumulator follows [accum_prec]. *)
+              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments accumulate
+                 at f16 while every serial rendering holds f32 residency (gh-ocannl-680). Seeding
+                 already withholds such candidates ([mma_f16_wide_acc]); this decline covers
+                 hand-built [Tile_mma] IR, falling back to the lane-0 scalar rendering whose
+                 accumulator follows [accum_prec]. *)
               | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
               | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
               | _ -> None
@@ -851,11 +851,11 @@ module Impl = struct
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments
-                 accumulate at f16 while every serial rendering holds f32 residency
-                 (gh-ocannl-680). Seeding already withholds such candidates ([mma_f16_wide_acc]);
-                 this decline covers hand-built [Tile_mma] IR, falling back to the lane-0 scalar
-                 rendering whose accumulator follows [accum_prec]. *)
+              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments accumulate
+                 at f16 while every serial rendering holds f32 residency (gh-ocannl-680). Seeding
+                 already withholds such candidates ([mma_f16_wide_acc]); this decline covers
+                 hand-built [Tile_mma] IR, falling back to the lane-0 scalar rendering whose
+                 accumulator follows [accum_prec]. *)
               | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
               | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
               | _ -> None

@@ -120,14 +120,14 @@ module type ARM = sig
   (** What the COMPILED KERNEL reports about itself, keyed by the macro's own C spelling: CUDA's
       [__CUDA_ARCH__], HIP's [HIP_FP8_CVT_FAST_PATH] and [HIP_FP8_TYPE_OCP]. Which conversion those
       readings MEAN is decided here in the shared module, not in the arm, and rides in every claim's
-      label so no run can be mistaken for the other kind afterwards (Codex P2 round 4 on PR #463). *)
+      label so no run can be mistaken for the other kind afterwards (Codex P2 round 4 on PR #463).
+  *)
 
   val narrow_f32 : spelling:spelling -> base:int -> count:int -> bytes_buf -> unit
   (** Fills [out.{i}] with the code the given spelling narrows the f32 with bit pattern [base + i]
       to. Never asked for a spelling outside the vendor record's [spellings]. *)
 
-  val narrow_f64 :
-    spelling:spelling -> base:int -> count:int -> lows:int array -> bytes_buf -> unit
+  val narrow_f64 : spelling:spelling -> base:int -> count:int -> lows:int array -> bytes_buf -> unit
   (** Fills [out.{4*i + k}] with the code the given spelling narrows the double with bit pattern
       [(base + i) << 32 | lows.(k)] to. *)
 end
@@ -143,8 +143,8 @@ type vendor = {
   spellings : spelling list;
       (** Which narrowing spellings this vendor has, the DEFAULT first. [`Raw] is the platform's own
           cast, which is what every backend emits except HIP's, where it is broken for tiny
-          magnitudes (gh-ocannl-647) and [`Guarded] — the [ocannl_*_to_fp8_uniform] helpers — is what
-          is emitted instead. An arm is never asked for a spelling outside this list. *)
+          magnitudes (gh-ocannl-647) and [`Guarded] — the [ocannl_*_to_fp8_uniform] helpers — is
+          what is emitted instead. An arm is never asked for a spelling outside this list. *)
   spelling_label : spelling -> string;
       (** How the swept narrowing is written in an emitted kernel, for the claim labels. *)
   target : report:(string * string) list -> macros:(string * int) list -> string;
@@ -243,8 +243,7 @@ let hip_vendor =
        say which one it swept. [`Guarded] first: it is what OCANNL emits, hence the default. *)
     spellings = [ `Guarded; `Raw ];
     spelling_label =
-      (function
-      | `Raw -> "(__hip_fp8_e5m2)x" | `Guarded -> "ocannl_{single,double}_to_fp8_uniform");
+      (function `Raw -> "(__hip_fp8_e5m2)x" | `Guarded -> "ocannl_{single,double}_to_fp8_uniform");
     macro_facts =
       (fun ~macros ->
         [
@@ -257,11 +256,11 @@ let hip_vendor =
     conversion_path =
       (fun ~target ~macros ->
         (* The gcn arch travels with the answer because it is what SELECTS the side, but the value
-           reported is the macro the kernel compiled with, not a name matched against a list here. *)
+           reported is the macro the kernel compiled with, not a name matched against a list
+           here. *)
         match macro macros hip_fast_path_macro with
         | 1 -> Printf.sprintf "hardware cvt (%s = 1 on %s)" hip_fast_path_macro target
-        | 0 ->
-            Printf.sprintf "header software cast_to_f8 (%s = 0 on %s)" hip_fast_path_macro target
+        | 0 -> Printf.sprintf "header software cast_to_f8 (%s = 0 on %s)" hip_fast_path_macro target
         | _ -> Printf.sprintf "unknown (%s undefined, on %s)" hip_fast_path_macro target);
   }
 
@@ -280,7 +279,8 @@ let probe v (module A : ARM) =
     | Ok 0 -> Error (Printf.sprintf "%s is linked, but %s reports no device" v.library v.runtime)
     | Ok _ -> Ok ()
     | Error e ->
-        Error (Printf.sprintf "%s is linked, but %s initialization failed: %s" v.library v.runtime e)
+        Error
+          (Printf.sprintf "%s is linked, but %s initialization failed: %s" v.library v.runtime e)
 
 let target v (module A : ARM) = v.target ~report:(A.device_report ()) ~macros:(A.kernel_macros ())
 
@@ -301,14 +301,13 @@ let describe v (module A : ARM) =
        arm's own device facts under their own labels, then what only the macros can say. A device
        fact the target already states verbatim is not repeated -- on HIP the gcn arch IS the compile
        target, on CUDA the device's capability and the target are two different numbers. *)
-    (("target", target)
-     :: List.filter report ~f:(fun (k, x) ->
-            (not (String.equal k "device")) && not (String.equal x target)))
+    ("target", target)
+    :: List.filter report ~f:(fun (k, x) ->
+        (not (String.equal k "device")) && not (String.equal x target))
     @ v.macro_facts ~macros
     |> List.map ~f:(fun (k, x) -> Printf.sprintf "%s: %s" k x)
   in
-  Printf.sprintf "%s (%s); %s options: %s" (field report "device")
-    (String.concat ~sep:", " facts)
+  Printf.sprintf "%s (%s); %s options: %s" (field report "device") (String.concat ~sep:", " facts)
     v.compiler
     (match A.compile_options () with [] -> "(none)" | os -> String.concat ~sep:" " os)
 
@@ -633,9 +632,9 @@ let () =
          pre-sm_89 GPU asks honestly for the device's own architecture and still gets the header's
          software conversion, so "device mode" is not by itself a statement about hardware. *)
       Stdio.printf "  conversion swept: %s\n%!" (conversion_path v arm);
-      (* [`Guarded] is asked for only where the vendor has it -- [v.spellings] is that menu, with the
-         default at the head -- so [--spelling=guarded] on CUDA sweeps nothing and says so rather
-         than reaching a [narrow_f32] that would reject it. *)
+      (* [`Guarded] is asked for only where the vendor has it -- [v.spellings] is that menu, with
+         the default at the head -- so [--spelling=guarded] on CUDA sweeps nothing and says so
+         rather than reaching a [narrow_f32] that would reject it. *)
       let available = v.spellings in
       let wanted =
         match !spelling with

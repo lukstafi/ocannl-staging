@@ -6,9 +6,7 @@
    A second module also makes this library WRAPPED, so its interface carries the module aliases the
    derivation takes its module list from. *)
 
-let renders_without_an_annotation code =
-  ([ "kparam" ], Emitter_fixture_a.renders_a_document code, 0)
-
+let renders_without_an_annotation code = ([ "kparam" ], Emitter_fixture_a.renders_a_document code, 0)
 let names_the_routine code = Emitter_fixture_a.describes_the_code code
 
 (* The control for how transparent aliases are keyed. [rendered] is [Emitter_fixture_a]'s name for
