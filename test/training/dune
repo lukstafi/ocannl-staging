@@ -409,6 +409,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-golden-recorded-on: transformer_names-cuda.expected <- cc -- copied from the shared cc golden
+ ; ocannl-golden-recorded-on: transformer_names-hip.expected <- cc -- copied from the shared cc golden
  (alias train-transformer_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)

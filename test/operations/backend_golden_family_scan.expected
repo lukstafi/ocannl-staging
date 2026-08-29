@@ -1,0 +1,18 @@
+Backend golden families:
+  test/operations/micrograd_demo_logging-<backend>-0-0.log.expected
+  test/training/transformer_names-<backend>.expected
+
+Members not yet recorded on their own backend:
+  test/training/transformer_names-cuda.expected <- cc -- copied from the shared cc golden
+  test/training/transformer_names-hip.expected <- cc -- copied from the shared cc golden
+
+Synthetic controls:
+  a complete synthesized family and valid contained marker are accepted
+  a synthesized family missing one backend is refused
+  a rule whose whole family is absent is refused
+  repository-relative family paths stay slash-normalized
+  a marker outside every stanza is refused
+  a marker inside the wrong family rule is refused
+  a malformed marker is refused
+
+backend golden families are complete and provenance markers are valid: true
