@@ -48,13 +48,13 @@ let rec remove_tree path =
   | _ -> Unix.unlink path
   | exception Unix.Unix_error _ -> ()
 
-(* Recursively, because not every fixture here is a file: the publication leg builds a staging
-   TREE and publishes it as one, and the sweep leg creates a directory of its own. A run
-   interrupted between planting one of those and removing it leaves a DIRECTORY behind, and a
-   file-only reset walked past it -- so the next run died at [Unix.mkdir] with EEXIST, or at
-   [publish_staged]'s rename into a non-empty target, instead of starting from the empty directory
-   every leg here assumes (gh-ocannl-803). Removal is best-effort per entry, so one entry the
-   filesystem refuses does not leave the rest of the leftovers in place. *)
+(* Recursively, because not every fixture here is a file: the publication leg builds a staging TREE
+   and publishes it as one, and the sweep leg creates a directory of its own. A run interrupted
+   between planting one of those and removing it leaves a DIRECTORY behind, and a file-only reset
+   walked past it -- so the next run died at [Unix.mkdir] with EEXIST, or at [publish_staged]'s
+   rename into a non-empty target, instead of starting from the empty directory every leg here
+   assumes (gh-ocannl-803). Removal is best-effort per entry, so one entry the filesystem refuses
+   does not leave the rest of the leftovers in place. *)
 let reset_dir () =
   AF.ensure_dir dir;
   List.iter (listing ()) ~f:(fun name ->
@@ -66,17 +66,17 @@ let reset_dir () =
 let () = reset_dir ()
 
 (* The child half of the rerun control below. What recovers a rerun is the initialization directly
-   above -- what happens when the PROCESS starts -- and a control that calls [reset_dir] itself
-   pins the HELPER instead: it would stay green with that startup call deleted, or moved after the
-   first leg, because the per-leg resets mask its absence (Codex P2, round 1). So the control
-   plants leftovers and starts a fresh process, which lands here: this argument makes a run do its
-   startup and nothing else, reporting where it ran and what the scratch directory held once the
-   startup reset had run.
+   above -- what happens when the PROCESS starts -- and a control that calls [reset_dir] itself pins
+   the HELPER instead: it would stay green with that startup call deleted, or moved after the first
+   leg, because the per-leg resets mask its absence (Codex P2, round 1). So the control plants
+   leftovers and starts a fresh process, which lands here: this argument makes a run do its startup
+   and nothing else, reporting where it ran and what the scratch directory held once the startup
+   reset had run.
 
    An argv marker rather than an environment variable, so nothing ambient can put a run into this
    mode -- OCANNL's commandline scan leaves an argument it is not addressed by alone, and there is
-   no undeclared variable for dune to serve a stale result across. It must sit immediately after
-   the startup reset and before every leg, or what it reports would be some later leg's reset. *)
+   no undeclared variable for dune to serve a stale result across. It must sit immediately after the
+   startup reset and before every leg, or what it reports would be some later leg's reset. *)
 let startup_probe_arg = "--startup-probe"
 
 let () =
@@ -484,18 +484,18 @@ let () =
     (List.is_empty (staging_leftovers ()));
   Verdict.p "a privately built directory tree publishes as one path" (publish_directory_tree ())
 
-(* The rerun control (gh-ocannl-803). Every leg above starts from an empty scratch directory, and
-   a run cut short -- Ctrl-C, a failed claim's exit, a killed suite -- does not get to finish its
-   own cleanup. So plant, by hand, exactly what an interruption in this file can leave behind: the
+(* The rerun control (gh-ocannl-803). Every leg above starts from an empty scratch directory, and a
+   run cut short -- Ctrl-C, a failed claim's exit, a killed suite -- does not get to finish its own
+   cleanup. So plant, by hand, exactly what an interruption in this file can leave behind: the
    staging tree built but not yet published, the published tree not yet removed, the sweep leg's
    directory not yet rmdir'd, and a stale published file. Each tree gets a nested subtree, so that
    clearing them is claimed to RECURSE rather than merely to try [rmdir] once.
 
-   Then hand that state to an ACTUAL rerun -- a fresh process, whose startup is the thing under
-   test -- and re-run the sequence the leftovers obstruct. Under a file-only reset the directories
+   Then hand that state to an ACTUAL rerun -- a fresh process, whose startup is the thing under test
+   -- and re-run the sequence the leftovers obstruct. Under a file-only reset the directories
    survive the child's startup, [Unix.mkdir] raises EEXIST and [publish_staged] renames into a
-   non-empty target; with the startup reset gone, the child reports the leftovers it was supposed
-   to have cleared. *)
+   non-empty target; with the startup reset gone, the child reports the leftovers it was supposed to
+   have cleared. *)
 let () =
   AF.ensure_dir dir;
   let plant_tree name =
