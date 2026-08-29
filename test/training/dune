@@ -287,7 +287,7 @@
  (name conv_data)
  (package neural_nets_lib)
  (modules conv_data)
- (libraries unix))
+ (libraries unix arrayjit.utils))
 
 ; mnist_conv is a slow training run: gated behind the `slow` alias (see cifar_conv).
 

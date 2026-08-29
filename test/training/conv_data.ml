@@ -99,15 +99,14 @@ let ensure_cifar10_binary () =
       end
     in
     mkdir_p (Filename.dirname (cache_dir ^ "."));
-    (* Download if needed. To a [.part] name renamed on success: a killed process must not leave a
+    (* Download if needed. [Atomic_file] gives every concurrent run its own staging sibling and
+       publishes only after curl exits successfully; a killed process therefore cannot leave a
        partial tarball that a later run mistakes for a completed download (the extraction then fails
        on a "truncated tar archive" until the cache is cleaned by hand). [-f] makes HTTP errors fail
-       the command instead of saving the error page; on Windows, prefer the System32 curl (Schannel,
-       OS certificate store) and tolerate offline revocation servers, and build the command with
-       [Filename.quote_command] — [cmd /c] strips a leading hand-quoted pair. *)
+       instead of saving the error page; on Windows, prefer the System32 curl (Schannel, OS
+       certificate store) and tolerate offline revocation servers. *)
     if not (Sys.file_exists tar_path) then begin
       Printf.printf "Downloading CIFAR-10 binary dataset...\n%!";
-      let part_path = tar_path ^ ".part" in
       let curl_exe =
         if Sys.win32 then
           let sys32 = "C:\\Windows\\System32\\curl.exe" in
@@ -115,14 +114,15 @@ let ensure_cifar10_binary () =
         else "curl"
       in
       let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
-      match
-        Unix.system
-          (Filename.quote_command curl_exe ([ "-fL"; "-o"; part_path ] @ revoke_args @ [ url ]))
-      with
-      | Unix.WEXITED 0 -> Sys.rename part_path tar_path
-      | _ ->
-          (try Sys.remove part_path with Sys_error _ -> ());
-          failwith "Failed to download CIFAR-10 binary dataset"
+      Utils.Atomic_file.cleanup_stale_for tar_path;
+      Utils.Atomic_file.with_channel ~path:tar_path () ~f:(fun oc ->
+          let argv = Array.of_list ([ curl_exe; "-fL" ] @ revoke_args @ [ url ]) in
+          let pid =
+            Unix.create_process curl_exe argv Unix.stdin (Unix.descr_of_out_channel oc) Unix.stderr
+          in
+          match snd (Unix.waitpid [] pid) with
+          | Unix.WEXITED 0 -> ()
+          | _ -> failwith "Failed to download CIFAR-10 binary dataset")
     end;
     (* Extract; a failure invalidates the cached tarball, so the next run re-downloads instead of
        failing forever on a corrupt archive. *)
