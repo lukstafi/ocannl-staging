@@ -793,7 +793,7 @@ let%track7_sexp c_compile_and_load ~f_path =
      — the decision itself no-ops under [`Dispatch]/[`None], and re-reading the syntax setting here
      would re-scan argv per kernel compile just to guard an already-memoized force. *)
   ignore (Lazy.force pool_restriction : Utils.Cpu_topology.pool_decision);
-  let base_name : string = Stdlib.Filename.chop_extension f_path in
+  let _base_name : string = Stdlib.Filename.chop_extension f_path in
   (* There can be only one library with a given name, the object gets cached. Moreover, [Dl.dlclose]
      is not required to unload the library, although ideally it should. *)
   let run_id = Int.to_string @@ Utils.get_global_run_id () in
@@ -801,7 +801,7 @@ let%track7_sexp c_compile_and_load ~f_path =
     let file_stem = Stdlib.Filename.chop_extension @@ Stdlib.Filename.basename f_path in
     if Utils.get_global_flag ~default:false ~arg_name:"output_dlls_in_build_directory" then
       (* Use only the path from f_path for the linked library libname *)
-      base_name ^ "_run_id_" ^ run_id ^ if Sys.win32 then ".dll" else ".so"
+      _base_name ^ "_run_id_" ^ run_id ^ if Sys.win32 then ".dll" else ".so"
     else
       (* Use temp_file without the run_id component *)
       Stdlib.Filename.temp_file file_stem (if Sys.win32 then ".dll" else ".so")
@@ -835,7 +835,7 @@ let%track7_sexp c_compile_and_load ~f_path =
     ]
     |> List.filter_opt |> String.concat ~sep:" "
   in
-  let cmdline : string =
+  let _cmdline : string =
     (* Quoted for the same reason as the probes': these paths sit under the build or the system temp
        directory, either of which can contain whitespace, and an unquoted one splits into arguments
        and fails every compile with a "this is a bug in OCANNL" report against a command the shell
@@ -845,9 +845,9 @@ let%track7_sexp c_compile_and_load ~f_path =
       kernel_link_flags (Stdlib.Filename.quote temp_log)
   in
   (* Debug: log the command if debugging is enabled *)
-  [%log3 "command", cmdline];
-  let rc : int = Stdlib.Sys.command cmdline in
-  (if rc <> 0 then (
+  [%log3 "command", _cmdline];
+  let _rc : int = Stdlib.Sys.command _cmdline in
+  (if _rc <> 0 then (
      let compiler_output =
        try Stdio.In_channel.read_all temp_log with _ -> "(unable to read compiler output)"
      in
@@ -859,7 +859,7 @@ let%track7_sexp c_compile_and_load ~f_path =
           Compilation command: %s\n\
           Compiler output:\n\
           %s"
-         rc f_path cmdline compiler_output
+         _rc f_path _cmdline compiler_output
      in
      raise
        (Schedule_outcome.Cause_at
@@ -1228,7 +1228,7 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized arr
 
 let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers
     (code : procedure) =
-  let name : string = code.name in
+  let _name : string = code.name in
   let log_file_name = Utils.diagn_log_file [%string "debug-%{runner_label}-%{code.name}.log"] in
   (* When [lowered_bindings] is given (batch linking, e.g. fissioned segments of one routine), the
      static-index refs are shared: looked up by the [Static_idx] param's symbol rather than freshly
@@ -1245,7 +1245,7 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
           ('a -> 'b, 'idcs, 'p1, 'p2) Indexing.variadic =
        fun (type a b idcs) (binds : idcs Indexing.bindings) kparams (cs : (a -> b) Ctypes.fn) ->
         match (binds, kparams) with
-        | Empty, [] -> Indexing.Result (Foreign.foreign ~from:code.result.lib name cs)
+        | Empty, [] -> Indexing.Result (Foreign.foreign ~from:code.result.lib _name cs)
         | Bind _, [] -> invalid_arg "Cc_backend.link: too few static index params"
         | Bind (_, bs), Static_idx s :: ps -> Param_idx (idx_ref s, link bs ps Ctypes.(int @-> cs))
         | Empty, Static_idx _ :: _ -> invalid_arg "Cc_backend.link: too many static index params"
@@ -1281,7 +1281,7 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
       link code.bindings kparams Ctypes.(void @-> returning void)]
   in
   let%diagn_sexp work () : unit =
-    [%log_result name];
+    [%log_result _name];
     (* Stdio.printf "launching %s\n" name; *)
     Indexing.apply run_variadic ();
     if Utils.debug_log_from_routines () then

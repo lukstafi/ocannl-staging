@@ -971,23 +971,23 @@ files.
   therefore stay green no matter what the FMA4 path does — adding `__FMA4__` to the predicate and a
   `bdver1` column is unfiled work, and until it exists the FMA4 claims in this note rest on the
   hand probes recorded here rather than on the suite.
-- **Reading the backend's own compile command: it works, but only at `OCANNL_LOG_LEVEL_CC_BACKEND=9`
-  and with a text backend** (gh-ocannl-753). `cc_backend.ml` logs its exact invocation as
-  `[%log3 "command", cmdline]`, which is the direct answer to "what flags did my kernel actually
+- **Reading the backend's own compile command: use `OCANNL_LOG_LEVEL_CC_BACKEND=3` or higher and a
+  text backend** (gh-ocannl-753, gh-ocannl-823). `cc_backend.ml` logs its exact invocation as
+  `[%log3 "command", _cmdline]`, which is the direct answer to "what flags did my kernel actually
   compile with". Three things stand between you and it, all established by running them. The gate is
   a PREPROCESSING one (`[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_CC_BACKEND"]`,
   declared as a `preprocessor_deps` `env_var` in `arrayjit/lib/dune`), so a runtime `log_level`
   alone leaves the call stripped — the same runtime-vs-preprocessing confusion recorded at the top
-  of that dune file from gh-ocannl-628. Rebuilding under it FAILS at low values: `=1` and `=3` both
-  die on warning 27 (`unused-var-strict`) for `base_name`, `cmdline` and `rc` — `name` too at `=1`
-  — which are warnings-as-errors here; **`=9` builds clean**, and 9 is the value the file's own
-  header comment names, so the low values look simply untested (an unfiled defect: a debug knob that
-  does not compile at two of its values). And the default `debug_backend=db` writes
+  of that dune file from gh-ocannl-628. The tracked scopes can be stripped independently of locals
+  they reference, so those locals use leading-underscore names: this keeps warning 27 clean at
+  every compile-time level without changing their evaluation or real uses. The CI guard builds
+  `@check` at `=3`, the minimum level that retains the command log. The default `debug_backend=db`
+  writes
   `log_files/<exe>/debug.db` + `debug_meta.db` (that directory follows `build_files_prefix` like
   every artifact — `log_files/<prefix>/` when set, flat `log_files/` at `.`), ppx_minidebug's binary
   database, which needs its
   rendering client; `debug_backend=text` gives readable output instead. With
-  `OCANNL_LOG_LEVEL_CC_BACKEND=9`, `log_level=9`, `debug_backend=text` the command appears verbatim
+  `OCANNL_LOG_LEVEL_CC_BACKEND=3`, `log_level=3`, `debug_backend=text` the command appears verbatim
   under a `command` node:
   `cc '<...>.c' -O3 -mcpu=native -o '<...>.so' -bundle -undefined dynamic_lookup > '<...>' 2>&1`.
   **Where that lands is decided by `log_main_domain_to_stdout`, and both answers are live in this
