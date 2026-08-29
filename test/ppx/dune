@@ -56,7 +56,8 @@
  (deps
   (alias runtest-test_ppx_op-ppx)
   (alias runtest-test_ppx_name_conflict-ppx)
-  (alias runtest-test_compose_logic_err-ppx)))
+  (alias runtest-test_compose_logic_err-ppx)
+  (alias runtest-test_raw_accum-ppx)))
 
 (executable
  (name pp)
@@ -100,6 +101,17 @@
   (run ./%{pp} --impl %{input} -o %{targets})))
 
 (rule
+ ; ocannl-backend: none -- pp.exe links ppx_ocannl, which is base, ppxlib, str and einsum_parser:
+ ; no arrayjit at all, so no OCANNL configuration is in reach. Its output is a printed AST.
+ (targets test_raw_accum_actual.ml)
+ (package neural_nets_lib)
+ (deps
+  (:pp pp.exe)
+  (:input test_raw_accum.ml))
+ (action
+  (run ./%{pp} --impl %{input} -o %{targets})))
+
+(rule
  (alias runtest-test_ppx_op-ppx)
  (package neural_nets_lib)
  (deps
@@ -123,6 +135,14 @@
  (action
   (diff test_compose_logic_err_expected.ml test_compose_logic_err_actual.ml)))
 
+(rule
+ (alias runtest-test_raw_accum-ppx)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff test_raw_accum_expected.ml test_raw_accum_actual.ml)))
+
 (test
  (name test_ppx_op)
  (package neural_nets_lib)
@@ -138,6 +158,30 @@
  (name test_ppx_op_expected)
  (package neural_nets_lib)
  (modules test_ppx_op_expected)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries ocannl))
+
+; Both sides of the golden are compiled, so the call shapes it pins are checked to type-check --
+; the same pairing test_ppx_op uses. Neither executable does anything at run time: their toplevels
+; only define functions.
+
+(test
+ (name test_raw_accum)
+ (package neural_nets_lib)
+ (modules test_raw_accum)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries ocannl)
+ (preprocess
+  (pps ppx_ocannl)))
+
+(test
+ (name test_raw_accum_expected)
+ (package neural_nets_lib)
+ (modules test_raw_accum_expected)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
