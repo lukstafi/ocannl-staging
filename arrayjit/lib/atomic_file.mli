@@ -49,6 +49,14 @@ val staging_infix : string
     has no way to spell "one or more digits", can describe exactly this set and no ordinary file
     besides. *)
 
+val field_width : int
+(** Width of the pid and counter fields in a staging name. Exposed with {!nonce_width} so the test
+    can derive the repository's [.gitignore] rule from the generator's constants rather than
+    restating them. *)
+
+val nonce_width : int
+(** Width of the nonce field in a staging name. See {!field_width}. *)
+
 val is_staging_file : string -> bool
 (** Whether a file NAME (not necessarily a path) is one of this module's staging artifacts. The
     predicate to be checked against, rather than a second spelling of the naming scheme.
@@ -91,6 +99,15 @@ val is_staging_file_for : path:string -> string -> bool
 val ensure_dir : string -> unit
 (** Creates the directory and its missing parents, tolerating concurrent creators. A no-op for
     ["."], ["/"] and the empty string, so a bare filename's [Filename.dirname] is safe to pass. *)
+
+val publish_staged : staging:string -> path:string -> unit
+(** [publish_staged ~staging ~path] atomically renames a complete, closed staging path over [path],
+    using the same bounded Windows retry as file publication. It also accepts a staged directory
+    tree, which lets callers build a multi-file artifact privately before exposing the whole tree.
+
+    The caller owns staging-name uniqueness, ensures both paths are on the same filesystem, and
+    removes [staging] after a failed publication. Prefer {!with_channel} for one file: it provides
+    all three automatically. *)
 
 val with_channel :
   ?before_commit:(unit -> unit) ->

@@ -26,6 +26,7 @@
 
 open Base
 module AF = Utils.Atomic_file
+module Ignore = Test_utils.Cache_dir_scan
 
 let dir = "atomic_file_race_dir"
 let target = Stdlib.Filename.concat dir "published.bin"
@@ -36,6 +37,16 @@ let listing () =
   | entries -> List.sort ~compare:String.compare (Array.to_list entries)
 
 let staging_leftovers () = List.filter (listing ()) ~f:AF.is_staging_file
+let generated_staging_names = ref []
+
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (Stdlib.Sys.readdir path) ~f:(fun entry ->
+          remove_tree (Stdlib.Filename.concat path entry));
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
 
 let reset_dir () =
   AF.ensure_dir dir;
@@ -348,7 +359,10 @@ let () =
       ~before_commit:(fun () -> names := staging_leftovers () @ !names)
       ()
   done;
-  Verdict.p_all ~min:50 "every attempt stages exactly one file" !names ~f:AF.is_staging_file;
+  generated_staging_names := !names;
+  Verdict.p "all 50 attempts expose exactly one staging path" (List.length !names = 50);
+  Verdict.p_all ~min:50 "every staging_path output round-trips through is_staging_file" !names
+    ~f:AF.is_staging_file;
   Verdict.p "no two staging names repeat"
     (List.length (List.dedup_and_sort !names ~compare:String.compare) = List.length !names);
   Verdict.p_all ~min:50 "a differently-cased short target claims its staging files too" !names
@@ -393,7 +407,15 @@ let () =
   Verdict.p "a failed streamed publish leaves the previous payload"
     (Option.equal String.equal (read_published ()) (Some streamed));
   Verdict.p "a failed streamed publish removes its own staging file"
-    (List.is_empty (staging_leftovers ()))
+    (List.is_empty (staging_leftovers ()));
+  let staged_dir = Stdlib.Filename.concat dir "staged-directory" in
+  let published_dir = Stdlib.Filename.concat dir "published-directory" in
+  Unix.mkdir staged_dir 0o755;
+  Stdio.Out_channel.write_all (Stdlib.Filename.concat staged_dir "complete") ~data:"tree";
+  AF.publish_staged ~staging:staged_dir ~path:published_dir;
+  Verdict.p "a privately built directory tree publishes as one path"
+    (Stdlib.Sys.file_exists (Stdlib.Filename.concat published_dir "complete"));
+  remove_tree published_dir
 
 (* One exception type for filesystem refusals, whatever refused. A best-effort writer -- the
    schedule cache treats a refusal as a future miss rather than a failed tuning run -- needs one
@@ -436,14 +458,146 @@ let () =
 (* Crash-stale cleanup: the writer that dies in its commit window cannot clean up after itself, so
    the sweep must — by age, and only over this module's own artifacts. *)
 let age_seconds = 3600.
-
-(* A staging name a writer could have produced: the generated shape is the stem, the infix, and then
-   three FIXED-WIDTH hex fields -- pid, counter, nonce. Only names of that shape are the sweep's to
-   delete, and only they are the ones `.gitignore` hides. *)
-let nonce = "00c0ffee00c0ffee"
+let hex_alphabet = "abcdef0123456789"
+let hex_field width = String.init width ~f:(fun i -> hex_alphabet.[i % String.length hex_alphabet])
+let nonce = hex_field AF.nonce_width
+let field value = Printf.sprintf "%0*x" AF.field_width value
 
 let staged_name ~target ~counter =
-  Printf.sprintf "%s%s%08x.%08x.%s" target AF.staging_infix 4242 counter nonce
+  Printf.sprintf "%s%s%s.%s.%s" target AF.staging_infix (field 4242) (field counter) nonce
+
+let staging_name_of_fields ~stem = function
+  | [ pid; counter; nonce ] -> Printf.sprintf "%s%s%s.%s.%s" stem AF.staging_infix pid counter nonce
+  | _ -> invalid_arg "staging_name_of_fields: expected pid, counter and nonce"
+
+let valid_fields = [ hex_field AF.field_width; hex_field AF.field_width; nonce ]
+
+let replace_field fields at replacement =
+  List.mapi fields ~f:(fun i field -> if i = at then replacement else field)
+
+(* Each of the three generated fields is perturbed in every direction that previously drifted by
+   hand: wider, narrower, outside lowercase hex, and case-flipped. This matrix replaces the list of
+   reviewer-found impostors, so a change to a width or to the field count expands from the same
+   constants as generation rather than requiring another literal name. *)
+let field_near_misses =
+  List.mapi valid_fields ~f:(fun at original ->
+      let perturbed =
+        [
+          original ^ "0";
+          String.drop_suffix original 1;
+          "g" ^ String.drop_prefix original 1;
+          String.uppercase original;
+        ]
+      in
+      List.map perturbed ~f:(fun replacement ->
+          staging_name_of_fields ~stem:"report" (replace_field valid_fields at replacement)))
+  |> List.concat
+
+let empty_stem_near_miss = AF.staging_infix ^ String.concat ~sep:"." valid_fields
+
+let overlong_stem_near_miss =
+  String.make 192 's' ^ AF.staging_infix ^ String.concat ~sep:"." valid_fields
+
+let missing_field_near_miss =
+  "report" ^ AF.staging_infix ^ String.concat ~sep:"." (List.drop_last_exn valid_fields)
+
+let surplus_field_near_miss = staging_name_of_fields ~stem:"report" valid_fields ^ ".extra"
+
+let structural_near_misses =
+  [
+    (* Empty stems are not generated. *)
+    empty_stem_near_miss;
+    (* Every field is valid, but generation never emits a stem beyond its 191-byte budget. *)
+    overlong_stem_near_miss;
+    (* Missing and surplus fields cannot be generator outputs either. *)
+    missing_field_near_miss;
+    surplus_field_near_miss;
+  ]
+
+let near_misses = field_near_misses @ structural_near_misses
+
+let rec gitignore_files dir =
+  Array.to_list (Stdlib.Sys.readdir dir)
+  |> List.concat_map ~f:(fun entry ->
+      let path = Stdlib.Filename.concat dir entry in
+      if String.equal entry ".gitignore" then [ path ]
+      else if String.equal entry ".git" || String.equal entry "_build" then []
+      else
+        match Stdlib.Sys.is_directory path with
+        | true -> gitignore_files path
+        | false -> []
+        | exception Stdlib.Sys_error _ -> [])
+
+(* The ignore rule is the third description of the name scheme. Derive it from the generator's
+   constants, then compare against the one committed line instead of pinning another copy. The one
+   known bound remains: a glob cannot express the recognizer's MAXIMUM stem length. It can therefore
+   hide an overlong near-miss from [git status], but that is leak-or-hide only, never
+   wrong-deletion: the destructive sweep consults [is_staging_file], which rejects that name. *)
+let () =
+  let field_glob width = String.concat (List.init width ~f:(fun _ -> "[0-9a-f]")) in
+  let expected =
+    Printf.sprintf "?*%s%s.%s.%s" AF.staging_infix (field_glob AF.field_width)
+      (field_glob AF.field_width) (field_glob AF.nonce_width)
+  in
+  let gitignore = Stdio.In_channel.read_all "../../.gitignore" in
+  let committed =
+    String.split_lines gitignore
+    |> List.filter ~f:(fun line ->
+        (not (String.is_prefix line ~prefix:"#"))
+        && String.is_substring line ~substring:AF.staging_infix)
+  in
+  Verdict.p "the ignore file carries exactly one Atomic_file staging rule"
+    (List.length committed = 1);
+  Verdict.p_all "the committed staging rule equals the scheme derived from Atomic_file" committed
+    ~f:(String.equal expected);
+  let matches_committed_rule name =
+    List.exists committed ~f:(fun pattern -> Ignore.glob_matches pattern name)
+  in
+  (* The generator is the authority on separators and field layout. These are actual names captured
+     while [with_channel] held them in the commit window, so changing [staging_path] and its
+     recognizer together cannot leave this relationship green against an old ignore rule. The exact
+     derived rule contains no slash, so Git applies it to the basename at every depth. Under Git's
+     ordered last-match-wins semantics, reject every later negation that has a wildcard/class or
+     literally names the staging infix. A backslash is refused too: it can hide an escaped literal
+     from the raw spelling. Exact unrelated re-inclusions (the committed file has two for [.claude])
+     cannot match a generated staging basename; any general or escaped negation is refused
+     conservatively. This needs neither a [.git] directory nor a Git executable in package builds
+     (Codex P2, rounds 4-6 and 8). *)
+  Verdict.p_all ~min:50 "the committed basename rule matches every actual staging_path output"
+    !generated_staging_names ~f:matches_committed_rule;
+  let patterns = Ignore.ignore_patterns gitignore in
+  let rec after_committed_rule = function
+    | [] -> []
+    | { Ignore.pattern; negated = false } :: rest when String.equal pattern expected -> rest
+    | _ :: rest -> after_committed_rule rest
+  in
+  let could_expose_staging { Ignore.pattern; negated } =
+    negated
+    && (String.exists pattern ~f:(fun c ->
+            Char.equal c '*' || Char.equal c '?' || Char.equal c '[' || Char.equal c '\\')
+       || String.is_substring pattern ~substring:AF.staging_infix)
+  in
+  Verdict.p_none "no later Git negation can match an Atomic_file staging path"
+    (after_committed_rule patterns) ~f:could_expose_staging;
+  let ignore_root = Stdlib.Filename.concat ".." ".." in
+  let nested_ignores =
+    gitignore_files ignore_root
+    |> List.filter ~f:(fun path -> not (String.equal (Stdlib.Filename.dirname path) ignore_root))
+  in
+  let nested_patterns =
+    List.concat_map nested_ignores ~f:(fun path ->
+        Ignore.ignore_patterns (Stdio.In_channel.read_all path)
+        |> List.map ~f:(fun pattern -> (path, pattern)))
+  in
+  Verdict.p_exists "the nested ignore corpus is present" nested_ignores ~f:(fun _ -> true);
+  Verdict.p_none "no nested Git negation can match an Atomic_file staging path" nested_patterns
+    ~f:(fun (_, pattern) -> could_expose_staging pattern);
+  Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
+    (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
+    ~f:matches_committed_rule;
+  Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
+    [ overlong_stem_near_miss ] ~f:(fun name ->
+      matches_committed_rule name && not (AF.is_staging_file name))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
@@ -459,35 +613,13 @@ let () =
   let stale = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:0) ~age:7200. in
   let fresh = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:1) ~age:0. in
   let bystander = plant_staging ~name:"unrelated.bin" ~age:7200. in
-  (* Names carrying the infix that this module did NOT generate. The sweep deletes what the
-     predicate accepts, so each of these is a file somebody else owns (Codex P2, round 1): a
-     descriptive suffix instead of the counter, a missing counter, a non-numeric pid, and a staging
-     name with no target in front of it. *)
-  let impostors =
-    [
-      "report" ^ AF.staging_infix ^ "backup";
-      "report" ^ AF.staging_infix ^ "4242";
-      "report" ^ AF.staging_infix ^ "4242.0";
-      "report" ^ AF.staging_infix ^ "host7.0." ^ nonce;
-      "report" ^ AF.staging_infix ^ "00001092.00000000.nonsense0nonsense";
-      (* Hex, but not at the widths this module generates -- in the nonce and in the fields both. *)
-      "report" ^ AF.staging_infix ^ "1.2.a";
-      "report" ^ AF.staging_infix ^ "00001092.00000000." ^ nonce ^ "0";
-      "report" ^ AF.staging_infix ^ "1092.0." ^ nonce;
-      (* The shape a `[0-9]*` glob would have swallowed: fields that start numeric and go on. *)
-      "report" ^ AF.staging_infix ^ "1abc.2bar." ^ nonce;
-      (* Every field right, but a stem longer than generation can emit: it always truncates. *)
-      String.make 192 's' ^ AF.staging_infix ^ "00001092.00000000." ^ nonce;
-      AF.staging_infix ^ "4242.0." ^ nonce;
-    ]
-  in
-  let planted_impostors = List.map impostors ~f:(fun name -> plant_staging ~name ~age:7200.) in
+  let planted_near_misses = List.map near_misses ~f:(fun name -> plant_staging ~name ~age:7200.) in
   Verdict.p_all "every planted staging file is recognized as one" [ stale; fresh ] ~f:(fun path ->
       AF.is_staging_file (Stdlib.Filename.basename path));
   Verdict.p "the bystander is not recognized as a staging file"
     (not (AF.is_staging_file (Stdlib.Filename.basename bystander)));
-  Verdict.p_none "no name that merely contains the infix is recognized as a staging file" impostors
-    ~f:AF.is_staging_file;
+  Verdict.p_none ~min:16 "no systematically perturbed near-miss is recognized as a staging file"
+    near_misses ~f:AF.is_staging_file;
   (* The narrow scope: whose staging file it is, not merely that it is one. *)
   Verdict.p_all "the published file's own staging files are recognized as its" [ stale; fresh ]
     ~f:(fun path -> AF.is_staging_file_for ~path:target (Stdlib.Filename.basename path));
@@ -509,7 +641,7 @@ let () =
   Verdict.p "the sweep spares the published file" (Stdlib.Sys.file_exists target);
   Verdict.p "the sweep spares an aged file that is not a staging artifact"
     (Stdlib.Sys.file_exists bystander);
-  Verdict.p_all "the sweep spares every aged file that merely contains the infix" planted_impostors
+  Verdict.p_all "the sweep spares every aged systematically perturbed near-miss" planted_near_misses
     ~f:Stdlib.Sys.file_exists;
   Verdict.p "the published file still reads as it was written"
     (Option.equal String.equal (read_published ()) (Some seed));

@@ -100,6 +100,7 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-atomic_file_rename_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
@@ -179,6 +180,7 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-atomic_file_rename_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
   (alias runtest-autotune_bound_pruning)
@@ -1882,6 +1884,40 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
+
+; gh-ocannl-803: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
+; recursive over the whole repository, so a new top-level directory joins the scan without another
+; list to maintain; the generated lexer/parser outputs add the compiled OCaml actions from .mll/.mly
+; inputs. The one raw rename that implements Atomic_file is a named exemption in the scanner,
+; carrying its reason and a staleness check. tools/test-run.sh's shell twin is outside an OCaml parse
+; by design and remains tracked through gh-ocannl-607.
+
+(executable
+ (name atomic_file_rename_scan)
+ (modules atomic_file_rename_scan)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it parses every repository OCaml source.
+ (target atomic_file_rename_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../tensor/lexer.ml
+  ../../tensor/parser.ml
+  (glob_files_rec ../../*.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:atomic_file_rename_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-atomic_file_rename_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
 
 (executable
  (name config_dep_completeness)
@@ -4036,9 +4072,11 @@
  ; ocannl-backend: none -- links arrayjit.utils and races the filesystem helper; it compiles nothing.
  (name atomic_file_race)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../.gitignore))
  (modules atomic_file_race)
- (libraries base stdio unix arrayjit.utils arrayjit.verdict))
+ (libraries base stdio unix arrayjit.utils test_utils arrayjit.verdict))
 
 ; The exactness of [diff.zero_grads.embedded_nodes] (gh-ocannl-771), at both ends of the
 ; recursion: a parameter's singleton, and a composite loss's set equality against what its

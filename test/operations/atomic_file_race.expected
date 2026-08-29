@@ -33,7 +33,8 @@ every staging name of a multibyte target is itself valid UTF-8: true
 a multibyte target's staging file fits one filesystem component: true
 a multibyte target's staging file is recognized as that target's: true
 a differently-cased spelling of the target claims its staging files: true
-every attempt stages exactly one file: true
+all 50 attempts expose exactly one staging path: true
+every staging_path output round-trips through is_staging_file: true
 no two staging names repeat: true
 a differently-cased short target claims its staging files too: true
 the repeated publishing left only the published file: true
@@ -44,13 +45,22 @@ a streamed publish commits its whole payload: true
 a streamed publish that raises mid-write raises: true
 a failed streamed publish leaves the previous payload: true
 a failed streamed publish removes its own staging file: true
+a privately built directory tree publishes as one path: true
 every filesystem refusal reaches the caller as Sys_error: true
 an exception from the caller's own writer is not converted: true
 an exception from the commit hook is not converted: true
 a refused publish leaves no staging file: true
+the ignore file carries exactly one Atomic_file staging rule: true
+the committed staging rule equals the scheme derived from Atomic_file: true
+the committed basename rule matches every actual staging_path output: true
+no later Git negation can match an Atomic_file staging path: true
+the nested ignore corpus is present: true
+no nested Git negation can match an Atomic_file staging path: true
+the committed rule rejects every expressible generated near-miss: true
+the glob-only overlong-stem residue is hidden but never recognized for deletion: true
 every planted staging file is recognized as one: true
 the bystander is not recognized as a staging file: true
-no name that merely contains the infix is recognized as a staging file: true
+no systematically perturbed near-miss is recognized as a staging file: true
 the published file's own staging files are recognized as its: true
 another target's staging file is not recognized as this one's: true
 the narrow sweep removes this target's abandoned staging file: true
@@ -60,7 +70,7 @@ the sweep removes another target's abandoned staging file too: true
 the sweep spares a staging file young enough to be in flight: true
 the sweep spares the published file: true
 the sweep spares an aged file that is not a staging artifact: true
-the sweep spares every aged file that merely contains the infix: true
+the sweep spares every aged systematically perturbed near-miss: true
 the published file still reads as it was written: true
 a directory that did not exist yet does not consume its one sweep: true
 the once-per-process sweep does not run a second time: true

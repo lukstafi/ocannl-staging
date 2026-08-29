@@ -83,12 +83,47 @@ let cifar10_cache_dir () =
 
 let cifar10_data_dir () = cifar10_cache_dir () ^ "cifar-10-batches-bin/"
 
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (fun entry -> remove_tree (Filename.concat path entry)) (Sys.readdir path);
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
+
+let cifar_prepare_mutex = Mutex.create ()
+
+let with_file_lock path f =
+  Mutex.lock cifar_prepare_mutex;
+  Fun.protect
+    ~finally:(fun () -> Mutex.unlock cifar_prepare_mutex)
+    (fun () ->
+      let fd = Unix.openfile path [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.lockf fd Unix.F_LOCK 0;
+          f ()))
+
+let cleanup_abandoned_extractions cache_dir =
+  if Sys.file_exists cache_dir then
+    Array.iter
+      (fun entry ->
+        if String.starts_with ~prefix:"cifar-extract-" entry then
+          remove_tree (Filename.concat cache_dir entry))
+      (Sys.readdir cache_dir)
+
 let ensure_cifar10_binary () =
   let cache_dir = cifar10_cache_dir () in
   let data_dir = cifar10_data_dir () in
   let check_file = data_dir ^ "test_batch.bin" in
+  let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
+  (* A successful sibling can make both existence guards below true while a killed downloader's
+     staging file remains. Sweep before either guard so publication by one writer never suppresses
+     reclamation of another writer's abandoned near-complete archive. A missing cache directory is
+     harmless: the cleanup helper treats it as an empty sweep. *)
+  Utils.Atomic_file.cleanup_stale_for tar_path;
   if not (Sys.file_exists check_file) then begin
-    let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
     let url = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz" in
     (* Create cache dir natively: `mkdir -p` via Unix.system goes through cmd.exe on Windows, which
        has no -p flag. *)
@@ -99,41 +134,63 @@ let ensure_cifar10_binary () =
       end
     in
     mkdir_p (Filename.dirname (cache_dir ^ "."));
-    (* Download if needed. To a [.part] name renamed on success: a killed process must not leave a
-       partial tarball that a later run mistakes for a completed download (the extraction then fails
-       on a "truncated tar archive" until the cache is cleaned by hand). [-f] makes HTTP errors fail
-       the command instead of saving the error page; on Windows, prefer the System32 curl (Schannel,
-       OS certificate store) and tolerate offline revocation servers, and build the command with
-       [Filename.quote_command] — [cmd /c] strips a leading hand-quoted pair. *)
-    if not (Sys.file_exists tar_path) then begin
-      Printf.printf "Downloading CIFAR-10 binary dataset...\n%!";
-      let part_path = tar_path ^ ".part" in
-      let curl_exe =
-        if Sys.win32 then
-          let sys32 = "C:\\Windows\\System32\\curl.exe" in
-          if Sys.file_exists sys32 then sys32 else "curl"
-        else "curl"
-      in
-      let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
-      match
-        Unix.system
-          (Filename.quote_command curl_exe ([ "-fL"; "-o"; part_path ] @ revoke_args @ [ url ]))
-      with
-      | Unix.WEXITED 0 -> Sys.rename part_path tar_path
-      | _ ->
-          (try Sys.remove part_path with Sys_error _ -> ());
-          failwith "Failed to download CIFAR-10 binary dataset"
-    end;
-    (* Extract; a failure invalidates the cached tarball, so the next run re-downloads instead of
-       failing forever on a corrupt archive. *)
-    Printf.printf "Extracting CIFAR-10...\n%!";
-    (match Unix.system (Filename.quote_command "tar" [ "xzf"; tar_path; "-C"; cache_dir ]) with
-    | Unix.WEXITED 0 -> ()
-    | _ ->
-        (try Sys.remove tar_path with Sys_error _ -> ());
-        failwith "Failed to extract CIFAR-10 archive (cached tarball removed; rerun to re-download)");
-    if not (Sys.file_exists check_file) then
-      failwith ("Extraction succeeded but check file not found: " ^ check_file)
+    (* The mutex covers Domains in this process; the record lock covers other processes and is
+       released by the OS when its owner dies. Keeping the lock file permanently avoids the POSIX
+       unlink/recreate inode race: every process always locks the same object. Once both are held,
+       no private extraction directory can still belong to a live peer, so crash leftovers and a
+       legacy direct-extraction target are safe to reclaim immediately. *)
+    with_file_lock (Filename.concat cache_dir ".cifar-10.prepare.lock") (fun () ->
+        if not (Sys.file_exists check_file) then begin
+          cleanup_abandoned_extractions cache_dir;
+          let data_path = Filename.dirname (data_dir ^ ".") in
+          if Sys.file_exists data_path then remove_tree data_path;
+          (* [Atomic_file] publishes only after curl exits successfully; a killed process therefore
+             cannot leave a partial tarball that a later run mistakes for a completed download. [-f]
+             makes HTTP errors fail instead of saving the error page; on Windows, prefer the
+             System32 curl (Schannel, OS certificate store) and tolerate offline revocation
+             servers. *)
+          if not (Sys.file_exists tar_path) then begin
+            Printf.printf "Downloading CIFAR-10 binary dataset...\n%!";
+            let curl_exe =
+              if Sys.win32 then
+                let sys32 = "C:\\Windows\\System32\\curl.exe" in
+                if Sys.file_exists sys32 then sys32 else "curl"
+              else "curl"
+            in
+            let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
+            Utils.Atomic_file.with_channel ~path:tar_path () ~f:(fun oc ->
+                let argv = Array.of_list ([ curl_exe; "-fL" ] @ revoke_args @ [ url ]) in
+                let pid =
+                  Unix.create_process curl_exe argv Unix.stdin (Unix.descr_of_out_channel oc)
+                    Unix.stderr
+                in
+                match snd (Unix.waitpid [] pid) with
+                | Unix.WEXITED 0 -> ()
+                | _ -> failwith "Failed to download CIFAR-10 binary dataset")
+          end;
+          (* Extract into a private sibling tree, then publish the whole directory at once. Readers
+             can therefore observe no batch file until every batch is complete. *)
+          Printf.printf "Extracting CIFAR-10...\n%!";
+          let extraction_root = Filename.temp_dir ~temp_dir:cache_dir "cifar-extract-" "" in
+          Fun.protect
+            ~finally:(fun () -> remove_tree extraction_root)
+            (fun () ->
+              match
+                Unix.system
+                  (Filename.quote_command "tar" [ "xzf"; tar_path; "-C"; extraction_root ])
+              with
+              | Unix.WEXITED 0 ->
+                  let staged_data = Filename.concat extraction_root "cifar-10-batches-bin" in
+                  let staged_check = Filename.concat staged_data "test_batch.bin" in
+                  if not (Sys.file_exists staged_check) then
+                    failwith ("Extraction succeeded but check file not found: " ^ staged_check);
+                  Utils.Atomic_file.publish_staged ~staging:staged_data ~path:data_path
+              | _ ->
+                  (try Sys.remove tar_path with Sys_error _ -> ());
+                  failwith
+                    "Failed to extract CIFAR-10 archive (cached tarball removed; rerun to \
+                     re-download)")
+        end)
   end
 
 (** Read a single CIFAR-10 binary batch file. Each record is 1 label byte + 3072 pixel bytes
