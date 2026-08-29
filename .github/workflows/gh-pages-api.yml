@@ -47,26 +47,28 @@ jobs:
 
       # Resolve only after every pin is registered; the live registry is the
       # source of truth for the cache key in both workflows.
-      - name: Resolve pinned dependency revisions
+      - name: Resolve opam dependency source revisions
         id: pins
         uses: ./.github/actions/pin-revisions
 
       # Cache the built local switch, where the ~180 compiled dependencies live.
       # The key covers every input that can make its contents runner-specific or
       # dependency-specific: OS, architecture, exact compiler, all project opam
-      # files, and every resolved remote pin. Over-invalidating costs one rebuild;
-      # under-invalidating silently serves stale code.
+      # files, the live opam-repository state, and every resolved remote pin.
+      # Over-invalidating costs one rebuild; under-invalidating silently serves
+      # stale code.
       #
       # Deliberately use exact-key restores only. Pin resolution above reads the
       # live `_opam` registry before cache lookup; a broad restore key could then
       # replace it with a switch carrying older pins. An exact hit has the same
-      # opam-file and resolved-pin identity, so restoring that registry is safe.
+      # opam-file, repository-state and resolved-pin identity, so restoring that
+      # registry is safe.
       - name: Cache opam dependencies
         id: opam-cache
         uses: actions/cache@v6
         with:
           path: _opam
-          key: opam-deps-${{ runner.os }}-${{ runner.arch }}-${{ env.OCAML_COMPILER }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.digest }}
+          key: opam-deps-${{ runner.os }}-${{ runner.arch }}-${{ env.OCAML_COMPILER }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.repository-digest }}-${{ steps.pins.outputs.digest }}
 
       # Depexts are system packages: a restored `_opam` records their opam
       # packages, but the fresh runner still lacks the libraries themselves.

@@ -1017,10 +1017,13 @@ that they earn a lookup rather than always-loaded space.
 - Both `ci.yml` and `gh-pages-api.yml` cache the built local dependency switch `_opam`, where the
   ~180 compiled packages live; setup-ocaml separately caches opam's root and bare compiler switch.
   Their entries stay separate because the CI matrix and the fixed docs runner have different key
-  shapes, but both keys include the platform, compiler, project opam files and the digest from
-  `.github/actions/pin-revisions`. That action runs after the workflows' `opam pin -n` steps,
-  derives every remote git pin from opam's live registry, resolves it with `git ls-remote`, and
-  digests the shas. A key over `hashFiles('*.opam')` alone is blind to the branch-tracking pins
+  shapes, but both keys include the platform, compiler, project opam files, live repository-state
+  digest and resolved-pin digest from `.github/actions/pin-revisions`. That action runs after
+  setup-ocaml updates the repositories and after the workflows' `opam pin -n` steps. It reads each
+  selected repository's live stamp in priority order, then derives every remote git pin from opam's
+  live registry, resolves it with `git ls-remote`, and digests the shas. A key over
+  `hashFiles('*.opam')` alone is blind both to new compatible ordinary-package releases and to the
+  branch-tracking pins
   (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move while the opam files
   stay byte-identical. Deriving from the registry matters: a newly added explicit pin enters the key
   without a second caller-owned list to update. Both workflows use exact-key restores only: cache

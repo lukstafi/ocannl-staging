@@ -1,27 +1,26 @@
-name: Resolve pinned dependency revisions
+name: Resolve opam dependency source revisions
 description: >-
-  Resolve every remote git pin in the current opam switch to a commit sha and
-  emit a short digest of them, to be mixed into an opam cache key.
+  Resolve the live opam-repository state and every remote git pin in the
+  current switch, and emit short digests to mix into an opam cache key.
 
 # Why this exists at all: an opam cache key built from `hashFiles('*.opam')`
-# alone is blind to every pin that tracks a BRANCH. `ppx_minidebug#main`,
+# alone is blind to ordinary package releases and metadata changes in the live
+# opam repositories, and to every pin that tracks a BRANCH. `ppx_minidebug#main`,
 # `notty-community#master` and `dataprep#main` move while the opam files stay
-# byte-identical, so a key that ignores them serves a switch built from stale
-# sources indefinitely, and the workflow's verdict becomes a fact about the
-# cache's age rather than about the commit under test. Over-invalidating costs
-# one rebuild; under-invalidating is silent staleness, so the trade is not close.
+# byte-identical, so a key that ignores either registry serves a switch built
+# from stale sources indefinitely. The workflow's verdict then becomes a fact
+# about cache age rather than the dependency state under test. Over-invalidating
+# costs one rebuild; under-invalidating is silent staleness, so the trade is not
+# close.
 #
-# Why it is an action rather than a copy per workflow: derivation and resolution
-# are one cohesive question ("what do our pins point at right now?") and drift between
-# two copies of the answer is precisely the failure gh-ocannl-732 recorded --
-# `ci.yml` had this and `gh-pages-api.yml` did not, so the latter's cache key
-# was a literal that never invalidated. Sharing the STEP is also what gets it
-# tested: `ci.yml` runs on every pull request across ubuntu and macOS, while
-# `gh-pages-api.yml` only ever runs on a push to master, so a change here that
-# broke resolution would surface on the PR rather than on master. The two
-# workflows' cache ENTRIES stay separate -- they cache different things (see
-# each `Cache` step) and have no reason to share a key. Callers run this after
-# all their `opam pin -n` steps, so the registry is the single source of truth.
+# Why it is an action rather than a copy per workflow: repository and pin
+# resolution are one cohesive question ("which dependency sources will the
+# solver see right now?") and drift between two copies of the answer is
+# precisely the failure gh-ocannl-732 recorded. Both `ci.yml` and
+# `gh-pages-api.yml` cache `_opam` and exercise this action on pull requests;
+# their entries stay separate because their runner matrices and key shapes
+# differ. Callers run this after setup-ocaml has updated the repositories and
+# after all `opam pin -n` steps, so both live registries are the source of truth.
 
 outputs:
   digest:
@@ -29,6 +28,11 @@ outputs:
       Twelve hex characters standing for the resolved revisions; changes iff any
       pin moved.
     value: ${{ steps.resolve.outputs.digest }}
+  repository-digest:
+    description: >-
+      Twelve hex characters standing for the selected opam repositories and
+      their live stamps; changes when their order or state changes.
+    value: ${{ steps.resolve.outputs.repository-digest }}
 
 runs:
   using: composite
@@ -37,6 +41,40 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        hash12() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum | cut -c1-12
+          else
+            shasum -a 256 | cut -c1-12
+          fi
+        }
+
+        # setup-ocaml updates the selected repositories before this action.
+        # Opam records the exact fetched state in each repository's `stamp`;
+        # include the repository names in priority order because that order is
+        # itself solver input. Hashing only the project opam files would miss a
+        # new compatible release or changed metadata in opam-repository.
+        root=$(opam var root)
+        case "$root" in
+          [A-Za-z]:\\*)
+            command -v cygpath >/dev/null 2>&1 \
+              || { echo "cannot translate Windows opam root: $root" >&2; exit 1; }
+            root=$(cygpath -u "$root")
+            ;;
+        esac
+        repos=$(opam --cli=2.1 repository list --safe --short)
+        [ -n "$repos" ] || { echo "no selected opam repositories found" >&2; exit 1; }
+        repository_states=
+        while IFS= read -r repo; do
+          repo_file="$root/repo/$repo/repo"
+          [ -f "$repo_file" ] || { echo "repository metadata not found: $repo_file" >&2; exit 1; }
+          stamp=$(sed -n 's/^stamp:[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_file")
+          [ -n "$stamp" ] || { echo "repository stamp not found: $repo_file" >&2; exit 1; }
+          echo "$repo -> $stamp"
+          repository_states=$repository_states$repo:$stamp$'\n'
+        done <<< "$repos"
+        echo "repository-digest=$(printf %s "$repository_states" | hash12)" >>"$GITHUB_OUTPUT"
+
         # `--cli=2.1` fixes the table format this parser consumes across opam
         # upgrades. Local project pins are reported as git+file:// URLs; omit
         # them because the source checkout already selects their revision and a
@@ -73,10 +111,5 @@ runs:
           echo "$url#$ref -> $sha"
           shas=$shas$sha
         done <<< "$specs"
-        # macOS ships shasum, not sha256sum.
-        if command -v sha256sum >/dev/null 2>&1; then
-          digest=$(printf %s "$shas" | sha256sum)
-        else
-          digest=$(printf %s "$shas" | shasum -a 256)
-        fi
-        echo "digest=$(printf %s "$digest" | cut -c1-12)" >>"$GITHUB_OUTPUT"
+        # macOS ships shasum, not sha256sum; hash12 handles both runners.
+        echo "digest=$(printf %s "$shas" | hash12)" >>"$GITHUB_OUTPUT"
