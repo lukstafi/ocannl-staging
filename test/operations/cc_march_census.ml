@@ -640,13 +640,13 @@ let cache_misses = ref 0
 let cache_bypasses = ref 0
 let cache_active = ref false
 
-type cache_location = { path : string; owner_only : bool }
+type cache_location = { path : string; owner_only_root : string option }
 
 let cache_dir =
   lazy
     (match Stdlib.Sys.getenv_opt "OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR" with
     | Some dir when not (String.is_empty (String.strip dir)) ->
-        Some { path = String.strip dir; owner_only = false }
+        Some { path = String.strip dir; owner_only_root = None }
     | _ ->
         let base =
           match Stdlib.Sys.getenv_opt "XDG_CACHE_HOME" with
@@ -660,14 +660,14 @@ let cache_dir =
         Option.map base ~f:(fun base ->
             {
               path = Stdlib.Filename.concat (Stdlib.Filename.concat base "ocannl") "cc_march_census";
-              owner_only = true;
+              owner_only_root = Some base;
             }))
 
 (* Native Windows reports synthetic uid/mode values (uid 0 here versus [getuid () = 1], mode 0777),
    so its proof is the real file kind plus the user-cache directory's inherited Windows ACL. This is
    the same boundary as [Cc_backend]'s persistent probe cache. POSIX additionally enforces the
    owner/mode checks below. *)
-let secure_owner_only_dir path =
+let secure_owner_only_dir ~root path =
   try
     Utils.Atomic_file.ensure_dir path;
     let secure_one dir =
@@ -681,10 +681,10 @@ let secure_owner_only_dir path =
           | _ -> false)
       | _ -> false
     in
-    (* Securing the OCANNL parent too prevents another account from replacing the private leaf by
-       renaming it through a permissively-created parent. The XDG/HOME cache root remains the user's
-       own policy and is not chmodded by this test. *)
-    secure_one (Stdlib.Filename.dirname path) && secure_one path
+    (* Secure from the implicit XDG/HOME root down. [ensure_dir] may just have created that root
+       under a permissive umask; protecting only its descendants would still let another account
+       rename the OCANNL parent through the writable root after this check. *)
+    secure_one root && secure_one (Stdlib.Filename.dirname path) && secure_one path
   with _ -> false
 
 let secure_owner_only_file path =
@@ -877,10 +877,11 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
   | None ->
       Int.incr cache_bypasses;
       Census.compile t ~opt_level ~src_path ~asm_path
-  | Some { path = dir; owner_only = true } when not (secure_owner_only_dir dir) ->
+  | Some { path = dir; owner_only_root = Some root } when not (secure_owner_only_dir ~root dir) ->
       Int.incr cache_bypasses;
       Census.compile t ~opt_level ~src_path ~asm_path
-  | Some { path = dir; owner_only } -> (
+  | Some { path = dir; owner_only_root } -> (
+      let owner_only = Option.is_some owner_only_root in
       cache_active := true;
       match toolchain_identity t ~opt_level ~source with
       | None ->
