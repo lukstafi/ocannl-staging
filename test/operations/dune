@@ -4071,7 +4071,7 @@
  (package neural_nets_lib)
  (deps ocannl_config ../../.gitignore)
  (modules atomic_file_race)
- (libraries base stdio unix arrayjit.utils arrayjit.verdict))
+ (libraries base stdio unix arrayjit.utils test_utils arrayjit.verdict))
 
 ; The exactness of [diff.zero_grads.embedded_nodes] (gh-ocannl-771), at both ends of the
 ; recursion: a parameter's singleton, and a composite loss's set equality against what its

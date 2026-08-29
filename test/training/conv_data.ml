@@ -87,8 +87,13 @@ let ensure_cifar10_binary () =
   let cache_dir = cifar10_cache_dir () in
   let data_dir = cifar10_data_dir () in
   let check_file = data_dir ^ "test_batch.bin" in
+  let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
+  (* A successful sibling can make both existence guards below true while a killed downloader's
+     staging file remains. Sweep before either guard so publication by one writer never suppresses
+     reclamation of another writer's abandoned near-complete archive. A missing cache directory is
+     harmless: the cleanup helper treats it as an empty sweep. *)
+  Utils.Atomic_file.cleanup_stale_for tar_path;
   if not (Sys.file_exists check_file) then begin
-    let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
     let url = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz" in
     (* Create cache dir natively: `mkdir -p` via Unix.system goes through cmd.exe on Windows, which
        has no -p flag. *)
@@ -114,7 +119,6 @@ let ensure_cifar10_binary () =
         else "curl"
       in
       let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
-      Utils.Atomic_file.cleanup_stale_for tar_path;
       Utils.Atomic_file.with_channel ~path:tar_path () ~f:(fun oc ->
           let argv = Array.of_list ([ curl_exe; "-fL" ] @ revoke_args @ [ url ]) in
           let pid =

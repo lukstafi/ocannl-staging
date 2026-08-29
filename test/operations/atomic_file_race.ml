@@ -26,6 +26,7 @@
 
 open Base
 module AF = Utils.Atomic_file
+module Ignore = Test_utils.Cache_dir_scan
 
 let dir = "atomic_file_race_dir"
 let target = Stdlib.Filename.concat dir "published.bin"
@@ -36,6 +37,7 @@ let listing () =
   | entries -> List.sort ~compare:String.compare (Array.to_list entries)
 
 let staging_leftovers () = List.filter (listing ()) ~f:AF.is_staging_file
+let generated_staging_names = ref []
 
 let reset_dir () =
   AF.ensure_dir dir;
@@ -348,6 +350,7 @@ let () =
       ~before_commit:(fun () -> names := staging_leftovers () @ !names)
       ()
   done;
+  generated_staging_names := !names;
   Verdict.p "all 50 attempts expose exactly one staging path" (List.length !names = 50);
   Verdict.p_all ~min:50 "every staging_path output round-trips through is_staging_file" !names
     ~f:AF.is_staging_file;
@@ -473,16 +476,25 @@ let field_near_misses =
           staging_name_of_fields ~stem:"report" (replace_field valid_fields at replacement)))
   |> List.concat
 
+let empty_stem_near_miss = AF.staging_infix ^ String.concat ~sep:"." valid_fields
+
+let overlong_stem_near_miss =
+  String.make 192 's' ^ AF.staging_infix ^ String.concat ~sep:"." valid_fields
+
+let missing_field_near_miss =
+  "report" ^ AF.staging_infix ^ String.concat ~sep:"." (List.drop_last_exn valid_fields)
+
+let surplus_field_near_miss = staging_name_of_fields ~stem:"report" valid_fields ^ ".extra"
+
 let structural_near_misses =
-  let suffix = String.concat ~sep:"." valid_fields in
   [
     (* Empty stems are not generated. *)
-    AF.staging_infix ^ suffix;
+    empty_stem_near_miss;
     (* Every field is valid, but generation never emits a stem beyond its 191-byte budget. *)
-    String.make 192 's' ^ AF.staging_infix ^ suffix;
+    overlong_stem_near_miss;
     (* Missing and surplus fields cannot be generator outputs either. *)
-    "report" ^ AF.staging_infix ^ String.concat ~sep:"." (List.drop_last_exn valid_fields);
-    staging_name_of_fields ~stem:"report" valid_fields ^ ".extra";
+    missing_field_near_miss;
+    surplus_field_near_miss;
   ]
 
 let near_misses = field_near_misses @ structural_near_misses
@@ -507,7 +519,18 @@ let () =
   Verdict.p "the ignore file carries exactly one Atomic_file staging rule"
     (List.length committed = 1);
   Verdict.p_all "the committed staging rule equals the scheme derived from Atomic_file" committed
-    ~f:(String.equal expected)
+    ~f:(String.equal expected);
+  let ignored name = List.exists committed ~f:(fun pattern -> Ignore.glob_matches pattern name) in
+  (* The generator is the authority on separators and field layout. These are actual names captured
+     while [with_channel] held them in the commit window, so changing [staging_path] and its
+     recognizer together cannot leave this relationship green against an old ignore rule. *)
+  Verdict.p_all ~min:50 "the committed rule matches every actual staging_path output"
+    !generated_staging_names ~f:ignored;
+  Verdict.p_none ~min:15 "the committed rule rejects every expressible generated near-miss"
+    (field_near_misses @ [ empty_stem_near_miss; missing_field_near_miss; surplus_field_near_miss ])
+    ~f:ignored;
+  Verdict.p_all "the glob-only overlong-stem residue is hidden but never recognized for deletion"
+    [ overlong_stem_near_miss ] ~f:(fun name -> ignored name && not (AF.is_staging_file name))
 
 let plant_staging ~name ~age =
   let path = Stdlib.Filename.concat dir name in
