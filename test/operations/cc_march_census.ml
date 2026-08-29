@@ -663,11 +663,16 @@ let cache_dir =
               owner_only = true;
             }))
 
+(* Native Windows reports synthetic uid/mode values (uid 0 here versus [getuid () = 1], mode 0777),
+   so its proof is the real file kind plus the user-cache directory's inherited Windows ACL. This is
+   the same boundary as [Cc_backend]'s persistent probe cache. POSIX additionally enforces the
+   owner/mode checks below. *)
 let secure_owner_only_dir path =
   try
     Utils.Atomic_file.ensure_dir path;
     let secure_one dir =
       match Unix.lstat dir with
+      | { Unix.st_kind = Unix.S_DIR; _ } when Sys.win32 -> true
       | { Unix.st_kind = Unix.S_DIR; st_uid; _ } when st_uid = Unix.getuid () -> (
           Unix.chmod dir 0o700;
           match Unix.lstat dir with
@@ -685,6 +690,7 @@ let secure_owner_only_dir path =
 let secure_owner_only_file path =
   try
     match Unix.lstat path with
+    | { Unix.st_kind = Unix.S_REG; _ } when Sys.win32 -> true
     | { Unix.st_kind = Unix.S_REG; st_uid; _ } when st_uid = Unix.getuid () -> (
         Unix.chmod path 0o600;
         match Unix.lstat path with
