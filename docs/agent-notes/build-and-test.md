@@ -463,6 +463,14 @@ that they earn a lookup rather than always-loaded space.
   reproduces at all (a bare `dune promotion apply` in the same scenario commits the stale golden) —
   without it, leg 2 would pass if `git commit` merely picked up the working tree, and the guard
   would be untested. Measured: legs 2, 5 and 6 all fail against the pre-guard script.
+- Two Windows C-runtime formatting differences make hand-formatted floats non-portable in goldens:
+  it prints 3-digit exponents (`e+018` where Linux prints `e+18`), and it rounds representable
+  decimal ties away from zero where glibc rounds to even (`%.1f` of `2.25` prints `2.3` there,
+  `2.2` on Linux). `Ir.Ndarray.concise_float ~prec` normalizes the exponents, OCaml's `%h`
+  hex-float format sidesteps decimal rounding entirely, and tie-free test data sidesteps it too;
+  `test/support/test_utils.ml` packages the rules — `hex_float` and `set_binary_stdout` are
+  portable by construction, while `print_float`/`print_floats` delegate to `concise_float` and so
+  still need tie-free inputs.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
@@ -605,6 +613,12 @@ that they earn a lookup rather than always-loaded space.
   array. Neither constructor reaches `optimize` through the ordinary pipeline (lowering emits
   neither, and the rewrite runs after both virtualization arms), so hand-built IR is the only way
   to put one in front of the analyses; `gather_table_placement.ml` is what that looks like.
+- An executed reference must DISCRIMINATE, not merely run: give every producer a value that varies
+  with every symbol of its iteration and stays clear of the init/sentinel value (`1 + i`,
+  `1 + 10*outer + inner` — the `tick`/`tag` helpers in `test/operations/virtual_diagonal.ml`). A
+  constant producer replays an identical assignment under a too-wide range guard, a value omitting
+  one symbol is constant along that axis under a wrong substitution, and a value colliding with the
+  zero-init hides a dropped first iteration — each is a leg that passes for the wrong reason.
 - A test operand minted from a FLATTENED offset stops discriminating at sizes that divide its
   modulus, and does it while still looking right: `(row * stride + col) mod p` collapses to
   `col mod p` whenever `p` divides the row stride, so every row becomes identical. That makes a
@@ -680,7 +694,19 @@ that they earn a lookup rather than always-loaded space.
   so `ocannl_backend=metal` decided the backend while invalidating nothing. gh-ocannl-652 closed it
   from the other end: the environment has ONE spelling, `OCANNL_<KEY>`, and setting a lowercase or
   dashed spelling of a known key aborts the run with a message naming the spelling that works, so
-  the variable cannot quietly decide nothing either.
+  the variable cannot quietly decide nothing either — on case-sensitive environments, that is:
+  native Windows's case-insensitive environment makes the lowercase spelling the SAME variable,
+  read normally (`Utils.env_names_case_insensitive`; `test/operations/config_var_spellings` pins
+  both readings on every host), while a dashed spelling differs on every platform and stays fatal.
+- `env_spelling_gate` is one gate per DIRECTORY because dune aliases are per directory, and it
+  depends on `(universe)` so it reruns on every invocation — no suite comes back green with a
+  rejected lowercase spelling ambient. `runtest` and `slow` are gated separately; a gate in a file
+  that serializes on `ocannl_training_test` must take the lock, since an unlocked action in a
+  locked file is what the next training test gets copied from (the gate starts no pool). Hand-written
+  per-test aliases depend on the gate explicitly, while dune's GENERATED `runtest-<name>` aliases do
+  not — a targeted run of a `(test)` stanza can be served stale under a rejected spelling — and
+  `env_var_deps` checks that every alias with test actions in a directory carries that directory's
+  gate.
 - Deleting a file target out from under dune is not a way to force it to re-run: `dune build
   <that target>` afterwards exits 0 having produced nothing (observed on dune 3.23.1 with
   `test/operations/<name>.exe.output`), and `-f/--force` does not rescue it — `--force` only
@@ -697,7 +723,11 @@ that they earn a lookup rather than always-loaded space.
   a full rebuild, which on macOS means every fresh executable queueing behind XProtect again. Worth
   knowing before it bites, because the failure is silent in the dangerous direction: the missing
   target leaves whatever `.actual` was there before, so a probe that only diffs the file reads
-  green while nothing has run.
+  green while nothing has run. The same probe has a second stale-reading trap: discarding the
+  build's stderr (`2>/dev/null`) without checking its exit status — a FAILED build (say, a
+  warning-as-error from a temporary edit) leaves the previous `.exe.output` untouched, and the
+  stale file reads as a green probe; that turned a negative control into a false positive during
+  gh-ocannl-554.
 - **Before changing code generation, read the inventory**: `dune build
   @test/operations/runtest-codegen_text_inventory` prints, as its golden, every file in the tree
   that pins the TEXT of emitted code (gh-ocannl-712). Two populations, and no single search finds
@@ -866,6 +896,14 @@ that they earn a lookup rather than always-loaded space.
   sweep's GPU boxes, so a codegen change that moves the trajectory leaves those two stale until the
   daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
   multidev_cc leg exists.
+- Gating a new slow test is the same conversion with `slow-` names: replace the `(test)` stanza
+  with an `(executable)` plus a `(rule (alias slow-<name>) …)` that runs the exe and diffs
+  `<name>.expected`, put `(alias slow-env_spelling_gate)` first in the rule's `(deps …)` so the
+  ambient gate runs before the test, and list `(alias slow-<name>)` in the directory's
+  `(alias (name slow) …)` aggregate — `test/training/dune` is the pattern, and `env_var_deps` fails
+  on a rule the aggregate omits, since `dune build @slow` would otherwise skip it silently. The
+  action needs `(no-infer …)` here for the same reason as above: an `.actual` registered as a build
+  target puts the slow run on plain `dune build`'s `@all`.
 - Two focused aggregates sit beside `scans`, built the same way and answering a narrower question
   (gh-ocannl-783): `dune build @metal-codegen` runs the Metal-pinned tests — the executed Metal-only
   guards and the emitted-MSL structural ones — and `dune build @lifecycle` runs the
@@ -1018,6 +1056,12 @@ that they earn a lookup rather than always-loaded space.
   MSYS perl's flock genuinely excludes a second process; and `proc_alive` does not in fact need
   its tokenless fallback there — MSYS `ps` has no `-o` at all, but MSYS *does* provide
   `/proc/<pid>/stat`, so `ps_token` takes the Linux branch and records real tokens.
+- The Git Bash requirement is specifically MSYS, not any bash on the box: opam's cygwin bash — or
+  whatever `bash` resolves to once opam's cygwin is on PATH — reports `OSTYPE=cygwin` exactly like
+  Git Bash, so the two are told apart by `uname -o` (`Msys` vs `Cygwin`). Only the MSYS one gets
+  `tools/opam-env.sh`'s path rewrite (the un-primed signature is dune found but linking dead with
+  `cygpath: error converting … -lpthread`), and Cygwin ships no `perl`, which `tools/test-run.sh`
+  needs for its lock, cap and `last` pointer and refuses without (gh-ocannl-662).
 - What that run FOUND: under MSYS with the default `winsymlinks` mode, `ln -s` does not create a
   link, it silently COPIES — so `ln -sfn <run-dir> last-<key>` left a full copy of the run
   directory where the pointer belonged, and every `last` lookup afterwards resolved to nothing.
