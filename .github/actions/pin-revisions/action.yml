@@ -1,7 +1,7 @@
 name: Resolve pinned dependency revisions
 description: >-
-  Resolve every VCS pin this project depends on to a commit sha and emit a short
-  digest of them, to be mixed into an opam cache key.
+  Resolve every remote git pin in the current opam switch to a commit sha and
+  emit a short digest of them, to be mixed into an opam cache key.
 
 # Why this exists at all: an opam cache key built from `hashFiles('*.opam')`
 # alone is blind to every pin that tracks a BRANCH. `ppx_minidebug#main`,
@@ -11,8 +11,8 @@ description: >-
 # cache's age rather than about the commit under test. Over-invalidating costs
 # one rebuild; under-invalidating is silent staleness, so the trade is not close.
 #
-# Why it is an action rather than a copy per workflow: the resolution is one
-# cohesive question ("what do our pins point at right now?") and drift between
+# Why it is an action rather than a copy per workflow: derivation and resolution
+# are one cohesive question ("what do our pins point at right now?") and drift between
 # two copies of the answer is precisely the failure gh-ocannl-732 recorded --
 # `ci.yml` had this and `gh-pages-api.yml` did not, so the latter's cache key
 # was a literal that never invalidated. Sharing the STEP is also what gets it
@@ -20,16 +20,8 @@ description: >-
 # `gh-pages-api.yml` only ever runs on a push to master, so a change here that
 # broke resolution would surface on the PR rather than on master. The two
 # workflows' cache ENTRIES stay separate -- they cache different things (see
-# each `Cache` step) and have no reason to share a key.
-
-inputs:
-  extra-specs:
-    description: >-
-      Whitespace-separated `<url>[#<ref>]` specs for pins the calling workflow
-      declares itself with `opam pin`, on top of the `pin-depends` entries read
-      out of the opam files. `<ref>` defaults to HEAD.
-    required: false
-    default: ""
+# each `Cache` step) and have no reason to share a key. Callers run this after
+# all their `opam pin -n` steps, so the registry is the single source of truth.
 
 outputs:
   digest:
@@ -43,43 +35,28 @@ runs:
   steps:
     - id: resolve
       shell: bash
-      # Through the environment rather than `${{ }}` interpolated into the script
-      # text: an expression substituted there is spliced in before bash parses
-      # the line, so the input's punctuation would be shell syntax.
-      env:
-        EXTRA_SPECS: ${{ inputs.extra-specs }}
-      # Runs in the workspace, so `*.opam` is the checked-out tree's -- the
-      # caller must have run `actions/checkout` first.
       run: |
         set -euo pipefail
-        # Deliberately flat: the macOS runners have bash 3.2, which mis-parses a
-        # `case` inside `$( )` -- the first pattern's `)` closes the substitution
-        # early and the arm's `;;` becomes a syntax error.
-        # Whatever the caller pins explicitly...
-        specs="${EXTRA_SPECS:-}"
-        # ...plus every pin-depends entry, read from the opam files so the key
-        # cannot drift out of step with them. dev-repo is deliberately not
-        # matched, since it points at this project and its HEAD moves with every
-        # commit. `|| true` so that no match reaches the check below rather than
-        # tripping `set -e` with nothing said.
-        pin_depends=$(grep -hoE '\["[^"]+" *"git\+[^"]+"\]' *.opam | grep -oE 'git\+[^"]+' | sed 's/^git+//' || true)
-        # Were that grep to stop matching -- a reformatted opam file, a new
-        # spelling of the entry -- the branch-tracking pins would quietly drop
-        # out of every caller's key, which is a key that no longer invalidates:
-        # exactly the bug this action exists to prevent, silently reintroduced.
-        # This project always has pin-depends entries, so none is a defect and
-        # not a case. Checked on the extraction rather than on the final list,
-        # since a caller's own `extra-specs` would otherwise mask it.
-        [ -n "$pin_depends" ] || { echo "no pin-depends entries found in *.opam" >&2; exit 1; }
-        specs="$specs $pin_depends"
-        # Sorted and deduplicated so the digest depends on the SET of pins and
-        # not on how the caller happened to order them -- a caller may name a pin
-        # that pin-depends already carries without double-counting it. LC_ALL=C
-        # because collation of `-`, `.` and `/` differs by locale, and the digest
-        # must not: unquoted for word splitting, as in the loop below.
-        specs=$(printf '%s\n' $specs | LC_ALL=C sort -u)
+        # `--cli=2.1` fixes the table format this parser consumes across opam
+        # upgrades. Local project pins are reported as git+file:// URLs; omit
+        # them because the source checkout already selects their revision and a
+        # dependency cache must not miss on every project commit. Every remote
+        # git pin, whether explicit or introduced by pin-depends, comes from the
+        # registry populated by the caller's preceding `opam pin -n` steps.
+        # LC_ALL=C keeps the digest stable across runner locales.
+        specs=$(opam --cli=2.1 pin list --safe \
+          | sed -n 's/.* \(git+[^[:space:]]*\).*/\1/p' \
+          | sed '/^git+file:\/\//d' \
+          | LC_ALL=C sort -u)
+        # An empty list means the registry extraction stopped matching (or the
+        # caller ran this too early). Never collapse that defect into the digest
+        # of an empty string: that would silently freeze the cache key.
+        [ -n "$specs" ] || { echo "no remote git pins found in opam pin registry" >&2; exit 1; }
+        echo "Derived remote git pin specs:"
+        printf '%s\n' "$specs" | sed 's/^/  /'
         shas=
-        for spec in $specs; do
+        while IFS= read -r spec; do
+          spec=${spec#git+}
           url=${spec%%#*}
           ref=${spec#*#}
           [ "$ref" != "$spec" ] || ref=HEAD
@@ -95,7 +72,7 @@ runs:
           # this at all: nothing else currently reports them.
           echo "$url#$ref -> $sha"
           shas=$shas$sha
-        done
+        done <<< "$specs"
         # macOS ships shasum, not sha256sum.
         if command -v sha256sum >/dev/null 2>&1; then
           digest=$(printf %s "$shas" | sha256sum)
