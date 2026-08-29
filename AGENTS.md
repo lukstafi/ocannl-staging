@@ -139,10 +139,10 @@ design history) that is not derivable from the code alone.
 
 **Module Paths and Common APIs**:
 
-- **For files outside OCANNL implementation (tests, examples, user code), always start with `open Ocannl.Operation.DSL_modules`** - this brings all DSL modules into scope (defined near the end of `tensor/operation.ml`)
-- Available modules after `open Ocannl.Operation.DSL_modules`:
+- **For files outside OCANNL implementation (tests, examples, user code), start with `open Ocannl.Nn_blocks.DSL_modules`** - it re-emits the DSLs of `Ocannl.Operation.DSL_modules` (defined near the end of `tensor/operation.ml`) extended with the non-uniform initializers `normal`, `normal1`, `normal_at`, `normal_at1`, `kaiming`, `xavier`, `kaiming_at`, `xavier_at` (`lib/nn_blocks.ml`), which is what building a model needs. `open Ocannl.Operation.DSL_modules` is the narrower open, for a file that uses no initializer
+- Available modules after either open:
   - `Ir` - Low-level IR types and operations (Ndarray, Ops, Tnode, etc.)
-  - `Row` - Row variables for shape inference
+  - `Row` - Row variables for shape inference; exported by `Operation.DSL_modules` only, so under the `Nn_blocks` open it comes from `open Ocannl` (`lib/ocannl.ml`), which such files generally have anyway
   - `Shape` - Shape inference and einsum notation
   - `Tensor` - Core tensor type and operations
   - `TDSL` - Tensor DSL with automatic differentiation (grad_spec: If_needed)
