@@ -612,20 +612,24 @@ void ocannl_probe_widen(ocannl_probe_f *dst, const ocannl_probe_h *src) {
    A listing is a pure function of four inputs: the GENERATED source bytes, the toolchain's own
    probed identity, [-march], and [-O]. Cache exactly that tuple. Width, fp16 policy and row names
    do not belong in the key: they matter only insofar as they change the generated source. Likewise,
-   the compiler command's path or package does not identify a toolchain --
-   {!Census.toolchain_identity} asks the compiler and this code treats its complete answer as opaque
-   identity data.
+   the compiler command's path or package alone does not identify a toolchain --
+   {!Census.toolchain_identity} asks the compiler, and the identity component combines that opaque
+   answer with the complete configured command so wrapper flags cannot alias one another.
 
    Entries live outside [_build], under a per-user cache by default, so [dune clean] does not throw
    them away. [OCANNL_TOOL_CC_MARCH_CENSUS_CACHE_DIR] overrides the directory for controlled runs
-   and unusual hosts. A missing, unwritable or malformed cache is only a cache miss: the census
-   still compiles and measures the same listing it did before this memoization existed.
+   and unusual hosts. Entries older than 30 days are expired and the remaining newest entries are
+   capped at 512 MiB, so source/toolchain generations cannot accumulate indefinitely. A missing,
+   unwritable or malformed cache is only a cache miss: the census still compiles and measures the
+   same listing it did before this memoization existed.
 
    Several dune processes can miss the same entry together. They may all compile it; publication is
    through [Utils.Atomic_file], so a reader sees one whole listing and never a mixture. The
    generated source has the same basename in every worktree, which is all the DWARF parser relies
    on; absolute source-directory differences inside a cached listing do not change the census. *)
-let cache_marker = "ocannl-cc-march-census-v1\n"
+let cache_marker = "ocannl-cc-march-census-v2\n"
+let cache_max_age_seconds = 30. *. 24. *. 60. *. 60.
+let cache_max_bytes = 512 * 1024 * 1024
 let cache_hits = ref 0
 let cache_misses = ref 0
 let cache_bypasses = ref 0
@@ -667,7 +671,7 @@ let toolchain_identities : (string, string option) Hashtbl.t = Hashtbl.create (m
 let toolchain_identity (t : Census.toolchain) =
   Hashtbl.find_or_add toolchain_identities t.command ~default:(fun () ->
       match Census.toolchain_identity t with
-      | Ok identity -> Some identity
+      | Ok probed -> Some (tuple_field t.command ^ tuple_field probed)
       | Error out ->
           Stdio.eprintf
             "cc census cache bypassed: toolchain identity probe failed for %s (not part of the \
@@ -676,7 +680,101 @@ let toolchain_identity (t : Census.toolchain) =
             t.label out;
           None)
 
-let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path =
+type cache_file = { path : string; size : int; mtime : float }
+
+let is_cache_entry name =
+  match
+    String.chop_prefix name ~prefix:"listing-" |> Option.bind ~f:(String.chop_suffix ~suffix:".s")
+  with
+  | Some digest ->
+      String.length digest = 32
+      && String.for_all digest ~f:(fun c -> Char.is_digit c || Char.between c ~low:'a' ~high:'f')
+  | None -> false
+
+(* The directory is dedicated to this cache. Still recognize the complete filename before deleting:
+   an override may point at a directory containing something else, and eviction does not own it. *)
+let prune_cache dir =
+  try
+    let now = Unix.time () in
+    let retained =
+      Stdlib.Sys.readdir dir |> Array.to_list
+      |> List.filter_map ~f:(fun name ->
+          if not (is_cache_entry name) then None
+          else
+            let path = Stdlib.Filename.concat dir name in
+            match Unix.lstat path with
+            | { Unix.st_kind = Unix.S_REG; st_size = size; st_mtime = mtime; _ } ->
+                let file = { path; size; mtime } in
+                if Float.(now -. mtime > cache_max_age_seconds) then
+                  try
+                    Stdlib.Sys.remove path;
+                    None
+                  with _ -> Some file
+                else Some file
+            | _ -> None
+            | exception _ -> None)
+    in
+    let total = List.fold retained ~init:0L ~f:(fun n f -> Int64.(n + of_int f.size)) in
+    let rec trim total = function
+      | [] -> ()
+      | _ when Int64.(total <= of_int cache_max_bytes) -> ()
+      | f :: rest ->
+          let removed =
+            try
+              Stdlib.Sys.remove f.path;
+              true
+            with _ -> false
+          in
+          trim (if removed then Int64.(total - of_int f.size) else total) rest
+    in
+    trim total (List.sort retained ~compare:(fun a b -> Float.compare a.mtime b.mtime))
+  with _ -> ()
+
+let cache_pruned = ref false
+
+let prune_cache_once dir =
+  if not !cache_pruned then (
+    cache_pruned := true;
+    prune_cache dir)
+
+let cache_data ~header asm =
+  Printf.sprintf "%s%s\n%d\n%s" header
+    (Stdlib.Digest.to_hex (Stdlib.Digest.string asm))
+    (String.length asm) asm
+
+let decode_cache_data ~header ~validate data =
+  match String.chop_prefix data ~prefix:header with
+  | None -> None
+  | Some data -> (
+      match String.lsplit2 data ~on:'\n' with
+      | None -> None
+      | Some (digest, data) -> (
+          match String.lsplit2 data ~on:'\n' with
+          | None -> None
+          | Some (length, asm) ->
+              Option.bind (Int.of_string_opt length) ~f:(fun length ->
+                  Option.some_if
+                    (length = String.length asm
+                    && String.equal digest (Stdlib.Digest.to_hex (Stdlib.Digest.string asm))
+                    && validate asm)
+                    asm)))
+
+let cache_format_probes () =
+  let header = "synthetic-header\n" in
+  let asm = "synthetic listing for expected_function\n" in
+  let data = cache_data ~header asm in
+  let valid data =
+    decode_cache_data ~header ~validate:(String.is_substring ~substring:"expected_function") data
+  in
+  Verdict.claim "a complete cache payload validates"
+    (Option.equal String.equal (valid data) (Some asm));
+  Verdict.claim "a truncated cache payload is rejected"
+    (Option.is_none (valid (String.drop_suffix data 1)));
+  Verdict.claim "a cache payload for the wrong listing is rejected"
+    (Option.is_none
+       (decode_cache_data ~header ~validate:(String.is_substring ~substring:"other_function") data))
+
+let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path ~validate =
   match toolchain_identity t with
   | None ->
       Int.incr cache_bypasses;
@@ -689,13 +787,12 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
           (Printf.sprintf "listing-%s.s" (Stdlib.Digest.to_hex (Stdlib.Digest.string tuple)))
       in
       let header = cache_marker ^ tuple ^ "\n" in
+      prune_cache_once dir;
       (try Utils.Atomic_file.cleanup_stale_once dir with _ -> ());
       let cached =
         try
           let data = Stdio.In_channel.read_all path in
-          if String.is_prefix data ~prefix:header then
-            Some (String.drop_prefix data (String.length header))
-          else None
+          decode_cache_data ~header ~validate data
         with _ -> None
       in
       match cached with
@@ -714,7 +811,7 @@ let compile_cached (t : Census.toolchain) ~opt_level ~source ~src_path ~asm_path
               (try
                  Utils.Atomic_file.ensure_dir dir;
                  Utils.Atomic_file.cleanup_stale_once dir;
-                 Utils.Atomic_file.write_all ~path ~data:(header ^ asm) ()
+                 Utils.Atomic_file.write_all ~path ~data:(cache_data ~header asm) ()
                with _ -> ());
               ok))
 
@@ -736,12 +833,12 @@ let packed_half_widen t ~width ~opt_level =
   Hashtbl.find_or_add half_widen_cache (t.Census.label, width, opt_level) ~default:(fun () ->
       let src = Stdlib.Filename.temp_file "ocannl_census_widen_" ".c" in
       let asm = Stdlib.Filename.temp_file "ocannl_census_widen_" ".s" in
-      Stdio.Out_channel.write_all src ~data:(half_widen_probe_source ~lanes:(width / 4));
+      let source = half_widen_probe_source ~lanes:(width / 4) in
+      Stdio.Out_channel.write_all src ~data:source;
       let verdict =
         match
-          compile_cached t ~opt_level
-            ~source:(half_widen_probe_source ~lanes:(width / 4))
-            ~src_path:src ~asm_path:asm
+          compile_cached t ~opt_level ~source ~src_path:src ~asm_path:asm ~validate:(fun asm ->
+              String.is_substring asm ~substring:"ocannl_probe_widen")
         with
         | Error _ -> false
         | Ok () ->
@@ -967,6 +1064,7 @@ let () =
       let root = Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) "cc_march_census_kernels" in
       rm_rf root;
       mkdir_p root;
+      cache_format_probes ();
       dialect_probes ();
       let emitted = emit_all ~exe ~root in
       Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->
@@ -1080,7 +1178,8 @@ let () =
                     in
                     match
                       compile_cached t ~opt_level:opt ~source:e.source ~src_path:e.src_path
-                        ~asm_path
+                        ~asm_path ~validate:(fun asm ->
+                          String.is_substring asm ~substring:(routine ^ ".c"))
                     with
                     | Error out ->
                         failed_compiles :=
@@ -1135,6 +1234,7 @@ let () =
                             }))))
       in
       Stdio.eprintf "=== end census ===\n\n";
+      prune_cache (Lazy.force cache_dir);
       Stdio.eprintf
         "cc census cache: %d hit(s), %d miss(es), %d bypass(es) in %s (not part of the golden)\n\n"
         !cache_hits !cache_misses !cache_bypasses (Lazy.force cache_dir);
