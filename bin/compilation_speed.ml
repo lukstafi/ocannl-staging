@@ -12,41 +12,43 @@ let benchmark_overhead _backend_name () =
   let ctx = Context.auto () in
   CDSL.disable_all_debugs ();
   Stdio.prerr_endline @@ "\n\n****** Benchmarking " ^ Context.backend_name ctx ^ " ******";
-  let init_time = Time_now.nanoseconds_since_unix_epoch () in
   let%op f = (3 *. ({ x; o = [ 5 ] } **. 2)) - (4 *. x) + 5 in
   Train.set_materialized f.value;
 
   let update_f = Train.grad_update f in
   let ctx = Train.init_params ctx IDX.empty f in
-  let _, f_routine = Train.to_routine ctx IDX.empty update_f in
+  let f_ctx, f_routine = Train.to_routine ctx IDX.empty update_f in
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
   (* [printf_tree] renders straight to stdout, and the loop below compiles 20 fresh routines before
      anything else is printed. Unflushed, that tree waits for process exit and the run looks like it
-     produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the end.
-     Note that the loop itself is currently broken — [Context.run] refuses [update_x] for unexecuted
-     dependencies (gh-ocannl-831) — so this tree is in practice the only output the tool produces,
-     which is the more reason for it to reach the reader. *)
+     produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the end. *)
   Bench_out.flush ();
 
   let xs = Array.init n_data ~f:Float.(fun i -> of_int i - (of_int n_data /. 2.)) in
   let open Operation.At in
-  (* Note: this compiles entirely fresh code for each step of the loop. *)
+  (* Every fresh [update_x] compile below follows [f_routine] in the compilation lineage, so its WAR
+     dependency requires [f_routine] to have executed first. Prime that shared execution ledger
+     outside the measured region; then start every step from this same post-[f_routine] context so
+     the update routines remain fresh sibling compiles rather than a growing compile chain. *)
+  let step_ctx = Context.run f_ctx f_routine in
+  Context.sync step_ctx;
+  let init_time = Time_now.nanoseconds_since_unix_epoch () in
   let ys =
     Array.map xs ~f:(fun v ->
         let%cd update_x =
           ~~("update_x";
              x =: !.v)
         in
-        let _, assign_x = Train.to_routine f_routine.Context.context IDX.empty update_x in
-        Train.run ctx assign_x;
-        Train.run ctx f_routine;
+        let assign_ctx, assign_x = Train.to_routine step_ctx IDX.empty update_x in
+        let ctx = Context.run assign_ctx assign_x in
+        let ctx = Context.run ctx f_routine in
         (ctx, f).@[0])
   in
+  let final_time = Time_now.nanoseconds_since_unix_epoch () in
   let plot_box =
     PrintBox_utils.plot ~small:true ~x_label:"x" ~y_label:"f(x)"
       [ Scatterplot { points = Array.zip_exn xs ys; content = PrintBox.line "#" } ]
   in
-  let final_time = Time_now.nanoseconds_since_unix_epoch () in
   let time_in_sec = Int63.(to_float @@ (final_time - init_time)) /. 1000_000_000. in
   let result =
     PrintBox_utils.Benchmark
