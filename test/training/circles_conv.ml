@@ -135,7 +135,7 @@ let () =
   printf "\nStarting training for %d epochs (%d steps)...\n%!" epochs total_steps;
 
   let logged_losses = ref [] in
-  let final_avg = ref Float.infinity in
+  let tail_window_size = 10 in
   (* Two-sided, because an upper bound alone is one-sided: if `neg (log correct_prob)` lost its
      negation, or a backend emitted the wrong sign, the trajectory would still fall and still land
      under the threshold, and only the digits this commit removed would have caught it (Codex round
@@ -158,26 +158,26 @@ let () =
     if not Float.(is_finite avg && avg >= -1e-3) then all_valid := false;
     if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then (
       logged_losses := (epoch, avg) :: !logged_losses;
-      eprintf "Epoch %d: avg loss = %.2f (not part of the golden)\n%!" epoch avg);
-    if epoch = epochs then final_avg := avg
+      eprintf "Epoch %d: avg loss = %.2f (not part of the golden)\n%!" epoch avg)
   done;
+  let tail_mean =
+    Training_golden.recent_mean_exn ~count:tail_window_size (List.map !logged_losses ~f:snd)
+  in
+  eprintf "Last %d logged epochs mean avg loss = %.6f (not part of the golden)\n%!" tail_window_size
+    tail_mean;
   (match List.rev !logged_losses with
   | [] -> ()
-  | (first_epoch, first_loss) :: _ as logged ->
-      let last_epoch, last_loss = List.last_exn logged in
-      Verdict.pf "avg loss fell from epoch %d to epoch %d" first_epoch last_epoch
-        Float.(last_loss < first_loss));
+  | (first_epoch, first_loss) :: _ ->
+      Verdict.pf "avg loss fell from epoch %d to the last %d logged epochs" first_epoch
+        tail_window_size
+        Float.(tail_mean < first_loss));
   Verdict.p "every epoch's avg loss is a finite, nonnegative cross-entropy" !all_valid;
-  (* The threshold is 0.5, not the 0.3 it started at: the epoch-750 mean is ONE noisy sample, and
-     0.3 left it no headroom on either kind of backend. The deterministic backends (cc, metal, cuda,
-     hip) descend smoothly and land on exactly 0.29 -- three hundredths under the old bound, which
-     their own epoch-650 value of 0.32 was still above, so they crossed 0.3 only in the last fifty
-     epochs. multidev_cc converges lower but jitters epoch to epoch: five daily sweeps landed 0.18 /
-     0.13 / 0.13 / 0.11 / 0.32, the last of them a single-epoch excursion off a 0.14-0.19 tail (an
-     equally large one at epoch 680 of an earlier run went unnoticed only because it was not the
-     epoch sampled). 0.5 clears the worst observed sample by half again and still discriminates by a
-     wide margin: an untrained or broken run sits near chance, and even epoch 100 is at 0.95 (cc) /
-     0.81 (multidev_cc). *)
-  Verdict.p "Final avg loss below threshold" Float.(!final_avg < 0.5);
+  (* Across the 2026-08-24..30 sweeps, this statistic is 0.301 on every deterministic backend/day
+     and 0.115--0.186 on six multidev_cc runs. The 08-29 final-epoch excursion to 0.32 contributes
+     to a 0.186 window mean instead of deciding the claim. A 0.4 bound clears the observed window
+     spread while still separating convergence from the 0.80--1.06 epoch-100 means. *)
+  let tail_limit = 0.4 in
+  Verdict.pf "Last %d logged epochs mean avg loss below %g" tail_window_size tail_limit
+    Float.(tail_mean < tail_limit);
 
   printf "\nTraining complete!\n%!"

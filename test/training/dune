@@ -195,10 +195,16 @@
 
 ; mlp_names is a training integration run on the `train` tier (see the aggregate above).
 
+(library
+ (name training_golden)
+ (package neural_nets_lib)
+ (modules training_golden)
+ (libraries base))
+
 (executable
  (name mlp_names)
  (modules mlp_names)
- (libraries ocannl dataprep arrayjit.verdict)
+ (libraries ocannl dataprep arrayjit.verdict training_golden)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -226,7 +232,7 @@
 (executable
  (name mlp_bn_names)
  (modules mlp_bn_names)
- (libraries ocannl dataprep arrayjit.verdict)
+ (libraries ocannl dataprep arrayjit.verdict training_golden)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -261,7 +267,7 @@
 (executable
  (name circles_conv)
  (modules circles_conv)
- (libraries ocannl dataprep arrayjit.verdict)
+ (libraries ocannl dataprep arrayjit.verdict training_golden)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -354,7 +360,7 @@
 (executable
  (name fsm_transformer)
  (modules fsm_transformer)
- (libraries ocannl arrayjit.verdict)
+ (libraries ocannl arrayjit.verdict training_golden)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -407,7 +413,7 @@
 (executable
  (name transformer_names)
  (modules transformer_names)
- (libraries ocannl dataprep arrayjit.verdict)
+ (libraries ocannl dataprep arrayjit.verdict training_golden)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

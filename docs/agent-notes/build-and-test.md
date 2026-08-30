@@ -1205,3 +1205,12 @@ that they earn a lookup rather than always-loaded space.
   in alongside them. Ask what range the removed digits excluded, and claim that range. Second: mark
   every relocated line `(not part of the golden)` — stderr and stdout interleave in a terminal, and
   without the tag a reader cannot tell an informational number from an asserted one.
+- A training convergence threshold reads a WINDOW, not the last epoch alone (gh-ocannl-854): use
+  the mean of the last ten logged epochs through `test/training/training_golden.ml`, keep the exact
+  statistic on stderr, and put only its two-sided `Verdict` contract in the golden. Size the bound
+  from the cross-backend/day spread of that SAME window statistic, not from one backend's final
+  draw. `circles_conv` is the motivating control: its 2026-08-29 multidev_cc final epoch jumped to
+  0.32 off a 0.14--0.19 tail, while the ten-point window mean was 0.186; across the 08-24..30 sweep
+  the window statistic ranged 0.115--0.301, so 0.4 leaves measured headroom and still excludes the
+  0.80--1.06 epoch-100 means. The helper rejects fewer than ten values, so shortening a loop cannot
+  silently turn the window claim back into a smaller, noisier sample.

@@ -2,8 +2,8 @@ Generating 160 circle counting images (3 classes)...
 Dataset generated: images shape [160; 16; 16; 1], labels shape [160; 1]
 
 Starting training for 750 epochs (3750 steps)...
-avg loss fell from epoch 10 to epoch 750: true
+avg loss fell from epoch 10 to the last 10 logged epochs: true
 every epoch's avg loss is a finite, nonnegative cross-entropy: true
-Final avg loss below threshold: true
+Last 10 logged epochs mean avg loss below 0.4: true
 
 Training complete!
