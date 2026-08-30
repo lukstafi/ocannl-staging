@@ -40,6 +40,8 @@ an underscore-prefixed local forwarded later is a real use: implementation class
 an underscore-prefixed local forwarded later is a real use: honesty classified: true
 a locally shadowed ignore is a real use: implementation classified: true
 a locally shadowed ignore is a real use: honesty classified: true
+ignore shadowing survives underscore-local forwarding analysis: implementation classified: true
+ignore shadowing survives underscore-local forwarding analysis: honesty classified: true
 a later ignore parameter makes its call a real use: implementation classified: true
 a later ignore parameter makes its call a real use: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true

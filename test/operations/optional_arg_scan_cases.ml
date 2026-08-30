@@ -82,6 +82,9 @@ let () =
   case "a locally shadowed ignore is a real use"
     {ocaml|let f ?(_feature = true) () = let ignore x = if x then enable () in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
+  case "ignore shadowing survives underscore-local forwarding analysis"
+    {ocaml|let f ?(_feature = true) () = let ignore x = if x then enable () in let _v = _feature in ignore _v|ocaml}
+    ~implemented:true ~honest:false;
   case "a later ignore parameter makes its call a real use"
     {ocaml|let f ?(_feature = true) ignore = ignore _feature|ocaml} ~implemented:true ~honest:false;
   case "a locally opened ignore can be effectful"

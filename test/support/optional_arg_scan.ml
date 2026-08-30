@@ -177,11 +177,6 @@ let string_constant expression =
   | Pexp_constant (Pconst_string (text, _, _)) -> Some text
   | _ -> None
 
-(* These are exactly the [Lident] forms handled by [Ppx_op.translate] / [Ppx_cd.translate]. Concat
-   is op-only, but this scan's superset is harmless inside [%cd]: an unsupported expression will
-   fail compilation rather than make a public option silently inert. *)
-let einsum_operators = [ "+*"; "@^+"; "+++"; "++"; "@^^"; "++^" ]
-
 (* The spec is the right operand's callee in [x ++ "spec" dims] / [x +* "spec" y], and its first
    direct argument in the inline-tensor form [x +* kernel "spec" dims]. Restricting generated reads
    to this exact operator position keeps a diagnostic string from lending an option a use. *)
@@ -190,7 +185,8 @@ let einsum_spec expression =
   | Pexp_apply (operator, [ (_, _left); (_, right) ]) -> (
       let is_einsum =
         match operator.pexp_desc with
-        | Pexp_ident { txt = Lident name; _ } -> List.mem einsum_operators name ~equal:String.equal
+        | Pexp_ident { txt = Lident name; _ } ->
+            List.mem Einsum_parser.operators_with_generated_specs name ~equal:String.equal
         | _ -> false
       in
       if not is_einsum then None
@@ -283,7 +279,8 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
                       | Named_throwaway bound_names ->
                           let used_in_body =
                             List.exists bound_names ~f:(fun bound ->
-                                meaningfully_used ~dsl:!dsl_mode bound (Expression body))
+                                meaningfully_used ~ignore_is_shadowed:!ignore_shadowed
+                                  ~dsl:!dsl_mode bound (Expression body))
                           in
                           let used_in_recursive_group =
                             match recursive with
@@ -291,8 +288,8 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
                             | Recursive ->
                                 List.exists bindings ~f:(fun other ->
                                     List.exists bound_names ~f:(fun bound ->
-                                        meaningfully_used ~dsl:!dsl_mode bound
-                                          (Expression other.pvb_expr)))
+                                        meaningfully_used ~ignore_is_shadowed:!ignore_shadowed
+                                          ~dsl:!dsl_mode bound (Expression other.pvb_expr)))
                           in
                           not (used_in_body || used_in_recursive_group)
                   in
