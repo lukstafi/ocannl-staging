@@ -121,14 +121,19 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # Two complete forced units expose only the INTERSECTION of their skip sets.
 # The three absent backends keep this a potential finding rather than a failure:
 # one of them may have evaluated the common claim. A per-backend-only marker
-# must not leak into the report merely because it occurred somewhere.
-common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tcommon unevaluated claim'
-cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tcc-only unevaluated claim'
-multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tmultidev-only unevaluated claim'
+# must not leak into the report merely because it occurred somewhere. A skip
+# whose gate belongs to the environment occurs in both logs too, but its
+# explicit scope keeps it out of this backend-coverage question.
+common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tcommon unevaluated claim'
+cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
+multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
+environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
 coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
-$cc_only" \
+$cc_only
+$environment" \
   SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
-$multidev_only" \
+$multidev_only
+$environment" \
   run_sweep_args --force --only cc --only multidev_cc)
 coverage_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$coverage" | tail -1)
 [ -f "$coverage_report" ]
@@ -138,6 +143,7 @@ grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common une
   "$coverage_report"
 ! grep -q 'cc-only unevaluated claim' "$coverage_report"
 ! grep -q 'multidev-only unevaluated claim' "$coverage_report"
+! grep -q 'environment-gated claim' "$coverage_report"
 
 # The pure aggregator's complete-backend control is the escalation seam the
 # real sweep reaches only when both remote GPU boxes and all local units pass.
@@ -159,6 +165,7 @@ set -e
 grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
 grep -q '^FAIL: skipped on every known backend: verdict_skip_probe.exe: common unevaluated claim$' \
   <<<"$complete_fail"
+! grep -q 'common environment-gated claim' <<<"$complete_fail"
 
 printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
 complete_pass=$("$aggregate" "${aggregate_args[@]}")

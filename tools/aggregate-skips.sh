@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Intersect Verdict.skipped announcements from complete per-backend test logs.
+# Intersect backend-scoped Verdict.skipped announcements from complete
+# per-backend test logs. Environment-gated skips remain human-visible but are
+# deliberately excluded from this backend-coverage question.
 #
 # A claim absent from one COMPLETE backend log was evaluated there; a claim
 # present in every complete log was not.  The caller owns completeness -- the
@@ -119,11 +121,12 @@ extract_claims() {
   awk '
     index($0, "SKIPPED on ") == 1 { human++ }
     index($0, "OCANNL_VERDICT_SKIP\t") == 1 {
-      key = substr($0, length("OCANNL_VERDICT_SKIP\t") + 1)
-      if (index(key, "\t") > 1) {
-        machine++
-        print key
-      } else malformed = 1
+      record = substr($0, length("OCANNL_VERDICT_SKIP\t") + 1)
+      fields = split(record, part, "\t")
+      machine++
+      if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1
+      else if (part[1] == "backend") print part[2] "\t" part[3]
+      else if (part[1] != "environment") malformed = 1
     }
     END { if (malformed || human != machine) exit 3 }
   ' "$1" | LC_ALL=C sort -u
