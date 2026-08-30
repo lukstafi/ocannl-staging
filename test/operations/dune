@@ -107,7 +107,8 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
   (alias runtest-ocamlformat_ignore_scan)
-  (alias runtest-shell_scripts_parse)))
+  (alias runtest-shell_scripts_parse)
+  (alias runtest-refusal_control_scan_cases)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
 ; check, a different question: `scans` collects the tests that read the REPOSITORY, these collect
@@ -1787,23 +1788,30 @@
   backend_golden_family_scan.expected
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
+  cache_dir_ignores.expected
   codegen_text_inventory.ml
   codegen_text_scan_cases.expected
+  codegen_text_inventory.expected
   config_dep_completeness.ml
   dune_scan_cases.expected
+  config_dep_completeness.expected
   dead_export_scan.ml
   dead_export_scan.expected
   digest_completeness.ml
   config_scan_lexing.expected
+  digest_completeness.expected
   env_var_deps.ml
   env_var_deps_control.expected
+  env_var_deps.expected
   ocamlformat_ignore_scan.ml
   ocamlformat_ignore_scan.expected
   shell_scripts_parse.ml
   shell_scripts_parse.expected
   test_config_consistency.ml
+  test_config_consistency.expected
   verdict_ratchet.ml
-  verdict_scan_cases.expected)
+  verdict_scan_cases.expected
+  verdict_ratchet.expected)
  (action
   (run
    %{test}
@@ -1814,25 +1822,25 @@
    backend_golden_family_scan.ml
    backend_golden_family_scan.expected
    cache_dir_ignores.ml
-   cache_dir_scan_cases.expected
+   cache_dir_scan_cases.expected,cache_dir_ignores.expected
    codegen_text_inventory.ml
-   codegen_text_scan_cases.expected
+   codegen_text_scan_cases.expected,codegen_text_inventory.expected
    config_dep_completeness.ml
-   dune_scan_cases.expected
+   dune_scan_cases.expected,config_dep_completeness.expected
    dead_export_scan.ml
    dead_export_scan.expected
    digest_completeness.ml
-   config_scan_lexing.expected
+   config_scan_lexing.expected,digest_completeness.expected
    env_var_deps.ml
-   env_var_deps_control.expected
+   env_var_deps_control.expected,env_var_deps.expected
    ocamlformat_ignore_scan.ml
    ocamlformat_ignore_scan.expected
    shell_scripts_parse.ml
    shell_scripts_parse.expected
    test_config_consistency.ml
-   config_scan_lexing.expected
+   config_scan_lexing.expected,test_config_consistency.expected
    verdict_ratchet.ml
-   verdict_scan_cases.expected))
+   verdict_scan_cases.expected,verdict_ratchet.expected))
  (modules refusal_control_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -1959,7 +1967,9 @@
  ; OCaml source, which links no backend and compiles nothing.
  (target env_var_deps_control.actual)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  env_var_deps.ml)
  (action
   (with-stdout-to
    %{target}

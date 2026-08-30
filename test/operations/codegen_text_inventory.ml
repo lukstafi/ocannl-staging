@@ -48,6 +48,9 @@
 
 open Base
 open Stdio
+
+let printf = Test_utils.Refusal_control_manifest.printf
+
 module Scan = Test_utils.Codegen_text_scan
 module Floors = Test_utils.Scan_floors
 
@@ -299,4 +302,5 @@ let () =
     (List.equal String.equal declared read_interfaces);
   Verdict.p_all "every scanned library declares modules" frontier.Emitter_frontier.interfaces
     ~f:(fun i -> not (List.is_empty i.Emitter_frontier.declared));
-  Verdict.p "no source hides a route to generated text behind an open" (List.is_empty !rejected)
+  Verdict.p "no source hides a route to generated text behind an open" (List.is_empty !rejected);
+  Test_utils.Refusal_control_manifest.print "codegen_text_inventory.ml"

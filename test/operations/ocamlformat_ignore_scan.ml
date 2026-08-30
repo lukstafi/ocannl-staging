@@ -19,6 +19,8 @@
 open Base
 open Stdio
 
+let printf = Test_utils.Refusal_control_manifest.printf
+
 type line = { number : int; entry : string }
 
 let is_ppx_golden path =

@@ -58,9 +58,3 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:7d1962ff34bbe1ed7b89a535dc0cfd7e] exempted literals that
   [scanner-refusal:ad023891a3bd7827b3905292c487055b] claim-shaped literal any
   [scanner-refusal:e1354d390a356f0c79420c25232b0b42] planted canaries the
-  [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict
-  [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted
-  [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on
-  [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals
-  [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments
-  [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory

@@ -20,7 +20,8 @@ module Ast_traverse = Ppxlib.Ast_traverse
 module Digest = Stdlib.Digest
 module Read = Config_key_scan
 
-type diagnostic = { line : int; fragment : string; format : string; identity : string }
+type kind = Fail | Claim
+type diagnostic = { line : int; fragment : string; format : string; identity : string; kind : kind }
 
 let normalize text =
   String.split_on_chars text ~on:[ ' '; '\t'; '\r'; '\n' ]
@@ -56,7 +57,7 @@ let static_runs format =
   let flush () =
     let run = Buffer.contents buffer |> normalize |> trim_static_run in
     Buffer.clear buffer;
-    if String.count run ~f:Char.is_alpha >= 8 then found := run :: !found
+    if String.exists run ~f:Char.is_alphanum then found := run :: !found
   in
   let rec loop index =
     if index >= length then flush ()
@@ -89,9 +90,13 @@ let trigrams words =
   loop [] words
 
 let fragment_of_format format =
-  Option.bind
-    (List.hd (static_runs format))
-    ~f:(fun run ->
+  let runs = static_runs format in
+  let selected =
+    Option.first_some
+      (List.find runs ~f:(fun run -> String.count run ~f:Char.is_alpha >= 8))
+      (List.hd runs)
+  in
+  Option.bind selected ~f:(fun run ->
       let words = words run in
       let code_tokens =
         List.filter words ~f:(fun token ->
@@ -109,13 +114,24 @@ let fragment_of_format format =
                 Int.compare (String.length a) (String.length b))
           with
           | Some phrase -> Some phrase
-          | None when String.length run >= 12 -> Some run
-          | None -> None))
+          | None -> Some run))
 
 let last_name expression = Option.bind (Read.longident_of expression) ~f:List.last
 
 let refusal_callees =
-  [ "fail"; "p"; "pf"; "p_all"; "p_none"; "p_exists"; "p_empty"; "claim"; "claimf"; "pass_fail" ]
+  [
+    "fail";
+    "p";
+    "pf";
+    "p_all";
+    "p_all2";
+    "p_none";
+    "p_exists";
+    "p_empty";
+    "claim";
+    "claimf";
+    "pass_fail";
+  ]
 
 let is_refusal expression =
   Option.value_map (last_name expression) ~default:false ~f:(fun name ->
@@ -142,12 +158,14 @@ let rec format_of expression =
 let diagnostic_argument expression =
   match expression.pexp_desc with
   | Pexp_apply (callee, arguments) when is_refusal callee ->
-      List.find_map arguments ~f:(fun (label, argument) ->
-          match label with Nolabel -> Some argument | Labelled _ | Optional _ -> None)
+      Option.map
+        (List.find_map arguments ~f:(fun (label, argument) ->
+             match label with Nolabel -> Some argument | Labelled _ | Optional _ -> None))
+        ~f:(fun argument -> (Option.value_exn (last_name callee), argument))
   | Pexp_apply (operator, [ (Nolabel, callee); (Nolabel, argument) ])
     when Option.value_map (last_name operator) ~default:false ~f:(String.equal "@@")
          && is_refusal callee ->
-      Some argument
+      Some (Option.value_exn (last_name callee), argument)
   | _ -> None
 
 let diagnostics content =
@@ -161,15 +179,25 @@ let diagnostics content =
       method! attribute _ = ()
 
       method! expression expression =
-        (match Option.bind (diagnostic_argument expression) ~f:format_of with
-        | Some format -> (
-            match fragment_of_format format with
-            | Some fragment ->
-                let identity = Digest.string (normalize format) |> Digest.to_hex in
-                found :=
-                  { line = expression.pexp_loc.loc_start.pos_lnum; fragment; format; identity }
-                  :: !found
-            | None -> ())
+        (match diagnostic_argument expression with
+        | Some (callee, argument) -> (
+            match format_of argument with
+            | None -> ()
+            | Some format -> (
+                match fragment_of_format format with
+                | Some fragment ->
+                    let identity = Digest.string (normalize format) |> Digest.to_hex in
+                    let kind = if String.equal callee "fail" then Fail else Claim in
+                    found :=
+                      {
+                        line = expression.pexp_loc.loc_start.pos_lnum;
+                        fragment;
+                        format;
+                        identity;
+                        kind;
+                      }
+                      :: !found
+                | None -> ()))
         | None -> ());
         super#expression expression
     end
@@ -179,6 +207,18 @@ let diagnostics content =
 
 let marker diagnostic =
   Printf.sprintf "[scanner-refusal:%s] %s" diagnostic.identity diagnostic.fragment
+
+let format_matches ~format label =
+  let runs = static_runs format in
+  let label = normalize label in
+  let rec consume position = function
+    | [] -> true
+    | run :: rest -> (
+        match String.substr_index label ~pos:position ~pattern:run with
+        | None -> false
+        | Some found -> consume (found + String.length run) rest)
+  in
+  (not (List.is_empty runs)) && consume 0 runs
 
 let covered ~control_text diagnostic =
   String.is_substring control_text ~substring:(marker diagnostic)

@@ -49,6 +49,7 @@ open Base
 open Stdio
 module Scan = Test_utils.Cache_dir_scan
 
+let printf = Test_utils.Refusal_control_manifest.printf
 let base_dir = Test_utils.Dune_stanza_scan.base_dir
 let repo_relative = Test_utils.Dune_stanza_scan.repo_relative
 
@@ -205,4 +206,5 @@ let () =
      golden pinning that would fail on build order rather than on anything true. *)
   if not (Verdict.any_failed ()) then
     printf "\nOK: %d sources name one; the ignore list needs no entry per directory.\n"
-      (List.length naming)
+      (List.length naming);
+  Test_utils.Refusal_control_manifest.print "cache_dir_ignores.ml"

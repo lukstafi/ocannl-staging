@@ -22,6 +22,8 @@ open Stdio
 module Read = Test_utils.Config_key_scan
 module Ast_traverse = Ppxlib.Ast_traverse
 
+let printf = Test_utils.Refusal_control_manifest.printf
+
 type reference = { source : string; line : int; identifier : string list }
 type exemption = { source : string; identifier : string list; reason : string }
 type corpus = { generators : string list; generated : string list; sources : string list }

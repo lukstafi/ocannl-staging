@@ -1,6 +1,11 @@
 (** The explicit bridge from mechanically extracted scanner diagnostics to their assigned permanent
     control suites. A new diagnostic is absent here by default; the catalogue test holds this
-    manifest equal to the extractor and holds every entry against the assigned golden. *)
+    manifest equal to the extractor and holds every entry against the assigned golden.
+
+    This table is inventory, not evidence. [print] emits a claim marker only when Verdict recorded a
+    successful execution of the claim's diagnostic format, and emits a direct-failure marker only
+    when the exact control line assigned below was observed. Adding a row here therefore cannot make
+    its own golden pass. *)
 
 open Base
 open Stdio
@@ -37,6 +42,7 @@ let entries =
         "[scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern";
         "[scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check";
         "[scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory";
+        "[scanner-refusal:a8ea78ba60f371d22646868a36871617] argument";
         "[scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads";
         "[scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default";
         "[scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory";
@@ -97,6 +103,7 @@ let entries =
         "[scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives";
         "[scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from";
         "[scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment";
+        "[scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality";
         "[scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's";
         "[scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation";
         "[scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated";
@@ -124,6 +131,7 @@ let entries =
         "[scanner-refusal:4012b24c7623acd977522e8f2eacf2bb] attaches a rule";
         "[scanner-refusal:ba5d90fc4bcec944ebd169329c706968] goldens on the";
         "[scanner-refusal:c1a398b587b5de3d7d02145dc45274a6] alias <suite>-<name> that";
+        "[scanner-refusal:941a9fb77d867c7b1576a0f19ee5db3b] declares";
         "[scanner-refusal:2b67d02d52c3465bfba40d167802f0a7] env_var";
         "[scanner-refusal:0deef0cb94c45615f32ee84ac2e76f8e] declares tracing gates";
         "[scanner-refusal:02e183a4105132ec092206c1d35d6247] reads the tracing";
@@ -149,6 +157,7 @@ let entries =
         "[scanner-refusal:b54873c01dcc148c1691a882e4181993] Test_utils.Generated.init";
         "[scanner-refusal:7ff972d0b76d472194796b39466092aa] Test_utils.Generated.init";
         "[scanner-refusal:f8d375e9267abafa87ce8eec2d53731d] repository-wide scan rules";
+        "[scanner-refusal:f1c1e39705142c7bdc92b3f0ede72582] refusal-control manifest source";
         "[scanner-refusal:1f42d7a2739170c96004439d524c5d96] permanent control-golden corpus";
         "[scanner-refusal:a2ef9338814a08816bb85a6bab6ac71c] statically recoverable scanner";
         "[scanner-refusal:96e2132b9ea14b4c19e7573b7725b9ec] omits the declaration";
@@ -243,6 +252,9 @@ let entries =
       ] );
     ( "shell_scripts_parse.ml",
       [
+        "[scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang";
+        "[scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang";
+        "[scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses";
         "[scanner-refusal:8d61869dcd0de680f0aead692a642ebe] the scan reached";
         "[scanner-refusal:8fe3f688c6c4ef4b004016098ba03f34] reached the session";
       ] );
@@ -255,6 +267,7 @@ let entries =
         "[scanner-refusal:9a0c38727d642eb678b4707766f25708] known_config_keys";
         "[scanner-refusal:1ce67444f994f72961fbc476c23dcd84] sets keys missing";
         "[scanner-refusal:2651df7744050e9d7f649f390b7c53b1] payload quoted in";
+        "[scanner-refusal:3a6832937329cda23c716c3883e04cb2] has no '";
         "[scanner-refusal:8bb76ad7cf948a8181b88ee36b0148c6] scanned files share";
         "[scanner-refusal:11c8ffb35753ffb6f87da20d2ba6654f] Utils.settings";
         "[scanner-refusal:c56af001748a614d221709bf11098511] the empty string";
@@ -280,7 +293,317 @@ let entries =
   ]
 
 let markers source = List.Assoc.find_exn entries source ~equal:String.equal
+let sources = List.map entries ~f:fst
+
+let direct_evidence =
+  [
+    ( "atomic_file_rename_scan.ml:fb72b56980e9afc888059f90e9734599",
+      "arrayjit/lib/atomic_file.ml: Stdlib.Sys.rename -- implements Atomic_file's single commit \
+       primitive; every other OCaml publisher routes through this module" );
+    ( "atomic_file_rename_scan.ml:20f449385ebca8a7a25b2d306c8e0f44",
+      "arrayjit/lib/atomic_file.ml: Stdlib.Sys.rename -- implements Atomic_file's single commit \
+       primitive; every other OCaml publisher routes through this module" );
+    ( "cache_dir_ignores.ml:e2e9d19ffe2ad7688396847bd1ee643a",
+      "ok: built-in default -- another key's default is not this one's" );
+    ( "cache_dir_ignores.ml:0f307832357ee7ca58b9798a86530dac",
+      "ok: built-in default -- another key's default is not this one's" );
+    ( "cache_dir_ignores.ml:88e191145bdba435fd0fb303d486d684",
+      "ok: built-in default -- an empty default names no directory" );
+    ( "cache_dir_ignores.ml:3076fb53f1ae34b427f82aaa89404cb3",
+      "ok: glob -- a one-character stem is still the helper's" );
+    ( "cache_dir_ignores.ml:e2fdd92481a66b85f6f54b5c68513edd",
+      "ok: use -- anything else is reported rather than assumed harmless" );
+    ( "cache_dir_ignores.ml:cd6f72db4a56b656b92efd2c4a07945f",
+      "ok: glob -- and a name with no stem at all is not" );
+    ( "cache_dir_ignores.ml:a8ea78ba60f371d22646868a36871617",
+      "ok: use -- an unresolved name is reported by name" );
+    ( "cache_dir_ignores.ml:4168ef8491021497635783bb1f7e4232",
+      "ok: built-in default -- an empty default names no directory" );
+    ( "cache_dir_ignores.ml:298f6bafdca761627eb0f4dfecddf6d3",
+      "ok: built-in default -- the default a search falls back to" );
+    ( "cache_dir_ignores.ml:50ad95ff66f64313a7ce58dadb8aeda9",
+      "ok: use -- an unresolved name is reported by name" );
+    ( "codegen_text_inventory.ml:83dfdd0395c402128515f27b2f3b1b1c",
+      "ok: source -- a predicate over the backend's NAME pins nothing, however it is spelled" );
+    ( "codegen_text_inventory.ml:123bedafe19167d3536ddb2ca1115d21",
+      "ok: source -- text the scan cannot name marks the itemisation partial, without losing the \
+       file" );
+    ( "codegen_text_inventory.ml:532d3ed986dd6559fec87d780769ee1f",
+      "ok: rejection -- opening the emitter's module hides the render" );
+    ( "config_dep_completeness.ml:2ade05f14bd972f85a1792722f8a0ab6",
+      "ok: a program action's arguments are not actions" );
+    ( "config_dep_completeness.ml:6c29eb9b1db92bba229707a7cd8e1b5b",
+      "ok: a rule that copies an executable does not run it" );
+    ( "config_dep_completeness.ml:57862024aefd0884bbbd6d074a2e173b",
+      "ok: raw stanzas -- a name the stanza binds resolves under one too" );
+    ( "config_dep_completeness.ml:6d151bed80a45201e61d096c2c38d210",
+      "ok: copies the config -- no copy_files at all" );
+    ( "config_dep_completeness.ml:5509acc7fac8ff0412e3631b49c06dc7",
+      "ok: a test's shell action leaves its directory unestablished too" );
+    ( "config_dep_completeness.ml:e11f1dd0ebe8035f6b6bb919c904e611",
+      "ok: a named dep may wrap its path in a dependency form" );
+    ( "config_dep_completeness.ml:e20c1b4ad3881b8147939aef02357ab2",
+      "ok: an action head on neither list is reported" );
+    ( "config_dep_completeness.ml:332abda7feebdaa6c1c10670865ea5c6",
+      "ok: a library's own deps are not the inline tests' deps" );
+    ( "config_dep_completeness.ml:c35e7bf895b2bfc334caa198f2db4c83",
+      "ok: raw stanzas -- a tool only reading them is the same text" );
+    ( "config_dep_completeness.ml:a83ec7419ab530468bb3d4143c8c8576",
+      "ok: raw stanzas -- a tool only reading them is the same text" );
+    ( "config_dep_completeness.ml:28c35655d1568c3c11bdc1893d8847fa",
+      "ok: raw stanzas -- a bare command under setenv PATH is unnameable" );
+    ( "config_dep_completeness.ml:929a18d24ebaad373970a360298e3b88",
+      "ok: raw stanzas -- a tool only reading them is the same text" );
+    ( "config_dep_completeness.ml:328553bf93b184a97ab7d44d97c369a4",
+      "ok: raw stanzas -- a library's preprocessor is not a test-running rule" );
+    ( "dead_export_scan.ml:ab97825eb17bf92bf92973b99e0849ff",
+      "named dead-export exemptions are unique: true" );
+    ( "dead_export_scan.ml:20f449385ebca8a7a25b2d306c8e0f44",
+      "named dead-export exemptions are unique: true" );
+    ( "dead_export_scan.ml:085de8c521f251df70b65fc6454dfdad",
+      "named dead-export exemptions are unique: true" );
+    ( "digest_completeness.ml:7cab0a5763f4811f331a4aab327c6784",
+      "ok: key list -- a list written at the iteration" );
+    ( "digest_completeness.ml:fc3ef3788212f2d1f5a9d9a46be3ca38",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "digest_completeness.ml:dc9995a5d5b80370dc90971d3fd019df",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "digest_completeness.ml:a385ae718c8af3ab39a45701b75fda4d",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "digest_completeness.ml:14b02d2180d3814d6746acd827aecbc3",
+      "ok: Generated.init -- a bare init without the open is somebody else's function" );
+    ( "digest_completeness.ml:8109160f59717560ff5e6f7251a6a2b2",
+      "ok: an escape sequence decodes to the real key" );
+    ( "digest_completeness.ml:1825a277ba0eda3313fbe079e465c15d",
+      "ok: environment read -- a function of the file's own that happens to share the name is not \
+       the reader" );
+    ( "env_var_deps.ml:490ac5e3405d328c2953c38df4f0974b",
+      "a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is \
+       reported there too: true" );
+    ( "env_var_deps.ml:1356c3ade8d75f4aeb6332c69e239db3",
+      "a source that names the instrumentation in a comment, a string and a longer identifier \
+       reads none of it, and is no member: true" );
+    ("env_var_deps.ml:09e01a62cce1d340393a2244ed33ea10", "derivation calls a member.");
+    ( "env_var_deps.ml:034280d144ee4338406ff5f6a1cf287d",
+      "a source that names the instrumentation in a comment, a string and a longer identifier \
+       reads none of it, and is no member: true" );
+    ( "env_var_deps.ml:30c88c1631600d7969a9aefd4de74162",
+      "an executable declared in a `(subdir …)` group is aggregated by the top-level family stanza \
+       when the rule that runs it sits at the top level: true" );
+    ( "env_var_deps.ml:f2633aa4ebd6f2c33fd21e4d69cc9786",
+      "a stanza whose backend marker names metal is reported, naming its family, when the \
+       metal-codegen alias does not reach it: true" );
+    ( "env_var_deps.ml:2803edcc7de84ea6d928343b9d8c8ad2",
+      "a stanza whose backend marker names metal is reported, naming its family, when the \
+       metal-codegen alias does not reach it: true" );
+    ( "env_var_deps.ml:533fc9999ad0841992e0c1734d9c1f5d",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:7336dd5a712b0c3a578b64d7defb1654",
+      "a stanza whose backend marker names metal is reported, naming its family, when the \
+       metal-codegen alias does not reach it: true" );
+    ( "env_var_deps.ml:1aaab6e3cd8f4615e1cd1d0321e309a1",
+      "a dune file whose module sets this scan cannot place is refused, not approximated: true" );
+    ( "env_var_deps.ml:f11c09a8318b3a7863444256973f57d4",
+      "a rule running a file that shares the executable's public name is not its runner, however \
+       alike the two strings are: true" );
+    ( "env_var_deps.ml:95919586e2a2b25eaaf13ca8093ab584",
+      "a runner that runs another directory's executable of the same name does not aggregate this \
+       directory's member: true" );
+    ( "env_var_deps.ml:be41f253ce4b808b6b4ec587c304ec08",
+      "a runner that runs another directory's executable of the same name does not aggregate this \
+       directory's member: true" );
+    ( "env_var_deps.ml:b040632469771b25abb3469878413be3",
+      "a module the stanza names and this check was handed no source for is reported, not read as \
+       one that makes no reads: true" );
+    ( "env_var_deps.ml:dda5b4655f74eda46ec0c60e320d232b",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:747372ab4b28cca8978c2b6bd8983005",
+      "nor does writing `Vendor.Ir.Alloc_census` out in full: a path names the module it starts \
+       at: true" );
+    ( "env_var_deps.ml:364d32b22a5cb7a70b569db0d8864170",
+      "a runner that runs another directory's executable of the same name does not aggregate this \
+       directory's member: true" );
+    ( "env_var_deps.ml:07e7987f0d61b10a9fea6c6590c73d59",
+      "a test directory's own `utils.ml` is not the module that defines the reader, and is not \
+       exempt: true" );
+    ( "env_var_deps.ml:bbadfd8513559355fedbc54dc3dc678a",
+      "a `(subdir …)` group whose actions take the training lock and whose gate does not is \
+       reported there too: true" );
+    ( "env_var_deps.ml:eb5d5419b3bd18240469743cbabc58f2",
+      "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
+       deliberate gate collision, and is reported: true" );
+    ( "env_var_deps.ml:a06dccc27afe2153a7700609691d3c8d",
+      "a public name belongs to its own executable, so a rule running the second unit's public \
+       name does not aggregate the first: true" );
+    ( "env_var_deps.ml:cd2777d83ada3318386d3cd02b39018b",
+      "a public name belongs to its own executable, so a rule running the second unit's public \
+       name does not aggregate the first: true" );
+    ( "env_var_deps.ml:ffdd3e3b7a0db8da177f376b13f03c45",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:f16784d0b1f52de5e30378cb771ada5c",
+      "a runner that runs another directory's executable of the same name does not aggregate this \
+       directory's member: true" );
+    ( "env_var_deps.ml:4012b24c7623acd977522e8f2eacf2bb",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:ba5d90fc4bcec944ebd169329c706968",
+      "the same tree with the runner's own alias listed passes: true" );
+    ( "env_var_deps.ml:c1a398b587b5de3d7d02145dc45274a6",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:941a9fb77d867c7b1576a0f19ee5db3b",
+      "a guard in a plain library is reported, there being no `deps` field in reach to declare it: \
+       true" );
+    ( "env_var_deps.ml:2b67d02d52c3465bfba40d167802f0a7",
+      "`(env_var OCANNL_BUILD_FILES_PREFIX)`. Nothing else differs between the two runs." );
+    ( "env_var_deps.ml:0deef0cb94c45615f32ee84ac2e76f8e",
+      "a module the stanza names and this check was handed no source for is reported, not read as \
+       one that makes no reads: true" );
+    ( "env_var_deps.ml:02e183a4105132ec092206c1d35d6247",
+      "a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and \
+       is reported without one: true" );
+    ( "env_var_deps.ml:2df546d04b63387a24409b3c4c6a9611",
+      "two stanzas that omit `(modules …)` get a main each, so only the one whose main reads the \
+       instrumentation is a member: true" );
+    ( "env_var_deps.ml:e55f77a62871fb685d23199e95c8f173",
+      "an executable run by a `(test)` stanza's custom action is aggregated through the \
+       `runtest-<name>` dune generates for that test: true" );
+    ( "env_var_deps.ml:d5f94657407bc4dbf949ba4187e80100",
+      "a dune file whose module sets this scan cannot place is refused, not approximated: true" );
+    ( "env_var_deps.ml:ea6e2adedc7afd62fa55afcf859f251d",
+      "a module the stanza names and this check was handed no source for is reported, not read as \
+       one that makes no reads: true" );
+    ( "env_var_deps.ml:55f2feade4e139b5abb073d0b89c42cb",
+      "the key list is resolvable at all. Nothing else differs between the runs." );
+    ( "env_var_deps.ml:267a42b2812f4679c4463495cc199d36",
+      "and declaring the variable in `(inline_tests (deps …))` is no licence: that invalidates the \
+       inline runner alone: true" );
+    ( "env_var_deps.ml:41d9bc729b5b8b3908a48d45b1e0203c",
+      "The guard rule is put to a tree of one `(executable)` whose module reads a configuration key"
+    );
+    ( "env_var_deps.ml:a323f01100bfd685e76c62154cf4eaae",
+      "the checker reports the key and exits 1 when the rule running the guard neither declares \
+       nor pins it: true" );
+    ( "env_var_deps.ml:e45e166af22d229414296459a3ca022a",
+      "appears in no permanent control golden in the negative arm, and appears in the positive arm."
+    );
+    ( "env_var_deps.ml:fe4c53f899eb08a9ae67e7a797a5a841",
+      "a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and \
+       is reported without one: true" );
+    ( "env_var_deps.ml:0b33370125e32eaa4bb0f50c6cc3bc1a",
+      "`open Vendor.Ir` and `module Ir = Vendor.Ir` bind Vendor's module, not the qualifier, so \
+       neither makes their file a member: true" );
+    ( "env_var_deps.ml:638620a0745d0a136810c5b0256e0ec0",
+      "a family alias defined inside a `(subdir …)` group needs that group's own ambient gate, and \
+       is reported without one: true" );
+    ( "env_var_deps.ml:09ce44850cdf45c95e308d6c64aed813",
+      "a stanza neither derivation calls a member is asked for no family alias: true" );
+    ( "env_var_deps.ml:b35f6c5cf70c9d942c2e42a4c1af9975",
+      "an external command handed a file this workspace builds is a stanza the rule reaches, \
+       reported by name when it declares neither: true" );
+    ( "env_var_deps.ml:9ad60261dbb2540d4d7e060be725ad4d",
+      "a dynamic reach whose keys resolve to nothing is refused rather than passed over in \
+       silence: true" );
+    ( "test_config_consistency.ml:40f6a4df02a115c327391e051bacd5c6",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "test_config_consistency.ml:dfd9b6901bf188f6500bcc1284778dcd",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "test_config_consistency.ml:a22f67563f6e58a972758cfb6438b236",
+      "ok: environment read -- a function of the file's own that happens to share the name is not \
+       the reader" );
+    ( "test_config_consistency.ml:f183d4fa8451402727499389f65d55a4",
+      "ok: environment read -- a function of the file's own that happens to share the name is not \
+       the reader" );
+    ( "test_config_consistency.ml:9a0c38727d642eb678b4707766f25708",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "test_config_consistency.ml:1ce67444f994f72961fbc476c23dcd84",
+      "ok: predicate call contributes its keys -- with_runtime_debug" );
+    ( "test_config_consistency.ml:2651df7744050e9d7f649f390b7c53b1",
+      "ok: a record literal is not a quoted string" );
+    ( "test_config_consistency.ml:3a6832937329cda23c716c3883e04cb2",
+      "ok: Generated.init -- a bare init without the open is somebody else's function" );
+    ( "test_config_consistency.ml:8bb76ad7cf948a8181b88ee36b0148c6",
+      "ok: key list -- a list written at the iteration" );
+    ( "test_config_consistency.ml:11c8ffb35753ffb6f87da20d2ba6654f",
+      "ok: settings read -- an unqualified record of the same shape is not a read" );
+    ( "test_config_consistency.ml:c56af001748a614d221709bf11098511",
+      "ok: an empty literal names no key, so no key is read" );
+    ( "test_config_consistency.ml:e583c416783b3632963a66636f20f65e",
+      "ok: a record literal is not a quoted string" );
+    ( "test_config_consistency.ml:b4c59d5ad7a9c4e591998fccf8f039aa",
+      "ok: key list -- a list written at the iteration" );
+    ( "verdict_ratchet.ml:0f307832357ee7ca58b9798a86530dac",
+      "ok: not a claim -- nothing before it but a blank line" );
+    ("verdict_ratchet.ml:f3e306858423827e6575d13a17d57af6", "ok: claim shape -- the plain form");
+    ( "verdict_ratchet.ml:53b71ea33a69d24c941985f4eb35406b",
+      "ok: not a claim -- nothing before it but a blank line" );
+    ( "verdict_ratchet.ml:7d1962ff34bbe1ed7b89a535dc0cfd7e",
+      "ok: source -- a claim inside a list is reached" );
+    ( "verdict_ratchet.ml:ad023891a3bd7827b3905292c487055b",
+      "the walk counts every string literal it passes: true" );
+    ("verdict_ratchet.ml:e1354d390a356f0c79420c25232b0b42", "ok: claim shape -- the planted canary");
+  ]
+
+let observed_output = Hash_set.create (module String)
+let failure_key ~source ~identity = source ^ ":" ^ identity
+
+let observe_output text =
+  String.split_lines text |> List.map ~f:String.strip
+  |> List.filter ~f:(Fn.non String.is_empty)
+  |> List.iter ~f:(Hash_set.add observed_output)
+
+let printf format =
+  Printf.ksprintf
+    (fun output ->
+      observe_output output;
+      Stdio.printf "%s%!" output)
+    format
+
+let claim_exercises passed_labels diagnostic =
+  let rec take_match before = function
+    | [] -> None
+    | label :: after ->
+        if Refusal_control_scan.format_matches ~format:diagnostic.Refusal_control_scan.format label
+        then Some (List.rev_append before after)
+        else take_match (label :: before) after
+  in
+  take_match [] passed_labels
+
+let evidence_observed ~passed_labels evidence =
+  Hash_set.mem observed_output evidence
+  ||
+  match String.chop_suffix evidence ~suffix:": true" with
+  | Some label -> List.mem passed_labels label ~equal:String.equal
+  | None -> List.mem passed_labels evidence ~equal:String.equal
 
 let print source =
+  let source_path =
+    if Stdlib.Sys.file_exists source then source
+    else Stdlib.Filename.concat "test/operations" source
+  in
+  let source = Stdlib.Filename.basename source in
+  let diagnostics = Refusal_control_scan.diagnostics (In_channel.read_all source_path) in
+  let expected = markers source in
+  let passed_labels = ref (Verdict.passed_labels ()) in
   printf "\nSynthetic controls: scanner refusal diagnostics exercised by this control golden:\n";
-  markers source |> List.iter ~f:(printf "  %s\n")
+  diagnostics
+  |> List.iter ~f:(fun diagnostic ->
+      let marker = Refusal_control_scan.marker diagnostic in
+      if List.mem expected marker ~equal:String.equal then
+        match diagnostic.Refusal_control_scan.kind with
+        | Refusal_control_scan.Claim -> (
+            match claim_exercises !passed_labels diagnostic with
+            | None -> ()
+            | Some remaining ->
+                passed_labels := remaining;
+                printf "  %s\n" marker)
+        | Refusal_control_scan.Fail ->
+            let key = failure_key ~source ~identity:diagnostic.Refusal_control_scan.identity in
+            let assigned_evidence = List.Assoc.find direct_evidence key ~equal:String.equal in
+            if
+              Option.value_map assigned_evidence ~default:false
+                ~f:(evidence_observed ~passed_labels:(Verdict.passed_labels ()))
+            then printf "  %s\n" marker)

@@ -28,16 +28,22 @@ let quantified xs =
 
 let formatted_claim name ok = Verdict.pf "%s refusal stays live" name ok
 
+let paired got want = Verdict.p_all2 "paired" got want ~f:Int.equal
+
+let concise ok = Verdict.p "valid" ok
+let concise_fail () = Verdict.fail "bad key"
+
 let prose = "Verdict.fail \"quoted code is not an application\""
 let dynamic reason = Verdict.fail reason
 |ocaml}
   in
   let diagnostics = Scan.diagnostics source in
   let fragments = List.map diagnostics ~f:(fun diagnostic -> diagnostic.Scan.fragment) in
-  Verdict.p_all ~min:5 "direct, formatted, `@@`, quantified, and `pf` refusal formats are extracted"
+  Verdict.p_all ~min:8
+    "direct, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats are extracted"
     diagnostics ~f:(fun diagnostic -> not (String.is_empty diagnostic.Scan.fragment));
   Verdict.p "comments, quoted code, and a dynamic value contribute no diagnostic string constant"
-    (List.length diagnostics = 5);
+    (List.length diagnostics = 8);
   Verdict.p "Printf substitutions are holes and a stable literal fragment becomes the fragment"
     (List.mem fragments "formatted_relationship" ~equal:String.equal);
   let one = List.hd_exn diagnostics in
@@ -50,6 +56,15 @@ let dynamic reason = Verdict.fail reason
   in
   Verdict.p "two diagnostics sharing a display fragment still require distinct controls"
     (List.length (Scan.orphans ~control_text:(Scan.marker one) [ one; colliding_fragment ]) = 1);
+  let valid =
+    List.find_exn diagnostics ~f:(fun diagnostic -> String.equal diagnostic.Scan.format "valid")
+  in
+  Verdict.p "one observed claim execution is consumed by only one matching diagnostic"
+    (Option.value_map (Manifest.claim_exercises [ "valid" ] valid) ~default:false ~f:List.is_empty);
+  Verdict.p "a second identical diagnostic cannot reuse the consumed claim execution"
+    (Option.is_none
+       (Option.bind (Manifest.claim_exercises [ "valid" ] valid) ~f:(fun remaining ->
+            Manifest.claim_exercises remaining valid)));
   let arguments = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1) in
   let rec pairs = function
     | source :: control :: rest -> (source, control) :: pairs rest
@@ -61,7 +76,8 @@ let dynamic reason = Verdict.fail reason
   printf "\nScanner refusal formats and the permanent control suite assigned to their source:\n";
   pairs arguments
   |> List.iter ~f:(fun (source, control) ->
-      let control_text = In_channel.read_all control in
+      let controls = String.split control ~on:',' in
+      let control_text = controls |> List.map ~f:In_channel.read_all |> String.concat ~sep:"\n" in
       let diagnostics = Scan.diagnostics (In_channel.read_all source) in
       let extracted = List.map diagnostics ~f:Scan.marker in
       Verdict.p
@@ -70,5 +86,9 @@ let dynamic reason = Verdict.fail reason
       diagnostics
       |> List.iter ~f:(fun diagnostic ->
           Verdict.p
-            (Printf.sprintf "%s: %s is catalogued beside %s" source (Scan.marker diagnostic) control)
+            (Printf.sprintf "%s: %s (%s) is catalogued beside %s" source (Scan.marker diagnostic)
+               (match diagnostic.Scan.kind with
+               | Scan.Fail -> "direct failure"
+               | Scan.Claim -> "claim")
+               (String.concat ~sep:", " controls))
             (Scan.covered ~control_text diagnostic)))

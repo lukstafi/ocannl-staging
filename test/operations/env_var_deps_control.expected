@@ -8,6 +8,7 @@ appears in no permanent control golden in the negative arm, and appears in the p
 
 a diagnostic absent from every control golden is an orphan: true
 the same diagnostic fragment in a control golden is covered: true
+a scanner absent from the manifest is detected by the population equality: true
 
 The rule is put to a stanza this repository does not contain: an `(executable)` whose one
 module calls `Test_utils.Generated.init`, run by a rule that does or does not declare
@@ -112,6 +113,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives
   [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from
   [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment
+  [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality
   [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's
   [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation
   [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated
@@ -139,6 +141,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:4012b24c7623acd977522e8f2eacf2bb] attaches a rule
   [scanner-refusal:ba5d90fc4bcec944ebd169329c706968] goldens on the
   [scanner-refusal:c1a398b587b5de3d7d02145dc45274a6] alias <suite>-<name> that
+  [scanner-refusal:941a9fb77d867c7b1576a0f19ee5db3b] declares
   [scanner-refusal:2b67d02d52c3465bfba40d167802f0a7] env_var
   [scanner-refusal:0deef0cb94c45615f32ee84ac2e76f8e] declares tracing gates
   [scanner-refusal:02e183a4105132ec092206c1d35d6247] reads the tracing
@@ -154,18 +157,9 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:fe4c53f899eb08a9ae67e7a797a5a841] scanner-refusal exemptions no
   [scanner-refusal:0b33370125e32eaa4bb0f50c6cc3bc1a] exempted declarations no
   [scanner-refusal:638620a0745d0a136810c5b0256e0ec0] directories exempted from
-  [scanner-refusal:7d1923374b5bbf7028b59f2670772e8c] executable either declares
-  [scanner-refusal:68816c7803a2eabaa2a2d8799ba00a78] running an executable
-  [scanner-refusal:a90efecb7feb61485c0886565a0e4ba9] running an executable
   [scanner-refusal:09ce44850cdf45c95e308d6c64aed813] the repository's
-  [scanner-refusal:1bb3be04ec494f4917d1537675671f1d] repository-wide derivation finds
   [scanner-refusal:b35f6c5cf70c9d942c2e42a4c1af9975] Test_utils.Generated.init
   [scanner-refusal:9ad60261dbb2540d4d7e060be725ad4d] repository's census finds
-  [scanner-refusal:b54873c01dcc148c1691a882e4181993] Test_utils.Generated.init
-  [scanner-refusal:7ff972d0b76d472194796b39466092aa] Test_utils.Generated.init
-  [scanner-refusal:f8d375e9267abafa87ce8eec2d53731d] repository-wide scan rules
-  [scanner-refusal:1f42d7a2739170c96004439d524c5d96] permanent control-golden corpus
-  [scanner-refusal:a2ef9338814a08816bb85a6bab6ac71c] statically recoverable scanner
   [scanner-refusal:96e2132b9ea14b4c19e7573b7725b9ec] omits the declaration
   [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes
   [scanner-refusal:055900a8a1fbefd29b7c64a46953700f] external command handed

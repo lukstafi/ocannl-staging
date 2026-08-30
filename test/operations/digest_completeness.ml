@@ -23,6 +23,9 @@
 
 open Base
 open Stdio
+
+let printf = Test_utils.Refusal_control_manifest.printf
+
 module SC = Ir.Schedule_cache
 module Config_key_scan = Test_utils.Config_key_scan
 
@@ -162,4 +165,5 @@ let () =
   Verdict.p "every scanned root meets its source-count floor" (List.is_empty floor_violations);
   if not (Verdict.any_failed ()) then
     printf "OK: %d config keys classified against %d cache-key components.\n"
-      (Set.length classified) (List.length SC.key_components)
+      (Set.length classified) (List.length SC.key_components);
+  Test_utils.Refusal_control_manifest.print "digest_completeness.ml"

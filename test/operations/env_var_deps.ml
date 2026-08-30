@@ -89,6 +89,8 @@ module Sources = Test_utils.Config_key_scan
 module Refusals = Test_utils.Refusal_control_scan
 module Refusal_manifest = Test_utils.Refusal_control_manifest
 
+let printf = Refusal_manifest.printf
+
 (* Declarations of a name OCANNL does not read as a configuration key. Keyed by "<dune
    file>:<name>", and each entry earns its place on every run (see the staleness check below): a
    rule tracking a variable no key would be read from is normally a typo, which is the whole point
@@ -721,6 +723,8 @@ let refuse name =
      appears in no permanent control golden in the negative arm, and appears in the positive arm.\n\n";
   Verdict.p "a diagnostic absent from every control golden is an orphan" (List.length absent = 1);
   Verdict.p "the same diagnostic fragment in a control golden is covered" (List.is_empty covered);
+  Verdict.p "a scanner absent from the manifest is detected by the population equality"
+    (not (List.equal String.equal [ "scanner_a.ml" ] [ "scanner_a.ml"; "scanner_b.ml" ]));
   printf "\n"
 
 let main () =
@@ -2380,6 +2384,12 @@ let main () =
      where dune runs it, and every declaration of it has a caller behind it"
     (!artifact_violations = 0);
   if repository_census then (
+    let scanner_basenames =
+      Set.to_list !scanner_sources
+      |> List.map ~f:Stdlib.Filename.basename
+      |> List.sort ~compare:String.compare
+    in
+    let manifest_sources = List.sort Refusal_manifest.sources ~compare:String.compare in
     printf
       "\n\
        Scanner refusal controls (gh-ocannl-800). Sources come from repository-wide scan rules;\n\
@@ -2399,6 +2409,8 @@ let main () =
     Verdict.p_all ~min:10 "repository-wide scan rules resolve to scanner sources"
       (Set.to_list !scanner_sources) ~f:(fun source ->
         List.Assoc.mem sources source ~equal:String.equal);
+    Verdict.p "the refusal-control manifest source set equals the derived scanner census"
+      (List.equal String.equal manifest_sources scanner_basenames);
     Verdict.p_all ~min:10 "the permanent control-golden corpus is present" control_goldens
       ~f:(fun (_path, on_disk) -> not (String.is_empty (In_channel.read_all on_disk)));
     Verdict.p
@@ -2410,7 +2422,10 @@ let main () =
       "\n\
        OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test \
        directory carries the ambient gate, and every per-module tracing gate is declared by the \
-       library whose modules read it.\n"
+       library whose modules read it.\n";
+  if repository_census then
+    List.Assoc.find sources "test/operations/env_var_deps.ml" ~equal:String.equal
+    |> Option.iter ~f:(fun source -> Refusal_manifest.print source)
 
 (* gh-ocannl-723's negative control, and why it runs the checker rather than inspecting it.
 

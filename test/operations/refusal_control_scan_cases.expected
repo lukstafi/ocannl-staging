@@ -1,254 +1,264 @@
-direct, formatted, `@@`, quantified, and `pf` refusal formats are extracted: true
+direct, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats are extracted: true
 comments, quoted code, and a dynamic value contribute no diagnostic string constant: true
 Printf substitutions are holes and a stable literal fragment becomes the fragment: true
 an absent fragment is an orphan: true
 the diagnostic's unique marker in a control golden covers it: true
 two diagnostics sharing a display fragment still require distinct controls: true
+one observed claim execution is consumed by only one matching diagnostic: true
+a second identical diagnostic cannot reuse the consumed claim execution: true
 
 Scanner refusal formats and the permanent control suite assigned to their source:
 atomic_file_rename_scan.ml has exactly the explicitly assigned refusal controls: true
-atomic_file_rename_scan.ml: [scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:77ea18b8b8167a5861a77a9a6bbe45bf] unrelated rename spelling is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:298ab0be4c86a0dabfaeeddc5e67bd29] contributes its derived is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:dfeaf03eef363cf0944237d1f754cb5a] generated-source negative control is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:16447aab0e906595f837aaa44096abbc] Atomic_file is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:698fae6b12a0d52a71f789bc962a882b] raw rename exemption is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:ed6060063668d409574488fcb7fc8897] exemption matches exactly is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's (direct failure) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:77ea18b8b8167a5861a77a9a6bbe45bf] unrelated rename spelling (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:298ab0be4c86a0dabfaeeddc5e67bd29] contributes its derived (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:dfeaf03eef363cf0944237d1f754cb5a] generated-source negative control (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:16447aab0e906595f837aaa44096abbc] Atomic_file (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:698fae6b12a0d52a71f789bc962a882b] raw rename exemption (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:ed6060063668d409574488fcb7fc8897] exemption matches exactly (claim) is catalogued beside atomic_file_rename_scan.expected: true
 agent_notes_structure.ml has exactly the explicitly assigned refusal controls: true
-agent_notes_structure.ml: [scanner-refusal:bc4968cf04b3b7f3212afef877977199] handed the notes is catalogued beside agent_notes_structure.expected: true
-agent_notes_structure.ml: [scanner-refusal:2ac555c09ba6fe90fc6321fecba16cab] the notes' bullets is catalogued beside agent_notes_structure.expected: true
-agent_notes_structure.ml: [scanner-refusal:ec487246d0ff9ad951333a2c56d4a990] names is reported is catalogued beside agent_notes_structure.expected: true
-agent_notes_structure.ml: [scanner-refusal:ed552c5b3e09a3046aa9cce5257cc148] every finding carries is catalogued beside agent_notes_structure.expected: true
-agent_notes_structure.ml: [scanner-refusal:348bb1f1fa0be73fb4796a31a76abaad] each flagged bullet is catalogued beside agent_notes_structure.expected: true
-agent_notes_structure.ml: [scanner-refusal:ec62d0a7d728c7ab15a2c9b8608c6404] every exemption still is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:bc4968cf04b3b7f3212afef877977199] handed the notes (claim) is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:2ac555c09ba6fe90fc6321fecba16cab] the notes' bullets (claim) is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:ec487246d0ff9ad951333a2c56d4a990] names is reported (claim) is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:ed552c5b3e09a3046aa9cce5257cc148] every finding carries (claim) is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:348bb1f1fa0be73fb4796a31a76abaad] each flagged bullet (claim) is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: [scanner-refusal:ec62d0a7d728c7ab15a2c9b8608c6404] every exemption still (claim) is catalogued beside agent_notes_structure.expected: true
 backend_golden_family_scan.ml has exactly the explicitly assigned refusal controls: true
-backend_golden_family_scan.ml: [scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families is catalogued beside backend_golden_family_scan.expected: true
+backend_golden_family_scan.ml: [scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families (claim) is catalogued beside backend_golden_family_scan.expected: true
 cache_dir_ignores.ml has exactly the explicitly assigned refusal controls: true
-cache_dir_ignores.ml: [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:88e191145bdba435fd0fb303d486d684] gitignore no longer is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default is catalogued beside cache_dir_scan_cases.expected: true
-cache_dir_ignores.ml: [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:88e191145bdba435fd0fb303d486d684] gitignore no longer (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:a8ea78ba60f371d22646868a36871617] argument (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
 codegen_text_inventory.ml has exactly the explicitly assigned refusal controls: true
-codegen_text_inventory.ml: [scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:c995ea0a058a228bf654449befcccb4b] meets its source-site is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:d246f03ca5c483db40b94796658cf426] every source handed is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:ebeeadb92d10e201894cb4b9fb9021bb] every exclusion still is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:545694a8ea6e371db823bcc7d2639f85] scanned library interfaces is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:327f5dea331c9591f8d59a6da296202d] scanned library declares is catalogued beside codegen_text_scan_cases.expected: true
-codegen_text_inventory.ml: [scanner-refusal:80b2a504ebea9c64f6fcc3c5da12164e] generated text behind is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: [scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for (direct failure) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether (direct failure) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module (direct failure) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:c995ea0a058a228bf654449befcccb4b] meets its source-site (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:d246f03ca5c483db40b94796658cf426] every source handed (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:ebeeadb92d10e201894cb4b9fb9021bb] every exclusion still (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:545694a8ea6e371db823bcc7d2639f85] scanned library interfaces (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:327f5dea331c9591f8d59a6da296202d] scanned library declares (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
+codegen_text_inventory.ml: [scanner-refusal:80b2a504ebea9c64f6fcc3c5da12164e] generated text behind (claim) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
 config_dep_completeness.ml has exactly the explicitly assigned refusal controls: true
-config_dep_completeness.ml: [scanner-refusal:2ade05f14bd972f85a1792722f8a0ab6] arguments the rule's is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:6c29eb9b1db92bba229707a7cd8e1b5b] Dune_stanza_scan.action_heads is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:57862024aefd0884bbbd6d074a2e173b] Dune_stanza_scan is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:6d151bed80a45201e61d096c2c38d210] which has no is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:5509acc7fac8ff0412e3631b49c06dc7] change directory without is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:e11f1dd0ebe8035f6b6bb919c904e611] this check cannot is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:e20c1b4ad3881b8147939aef02357ab2] classification for and is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:332abda7feebdaa6c1c10670865ea5c6] does not declare is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:c35e7bf895b2bfc334caa198f2db4c83] raw text shows is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:a83ec7419ab530468bb3d4143c8c8576] raw text shows is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:28c35655d1568c3c11bdc1893d8847fa] raw text runs is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:929a18d24ebaad373970a360298e3b88] raw text runs is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:328553bf93b184a97ab7d44d97c369a4] exempted sites that is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:c4c555263d62473311fe0cfc7f769958] stanza inline-test library is catalogued beside dune_scan_cases.expected: true
-config_dep_completeness.ml: [scanner-refusal:bdc9f2c15b8f17359eec6d359dfefbdd] that floor applies is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: [scanner-refusal:2ade05f14bd972f85a1792722f8a0ab6] arguments the rule's (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:6c29eb9b1db92bba229707a7cd8e1b5b] Dune_stanza_scan.action_heads (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:57862024aefd0884bbbd6d074a2e173b] Dune_stanza_scan (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:6d151bed80a45201e61d096c2c38d210] which has no (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:5509acc7fac8ff0412e3631b49c06dc7] change directory without (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:e11f1dd0ebe8035f6b6bb919c904e611] this check cannot (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:e20c1b4ad3881b8147939aef02357ab2] classification for and (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:332abda7feebdaa6c1c10670865ea5c6] does not declare (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:c35e7bf895b2bfc334caa198f2db4c83] raw text shows (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:a83ec7419ab530468bb3d4143c8c8576] raw text shows (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:28c35655d1568c3c11bdc1893d8847fa] raw text runs (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:929a18d24ebaad373970a360298e3b88] raw text runs (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:328553bf93b184a97ab7d44d97c369a4] exempted sites that (direct failure) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:c4c555263d62473311fe0cfc7f769958] stanza inline-test library (claim) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
+config_dep_completeness.ml: [scanner-refusal:bdc9f2c15b8f17359eec6d359dfefbdd] that floor applies (claim) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
 dead_export_scan.ml has exactly the explicitly assigned refusal controls: true
-dead_export_scan.ml: [scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:085de8c521f251df70b65fc6454dfdad] OCaml source does is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules (direct failure) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:085de8c521f251df70b65fc6454dfdad] OCaml source does (direct failure) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export (claim) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions (claim) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains (claim) is catalogued beside dead_export_scan.expected: true
 digest_completeness.ml has exactly the explicitly assigned refusal controls: true
-digest_completeness.ml: [scanner-refusal:7cab0a5763f4811f331a4aab327c6784] which the codegen-stage is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:fc3ef3788212f2d1f5a9d9a46be3ca38] keys classified more is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:dc9995a5d5b80370dc90971d3fd019df] no cache-identity classification is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:a385ae718c8af3ab39a45701b75fda4d] Utils.known_config_keys is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:14b02d2180d3814d6746acd827aecbc3] classifications claim cache-key is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:8109160f59717560ff5e6f7251a6a2b2] cache-key components no is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:1825a277ba0eda3313fbe079e465c15d] but classified code-borne is catalogued beside config_scan_lexing.expected: true
-digest_completeness.ml: [scanner-refusal:55743888dd2a4a2234ee1d3f031ea47e] meets its source-count is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: [scanner-refusal:7cab0a5763f4811f331a4aab327c6784] which the codegen-stage (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:fc3ef3788212f2d1f5a9d9a46be3ca38] keys classified more (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:dc9995a5d5b80370dc90971d3fd019df] no cache-identity classification (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:a385ae718c8af3ab39a45701b75fda4d] Utils.known_config_keys (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:14b02d2180d3814d6746acd827aecbc3] classifications claim cache-key (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:8109160f59717560ff5e6f7251a6a2b2] cache-key components no (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:1825a277ba0eda3313fbe079e465c15d] but classified code-borne (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
+digest_completeness.ml: [scanner-refusal:55743888dd2a4a2234ee1d3f031ea47e] meets its source-count (claim) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
 env_var_deps.ml has exactly the explicitly assigned refusal controls: true
-env_var_deps.ml: [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:034280d144ee4338406ff5f6a1cf287d] comment that does is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:30c88c1631600d7969a9aefd4de74162] carries a backend is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f2633aa4ebd6f2c33fd21e4d69cc9786] one backend marker is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2803edcc7de84ea6d928343b9d8c8ad2] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:533fc9999ad0841992e0c1734d9c1f5d] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:7336dd5a712b0c3a578b64d7defb1654] between stanzas declares is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1aaab6e3cd8f4615e1cd1d0321e309a1] times and only is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f11c09a8318b3a7863444256973f57d4] running an executable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:95919586e2a2b25eaaf13ca8093ab584] repository-wide scan rule is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:be41f253ce4b808b6b4ec587c304ec08] repository-wide scan rule is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b040632469771b25abb3469878413be3] the repository scanner is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:dda5b4655f74eda46ec0c60e320d232b] run's generated artifacts is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:747372ab4b28cca8978c2b6bd8983005] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:364d32b22a5cb7a70b569db0d8864170] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:07e7987f0d61b10a9fea6c6590c73d59] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:bbadfd8513559355fedbc54dc3dc678a] serializes its actions is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:eb5d5419b3bd18240469743cbabc58f2] has actions on is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a06dccc27afe2153a7700609691d3c8d] attaches a rule is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:cd2777d83ada3318386d3cd02b39018b] repository a repo-wide is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ffdd3e3b7a0db8da177f376b13f03c45] repository to produce is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f16784d0b1f52de5e30378cb771ada5c] alias does not is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:4012b24c7623acd977522e8f2eacf2bb] attaches a rule is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ba5d90fc4bcec944ebd169329c706968] goldens on the is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:c1a398b587b5de3d7d02145dc45274a6] alias <suite>-<name> that is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2b67d02d52c3465bfba40d167802f0a7] env_var is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:0deef0cb94c45615f32ee84ac2e76f8e] declares tracing gates is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:02e183a4105132ec092206c1d35d6247] reads the tracing is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2df546d04b63387a24409b3c4c6a9611] declares the tracing is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:e55f77a62871fb685d23199e95c8f173] the environment variable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:d5f94657407bc4dbf949ba4187e80100] include_subdirs is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ea6e2adedc7afd62fa55afcf859f251d] names the module is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:55f2feade4e139b5abb073d0b89c42cb] reaches the environment is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:267a42b2812f4679c4463495cc199d36] reads the configuration is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:41d9bc729b5b8b3908a48d45b1e0203c] reads the configuration is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a323f01100bfd685e76c62154cf4eaae] reads the configuration is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:e45e166af22d229414296459a3ca022a] scanner refusal is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:fe4c53f899eb08a9ae67e7a797a5a841] scanner-refusal exemptions no is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:0b33370125e32eaa4bb0f50c6cc3bc1a] exempted declarations no is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:638620a0745d0a136810c5b0256e0ec0] directories exempted from is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:7d1923374b5bbf7028b59f2670772e8c] executable either declares is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:68816c7803a2eabaa2a2d8799ba00a78] running an executable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a90efecb7feb61485c0886565a0e4ba9] running an executable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:09ce44850cdf45c95e308d6c64aed813] the repository's is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1bb3be04ec494f4917d1537675671f1d] repository-wide derivation finds is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b35f6c5cf70c9d942c2e42a4c1af9975] Test_utils.Generated.init is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:9ad60261dbb2540d4d7e060be725ad4d] repository's census finds is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b54873c01dcc148c1691a882e4181993] Test_utils.Generated.init is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:7ff972d0b76d472194796b39466092aa] Test_utils.Generated.init is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f8d375e9267abafa87ce8eec2d53731d] repository-wide scan rules is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1f42d7a2739170c96004439d524c5d96] permanent control-golden corpus is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a2ef9338814a08816bb85a6bab6ac71c] statically recoverable scanner is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:96e2132b9ea14b4c19e7573b7725b9ec] omits the declaration is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:055900a8a1fbefd29b7c64a46953700f] external command handed is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:fac924c455e2114b6e6bdebdc44811fd] same stanza declaring is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b4a6c6ad5ae1c0d26b7fe78da5c5aa7f] command handed nothing is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a6ad129bb27775f8c16abc37c6c39ed6] metal-codegen alias does is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:d2a4a4c55f9409ff2a808631d0753f27] family stanza passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:8ebeaee3c8fee72d0c6d5b1df2fa0c34] the resource-lifecycle instrumentation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:da4ac19271accffacfcd9a6bbe210e22] member listed passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:3f9f68401bac53be0cbb38ce715e460d] executable whose RUNNER is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ed1dfb1acf49ea77d9b2bdd8ad92d312] alias listed passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ddd1defde5b6df4dab1d802e19cd88ef] generated aliases listed is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:46c759bca27349aa081cf5efe33bdef0] same plural stanza is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:aff85d14fb92bfaa9802e45b964c7292] reads the instrumentation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:38cc9ab62dfcf93c10a811d1a8f37ecb] inline-test library carrying is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:97233d85a47856acfecb615dd26a3ebc] generated alias passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:e45a490c152af6ca00b7e83c84599d95] recursive build from is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a0fe83d0193d8ac517eb248c21c7f120] another directory's executable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:45113608604d50fd82c92657c03134f4] this directory's executable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:cf759af799dd89758aa6f0eff3cd03b5] public_name is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:55ce549b47e5402396164709a1e7564b] top-level family stanza is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:82254747d84d2b7698c0987019df1914] the directory-wide runtest is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:0ad19c6a66fdbd030d2b742800df58bc] second unit's public is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:7735cb3446daca7f4157aa26d3d583da] names the instrumentation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:248545b295fe9393f046d06407875db5] family alias defined is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:65fecdef5d771aadd55c653ca5f36ccd] group whose actions is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:8043b9ea16535c8062dcc52282cdb90a] through another qualifier is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1cb2feb54940b69b22887119d96e5203] Alloc_census.snapshot is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:3c9662bb21fae53a6e850ec0b1d533fa] I.Alloc_census.snapshot is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:aa4e4d279169f4e2990023a88a8a29fc] Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:de5cf6819a64d46d5a27eb8c300af31b] Ir.Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:84e456282a1ff74968abe67ae2fa4694] executable's public name is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:1e238caa905efec1f7ae0cf764033e25] Vendor.Ir is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:00e63d0fbcdd91be8bea4b0244c7860e] Vendor.Ir.Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2a67fb33bc312d6cfdc1ce0f15d513bd] Foo.Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f84656abac178f5d2b2d79677353a343] Vendor.I.Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:f63c79247666a73ea1dc618899111b77] functor parameter named is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:5e4f4234263c64ddf6bc2236f1b4032c] I.Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:c4b1b7a8d9409c62e651fec93e8bb1a3] structure defines something is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2d6a378a5a45d9bb99e928532c0226b7] somebody else re-exports is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b4b3077aecacdd13f81ef68627f7e8ff] functor's parameter named is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:e34dc9c194473eab7a73109597d033c0] includes the qualifier is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:081886dc55c593d16ce4e598ecc604c1] Ir.Alloc_census.t is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:5940ea2811e203c19adf2bb49003d448] definition supersedes it is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:15b55a16ec2a2d4b14898f888710526f] Alloc_census is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:73cf957dbac466cdcb1ed757fcff1aa1] qualifier's name shadows is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b2ffc9450c3e952a03abd091b5abea61] later reference alive is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:bb4952563f8b6d5b4e642fe1130df293] alias declared before is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:6798c11e122a65375ac4a8b22ddfd20b] includes the qualifier is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:8f7f708a45a89228e1e478f3ddb158ae] I.Alloc_census.t is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:be7f67353f6c0f8782c3b867b1023af5] runtest-<name> dune generates is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:dc2fb82ae5ada84e736e180065bc2881] reads the instrumentation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:27dfb3ff299833db9842614f2e2b5384] local executable's name is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:0880ce931733097b9e44c86e1f0b7065] ANOTHER directory's binary is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:93ed6fc086891252db10d64e8dbfeca0] alias dune generates is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:84a1eda5072c0c3e43ecad5c2af6e561] stanza neither derivation is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:e38848b2fb4d8a90933cfe88e13cc04e] guard neither declares is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:605b6d65216f3c4fba7184a09d392f05] pinning the variable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:351acc91087a8ad372f2b9d40f2c1d20] SIBLING branch of is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:c0e7be9911f1a357c38e840ace916450] pinned guard does is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:c417aa0905f775b98ac3a197ecdd454c] dune's default module is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:bf505697938fab0cadb9434dc171764b] program declared inside is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:9b0ca5fe801d10403fb73978e58049f1] module the stanza is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:3aaf1e15d8b245e1193c7d00698c8d84] utils.ml is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:ba0a6cca6e0d6cef1cf5e8661a56b5a0] reported as undeclarable is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:21fd01e1a9e76489f599ef5a9387c17f] and pinning it is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:23b8372cc11b73d08a28c880b778eaf2] itself pins through is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:67415c1f44643b671427afd9352d8ba4] refused not approximated is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:422d713c4296fbd0c9cc8cace51b682d] same directive inside is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:a317ce82c0267d509ae45cf1d1b349d7] reported there being is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:c0f203aa0cf72d22c483afaf430d5353] library with inline is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:afc8337bcb6f3d267d65774a59ca7f86] inline_tests is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b850c5e69abfcc5facf9b920af1a291f] same executable answers is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:b098b95e7bbcc632b19f0e470447fd97] both declaring passes is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:d8c7b4408936ac9480281388a26eb873] dynamic reach whose is catalogued beside env_var_deps_control.expected: true
-env_var_deps.ml: [scanner-refusal:7a38e9cb5b4418e6e5bb8fe3b294d8fd] the same variable is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:034280d144ee4338406ff5f6a1cf287d] comment that does (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:30c88c1631600d7969a9aefd4de74162] carries a backend (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f2633aa4ebd6f2c33fd21e4d69cc9786] one backend marker (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2803edcc7de84ea6d928343b9d8c8ad2] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:533fc9999ad0841992e0c1734d9c1f5d] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:7336dd5a712b0c3a578b64d7defb1654] between stanzas declares (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1aaab6e3cd8f4615e1cd1d0321e309a1] times and only (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f11c09a8318b3a7863444256973f57d4] running an executable (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:95919586e2a2b25eaaf13ca8093ab584] repository-wide scan rule (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:be41f253ce4b808b6b4ec587c304ec08] repository-wide scan rule (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b040632469771b25abb3469878413be3] the repository scanner (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:dda5b4655f74eda46ec0c60e320d232b] run's generated artifacts (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:747372ab4b28cca8978c2b6bd8983005] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:364d32b22a5cb7a70b569db0d8864170] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:07e7987f0d61b10a9fea6c6590c73d59] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:bbadfd8513559355fedbc54dc3dc678a] serializes its actions (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:eb5d5419b3bd18240469743cbabc58f2] has actions on (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a06dccc27afe2153a7700609691d3c8d] attaches a rule (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:cd2777d83ada3318386d3cd02b39018b] repository a repo-wide (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ffdd3e3b7a0db8da177f376b13f03c45] repository to produce (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f16784d0b1f52de5e30378cb771ada5c] alias does not (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:4012b24c7623acd977522e8f2eacf2bb] attaches a rule (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ba5d90fc4bcec944ebd169329c706968] goldens on the (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:c1a398b587b5de3d7d02145dc45274a6] alias <suite>-<name> that (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:941a9fb77d867c7b1576a0f19ee5db3b] declares (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2b67d02d52c3465bfba40d167802f0a7] env_var (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:0deef0cb94c45615f32ee84ac2e76f8e] declares tracing gates (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:02e183a4105132ec092206c1d35d6247] reads the tracing (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2df546d04b63387a24409b3c4c6a9611] declares the tracing (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e55f77a62871fb685d23199e95c8f173] the environment variable (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:d5f94657407bc4dbf949ba4187e80100] include_subdirs (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ea6e2adedc7afd62fa55afcf859f251d] names the module (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:55f2feade4e139b5abb073d0b89c42cb] reaches the environment (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:267a42b2812f4679c4463495cc199d36] reads the configuration (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:41d9bc729b5b8b3908a48d45b1e0203c] reads the configuration (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a323f01100bfd685e76c62154cf4eaae] reads the configuration (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e45e166af22d229414296459a3ca022a] scanner refusal (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:fe4c53f899eb08a9ae67e7a797a5a841] scanner-refusal exemptions no (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:0b33370125e32eaa4bb0f50c6cc3bc1a] exempted declarations no (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:638620a0745d0a136810c5b0256e0ec0] directories exempted from (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:7d1923374b5bbf7028b59f2670772e8c] executable either declares (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:68816c7803a2eabaa2a2d8799ba00a78] running an executable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a90efecb7feb61485c0886565a0e4ba9] running an executable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:09ce44850cdf45c95e308d6c64aed813] the repository's (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1bb3be04ec494f4917d1537675671f1d] repository-wide derivation finds (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b35f6c5cf70c9d942c2e42a4c1af9975] Test_utils.Generated.init (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:9ad60261dbb2540d4d7e060be725ad4d] repository's census finds (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b54873c01dcc148c1691a882e4181993] Test_utils.Generated.init (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:7ff972d0b76d472194796b39466092aa] Test_utils.Generated.init (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f8d375e9267abafa87ce8eec2d53731d] repository-wide scan rules (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f1c1e39705142c7bdc92b3f0ede72582] refusal-control manifest source (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1f42d7a2739170c96004439d524c5d96] permanent control-golden corpus (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a2ef9338814a08816bb85a6bab6ac71c] statically recoverable scanner (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:96e2132b9ea14b4c19e7573b7725b9ec] omits the declaration (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:055900a8a1fbefd29b7c64a46953700f] external command handed (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:fac924c455e2114b6e6bdebdc44811fd] same stanza declaring (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b4a6c6ad5ae1c0d26b7fe78da5c5aa7f] command handed nothing (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a6ad129bb27775f8c16abc37c6c39ed6] metal-codegen alias does (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:d2a4a4c55f9409ff2a808631d0753f27] family stanza passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:8ebeaee3c8fee72d0c6d5b1df2fa0c34] the resource-lifecycle instrumentation (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:da4ac19271accffacfcd9a6bbe210e22] member listed passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:3f9f68401bac53be0cbb38ce715e460d] executable whose RUNNER (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ed1dfb1acf49ea77d9b2bdd8ad92d312] alias listed passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ddd1defde5b6df4dab1d802e19cd88ef] generated aliases listed (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:46c759bca27349aa081cf5efe33bdef0] same plural stanza (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:aff85d14fb92bfaa9802e45b964c7292] reads the instrumentation (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:38cc9ab62dfcf93c10a811d1a8f37ecb] inline-test library carrying (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:97233d85a47856acfecb615dd26a3ebc] generated alias passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e45a490c152af6ca00b7e83c84599d95] recursive build from (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a0fe83d0193d8ac517eb248c21c7f120] another directory's executable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:45113608604d50fd82c92657c03134f4] this directory's executable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:cf759af799dd89758aa6f0eff3cd03b5] public_name (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:55ce549b47e5402396164709a1e7564b] top-level family stanza (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:82254747d84d2b7698c0987019df1914] the directory-wide runtest (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:0ad19c6a66fdbd030d2b742800df58bc] second unit's public (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:7735cb3446daca7f4157aa26d3d583da] names the instrumentation (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:248545b295fe9393f046d06407875db5] family alias defined (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:65fecdef5d771aadd55c653ca5f36ccd] group whose actions (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:8043b9ea16535c8062dcc52282cdb90a] through another qualifier (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1cb2feb54940b69b22887119d96e5203] Alloc_census.snapshot (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:3c9662bb21fae53a6e850ec0b1d533fa] I.Alloc_census.snapshot (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:aa4e4d279169f4e2990023a88a8a29fc] Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:de5cf6819a64d46d5a27eb8c300af31b] Ir.Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:84e456282a1ff74968abe67ae2fa4694] executable's public name (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:1e238caa905efec1f7ae0cf764033e25] Vendor.Ir (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:00e63d0fbcdd91be8bea4b0244c7860e] Vendor.Ir.Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2a67fb33bc312d6cfdc1ce0f15d513bd] Foo.Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f84656abac178f5d2b2d79677353a343] Vendor.I.Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:f63c79247666a73ea1dc618899111b77] functor parameter named (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:5e4f4234263c64ddf6bc2236f1b4032c] I.Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:c4b1b7a8d9409c62e651fec93e8bb1a3] structure defines something (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2d6a378a5a45d9bb99e928532c0226b7] somebody else re-exports (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b4b3077aecacdd13f81ef68627f7e8ff] functor's parameter named (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e34dc9c194473eab7a73109597d033c0] includes the qualifier (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:081886dc55c593d16ce4e598ecc604c1] Ir.Alloc_census.t (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:5940ea2811e203c19adf2bb49003d448] definition supersedes it (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:15b55a16ec2a2d4b14898f888710526f] Alloc_census (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:73cf957dbac466cdcb1ed757fcff1aa1] qualifier's name shadows (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b2ffc9450c3e952a03abd091b5abea61] later reference alive (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:bb4952563f8b6d5b4e642fe1130df293] alias declared before (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:6798c11e122a65375ac4a8b22ddfd20b] includes the qualifier (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:8f7f708a45a89228e1e478f3ddb158ae] I.Alloc_census.t (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:be7f67353f6c0f8782c3b867b1023af5] runtest-<name> dune generates (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:dc2fb82ae5ada84e736e180065bc2881] reads the instrumentation (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:27dfb3ff299833db9842614f2e2b5384] local executable's name (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:0880ce931733097b9e44c86e1f0b7065] ANOTHER directory's binary (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:93ed6fc086891252db10d64e8dbfeca0] alias dune generates (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:84a1eda5072c0c3e43ecad5c2af6e561] stanza neither derivation (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:e38848b2fb4d8a90933cfe88e13cc04e] guard neither declares (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:605b6d65216f3c4fba7184a09d392f05] pinning the variable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:351acc91087a8ad372f2b9d40f2c1d20] SIBLING branch of (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:c0e7be9911f1a357c38e840ace916450] pinned guard does (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:c417aa0905f775b98ac3a197ecdd454c] dune's default module (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:bf505697938fab0cadb9434dc171764b] program declared inside (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:9b0ca5fe801d10403fb73978e58049f1] module the stanza (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:3aaf1e15d8b245e1193c7d00698c8d84] utils.ml (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:ba0a6cca6e0d6cef1cf5e8661a56b5a0] reported as undeclarable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:21fd01e1a9e76489f599ef5a9387c17f] and pinning it (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:23b8372cc11b73d08a28c880b778eaf2] itself pins through (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:67415c1f44643b671427afd9352d8ba4] refused not approximated (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:422d713c4296fbd0c9cc8cace51b682d] same directive inside (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:a317ce82c0267d509ae45cf1d1b349d7] reported there being (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:c0f203aa0cf72d22c483afaf430d5353] library with inline (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:afc8337bcb6f3d267d65774a59ca7f86] inline_tests (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b850c5e69abfcc5facf9b920af1a291f] same executable answers (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:b098b95e7bbcc632b19f0e470447fd97] both declaring passes (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:d8c7b4408936ac9480281388a26eb873] dynamic reach whose (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:7a38e9cb5b4418e6e5bb8fe3b294d8fd] the same variable (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 ocamlformat_ignore_scan.ml has exactly the explicitly assigned refusal controls: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:e1f2fc5fc55abe7d73725c939c81a516] ocamlformat-ignore ends in is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:d936cdade68aaf6cb4f1a8a0bfc17655] ocamlformat-ignore line contains is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:cf335754f478997f3146ae0063d7d03e] every ocamlformat-ignore entry is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:2e170f2ab6d02300e60fc334c88d3481] every ppx-expectation golden is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:bd075431f78cab212b8ec01cde19088f] complete fixture with is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:050d763773d2e7b11b18179905cf9981] concatenated append is is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:f111a87fee55ca52831220a49495432a] its append-corruption diagnostic is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:d3e7969b1266fa6b311234da304986db] line containing no is catalogued beside ocamlformat_ignore_scan.expected: true
-ocamlformat_ignore_scan.ml: [scanner-refusal:4186a2cb3aaa270f0e693d87e91d2e2d] undeclared file present is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:e1f2fc5fc55abe7d73725c939c81a516] ocamlformat-ignore ends in (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:d936cdade68aaf6cb4f1a8a0bfc17655] ocamlformat-ignore line contains (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:cf335754f478997f3146ae0063d7d03e] every ocamlformat-ignore entry (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:2e170f2ab6d02300e60fc334c88d3481] every ppx-expectation golden (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:bd075431f78cab212b8ec01cde19088f] complete fixture with (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:050d763773d2e7b11b18179905cf9981] concatenated append is (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:f111a87fee55ca52831220a49495432a] its append-corruption diagnostic (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:d3e7969b1266fa6b311234da304986db] line containing no (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: [scanner-refusal:4186a2cb3aaa270f0e693d87e91d2e2d] undeclared file present (claim) is catalogued beside ocamlformat_ignore_scan.expected: true
 shell_scripts_parse.ml has exactly the explicitly assigned refusal controls: true
-shell_scripts_parse.ml: [scanner-refusal:8d61869dcd0de680f0aead692a642ebe] the scan reached is catalogued beside shell_scripts_parse.expected: true
-shell_scripts_parse.ml: [scanner-refusal:8fe3f688c6c4ef4b004016098ba03f34] reached the session is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang (claim) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang (claim) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses (claim) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:8d61869dcd0de680f0aead692a642ebe] the scan reached (claim) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:8fe3f688c6c4ef4b004016098ba03f34] reached the session (claim) is catalogued beside shell_scripts_parse.expected: true
 test_config_consistency.ml has exactly the explicitly assigned refusal controls: true
-test_config_consistency.ml: [scanner-refusal:40f6a4df02a115c327391e051bacd5c6] call-site keys missing is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:dfd9b6901bf188f6500bcc1284778dcd] known_config_keys is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:a22f67563f6e58a972758cfb6438b236] known_config_keys is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:f183d4fa8451402727499389f65d55a4] known_config_keys is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:9a0c38727d642eb678b4707766f25708] known_config_keys is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:1ce67444f994f72961fbc476c23dcd84] sets keys missing is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:2651df7744050e9d7f649f390b7c53b1] payload quoted in is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:8bb76ad7cf948a8181b88ee36b0148c6] scanned files share is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:11c8ffb35753ffb6f87da20d2ba6654f] Utils.settings is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:c56af001748a614d221709bf11098511] the empty string is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:e583c416783b3632963a66636f20f65e] string literal in is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:b4c59d5ad7a9c4e591998fccf8f039aa] exempted functions that is catalogued beside config_scan_lexing.expected: true
-test_config_consistency.ml: [scanner-refusal:55743888dd2a4a2234ee1d3f031ea47e] meets its source-count is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: [scanner-refusal:40f6a4df02a115c327391e051bacd5c6] call-site keys missing (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:dfd9b6901bf188f6500bcc1284778dcd] known_config_keys (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:a22f67563f6e58a972758cfb6438b236] known_config_keys (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:f183d4fa8451402727499389f65d55a4] known_config_keys (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:9a0c38727d642eb678b4707766f25708] known_config_keys (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:1ce67444f994f72961fbc476c23dcd84] sets keys missing (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:2651df7744050e9d7f649f390b7c53b1] payload quoted in (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:3a6832937329cda23c716c3883e04cb2] has no ' (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:8bb76ad7cf948a8181b88ee36b0148c6] scanned files share (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:11c8ffb35753ffb6f87da20d2ba6654f] Utils.settings (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:c56af001748a614d221709bf11098511] the empty string (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:e583c416783b3632963a66636f20f65e] string literal in (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:b4c59d5ad7a9c4e591998fccf8f039aa] exempted functions that (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
+test_config_consistency.ml: [scanner-refusal:55743888dd2a4a2234ee1d3f031ea47e] meets its source-count (claim) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
 verdict_ratchet.ml has exactly the explicitly assigned refusal controls: true
-verdict_ratchet.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:f3e306858423827e6575d13a17d57af6] check cannot vouch is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:53b71ea33a69d24c941985f4eb35406b] prints the claim is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:7d1962ff34bbe1ed7b89a535dc0cfd7e] exempted literals that is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:ad023891a3bd7827b3905292c487055b] claim-shaped literal any is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:e1354d390a356f0c79420c25232b0b42] planted canaries the is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments is catalogued beside verdict_scan_cases.expected: true
-verdict_ratchet.ml: [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:f3e306858423827e6575d13a17d57af6] check cannot vouch (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:53b71ea33a69d24c941985f4eb35406b] prints the claim (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:7d1962ff34bbe1ed7b89a535dc0cfd7e] exempted literals that (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:ad023891a3bd7827b3905292c487055b] claim-shaped literal any (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:e1354d390a356f0c79420c25232b0b42] planted canaries the (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true

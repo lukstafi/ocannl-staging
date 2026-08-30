@@ -38,6 +38,9 @@
 
 open Base
 open Stdio
+
+let printf = Test_utils.Refusal_control_manifest.printf
+
 module Scan = Test_utils.Verdict_scan
 module Dune = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
@@ -313,4 +316,5 @@ let () =
   Verdict.p "and placed some of them as arguments of a named function" (!applied > 0);
   Verdict.p "over more than one test directory" (List.length directories > 1);
   if not (Verdict.any_failed ()) then
-    printf "\nOK: no test source prints a claim it decided itself outside `Verdict`.\n"
+    printf "\nOK: no test source prints a claim it decided itself outside `Verdict`.\n";
+  Test_utils.Refusal_control_manifest.print "verdict_ratchet.ml"

@@ -8,8 +8,9 @@
     is easiest to write for. *)
 
 open Base
-open Stdio
 module Scan = Test_utils.Dune_stanza_scan
+
+let printf = Test_utils.Refusal_control_manifest.printf
 
 (* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
    promote`d into the golden as the expected output (gh-ocannl-601). *)
