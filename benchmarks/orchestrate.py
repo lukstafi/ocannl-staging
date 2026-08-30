@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import fixture_digest
+import cell_group
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -269,186 +270,27 @@ def ocannl_exe(model):
     return ROOT / f"_build/default/benchmarks/runners/ocannl/bench_{model}.exe"
 
 
-def _own_group_kwargs():
-    """Popen kwargs that give a cell a process group of its own (gh-ocannl-760).
-
-    A wedged cell is not one process: tinygrad's beam search runs its candidate compiles in a
-    `spawn` pool, a torch.compile cell forks inductor workers, and an OCANNL cell shells out to a
-    compiler. Killing the direct child leaves those alive — holding the output pipe open, so even
-    reading what the cell managed to print would then block forever — which is why the cap kills a
-    GROUP and the group has to be established at spawn time.
-    """
-    if os.name == "posix":
-        # setsid: the child leads a new session and a new process group whose id is its pid.
-        return {"start_new_session": True}
-    # Windows has no process groups in the POSIX sense; this is what `taskkill /T` walks.
-    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+def _group_observation(proc):
+    return proc.observe()
 
 
-def _signal_group(proc, force):
-    """Ask the whole group led by `proc` to stop (`force=False`) or kill it (`force=True`).
-
-    The escalation is a BOOLEAN rather than a signal number because the two platforms spell the
-    two steps in different vocabularies, and passing a POSIX signal through decides the Windows
-    branch by accident: `signal.SIGKILL` does not exist on Windows at all, so the obvious
-    "SIGKILL if posix else SIGTERM" hands the console-control branch its own SIGTERM and sends a
-    second CTRL_BREAK where the force kill was due — a cell that ignores CTRL_BREAK would then
-    never be killed while the sweep reports that it was (gh-ocannl-760 review).
-    """
-    try:
-        if os.name == "posix":
-            sig = signal.SIGKILL if force else signal.SIGTERM
-            try:
-                os.killpg(proc.pid, sig)
-            except ProcessLookupError:
-                # No group with that id — either it is gone, or it does not exist YET: `setsid`
-                # runs in the child between the fork and the exec, so a kill decided in the
-                # moments after `Popen` returns can arrive before the child leads a group of its
-                # own. Signalling the child directly is then both correct and necessary; what it
-                # must NOT do is fall back to a group id it does not own, which at that instant
-                # is the sweep's own. (Found by the spawn-window test taking 10 s to kill a cell
-                # that should have died at once: the graceful pass was missing it entirely and
-                # only the SIGKILL pass, a grace period later, landed.)
-                if proc.poll() is None:
-                    proc.send_signal(sig)
-        elif force:
-            # /T walks the tree the group anchors, which is the point — see _own_group_kwargs.
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            # The Windows console-control route: only a group leader spawned with
-            # CREATE_NEW_PROCESS_GROUP can be reached this way, and only with CTRL_BREAK.
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-    except (ProcessLookupError, OSError):
-        pass
-
-
-def _group_alive(pid):
-    """Whether the process group led by `pid` still has a RUNNING member.
-
-    A zombie is not one, and the distinction decides both of this function's callers. What the
-    escalation is really asking is "does anything still hold the device", and a zombie holds
-    nothing — it is an exit status waiting to be read. But `killpg(pgid, 0)` succeeds for a group
-    whose every member is a zombie, and after the kill that is the normal state of the
-    descendants: they are orphans by then, so whether they vanish or linger unreaped is decided by
-    whoever inherits them, and under a PID 1 that does not reap (a container) they linger. Signal
-    0 alone would then report a killed group as alive — announcing a SIGKILL survivor that does
-    not exist, and sitting through both grace periods to do it (gh-ocannl-760 review).
-
-    So on Linux the answer comes from `/proc`: any process whose process-group id is `pid` and
-    whose state is not `Z`. Elsewhere the signal-0 answer is all there is; on macOS launchd reaps
-    orphans promptly, which is what makes that acceptable there.
-    """
-    if os.name != "posix":
-        # No POSIX groups: see `kill_cell_group` for what stands in.
-        return False
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Members exist; they are just not ours to signal (a setuid child). Not "gone".
-        return True
-    except OSError:
-        return False
-    proc_fs = Path("/proc")
-    if not (proc_fs / "self" / "stat").exists():
-        return True  # no procfs to refine the answer with
-    for entry in proc_fs.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            # `comm` can hold spaces and parentheses, so the fields are counted from the LAST
-            # ')': state is the first after it, and the process-group id the third.
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            if fields[0] != "Z" and int(fields[2]) == pid:
-                return True
-        except (OSError, IndexError, ValueError):
-            continue  # it exited while we looked, or /proc served a partial line
-    return False
+def _remaining_note(observation):
+    if observation is cell_group.SURVIVORS:
+        return "A MEMBER SURVIVED SIGKILL"
+    return "GROUP LIVENESS IS UNKNOWN AFTER SIGKILL"
 
 
 def kill_cell_group(proc):
-    """Kill a cell and everything it spawned; return `(output, survived)`.
-
-    SIGTERM the group, give it `CELL_KILL_GRACE_S` to unwind, then SIGKILL it. The output read is
-    what the run had already written: a wedged cell's log up to the point it stopped making
-    progress is the only evidence about it the sweep will ever have, so it is kept rather than
-    discarded with the process.
-
-    The escalation is decided by the GROUP and not by the cell's pipes (the discipline
-    `gh675_cells.kill_group` already runs on, for the same reason): a descendant that ignores
-    SIGTERM but does not hold stdout lets `communicate` return promptly, so keying the SIGKILL on
-    the pipe closing skips it exactly when it is needed — and the survivor keeps the GPU while the
-    sweep walks into the next cell and stamps its timing valid (gh-ocannl-760 review).
-
-    `survived` says a member outlived SIGKILL, which means it is stuck in the kernel (an
-    uninterruptible driver ioctl) and still holds the device. Unlike that standalone driver this
-    one does not stop the sweep over it — losing the run to a wedge is the cost gh-ocannl-760
-    exists to remove — but the caller says so in the cell's failure note, because every later cell
-    in the run was then measured against it.
-    """
-    out = ""
-    reaped = False
-
-    def reap(timeout):
-        nonlocal out, reaped
-        if reaped:
-            return
-        try:
-            got, _ = proc.communicate(timeout=timeout)
-            out = got or out
-            reaped = True
-        except subprocess.TimeoutExpired as expired:
-            # What the cell had printed is on the exception. It matters in exactly the case where
-            # nothing else can deliver it: a member that outlives SIGKILL still owns the pipe, so
-            # every `communicate` here times out and the cell's own log — the only evidence about
-            # a cell nobody will run again — would otherwise be empty (gh-ocannl-760 review).
-            partial = expired.output
-            if partial:
-                out = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
-        except ValueError:  # pipes already closed by an earlier communicate
-            reaped = True
-
-    for force in (False, True):
-        _signal_group(proc, force)
-        deadline = time.monotonic() + CELL_KILL_GRACE_S
-        while time.monotonic() < deadline:
-            reap(0.5)
-            if reaped and not _group_alive(proc.pid):
-                if force or os.name == "posix":
-                    return out, False
-                # Windows has no group liveness to read: `_group_alive` answers False there
-                # whatever is running, so returning here on the FIRST pass would be equating a
-                # closed leader pipe with a dead tree — the very inference the group kill exists
-                # to avoid — and `taskkill /F /T` would never run (gh-ocannl-760 review). Fall
-                # through to the force pass, which is what a Windows tree is killed by. It is
-                # best-effort even so: `/T` walks the tree from its anchor, so a descendant whose
-                # leader is already gone is out of its reach, and killing that reliably wants a
-                # Job Object the spawn does not create yet.
-                break
-            time.sleep(0.05)
-    reap(1)
-    if not reaped:
-        # Nothing more will ever be read here: the only way out of the loop without reaping is a
-        # member that outlived SIGKILL and still owns the write end. The sweep would otherwise
-        # keep the read end for the rest of the run — one leaked descriptor per cell it could not
-        # reap, on the path least able to spare them (it announced itself as a ResourceWarning
-        # under `dune build @benchmarks/runtest`).
-        for pipe in (proc.stdout, proc.stderr, proc.stdin):
-            if pipe is not None:
-                with contextlib.suppress(OSError):
-                    pipe.close()
-        # And the leader itself, which is reapable even here: what `reap` could not finish is the
-        # READ, blocked on a pipe the survivor holds — the leader took the SIGKILL. Left unwaited
-        # it stays a zombie in the sweep's child table for the rest of the run, and `Popen` says
-        # so at collection ("subprocess N is still running") about a process that is not running.
-        with contextlib.suppress(OSError):
-            proc.poll()
-    return out, _group_alive(proc.pid)
+    """Apply the shared TERM/KILL/reap mechanism and return its output and observation."""
+    result = cell_group.terminate(
+        proc,
+        CELL_KILL_GRACE_S,
+        observe=lambda: _group_observation(proc),
+    )
+    out = result.stdout
+    if isinstance(out, bytes):
+        out = out.decode(errors="replace")
+    return out or "", result.observation
 
 
 def install_termination_handler():
@@ -537,8 +379,11 @@ def _deferring_cancellation():
         yield
     finally:
         _defer_depth -= 1
-    if _defer_depth == 0:
-        _raise_deferred()
+        # This belongs in the finally itself.  Code after it is skipped when the protected body
+        # is already unwinding with another exception, which used to strand the held cancellation
+        # until some later child (or forever, if this was the last one).
+        if _defer_depth == 0:
+            _raise_deferred()
 
 
 @contextlib.contextmanager
@@ -566,7 +411,7 @@ def _cancellable():
         _defer_depth = held
 
 
-def run_supporting(cmd, cwd=None, capture_output=False, check=False, timeout=None):
+def run_supporting(cmd, cwd=None, env=None, capture_output=False, check=False, timeout=None):
     """A subprocess the sweep runs for ITSELF — a build, a device probe — in its own group.
 
     Same discipline as a cell, for the same reason: `dune build` forks compilers, the probes
@@ -577,29 +422,29 @@ def run_supporting(cmd, cwd=None, capture_output=False, check=False, timeout=Non
     Returns the `CompletedProcess` that `subprocess.run` would have.
     """
     with _deferring_cancellation():
-        return _run_supporting(cmd, cwd, capture_output, check, timeout)
+        return _run_supporting(cmd, cwd, env, capture_output, check, timeout)
 
 
-def _run_supporting(cmd, cwd, capture_output, check, timeout):
+def _run_supporting(cmd, cwd, env, capture_output, check, timeout):
     proc = None
     try:
         # The same window a cell gets, for the same reason: between `_execute_child` and `Popen`
         # returning there is no name for the new process, so a cancellation there orphans a
         # freshly isolated group (gh-ocannl-760 review).
-        proc = subprocess.Popen(
+        proc = cell_group.spawn(
             cmd,
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=capture_output,
-            **_own_group_kwargs(),
         )
         with _cancellable():
             out, err = proc.communicate(timeout=timeout)
     except BaseException:
         if proc is not None:
-            _, stuck = kill_cell_group(proc)
-            if stuck:
+            _, remaining = kill_cell_group(proc)
+            if remaining is not cell_group.GONE:
                 # The other exit from this function, and the same survivor. Here the sweep is
                 # already leaving, so there is nothing to stop — but the operator is about to be
                 # told the group was killed, and it was not: a cancellation that reports a clean
@@ -607,27 +452,31 @@ def _run_supporting(cmd, cwd, capture_output, check, timeout):
                 # against it (gh-ocannl-760 review).
                 print(
                     "!!! a member of the process group of "
-                    f"{cmd[0]} SURVIVED SIGKILL and still holds the device — clear the "
+                    f"{cmd[0]}: {_remaining_note(remaining)} ({remaining.value}) — clear "
+                    "the "
                     "survivors before re-running anything on this box",
                     flush=True,
                 )
         raise
-    if _group_alive(proc.pid):
+    initial = _group_observation(proc)
+    if initial is not cell_group.GONE:
         # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER
         # exited, and a build's compiler worker or a probe's framework helper can outlive it
         # holding the GPU (gh-ocannl-760 review).
-        _, stuck = kill_cell_group(proc)
-        if stuck:
+        _, remaining = kill_cell_group(proc)
+        if remaining is not cell_group.GONE:
             # And here the sweep DOES stop, where a cell's survivor only fails that cell. This
             # runs before any cell is dispatched, so a member still holding the device would be
             # shared by every row the sweep is about to produce — there is no subset of the
             # results to disbelieve, and a cap cannot bound damage that is already in all of
             # them (gh-ocannl-760 review).
             raise SystemExit(
-                f"orchestrate: a member of {cmd[0]}'s process group SURVIVED SIGKILL and still "
-                "holds the device. Every cell of this sweep would be measured against it, so "
+                f"orchestrate: {cmd[0]}: {_remaining_note(remaining)} ({remaining.value}). "
+                "Every cell of this sweep could be measured against it, so "
                 "nothing is dispatched: clear the survivors and re-run."
             )
+    else:
+        proc.close()
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
@@ -658,25 +507,24 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_incomplete=None):
 def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
     print(f"--- {label}", flush=True)
     timed_out = False
-    survived = False
+    remaining = cell_group.GONE
     cache_note = ""
     proc = None
     try:
-        proc = subprocess.Popen(
+        proc = cell_group.spawn(
             cmd,
             env=env,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            **_own_group_kwargs(),
         )
         with _cancellable():
             # The wait a cancellation is FOR: here, and only here, a signal should raise at once.
             stdout, _ = proc.communicate(timeout=timeout or None)
     except subprocess.TimeoutExpired:
         timed_out = True
-        stdout, survived = kill_cell_group(proc)
+        stdout, remaining = kill_cell_group(proc)
         # Before anything fallible: the kill is what tore the cache, so undoing it must not be
         # reachable only through code that can raise first (the optional cell log below writes
         # to an operator-supplied directory, which can be unwritable or full). Losing the sweep to
@@ -691,13 +539,13 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         # behind is not the pass it claims to be (gh-ocannl-760 review).
         if proc is not None:
             _, outlived = kill_cell_group(proc)
-            if outlived:
+            if outlived is not cell_group.GONE:
                 # The one branch that exits rather than records, so this is the operator's
                 # only chance to hear it: the cancellation's own message says the cell was
                 # killed, and a retry started over a survivor that still holds the device
                 # would be measured against it (gh-ocannl-760 review).
                 print(
-                    f"!!! {label}: A MEMBER SURVIVED SIGKILL and still holds the device — "
+                    f"!!! {label}: {_remaining_note(outlived)} ({outlived.value}) — "
                     "clear the survivors before re-running anything on this box",
                     flush=True,
                 )
@@ -706,8 +554,9 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         raise
     stdout = stdout or ""
     leftovers = ""
-    stuck = False
-    if not timed_out and _group_alive(proc.pid):
+    stuck = cell_group.GONE
+    initial = _group_observation(proc)
+    if not timed_out and initial is not cell_group.GONE:
         # The cell is done and something it spawned is not. `communicate` returned because the
         # LEADER exited and the pipe closed, which says nothing about a worker that redirected
         # its own output — and that worker still holds the GPU, so every later cell of the
@@ -716,10 +565,13 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         _, stuck = kill_cell_group(proc)
         leftovers = (
             "the cell left members of its process group behind; they were killed"
-            if not stuck
-            else "the cell left members of its process group behind AND THEY SURVIVED SIGKILL"
+            if stuck is cell_group.GONE
+            else "the cell left members of its process group behind AND "
+            f"{_remaining_note(stuck)} ({stuck.value})"
         )
         print(f"!!! {label}: {leftovers}", flush=True)
+    elif not timed_out:
+        proc.close()
     if CELL_LOG_DIR:
         # A cell's own output is otherwise discarded on success, which throws away exactly the
         # evidence a measurement sweep is asked to report: with autotune_log=true the search
@@ -743,20 +595,21 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
             f"TIMED OUT after {timeout:g}s (cap; --cell-timeout raises it, 0 disables) — "
             "killed the cell's whole process group"
         )
-        if survived:
-            # A member outlived SIGKILL: it is stuck in the kernel and still holds the device, so
+        if remaining is not cell_group.GONE:
+            # A member may have outlived SIGKILL, or the platform could not prove the group gone;
             # every cell measured after it in this run was measured against it. The sweep goes on
             # (that is the point of the cap) but no later row from this run is quotable until
             # someone has cleared the survivor and re-run them.
             note += (
-                "; A MEMBER SURVIVED SIGKILL and still holds the device — every later cell in "
-                "this run was measured against it, so clear the survivors and re-run them"
+                f"; {_remaining_note(remaining)} ({remaining.value}) — every later cell in "
+                "this run may have been measured "
+                "against it, so clear the survivors and re-run them"
             )
         if cache_note:
             note += f"; {cache_note}"
         print(f"!!! {label} {note}", flush=True)
         return None, note
-    if stuck:
+    if stuck is not cell_group.GONE:
         # The cell ran to completion — it may even have printed a result line — but something it
         # spawned outlived SIGKILL and still holds the device. That makes THIS cell's own timing
         # suspect (it shared the device with a process nobody scheduled) and every later cell of
@@ -764,9 +617,10 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         # on a console nobody keeps is not a record, and the report would otherwise publish the
         # row and everything after it (gh-ocannl-760 review).
         note = (
-            "the cell left members of its process group behind AND THEY SURVIVED SIGKILL — they "
-            "still hold the device, so this cell's own timing and every later cell's in this run "
-            "were measured against them; clear the survivors and re-run"
+            "the cell left members of its process group behind AND "
+            f"{_remaining_note(stuck)} ({stuck.value}) — it may still hold the device, so this cell's "
+            "own timing and every later cell's in this run may have been measured against it; "
+            "clear the survivors and re-run"
         )
         # This branch returns early, so the cache handling has to happen here too: part of the
         # search was forcibly interrupted (that is what `stuck` means), which is exactly the torn
@@ -823,12 +677,11 @@ def tinygrad_cachedb(env=None):
     nothing. The composition below is only the fallback for a probe that could not run.
     """
     try:
-        probe = subprocess.run(
+        probe = run_supporting(
             [str(VENV_PY), "-c", "from tinygrad.helpers import CACHEDB; print(CACHEDB)"],
             env=env,
             cwd=str(HERE),
             capture_output=True,
-            text=True,
             timeout=CELL_KILL_GRACE_S,
         )
         if probe.returncode == 0 and probe.stdout.strip():
@@ -1353,8 +1206,8 @@ def report(results, out_dir, unavailable=(), failures=()):
             # worth raising over rather than writing an unreadable file (gh-ocannl-676).
             f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
     lines = []
-    commit = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True
+    commit = run_supporting(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True
     ).stdout.strip()
     lines.append(f"# Benchmark results\n")
     lines.append(

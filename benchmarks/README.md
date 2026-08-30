@@ -226,7 +226,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   **A wedged cell costs the cell, not the sweep** (gh-ocannl-760). tinygrad's parallel beam
   search deadlocks intermittently — the same search that takes 53–115 s in its other repeats
   sits at ~1% CPU with the GPU idle indefinitely, seen on both the CUDA and the HIP box — so
-  every cell runs in a process group of its own under a wall-clock cap, `--cell-timeout SECONDS`
+  every child the sweep starts runs through `cell_group.py`, in an isolated process group under a
+  wall-clock cap, `--cell-timeout SECONDS`
   (default 1800; `0` disables). Over the cap, the whole group is killed — the runner *and*
   whatever it spawned, tinygrad's candidate-compile pool included, which is also why the kill is
   a group kill: those workers hold the cell's stdout pipe, so killing the direct child alone
@@ -238,11 +239,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   to be stuck in a driver ioctl — the failure says so, because every later cell of that run was
   then measured against it. A SIGTERM to the sweep itself (a job cancellation, a scheduler's time
   limit) and a Ctrl-C both take the running cell's group with them: the cell is in its own session
-  precisely so the sweep's signals do *not* reach it by default. On **Windows** the same kill is
-  best-effort: the cell gets `CREATE_NEW_PROCESS_GROUP` and the force step is `taskkill /F /T`,
-  which walks the tree from its anchor — so a descendant whose leader has already exited is out
-  of its reach, and there is no group-liveness probe to escalate on. Killing that reliably wants
-  a Job Object at spawn time, which this does not create yet.
+  precisely so the sweep's signals do *not* reach it by default. The supervisor returns one of
+  `GONE`, `SURVIVORS`, or `UNKNOWN` after reaping, leaving policy to the driver: the matrix records
+  a failed cell, while the paired gh-675 experiment aborts rather than contaminate its next pair.
+  On **Windows**, the child is created suspended, assigned to a kill-on-close Job Object, and then
+  resumed. The Job retains descendants after the leader exits, provides the liveness count, and
+  makes the force step a whole-job termination rather than a best-effort `taskkill /T` tree walk.
 
   A killed beam search leaves a **partial `cache.db`**: the next run over it neither replays a
   complete result nor searches from scratch, while `searched` reports one of the two, so a retry

@@ -34,9 +34,11 @@ Nothing this driver writes touches the checkout: caches, records and the tuned c
 
 See benchmarks/report-gh675-cuda.md for what it measured.
 """
-import argparse, hashlib, json, os, shutil, signal, subprocess, sys, time
+import argparse, hashlib, json, os, shutil, subprocess, sys, time
 from collections import Counter
 from pathlib import Path
+
+import cell_group
 
 ROOT = Path(__file__).resolve().parent.parent
 HERE = ROOT / "benchmarks"
@@ -120,8 +122,14 @@ def gate():
     for _ in range(24):
         load = float(open("/proc/loadavg").read().split()[0])
         try:
-            util = subprocess.run([NVSMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                                  capture_output=True, text=True, timeout=30).stdout.strip().splitlines()[0]
+            probe = cell_group.spawn(
+                [NVSMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            out, _ = communicate_clean(probe, timeout=30, context="GPU-utilization probe")
+            util = out.strip().splitlines()[0]
             util = int(util)
         except Exception as ex:
             # An unreadable GPU is not an idle GPU. Absent `nvidia-smi`, a timeout or malformed
@@ -146,67 +154,31 @@ def gate():
     return False
 
 
-def kill_group(proc, pgid):
-    """Take down the whole process group and confirm it is gone.
-
-    TERM first so a runner can flush, then KILL. Nothing after this may assume the box is quiet
-    until the group is reaped -- which is the entire point of killing the group rather than the
-    process.
-
-    `pgid` is passed in rather than looked up here. `start_new_session=True` makes the runner's own
-    pid the group id, and by the time a timeout is being handled the runner may already have exited
-    (descendants can hold its pipes open, or it can exit between the timeout and this call) -- at
-    which point `os.getpgid` raises and a lookup here would return without ever signalling a group
-    that is still very much alive.
-    """
-
-    def group_alive():
-        # Signal 0 tests for members without signalling them. The direct child counts while it is
-        # still an unreaped zombie, which is why each poll also tries to reap it.
-        try:
-            os.killpg(pgid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-
-    reaped = False
-
-    def reap(timeout):
-        nonlocal reaped
-        if reaped:
-            return
-        try:
-            proc.communicate(timeout=timeout)
-            reaped = True
-        except subprocess.TimeoutExpired:
-            pass
-        except ValueError:  # pipes already closed by an earlier communicate
-            reaped = True
-
-    # Escalation is decided by the GROUP, never by the runner's pipes. A descendant that ignores
-    # TERM and does not hold those pipes lets `communicate` return promptly -- so keying the
-    # SIGKILL on the pipe closing skips it exactly when it is needed, and the survivor keeps the
-    # GPU and the pinned cores while the sweep walks into the next pair.
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            reap(0.5)
-            if not group_alive():
-                return
-            time.sleep(0.2)
-    reap(1)
-    if group_alive():
-        # Nothing downstream can be trusted after this. A process that outlives SIGKILL is stuck in
-        # the kernel (uninterruptible I/O, a wedged driver ioctl), it still holds the pinned cores
-        # or the GPU, and every later pair would be measured against it and stamped valid. A
-        # warning is not an action; the sweep stops here and says why.
-        sys.exit(f"process group {pgid} survived SIGKILL and still holds the pinned CPUs or the "
-                 "GPU -- every later pair would be measured against it. Stopping the sweep: clear "
-                 "the survivors, then resume with a --start-repeat past what is recorded.")
+def communicate_clean(proc, timeout, context):
+    """Wait for one managed child and abort this experiment if its group is not proven gone."""
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        result = cell_group.terminate(proc, grace=5)
+        if result.observation is not cell_group.GONE:
+            sys.exit(
+                f"{context} process group was not observed gone after SIGKILL "
+                f"({result.observation.value}) and may still hold the pinned CPUs or GPU. "
+                "Stopping the sweep: clear it, then resume past what is recorded."
+            )
+        raise
+    initial = proc.observe()
+    if initial is not cell_group.GONE:
+        result = cell_group.terminate(proc, grace=5)
+        if result.observation is not cell_group.GONE:
+            sys.exit(
+                f"{context} left a process group that was not observed gone after SIGKILL "
+                f"({result.observation.value}). Every later pair would be contaminated; "
+                "clear it before resuming."
+            )
+    else:
+        proc.close()
+    return out, err
 
 
 def run(cmd, env=None, cwd=None, timeout=None):
@@ -221,23 +193,15 @@ def run(cmd, env=None, cwd=None, timeout=None):
     # on to the next pair with nothing in its record to show it was measured against them. That is
     # not hypothetical -- it happened while taking these numbers, and a CPU reference taken over
     # the survivors read 340 ms against 0.13 ms once the box was clean.
-    proc = subprocess.Popen(TASKSET + cmd, env=e, cwd=cwd or str(HERE),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            start_new_session=True)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # proc.pid IS the group id: `start_new_session=True` makes the child a session leader.
-        kill_group(proc, proc.pid)
-        raise
-    except BaseException:
-        # Ctrl-C included, which is the likely one: the same `start_new_session=True` that lets a
-        # timeout reach the descendants also detaches them from the terminal, so SIGINT reaches
-        # THIS driver and not the beam pool. Without this the operator interrupts a long search,
-        # the driver exits, and the workers keep the GPU and the pinned cores -- contaminating
-        # whatever is run next, including the resumed sweep.
-        kill_group(proc, proc.pid)
-        raise
+    proc = cell_group.spawn(
+        TASKSET + cmd,
+        env=e,
+        cwd=cwd or str(HERE),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    out, err = communicate_clean(proc, timeout=timeout, context="benchmark cell")
     wall = time.monotonic() - t0
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     line = None
