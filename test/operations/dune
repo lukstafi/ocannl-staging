@@ -105,6 +105,7 @@
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
+  (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
@@ -195,6 +196,7 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
@@ -3920,6 +3922,38 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
+
+; gh-ocannl-866: PPX output goldens are ocamlformat-hostile and must all be excluded from the
+; unattended formatting sweep. The correspondence used to live only in prose; a path appended to
+; an unterminated `.ocamlformat-ignore` line silently removed two exclusions at once. The scanner
+; checks both directions plus the line/newline structure, and its own child-process controls stage
+; every refusal so a green live tree cannot leave the diagnostic paths dead.
+
+(executable
+ (name ocamlformat_ignore_scan)
+ (modules ocamlformat_ignore_scan)
+ (libraries base stdio unix arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- reads path lists and file existence only, and links no backend.
+ (target ocamlformat_ignore_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../.ocamlformat-ignore
+  (glob_files_rec ../../test/ppx/*_expected.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-ocamlformat_ignore_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff ocamlformat_ignore_scan.expected ocamlformat_ignore_scan.actual)))
 
 (test
  ; This test asserts which FORM a reduction renders as and which accumulator reference its value

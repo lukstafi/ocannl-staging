@@ -1,0 +1,11 @@
+.ocamlformat-ignore ends in a newline: true
+every .ocamlformat-ignore line contains exactly one path: true
+every .ocamlformat-ignore entry names an existing file: true
+every ppx-expectation golden is listed in .ocamlformat-ignore: true
+Synthetic controls invoke the shipping scanner over a complete fixture and over each
+malformed shape; refusal output is captured and matched below.
+
+a complete newline-terminated one-path-per-line fixture passes: true
+a concatenated append is refused in both directions, naming the nonexistent entry and omitted golden: true
+a missing trailing newline is refused with its append-corruption diagnostic: true
+a blank line is refused as a line containing no path: true
