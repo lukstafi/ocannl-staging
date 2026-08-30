@@ -164,7 +164,7 @@ def communicate_clean(proc, timeout, context):
     except BaseException:
         result = cell_group.terminate(proc, grace=5)
         if result.observation is not cell_group.GONE:
-            sys.exit(
+            raise cell_group.CleanupFailed(
                 f"{context} process group was not observed gone after SIGKILL "
                 f"({result.observation.value}) and may still hold the pinned CPUs or GPU. "
                 "Stopping the sweep: clear it, then resume past what is recorded."
@@ -174,7 +174,7 @@ def communicate_clean(proc, timeout, context):
     if initial is not cell_group.GONE:
         result = cell_group.terminate(proc, grace=5)
         if result.observation is not cell_group.GONE:
-            sys.exit(
+            raise cell_group.CleanupFailed(
                 f"{context} left a process group that was not observed gone after SIGKILL "
                 f"({result.observation.value}). Every later pair would be contaminated; "
                 "clear it before resuming."

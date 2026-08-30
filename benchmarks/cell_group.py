@@ -16,6 +16,7 @@ import enum
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,10 @@ class Observation(enum.Enum):
 GONE = Observation.GONE
 SURVIVORS = Observation.SURVIVORS
 UNKNOWN = Observation.UNKNOWN
+
+
+class CleanupFailed(SystemExit):
+    """A managed group was not proven gone; its message owns the operator's next action."""
 
 
 class CancellationDeferral:
@@ -75,6 +80,17 @@ class CancellationDeferral:
             "first"
         )
 
+    def _deliver_or_annotate(self):
+        if self.held_signal is None:
+            return
+        active = sys.exc_info()[1]
+        if isinstance(active, CleanupFailed):
+            signum, self.held_signal = self.held_signal, None
+            if hasattr(active, "add_note"):
+                active.add_note(f"signal {signum} was also received while cleanup was failing")
+            return
+        self._raise_held()
+
     @contextlib.contextmanager
     def deferring(self):
         self.depth += 1
@@ -83,7 +99,10 @@ class CancellationDeferral:
         finally:
             self.depth -= 1
             if self.depth == 0:
-                self._raise_held()
+                # A cleanup failure is the stronger fact: replacing it with the cancellation's
+                # generic "cleaned first" exit would invite a retry over the very survivor it
+                # reported. Other active exceptions still yield to the held operator request.
+                self._deliver_or_annotate()
 
     @contextlib.contextmanager
     def cancellable(self):
@@ -286,10 +305,10 @@ class ManagedProcess:
     def __getattr__(self, name):
         return getattr(self.proc, name)
 
-    def observe(self):
+    def observe(self, allow_zombie_gone=False):
         if self.job is not None:
             return self.job.observe()
-        return _observe_posix_group(self.pgid)
+        return _observe_posix_group(self.pgid, allow_zombie_gone=allow_zombie_gone)
 
     def signal(self, force):
         if self.job is not None:
@@ -357,7 +376,7 @@ def spawn(args, **kwargs):
     raise NotImplementedError(f"no child-group implementation for os.name={os.name!r}")
 
 
-def _observe_posix_group(pgid):
+def _observe_posix_group(pgid, allow_zombie_gone=False):
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -374,6 +393,7 @@ def _observe_posix_group(pgid):
         return UNKNOWN
 
     matched = False
+    complete = True
     for entry in proc_fs.iterdir():
         if not entry.name.isdigit():
             continue
@@ -387,11 +407,13 @@ def _observe_posix_group(pgid):
             if fields[0] != "Z":
                 return SURVIVORS
         except (OSError, IndexError, ValueError):
+            complete = False
             continue
-    # A matched group of corpses is gone for benchmark purposes: zombies own no pipe or device.
-    # If signal zero saw a group but the process-table scan did not, the snapshot raced a fork or
-    # exit and cannot justify either verdict.
-    return GONE if matched else UNKNOWN
+    # A matched group of corpses is gone for benchmark purposes only after SIGKILL has made a
+    # concurrent fork impossible. During the graceful phase, a non-atomic /proc traversal cannot
+    # prove that a live member did not join after its directory snapshot. Any unread entry makes
+    # the census incomplete in either phase.
+    return GONE if allow_zombie_gone and matched and complete else UNKNOWN
 
 
 @dataclass
@@ -441,14 +463,14 @@ def terminate(group, grace, poll_interval=0.05, final_reap=1.0, observe=None):
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
             reap(min(0.5, max(0, deadline - time.monotonic())))
-            observation = observe()
+            observation = observe(force)
             if reaped and observation is GONE:
                 group.close()
                 return Termination(stdout, stderr, observation, reaped)
             time.sleep(poll_interval)
 
     reap(final_reap)
-    observation = observe()
+    observation = observe(True)
     if not reaped:
         # A survivor outside the managed group may still own the inherited pipe.  Stop reading it
         # forever, then reap the direct child independently of that pipe.

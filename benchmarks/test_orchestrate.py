@@ -1672,7 +1672,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             _, note, _ = self.run_cell(
@@ -1765,7 +1767,10 @@ class CellTimeoutTest(unittest.TestCase):
         end = time.monotonic() + 10
         alive = True
         while time.monotonic() < end and alive:
-            alive = cell_group._observe_posix_group(proc.pid) is not cell_group.GONE
+            alive = (
+                cell_group._observe_posix_group(proc.pid, allow_zombie_gone=True)
+                is not cell_group.GONE
+            )
             if alive:
                 time.sleep(0.02)
         os.kill(proc.pid, 0)
@@ -1877,7 +1882,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             result, note, _ = self.run_cell("successful with a survivor", cell, timeout=60)
@@ -2039,7 +2046,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             _, note, _ = self.run_cell(
@@ -2194,7 +2203,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -2289,7 +2300,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             with self.assertRaises(SystemExit) as raised:
@@ -2352,7 +2365,9 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
                 unittest.mock.patch.object(
-                    orchestrate, "_group_observation", lambda _proc: cell_group.SURVIVORS
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
             out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))

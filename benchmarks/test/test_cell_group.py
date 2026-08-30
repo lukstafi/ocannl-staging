@@ -105,12 +105,13 @@ class CellGroupTest(unittest.TestCase):
     def test_a_zombie_only_group_is_observed_gone(self):
         child = cell_group.spawn(self.python("pass"), stdout=subprocess.DEVNULL)
         deadline = time.monotonic() + 10
-        observed = child.observe()
+        observed = child.observe(allow_zombie_gone=True)
         while observed is not cell_group.GONE and time.monotonic() < deadline:
             time.sleep(0.02)
-            observed = child.observe()
+            observed = child.observe(allow_zombie_gone=True)
         os.kill(child.pid, 0)  # the unreaped process-table entry still exists
 
+        self.assertIs(child.observe(), cell_group.UNKNOWN)
         self.assertIs(observed, cell_group.GONE)
         child.wait()
 
@@ -140,6 +141,18 @@ class CellGroupTest(unittest.TestCase):
         job.close.assert_called_once_with()
         child.kill.assert_called_once_with()
         child.wait.assert_called_once_with(timeout=1)
+
+    def test_a_held_signal_does_not_replace_a_cleanup_failure(self):
+        cancellation = cell_group.CancellationDeferral("test driver")
+
+        with self.assertRaises(cell_group.CleanupFailed) as raised:
+            with cancellation.deferring():
+                cancellation.held_signal = signal.SIGTERM
+                raise cell_group.CleanupFailed("SURVIVORS still hold the device")
+
+        self.assertIn("SURVIVORS", str(raised.exception))
+        self.assertNotIn("cleaned first", str(raised.exception))
+        self.assertIsNone(cancellation.held_signal)
 
     @unittest.skipUnless(os.name == "posix", "spawn-window signal fixture uses POSIX delivery")
     def test_the_gh675_spawn_window_defers_cancellation_until_cleanup_is_owned(self):

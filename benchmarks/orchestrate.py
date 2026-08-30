@@ -270,8 +270,8 @@ def ocannl_exe(model):
     return ROOT / f"_build/default/benchmarks/runners/ocannl/bench_{model}.exe"
 
 
-def _group_observation(proc):
-    return proc.observe()
+def _group_observation(proc, allow_zombie_gone=False):
+    return proc.observe(allow_zombie_gone=allow_zombie_gone)
 
 
 def _remaining_note(observation):
@@ -285,7 +285,7 @@ def kill_cell_group(proc):
     result = cell_group.terminate(
         proc,
         CELL_KILL_GRACE_S,
-        observe=lambda: _group_observation(proc),
+        observe=lambda allow_zombie_gone: _group_observation(proc, allow_zombie_gone),
     )
     out = result.stdout
     if isinstance(out, bytes):
