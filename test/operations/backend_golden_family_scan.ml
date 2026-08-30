@@ -21,6 +21,8 @@ open Stdio
 module Backends = Context.Backends
 module Dune_scan = Test_utils.Dune_stanza_scan
 
+let printf = Test_utils.Refusal_control_manifest.printf
+
 type member = { path : string; family : string; backend : string }
 
 type provenance = {
@@ -453,4 +455,5 @@ let () =
   let complete =
     List.is_empty result.incomplete && List.is_empty result.errors && List.for_all controls ~f:snd
   in
-  Verdict.p "backend golden families are complete and provenance markers are valid" complete
+  Verdict.p "backend golden families are complete and provenance markers are valid" complete;
+  Test_utils.Refusal_control_manifest.print "backend_golden_family_scan.ml"

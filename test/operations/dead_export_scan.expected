@@ -1,3 +1,8 @@
 every zero-reference implicit export is named: true
 named dead-export exemptions are unique: true
 every named dead-export exemption remains necessary: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export
+  [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions
+  [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains

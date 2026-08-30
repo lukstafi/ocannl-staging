@@ -8,8 +8,9 @@
     is easiest to write for. *)
 
 open Base
-open Stdio
 module Scan = Test_utils.Dune_stanza_scan
+
+let printf = Test_utils.Refusal_control_manifest.printf
 
 (* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
    promote`d into the golden as the expected output (gh-ocannl-601). *)
@@ -1560,4 +1561,5 @@ let () =
       | exception _ -> printf "ok: refused -- %s\n" name
       | sites ->
           fail "refused -- %s: read the file as %d sites instead of refusing it" name
-            (List.length sites))
+            (List.length sites));
+  Test_utils.Refusal_control_manifest.print "config_dep_completeness.ml"

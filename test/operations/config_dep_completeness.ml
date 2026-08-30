@@ -50,6 +50,9 @@
 
 open Base
 open Stdio
+
+let printf = Test_utils.Refusal_control_manifest.printf
+
 module Scan = Test_utils.Dune_stanza_scan
 
 (* Rules that run something which reads no configuration. Keyed by "<dir>:<what the scan reports>",
@@ -493,4 +496,5 @@ let () =
       "\n\
        OK: every test stanza, inline-test library and exe-running rule in these files declares %s, \
        apart from the sites exempted above.\n"
-      Scan.config_file
+      Scan.config_file;
+  Test_utils.Refusal_control_manifest.print "config_dep_completeness.ml"

@@ -85,3 +85,7 @@ ok: rejection -- an open inside a nested module dies with it
 ok: rejection -- opening Utils without reading the artifact directory is fine
 ok: rejection -- a name an emitter shares with an unopened module is not hidden
 ok: rejection -- the qualified spelling is what everything already uses
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether
+  [scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module

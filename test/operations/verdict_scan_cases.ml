@@ -11,8 +11,9 @@
     of a source the walk reaches. *)
 
 open Base
-open Stdio
 module Scan = Test_utils.Verdict_scan
+
+let printf = Test_utils.Refusal_control_manifest.printf
 
 (* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
    promote`d into the golden as the expected output (gh-ocannl-601) -- the rule this whole check is
@@ -209,4 +210,5 @@ let () =
   let counted = Scan.scan {ocaml|let unapplied = "c"
 let () = printf "a" "b"|ocaml} in
   Verdict.p "the walk counts every string literal it passes" (counted.Scan.literals = 3);
-  Verdict.p "and places the ones a named function receives" (counted.Scan.applied_literals = 2)
+  Verdict.p "and places the ones a named function receives" (counted.Scan.applied_literals = 2);
+  Test_utils.Refusal_control_manifest.print "verdict_ratchet.ml"

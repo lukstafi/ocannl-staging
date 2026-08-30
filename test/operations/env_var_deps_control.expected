@@ -3,6 +3,15 @@ checker plugged into it contains no traversal of its own.
 
 a newly plugged-in check receives the root and every nested directory without adding descent: true
 
+The refusal relationship is put to a synthesized `Verdict.fail` format. Its stable fragment
+appears in no permanent control golden in the negative arm, and appears in the positive arm.
+
+a diagnostic absent from every control golden is an orphan: true
+the same diagnostic fragment in a control golden is covered: true
+one control marker occurrence covers only one identical diagnostic: true
+a scanner absent from the manifest is detected by the population equality: true
+repo-relative scanner paths keep equal basenames distinct: true
+
 The rule is put to a stanza this repository does not contain: an `(executable)` whose one
 module calls `Test_utils.Generated.init`, run by a rule that does or does not declare
 `(env_var OCANNL_BUILD_FILES_PREFIX)`. Nothing else differs between the two runs.
@@ -101,3 +110,134 @@ an absolute path ending in the local executable's name is not the local executab
 a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the deliberate gate collision, and is reported: true
 a rule reusing the alias dune generates for a `(test)` in the same `(subdir …)` group is reported there too: true
 a stanza neither derivation calls a member is asked for no family alias: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives
+  [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from
+  [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment
+  [scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence
+  [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality
+  [scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths
+  [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's
+  [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation
+  [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated
+  [scanner-refusal:034280d144ee4338406ff5f6a1cf287d] comment that does
+  [scanner-refusal:30c88c1631600d7969a9aefd4de74162] carries a backend
+  [scanner-refusal:f2633aa4ebd6f2c33fd21e4d69cc9786] one backend marker
+  [scanner-refusal:2803edcc7de84ea6d928343b9d8c8ad2] env_var
+  [scanner-refusal:533fc9999ad0841992e0c1734d9c1f5d] env_var
+  [scanner-refusal:7336dd5a712b0c3a578b64d7defb1654] between stanzas declares
+  [scanner-refusal:1aaab6e3cd8f4615e1cd1d0321e309a1] times and only
+  [scanner-refusal:f11c09a8318b3a7863444256973f57d4] running an executable
+  [scanner-refusal:95919586e2a2b25eaaf13ca8093ab584] repository-wide scan rule
+  [scanner-refusal:be41f253ce4b808b6b4ec587c304ec08] repository-wide scan rule
+  [scanner-refusal:b040632469771b25abb3469878413be3] the repository scanner
+  [scanner-refusal:dda5b4655f74eda46ec0c60e320d232b] run's generated artifacts
+  [scanner-refusal:747372ab4b28cca8978c2b6bd8983005] env_var
+  [scanner-refusal:364d32b22a5cb7a70b569db0d8864170] env_var
+  [scanner-refusal:07e7987f0d61b10a9fea6c6590c73d59] env_var
+  [scanner-refusal:bbadfd8513559355fedbc54dc3dc678a] serializes its actions
+  [scanner-refusal:eb5d5419b3bd18240469743cbabc58f2] has actions on
+  [scanner-refusal:a06dccc27afe2153a7700609691d3c8d] attaches a rule
+  [scanner-refusal:cd2777d83ada3318386d3cd02b39018b] repository a repo-wide
+  [scanner-refusal:ffdd3e3b7a0db8da177f376b13f03c45] repository to produce
+  [scanner-refusal:f16784d0b1f52de5e30378cb771ada5c] alias does not
+  [scanner-refusal:4012b24c7623acd977522e8f2eacf2bb] attaches a rule
+  [scanner-refusal:ba5d90fc4bcec944ebd169329c706968] goldens on the
+  [scanner-refusal:c1a398b587b5de3d7d02145dc45274a6] alias <suite>-<name> that
+  [scanner-refusal:941a9fb77d867c7b1576a0f19ee5db3b] declares
+  [scanner-refusal:2b67d02d52c3465bfba40d167802f0a7] env_var
+  [scanner-refusal:0deef0cb94c45615f32ee84ac2e76f8e] declares tracing gates
+  [scanner-refusal:02e183a4105132ec092206c1d35d6247] reads the tracing
+  [scanner-refusal:2df546d04b63387a24409b3c4c6a9611] declares the tracing
+  [scanner-refusal:e55f77a62871fb685d23199e95c8f173] the environment variable
+  [scanner-refusal:d5f94657407bc4dbf949ba4187e80100] include_subdirs
+  [scanner-refusal:ea6e2adedc7afd62fa55afcf859f251d] names the module
+  [scanner-refusal:55f2feade4e139b5abb073d0b89c42cb] reaches the environment
+  [scanner-refusal:267a42b2812f4679c4463495cc199d36] reads the configuration
+  [scanner-refusal:41d9bc729b5b8b3908a48d45b1e0203c] reads the configuration
+  [scanner-refusal:a323f01100bfd685e76c62154cf4eaae] reads the configuration
+  [scanner-refusal:e45e166af22d229414296459a3ca022a] scanner refusal
+  [scanner-refusal:fe4c53f899eb08a9ae67e7a797a5a841] scanner-refusal exemptions no
+  [scanner-refusal:0b33370125e32eaa4bb0f50c6cc3bc1a] exempted declarations no
+  [scanner-refusal:638620a0745d0a136810c5b0256e0ec0] directories exempted from
+  [scanner-refusal:09ce44850cdf45c95e308d6c64aed813] the repository's
+  [scanner-refusal:b35f6c5cf70c9d942c2e42a4c1af9975] Test_utils.Generated.init
+  [scanner-refusal:9ad60261dbb2540d4d7e060be725ad4d] repository's census finds
+  [scanner-refusal:96e2132b9ea14b4c19e7573b7725b9ec] omits the declaration
+  [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes
+  [scanner-refusal:055900a8a1fbefd29b7c64a46953700f] external command handed
+  [scanner-refusal:fac924c455e2114b6e6bdebdc44811fd] same stanza declaring
+  [scanner-refusal:b4a6c6ad5ae1c0d26b7fe78da5c5aa7f] command handed nothing
+  [scanner-refusal:a6ad129bb27775f8c16abc37c6c39ed6] metal-codegen alias does
+  [scanner-refusal:d2a4a4c55f9409ff2a808631d0753f27] family stanza passes
+  [scanner-refusal:8ebeaee3c8fee72d0c6d5b1df2fa0c34] the resource-lifecycle instrumentation
+  [scanner-refusal:da4ac19271accffacfcd9a6bbe210e22] member listed passes
+  [scanner-refusal:3f9f68401bac53be0cbb38ce715e460d] executable whose RUNNER
+  [scanner-refusal:ed1dfb1acf49ea77d9b2bdd8ad92d312] alias listed passes
+  [scanner-refusal:ddd1defde5b6df4dab1d802e19cd88ef] generated aliases listed
+  [scanner-refusal:46c759bca27349aa081cf5efe33bdef0] same plural stanza
+  [scanner-refusal:aff85d14fb92bfaa9802e45b964c7292] reads the instrumentation
+  [scanner-refusal:38cc9ab62dfcf93c10a811d1a8f37ecb] inline-test library carrying
+  [scanner-refusal:97233d85a47856acfecb615dd26a3ebc] generated alias passes
+  [scanner-refusal:e45a490c152af6ca00b7e83c84599d95] recursive build from
+  [scanner-refusal:a0fe83d0193d8ac517eb248c21c7f120] another directory's executable
+  [scanner-refusal:45113608604d50fd82c92657c03134f4] this directory's executable
+  [scanner-refusal:cf759af799dd89758aa6f0eff3cd03b5] public_name
+  [scanner-refusal:55ce549b47e5402396164709a1e7564b] top-level family stanza
+  [scanner-refusal:82254747d84d2b7698c0987019df1914] the directory-wide runtest
+  [scanner-refusal:0ad19c6a66fdbd030d2b742800df58bc] second unit's public
+  [scanner-refusal:7735cb3446daca7f4157aa26d3d583da] names the instrumentation
+  [scanner-refusal:248545b295fe9393f046d06407875db5] family alias defined
+  [scanner-refusal:65fecdef5d771aadd55c653ca5f36ccd] group whose actions
+  [scanner-refusal:8043b9ea16535c8062dcc52282cdb90a] through another qualifier
+  [scanner-refusal:1cb2feb54940b69b22887119d96e5203] Alloc_census.snapshot
+  [scanner-refusal:3c9662bb21fae53a6e850ec0b1d533fa] I.Alloc_census.snapshot
+  [scanner-refusal:aa4e4d279169f4e2990023a88a8a29fc] Alloc_census
+  [scanner-refusal:de5cf6819a64d46d5a27eb8c300af31b] Ir.Alloc_census
+  [scanner-refusal:84e456282a1ff74968abe67ae2fa4694] executable's public name
+  [scanner-refusal:1e238caa905efec1f7ae0cf764033e25] Vendor.Ir
+  [scanner-refusal:00e63d0fbcdd91be8bea4b0244c7860e] Vendor.Ir.Alloc_census
+  [scanner-refusal:2a67fb33bc312d6cfdc1ce0f15d513bd] Foo.Alloc_census
+  [scanner-refusal:f84656abac178f5d2b2d79677353a343] Vendor.I.Alloc_census
+  [scanner-refusal:f63c79247666a73ea1dc618899111b77] functor parameter named
+  [scanner-refusal:5e4f4234263c64ddf6bc2236f1b4032c] I.Alloc_census
+  [scanner-refusal:c4b1b7a8d9409c62e651fec93e8bb1a3] structure defines something
+  [scanner-refusal:2d6a378a5a45d9bb99e928532c0226b7] somebody else re-exports
+  [scanner-refusal:b4b3077aecacdd13f81ef68627f7e8ff] functor's parameter named
+  [scanner-refusal:e34dc9c194473eab7a73109597d033c0] includes the qualifier
+  [scanner-refusal:081886dc55c593d16ce4e598ecc604c1] Ir.Alloc_census.t
+  [scanner-refusal:5940ea2811e203c19adf2bb49003d448] definition supersedes it
+  [scanner-refusal:15b55a16ec2a2d4b14898f888710526f] Alloc_census
+  [scanner-refusal:73cf957dbac466cdcb1ed757fcff1aa1] qualifier's name shadows
+  [scanner-refusal:b2ffc9450c3e952a03abd091b5abea61] later reference alive
+  [scanner-refusal:bb4952563f8b6d5b4e642fe1130df293] alias declared before
+  [scanner-refusal:6798c11e122a65375ac4a8b22ddfd20b] includes the qualifier
+  [scanner-refusal:8f7f708a45a89228e1e478f3ddb158ae] I.Alloc_census.t
+  [scanner-refusal:be7f67353f6c0f8782c3b867b1023af5] runtest-<name> dune generates
+  [scanner-refusal:dc2fb82ae5ada84e736e180065bc2881] reads the instrumentation
+  [scanner-refusal:27dfb3ff299833db9842614f2e2b5384] local executable's name
+  [scanner-refusal:0880ce931733097b9e44c86e1f0b7065] ANOTHER directory's binary
+  [scanner-refusal:93ed6fc086891252db10d64e8dbfeca0] alias dune generates
+  [scanner-refusal:84a1eda5072c0c3e43ecad5c2af6e561] stanza neither derivation
+  [scanner-refusal:e38848b2fb4d8a90933cfe88e13cc04e] guard neither declares
+  [scanner-refusal:2eb428f8dfd55908e0cd2236bc4505b4] declaration added passes
+  [scanner-refusal:605b6d65216f3c4fba7184a09d392f05] pinning the variable
+  [scanner-refusal:351acc91087a8ad372f2b9d40f2c1d20] SIBLING branch of
+  [scanner-refusal:c0e7be9911f1a357c38e840ace916450] pinned guard does
+  [scanner-refusal:c417aa0905f775b98ac3a197ecdd454c] dune's default module
+  [scanner-refusal:bf505697938fab0cadb9434dc171764b] program declared inside
+  [scanner-refusal:9b0ca5fe801d10403fb73978e58049f1] module the stanza
+  [scanner-refusal:3aaf1e15d8b245e1193c7d00698c8d84] utils.ml
+  [scanner-refusal:ba0a6cca6e0d6cef1cf5e8661a56b5a0] reported as undeclarable
+  [scanner-refusal:21fd01e1a9e76489f599ef5a9387c17f] and pinning it
+  [scanner-refusal:23b8372cc11b73d08a28c880b778eaf2] itself pins through
+  [scanner-refusal:67415c1f44643b671427afd9352d8ba4] refused not approximated
+  [scanner-refusal:422d713c4296fbd0c9cc8cace51b682d] same directive inside
+  [scanner-refusal:a317ce82c0267d509ae45cf1d1b349d7] reported there being
+  [scanner-refusal:c0f203aa0cf72d22c483afaf430d5353] library with inline
+  [scanner-refusal:afc8337bcb6f3d267d65774a59ca7f86] inline_tests
+  [scanner-refusal:b850c5e69abfcc5facf9b920af1a291f] same executable answers
+  [scanner-refusal:b098b95e7bbcc632b19f0e470447fd97] both declaring passes
+  [scanner-refusal:d8c7b4408936ac9480281388a26eb873] dynamic reach whose
+  [scanner-refusal:7a38e9cb5b4418e6e5bb8fe3b294d8fd] the same variable

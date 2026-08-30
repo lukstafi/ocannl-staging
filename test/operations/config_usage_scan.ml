@@ -13,6 +13,9 @@
 open Base
 open Stdio
 module Markdown = Test_utils.Agent_notes_scan
+module Refusal_manifest = Test_utils.Refusal_control_manifest
+
+let printf = Refusal_manifest.printf
 
 type kind =
   | Cli_flag
@@ -614,7 +617,6 @@ let non_config_assignment_mentions =
     ("benchmarks/README.md", "bench_sr_sites", 1);
     ("benchmarks/README.md", "beam", 1);
     ("docs/agent-notes/backend-dialects-and-idents.md", "mtl_shader_validation", 1);
-    ("docs/agent-notes/backend-precision-and-simd.md", "fastmathenabled", 2);
     ("docs/agent-notes/build-and-test.md", "execution", 3);
     ("docs/agent-notes/build-and-test.md", "ostype", 1);
     ("docs/agent-notes/scheduling-and-autotune.md", "n", 1);
@@ -660,32 +662,7 @@ let non_config_assignment_mentions =
 
 let mention_site path key = path ^ "\000" ^ key
 
-let non_config_assignment_sites =
-  Set.of_list (module String)
-  @@ List.map non_config_assignment_mentions ~f:(fun (path, key, _) -> mention_site path key)
-
-let non_config_environment_sites =
-  Set.of_list (module String)
-  @@ List.map non_config_environment_mentions ~f:(fun (path, key, _) -> mention_site path key)
-
-let historical_invalid_config_sites =
-  Set.of_list (module String)
-  @@ List.map historical_invalid_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
-
-let spaced_config_sites =
-  Set.of_list (module String)
-  @@ List.map spaced_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
-
-let prefix_free_config_sites =
-  Set.of_list (module String)
-  @@ List.map prefix_free_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
-
 let ambiguous_cli_value_site path spelling key = path ^ "\000" ^ spelling ^ "\000" ^ key
-
-let ambiguous_cli_value_sites =
-  Set.of_list (module String)
-  @@ List.map ambiguous_cli_value_mentions ~f:(fun (path, prefix, suffix, key, _) ->
-      ambiguous_cli_value_site path (prefix ^ suffix) key)
 
 let kind_name = function
   | Cli_flag -> "command-line flag"
@@ -695,7 +672,28 @@ let kind_name = function
   | Markdown_assignment -> "documentation assignment"
   | Config_file_assignment -> "configuration-file assignment"
 
-let check ~repository_census occurrences =
+let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
+    ?(control_non_config_environment_mentions = non_config_environment_mentions)
+    ?(control_non_config_assignment_mentions = non_config_assignment_mentions)
+    ?(control_historical_invalid_config_mentions = historical_invalid_config_mentions)
+    ?(control_spaced_config_mentions = spaced_config_mentions)
+    ?(control_prefix_free_config_mentions = prefix_free_config_mentions)
+    ?(control_ambiguous_cli_value_mentions = ambiguous_cli_value_mentions) ~repository_census
+    occurrences =
+  let sites mentions =
+    Set.of_list (module String)
+    @@ List.map mentions ~f:(fun (path, key, _) -> mention_site path key)
+  in
+  let non_config_environment_sites = sites control_non_config_environment_mentions in
+  let non_config_assignment_sites = sites control_non_config_assignment_mentions in
+  let historical_invalid_config_sites = sites control_historical_invalid_config_mentions in
+  let spaced_config_sites = sites control_spaced_config_mentions in
+  let prefix_free_config_sites = sites control_prefix_free_config_mentions in
+  let ambiguous_cli_value_sites =
+    Set.of_list (module String)
+    @@ List.map control_ambiguous_cli_value_mentions ~f:(fun (path, prefix, suffix, key, _) ->
+        ambiguous_cli_value_site path (prefix ^ suffix) key)
+  in
   let seen_non_config = Hashtbl.create (module String) in
   let seen_non_config_environment = Hashtbl.create (module String) in
   let seen_historical = Hashtbl.create (module String) in
@@ -712,7 +710,7 @@ let check ~repository_census occurrences =
          let site = mention_site occurrence.path occurrence.key in
          if Set.mem spaced_config_sites site then Hashtbl.incr seen_spaced_config site
          else
-           Verdict.fail
+           fail
              (Printf.sprintf
                 "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
                  spaced_config_mentions"
@@ -722,13 +720,13 @@ let check ~repository_census occurrences =
           let site = mention_site occurrence.path occurrence.key in
           if Set.mem prefix_free_config_sites site then Hashtbl.incr seen_prefix_free site
           else if repository_census then
-            Verdict.fail
+            fail
               (Printf.sprintf
                  "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
                   prefix_free_config_mentions"
                  occurrence.path occurrence.line occurrence.spelling)
       | _ -> ());
-      if Set.mem Utils.known_config_keys occurrence.key then ()
+      if Set.mem known_keys occurrence.key then ()
       else if Set.mem non_config_environment_sites (mention_site occurrence.path occurrence.key)
       then Hashtbl.incr seen_non_config_environment (mention_site occurrence.path occurrence.key)
       else if Set.mem non_config_assignment_sites (mention_site occurrence.path occurrence.key) then
@@ -736,24 +734,24 @@ let check ~repository_census occurrences =
       else if Set.mem historical_invalid_config_sites (mention_site occurrence.path occurrence.key)
       then Hashtbl.incr seen_historical (mention_site occurrence.path occurrence.key)
       else
-        Verdict.fail
+        fail
           (Printf.sprintf "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys"
              occurrence.path occurrence.line (kind_name occurrence.kind) occurrence.spelling
              occurrence.key));
   if repository_census then (
     let newly_real_environment =
-      List.filter non_config_environment_mentions ~f:(fun (_, key, _) ->
-          Set.mem Utils.known_config_keys key)
+      List.filter control_non_config_environment_mentions ~f:(fun (_, key, _) ->
+          Set.mem known_keys key)
     in
     if not (List.is_empty newly_real_environment) then
-      Verdict.fail
+      fail
         (Printf.sprintf
            "non-config environment exemptions now name registered config keys -- remove: %s"
            (newly_real_environment
            |> List.map ~f:(fun (path, key, _) -> path ^ ":" ^ key)
            |> String.concat ~sep:", "));
     let drifted_non_config_environment =
-      List.filter_map non_config_environment_mentions ~f:(fun (path, key, expected) ->
+      List.filter_map control_non_config_environment_mentions ~f:(fun (path, key, expected) ->
           let actual =
             Hashtbl.find seen_non_config_environment (mention_site path key)
             |> Option.value ~default:0
@@ -761,81 +759,82 @@ let check ~repository_census occurrences =
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
     if not (List.is_empty drifted_non_config_environment) then
-      Verdict.fail
+      fail
         (Printf.sprintf "non-config environment-mention occurrence counts drifted: %s"
            (drifted_non_config_environment
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let newly_real =
-      List.filter non_config_assignment_mentions ~f:(fun (_, key, _) ->
-          Set.mem Utils.known_config_keys key)
+      List.filter control_non_config_assignment_mentions ~f:(fun (_, key, _) ->
+          Set.mem known_keys key)
     in
     if not (List.is_empty newly_real) then
-      Verdict.fail
+      fail
         (Printf.sprintf
            "non-config assignment exemptions now name registered config keys -- remove: %s"
            (newly_real
            |> List.map ~f:(fun (path, key, _) -> path ^ ":" ^ key)
            |> String.concat ~sep:", "));
     let drifted_non_config =
-      List.filter_map non_config_assignment_mentions ~f:(fun (path, key, expected) ->
+      List.filter_map control_non_config_assignment_mentions ~f:(fun (path, key, expected) ->
           let actual =
             Hashtbl.find seen_non_config (mention_site path key) |> Option.value ~default:0
           in
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
     if not (List.is_empty drifted_non_config) then
-      Verdict.fail
+      fail
         (Printf.sprintf "non-config assignment exemption occurrence counts drifted: %s"
            (drifted_non_config
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_historical =
-      List.filter_map historical_invalid_config_mentions ~f:(fun (path, key, expected) ->
+      List.filter_map control_historical_invalid_config_mentions ~f:(fun (path, key, expected) ->
           let actual =
             Hashtbl.find seen_historical (mention_site path key) |> Option.value ~default:0
           in
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
     if not (List.is_empty drifted_historical) then
-      Verdict.fail
+      fail
         (Printf.sprintf "historical invalid-config exemption occurrence counts drifted: %s"
            (drifted_historical
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_spaced =
-      List.filter_map spaced_config_mentions ~f:(fun (path, key, expected) ->
+      List.filter_map control_spaced_config_mentions ~f:(fun (path, key, expected) ->
           let actual =
             Hashtbl.find seen_spaced_config (mention_site path key) |> Option.value ~default:0
           in
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
     if not (List.is_empty drifted_spaced) then
-      Verdict.fail
+      fail
         (Printf.sprintf "spaced config-mention occurrence counts drifted: %s"
            (drifted_spaced
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_prefix_free =
-      List.filter_map prefix_free_config_mentions ~f:(fun (path, key, expected) ->
+      List.filter_map control_prefix_free_config_mentions ~f:(fun (path, key, expected) ->
           let actual =
             Hashtbl.find seen_prefix_free (mention_site path key) |> Option.value ~default:0
           in
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
     if not (List.is_empty drifted_prefix_free) then
-      Verdict.fail
+      fail
         (Printf.sprintf "prefix-free config-mention occurrence counts drifted: %s"
            (drifted_prefix_free
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_ambiguous_cli_value =
-      List.filter_map ambiguous_cli_value_mentions ~f:(fun (path, prefix, suffix, key, expected) ->
+      List.filter_map control_ambiguous_cli_value_mentions
+        ~f:(fun (path, prefix, suffix, key, expected) ->
           let spelling = prefix ^ suffix in
           let actual =
             Hashtbl.find seen_ambiguous_cli_value (ambiguous_cli_value_site path spelling key)
@@ -844,12 +843,76 @@ let check ~repository_census occurrences =
           Option.some_if (not (Int.equal actual expected)) (path, spelling, key, expected, actual))
     in
     if not (List.is_empty drifted_ambiguous_cli_value) then
-      Verdict.fail
+      fail
         (Printf.sprintf "ambiguous command-line value occurrence counts drifted: %s"
            (drifted_ambiguous_cli_value
            |> List.map ~f:(fun (path, spelling, key, expected, actual) ->
                Printf.sprintf "%s:%s (%s) expected %d, saw %d" path spelling key expected actual)
            |> String.concat ~sep:", ")))
+
+let direct_refusal_formats =
+  [
+    "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
+     spaced_config_mentions";
+    "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
+     prefix_free_config_mentions";
+    "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys";
+    "non-config environment exemptions now name registered config keys -- remove: %s";
+    "non-config environment-mention occurrence counts drifted: %s";
+    "non-config assignment exemptions now name registered config keys -- remove: %s";
+    "non-config assignment exemption occurrence counts drifted: %s";
+    "historical invalid-config exemption occurrence counts drifted: %s";
+    "spaced config-mention occurrence counts drifted: %s";
+    "prefix-free config-mention occurrence counts drifted: %s";
+    "ambiguous command-line value occurrence counts drifted: %s";
+  ]
+
+let refusal_control () =
+  let source = "test/operations/config_usage_scan.ml" in
+  let observed = Hash_set.create (module String) in
+  let unexpected = ref [] in
+  let fail message =
+    match
+      List.find direct_refusal_formats ~f:(fun format ->
+          Test_utils.Refusal_control_scan.format_matches ~format message)
+    with
+    | Some format ->
+        Hash_set.add observed format;
+        Refusal_manifest.observe_failure ~source ~format
+    | None -> unexpected := message :: !unexpected
+  in
+  let known_keys =
+    let add_first_key mentions keys =
+      match mentions with
+      | (_, key, _) :: _ -> Set.add keys key
+      | [] -> keys
+    in
+    Utils.known_config_keys
+    |> add_first_key non_config_environment_mentions
+    |> add_first_key non_config_assignment_mentions
+  in
+  let occurrence ?(spaced_bare = false) ~path ~key ~spelling ~kind () =
+    { path; line = 1; key; spelling; kind; spaced_bare }
+  in
+  Verdict.p "a runtime value separator is resolved before equals inside its value"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"docs/agent-notes/build-and-test.md"
+          ("--ocannl_" ^ "backend_cuda=true"))
+       (Some "backend"));
+  check ~fail ~known_keys ~repository_census:true
+    [
+      occurrence ~spaced_bare:true ~path:"missing-spaced.md" ~key:"backend"
+        ~spelling:"backend = cc" ~kind:Markdown_assignment ();
+      occurrence ~path:"missing-prefix-free.ml" ~key:"backend" ~spelling:"--backend=cc"
+        ~kind:Prefix_free_cli_flag ();
+      occurrence ~path:"unknown.sh" ~key:"definitely_missing"
+        ~spelling:("--ocannl_" ^ "missing=true") ~kind:Cli_flag ();
+    ];
+  Verdict.p_all ~min:11 "every config-usage direct refusal format is observed"
+    direct_refusal_formats ~f:(Hash_set.mem observed);
+  Verdict.p "the config-usage refusal control emits no unexpected diagnostic"
+    (List.is_empty !unexpected);
+  Refusal_manifest.print source
 
 let file_kind path =
   let basename = Stdlib.Filename.basename path in
@@ -900,11 +963,6 @@ let occurrences_of_file ~reported_path path =
 let fixture path config_path multiline_path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
-  Verdict.p "a runtime value separator is resolved before equals inside its value"
-    (Option.equal String.equal
-       (cli_key_of_token ~path:"docs/agent-notes/build-and-test.md"
-          ("--ocannl_" ^ "backend_cuda=true"))
-       (Some "backend"));
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
     @ markdown_occurrences ~allow_bare:true ~path:reported_path content
@@ -1053,10 +1111,12 @@ let live workspace_root paths =
        non-config notation.\n";
     printf
       "OK: configuration tokens in Dune actions and checked-in ocannl_config files name registered \
-       keys or counted intentional-invalid controls.\n")
+       keys or counted intentional-invalid controls.\n");
+  Refusal_manifest.print "config_usage_scan.ml"
 
 let () =
   match Array.to_list Stdlib.Sys.argv with
+  | _ :: [ "--refusal-control" ] -> refusal_control ()
   | _ :: [ "--fixture"; path; config_path; multiline_path ] ->
       fixture path config_path multiline_path
   | _ :: workspace_root :: paths when not (List.is_empty paths) -> live workspace_root paths

@@ -23,6 +23,14 @@
 open Base
 
 let failures = ref 0
+let passed_label_history = ref []
+
+(** The labels of claims this process actually evaluated successfully, in evaluation order.
+    Scanner-control goldens use this as causal evidence: a diagnostic marker is emitted only after
+    the claim that would emit that diagnostic has run and passed. *)
+let passed_labels () = List.rev !passed_label_history
+
+let record_pass label = passed_label_history := label :: !passed_label_history
 
 (** Records a failure, on stdout (where the golden sees it) and stderr (where it survives the
     nonzero exit). [msg] should read as the thing that is wrong, without a "FAIL" prefix of its own.
@@ -35,7 +43,8 @@ let fail msg =
 (** [claim name b] fails the run when [b] is false, printing nothing on stdout: for a test that
     renders the boolean itself, in a column layout of its own. Prefer {!p}, which does both. *)
 let claim name b =
-  if not b then (
+  if b then record_pass name
+  else (
     Int.incr failures;
     Stdio.eprintf "FAIL: %s: false\n" name)
 
@@ -238,7 +247,9 @@ let skipped ?(aggregation = (`Backend : skip_aggregation)) ~backend name =
     [?detail] is evaluated only on failure and appended in parentheses — the place for a machine-
     specific number (a measured value, a difference) that must stay out of a passing golden. *)
 let pass_fail ?detail label b =
-  if b then Stdio.printf "%s: PASS\n" label
+  if b then (
+    record_pass label;
+    Stdio.printf "%s: PASS\n" label)
   else
     let detail = match detail with None -> "" | Some f -> " (" ^ f () ^ ")" in
     Int.incr failures;

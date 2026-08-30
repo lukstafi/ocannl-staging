@@ -100,17 +100,24 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-cache_dir_ignores_control)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
+  (alias runtest-dead_export_scan_control)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-codegen_text_inventory_control)
   (alias runtest-agent_notes_structure)
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
+  (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
-  (alias runtest-optional_arg_inventory)))
+  (alias runtest-refusal_control_scan_cases)
+  (alias runtest-optional_arg_inventory)
+  (alias runtest-optional_arg_inventory_control)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
 ; check, a different question: `scans` collects the tests that read the REPOSITORY, these collect
@@ -186,8 +193,11 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-cache_dir_ignores_control)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
+  (alias runtest-dead_export_scan_control)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
@@ -201,11 +211,14 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-codegen_text_inventory_control)
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
+  (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-optional_arg_inventory)
+  (alias runtest-optional_arg_inventory_control)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)
   (alias runtest-sweep_harness)))
@@ -1767,7 +1780,10 @@
  ; ocannl-backend: none -- links no backend: it reads embedded OCaml snippets through Config_key_scan as text.
  (name config_scan_lexing)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  digest_completeness.ml
+  test_config_consistency.ml)
  (modules config_scan_lexing)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -1786,8 +1802,98 @@
  ; ocannl-backend: none -- links no backend: it reads embedded dune-file text through Dune_stanza_scan as text.
  (name dune_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  config_dep_completeness.ml)
  (modules dune_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+; gh-ocannl-800: static scanner refusal formats are related to permanent control goldens. These
+; cases pin extraction, Printf-hole normalization, the orphan arm, and the covered near miss on
+; synthetic OCaml rather than relying on the currently complete repository relationship.
+
+(test
+ ; ocannl-backend: none -- links no backend: it parses embedded scanner source and compares text.
+ (name refusal_control_scan_cases)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  atomic_file_rename_scan.ml
+  atomic_file_rename_scan.expected
+  atomic_file_rename_scan_control.expected
+  agent_notes_structure.ml
+  agent_notes_structure.expected
+  backend_golden_family_scan.ml
+  backend_golden_family_scan.expected
+  cache_dir_ignores.ml
+  cache_dir_scan_cases.expected
+  cache_dir_ignores.expected
+  cache_dir_ignores_control.expected
+  codegen_text_inventory.ml
+  codegen_text_scan_cases.expected
+  codegen_text_inventory_control.expected
+  codegen_text_inventory.expected
+  config_dep_completeness.ml
+  dune_scan_cases.expected
+  config_dep_completeness.expected
+  config_usage_scan.ml
+  config_usage_scan.expected
+  config_usage_scan_refusal_control.expected
+  dead_export_scan.ml
+  dead_export_scan.expected
+  dead_export_scan_control.expected
+  digest_completeness.ml
+  config_scan_lexing.expected
+  digest_completeness.expected
+  env_var_deps.ml
+  env_var_deps_control.expected
+  env_var_deps.expected
+  ocamlformat_ignore_scan.ml
+  ocamlformat_ignore_scan.expected
+  optional_arg_inventory.ml
+  optional_arg_inventory.expected
+  optional_arg_inventory_control.expected
+  shell_scripts_parse.ml
+  shell_scripts_parse.expected
+  test_config_consistency.ml
+  test_config_consistency.expected
+  verdict_ratchet.ml
+  verdict_scan_cases.expected
+  verdict_ratchet.expected)
+ (action
+  (run
+   %{test}
+   atomic_file_rename_scan.ml
+   atomic_file_rename_scan.expected,atomic_file_rename_scan_control.expected
+   agent_notes_structure.ml
+   agent_notes_structure.expected
+   backend_golden_family_scan.ml
+   backend_golden_family_scan.expected
+   cache_dir_ignores.ml
+   cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
+   codegen_text_inventory.ml
+   codegen_text_scan_cases.expected,codegen_text_inventory_control.expected,codegen_text_inventory.expected
+   config_dep_completeness.ml
+   dune_scan_cases.expected,config_dep_completeness.expected
+   config_usage_scan.ml
+   config_usage_scan.expected,config_usage_scan_refusal_control.expected
+   dead_export_scan.ml
+   dead_export_scan.expected,dead_export_scan_control.expected
+   digest_completeness.ml
+   config_scan_lexing.expected,digest_completeness.expected
+   env_var_deps.ml
+   env_var_deps_control.expected,env_var_deps.expected
+   ocamlformat_ignore_scan.ml
+   ocamlformat_ignore_scan.expected
+   optional_arg_inventory.ml
+   optional_arg_inventory.expected,optional_arg_inventory_control.expected
+   shell_scripts_parse.ml
+   shell_scripts_parse.expected
+   test_config_consistency.ml
+   config_scan_lexing.expected,test_config_consistency.expected
+   verdict_ratchet.ml
+   verdict_scan_cases.expected,verdict_ratchet.expected))
+ (modules refusal_control_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
 ; gh-ocannl-689: the marker grammar's closed backend vocabulary, held equal to the backends OCANNL
@@ -1881,7 +1987,12 @@
   ; ambient variables it reads by name, and a test reading one is exactly the case that goes
   ; stale unnoticed -- `test_cpu_topology` and its hardware hook (Codex P2, round 2 on PR #371).
   (glob_files_rec ../../test/*.ml)
-  (glob_files_rec ../../arrayjit/test/*.ml))
+  (glob_files_rec ../../arrayjit/test/*.ml)
+  ; gh-ocannl-800: the refusal-control corpus. Only `_cases.expected`, `_control.expected`, and a
+  ; live scan golden explicitly headed `Synthetic controls:` count; the broad hand-over means a
+  ; new control joins without a second path list.
+  (glob_files_rec ../../test/*.expected)
+  (glob_files_rec ../../arrayjit/test/*.expected))
  (action
   (with-stdout-to
    %{target}
@@ -1908,7 +2019,9 @@
  ; OCaml source, which links no backend and compiles nothing.
  (target env_var_deps_control.actual)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  env_var_deps.ml)
  (action
   (with-stdout-to
    %{target}
@@ -1955,6 +2068,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scanner's missing-input refusal controls.
+ (target cache_dir_ignores_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  cache_dir_ignores.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:cache_dir_ignores.exe} --refusal-control))))
+
+(rule
+ (alias runtest-cache_dir_ignores_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff cache_dir_ignores_control.expected cache_dir_ignores_control.actual)))
 
 ; gh-ocannl-803/862: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
 ; recursive over the whole repository, so a new top-level directory joins the scan without another
@@ -2003,6 +2136,26 @@
  (action
   (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
 
+(rule
+ ; ocannl-backend: none -- runs only synthetic argument-validation refusals in the scanner executable.
+ (target atomic_file_rename_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  atomic_file_rename_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:atomic_file_rename_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-atomic_file_rename_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff atomic_file_rename_scan_control.expected atomic_file_rename_scan_control.actual)))
+
 ; gh-ocannl-806: modules without interfaces implicitly export every top-level binding. The live
 ; scan ratchets every source-declared value in direct modules under arrayjit/lib and tensor against
 ; external qualified, aliased, opened, or included references. The matching policy is pure in
@@ -2044,6 +2197,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff dead_export_scan.expected dead_export_scan.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scanner's three synthetic direct-refusal branches.
+ (target dead_export_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  dead_export_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:dead_export_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-dead_export_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff dead_export_scan_control.expected dead_export_scan_control.actual)))
 
 ; gh-ocannl-802: a per-backend golden family covers the backend vocabulary derived from
 ; `Backends.all_of_backend`, and goldens copied from another backend carry a visible provenance
@@ -2114,6 +2287,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff optional_arg_inventory.expected optional_arg_inventory.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the inventory's synthetic empty-source refusal branch.
+ (target optional_arg_inventory_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  optional_arg_inventory.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:optional_arg_inventory.exe} --refusal-control))))
+
+(rule
+ (alias runtest-optional_arg_inventory_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff optional_arg_inventory_control.expected optional_arg_inventory_control.actual)))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files as text.
@@ -2236,6 +2429,26 @@
  (action
   (diff codegen_text_inventory.expected codegen_text_inventory.actual)))
 
+(rule
+ ; ocannl-backend: none -- runs the scanner's synthetic stale-exclusion refusal branch.
+ (target codegen_text_inventory_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  codegen_text_inventory.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:codegen_text_inventory.exe} --refusal-control))))
+
+(rule
+ (alias runtest-codegen_text_inventory_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff codegen_text_inventory_control.expected codegen_text_inventory_control.actual)))
+
 ; Interfaces built to break the emitter derivation: a library whose .mli declares every shape
 ; `Emitter_frontier` has to answer for, beside the near misses that decide the rule. Its second
 ; module carries no .mli and no annotation, which is `C_syntax.compile_proc`'s situation -- the
@@ -2267,7 +2480,9 @@
  ; ocannl-backend: none -- links no backend: the fixtures are embedded strings it classifies as text.
  (name codegen_text_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  codegen_text_inventory.ml)
  (modules codegen_text_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2296,7 +2511,9 @@
  ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
  (name cache_dir_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  cache_dir_ignores.ml)
  (modules cache_dir_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2304,7 +2521,9 @@
  ; ocannl-backend: none -- links no backend: it reads embedded format strings through Verdict_scan as text.
  (name verdict_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  verdict_ratchet.ml)
  (modules verdict_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -4102,7 +4321,7 @@
 (executable
  (name ocamlformat_ignore_scan)
  (modules ocamlformat_ignore_scan)
- (libraries base stdio unix arrayjit.verdict))
+ (libraries base stdio unix test_utils arrayjit.verdict))
 
 (rule
  ; ocannl-backend: none -- reads path lists and file existence only, and links no backend.
@@ -4435,6 +4654,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff config_usage_scan_control.expected config_usage_scan_control.actual)))
+
+(rule
+ ; ocannl-backend: none -- drives every direct config-usage refusal through injected state.
+ (target config_usage_scan_refusal_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  config_usage_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:config_usage_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-config_usage_scan_refusal_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan_refusal_control.expected config_usage_scan_refusal_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached. It shares a lock

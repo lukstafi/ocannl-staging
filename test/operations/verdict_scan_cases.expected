@@ -50,3 +50,11 @@ ok: source -- a claim inside an extension payload is reached
 ok: source -- a claim quoted inside a string is not a claim
 the walk counts every string literal it passes: true
 and places the ones a named function receives: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's
+  [scanner-refusal:f3e306858423827e6575d13a17d57af6] check cannot vouch
+  [scanner-refusal:53b71ea33a69d24c941985f4eb35406b] prints the claim
+  [scanner-refusal:7d1962ff34bbe1ed7b89a535dc0cfd7e] exempted literals that
+  [scanner-refusal:ad023891a3bd7827b3905292c487055b] claim-shaped literal any
+  [scanner-refusal:e1354d390a356f0c79420c25232b0b42] planted canaries the

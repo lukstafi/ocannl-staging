@@ -46,6 +46,9 @@
 
 open Base
 open Stdio
+
+let printf = Test_utils.Refusal_control_manifest.printf
+
 module Scan = Test_utils.Verdict_scan
 module Dune = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
@@ -760,6 +763,28 @@ let run_refusal_control () =
     eprintf "the helper-refusal child did not reject its planted fixture as designed:\n%s\n" output;
   ("the shipping ratchet process refuses the planted helper fixture", ok)
 
+let refuse_stale_quantified ~fail stale_quantified =
+  if not (Set.is_empty stale_quantified) then
+    fail
+      (Printf.sprintf
+         "exempted quantified helpers that no Verdict claim reaches any more -- drop them from the \
+          exemption list: %s"
+         (String.concat ~sep:", " (Set.to_list stale_quantified)))
+
+let run_stale_quantified_control () =
+  let source = "test/operations/verdict_ratchet.ml" in
+  let format =
+    "exempted quantified helpers that no Verdict claim reaches any more -- drop them from the \
+     exemption list: %s"
+  in
+  let refused = ref false in
+  let fail _message =
+    refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source ~format
+  in
+  refuse_stale_quantified ~fail (Set.singleton (module String) "fixture:stale");
+  ("refuses a stale quantified-helper exemption", !refused)
+
 let base_dir = Dune.base_dir
 let repo_relative = Dune.repo_relative
 
@@ -806,7 +831,9 @@ let () =
   let data_used = ref (Set.empty (module String)) in
   let literals = ref 0 and applied = ref 0 and offenders = ref 0 in
   let quantified_offenders = ref 0 in
-  let control_results = run_quantified_helper_controls () @ [ run_refusal_control () ] in
+  let control_results =
+    run_quantified_helper_controls () @ [ run_refusal_control (); run_stale_quantified_control () ]
+  in
   let per_directory = Hashtbl.create (module String) in
   printf
     "Test sources that print a claim they decided themselves, outside `Verdict`: a format whose\n\
@@ -929,12 +956,7 @@ let () =
          "exempted literals that no source carries any more -- drop them from the exemption list: \
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
-  if not (Set.is_empty stale_quantified) then
-    fail
-      (Printf.sprintf
-         "exempted quantified helpers that no Verdict claim reaches any more -- drop them from the \
-          exemption list: %s"
-         (String.concat ~sep:", " (Set.to_list stale_quantified)));
+  refuse_stale_quantified ~fail stale_quantified;
   (* An exempted source that carries no claim-shaped literal is either a file that stopped being a
      fixture, or one this scan stopped reading -- and the second is what a blanket exemption is
      capable of hiding, so it is checked rather than trusted. *)
@@ -980,4 +1002,5 @@ let () =
     printf
       "\n\
        OK: test claims route through `Verdict`, and helper-wrapped quantifiers cannot pass on \
-       nothing.\n"
+       nothing.\n";
+  Test_utils.Refusal_control_manifest.print "verdict_ratchet.ml"

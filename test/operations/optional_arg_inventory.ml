@@ -7,10 +7,33 @@ open Stdio
 module Scan = Test_utils.Optional_arg_scan
 module Dune = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
+module Refusal_manifest = Test_utils.Refusal_control_manifest
 
 let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
+let printf = Refusal_manifest.printf
+
+let require_sources ~fail sources =
+  if List.is_empty sources then (
+    fail "the lib/ source glob handed the inventory nothing";
+    false)
+  else true
+
+let refusal_control () =
+  let source = "test/operations/optional_arg_inventory.ml" in
+  let refused = ref false in
+  let format = "the lib/ source glob handed the inventory nothing" in
+  let fail _message =
+    refused := true;
+    Refusal_manifest.observe_failure ~source ~format
+  in
+  ignore (require_sources ~fail [] : bool);
+  Verdict.p "an empty lib source hand-over reaches the inventory refusal" !refused;
+  Refusal_manifest.print source
 
 let () =
+  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+    refusal_control ();
+    Stdlib.exit 0);
   if Array.length Stdlib.Sys.argv < 3 then (
     eprintf "Usage: %s <workspace_root> <lib source...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
@@ -21,7 +44,7 @@ let () =
   in
   let on_disk = Map.of_alist_reduce (module String) arguments ~f:(fun first _ -> first) in
   let sources = Sources.sources_among (List.map arguments ~f:fst) in
-  if List.is_empty sources then Verdict.fail "the lib/ source glob handed the inventory nothing";
+  ignore (require_sources ~fail:Verdict.fail sources : bool);
   let args =
     List.concat_map sources ~f:(fun source ->
         let interface =
@@ -42,4 +65,5 @@ let () =
   Verdict.p_exists "the inventory found lib/ optional arguments" args ~f:(fun _ -> true);
   Verdict.p_all
     "every implemented option has an ordinary label and every unimplemented option an underscore"
-    args ~f:Scan.honest
+    args ~f:Scan.honest;
+  Refusal_manifest.print "optional_arg_inventory.ml"

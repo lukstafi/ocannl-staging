@@ -1,0 +1,5 @@
+an exclusion absent from the hand-over reaches the stale-exclusion refusal: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for
+  [scanner-refusal:b1a8055bff15f499f2f143975afca3d7] reaches the stale-exclusion

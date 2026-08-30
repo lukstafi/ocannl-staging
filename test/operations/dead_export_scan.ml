@@ -336,7 +336,59 @@ let in_scan_root path =
   let directory = Stdlib.Filename.dirname path in
   String.equal directory "arrayjit/lib" || String.equal directory "tensor"
 
+let require_implementations ~fail implementations =
+  if List.is_empty implementations then (
+    fail "no .mli-less implementation modules found under arrayjit/lib or tensor";
+    false)
+  else true
+
+let exports_or_refusal ~fail ~source contents =
+  match Scan.exports_of_source ~source contents with
+  | exports -> exports
+  | exception exn ->
+      fail
+        (Printf.sprintf "%s does not parse as OCaml, so this scan cannot vouch for it: %s" source
+           (Exn.to_string exn));
+      []
+
+let references_or_refusal ~fail ~exports ~sources =
+  match Scan.references ~exports ~sources with
+  | references -> references
+  | exception exn ->
+      fail
+        (Printf.sprintf "an OCaml source does not parse, so this scan cannot vouch for it: %s"
+           (Exn.to_string exn));
+      []
+
+let refusal_control () =
+  let source = "test/operations/dead_export_scan.ml" in
+  let case label ~format run =
+    let refused = ref false in
+    let fail _message =
+      refused := true;
+      Test_utils.Refusal_control_manifest.observe_failure ~source ~format
+    in
+    run fail;
+    Verdict.p label !refused
+  in
+  case "an empty implementation census reaches its refusal"
+    ~format:"no .mli-less implementation modules found under arrayjit/lib or tensor" (fun fail ->
+      ignore (require_implementations ~fail [] : bool));
+  case "an invalid implementation reaches the export-parser refusal"
+    ~format:"%s does not parse as OCaml, so this scan cannot vouch for it: %s" (fun fail ->
+      ignore (exports_or_refusal ~fail ~source:"arrayjit/lib/bad.ml" "let =" : Scan.export list));
+  let exports = Scan.exports_of_source ~source:"arrayjit/lib/sample.ml" "let value = 1" in
+  case "an invalid consumer reaches the reference-parser refusal"
+    ~format:"an OCaml source does not parse, so this scan cannot vouch for it: %s" (fun fail ->
+      ignore
+        (references_or_refusal ~fail ~exports ~sources:[ ("consumer.ml", "let =") ]
+          : Scan.reference list));
+  Test_utils.Refusal_control_manifest.print source
+
 let () =
+  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+    refusal_control ();
+    Stdlib.exit 0);
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <source...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
@@ -362,28 +414,12 @@ let () =
         | Some stem -> not (Set.mem interfaces (stem ^ ".mli"))
         | None -> false)
   in
-  if List.is_empty implementations then (
-    Verdict.fail "no .mli-less implementation modules found under arrayjit/lib or tensor";
-    Stdlib.exit 1);
+  if not (require_implementations ~fail:Verdict.fail implementations) then Stdlib.exit 1;
   let exports =
     List.concat_map implementations ~f:(fun (source, contents) ->
-        match Scan.exports_of_source ~source contents with
-        | exports -> exports
-        | exception exn ->
-            Verdict.fail
-              (Printf.sprintf "%s does not parse as OCaml, so this scan cannot vouch for it: %s"
-                 source (Exn.to_string exn));
-            [])
+        exports_or_refusal ~fail:Verdict.fail ~source contents)
   in
-  let references =
-    match Scan.references ~exports ~sources with
-    | references -> references
-    | exception exn ->
-        Verdict.fail
-          (Printf.sprintf "an OCaml source does not parse, so this scan cannot vouch for it: %s"
-             (Exn.to_string exn));
-        []
-  in
+  let references = references_or_refusal ~fail:Verdict.fail ~exports ~sources in
   let counts = Scan.counts ~exports references in
   let exemptions = Set.of_list (module String) exempt_zero_reference_exports in
   let zero_reference =
@@ -411,4 +447,5 @@ let () =
   Verdict.p "named dead-export exemptions are unique"
     (Set.length exemptions = List.length exempt_zero_reference_exports);
   Verdict.p_empty "every named dead-export exemption remains necessary"
-    ~over:exempt_zero_reference_exports stale
+    ~over:exempt_zero_reference_exports stale;
+  Test_utils.Refusal_control_manifest.print "dead_export_scan.ml"

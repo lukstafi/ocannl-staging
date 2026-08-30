@@ -14,3 +14,6 @@ Synthetic controls:
   a malformed marker is refused
 
 backend golden families are complete and provenance markers are valid: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families

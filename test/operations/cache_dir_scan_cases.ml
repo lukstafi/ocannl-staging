@@ -17,8 +17,9 @@
     can. *)
 
 open Base
-open Stdio
 module Scan = Test_utils.Cache_dir_scan
+
+let printf = Test_utils.Refusal_control_manifest.printf
 
 (* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
    promote`d into the golden as the expected output (gh-ocannl-601). *)
@@ -180,4 +181,5 @@ let () =
       if List.equal String.equal found expected then printf "ok: built-in default -- %s\n" name
       else
         fail "built-in default -- %s: expected [%s], found [%s]" name (render expected)
-          (render found))
+          (render found));
+  Test_utils.Refusal_control_manifest.print "cache_dir_ignores.ml"

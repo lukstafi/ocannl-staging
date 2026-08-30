@@ -120,20 +120,25 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest
   test/operations/dune                     @runtest-agent_notes_structure
   test/operations/dune                     @runtest-atomic_file_rename_scan
+  test/operations/dune                     @runtest-atomic_file_rename_scan_control
   test/operations/dune                     @runtest-autotune_bound_pruning
   test/operations/dune                     @runtest-autotune_routine_name
   test/operations/dune                     @runtest-backend_golden_family_scan
   test/operations/dune                     @runtest-bandwidth_calibration
   test/operations/dune                     @runtest-cache_dir_ignores
+  test/operations/dune                     @runtest-cache_dir_ignores_control
   test/operations/dune                     @runtest-codegen_text_inventory
+  test/operations/dune                     @runtest-codegen_text_inventory_control
   test/operations/dune                     @runtest-config_dep_completeness
   test/operations/dune                     @runtest-config_usage_scan
   test/operations/dune                     @runtest-config_usage_scan_control
+  test/operations/dune                     @runtest-config_usage_scan_refusal_control
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
   test/operations/dune                     @runtest-config_var_warnings
   test/operations/dune                     @runtest-cost_model_selection
   test/operations/dune                     @runtest-dead_export_scan
+  test/operations/dune                     @runtest-dead_export_scan_control
   test/operations/dune                     @runtest-digest_completeness
   test/operations/dune                     @runtest-env_spelling_gate
   test/operations/dune                     @runtest-env_var_deps
@@ -146,6 +151,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-n3_fwd_with_prec-unoptimized
   test/operations/dune                     @runtest-ocamlformat_ignore_scan
   test/operations/dune                     @runtest-optional_arg_inventory
+  test/operations/dune                     @runtest-optional_arg_inventory_control
   test/operations/dune                     @runtest-placement_surface
   test/operations/dune                     @runtest-shell_scripts_parse
   test/operations/dune                     @runtest-sweep_harness
@@ -255,4 +261,27 @@ every focused-aggregate member is reached by its family alias, and a repository-
 every source that calls Test_utils.Generated.init is claimed by some stanza's modules, and a repository-wide census finds enough of them for the rule to be about something: true
 every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_FILES_PREFIX where dune runs it, and every declaration of it has a caller behind it: true
 
+Scanner refusal controls (gh-ocannl-800). Sources come from repository-wide scan rules;
+controls are *_cases.expected, *_control.expected, or a live scan golden with an explicit
+`Synthetic controls:` section. Printf substitutions do not decide coverage.
+  statically extracted diagnostics: 279 (details on stderr)
+  named exemptions with reasons:
+    (none)
+repository-wide scan rules resolve to scanner sources: true
+the refusal-control manifest source set equals the derived scanner census: true
+the permanent control-golden corpus is present: true
+every statically recoverable scanner refusal diagnostic appears in a control golden or has a named reasoned exemption: true
+
 OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test directory carries the ambient gate, and every per-module tracing gate is declared by the library whose modules read it.
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:7d1923374b5bbf7028b59f2670772e8c] executable either declares
+  [scanner-refusal:68816c7803a2eabaa2a2d8799ba00a78] running an executable
+  [scanner-refusal:a90efecb7feb61485c0886565a0e4ba9] running an executable
+  [scanner-refusal:1bb3be04ec494f4917d1537675671f1d] repository-wide derivation finds
+  [scanner-refusal:b54873c01dcc148c1691a882e4181993] Test_utils.Generated.init
+  [scanner-refusal:7ff972d0b76d472194796b39466092aa] Test_utils.Generated.init
+  [scanner-refusal:f8d375e9267abafa87ce8eec2d53731d] repository-wide scan rules
+  [scanner-refusal:f1c1e39705142c7bdc92b3f0ede72582] refusal-control manifest source
+  [scanner-refusal:1f42d7a2739170c96004439d524c5d96] permanent control-golden corpus
+  [scanner-refusal:a2ef9338814a08816bb85a6bab6ac71c] statically recoverable scanner
