@@ -683,6 +683,12 @@ that they earn a lookup rather than always-loaded space.
   exemption list is only for helpers whose intended passing meaning allows an empty population;
   synthetic controls include a child process the shipping ratchet demonstrably refuses
   (gh-ocannl-801).
+- The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
+  `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
+  `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or
+  length-mismatch reason. A compound claim that joins independent parity pairs stays out of a
+  many-pair combinator: split it into separately labeled `p_all2` claims, so the transcript names
+  which readback failed rather than merely saying that one of them did.
 - Guarantees that fire only on an empty collection are never exercised by a green suite, so
   `verdict_quantified` stages them: the satisfied forms run directly, and each refusal runs as a
   CHILD process whose streams the parent captures. Capturing is not tidiness — a refusal prints

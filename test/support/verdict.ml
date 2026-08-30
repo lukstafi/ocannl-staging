@@ -160,14 +160,29 @@ let p_all ?min name xs ~f = quantified ?min name xs (fun () -> List.for_all xs ~
     off the transcript. Reported before emptiness, so a one-sided empty says which side it was.
 
     [?min] bounds the COMMON length, as in {!p_all}. *)
-let p_all2 ?min name got want ~f =
+type all2_outcome = All2_short of string | All2_holds of bool
+
+(* Shared by the two output dialects below: [p_all2] renders booleans and [pass_fail_all2] renders
+   PASS/FAIL, but a missing population and a length mismatch are the same refusal in either dialect.
+   Keeping the classification here also keeps [f] unevaluated when the pair is structurally too
+   short to support its claim. *)
+let all2_outcome ?(min = 1) got want ~f =
   let n_got = Array.length got and n_want = Array.length want in
-  if n_got <> n_want then short_fail name (Printf.sprintf "length %d vs %d" n_got n_want)
-  else
-    with_population ?min name
-      ~is_empty:(fun () -> n_got = 0)
-      ~length:(fun () -> n_got)
-      (fun () -> Array.for_all2_exn got want ~f)
+  if n_got <> n_want then All2_short (Printf.sprintf "length %d vs %d" n_got n_want)
+  else if if min <= 1 then n_got > 0 else n_got >= min then
+    All2_holds (Array.for_all2_exn got want ~f)
+  else All2_short (if n_got = 0 then "empty" else Printf.sprintf "only %d of %d" n_got min)
+
+let p_all2 ?min name got want ~f =
+  match all2_outcome ?min got want ~f with
+  | All2_short detail -> short_fail name detail
+  | All2_holds holds -> p name holds
+
+(** [pf_all2 fmt … got want ~f] is {!p_all2} with a COMPUTED label, as {!pf} is to {!p}. Format
+    arguments precede the two arrays and their predicate, so the call keeps the claim-shaped order:
+    [pf_all2 "%s values match" leg got want ~f]. Empty or mismatched readbacks retain [p_all2]'s
+    distinct refusal wording; [?min] has the same common-length meaning. *)
+let pf_all2 ?min fmt = Printf.ksprintf (fun label got want ~f -> p_all2 ?min label got want ~f) fmt
 
 (** [p_none name xs ~f] claims that no element of [xs] satisfies [f], and that there is an element —
     the guarded form of [p name (not (List.exists xs ~f))] and of
@@ -277,6 +292,23 @@ let pass_fail ?detail label b =
     Stdio.printf "%s: FAIL%s\n" label detail;
     Stdio.eprintf "FAIL: %s%s\n" label detail
 
+(** [pass_fail_all2 label got want ~f] is {!p_all2} in {!pass_fail}'s output dialect. It refuses
+    empty, short, and mismatched pairs before evaluating [f]. On those structural refusals the
+    automatic reason is kept even when [?detail] is supplied; the caller's lazy detail follows it,
+    separated by a semicolon, so an empty readback can report both [(empty)] and the useful
+    [(got [])] diagnostic. On an elementwise mismatch [?detail] behaves exactly as in {!pass_fail}.
+*)
+let pass_fail_all2 ?min ?detail label got want ~f =
+  match all2_outcome ?min got want ~f with
+  | All2_holds holds -> pass_fail ?detail label holds
+  | All2_short reason ->
+      let detail =
+        match detail with
+        | None -> fun () -> reason
+        | Some caller_detail -> fun () -> reason ^ "; " ^ caller_detail ()
+      in
+      pass_fail ~detail label false
+
 (** Whether any check has failed so far. For a test that wants to say something extra about a bad
     run; the exit status is taken care of without it. *)
 let any_failed () = !failures > 0
@@ -293,12 +325,14 @@ module Claims = struct
   let claimf = claimf
   let p_all = p_all
   let p_all2 = p_all2
+  let pf_all2 = pf_all2
   let p_none = p_none
   let p_empty = p_empty
   let p_exists = p_exists
   let p_pairwise_distinct = p_pairwise_distinct
   let skipped = skipped
   let pass_fail = pass_fail
+  let pass_fail_all2 = pass_fail_all2
 end
 
 (* Registered at module initialization, so it covers every test that links this module — including
