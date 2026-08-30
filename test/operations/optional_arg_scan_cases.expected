@@ -66,6 +66,10 @@ a local open can shadow the optional value itself: implementation classified: tr
 a local open can shadow the optional value itself: honesty classified: true
 module opens resolve against their lexical path: implementation classified: true
 module opens resolve against their lexical path: honesty classified: true
+module opens see values re-exported through aliases and includes: implementation classified: true
+module opens see values re-exported through aliases and includes: honesty classified: true
+module names introduced by preceding opens are resolved: implementation classified: true
+module names introduced by preceding opens are resolved: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
 underscore label makes an unimplemented option caller-visible: honesty classified: true
 implemented underscore label is stale: implementation classified: true
@@ -96,6 +100,8 @@ an optional argument on a destructured returned local function is inventoried: i
 an optional argument on a destructured returned local function is inventoried: honesty classified: true
 an optional class constructor argument is inventoried: implementation classified: true
 an optional class constructor argument is inventoried: honesty classified: true
+an optional method argument is inventoried: implementation classified: true
+an optional method argument is inventoried: honesty classified: true
 a constrained optional function is inventoried: implementation classified: true
 a constrained optional function is inventoried: honesty classified: true
 optional closures returned through control flow are inventoried: implementation classified: true

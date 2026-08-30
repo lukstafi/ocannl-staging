@@ -127,6 +127,17 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
 end
 module Later = struct module Defaults = struct let other = false end end|ocaml}
     ~implemented:false ~honest:false;
+  case "module opens see values re-exported through aliases and includes"
+    {ocaml|module Other = struct let feature = false end
+module Alias = Other
+module Defaults = struct include Alias end
+let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
+    ~implemented:false ~honest:false;
+  case "module names introduced by preceding opens are resolved"
+    {ocaml|module Outer = struct module Defaults = struct let feature = false end end
+open Outer
+let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
+    ~implemented:false ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -170,6 +181,9 @@ let f ?(feature = true) () = let _ = feature in let module M = struct open Defau
     ~implemented:false ~honest:false;
   case "an optional class constructor argument is inventoried"
     {ocaml|class c ?(feature = true) = object method run = ignore feature end|ocaml}
+    ~implemented:false ~honest:false;
+  case "an optional method argument is inventoried"
+    {ocaml|class c = object method run ?(feature = true) () = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
   case "a constrained optional function is inventoried"
     {ocaml|let f = (fun ?(feature = true) () -> ignore feature : ?feature:bool -> unit -> unit)|ocaml}
