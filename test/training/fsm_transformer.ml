@@ -193,7 +193,13 @@ let () =
      reaches 100% held-out valid-transition accuracy (the degenerate one plateaued near 90%). *)
   let epoch_loss_limit_first = 17.0 in
   let epoch_loss_limit_mid = 8.0 in
-  let epoch_loss_limit_last = 7.0 in
+  let tail_window_size = 10 in
+  (* Pre-window sweep logs retained only the threshold verdict, not the loss digits. Keep the old
+     cross-backend final bound instead of tightening it around this run's 5.61 window mean; the
+     stderr window statistic added below makes later spread audits quantitative. *)
+  let tail_loss_limit = 7.0 in
+  let logged_losses = ref [] in
+  let all_valid = ref true in
   for epoch = 0 to epochs - 1 do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
@@ -211,14 +217,19 @@ let () =
       epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
       Int.incr step_ref
     done;
-    if epoch = 0 || epoch = epochs / 2 || epoch = epochs - 1 then
-      let limit =
-        if epoch = 0 then epoch_loss_limit_first
-        else if epoch = epochs / 2 then epoch_loss_limit_mid
-        else epoch_loss_limit_last
-      in
+    logged_losses := !epoch_loss :: !logged_losses;
+    if not Float.(is_finite !epoch_loss && !epoch_loss >= -1e-3) then all_valid := false;
+    Stdio.eprintf "Epoch %d, loss=%.6f (not part of the golden)\n%!" epoch !epoch_loss;
+    if epoch = 0 || epoch = epochs / 2 then
+      let limit = if epoch = 0 then epoch_loss_limit_first else epoch_loss_limit_mid in
       Verdict.pf "Epoch %d, loss below threshold" epoch Float.(!epoch_loss < limit)
   done;
+  let tail_mean = Training_golden.recent_mean_exn ~count:tail_window_size !logged_losses in
+  Stdio.eprintf "Last %d logged epochs mean loss=%.6f (not part of the golden)\n%!" tail_window_size
+    tail_mean;
+  Verdict.p "every epoch loss is a finite, nonnegative cross-entropy" !all_valid;
+  Verdict.pf "Last %d logged epochs mean loss below %g" tail_window_size tail_loss_limit
+    Float.(tail_mean < tail_loss_limit);
 
   (* === Held-out Evaluation (inference only, no gradient update) === We evaluate "valid transition
      accuracy": whether the argmax-predicted state is one of the two valid successors for the

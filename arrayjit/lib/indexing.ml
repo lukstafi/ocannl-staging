@@ -27,8 +27,6 @@ let symbol_ident (Symbol s) = "i" ^ Int.to_string s
 
 type 'a environment = 'a Map.M(Symbol).t [@@deriving sexp]
 
-let empty_env : 'a environment = Map.empty (module Symbol)
-
 type static_symbol = {
   static_symbol : symbol;
   mutable static_range : int option; [@compare.ignore] [@equal.ignore] [@hash.ignore]
@@ -187,9 +185,6 @@ let axis_index_mentions_any (syms : symbol list) (idx : axis_index) : bool =
 
 type str_osym_map = (string, symbol option, Base.String.comparator_witness) Base.Map.t
 
-let sexp_of_str_osym_map (map : str_osym_map) =
-  Sexp.List (Map.to_alist map |> List.map ~f:[%sexp_of: string * symbol option])
-
 type projections_debug = { spec : string; derived_for : Sexp.t; trace : (string * int) list }
 [@@deriving sexp]
 
@@ -221,11 +216,13 @@ type projections = {
           of an operation. *)
   project_rhs : axis_index array array;
       (** [project_rhs.(i)] Produces an index into the [i+1]th argument of an operation. *)
-  extent_syms : (symbol * static_symbol) list;
-      (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value is
-          the axis's runtime extent. The corresponding segment's dimension is the maximum extent
-          (the symbol's declared range); lowering guards the loop body with [iterator < value] when
-          the symbol is among the routine's bindings. *)
+  extent_syms : (symbol option * static_symbol) list;
+      (** gh-490 symbolic extents: associates the product iterator, when there is one, with the
+          static symbol whose bound value is the axis's runtime extent. The corresponding segment's
+          dimension is the maximum extent (the symbol's declared range); lowering guards the loop
+          body with [iterator < value] when the symbol is among the routine's bindings. A
+          maximum-one axis has no iterator and is retained as [None], so consumers that cannot honor
+          dynamic extents can still reject it explicitly (gh-ocannl-817). *)
   debug_info : (projections_debug[@sexp.ignore] [@compare.ignore] [@equal.ignore]);
 }
 [@@deriving compare, equal, sexp]

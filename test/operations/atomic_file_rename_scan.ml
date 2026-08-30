@@ -24,6 +24,7 @@ module Ast_traverse = Ppxlib.Ast_traverse
 
 type reference = { source : string; line : int; identifier : string list }
 type exemption = { source : string; identifier : string list; reason : string }
+type corpus = { generators : string list; generated : string list; sources : string list }
 
 (* Each row exempts one occurrence with one exact identifier, not its whole source. The staleness
    claim below requires every row to be consumed exactly once, so another [rename] in the same file
@@ -73,14 +74,61 @@ let matcher_cases =
     ("unrelated API", "let publish a b = Other.rename a b", [ "Other"; "rename" ]);
   ]
 
+let generated_output source =
+  match String.chop_suffix source ~suffix:".mll" with
+  | Some stem -> stem ^ ".ml"
+  | None -> (
+      match String.chop_suffix source ~suffix:".mly" with
+      | Some stem -> stem ^ ".ml"
+      | None ->
+          failwith (Printf.sprintf "source-generation input has no .mll or .mly suffix: %s" source))
+
+let generated_control_source = "test/operations/atomic_file_rename_scan_fixture/raw_rename.ml"
+let generated_control_identifier = [ "Sys"; "rename" ]
+
+let parse_corpus arguments =
+  let rec take_until marker acc = function
+    | [] -> failwith (Printf.sprintf "missing corpus section %s" marker)
+    | head :: tail when String.equal head marker -> (List.rev acc, tail)
+    | head :: tail -> take_until marker (head :: acc) tail
+  in
+  match arguments with
+  | "--generators" :: arguments ->
+      let generators, arguments = take_until "--generated" [] arguments in
+      let generated, sources = take_until "--sources" [] arguments in
+      if List.exists [ generators; generated; sources ] ~f:List.is_empty then
+        failwith "each corpus section must be present and nonempty";
+      if List.exists sources ~f:(String.is_prefix ~prefix:"--") then
+        failwith "unexpected corpus section after --sources";
+      { generators; generated; sources }
+  | _ -> failwith "corpus arguments must begin with --generators"
+
+let emit_generated_dependencies prefix arguments =
+  List.map arguments ~f:(fun source -> Stdlib.Filename.concat prefix (generated_output source))
+  |> List.sort ~compare:String.compare |> List.iter ~f:print_endline
+
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <source...>\n" Stdlib.Sys.argv.(0);
+  if Array.length Stdlib.Sys.argv >= 3 && String.equal Stdlib.Sys.argv.(1) "--generated-deps" then (
+    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:3)
+    |> emit_generated_dependencies Stdlib.Sys.argv.(2);
+    Stdlib.exit 0);
+  if Array.length Stdlib.Sys.argv < 8 then (
+    eprintf
+      "Usage: %s <workspace_root> --generators <input...> --generated <output...> --sources \
+       <source...>\n"
+      Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
   let base = Test_utils.Dune_stanza_scan.base_dir Stdlib.Sys.argv.(1) in
+  let corpus = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2) |> parse_corpus in
+  let repo_relative path = Test_utils.Dune_stanza_scan.repo_relative base path in
+  let generators = List.map corpus.generators ~f:repo_relative in
+  let generated = List.map corpus.generated ~f:repo_relative in
+  let expected_generated =
+    List.map generators ~f:generated_output |> List.sort ~compare:String.compare
+  in
+  let generated = List.sort generated ~compare:String.compare in
   let arguments =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
-    |> List.map ~f:(fun path -> (Test_utils.Dune_stanza_scan.repo_relative base path, path))
+    corpus.generated @ corpus.sources |> List.map ~f:(fun path -> (repo_relative path, path))
   in
   let on_disk = Map.of_alist_reduce (module String) arguments ~f:(fun first _ -> first) in
   let sources = Read.sources_among (List.map arguments ~f:fst) in
@@ -97,6 +145,10 @@ let () =
               (Printf.sprintf "%s does not parse as OCaml, so this scan cannot vouch for it: %s"
                  source (Exn.to_string exn));
             [])
+  in
+  let generated_control_references, references =
+    List.partition_tf references ~f:(fun reference ->
+        String.equal reference.source generated_control_source)
   in
   let exemption_key ({ source; identifier; _ } : exemption) = (source, identifier) in
   let reference_key ({ source; identifier; _ } : reference) = (source, identifier) in
@@ -121,8 +173,10 @@ let () =
         "%s:%d: raw rename reference bypasses Utils.Atomic_file -- route publication through \
          Atomic_file, or add a named exemption with the reason this rename is unrelated\n"
         source line);
+  eprintf "Discovered %d generator input(s) and derived %d generated OCaml output(s).\n"
+    (List.length generators) (List.length generated);
   eprintf "Scanned %d OCaml sources; found %d raw rename reference(s).\n" (List.length sources)
-    (List.length references);
+    (List.length references + List.length generated_control_references);
   printf "Named raw rename exemptions:\n";
   List.iter exempt_references ~f:(fun { source; identifier; reason } ->
       printf "  %s: %s -- %s\n" source (String.concat ~sep:"." identifier) reason);
@@ -132,6 +186,14 @@ let () =
       match rename_references ~source:("synthetic " ^ label) content with
       | [ { identifier; _ } ] -> List.equal String.equal identifier expected
       | _ -> false);
+  Verdict.p "every .mll and .mly input contributes its derived .ml output"
+    (List.equal String.equal expected_generated generated);
+  Verdict.p "the generated-source negative control is detected through the derived corpus"
+    (List.mem generated generated_control_source ~equal:String.equal
+    &&
+    match generated_control_references with
+    | [ { identifier; _ } ] -> List.equal String.equal identifier generated_control_identifier
+    | _ -> false);
   Verdict.p_empty "no raw rename reference exists outside Atomic_file" ~over:references offenders;
   Verdict.p_all "every named raw rename exemption has a reason" exempt_references
     ~f:(fun { reason; _ } -> not (String.is_empty (String.strip reason)));

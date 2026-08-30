@@ -1,0 +1,3 @@
+every zero-reference implicit export is named: true
+named dead-export exemptions are unique: true
+every named dead-export exemption remains necessary: true

@@ -123,6 +123,10 @@ files.
   `benchmarks/example-report.md` are stale by that factor, and any tuned-vs-default gap measured on
   Metal before this was partly the search buying its way out of the tax (`Privatize` "sidesteps the
   volatile-RMW workaround tax", `autotune.ml`), so those gaps should be expected to shrink.
+  gh-ocannl-820 later changed the remaining workaround's form from a volatile accumulator to
+  expression-level volatile device reads inside the accumulating loop: on the standalone
+  scalar-loss shape the ratio fell from 4.08x to 1.03x while its reproducer matrix stayed green
+  row-for-row.
 - That digest covers the compiled result, NOT the diagnostics. When re-measuring a search's
   decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
   first — otherwise the second run reports `state=cache-replay`, `timed=0`, `declines=[]` and every
@@ -169,8 +173,10 @@ files.
   pool is `spawn`-based with `maxtasksperchild`, and a worker lost between `imap_unordered` chunks
   leaves the parent in `futex_do_wait` forever, at ~1% CPU with the GPU idle, on searches that take
   under two minutes in their other repeats. Seen on both the CUDA and the HIP box; the root cause is
-  upstream and unchased. `orchestrate.py` now spawns each cell in its own process group under
-  `--cell-timeout` (default 1800 s) and kills the GROUP on expiry: the pool workers hold the cell's
+  upstream and unchased. `cell_group.py` now gives every child spawned by `orchestrate.py` and
+  `gh675_cells.py` one shared group/job, TERM-to-KILL, output-preserving reap discipline;
+  `orchestrate.py` puts cells under `--cell-timeout` (default 1800 s) and kills the GROUP on expiry:
+  the pool workers hold the cell's
   stdout pipe, so killing the direct child alone moves the hang into the sweep's own
   `communicate()` — the trap to remember whenever a runner is bounded from outside. Two facts
   outlive the fix: `timeout(1)` cannot be the mechanism here (uutils' `-k` misses the process
@@ -184,8 +190,8 @@ files.
   wears a from-scratch label. Wipe it before quoting a search timing.
 
 - Killing a runner from outside: the escalation to SIGKILL is owed to the process GROUP, never to
-  the child's pipes (`gh675_cells.kill_group`, and `orchestrate.kill_cell_group` after the
-  gh-ocannl-760 review re-learned it). A descendant that ignores SIGTERM but does not hold the
+  the child's pipes (`cell_group.terminate`; gh-ocannl-842 unified the two hand-written versions
+  in `gh675_cells.py` and `orchestrate.py`). A descendant that ignores SIGTERM but does not hold the
   cell's stdout lets `communicate` return promptly, so a kill path that escalates only when its
   read blocks skips the SIGKILL exactly where it was needed — and the survivor keeps the GPU while
   the sweep stamps every later cell valid. The reverse trap is in the same function: a descendant
@@ -194,7 +200,10 @@ files.
   after the leader is gone. The escalation must also be spelled as a boolean rather than a signal
   number if the code runs on Windows: `signal.SIGKILL` does not exist there, so a
   "SIGKILL if posix else SIGTERM" argument silently picks the CTRL_BREAK branch again instead of
-  `taskkill /F /T`. And `start_new_session` cuts both ways — it is what lets a cap reach the
+  a Windows Job Object. The child is born suspended, assigned to a kill-on-close Job, and only
+  then resumed; the Job retains descendants after their leader exits and supplies the active
+  process count that `taskkill /F /T` could not. And `start_new_session` cuts both ways — it is
+  what lets a cap reach the
   descendants, and it is why a SIGTERM to the DRIVER no longer reaches them, so a driver that
   spawns cells this way owes itself a SIGTERM handler that takes the running cell with it.
 
@@ -205,6 +214,9 @@ files.
   halfway — but deferring must not be spelled `pthread_sigmask`: the mask is INHERITED across
   fork/exec, so every child starts with SIGTERM blocked, its graceful phase does nothing, and
   every kill costs the full grace before SIGKILL (measured here: 1.0 s → 11.5 s per killed cell).
+  Deliver a held cancellation from the deferral's `finally`, not after it: the latter is skipped
+  when cleanup is already unwinding with another exception, leaving SIGTERM pending until a later
+  child or forever when this was the last one (gh-ocannl-842).
   Defer with a flag the handler checks, and re-raise on the way out. The other one is about what
   a survivor means: a cell that ran to completion while something it spawned outlived SIGKILL is
   a FAILED cell, not a successful one with a warning — the survivor holds the device, so the

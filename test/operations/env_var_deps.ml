@@ -657,6 +657,43 @@ let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
    8). *)
 let env_reader_home = "arrayjit/lib/utils.ml"
 
+(* Dune resolves aliases, module defaults, and action paths within the directory a stanza is applied
+   to. Keep that descent in one place: checks plug into [checks], and this iterator hands every one
+   the same [(subdir, stanzas)] groups. A new check therefore starts per-directory instead of having
+   to rediscover [(subdir ...)] traversal for itself (gh-ocannl-813). *)
+let per_directory file_stanzas ~checks =
+  List.stable_sort file_stanzas ~compare:(fun (a, _) (b, _) -> String.compare a b)
+  |> List.group ~break:(fun (a, _) (b, _) -> not (String.equal a b))
+  |> List.iter ~f:(fun group ->
+      let subdir = fst (List.hd_exn group) in
+      let stanzas = List.map group ~f:snd in
+      List.iter checks ~f:(fun check -> check subdir stanzas))
+
+(* A control of the iteration seam itself. The callback stands for a check added after the refactor:
+   it contains no descent, yet receives the root and both nested directories from
+   [per_directory]. *)
+let per_directory_control () =
+  let stanzas =
+    Scan.stanzas
+      {dune|(rule (target root))
+(subdir child
+ (rule (target child))
+ (subdir grandchild
+  (rule (target grandchild))))
+|dune}
+  in
+  let file_stanzas = Scan.walk "" stanzas ~f:(fun subdir stanza -> [ (subdir, stanza) ]) in
+  let seen = ref [] in
+  let new_check subdir _stanzas = seen := subdir :: !seen in
+  per_directory file_stanzas ~checks:[ new_check ];
+  printf
+    "The per-directory seam is put to a root stanza and two nested `(subdir ...)` groups. The\n\
+     checker plugged into it contains no traversal of its own.\n\n";
+  Verdict.p
+    "a newly plugged-in check receives the root and every nested directory without adding descent"
+    (List.equal String.equal (List.rev !seen) [ ""; "child"; "child/grandchild" ]);
+  printf "\n"
+
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -988,22 +1025,16 @@ let main () =
           | [] -> []
           | words -> [ "markers: " ^ String.concat ~sep:", " words ] )
         :: !by_file;
-      (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
-         needing it. Both directions, since a declaration nothing reads for is the restatement this
-         replaces rather than the relationship.
-
-         Per SUBDIRECTORY, not per dune file (Codex P2, round 3). `(subdir gen …)` applies its
-         stanzas to another directory, so the modules they name live there and the executables they
-         run are theirs -- and a walk that only saw the top level reported a nested stanza's source
-         as claimed by nobody. `Scan.walk` is the same descent the marker and site scans make. *)
-      let artifact_groups =
-        Scan.walk "" stanzas ~f:(fun subdir stanza -> [ (subdir, stanza) ])
-        |> List.stable_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
-        |> List.group ~break:(fun (a, _) (b, _) -> not (String.equal a b))
-        |> List.map ~f:(fun group ->
-            let subdir = fst (List.hd_exn group) in
-            (subdir, Scan.in_subdir dir subdir, List.map group ~f:snd))
+      (* The stanzas as dune applies them, each with the [(subdir ...)] it sits under.
+         [marked_stanzas] makes the same descent as the backend subject scan; this is the one input
+         to [per_directory] below, so every directory-scoped check consumes the same groups. *)
+      let file_stanzas = List.map marked ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp)) in
+      let stanzas_in subdir =
+        List.filter_map file_stanzas ~f:(fun (candidate, stanza) ->
+            if String.equal candidate subdir then Some stanza else None)
       in
+      let directory_checks = ref [] in
+      let check_per_directory check = directory_checks := check :: !directory_checks in
       (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
          what qualifies them -- not the repository-relative directory the modules are looked up
          in. *)
@@ -1011,12 +1042,16 @@ let main () =
          relative to where the rule lives, so `(subdir a (rule … probe.exe))` and
          `(subdir b (rule … probe.exe))` name different programs and only the pair says which
          (gh-ocannl-747, Codex P2 round 3). *)
-      let all_group_runners =
-        List.concat_map artifact_groups ~f:(fun (subdir, _, group) ->
-            List.map group ~f:(fun stanza -> (subdir, stanza)))
-      in
-      let subjects =
-        List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
+      let all_group_runners = file_stanzas in
+      let artifact_subjects = ref [] in
+      (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
+         needing it. Both directions, since a declaration nothing reads for is the restatement this
+         replaces rather than the relationship. This is the first consumer of the common
+         per-directory seam; nested modules and executables cannot fall back to the dune file's
+         directory. *)
+      check_per_directory (fun subdir group ->
+          let here = Scan.in_subdir dir subdir in
+          let subjects =
             let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
             let calls module_name = Set.mem artifact_caller_keys (key module_name) in
             (* A module that reads `build_files_prefix` some other way needs the variable tracked
@@ -1044,109 +1079,92 @@ let main () =
                     Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
                   else None)
             in
-            List.map
-              (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_runners
-                 group ~calls ~reads_prefix) ~f:(fun subject -> (here, subject)))
-      in
-      List.iter subjects ~f:(fun (here, subject) ->
-          let where =
-            Printf.sprintf "%s, the %s %s" dune_file subject.Scan.artifact_head
-              subject.Scan.artifact_name
+            Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:all_group_runners
+              group ~calls ~reads_prefix
           in
-          let needs = subject.Scan.artifact_callers @ subject.Scan.artifact_readers in
-          let what =
-            match (subject.Scan.artifact_callers, subject.Scan.artifact_readers) with
-            | [], readers ->
-                String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
-            | callers, [] -> String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
-            | callers, readers ->
-                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init` and "
-                ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
-          in
-          List.iter needs ~f:(fun m ->
-              artifact_claimed :=
-                Set.add !artifact_claimed (String.lowercase (Scan.in_subdir here (m ^ ".ml"))));
-          artifact_table :=
-            Printf.sprintf "  %-58s %s (%s)" where
-              (Scan.artifact_verdict_name subject.Scan.artifact_verdict)
-              (if List.is_empty needs then subject.Scan.artifact_deps_site
-               else String.concat ~sep:", " needs)
-            :: !artifact_table;
-          match subject.Scan.artifact_verdict with
-          | Scan.Artifact_declared | Scan.Artifact_other_reader -> ()
-          | Scan.Artifact_undeclared ->
-              Int.incr artifact_violations;
-              fail
-                (Printf.sprintf
-                   "%s: %s -- `%s` decides which directory the run's generated artifacts are read \
-                    from, and %s does not declare `(env_var %s)`, so dune serves the previous \
-                    run's result across a change of it. Add the declaration there"
-                   where what artifact_config_key subject.Scan.artifact_deps_site
-                   Scan.artifact_env_var)
-          | Scan.Artifact_stale_declaration ->
-              Int.incr artifact_violations;
-              fail
-                (Printf.sprintf
-                   "%s declares `(env_var %s)` in %s and no module of it reads `%s` at all -- \
-                    neither through `Test_utils.Generated.init` nor by name. A declaration with \
-                    nothing behind it is a restatement, not a relationship, and the next author \
-                    copies it. Drop it, or read the generated artifacts through \
-                    `Test_utils.Generated`, which is the one supported way to read them"
-                   where Scan.artifact_env_var subject.Scan.artifact_deps_site artifact_config_key)
-          | Scan.Artifact_unrun ->
-              Int.incr artifact_violations;
-              fail
-                (Printf.sprintf
-                   "%s: %s, and no stanza in this file runs the executable -- an `(executable)` \
-                    has no `deps` field, so the `(env_var %s)` declaration goes on the rule that \
-                    RUNS it, the same placement as the `%s` dep and the backend marker. This scan \
-                    can find neither"
-                   where what Scan.artifact_env_var Scan.config_file)
-          | Scan.Artifact_in_library ->
-              Int.incr artifact_violations;
-              fail
-                (Printf.sprintf
-                   "%s: %s, from a library module -- the initializer empties the artifact \
-                    directory of the process that owns it, so it belongs to an executable's own \
-                    modules. Called through a library it puts the `(env_var %s)` requirement on \
-                    every stanza that links the library, where nothing follows it"
-                   where what Scan.artifact_env_var));
-      artifact_by_file := (dune_file, List.map subjects ~f:snd) :: !artifact_by_file;
-      (* The stanzas as dune applies them, each with the `(subdir …)` it sits under.
-         `marked_stanzas` makes the same descent and carries the same pairing, so the two readings
-         of one file agree about which stanzas it holds and where. *)
-      let file_stanzas = List.map marked ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp)) in
-      (* Dune resolves both a default module set and an ALIAS within one directory, so the stanzas
-         that answer for either are that subdirectory's (Codex P2, round 1; P1, round 4). *)
-      let stanzas_in subdir =
-        List.filter_map file_stanzas ~f:(fun (sub, stanza) ->
-            if String.equal sub subdir then Some stanza else None)
-      in
-      let subdirs =
-        List.dedup_and_sort ~compare:String.compare (List.map file_stanzas ~f:fst @ [ "" ])
-      in
+          List.iter subjects ~f:(fun subject ->
+              let where =
+                Printf.sprintf "%s, the %s %s" dune_file subject.Scan.artifact_head
+                  subject.Scan.artifact_name
+              in
+              let needs = subject.Scan.artifact_callers @ subject.Scan.artifact_readers in
+              let what =
+                match (subject.Scan.artifact_callers, subject.Scan.artifact_readers) with
+                | [], readers ->
+                    String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
+                | callers, [] ->
+                    String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
+                | callers, readers ->
+                    String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init` and "
+                    ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key
+                    ^ "` by name"
+              in
+              List.iter needs ~f:(fun m ->
+                  artifact_claimed :=
+                    Set.add !artifact_claimed (String.lowercase (Scan.in_subdir here (m ^ ".ml"))));
+              artifact_table :=
+                Printf.sprintf "  %-58s %s (%s)" where
+                  (Scan.artifact_verdict_name subject.Scan.artifact_verdict)
+                  (if List.is_empty needs then subject.Scan.artifact_deps_site
+                   else String.concat ~sep:", " needs)
+                :: !artifact_table;
+              artifact_subjects := subject :: !artifact_subjects;
+              match subject.Scan.artifact_verdict with
+              | Scan.Artifact_declared | Scan.Artifact_other_reader -> ()
+              | Scan.Artifact_undeclared ->
+                  Int.incr artifact_violations;
+                  fail
+                    (Printf.sprintf
+                       "%s: %s -- `%s` decides which directory the run's generated artifacts are \
+                        read from, and %s does not declare `(env_var %s)`, so dune serves the \
+                        previous run's result across a change of it. Add the declaration there"
+                       where what artifact_config_key subject.Scan.artifact_deps_site
+                       Scan.artifact_env_var)
+              | Scan.Artifact_stale_declaration ->
+                  Int.incr artifact_violations;
+                  fail
+                    (Printf.sprintf
+                       "%s declares `(env_var %s)` in %s and no module of it reads `%s` at all -- \
+                        neither through `Test_utils.Generated.init` nor by name. A declaration \
+                        with nothing behind it is a restatement, not a relationship, and the next \
+                        author copies it. Drop it, or read the generated artifacts through \
+                        `Test_utils.Generated`, which is the one supported way to read them"
+                       where Scan.artifact_env_var subject.Scan.artifact_deps_site
+                       artifact_config_key)
+              | Scan.Artifact_unrun ->
+                  Int.incr artifact_violations;
+                  fail
+                    (Printf.sprintf
+                       "%s: %s, and no stanza in this file runs the executable -- an \
+                        `(executable)` has no `deps` field, so the `(env_var %s)` declaration goes \
+                        on the rule that RUNS it, the same placement as the `%s` dep and the \
+                        backend marker. This scan can find neither"
+                       where what Scan.artifact_env_var Scan.config_file)
+              | Scan.Artifact_in_library ->
+                  Int.incr artifact_violations;
+                  fail
+                    (Printf.sprintf
+                       "%s: %s, from a library module -- the initializer empties the artifact \
+                        directory of the process that owns it, so it belongs to an executable's \
+                        own modules. Called through a library it puts the `(env_var %s)` \
+                        requirement on every stanza that links the library, where nothing follows \
+                        it"
+                       where what Scan.artifact_env_var)));
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). Per SUBDIRECTORY too: a
          `(subdir child …)` group defines aliases in `child`, and a gate at the top level is a gate
          for the top level -- so a family alias written inside the group could otherwise serve its
          member from cache with a rejected spelling ambient, which is the whole failure
          gh-ocannl-652 closed (Codex P1, round 4). *)
-      let in_directory subdir alias = subdir ^ "\t" ^ alias in
-      let gated_here =
-        List.concat_map subdirs ~f:(fun subdir ->
-            Set.to_list (gated_aliases (stanzas_in subdir)) |> List.map ~f:(in_directory subdir))
-        |> Set.of_list (module String)
-      in
-      let entry_points =
-        List.concat_map subdirs ~f:(fun subdir ->
-            List.map (entry_points (stanzas_in subdir)) ~f:(fun alias -> (subdir, alias)))
-      in
-      (* The lock (Codex P1 round 4): a gate in a directory whose actions take it has to take it
-         too. Per subdirectory group, like the gate check itself: `is_gate` is false of the outer
-         `(subdir …)` form, so a top-level reading finds neither the group's locked actions nor its
-         gate, and the group's unlocked gate is exactly the stanza the next training test gets
-         copied from (Codex P2, round 5). *)
-      List.iter subdirs ~f:(fun subdir ->
-          let here = stanzas_in subdir in
+      check_per_directory (fun subdir here ->
+          let where =
+            if String.is_empty subdir then dune_file
+            else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir
+          in
+          let gated_here = gated_aliases here in
+          let entries = entry_points here in
+          (* The lock (Codex P1 round 4): a gate in a directory whose actions take it has to take it
+             too. Since this check receives a directory group, a group's unlocked gate cannot hide
+             behind the outer [(subdir ...)] form (Codex P2, round 5). *)
           if List.exists here ~f:takes_training_lock then
             List.iter here ~f:(fun s ->
                 if is_gate s && not (takes_training_lock s) then
@@ -1160,44 +1178,43 @@ let main () =
                         else Printf.sprintf ", in `(subdir %s …)`" subdir)
                        training_lock
                        (String.concat ~sep:", " (aliases_of s))
-                       training_lock)));
-      List.iter entry_points ~f:(fun (subdir, alias) ->
-          let where =
-            if String.is_empty subdir then dune_file
-            else Printf.sprintf "%s, in `(subdir %s …)`" dune_file subdir
-          in
-          if Set.mem gated_here (in_directory subdir alias) then gated := (where, alias) :: !gated
-            (* The exemption is a statement about ONE directory -- `benchmarks/dune` runs python3
-               over the orchestrator's own tests and links no OCANNL executable -- and a `(subdir
-               …)` group of that file is a different directory, whose stanzas the recorded reason
-               says nothing about (Codex P2, round 7). Applying it there would exempt a nested
-               OCANNL-linked test on the strength of its parent's reason. *)
-          else if String.is_empty subdir && Map.mem gateless dune_file then
-            gateless_used := Set.add !gateless_used dune_file
-          else
-            fail
-              (Printf.sprintf
-                 "%s has actions on the `%s` alias and no ambient gate reaches it -- nothing there \
-                  declares a rejected environment spelling, so `ocannl_backend=cuda dune build \
-                  @%s` would serve that directory's cached results with the fatal startup check \
-                  never reached; copy the `env_spelling_gate` stanza for that alias from a \
-                  neighbour, depend on the gate's alias from the rule, or exempt the directory by \
-                  name with the reason"
-                 where alias
-                 (if String.equal alias "runtest" then
-                    Scan.in_subdir (Stdlib.Filename.dirname dune_file) (Scan.in_subdir subdir alias)
-                  else alias)));
-      (* Each suite's members, against what it aggregates -- in the directory that defines it. *)
-      List.iter suites ~f:(fun suite ->
-          List.iter entry_points ~f:(fun (subdir, alias) ->
-              let reaches = aliases_reached_from (stanzas_in subdir) suite in
-              if member_of suite alias && not (Set.mem reaches alias) then
+                       training_lock));
+          List.iter entries ~f:(fun alias ->
+              if Set.mem gated_here alias then gated := (where, alias) :: !gated
+                (* The exemption is a statement about ONE directory -- `benchmarks/dune` runs
+                   python3 over the orchestrator's own tests and links no OCANNL executable -- and a
+                   `(subdir …)` group of that file is a different directory, whose stanzas the
+                   recorded reason says nothing about (Codex P2, round 7). Applying it there would
+                   exempt a nested OCANNL-linked test on the strength of its parent's reason. *)
+              else if String.is_empty subdir && Map.mem gateless dune_file then
+                gateless_used := Set.add !gateless_used dune_file
+              else
                 fail
                   (Printf.sprintf
-                     "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- `dune \
-                      build @%s` would skip it silently; list `(alias %s)` in the `(alias (name \
-                      %s) (deps …))` stanza"
-                     dune_file alias suite suite alias suite)));
+                     "%s has actions on the `%s` alias and no ambient gate reaches it -- nothing \
+                      there declares a rejected environment spelling, so `ocannl_backend=cuda dune \
+                      build @%s` would serve that directory's cached results with the fatal \
+                      startup check never reached; copy the `env_spelling_gate` stanza for that \
+                      alias from a neighbour, depend on the gate's alias from the rule, or exempt \
+                      the directory by name with the reason"
+                     where alias
+                     (if String.equal alias "runtest" then
+                        Scan.in_subdir
+                          (Stdlib.Filename.dirname dune_file)
+                          (Scan.in_subdir subdir alias)
+                      else alias)));
+          (* Each suite's members, against what it aggregates -- in the directory that defines
+             it. *)
+          List.iter suites ~f:(fun suite ->
+              let reaches = aliases_reached_from here suite in
+              List.iter entries ~f:(fun alias ->
+                  if member_of suite alias && not (Set.mem reaches alias) then
+                    fail
+                      (Printf.sprintf
+                         "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- \
+                          `dune build @%s` would skip it silently; list `(alias %s)` in the \
+                          `(alias (name %s) (deps …))` stanza"
+                         dune_file alias suite suite alias suite))));
       (* The scans family, the same question asked of the repo-wide scans (gh-ocannl-703): the rule
          that diffs a scan's output against its golden is the one that fails, so it is the one
          `@scans` has to reach. The producers are recognized by what they read rather than by name,
@@ -1323,54 +1340,53 @@ let main () =
             has_family_modules u.unit_stanza
             && List.exists (unit_module_sources u) ~f:(Set.mem lifecycle_sources))
       in
-      List.iter
-        [ (metal_family, metal_members); (lifecycle_family, lifecycle_members) ]
-        ~f:(fun (family, members) ->
-          (* Reachability PER DIRECTORY, from the stanzas dune applies there: a `(subdir child …)`
-             group may carry its own `(alias (name <family>) …)`, and the root recursive `@<family>`
-             build reaches it, so a member there is correctly wired (Codex P2, round 2). Which
-             directory is asked comes from the ALIAS, not from the member: an executable in a
-             subdirectory run by a top-level rule is aggregated by a top-level family stanza (Codex
-             P2, round 3). What is never right is reaching an alias from a directory that does not
-             define it, which is what asking the file as a whole would have allowed. *)
-          let reaches =
-            Hashtbl.of_alist_exn
-              (module String)
-              (List.map
-                 (List.dedup_and_sort ~compare:String.compare
-                    (List.map file_stanzas ~f:fst @ [ "" ]))
-                 ~f:(fun subdir ->
-                   (subdir, aliases_reached_from (stanzas_in subdir) family.family_alias)))
-          in
-          let reached (subdir, alias) =
-            match Hashtbl.find reaches subdir with
-            | Some reached -> Set.mem reached alias
-            | None -> false
-          in
-          List.iter members ~f:(fun u ->
-              let aggregated = List.exists u.unit_aliases ~f:reached in
-              family_table :=
-                (dune_file, family.family_alias, u.unit_identity, aggregated) :: !family_table;
-              if not aggregated then
-                fail
-                  (Printf.sprintf
-                     "%s: the %s%s %s, and the `%s` alias does not reach it -- `dune build @%s` \
-                      would skip it silently. List %s, adding an `(alias (name %s) (deps …))` \
-                      stanza in that directory if it has no member yet"
-                     dune_file u.unit_identity
-                     (if String.is_empty u.unit_subdir then ""
-                      else Printf.sprintf " in `(subdir %s …)`" u.unit_subdir)
-                     family.family_is family.family_alias family.family_alias
-                     (match u.unit_aliases with
-                     | [] ->
-                         "the alias of a rule that runs it -- it has none of its own, being an \
-                          `(executable)` no rule in this file runs under a dedicated alias"
-                     | aliases ->
-                         String.concat ~sep:" or "
-                           (List.map aliases ~f:(fun (subdir, alias) ->
-                                if String.is_empty subdir then Printf.sprintf "`(alias %s)`" alias
-                                else Printf.sprintf "`(alias %s)` in `(subdir %s …)`" alias subdir)))
-                     family.family_alias)));
+      let family_reaches = Hashtbl.create (module String) in
+      let family_directory family subdir = family.family_alias ^ "\t" ^ subdir in
+      check_per_directory (fun subdir here ->
+          List.iter families ~f:(fun family ->
+              Hashtbl.set family_reaches ~key:(family_directory family subdir)
+                ~data:(aliases_reached_from here family.family_alias)));
+      let check_family_members () =
+        List.iter
+          [ (metal_family, metal_members); (lifecycle_family, lifecycle_members) ]
+          ~f:(fun (family, members) ->
+            (* Reachability PER DIRECTORY, from the stanzas dune applies there: a `(subdir child …)`
+               group may carry its own `(alias (name <family>) …)`, and the root recursive
+               `@<family>` build reaches it, so a member there is correctly wired (Codex P2, round
+               2). Which directory is asked comes from the ALIAS, not from the member: an executable
+               in a subdirectory run by a top-level rule is aggregated by a top-level family stanza
+               (Codex P2, round 3). What is never right is reaching an alias from a directory that
+               does not define it, which is what asking the file as a whole would have allowed. *)
+            let reached (subdir, alias) =
+              match Hashtbl.find family_reaches (family_directory family subdir) with
+              | Some reached -> Set.mem reached alias
+              | None -> false
+            in
+            List.iter members ~f:(fun u ->
+                let aggregated = List.exists u.unit_aliases ~f:reached in
+                family_table :=
+                  (dune_file, family.family_alias, u.unit_identity, aggregated) :: !family_table;
+                if not aggregated then
+                  fail
+                    (Printf.sprintf
+                       "%s: the %s%s %s, and the `%s` alias does not reach it -- `dune build @%s` \
+                        would skip it silently. List %s, adding an `(alias (name %s) (deps …))` \
+                        stanza in that directory if it has no member yet"
+                       dune_file u.unit_identity
+                       (if String.is_empty u.unit_subdir then ""
+                        else Printf.sprintf " in `(subdir %s …)`" u.unit_subdir)
+                       family.family_is family.family_alias family.family_alias
+                       (match u.unit_aliases with
+                       | [] ->
+                           "the alias of a rule that runs it -- it has none of its own, being an \
+                            `(executable)` no rule in this file runs under a dedicated alias"
+                       | aliases ->
+                           String.concat ~sep:" or "
+                             (List.map aliases ~f:(fun (subdir, alias) ->
+                                  if String.is_empty subdir then Printf.sprintf "`(alias %s)`" alias
+                                  else Printf.sprintf "`(alias %s)` in `(subdir %s …)`" alias subdir)))
+                       family.family_alias)))
+      in
       (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
          merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
          in the file rather than of the golden diffs alone, since any rule can be given such an
@@ -1379,8 +1395,7 @@ let main () =
          alias in the directory it applies the stanza to, and a top-level reading of a file with a
          group sees neither the group's `(test)` names nor the rules that could collide with them
          (Codex P2, round 10). *)
-      List.iter subdirs ~f:(fun subdir ->
-          let here = stanzas_in subdir in
+      check_per_directory (fun subdir here ->
           let generated = generated_runtest_names here in
           let gate_names = gate_generated_names here in
           List.iter here ~f:(fun stanza ->
@@ -1571,95 +1586,101 @@ let main () =
          live in that directory, and a top-level walk saw the `(subdir …)` wrapper instead of them
          -- so a child module could read a tracing gate or an ambient variable undeclared (Codex P2,
          round 16). *)
-      List.iter file_stanzas ~f:(fun (subdir, stanza) ->
+      check_per_directory (fun subdir stanzas ->
           let dir = Scan.in_subdir dir subdir in
-          match (Scan.head stanza, Scan.field stanza "modules") with
-          | Some kind, Some modules when List.mem module_stanzas kind ~equal:String.equal ->
-              let name = match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>" in
-              let where =
-                Printf.sprintf "%s%s, %s %s" dune_file
-                  (if String.is_empty subdir then ""
-                   else Printf.sprintf " in `(subdir %s …)`" subdir)
-                  kind name
-              in
-              let env_vars_of field =
-                match Scan.field stanza field with
-                | None -> []
-                | Some args -> List.concat_map args ~f:env_vars_in
-              in
-              let declared_gates =
-                List.filter (env_vars_of "preprocessor_deps") ~f:(fun name ->
-                    match Utils.classify_env_var name with
-                    | Utils.Env_reserved prefix -> String.equal prefix gate_prefix
-                    | _ -> false)
-              in
-              let sources =
-                List.filter_map modules ~f:(function
-                  | Sexp.Atom module_name ->
-                      Option.map (source_of ~dir module_name) ~f:(fun on_disk ->
-                          (module_name ^ ".ml", In_channel.read_all on_disk))
-                  | _ -> None)
-              in
-              let read_gates =
-                List.concat_map sources ~f:(fun (source, content) ->
-                    Sources.tracing_gates_in_source content
-                    |> List.map ~f:(fun gate -> (gate, source)))
-              in
-              if (not (List.is_empty declared_gates)) && not (Set.mem scanned_dirs dir) then
-                fail
-                  (Printf.sprintf
-                     "%s declares tracing gates, and this check was handed no sources from %s to \
-                      check them against -- add the directory to the rule\'s globs"
-                     where
-                     (if String.is_empty dir then "the repository root" else dir))
-              else (
-                List.iter read_gates ~f:(fun (gate, source) ->
-                    if not (List.mem declared_gates gate ~equal:String.equal) then
-                      fail
-                        (Printf.sprintf
-                           "%s/%s reads the tracing gate %s while being preprocessed, and %s does \
-                            not declare it -- setting the variable then returns the modules \
-                            already built without the trace statements"
-                           dir source gate where)
-                    else gate_table := (where, gate, dir ^ "/" ^ source) :: !gate_table);
-                List.iter declared_gates ~f:(fun gate ->
-                    if not (List.Assoc.mem read_gates gate ~equal:String.equal) then
-                      fail
-                        (Printf.sprintf
-                           "%s declares the tracing gate %s, which none of its modules reads -- \
-                            drop it, or move it to the library whose modules do"
-                           where gate)));
-              (* The run-time half (Codex P2, round 2). A gate is read while the module is built;
-                 `Sys.getenv "OCANNL_TOOL_TEST_RESTRICT_MASK"` is read while it RUNS, and the
-                 consequence of not declaring it is the same one this whole check is about --
-                 `test_cpu_topology` was reusable across a change of the mask that decides what it
-                 does. Presence is checkable here and not for configuration keys at large, which a
-                 test reaches through the library rather than by name: what makes the difference is
-                 the literal in the source, which says exactly which variable this module reads.
+          List.iter stanzas ~f:(fun stanza ->
+              match (Scan.head stanza, Scan.field stanza "modules") with
+              | Some kind, Some modules when List.mem module_stanzas kind ~equal:String.equal ->
+                  let name =
+                    match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>"
+                  in
+                  let where =
+                    Printf.sprintf "%s%s, %s %s" dune_file
+                      (if String.is_empty subdir then ""
+                       else Printf.sprintf " in `(subdir %s …)`" subdir)
+                      kind name
+                  in
+                  let env_vars_of field =
+                    match Scan.field stanza field with
+                    | None -> []
+                    | Some args -> List.concat_map args ~f:env_vars_in
+                  in
+                  let declared_gates =
+                    List.filter (env_vars_of "preprocessor_deps") ~f:(fun name ->
+                        match Utils.classify_env_var name with
+                        | Utils.Env_reserved prefix -> String.equal prefix gate_prefix
+                        | _ -> false)
+                  in
+                  let sources =
+                    List.filter_map modules ~f:(function
+                      | Sexp.Atom module_name ->
+                          Option.map (source_of ~dir module_name) ~f:(fun on_disk ->
+                              (module_name ^ ".ml", In_channel.read_all on_disk))
+                      | _ -> None)
+                  in
+                  let read_gates =
+                    List.concat_map sources ~f:(fun (source, content) ->
+                        Sources.tracing_gates_in_source content
+                        |> List.map ~f:(fun gate -> (gate, source)))
+                  in
+                  if (not (List.is_empty declared_gates)) && not (Set.mem scanned_dirs dir) then
+                    fail
+                      (Printf.sprintf
+                         "%s declares tracing gates, and this check was handed no sources from %s \
+                          to check them against -- add the directory to the rule\'s globs"
+                         where
+                         (if String.is_empty dir then "the repository root" else dir))
+                  else (
+                    List.iter read_gates ~f:(fun (gate, source) ->
+                        if not (List.mem declared_gates gate ~equal:String.equal) then
+                          fail
+                            (Printf.sprintf
+                               "%s/%s reads the tracing gate %s while being preprocessed, and %s \
+                                does not declare it -- setting the variable then returns the \
+                                modules already built without the trace statements"
+                               dir source gate where)
+                        else gate_table := (where, gate, dir ^ "/" ^ source) :: !gate_table);
+                    List.iter declared_gates ~f:(fun gate ->
+                        if not (List.Assoc.mem read_gates gate ~equal:String.equal) then
+                          fail
+                            (Printf.sprintf
+                               "%s declares the tracing gate %s, which none of its modules reads \
+                                -- drop it, or move it to the library whose modules do"
+                               where gate)));
+                  (* The run-time half (Codex P2, round 2). A gate is read while the module is
+                     built; `Sys.getenv "OCANNL_TOOL_TEST_RESTRICT_MASK"` is read while it RUNS, and
+                     the consequence of not declaring it is the same one this whole check is about
+                     -- `test_cpu_topology` was reusable across a change of the mask that decides
+                     what it does. Presence is checkable here and not for configuration keys at
+                     large, which a test reaches through the library rather than by name: what makes
+                     the difference is the literal in the source, which says exactly which variable
+                     this module reads.
 
-                 An `(executable)` stanza has no `deps` field at all -- its companion rule carries
-                 them -- so for those the declaration is looked for anywhere in the dune file, the
-                 same latitude `config_dep_completeness` gives the `ocannl_config` dep. *)
-              let declared_for_stanza =
-                match Scan.field stanza "deps" with
-                | Some _ -> env_vars_of "deps"
-                | None -> declared
-              in
-              List.iter sources ~f:(fun (source, content) ->
-                  Sources.env_var_reads_in_source content
-                  |> List.iter ~f:(fun read ->
-                      match Utils.classify_env_var read with
-                      | Utils.Env_not_addressed -> ()
-                      | _ ->
-                          if not (List.mem declared_for_stanza read ~equal:String.equal) then
-                            fail
-                              (Printf.sprintf
-                                 "%s/%s reads the environment variable %s by name, and %s does not \
-                                  declare it -- dune then reuses the previous result across a \
-                                  change of the variable that decides what the run does"
-                                 dir source read where)
-                          else read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
-          | _ -> ());
+                     An `(executable)` stanza has no `deps` field at all -- its companion rule
+                     carries them -- so for those the declaration is looked for anywhere in the dune
+                     file, the same latitude `config_dep_completeness` gives the `ocannl_config`
+                     dep. *)
+                  let declared_for_stanza =
+                    match Scan.field stanza "deps" with
+                    | Some _ -> env_vars_of "deps"
+                    | None -> declared
+                  in
+                  List.iter sources ~f:(fun (source, content) ->
+                      Sources.env_var_reads_in_source content
+                      |> List.iter ~f:(fun read ->
+                          match Utils.classify_env_var read with
+                          | Utils.Env_not_addressed -> ()
+                          | _ ->
+                              if not (List.mem declared_for_stanza read ~equal:String.equal) then
+                                fail
+                                  (Printf.sprintf
+                                     "%s/%s reads the environment variable %s by name, and %s does \
+                                      not declare it -- dune then reuses the previous result \
+                                      across a change of the variable that decides what the run \
+                                      does"
+                                     dir source read where)
+                              else read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
+              | _ -> ()));
       (* gh-ocannl-749: the same question, for the reads OCANNL's own environment reader makes.
          `Sys.getenv "NAME"` above says which variable it reads in the call itself;
          `Utils.read_env_var key` takes the key as a value, and the shape that matters takes it from
@@ -1697,23 +1718,23 @@ let main () =
       (* Through `Scan.walk`, so a directive inside a `(subdir gen …)` is reached too: looping the
          top-level forms let a nested one bypass the refusal entirely (Codex P2, round 13 -- the
          second defect in this one refusal, the first being that it matched nothing at all). *)
-      List.iter
-        (Scan.walk "" stanzas ~f:(fun _subdir stanza -> [ stanza ]))
-        ~f:(fun stanza ->
-          match stanza with
-          | Sexp.List (Sexp.Atom "include_subdirs" :: args)
-            when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
-              fail
-                (Printf.sprintf
-                   "%s declares `(include_subdirs %s)`, which puts a descendant directory's \
-                    modules into its stanzas' module sets -- this check derives a stanza's modules \
-                    from its own directory, so it cannot say which modules those stanzas own, nor \
-                    which environment reads go with them. Teach it the mode, or keep the guard's \
-                    modules beside their dune file"
-                   dune_file
-                   (String.concat ~sep:" " (List.concat_map args ~f:Scan.atoms)))
-          | _ -> ());
-      List.iter artifact_groups ~f:(fun (subdir, here, group) ->
+      check_per_directory (fun _subdir stanzas ->
+          List.iter stanzas ~f:(fun stanza ->
+              match stanza with
+              | Sexp.List (Sexp.Atom "include_subdirs" :: args)
+                when not (List.mem (List.concat_map args ~f:Scan.atoms) "no" ~equal:String.equal) ->
+                  fail
+                    (Printf.sprintf
+                       "%s declares `(include_subdirs %s)`, which puts a descendant directory's \
+                        modules into its stanzas' module sets -- this check derives a stanza's \
+                        modules from its own directory, so it cannot say which modules those \
+                        stanzas own, nor which environment reads go with them. Teach it the mode, \
+                        or keep the guard's modules beside their dune file"
+                       dune_file
+                       (String.concat ~sep:" " (List.concat_map args ~f:Scan.atoms)))
+              | _ -> ()));
+      check_per_directory (fun subdir group ->
+          let here = Scan.in_subdir dir subdir in
           let directory = if String.is_empty here then "." else here in
           let directory_modules =
             List.filter_map source_files ~f:(fun (path, _) ->
@@ -1937,7 +1958,12 @@ let main () =
                                       Printf.sprintf
                                         ". `%s` is no configuration key OCANNL reads, so it cannot \
                                          be declared -- pin it, or fix the spelling"
-                                        key)))))));
+                                        key))))));
+      (* Every directory-scoped check above plugs into this one traversal. Keep the reverse: checks
+         run in source order, so diagnostics and tables remain stable while the seam changes. *)
+      per_directory file_stanzas ~checks:(List.rev !directory_checks);
+      check_family_members ();
+      artifact_by_file := (dune_file, !artifact_subjects) :: !artifact_by_file);
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
   in
@@ -3902,6 +3928,7 @@ let guard_control () =
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | _ :: [ "--control" ] ->
+      per_directory_control ();
       control ();
       floor_control ();
       guard_control ();

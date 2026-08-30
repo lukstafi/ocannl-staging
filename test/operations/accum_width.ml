@@ -39,9 +39,24 @@ module Numerics = Ir.Numerics
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let p_all2 = Verdict.p_all2
+let p_none = Verdict.p_none
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
+
+type rival_values = { once_narrowed : float; per_step : float }
+type rival_fixture = { initial : float; increment : float; terms : int; narrow : float -> float }
+
+let values { once_narrowed; per_step } = [ once_narrowed; per_step ]
+
+let unordered_pairs xs =
+  List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
+
+let render_rivals { initial; increment; terms; narrow } =
+  let increments = List.init terms ~f:(fun _ -> increment) in
+  let once_narrowed = narrow (List.fold increments ~init:initial ~f:( +. )) in
+  let per_step = List.fold increments ~init:initial ~f:(fun acc x -> narrow (acc +. x)) in
+  { once_narrowed; per_step }
 
 (* Where the serial legs widen bf16 accumulators (see the header): CPU policy or CUDA's mma
    mirror. *)
@@ -196,6 +211,25 @@ let claim_wgreduce =
 let claim_fp8 =
   "fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16)"
 
+let fp8_fixture =
+  {
+    initial = 16.0;
+    increment = 0.5;
+    terms = 8;
+    narrow = (fun x -> Ir.Ops.fp8_to_single (Ir.Ops.single_to_fp8 x));
+  }
+
+let f16_fixture =
+  {
+    initial = 2048.0;
+    increment = 1.0;
+    terms = 8;
+    narrow = (fun x -> Ir.Ops.half_to_single (Ir.Ops.single_to_half x));
+  }
+
+let fp8_values = render_rivals fp8_fixture
+let f16_values = render_rivals f16_fixture
+
 (* === fp8 accumulates wide on every backend (gh-ocannl-663) === *)
 (* No backend has an fp8 accumulator format (its arithmetic bridges through float per operator
    everywhere, and Metal computes fp8 in f32 wholesale), so fp8 reductions take f32 residency
@@ -205,7 +239,7 @@ let claim_fp8 =
    the wide accumulator reaches 20, exactly representable. *)
 let fp8_sum ~name ~first_id () =
   let fp8 = Ir.Ops.fp8 in
-  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id ~dims:[| 8 |] () in
+  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id ~dims:[| fp8_fixture.terms |] () in
   let f8acc = f8node ~dims:[| 1 |] (name ^ "_acc") in
   let f8xs = f8node (name ^ "_xs") in
   Ll_test.materialize f8acc;
@@ -219,15 +253,23 @@ let fp8_sum ~name ~first_id () =
            (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
            (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
   in
-  let f8o = Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name (Ll_test.loop_n f8i 8 f8upd) in
+  let f8o =
+    Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name
+      (Ll_test.loop_n f8i fp8_fixture.terms f8upd)
+  in
   let f8vals =
     Ll_test.execute ~name f8o
-      ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
+      ~seed:
+        [
+          (f8acc, [| fp8_fixture.initial |]);
+          (f8xs, Array.create ~len:fp8_fixture.terms fp8_fixture.increment);
+        ]
       ~read:[ f8acc ]
   in
   (List.hd_exn f8vals).(0)
 
-let fp8_leg () = p claim_fp8 (Float.equal (fp8_sum ~name:"aw_fp8" ~first_id:9700 ()) 20.0)
+let fp8_leg () =
+  p claim_fp8 (Float.equal (fp8_sum ~name:"aw_fp8" ~first_id:9700 ()) fp8_values.once_narrowed)
 
 (* === f16 residency is the fp16_arithmetic policy's question (gh-ocannl-680) === *)
 (* Universal legs, executed on every backend. Under the default [Fp16_auto] each backend keeps its
@@ -241,7 +283,7 @@ let fp8_leg () = p claim_fp8 (Float.equal (fp8_sum ~name:"aw_fp8" ~first_id:9700
    backend exercising it would update these legs, not violate the policy. *)
 let f16_sum ~name ~first_id () =
   let half = Ir.Ops.half in
-  let hnode = Ll_test.node_factory ~prec:half ~first_id ~dims:[| 8 |] () in
+  let hnode = Ll_test.node_factory ~prec:half ~first_id ~dims:[| f16_fixture.terms |] () in
   let hacc = hnode ~dims:[| 1 |] (name ^ "_acc") in
   let hxs = hnode (name ^ "_xs") in
   Ll_test.materialize hacc;
@@ -255,10 +297,16 @@ let f16_sum ~name ~first_id () =
            (Ll_test.get hacc [| Ll_test.fixed 0 |], half),
            (Ll_test.get hxs [| Ll_test.iter hi |], half) ))
   in
-  let ho = Ll_test.optimize ~materialized:[ hacc; hxs ] ~name (Ll_test.loop_n hi 8 hupd) in
+  let ho =
+    Ll_test.optimize ~materialized:[ hacc; hxs ] ~name (Ll_test.loop_n hi f16_fixture.terms hupd)
+  in
   let hvals =
     Ll_test.execute ~name ho
-      ~seed:[ (hacc, [| 2048.0 |]); (hxs, Array.create ~len:8 1.0) ]
+      ~seed:
+        [
+          (hacc, [| f16_fixture.initial |]);
+          (hxs, Array.create ~len:f16_fixture.terms f16_fixture.increment);
+        ]
       ~read:[ hacc ]
   in
   (List.hd_exn hvals).(0)
@@ -303,14 +351,23 @@ let f16_matmul ~name () =
   run ~name mc
 
 let () =
-  let wide16 = Float.equal (f16_sum ~name:"aw_f16_auto" ~first_id:9740 ()) 2056.0 in
+  p_none "the fp8 scalar rival-rendering values are pairwise distinct"
+    (unordered_pairs (values fp8_values))
+    ~f:(fun (a, b) -> Float.equal a b);
+  p_none "the f16 scalar rival-rendering values are pairwise distinct"
+    (unordered_pairs (values f16_values))
+    ~f:(fun (a, b) -> Float.equal a b);
+  let wide16 =
+    Float.equal (f16_sum ~name:"aw_f16_auto" ~first_id:9740 ()) f16_values.once_narrowed
+  in
   Stdio.eprintf "accum_width: default-policy f16 residency on %s is %s (not part of the golden)\n%!"
     backend_name
     (if wide16 then "wide" else "storage");
   p claim_f16_default (Bool.equal wide16 on_cpu);
   let saved_policy = Numerics.get () in
   Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
-  p claim_f16_wide (Float.equal (f16_sum ~name:"aw_f16_wide" ~first_id:9760 ()) 2056.0);
+  p claim_f16_wide
+    (Float.equal (f16_sum ~name:"aw_f16_wide" ~first_id:9760 ()) f16_values.once_narrowed);
   let got_wide16 = f16_matmul ~name:"aw_f16_naive_wide" () in
   (* The wide contract is unconditional: [narrow_compute_f32 = false] leaves f16 COMPUTE at storage
      width (per-operator rounding), but the ACCUMULATOR still resides in f32 and narrows once —
@@ -320,7 +377,7 @@ let () =
   Numerics.set_policy
     { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
   p claim_f16_wide_ncf32_off
-    (Float.equal (f16_sum ~name:"aw_f16_wide_nco" ~first_id:9780 ()) 2056.0);
+    (Float.equal (f16_sum ~name:"aw_f16_wide_nco" ~first_id:9780 ()) f16_values.once_narrowed);
   (* The [Vectorized] retype's direct-cell SIMD form holds its register chains at COMPUTE precision
      — half, in this policy corner on a native-fp16 target — so it must decline rather than round
      narrowly while the serial schedule localizes at f32 (Codex P1 round 2 on staging PR #477). The
@@ -1021,7 +1078,7 @@ let () =
         Tn.update_prec mc2.Tensor.value Ir.Ops.bfloat16;
         let got_off = run ~name:"aw_bf16_naive_off" mc2 in
         p claim_off_value (not (Array.for_all2_exn got_off got ~f:Float.equal)));
-    p claim_off_fp8 (Float.equal (fp8_sum ~name:"aw_fp8_off" ~first_id:9720 ()) 16.0);
+    p claim_off_fp8 (Float.equal (fp8_sum ~name:"aw_fp8_off" ~first_id:9720 ()) fp8_values.per_step);
     Numerics.set_policy saved_policy;
     cc_only claim_off_shape (fun () ->
         let src = Generated.read ~ext:".c" "aw_bf16_naive_off" in

@@ -149,6 +149,16 @@ files.
   the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
   codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
   occurrence-level; they coincide only at first touch on the linear path.
+- The codegen localizer forwards a preceding whole-node `Zero_out` directly into a serial
+  accumulator local only when `Low_level.affine_accesses` finds exactly one same-cell RMW pair and
+  `Affine.covers_box` proves its closing stores cover the whole node (gh-ocannl-821). The zero store
+  is dropped only after `try_localize_serial_reduce` actually accepts, every loop that repeats a
+  cell is inside that accepted scope, no enclosing loop is statically dead, and the covering write
+  is unconditional. Those clauses are distinct from geometric coverage: an enclosing reduction
+  loop can repeat an otherwise covering output nest, a dead loop executes no closing store, and a
+  symbolic-extent guard can make only a prefix execute. A localizer/SIMD decline, partial or
+  conditional coverage, an opaque effect, or an accumulation with no preceding zero retains the
+  original opening value.
 - **A virtualization candidate under an `If` is rejected, and the guard's position decides which
   arm rejects it** (gh-ocannl-651). `check_and_store_virtual`'s walk sees only the subtree it is
   handed, so a guard INTERIOR to that subtree hits its own `If` arm while a guard ENCLOSING it is
@@ -192,6 +202,20 @@ files.
   that check, so neither can answer a hand-built gather with a bare provenance collision. Only
   hand-built IR reaches this: `Assignments` lowering emits no `Get_dynamic`, and the pipeline's own
   comes from `rewrite_one_hot_reductions`, downstream of both arms.
+- **`virtual_llc` owns every placement decision for a tensor read it leaves behind**
+  (gh-ocannl-805, `test/operations/virtual_decision_coverage.ml`). The always-on
+  `validate_virtualization_decision_coverage` seam runs immediately after the pass and before
+  cleanup: every `Get` / `Get_dynamic` in a statement cleanup will keep, including tensor-buffer
+  reads nested in a kept inlined `Local_scope` body, must have an effective placement state (a
+  lineage decision or declared intent). The intermediate IR still contains a virtual candidate's
+  setter and its self-read, but cleanup drops that statement whole without visiting its RHS, so the
+  seam mirrors cleanup's keep/drop decision and excludes it. `Never_virtual` counts -- it is the
+  virtualizer's materialization verdict even though cleanup/backend finalization later resolves it
+  to `Local` / `On_device`; a scope's `Get_local` and a `Get_merge_buffer` do not, because neither
+  reads a tensor context buffer. This is deliberately a second exhaustive walk rather than an
+  assertion copied into each read arm: forgetting a future arm fails at the pass boundary, before
+  cleanup can make the result depend on whether it walks the undecided node's setter (`Virtual
+  151/152`) or reader (`Never_virtual 17`) first.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 - Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,

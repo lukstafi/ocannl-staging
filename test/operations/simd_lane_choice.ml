@@ -51,7 +51,8 @@ let () =
   (* The claim the whole ladder exists to make, over every extent a kernel might carry. *)
   let extents = List.range 1 2049 in
   let never_worse ~elt_bytes =
-    List.for_all extents ~f:(fun extent ->
+    (not (List.is_empty extents))
+    && List.for_all extents ~f:(fun extent ->
         trips ~vector_bytes:64 ~elt_bytes ~extent <= trips ~vector_bytes:32 ~elt_bytes ~extent)
   in
   p "a 64-byte register file never renders more trips than a 32-byte one, f32"

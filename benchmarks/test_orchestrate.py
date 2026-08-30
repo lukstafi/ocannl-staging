@@ -14,8 +14,10 @@ import unittest.mock
 from pathlib import Path
 
 import fixture_digest
+import cell_group
 import orchestrate
 from runners import bench_common
+from test.test_cell_group import CellGroupTest  # imported so unittest.main includes shared tests
 
 HERE = Path(__file__).resolve().parent
 
@@ -1515,6 +1517,70 @@ class CellTimeoutTest(unittest.TestCase):
             time.sleep(0.05)
         return not self.alive(pid)
 
+    def test_a_held_termination_is_delivered_during_exceptional_unwinding(self):
+        # Code after a contextmanager's finally is skipped when the body raises.  The old
+        # deferral put delivery there, so a SIGTERM held while spawn/cleanup also raised stayed
+        # pending until a later child -- or forever when this was the last one.
+        self.assertEqual(orchestrate._defer_depth, 0)
+        self.assertIsNone(orchestrate._deferred_signal)
+        try:
+            with self.assertRaises(SystemExit) as raised:
+                with orchestrate._deferring_cancellation():
+                    orchestrate._deferred_signal = signal.SIGTERM
+                    raise RuntimeError("the concurrent child failure")
+            self.assertIn("terminated by signal", str(raised.exception))
+            self.assertIsInstance(raised.exception.__context__, RuntimeError)
+        finally:
+            orchestrate._defer_depth = 0
+            orchestrate._deferred_signal = None
+
+    def test_a_held_termination_does_not_replace_an_orchestrator_cleanup_failure(self):
+        self.assertEqual(orchestrate._defer_depth, 0)
+        self.assertIsNone(orchestrate._deferred_signal)
+        try:
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
+                with orchestrate._deferring_cancellation():
+                    orchestrate._deferred_signal = signal.SIGTERM
+                    raise cell_group.CleanupFailed("SURVIVORS still hold the device")
+            self.assertIn("SURVIVORS", str(raised.exception))
+            self.assertNotIn("killed first", str(raised.exception))
+        finally:
+            orchestrate._defer_depth = 0
+            orchestrate._deferred_signal = None
+
+    def test_the_tinygrad_cache_probe_collects_helpers_it_spawned(self):
+        # This probe was the final raw subprocess.run site in the matrix sweep.  Importing a
+        # framework can itself create helpers, so a direct-child timeout is not enough.
+        package = self.dir / "tinygrad"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        pidfile = self.dir / "probe-helper.pid"
+        cachedb = self.dir / "cache.db"
+        (package / "helpers.py").write_text(
+            "import os, subprocess, sys\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+            "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open(os.environ['PROBE_HELPER_PID'], 'w').write(str(kid.pid))\n"
+            "CACHEDB = os.environ['PROBE_CACHEDB']\n"
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHONPATH": str(self.dir),
+                "PROBE_HELPER_PID": str(pidfile),
+                "PROBE_CACHEDB": str(cachedb),
+            }
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "VENV_PY", Path(sys.executable)))
+            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
+            found = orchestrate.tinygrad_cachedb(env)
+
+        self.assertEqual(found, cachedb)
+        self.assertTrue(pidfile.exists(), "the probe fixture did not spawn its helper")
+        helper = int(pidfile.read_text())
+        self.assertTrue(self.wait_gone(helper), f"pid {helper} outlived the cache probe")
+
     def test_a_finished_cell_is_unaffected_by_the_cap(self):
         # The cap must be invisible to every cell that runs: same result line, no note.
         cell = self.python(
@@ -1618,35 +1684,19 @@ class CellTimeoutTest(unittest.TestCase):
         # was measured against whatever is still holding the device.
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
-            stack.enter_context(unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True))
+            stack.enter_context(
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
+            )
             _, note, _ = self.run_cell(
                 "stuck in the driver", self.python("import time; time.sleep(300)"), timeout=0.5
             )
 
         self.assertIn("SURVIVED SIGKILL", note)
         self.assertIn("measured against it", note)
-
-    def test_the_windows_force_step_is_a_force_step(self):
-        # The escalation is a boolean, not a signal number, because passing one decides the
-        # Windows branch by accident: `signal.SIGKILL` does not exist there, so the natural
-        # "SIGKILL if posix else SIGTERM" sends a second CTRL_BREAK where the force kill was due
-        # and a cell that ignores CTRL_BREAK is never killed at all (gh-ocannl-760 review).
-        win_signal = types.SimpleNamespace(
-            SIGTERM=signal.SIGTERM, SIGKILL=None, CTRL_BREAK_EVENT=1
-        )
-        proc = unittest.mock.Mock(pid=4242)
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(unittest.mock.patch.object(orchestrate.os, "name", "nt"))
-            stack.enter_context(unittest.mock.patch.object(orchestrate, "signal", win_signal))
-            run = stack.enter_context(unittest.mock.patch.object(orchestrate.subprocess, "run"))
-
-            orchestrate._signal_group(proc, force=False)
-            self.assertEqual(proc.send_signal.call_args[0][0], win_signal.CTRL_BREAK_EVENT)
-            self.assertEqual(run.call_count, 0)
-
-            orchestrate._signal_group(proc, force=True)
-            self.assertEqual(run.call_args[0][0], ["taskkill", "/F", "/T", "/PID", "4242"])
-            self.assertEqual(proc.send_signal.call_count, 1)  # not a second CTRL_BREAK
 
     @unittest.skipUnless(os.name == "posix", "SIGALRM and process groups are POSIX here")
     def test_an_interrupted_cell_gets_the_same_cache_treatment_as_a_capped_one(self):
@@ -1731,34 +1781,15 @@ class CellTimeoutTest(unittest.TestCase):
         end = time.monotonic() + 10
         alive = True
         while time.monotonic() < end and alive:
-            alive = orchestrate._group_alive(proc.pid)
+            alive = (
+                cell_group._observe_posix_group(proc.pid, allow_zombie_gone=True)
+                is not cell_group.GONE
+            )
             if alive:
                 time.sleep(0.02)
         os.kill(proc.pid, 0)
 
         self.assertFalse(alive, "a group of nothing but zombies read as alive")
-
-    def test_the_windows_force_step_is_not_skipped_when_the_leader_is_reaped(self):
-        # Windows has no group liveness to read, so `_group_alive` answers False there whatever is
-        # running. Returning on that answer at the first pass would equate a closed leader pipe
-        # with a dead tree -- the inference the group kill exists to avoid -- and `taskkill /F /T`
-        # would never run (gh-ocannl-760 review).
-        win_signal = types.SimpleNamespace(
-            SIGTERM=signal.SIGTERM, SIGKILL=None, CTRL_BREAK_EVENT=1
-        )
-        proc = unittest.mock.Mock(pid=4242)
-        proc.communicate.return_value = ("cell output", None)
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(unittest.mock.patch.object(orchestrate.os, "name", "nt"))
-            stack.enter_context(unittest.mock.patch.object(orchestrate, "signal", win_signal))
-            stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
-            run = stack.enter_context(unittest.mock.patch.object(orchestrate.subprocess, "run"))
-
-            out, survived = orchestrate.kill_cell_group(proc)
-
-        self.assertEqual(out, "cell output")
-        self.assertFalse(survived)
-        self.assertEqual(run.call_args[0][0], ["taskkill", "/F", "/T", "/PID", "4242"])
 
     def test_two_cells_killed_in_the_same_second_do_not_overwrite_each_other(self):
         # The stamp is second-resolution, so a low cap or a GPU column that wedges at once puts
@@ -1802,7 +1833,7 @@ class CellTimeoutTest(unittest.TestCase):
         self.addCleanup(signal.signal, signal.SIGINT, previous_int)
         orchestrate.install_termination_handler()
         cell = self.python("import time; time.sleep(300)")
-        real_popen = orchestrate.subprocess.Popen
+        real_popen = cell_group.subprocess.Popen
         spawned = []
 
         def popen_then_cancel(*args, **kwargs):
@@ -1816,7 +1847,7 @@ class CellTimeoutTest(unittest.TestCase):
 
         started = time.monotonic()
         with unittest.mock.patch.object(
-            orchestrate.subprocess, "Popen", side_effect=popen_then_cancel
+            cell_group.subprocess, "Popen", side_effect=popen_then_cancel
         ):
             with self.assertRaises(SystemExit):
                 self.run_cell("cancelled mid-spawn", cell, timeout=60)
@@ -1864,7 +1895,11 @@ class CellTimeoutTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
-                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
             )
             result, note, _ = self.run_cell("successful with a survivor", cell, timeout=60)
 
@@ -2024,7 +2059,11 @@ class CellTimeoutTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
-                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
             )
             _, note, _ = self.run_cell(
                 "successful over a survivor",
@@ -2128,7 +2167,7 @@ class CellTimeoutTest(unittest.TestCase):
         # ESCAPES the group into its own session while still holding the stdout it inherited,
         # which is what makes every reap in the loop time out.
         pidfile = self.dir / "unreapable.pid"
-        holder = subprocess.Popen(
+        holder = cell_group.spawn(
             self.python(
                 "import subprocess, sys, time\n"
                 "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
@@ -2140,7 +2179,6 @@ class CellTimeoutTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            **orchestrate._own_group_kwargs(),
         )
         # The kill loop cannot reap this leader (that is the point), so the test reaps it.
         self.addCleanup(holder.wait)
@@ -2163,7 +2201,7 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIsNotNone(holder.returncode, "the kill left the cell's leader unreaped")
 
     @unittest.skipUnless(os.name == "posix", "the cancellation is delivered by a signal here")
-    def test_a_cancelled_supporting_command_says_its_group_outlived_the_kill(self):
+    def test_a_cancelled_supporting_command_preserves_its_cleanup_failure(self):
         # The other exit from `_run_supporting`, and the same survivor its ordinary path stops
         # the sweep over. Here the sweep is already leaving, so there is nothing to stop -- but a
         # cancellation that reports a clean exit over a process still holding the device is how
@@ -2178,14 +2216,17 @@ class CellTimeoutTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
-                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
             )
-            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             signal.setitimer(signal.ITIMER_REAL, 1.0)
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
                 orchestrate.run_supporting(self.python("import time; time.sleep(300)"))
 
-        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
 
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_successful_cell_whose_leftovers_were_killed_still_handles_the_cache(self):
@@ -2271,7 +2312,11 @@ class CellTimeoutTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
-                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
             )
             with self.assertRaises(SystemExit) as raised:
                 orchestrate.run_supporting(self.python("pass"), capture_output=True)
@@ -2296,15 +2341,15 @@ class CellTimeoutTest(unittest.TestCase):
         # the probe itself.
         depth_at_probe = []
 
-        def probe(_pid):
+        def probe(_proc):
             depth_at_probe.append(orchestrate._defer_depth)
-            return False
+            return cell_group.GONE
 
         cell = self.python(
             "import json; print(json.dumps("
             "{'workload': 'w', 'step_ms': {'p50': 1.0}, 'compile_s': 0.5}))"
         )
-        with unittest.mock.patch.object(orchestrate, "_group_alive", probe):
+        with unittest.mock.patch.object(orchestrate, "_group_observation", probe):
             result, note, _ = self.run_cell("probed", cell, timeout=60)
 
         self.assertIsNone(note)
@@ -2316,7 +2361,7 @@ class CellTimeoutTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.name == "posix", "the interrupt path needs POSIX signals")
-    def test_an_interrupted_cell_with_a_survivor_says_so(self):
+    def test_an_interrupted_cell_preserves_its_cleanup_failure(self):
         # The interrupt branch exits rather than records, so its print is the operator's only
         # chance to hear that something still holds the device -- while the cancellation's own
         # message says the cell was killed, and the retry they are about to start would be
@@ -2332,15 +2377,18 @@ class CellTimeoutTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             stack.enter_context(
-                unittest.mock.patch.object(orchestrate, "_group_alive", lambda _pid: True)
+                unittest.mock.patch.object(
+                    orchestrate,
+                    "_group_observation",
+                    lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
+                )
             )
-            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
                 orchestrate.run_cell(
                     "interrupted over a survivor", self.python("import time; time.sleep(300)")
                 )
 
-        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
 
     def test_the_cache_is_quarantined_even_if_the_cell_log_cannot_be_written(self):
         # The kill is what tore the cache, so undoing it must not sit behind fallible code: the

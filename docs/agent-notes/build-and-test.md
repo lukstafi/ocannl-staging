@@ -41,6 +41,11 @@ that they earn a lookup rather than always-loaded space.
   bullets that merely open with the same few words. The second half is not decoration: a rule that
   fires on ordinary writing gets switched off rather than obeyed, so every rule owes a demonstration
   that it does not.
+- A repository scan that parses generated OCaml must derive those outputs from the generator inputs,
+  not name today's targets. `atomic_file_rename_scan` maps the recursively globbed `.mll`/`.mly`
+  inputs into a `%{read-lines:...}` dynamic-dependency manifest; its committed ocamllex fixture
+  carries a forbidden rename that must arrive through that derived set, so either a blind derivation
+  or disconnected scan wiring fails permanently (gh-ocannl-862).
 - GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
   branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
   staging#413) survived nine review rounds, `dune build @check`, its targeted aliases and a
@@ -378,6 +383,15 @@ that they earn a lookup rather than always-loaded space.
   they express the WHOLE shape, since they ignore locations and attributes while keeping arity and
   labels exact. What they cannot reach — a variable-length argument list, a string constant's value,
   a module binding — stays written against the constructors.
+- `dead_export_scan` (gh-ocannl-806) is a source-level ratchet over direct `.ml` modules without a
+  sibling `.mli` in `arrayjit/lib/` and `tensor/`: it enumerates source-declared top-level `let` and
+  `external` values, then counts qualified references from other sources. Module aliases are
+  followed conservatively; an unqualified identifier in the lexical scope of `open M` counts even
+  when shadowing could make it local, and `include M` counts every value because it re-exports the
+  interface. Those choices admit false positives rather than refusing valid code. Values created
+  only by PPX expansion or brought into the defining module by `include` are outside this first
+  cut. Every current zero-reference export is an exact stale-checked exemption: adding an `.mli`,
+  removing the value, or giving it a detected caller requires deleting its exemption.
 - A documentation comment survives into the parse tree as an `[@@@ocaml.doc "…"]` attribute holding
   a STRING, so an iterator hands it to an expression hook exactly like code would (verified by
   removing the guard — the prose cases flip to findings). Any scan over string literals must
@@ -446,7 +460,7 @@ that they earn a lookup rather than always-loaded space.
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
   cleanup assertion pass vacuously.
-  The same harness drives `stop` itself, since the predicate exists to keep three sentences apart:
+  The same harness drives `stop` itself, keeping its two surviving-group sentences apart:
   a FORGED run directory (`cmd`, `cap`, `wt`, `log`, `pgid`, `gtoken`, and deliberately no
   `pid`/`wpid`/`exit`, so the surviving-group branch is the one reached), pointed at by `last` under
   a private `OCANNL_TOOL_TEST_RUNS` so the ambient run history is never touched, with the pointer's
@@ -455,13 +469,13 @@ that they earn a lookup rather than always-loaded space.
   actually killed the WHOLE group, since announcing a KILL it did not send would leave the worktree
   lock held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The
   two legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly
-  one, and each is matched against stop's whole output rather than a substring of it: three legs
-  keeping three sentences apart all pass a containment test against a stop that prints two at once.
+  one, and each is matched against stop's whole output rather than a substring of it: both wording
+  legs pass a containment test against a stop that prints both sentences at once.
   Every fixture group holds TWO processes for the same reason — with only its leader in it, the
   incorrect leader-only `kill -KILL "$pg"` passes for a group kill while real dune children would
   survive it. And the leader is recorded for cleanup BETWEEN the fork and the checks, not after
   them: job control has just put that child out of reach of a signal aimed at the harness, so an
-  interrupt in that window otherwise leaves the group running past the run (all three: Codex round
+  interrupt in that window otherwise leaves the group running past the run (both: Codex round
   1 on staging#505, each reproduced against a mutated copy before being fixed). The sentence is
   matched against stop's STDOUT alone, with stderr kept and shown only on failure: a diagnostic on
   stderr is not part of the answer, and merging the two made a passing `stop` fail an exact match.
@@ -477,13 +491,11 @@ that they earn a lookup rather than always-loaded space.
   All four `/proc`-reading shell tools here (`tools/test-run.sh`, `scripts/setup-ocaml-env.sh` and
   both hand-run harnesses) use the grouped form; the plain one leaked the message into a caller
   that captured stderr.
-  The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
-  leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
-  itself a running member — in the field it is reached by the census losing a race with a leader
-  that exits between the two probes. That leg therefore FORCES the predicate, the way the zombie leg
-  forces the signal probe: a copy of the shipping script with `return 1` inserted as `group_alive`'s
-  first statement, asserted to be that one line and nothing else, so what is under test is the
-  sentence rather than the predicate legs 2-5 own.
+  The former corpses-only sentence had no constructible state: its branch opened only for a leader
+  that passed `group_verified`, while `proc_alive` rejects a zombie leader and a live leader is
+  itself running work. It was deleted in gh-ocannl-832; the surviving-processes sentence now warns
+  that the group may hold only unreaped exits, and the harness pins that combined wording without a
+  copy of the shipping script whose predicate is artificially forced.
 - **Promote through `tools/promote.sh` during a merge, on every platform.** Promotion writes the
   WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
   add` is committed with its PRE-promotion content, and nothing local objects — every later `dune
@@ -623,6 +635,12 @@ that they earn a lookup rather than always-loaded space.
   emptiness — "no candidate declines", "no key is undocumented", a scan over a tree that is usually
   clean — and those want a companion claim that the population was there at all, which is what the
   `p_empty ~over` form is.
+  `verdict_ratchet` also follows file-local boolean helpers into `Verdict.p`/`claim`/`pass_fail`
+  (and their format-taking forms): a helper returning `for_all`, `for_all2_exn`, `is_empty`, or a
+  negated `exists` must make non-emptiness part of its passing result. Its exact, stale-checked
+  exemption list is only for helpers whose intended passing meaning allows an empty population;
+  synthetic controls include a child process the shipping ratchet demonstrably refuses
+  (gh-ocannl-801).
 - Guarantees that fire only on an empty collection are never exercised by a green suite, so
   `verdict_quantified` stages them: the satisfied forms run directly, and each refusal runs as a
   CHILD process whose streams the parent captures. Capturing is not tidiness — a refusal prints
@@ -1026,9 +1044,22 @@ that they earn a lookup rather than always-loaded space.
 
 ### What CI actually covers
 
+- `dune build @bin-smoke` runs every `bin/` executable sequentially on deliberately tiny workloads
+  with the `cc` backend pinned (gh-ocannl-858). It is an exit-status canary only: its output and
+  timings are not goldens and make no measurement-validity claim. Per-PR CI includes it in the main
+  `@default @runtest` Dune walk, so `@check`'s inability to link or execute an executable no longer
+  leaves first-iteration failures in these tools uncovered. Keep benchmark-reproducibility work in
+  gh-ocannl-743 rather than expanding this alias into a benchmark assertion suite.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- The Ubuntu/OCaml 5.5 main job preprocesses `cc_backend.ml` with
+  `OCANNL_LOG_LEVEL_CC_BACKEND=3` and builds both `@check` and
+  `@test/operations/runtest-cc_backend_trace_name` in that environment. The focused runtime test
+  executes one cc routine and checks the bare result inside its `work` trace against the compiled
+  routine name: `@check` alone only type-checks, so a trace expression that silently resolved a
+  different in-scope binding would otherwise remain green (gh-ocannl-859). The test reports an
+  explicit skip in ordinary level-0 suite runs, keeping the extra execution confined to this gate.
 - `cuda_backend.ml` and `hip_backend.ml` are compiled by NEITHER the macOS dev boxes nor CI, so a
   green `dune build @check` locally proves nothing about them. Each lives in an `(optional)` library
   over `cudajit`/`hipjit`, and `arrayjit.context` reaches its implementation through a dune `select`
@@ -1046,6 +1077,61 @@ that they earn a lookup rather than always-loaded space.
   (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
   gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
+- `tools/remote-verify.sh` is the one-off counterpart to the scheduled sweep for a pushed branch:
+  it derives the remote pointing to the staging repository by URL, fetches the named branch,
+  without rewriting the checkout's `FETCH_HEAD`, resolves one commit, creates a fresh detached
+  worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
+  that switch, and removes just that worktree before its exit sentinel (never repository-wide
+  `worktree prune`, which could unregister an unrelated temporarily unavailable worktree). The individual
+  commands (including worktree add/remove) and the whole SSH trip have separate process-group caps; the latter also bounds setup
+  and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
+  Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
+  selected switch are printed and stripped inside `opam exec`, so only the requested backend can
+  override the pushed tree's configuration. A regular, non-symlink root `ocannl_config` from the pushed commit
+  is the configuration boundary; when the commit has none, the script creates an empty ignored one
+  in the disposable worktree so a personal file above it cannot reach root-launched probes. A
+  worktree root nested under any outer Dune root is refused: without that
+  boundary Dune can build the parent checkout while this script reports the detached commit.
+  `--expect-lib cudajit|hipjit` asserts all three
+  pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
+  backend's absent `.cmi`). A test, probe or `--record-golden` trip also requires a backend and
+  asserts `_build/default/test/config/ocannl_backend.txt`; an unrestricted test alias is reported
+  only as passing under that configuration, since the alias may be backend-independent, while a
+  runnable probe must print its own backend/device evidence. An `@check`-only trip says explicitly
+  that it compiled code and executed no backend. Golden mode prints the corrected `.actual`
+  contents and an apply-ready patch, then re-runs the alias before accepting it so a second failing
+  dependency cannot hide behind a promotable diff. Before reset, source status (with untracked-file
+  reporting forced independently of Git configuration) must name exactly the listed golden
+  destinations, both after promotion and after the re-run. After reporting it, the script resets tracked
+  files, removes untracked files, and proves the worktree clean at the resolved commit before
+  running another operation. Every path also reasserts exact HEAD, clean tracked/untracked source,
+  and the unchanged configuration boundary after each operation and before the final certificate;
+  a nominally successful probe that edits its checkout therefore fails loudly. Do not replace its
+  unpiped ssh output with a convenience pipe: the verifier source travels on a separate remote file
+  descriptor while child stdin is `/dev/null`, and the far-side sentinel is the build verdict plus
+  cleanup, and the local sentinel is ssh's transport verdict.
+- `tools/ci-compiler-test.sh` is the cheap local proxy for a compiler-sensitive Ubuntu CI failure
+  (gh-ocannl-846): it downloads the GCC 13 packages with `apt-get download`, extracts them into a
+  scratch prefix with `dpkg-deb -x`, and runs exactly one named `runtest-` alias in a fresh Dune
+  build directory with `OCANNL_CC_BACKEND_COMPILER_COMMAND` pointing at a logging wrapper. A pass
+  requires that wrapper to have been invoked, so an irrelevant alias or a cached action cannot be
+  certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient OCANNL
+  configuration, generic compiler/header selectors, and the full `LD_*` dynamic-loader override
+  family are cleared before the explicit settings are
+  injected, while the harness-control `OCANNL_TOOL_*` namespace is preserved. `--aarch64-clang`
+  additionally creates an isolated scratch apt index for the host's `VERSION_CODENAME` at
+  apt.llvm.org (with the signing key's SHA-256 pinned in the script), then unpacks clang 21 and
+  arm64 cross headers, derives `LD_LIBRARY_PATH` from the unpacked `libLLVM.so.21`, and sets
+  `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
+  NEON assembly dialect, with the Debian cross-header directory passed explicitly through
+  `-isystem`; today `cc_march_census` is the test that consumes that hook. The real
+  download is deliberately x86_64 Linux/Debian-family-only, since its cc kernels execute on the
+  host; `--dry-run` validates and prints the complete staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
+  GCC patch release is whichever candidate the configured apt indexes serve (the exact version and
+  target are printed and major 13 is enforced), and the clang leg has a Linux cross sysroot rather
+  than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
+  than replacing either. Fetches, extraction and the test harness are attached children: an outer
+  cancellation forwards `TERM` and reaps the active child before scratch cleanup.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
@@ -1080,7 +1166,13 @@ that they earn a lookup rather than always-loaded space.
   branch-tracking pins
   (`ppx_minidebug#main`, `notty-community#master`, `dataprep#main`), which move while the opam files
   stay byte-identical. Deriving from the registry matters: a newly added explicit pin enters the key
-  without a second caller-owned list to update. Both workflows use exact-key restores only: cache
+  without a second caller-owned list to update. The action delegates to
+  `.github/actions/pin-revisions/resolve.sh`, and `tools/test-pin-revisions.sh` exercises that exact
+  production script with fake opam 2.5.2 and git outputs: sorting, duplicates, local-pin exclusion,
+  color suppression, empty registries and failed resolutions all have fault-injected negative
+  controls. CI runs the harness once on its Ubuntu main leg because this is POSIX action plumbing,
+  not an OCaml test or a repository scan, and the fixtures need neither setup-ocaml nor network.
+  Both workflows use exact-key restores only: cache
   lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
   older switch. And both install non-Windows depexts unconditionally after restore, because those
   are system packages absent from `_opam` (gh-ocannl-809).
@@ -1228,3 +1320,12 @@ that they earn a lookup rather than always-loaded space.
   in alongside them. Ask what range the removed digits excluded, and claim that range. Second: mark
   every relocated line `(not part of the golden)` — stderr and stdout interleave in a terminal, and
   without the tag a reader cannot tell an informational number from an asserted one.
+- A training convergence threshold reads a WINDOW, not the last epoch alone (gh-ocannl-854): use
+  the mean of the last ten logged epochs through `test/training/training_golden.ml`, keep the exact
+  statistic on stderr, and put only its two-sided `Verdict` contract in the golden. Size the bound
+  from the cross-backend/day spread of that SAME window statistic, not from one backend's final
+  draw. `circles_conv` is the motivating control: its 2026-08-29 multidev_cc final epoch jumped to
+  0.32 off a 0.14--0.19 tail, while the ten-point window mean was 0.186; across the 08-24..30 sweep
+  the window statistic ranged 0.115--0.301, so 0.4 leaves measured headroom and still excludes the
+  0.80--1.06 epoch-100 means. The helper rejects fewer than ten values, so shortening a loop cannot
+  silently turn the window claim back into a smaller, noisier sample.

@@ -1,4 +1,5 @@
 Epoch 0, loss below threshold: true
 Epoch 20, loss below threshold: true
-Epoch 39, loss below threshold: true
+every epoch loss is a finite, nonnegative cross-entropy: true
+Last 10 logged epochs mean loss below 7: true
 Held-out valid-transition accuracy above 0.90: true

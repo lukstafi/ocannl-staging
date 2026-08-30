@@ -101,12 +101,14 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-dead_export_scan)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
+  (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
@@ -184,6 +186,7 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-dead_export_scan)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
@@ -199,6 +202,7 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
+  (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
@@ -212,6 +216,34 @@
  (libraries base ocannl stdio printbox-text)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-859: `@check` proves that a non-default ppx_minidebug gate compiles, but not that a
+; trace expression resolved the intended binding. The ordinary level-0 suite records an explicit
+; skip; the Ubuntu/OCaml 5.5 level-3 CI gate builds this focused alias in the same dune invocation
+; as `@check`, then executes one cc routine and checks the semantic value in its `work` trace.
+
+(test
+ ; ocannl-backend: cc -- Context.cpu selects cc directly; the action also enables its routine log.
+ (name cc_backend_trace_name)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_LOG_LEVEL_CC_BACKEND))
+ (modules cc_backend_trace_name)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (action
+  (run
+   %{test}
+   "--ocannl_build_files_prefix=cc_backend_trace_name"
+   "--ocannl_clean_up_log_files_on_startup=true"
+   "--ocannl_debug_backend=flushing"
+   "--ocannl_debug_log_from_routines=true"
+   "--ocannl_debug_log_to_stream_files=true"
+   "--ocannl_log_file_stem=cc_backend_trace_name"
+   "--ocannl_log_main_domain_to_stdout=false"
+   "--ocannl_log_level=3")))
 
 (executable
  (name micrograd_demo_logging)
@@ -1144,6 +1176,29 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-805: the post-virtual_llc decision-coverage seam. The negative control injects raw
+; hand-built IR directly into the validator; the normal leg runs the same shape through optimize.
+
+(test
+ ; ocannl-backend: none -- hand-built IR is optimized and inspected, never linked or executed.
+ (name virtual_decision_coverage)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules virtual_decision_coverage)
+ (libraries base ocannl ll_test))
+
+; gh-ocannl-817: real-graph reachability probe plus the explicit Set_vec_unop lowering boundary.
+
+(test
+ ; ocannl-backend: none -- shape inference and assignment lowering only; no routine is linked.
+ (name set_vec_extent_guard)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules set_vec_extent_guard)
+ (libraries base ocannl ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name virtual_uncaptured_loop)
  (package neural_nets_lib)
@@ -1891,12 +1946,13 @@
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
 
-; gh-ocannl-803: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
+; gh-ocannl-803/862: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
 ; recursive over the whole repository, so a new top-level directory joins the scan without another
-; list to maintain; the generated lexer/parser outputs add the compiled OCaml actions from .mll/.mly
-; inputs. The one raw rename that implements Atomic_file is a named exemption in the scanner,
-; carrying its reason and a staleness check. tools/test-run.sh's shell twin is outside an OCaml parse
-; by design and remains tracked through gh-ocannl-607.
+; list to maintain. atomic_file_rename_scan_fixture/generated_sources derives the generated OCaml
+; corpus from every .mll/.mly input; `%{read-lines:...}` turns those names into dependencies, so a
+; new producer joins by construction. The one production rename is a named, counted exemption;
+; the generated fixture is a permanent forbidden-rename control. tools/test-run.sh's shell twin is
+; outside an OCaml parse by design and remains tracked through gh-ocannl-607.
 
 (executable
  (name atomic_file_rename_scan)
@@ -1909,13 +1965,25 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
-  ../../tensor/lexer.ml
-  ../../tensor/parser.ml
-  (glob_files_rec ../../*.ml))
+  (:generators
+   (glob_files_rec ../../*.mll)
+   (glob_files_rec ../../*.mly))
+  (:generated
+   %{read-lines:atomic_file_rename_scan_fixture/generated_sources})
+  (:sources
+   (glob_files_rec ../../*.ml)))
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:atomic_file_rename_scan.exe} %{workspace_root} %{deps}))))
+   (run
+    %{dep:atomic_file_rename_scan.exe}
+    %{workspace_root}
+    --generators
+    %{generators}
+    --generated
+    %{generated}
+    --sources
+    %{sources}))))
 
 (rule
  (alias runtest-atomic_file_rename_scan)
@@ -1924,6 +1992,48 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
+
+; gh-ocannl-806: modules without interfaces implicitly export every top-level binding. The live
+; scan ratchets every source-declared value in direct modules under arrayjit/lib and tensor against
+; external qualified, aliased, opened, or included references. The matching policy is pure in
+; test/support/dead_export_scan.ml, so these cases exercise it against synthetic violations and
+; near misses rather than trusting today's usually-clean repository as its own control.
+
+(test
+ ; ocannl-backend: none -- reads synthetic OCaml sources through ppxlib and links no backend.
+ (name dead_export_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules dead_export_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(executable
+ (name dead_export_scan)
+ (modules dead_export_scan)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- parses repository OCaml sources and opens no backend.
+ (target dead_export_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../tensor/lexer.ml
+  ../../tensor/parser.ml
+  (glob_files_rec ../../*.ml)
+  (glob_files_rec ../../*.mli))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:dead_export_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-dead_export_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff dead_export_scan.expected dead_export_scan.actual)))
 
 ; gh-ocannl-802: a per-backend golden family covers the backend vocabulary derived from
 ; `Backends.all_of_backend`, and goldens copied from another backend carry a visible provenance
@@ -2756,6 +2866,15 @@
  (libraries base ocannl stdio arrayjit.verdict ll_test))
 
 (test
+ (name simplify_fma_precision)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules simplify_fma_precision)
+ (libraries base ocannl arrayjit.verdict ll_test))
+
+(test
  (name schedule_pipelined_matmul)
  (package neural_nets_lib)
  (deps
@@ -2945,7 +3064,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules reduction_accumulator_residency)
- (libraries base ocannl stdio arrayjit.utils test_utils arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.utils test_utils ll_test arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -3924,6 +4043,53 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
+
+; gh-ocannl-866: PPX output goldens are ocamlformat-hostile and must all be excluded from the
+; unattended formatting sweep. The correspondence used to live only in prose; a path appended to
+; an unterminated `.ocamlformat-ignore` line silently removed two exclusions at once. The scanner
+; checks both directions plus the line/newline structure, and its own child-process controls stage
+; every refusal so a green live tree cannot leave the diagnostic paths dead.
+
+(executable
+ (name ocamlformat_ignore_scan)
+ (modules ocamlformat_ignore_scan)
+ (libraries base stdio unix arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- reads path lists and file existence only, and links no backend.
+ (target ocamlformat_ignore_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ; The scanner enumerates this source tree inside a required clean sandbox. That preserves exact
+  ; path boundaries without putting the 37 KB expansion on a spawned command line. The action's
+  ; non-source occupants are its executable, output target and mandatory copied `ocannl_config`;
+  ; all three are passed below as exclusions so a listed generated path cannot produce a false
+  ; green.
+  (sandbox always)
+  (source_tree ../..)
+  (:ignore ../../.ocamlformat-ignore)
+  ; This focused glob is the independent discovery edge for new PPX goldens and marks the rule as
+  ; a scans-family member; the executable derives the same population from the sandbox tree.
+  (glob_files_rec ../../test/ppx/*_expected.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:ocamlformat_ignore_scan.exe}
+    %{workspace_root}
+    %{ignore}
+    %{target}
+    %{dep:ocamlformat_ignore_scan.exe}
+    %{dep:ocannl_config}))))
+
+(rule
+ (alias runtest-ocamlformat_ignore_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff ocamlformat_ignore_scan.expected ocamlformat_ignore_scan.actual)))
 
 (test
  ; This test asserts which FORM a reduction renders as and which accumulator reference its value
