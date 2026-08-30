@@ -9,3 +9,4 @@ a complete fixture with an extra existing path and no Git metadata passes: true
 a concatenated append is refused in both directions, naming the nonexistent entry and omitted golden: true
 a missing trailing newline is refused with its append-corruption diagnostic: true
 a blank line is refused as a line containing no path: true
+an undeclared file present in the build root is refused as a stale artifact: true

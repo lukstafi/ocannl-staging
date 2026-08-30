@@ -3943,13 +3943,15 @@
   ; Materialize the declared source tree in dune's build root, so existence checks operate only on
   ; declared inputs and work in release/opam source archives with no `.git` metadata. This also
   ; makes deleting any listed path invalidate the rule, not only deleting a PPX golden.
-  (source_tree ../..)
+  (:sources (source_tree ../..))
   (:ignore ../../.ocamlformat-ignore)
-  (:goldens (glob_files_rec ../../test/ppx/*_expected.ml)))
+  ; This focused glob is the independent discovery edge for new PPX goldens and marks the rule as
+  ; a scans-family member; the executable derives the same population from `%{sources}`.
+  (glob_files_rec ../../test/ppx/*_expected.ml))
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{ignore} %{goldens}))))
+   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{ignore} %{sources}))))
 
 (rule
  (alias runtest-ocamlformat_ignore_scan)

@@ -82,6 +82,15 @@ let scan ~path_root arguments =
     List.filter_map paths ~f:(fun (path, _) -> Option.some_if (is_ppx_golden path) path)
     |> List.dedup_and_sort ~compare:String.compare
   in
+  let declared_file path =
+    match List.Assoc.find paths path ~equal:String.equal with
+    | None -> false
+    | Some on_disk -> (
+        match Unix.stat on_disk with
+        | { Unix.st_kind = Unix.S_REG; _ } -> true
+        | _ -> false
+        | exception Unix.Unix_error _ -> false)
+  in
   match ignore_file with
   | None ->
       Verdict.fail
@@ -109,14 +118,14 @@ let scan ~path_root arguments =
                ".ocamlformat-ignore:%d: blank line; each line must contain exactly one path" number));
       Verdict.p_empty "every .ocamlformat-ignore line contains exactly one path" ~over:lines empty;
       let missing_entries =
-        List.filter nonempty ~f:(fun { entry; _ } ->
-            not (Stdlib.Sys.file_exists (Stdlib.Filename.concat path_root entry)))
+        List.filter nonempty ~f:(fun { entry; _ } -> not (declared_file entry))
       in
       report_details
         (List.map missing_entries ~f:(fun { number; entry } ->
-             Printf.sprintf ".ocamlformat-ignore:%d: listed path `%s` does not exist" number entry));
+             Printf.sprintf ".ocamlformat-ignore:%d: listed path `%s` is not a declared source file"
+               number entry));
       Verdict.p_all "every .ocamlformat-ignore entry names an existing file" nonempty
-        ~f:(fun { entry; _ } -> Stdlib.Sys.file_exists (Stdlib.Filename.concat path_root entry));
+        ~f:(fun { entry; _ } -> declared_file entry);
       let unlisted = List.filter goldens ~f:(fun path -> not (Set.mem entry_set path)) in
       report_details
         (List.map unlisted ~f:(fun path ->
@@ -177,10 +186,12 @@ let control () =
   let root = Stdlib.Filename.temp_dir "fmt_ignore_control" "" in
   let a = "test/ppx/a_expected.ml" and b = "test/ppx/b_expected.ml" in
   let extra = "fixtures/format_hostile.ml" in
+  let undeclared = "build/stale_expected.ml" in
   let ignore = ".ocamlformat-ignore" in
   List.iter [ a; b ] ~f:(fun path -> write_file (Stdlib.Filename.concat root path) "golden\n");
   write_file (Stdlib.Filename.concat root extra) "fixture\n";
-  let paths = [ ignore; a; b ] in
+  write_file (Stdlib.Filename.concat root undeclared) "stale artifact\n";
+  let paths = [ ignore; a; b; extra ] in
   let run content =
     write_file (Stdlib.Filename.concat root ignore) content;
     run_child ~root ~exe paths
@@ -201,12 +212,11 @@ let control () =
     if not ok then report label (status, text);
     ok
   in
-  (* [extra] is deliberately not one of the arguments: it proves existence is checked against the
-     declared root, not only against the PPX-golden dependency list. *)
   let legitimate = run (a ^ "\n" ^ b ^ "\n" ^ extra ^ "\n") in
   let concatenated = run (a ^ b ^ "\n") in
   let unterminated = run (a ^ "\n" ^ b) in
   let blank_line = run (a ^ "\n\n" ^ b ^ "\n") in
+  let stale_artifact = run (a ^ "\n" ^ b ^ "\n" ^ undeclared ^ "\n") in
   printf
     "Synthetic controls invoke the shipping scanner over a complete fixture and over each\n\
      malformed shape; refusal output is captured and matched below.\n\n";
@@ -218,7 +228,8 @@ let control () =
     (refused "concatenated append"
        ~messages:
          [
-           "listed path `test/ppx/a_expected.mltest/ppx/b_expected.ml` does not exist";
+           "listed path `test/ppx/a_expected.mltest/ppx/b_expected.ml` is not a declared source \
+            file";
            "test/ppx/b_expected.ml is a ppx-expectation golden missing from .ocamlformat-ignore";
          ]
        concatenated);
@@ -230,6 +241,10 @@ let control () =
     (refused "blank line"
        ~messages:[ ".ocamlformat-ignore:2: blank line; each line must contain exactly one path" ]
        blank_line);
+  Verdict.p "an undeclared file present in the build root is refused as a stale artifact"
+    (refused "stale artifact"
+       ~messages:[ "listed path `build/stale_expected.ml` is not a declared source file" ]
+       stale_artifact);
   remove_tree root
 
 let usage () =
