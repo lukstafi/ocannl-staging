@@ -425,7 +425,11 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx Train.IDX.empty loss1 in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+    (* Queued timing's batching semantics have dedicated executed coverage in
+       [autotune_timing_modes]. Keep this stateful gradient arm about split-reduce reachability: a
+       queued winner is exercised hundreds of times and can trip the separate repeated-execution
+       defect before this test can inspect its report. *)
+    Autotune.tune ~timing:Autotune.Isolated ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
       ~report:(fun r -> report := Some r)
       ctx
       (named "asr_cg_tuned" (Train.grad_update loss1))
