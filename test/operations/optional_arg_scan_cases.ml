@@ -117,6 +117,13 @@ let f ?(feature = true) () = ignore feature|ocaml}
     {ocaml|module Defaults = struct let feature = false end
 let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
     ~implemented:false ~honest:false;
+  case "module opens resolve against their lexical path"
+    {ocaml|module Earlier = struct
+  module Defaults = struct let feature = false end
+  let f ?(feature = true) () = let _ = feature in let open Defaults in feature
+end
+module Later = struct module Defaults = struct let other = false end end|ocaml}
+    ~implemented:false ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -133,14 +140,27 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
   case "local module opens affect following structure items"
     {ocaml|let f ?(_feature = true) () = let module M = struct open Effects let () = ignore _feature end in ()|ocaml}
     ~implemented:true ~honest:false;
+  case "structure opens shadow an outer optional value"
+    {ocaml|module Defaults = struct let feature = false end
+let f ?(feature = true) () = let _ = feature in let module M = struct open Defaults let enabled = feature end in M.enabled|ocaml}
+    ~implemented:false ~honest:false;
   case "an object self pattern shadows the outer option"
     {ocaml|let f ?(feature = true) () = let _ = feature in object (feature) method enabled = feature end|ocaml}
     ~implemented:false ~honest:false;
+  case "an object instance variable shadows the outer option"
+    {ocaml|let f ?(feature = true) () = let _ = feature in object val feature = false method enabled = feature end|ocaml}
+    ~implemented:false ~honest:false;
+  case "Base.ignore through an operator remains a discard"
+    {ocaml|let f ?(feature = true) () = feature |> Base.ignore|ocaml} ~implemented:false
+    ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
     ~honest:false;
   case "an optional argument on a directly returned closure is inventoried"
     {ocaml|let make () = fun ?(feature = true) () -> ignore feature|ocaml} ~implemented:false
+    ~honest:false;
+  case "an optional argument on a returned local function is inventoried"
+    {ocaml|let make () = let g ?(feature = true) () = ignore feature in g|ocaml} ~implemented:false
     ~honest:false;
   case "a constrained optional function is inventoried"
     {ocaml|let f = (fun ?(feature = true) () -> ignore feature : ?feature:bool -> unit -> unit)|ocaml}
@@ -160,6 +180,9 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
   case "a later definition replaces the earlier inventory entry"
     {ocaml|let f ?(feature = true) () = enable feature
 let f ?(feature = true) () = ignore feature|ocaml}
+    ~implemented:false ~honest:false;
+  case "a dynamic binary capture operand generates no read"
+    {ocaml|let%op f ?(stride = 1) kernel dynamic_dims = let _ = stride in let ( +* ) x y = x, y in kernel +* kernel "stride*o+k => o" dynamic_dims|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "recursive-module definitions retain qualification"
     {ocaml|module rec A : sig val f : ?feature:bool -> unit -> unit end = struct

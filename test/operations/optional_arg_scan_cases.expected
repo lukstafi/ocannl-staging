@@ -62,6 +62,8 @@ a local Base open preserves standard ignore: implementation classified: true
 a local Base open preserves standard ignore: honesty classified: true
 a local open can shadow the optional value itself: implementation classified: true
 a local open can shadow the optional value itself: honesty classified: true
+module opens resolve against their lexical path: implementation classified: true
+module opens resolve against their lexical path: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
 underscore label makes an unimplemented option caller-visible: honesty classified: true
 implemented underscore label is stale: implementation classified: true
@@ -74,12 +76,20 @@ local module value bindings shadow sequentially: implementation classified: true
 local module value bindings shadow sequentially: honesty classified: true
 local module opens affect following structure items: implementation classified: true
 local module opens affect following structure items: honesty classified: true
+structure opens shadow an outer optional value: implementation classified: true
+structure opens shadow an outer optional value: honesty classified: true
 an object self pattern shadows the outer option: implementation classified: true
 an object self pattern shadows the outer option: honesty classified: true
+an object instance variable shadows the outer option: implementation classified: true
+an object instance variable shadows the outer option: honesty classified: true
+Base.ignore through an operator remains a discard: implementation classified: true
+Base.ignore through an operator remains a discard: honesty classified: true
 comments and strings do not pretend the option is used: implementation classified: true
 comments and strings do not pretend the option is used: honesty classified: true
 an optional argument on a directly returned closure is inventoried: implementation classified: true
 an optional argument on a directly returned closure is inventoried: honesty classified: true
+an optional argument on a returned local function is inventoried: implementation classified: true
+an optional argument on a returned local function is inventoried: honesty classified: true
 a constrained optional function is inventoried: implementation classified: true
 a constrained optional function is inventoried: honesty classified: true
 optional closures returned through control flow are inventoried: implementation classified: true
@@ -92,5 +102,7 @@ an optional function exported through a tuple is inventoried: implementation cla
 an optional function exported through a tuple is inventoried: honesty classified: true
 a later definition replaces the earlier inventory entry: implementation classified: true
 a later definition replaces the earlier inventory entry: honesty classified: true
+a dynamic binary capture operand generates no read: implementation classified: true
+a dynamic binary capture operand generates no read: honesty classified: true
 recursive-module definitions retain qualification: implementation classified: true
 recursive-module definitions retain qualification: honesty classified: true

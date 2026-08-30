@@ -108,7 +108,7 @@ let rec direct_name expression =
 let is_ignore ~unqualified_visible expression =
   match flatten_ident expression with
   | Some [ "ignore" ] -> unqualified_visible
-  | Some [ "Stdlib"; "ignore" ] -> true
+  | Some [ ("Base" | "Stdlib"); "ignore" ] -> true
   | _ -> false
 
 let binding_defines_standard_ignore binding =
@@ -139,53 +139,99 @@ let values_bound_by_structure items =
       | _ -> [])
   |> List.dedup_and_sort ~compare:String.compare
 
+type module_export = { path : string list; position : int; values : string list }
+
 let module_values structure =
   let found = ref [] in
+  let module_path = ref [] in
+  let within_module name f =
+    let saved = !module_path in
+    module_path := saved @ [ name ];
+    Exn.protect ~f ~finally:(fun () -> module_path := saved)
+  in
+  let record name binding =
+    match binding.pmb_expr.pmod_desc with
+    | Pmod_structure items ->
+        found :=
+          {
+            path = !module_path @ [ name ];
+            position = binding.pmb_loc.loc_start.pos_cnum;
+            values = values_bound_by_structure items;
+          }
+          :: !found
+    | _ -> ()
+  in
   let iterator =
-    object
+    object (self)
       inherit Ast_traverse.iter as super
 
       method! structure_item item =
-        (match item.pstr_desc with
-        | Pstr_module
-            {
-              pmb_name = { txt = Some module_name; _ };
-              pmb_expr = { pmod_desc = Pmod_structure items; _ };
-              _;
-            } ->
-            found := (module_name, values_bound_by_structure items) :: !found
+        match item.pstr_desc with
+        | Pstr_module ({ pmb_name = { txt = Some module_name; _ }; _ } as binding) ->
+            record module_name binding;
+            within_module module_name (fun () -> self#module_expr binding.pmb_expr)
         | Pstr_recmodule bindings ->
             List.iter bindings ~f:(fun binding ->
-                match (binding.pmb_name.txt, binding.pmb_expr.pmod_desc) with
-                | Some module_name, Pmod_structure items ->
-                    found := (module_name, values_bound_by_structure items) :: !found
-                | _ -> ())
-        | _ -> ());
-        super#structure_item item
+                match binding.pmb_name.txt with
+                | Some module_name ->
+                    record module_name binding;
+                    within_module module_name (fun () -> self#module_expr binding.pmb_expr)
+                | None -> self#module_expr binding.pmb_expr)
+        | _ -> super#structure_item item
     end
   in
   iterator#structure structure;
   !found
 
-let module_expr_binds module_values module_expr name =
+let lookup_module_values module_values ~module_path ~position path =
+  let rec lexical_candidates prefix =
+    (prefix @ path)
+    :: (match List.drop_last prefix with None -> [] | Some parent -> lexical_candidates parent)
+  in
+  lexical_candidates module_path
+  |> List.find_map ~f:(fun candidate ->
+      List.filter module_values ~f:(fun export ->
+          List.equal String.equal export.path candidate && export.position <= position)
+      |> List.max_elt ~compare:(fun left right -> Int.compare left.position right.position)
+      |> Option.map ~f:(fun export -> export.values))
+
+let module_expr_binds module_values ~module_path module_expr name =
   match module_expr.pmod_desc with
   | Pmod_structure items -> List.mem (values_bound_by_structure items) name ~equal:String.equal
-  | Pmod_ident { txt = Lident module_name; _ } ->
-      List.Assoc.find module_values module_name ~equal:String.equal
-      |> Option.value_map ~default:false ~f:(fun values -> List.mem values name ~equal:String.equal)
+  | Pmod_ident { txt; _ } -> (
+      match try Some (Longident.flatten_exn txt) with _ -> None with
+      | Some path ->
+          lookup_module_values module_values ~module_path
+            ~position:module_expr.pmod_loc.loc_start.pos_cnum path
+          |> Option.value_map ~default:false ~f:(fun values ->
+              List.mem values name ~equal:String.equal)
+      | None -> false)
   | _ -> false
 
-let module_expr_may_shadow_ignore module_values module_expr =
+let module_expr_may_shadow_ignore module_values ~module_path module_expr =
   match module_expr.pmod_desc with
   | Pmod_ident { txt = Lident name; _ } when String.equal name "Base" || String.equal name "Stdlib"
     ->
       false
-  | Pmod_ident { txt = Lident module_name; _ } -> (
-      match List.Assoc.find module_values module_name ~equal:String.equal with
-      | Some values -> List.mem values "ignore" ~equal:String.equal
+  | Pmod_ident { txt; _ } -> (
+      match try Some (Longident.flatten_exn txt) with _ -> None with
+      | Some path ->
+          lookup_module_values module_values ~module_path
+            ~position:module_expr.pmod_loc.loc_start.pos_cnum path
+          |> Option.value_map ~default:true ~f:(fun values ->
+              List.mem values "ignore" ~equal:String.equal)
       | None -> true)
-  | Pmod_structure _ -> module_expr_binds module_values module_expr "ignore"
+  | Pmod_structure _ -> module_expr_binds module_values ~module_path module_expr "ignore"
   | _ -> true
+
+let structure_item_may_shadow_name module_values ~module_path item name =
+  match item.pstr_desc with
+  | Pstr_open open_declaration ->
+      module_expr_binds module_values ~module_path open_declaration.popen_expr name
+  | Pstr_include include_declaration ->
+      module_expr_binds module_values ~module_path include_declaration.pincl_mod name
+  | Pstr_primitive value_description -> String.equal value_description.pval_name.txt name
+  | _ -> false
 
 let direct_discard ~unqualified_ignore_visible name expression =
   match expression.pexp_desc with
@@ -217,53 +263,73 @@ let function_params expression =
   in
   peel [] expression
 
-let rec function_paths ~module_values ~ignore_is_shadowed expression =
+let rec function_paths ~module_values ~module_path ~ignore_is_shadowed expression =
   let params, tail = function_params expression in
-  let rec returned_paths ~ignore_is_shadowed expression =
+  let rec returned_paths ~locals ~ignore_is_shadowed expression =
     match expression.pexp_desc with
-    | Pexp_function _ -> function_paths ~module_values ~ignore_is_shadowed expression
+    | Pexp_function _ -> function_paths ~module_values ~module_path ~ignore_is_shadowed expression
     | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
-        returned_paths ~ignore_is_shadowed inner
+        returned_paths ~locals ~ignore_is_shadowed inner
+    | Pexp_ident { txt = Lident name; _ } -> (
+        match List.findi locals ~f:(fun _ (bound, _, _) -> String.equal bound name) with
+        | Some (index, (_, bound_expression, bound_ignore_is_shadowed)) ->
+            returned_paths
+              ~locals:(List.filteri locals ~f:(fun candidate _ -> candidate <> index))
+              ~ignore_is_shadowed:bound_ignore_is_shadowed bound_expression
+        | None -> [])
     | Pexp_ifthenelse (_, then_, else_) ->
-        returned_paths ~ignore_is_shadowed then_
-        @ Option.value_map else_ ~default:[] ~f:(returned_paths ~ignore_is_shadowed)
+        returned_paths ~locals ~ignore_is_shadowed then_
+        @ Option.value_map else_ ~default:[] ~f:(returned_paths ~locals ~ignore_is_shadowed)
     | Pexp_match (_, cases) ->
         List.concat_map cases ~f:(fun case ->
-            returned_paths
+            returned_paths ~locals
               ~ignore_is_shadowed:(ignore_is_shadowed || pattern_binds case.pc_lhs "ignore")
               case.pc_rhs)
     | Pexp_try (body, cases) ->
-        returned_paths ~ignore_is_shadowed body
+        returned_paths ~locals ~ignore_is_shadowed body
         @ List.concat_map cases ~f:(fun case ->
-            returned_paths
+            returned_paths ~locals
               ~ignore_is_shadowed:(ignore_is_shadowed || pattern_binds case.pc_lhs "ignore")
               case.pc_rhs)
-    | Pexp_let (_, bindings, body) ->
-        returned_paths
+    | Pexp_let (recursive, bindings, body) ->
+        let binding_ignore_is_shadowed =
+          match recursive with
+          | Nonrecursive -> ignore_is_shadowed
+          | Recursive -> Option.value (ignore_binding_state bindings) ~default:ignore_is_shadowed
+        in
+        let new_locals =
+          List.filter_map bindings ~f:(fun binding ->
+              match binding.pvb_pat.ppat_desc with
+              | Ppat_var { txt; _ } -> Some (txt, binding.pvb_expr, binding_ignore_is_shadowed)
+              | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) ->
+                  Some (txt, binding.pvb_expr, binding_ignore_is_shadowed)
+              | _ -> None)
+        in
+        returned_paths ~locals:(new_locals @ locals)
           ~ignore_is_shadowed:
             (Option.value (ignore_binding_state bindings) ~default:ignore_is_shadowed)
           body
     | Pexp_open (open_declaration, body) ->
         let opened_may_shadow =
-          module_expr_may_shadow_ignore module_values open_declaration.popen_expr
+          module_expr_may_shadow_ignore module_values ~module_path open_declaration.popen_expr
         in
-        returned_paths ~ignore_is_shadowed:(ignore_is_shadowed || opened_may_shadow) body
+        returned_paths ~locals ~ignore_is_shadowed:(ignore_is_shadowed || opened_may_shadow) body
     | Pexp_letop { let_; ands; body } ->
         let binds_ignore =
           pattern_binds let_.pbop_pat "ignore"
           || List.exists ands ~f:(fun binding -> pattern_binds binding.pbop_pat "ignore")
         in
-        returned_paths ~ignore_is_shadowed:(ignore_is_shadowed || binds_ignore) body
+        returned_paths ~locals ~ignore_is_shadowed:(ignore_is_shadowed || binds_ignore) body
     | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) | Pexp_sequence (_, body) ->
-        returned_paths ~ignore_is_shadowed body
+        returned_paths ~locals ~ignore_is_shadowed body
     | _ -> []
   in
   let nested =
     match tail with
-    | Expression body -> returned_paths ~ignore_is_shadowed body
+    | Expression body -> returned_paths ~locals:[] ~ignore_is_shadowed body
     | Cases cases ->
         List.concat_map cases ~f:(fun case ->
-            returned_paths
+            returned_paths ~locals:[]
               ~ignore_is_shadowed:(ignore_is_shadowed || pattern_binds case.pc_lhs "ignore")
               case.pc_rhs)
   in
@@ -306,6 +372,12 @@ let string_constant expression =
   | Pexp_constant (Pconst_string (text, _, _)) -> Some text
   | _ -> None
 
+let nonempty_capture_list expression =
+  match expression.pexp_desc with
+  | Pexp_construct ({ txt = Lident "::"; _ }, Some { pexp_desc = Pexp_tuple [ head; _tail ]; _ }) ->
+      Option.is_some (string_constant head)
+  | _ -> false
+
 (* The spec is the right operand's callee in [x ++ "spec" dims] / [x +* "spec" y], and its first
    direct argument in the inline-tensor form [x +* kernel "spec" dims]. Restricting generated reads
    to this exact operator position keeps a diagnostic string from lending an option a use. *)
@@ -329,19 +401,28 @@ let einsum_spec ~dsl expression =
       let spec =
         match (operator_kind, string_constant right, right.pexp_desc) with
         | `Unary, (Some _ as spec), _ -> spec
-        | `Unary, None, Pexp_apply (callee, _) -> string_constant callee
+        | `Unary, None, Pexp_apply (callee, [ (Nolabel, captures) ])
+          when nonempty_capture_list captures ->
+            string_constant callee
         | `Unary, None, _ -> None
         | `Binary, None, Pexp_apply (callee, arguments) -> (
-            match string_constant callee with
-            | Some _ as spec -> spec
-            | None -> (
-                match arguments with (_, first) :: _ -> string_constant first | [] -> None))
+            match arguments with
+            | [ (Nolabel, argument) ] -> (
+                match string_constant callee with
+                | Some _ as spec -> spec
+                | None -> string_constant argument)
+            | [ (Nolabel, first); (Nolabel, second) ] -> (
+                match string_constant callee with
+                | Some _ as spec when nonempty_capture_list first -> spec
+                | _ when nonempty_capture_list second -> string_constant first
+                | _ -> None)
+            | _ -> None)
         | (`Binary | `Other), _, _ -> None
       in
       Option.filter spec ~f:(fun spec -> String.contains spec '>')
   | _ -> None
 
-let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name tail =
+let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~module_path ~dsl name tail =
   let meaningful = ref false in
   let shadowed = ref false in
   let ignore_shadowed = ref ignore_is_shadowed in
@@ -401,7 +482,10 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
                   within_shadow binds_name (fun () -> walk rest))
           | item :: rest ->
               self#structure_item item;
-              within_ignore_shadow (structure_item_may_shadow_ignore item) (fun () -> walk rest)
+              within_ignore_shadow (structure_item_may_shadow_ignore item) (fun () ->
+                  within_shadow
+                    (structure_item_may_shadow_name module_values ~module_path item name) (fun () ->
+                      walk rest))
         in
         walk items
 
@@ -452,7 +536,7 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
                           let used_in_body =
                             List.exists bound_names ~f:(fun bound ->
                                 meaningfully_used ~ignore_is_shadowed:!ignore_shadowed
-                                  ~module_values ~dsl:!dsl_mode bound (Expression body))
+                                  ~module_values ~module_path ~dsl:!dsl_mode bound (Expression body))
                           in
                           let used_in_recursive_group =
                             match recursive with
@@ -461,7 +545,7 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
                                 List.exists bindings ~f:(fun other ->
                                     List.exists bound_names ~f:(fun bound ->
                                         meaningfully_used ~ignore_is_shadowed:!ignore_shadowed
-                                          ~module_values ~dsl:!dsl_mode bound
+                                          ~module_values ~module_path ~dsl:!dsl_mode bound
                                           (Expression other.pvb_expr)))
                           in
                           not (used_in_body || used_in_recursive_group)
@@ -511,13 +595,30 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
               (* A local open can replace both unqualified [ignore] and the target name. *)
               self#module_expr open_declaration.popen_expr;
               within_ignore_shadow
-                (module_expr_may_shadow_ignore module_values open_declaration.popen_expr) (fun () ->
-                  within_shadow (module_expr_binds module_values open_declaration.popen_expr name)
+                (module_expr_may_shadow_ignore module_values ~module_path
+                   open_declaration.popen_expr) (fun () ->
+                  within_shadow
+                    (module_expr_binds module_values ~module_path open_declaration.popen_expr name)
                     (fun () -> self#expression body))
           | Pexp_object class_structure ->
               within_ignore_shadow (pattern_binds class_structure.pcstr_self "ignore") (fun () ->
                   within_shadow (pattern_binds class_structure.pcstr_self name) (fun () ->
-                      List.iter class_structure.pcstr_fields ~f:self#class_field))
+                      let instance_names =
+                        List.filter_map class_structure.pcstr_fields ~f:(fun field ->
+                            match field.pcf_desc with
+                            | Pcf_val ({ txt; _ }, _, _) -> Some txt
+                            | _ -> None)
+                      in
+                      List.iter class_structure.pcstr_fields ~f:(fun field ->
+                          match field.pcf_desc with
+                          | Pcf_val (_, _, Cfk_concrete (_, initial_value)) ->
+                              self#expression initial_value
+                          | Pcf_val (_, _, Cfk_virtual _) -> ()
+                          | _ ->
+                              within_ignore_shadow
+                                (List.mem instance_names "ignore" ~equal:String.equal) (fun () ->
+                                  within_shadow (List.mem instance_names name ~equal:String.equal)
+                                    (fun () -> self#class_field field)))))
           | Pexp_for (pattern, from_, to_, _, body) ->
               self#expression from_;
               self#expression to_;
@@ -531,20 +632,21 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
   | Cases cases -> iterator#cases cases);
   !meaningful
 
-let implementation_of ~dsl ~module_values ~ignore_is_shadowed ~params ~position ~tail pattern =
+let implementation_of ~dsl ~module_values ~module_path ~ignore_is_shadowed ~params ~position ~tail
+    pattern =
   let names = pattern_names pattern in
   let name_used name =
     (* An earlier parameter is in scope in every later default until a later parameter shadows it;
        that shadowing parameter's own default is still evaluated before its pattern binds. *)
     let rec used_after ignore_is_shadowed = function
-      | [] -> meaningfully_used ~ignore_is_shadowed ~module_values ~dsl name tail
+      | [] -> meaningfully_used ~ignore_is_shadowed ~module_values ~module_path ~dsl name tail
       | param :: later -> (
           match param.pparam_desc with
           | Pparam_newtype _ -> used_after ignore_is_shadowed later
           | Pparam_val (_, default, pattern) ->
               let used_in_default =
                 Option.value_map default ~default:false ~f:(fun expression ->
-                    meaningfully_used ~ignore_is_shadowed ~module_values ~dsl name
+                    meaningfully_used ~ignore_is_shadowed ~module_values ~module_path ~dsl name
                       (Expression expression))
               in
               used_in_default
@@ -668,13 +770,15 @@ let args_in_source ~source content =
           let binding_found = ref [] in
           List.iter named ~f:(fun (definition, expression) ->
               List.iter
-                (function_paths ~module_values ~ignore_is_shadowed:!top_ignore_shadowed expression)
+                (function_paths ~module_values ~module_path:(List.rev !module_path)
+                   ~ignore_is_shadowed:!top_ignore_shadowed expression)
                 ~f:(fun (params, tail, path_ignore_is_shadowed) ->
                   List.iteri params ~f:(fun position param ->
                       match param.pparam_desc with
                       | Pparam_val (Asttypes.Optional label, _, pattern) ->
                           let implementation =
                             implementation_of ~dsl:!dsl_context ~module_values
+                              ~module_path:(List.rev !module_path)
                               ~ignore_is_shadowed:path_ignore_is_shadowed ~params ~position ~tail
                               pattern
                           in
