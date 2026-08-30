@@ -993,6 +993,13 @@ that they earn a lookup rather than always-loaded space.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- The Ubuntu/OCaml 5.5 main job preprocesses `cc_backend.ml` with
+  `OCANNL_LOG_LEVEL_CC_BACKEND=3` and builds both `@check` and
+  `@test/operations/runtest-cc_backend_trace_name` in that environment. The focused runtime test
+  executes one cc routine and checks the bare result inside its `work` trace against the compiled
+  routine name: `@check` alone only type-checks, so a trace expression that silently resolved a
+  different in-scope binding would otherwise remain green (gh-ocannl-859). The test reports an
+  explicit skip in ordinary level-0 suite runs, keeping the extra execution confined to this gate.
 - `cuda_backend.ml` and `hip_backend.ml` are compiled by NEITHER the macOS dev boxes nor CI, so a
   green `dune build @check` locally proves nothing about them. Each lives in an `(optional)` library
   over `cudajit`/`hipjit`, and `arrayjit.context` reaches its implementation through a dune `select`
