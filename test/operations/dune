@@ -2752,6 +2752,15 @@
  (libraries base ocannl stdio arrayjit.verdict ll_test))
 
 (test
+ (name simplify_fma_precision)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules simplify_fma_precision)
+ (libraries base ocannl arrayjit.verdict ll_test))
+
+(test
  (name schedule_pipelined_matmul)
  (package neural_nets_lib)
  (deps

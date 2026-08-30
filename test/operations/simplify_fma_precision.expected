@@ -1,0 +1,3 @@
+int64 mul-add remains integer arithmetic: true
+single-precision mul-add still rewrites to FMA: true
+int64 mul-add preserves the unit past 2^53: true
