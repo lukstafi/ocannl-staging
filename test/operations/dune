@@ -3022,7 +3022,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules reduction_accumulator_residency)
- (libraries base ocannl stdio arrayjit.utils test_utils arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.utils test_utils ll_test arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

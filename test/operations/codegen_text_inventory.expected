@@ -18,6 +18,7 @@ operand_ptr [Ir.C_syntax.C_syntax.operand_ptr]
 pp_array_offset [Ir.C_syntax.C_syntax.pp_array_offset]
 pp_array_offset_dyn [Ir.C_syntax.C_syntax.pp_array_offset_dyn]
 pp_axis_index [Ir.Indexing.Doc_helpers.pp_axis_index]
+pp_device_read_ptr [Ir.C_syntax.C_syntax.pp_device_read_ptr]
 pp_indices [Ir.Indexing.Doc_helpers.pp_indices]
 pp_ll [Ir.C_syntax.C_syntax.pp_ll]
 pp_pipelined_rotation [Ir.C_syntax.C_syntax.pp_pipelined_rotation]
@@ -182,8 +183,11 @@ test/operations/narrow_storage_compute.ml
     "vector_size"
 test/operations/reduction_accumulator_residency.ml [also pins text this scan cannot name]
     " = "
+    "["
     "] = " ^ ...
-    "volatile float*"
+    "__rmw_"
+    "device volatile float*"
+    "volatile float*)res_guard_mask"
     "volatile"
     ... ^ " = "
     ... ^ "["

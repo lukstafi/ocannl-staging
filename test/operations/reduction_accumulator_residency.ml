@@ -13,18 +13,18 @@
 
    - the emitted f32 kernel opens the accumulator into a local, updates the local inside the
    reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop; - the
-   accumulator's volatility agrees with what the compile REPORTED (gh-ocannl-782): the routine's
-   volatility census names the local, says whether the workaround qualified it, and says whether
-   this backend asked for the workaround at all — so the expectation is read off the compile instead
-   of off the backend's name, and the emitted text is checked against it. On a backend that requests
-   the workaround the accumulator is [volatile] (gh-ocannl-731), because the same shader-compiler
-   pass can corrupt the localized form too; on one that does not, it stays register-resident. Either
-   way the kernel carries no volatile POINTER shadow: localization lifted the device-memory RMW that
-   shadow pins, and the census's shadow count says so independently of the text; - the values match
-   a host reference computed in the same summation order. The producers discriminate: every element
-   is [1 + 10*i + j], so it varies with BOTH loop symbols and is clear of the zero the accumulator
-   is initialized to — a constant producer would survive a dropped or replayed iteration, and a
-   value omitting a symbol would survive a wrong substitution.
+   workaround decision agrees with what the compile REPORTED (gh-ocannl-782): the routine's
+   volatility census names the local, says whether its accumulating device reads use the workaround,
+   and says whether this backend asked for the workaround at all — so the expectation is read off
+   the compile instead of off the backend's name, and the emitted text is checked against it. On a
+   backend that requests the workaround the accumulator stays plain and register-resident while the
+   accumulating loop's device reads use expression-level [volatile] pointer casts (gh-ocannl-820);
+   on one that does not, both stay plain. Either way the kernel carries no RMW shadow declaration:
+   localization lifted that device-memory RMW, and the census's RMW-read count says so independently
+   of the text; - the values match a host reference computed in the same summation order. The
+   producers discriminate: every element is [1 + 10*i + j], so it varies with BOTH loop symbols and
+   is clear of the zero the accumulator is initialized to — a constant producer would survive a
+   dropped or replayed iteration, and a value omitting a symbol would survive a wrong substitution.
 
    Two nest shapes, because they exercise different placements of the localized store: a scalar
    reduction over both axes (the loss shape — the store lands above every loop, at function scope)
@@ -56,9 +56,16 @@ let%op total = x ++ "ij => 0"
 (* Leg 2: reduction over the row axis only — the batch-gradient / contraction shape. *)
 let%op per_col = x ++ "ij => j"
 
+(* Leg 3: an index-only scalar reduction. Its localized update has no materialized device read, so
+   even Metal selects no expression to cast. This is the negative control for the census: requested
+   capability is not the same as an emitted workaround site (Codex P2, review round 1 on #553). *)
+let indices = TDSL.range_of_shape ~batch_dims:[] ~input_dims:[] ~output_dims:[ rows; cols ] ()
+let%op index_total = indices ++ "ij => 0"
+
 let () =
   Train.set_materialized total.Tensor.value;
   Train.set_materialized per_col.Tensor.value;
+  Train.set_materialized index_total.Tensor.value;
   let ctx = Context.auto () in
   let ctx, r_total =
     Context.compile ~name:"res_total" ctx (Train.forward total) Ir.Indexing.Empty
@@ -68,8 +75,13 @@ let () =
     Context.compile ~name:"res_per_col" ctx (Train.forward per_col) Ir.Indexing.Empty
   in
   let ctx = Context.run ctx r_per_col in
+  let ctx, r_index_total =
+    Context.compile ~name:"res_index_total" ctx (Train.forward index_total) Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx r_index_total in
   let got_total = (Context.get_values ctx total.Tensor.value).(0) in
   let got_per_col = Context.get_values ctx per_col.Tensor.value in
+  let got_index_total = (Context.get_values ctx index_total.Tensor.value).(0) in
 
   (* Host reference, same summation order as the emitted nest. *)
   let ref_total =
@@ -93,6 +105,9 @@ let () =
   Verdict.p "row reduction matches host reference"
     (Array.length got_per_col = cols
     && Array.for_all2_exn got_per_col ref_per_col ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  let ref_index_total = Float.of_int (rows * cols * ((rows * cols) - 1) / 2) in
+  Verdict.p "index-only reduction matches host reference"
+    Float.(abs (got_index_total - ref_index_total) < 1e-3);
 
   (* The reference must be able to tell a dropped-iteration kernel apart from a correct one: with
      [rows * cols] terms all distinct and nonzero, a last-iteration-only result is far away. *)
@@ -130,7 +145,8 @@ let () =
               && String.for_all (String.sub lhs ~pos:1 ~len:(us - 1)) ~f:Char.is_digit
               && not (String.is_empty ident)
             in
-            if is_scope_local && String.is_prefix rhs ~prefix:(ident ^ "[") then Some (lhs, ident)
+            if is_scope_local && String.is_prefix rhs ~prefix:(ident ^ "[") then
+              Some (lhs, ident, st)
             else None)
   in
   (* The census names the local by the identifier the declaration carries ([scope_local_ident] is
@@ -155,26 +171,30 @@ let () =
           "no statement both reads and writes the node";
           "the node is stored exactly once, from the local";
           "the census names the accumulator the kernel declares";
-          "the declaration's volatility is the one the census reports";
-          "the accumulator is volatile exactly when the backend requests it";
-          "no volatile pointer shadow, by the census and by the text";
+          "the accumulator declaration stays plain";
+          "the accumulating loop's volatile-read form is the one the census reports";
+          "the opening read stays plain";
+          "no rmw shadow declaration, by the census and by the text";
         ] ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
     in
     match List.find_map statements ~f:scope_init with
     | None -> fail_all ()
-    | Some (local, ident) ->
+    | Some (local, ident, opening) ->
         let count st pattern =
           List.length (String.substr_index_all st ~may_overlap:false ~pattern)
         in
         let node_accesses st = count st (ident ^ "[") in
+        let accumulation_updates =
+          List.filter statements ~f:(fun st ->
+              node_accesses st = 0
+              && count st local >= 2
+              && String.is_substring st ~substring:(local ^ " = "))
+        in
         Verdict.p (label ^ ": accumulator opens into a scope local") true;
         (* The accumulation: assigns the local from itself, and never touches the node. *)
         Verdict.p
           (label ^ ": the reduction updates the local, not the node")
-          (List.exists statements ~f:(fun st ->
-               node_accesses st = 0
-               && count st local >= 2
-               && String.is_substring st ~substring:(local ^ " = ")));
+          (not (List.is_empty accumulation_updates));
         (* The read-modify-write shape is one statement reading and writing the node. Its absence is
            what localization buys; the [Zero_out] statement reaches the node once and is not it. *)
         Verdict.p_all (label ^ ": no statement both reads and writes the node") statements
@@ -190,33 +210,170 @@ let () =
            These claims are therefore backend-uniform: they say the same thing on Metal, where the
            workaround is requested, and on the C backends, where it is not. *)
         let v = compiled.Context.volatility in
-        let accumulators =
+        let accumulations =
           List.filter_map v.Ir.C_syntax.entries ~f:(fun (_, site) ->
               match site with
-              | Ir.C_syntax.Volatile_accumulator name -> Some (name, true)
+              | Ir.C_syntax.Volatile_accumulation_reads name -> Some (name, true)
               | Ir.C_syntax.Plain_accumulator name -> Some (name, false)
-              | Ir.C_syntax.Volatile_rmw_shadow _ -> None)
+              | Ir.C_syntax.Volatile_rmw_reads _ -> None)
         in
         Verdict.p
           (label ^ ": the census names the accumulator the kernel declares")
-          (List.mem (List.map accumulators ~f:fst) local ~equal:String.equal);
-        Verdict.p_all (label ^ ": the declaration's volatility is the one the census reports")
-          accumulators ~f:(fun (name, volatile) ->
-            match declared_volatile source name with
-            | Some declared -> Bool.equal declared volatile
-            | None -> false);
-        Verdict.p_all (label ^ ": the accumulator is volatile exactly when the backend requests it")
-          accumulators ~f:(fun (_, volatile) -> Bool.equal volatile v.Ir.C_syntax.requested);
+          (List.mem (List.map accumulations ~f:fst) local ~equal:String.equal);
+        Verdict.p_all (label ^ ": the accumulator declaration stays plain") accumulations
+          ~f:(fun (name, _) ->
+            match declared_volatile source name with Some declared -> not declared | None -> false);
+        Verdict.p_all
+          (label ^ ": the accumulating loop's volatile-read form is the one the census reports")
+          accumulations ~f:(fun (_, volatile_reads) ->
+            let update_reads_device =
+              List.exists accumulation_updates ~f:(fun st -> String.is_substring st ~substring:"[")
+            in
+            Bool.equal volatile_reads (v.Ir.C_syntax.requested && update_reads_device)
+            && (not (List.is_empty accumulation_updates))
+            && List.for_all accumulation_updates ~f:(fun st ->
+                let reads_device = String.is_substring st ~substring:"[" in
+                Bool.equal
+                  (String.is_substring st ~substring:"device volatile float*")
+                  (v.Ir.C_syntax.requested && reads_device)));
+        Verdict.p
+          (label ^ ": the opening read stays plain")
+          (not (String.is_substring opening ~substring:"volatile"));
         (* Localization lifted the device-memory read-modify-write the pointer shadow pins, so this
            routine has none — asserted twice over, from the census and from the emitted text, which
            is what makes either one a check rather than a restatement. *)
         Verdict.p
-          (label ^ ": no volatile pointer shadow, by the census and by the text")
-          (v.Ir.C_syntax.rmw_shadows = 0
-          && not (String.is_substring source ~substring:"volatile float*"))
+          (label ^ ": no rmw shadow declaration, by the census and by the text")
+          (v.Ir.C_syntax.volatile_rmw_reads = 0
+          && not (String.is_substring source ~substring:"__rmw_"))
   in
   check_localized r_total "res_total" "scalar reduction";
-  check_localized r_per_col "res_per_col" "row reduction"
+  check_localized r_per_col "res_per_col" "row reduction";
+  check_localized r_index_total "res_index_total" "index-only reduction";
+  Verdict.p "index-only accumulation is censused plain because it emits no device read"
+    (r_index_total.Context.volatility.Ir.C_syntax.volatile_accumulations = 0
+    && r_index_total.Context.volatility.Ir.C_syntax.plain_accumulations = 1)
+
+(* Cross-statement CSE lifts a shared scope out of both users as [Declare_local; body]. That form
+   renders its declaration before its accumulating [Set_local], so the census must retain the site
+   until rendering observes whether the update emitted a volatile read (Codex P2, review round 2 on
+   #553). This hand-built leg makes the optimizer produce that exact form and executes both users. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9820 ~dims:[| 8 |] () in
+  let src = node "res_lift_src"
+  and out_a = node ~dims:[| 1 |] "res_lift_a"
+  and out_b = node ~dims:[| 1 |] "res_lift_b"
+  and tmp = node ~dims:[| 1 |] "res_lift_tmp" in
+  List.iter [ src; out_a; out_b ] ~f:Ll_test.materialize;
+  Ll_test.virtualize tmp;
+  let i = Ll_test.sym () in
+  let scoped =
+    let id = LL.get_scope tmp in
+    let body =
+      LL.Seq
+        ( LL.Set_local (id, Ll_test.c 0.0),
+          Ll_test.loop_n i 8
+            (LL.Set_local
+               ( id,
+                 Ll_test.add (LL.Get_local id) (Ll_test.get src [| Ll_test.iter i |]) )) )
+    in
+    LL.Local_scope
+      { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }
+  in
+  let program =
+    LL.Seq
+      ( Ll_test.set out_a [| Ll_test.fixed 0 |] scoped,
+        Ll_test.set out_b [| Ll_test.fixed 0 |] scoped )
+  in
+  let optimized =
+    Ll_test.optimize ~materialized:[ src; out_a; out_b ] ~name:"res_lifted" program
+  in
+  let rec count_declarations = function
+    | LL.Declare_local _ -> 1
+    | LL.Seq (a, b) -> count_declarations a + count_declarations b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> count_declarations body
+    | LL.Tile_mma { fallback; _ } -> count_declarations fallback
+    | _ -> 0
+  in
+  Verdict.p "cross-statement CSE produces one lifted accumulator declaration"
+    (count_declarations optimized.LL.llc = 1 && Ll_test.count_scopes optimized.LL.llc = 0);
+  let ctx, routine = Ll_test.link ~name:"res_lifted" optimized in
+  let values = Array.init 8 ~f:(fun k -> Float.of_int (k + 1)) in
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:[ (src, values); (out_a, [| -1.0 |]); (out_b, [| -2.0 |]) ]
+  in
+  Verdict.p "lifted accumulator executes once for both users"
+    Float.(
+      equal (Context.get_values ctx out_a).(0) 36.0
+      && equal (Context.get_values ctx out_b).(0) 36.0);
+  let volatility = routine.Context.volatility in
+  Verdict.p "lifted accumulator contributes exactly one census site"
+    (volatility.Ir.C_syntax.volatile_accumulations + volatility.plain_accumulations = 1);
+  Verdict.p "lifted accumulator census follows its emitted volatile read"
+    (Bool.equal (volatility.volatile_accumulations = 1) volatility.requested
+    && Bool.equal (volatility.plain_accumulations = 1) (not volatility.requested));
+  let source = Test_utils.Generated.read "res_lifted" in
+  Verdict.p "lifted accumulating read uses the backend-requested form"
+    (Bool.equal
+       (String.is_substring source ~substring:"device volatile float*")
+       volatility.requested)
+
+(* A data-dependent guard can be the accumulating loop's only device read: [if mask[i] then
+   local += 1]. The scope remains reduction-shaped because the guard does not observe the local.
+   Metal must cast that controlling read even though the update expression itself dereferences no
+   node pointer (Codex P1, review round 3 on #553). *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9840 ~dims:[| 8 |] () in
+  let mask = node "res_guard_mask"
+  and out = node ~dims:[| 1 |] "res_guard_out"
+  and tmp = node ~dims:[| 1 |] "res_guard_tmp" in
+  List.iter [ mask; out ] ~f:Ll_test.materialize;
+  Ll_test.virtualize tmp;
+  let i = Ll_test.sym () in
+  let id = LL.get_scope tmp in
+  let body =
+    LL.Seq
+      ( LL.Set_local (id, Ll_test.c 0.0),
+        Ll_test.loop_n i 8
+          (LL.If
+             {
+               cond = (Ll_test.get mask [| Ll_test.iter i |], Ir.Ops.single);
+               body = LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.c 1.0));
+             }) )
+  in
+  let program =
+    Ll_test.set out [| Ll_test.fixed 0 |]
+      (LL.Local_scope
+         { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation })
+  in
+  let optimized = Ll_test.optimize ~materialized:[ mask; out ] ~name:"res_guarded" program in
+  Verdict.p "conditional reduction retains its scope-local accumulator"
+    (Ll_test.count_scopes optimized.LL.llc = 1);
+  let ctx, routine = Ll_test.link ~name:"res_guarded" optimized in
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:
+        [
+          (mask, [| 1.0; 0.0; 1.0; 1.0; 0.0; 0.0; 1.0; 0.0 |]);
+          (out, [| -1.0 |]);
+        ]
+  in
+  Verdict.p "conditional reduction matches the selected-term reference"
+    Float.(equal (Context.get_values ctx out).(0) 4.0);
+  let volatility = routine.Context.volatility in
+  Verdict.p "conditional reduction contributes exactly one census site"
+    (volatility.Ir.C_syntax.volatile_accumulations + volatility.plain_accumulations = 1);
+  Verdict.p "conditional reduction census follows the controlling read"
+    (Bool.equal (volatility.volatile_accumulations = 1) volatility.requested
+    && Bool.equal (volatility.plain_accumulations = 1) (not volatility.requested));
+  let source = Test_utils.Generated.read "res_guarded" in
+  Verdict.p "conditional reduction casts its controlling device read"
+    (Bool.equal
+       (String.is_substring source ~substring:"volatile float*)res_guard_mask")
+       volatility.requested)
 
 (* {1 The volatility census's own bracket}
 
@@ -230,7 +387,8 @@ let () =
   let entries_equal =
     List.equal (fun (n1, s1) (n2, s2) -> String.equal n1 n2 && Cs.equal_volatility_site s1 s2)
   in
-  let outer = Cs.Volatile_accumulator "v1_outer" and inner = Cs.Plain_accumulator "v2_inner" in
+  let outer = Cs.Volatile_accumulation_reads "v1_outer"
+  and inner = Cs.Plain_accumulator "v2_inner" in
   let inner_summary, outer_summary =
     Cs.with_volatility_census (fun () ->
         Cs.volatility_census := ("outer_kernel", outer) :: !Cs.volatility_census;
@@ -252,9 +410,9 @@ let () =
   Verdict.p "the enclosing bracket keeps its own capability across the nested one"
     outer_summary.Cs.requested;
   Verdict.p "the counts classify what was collected"
-    (outer_summary.Cs.volatile_accumulators = 1
-    && outer_summary.Cs.plain_accumulators = 1
-    && outer_summary.Cs.rmw_shadows = 0);
+    (outer_summary.Cs.volatile_accumulations = 1
+    && outer_summary.Cs.plain_accumulations = 1
+    && outer_summary.Cs.volatile_rmw_reads = 0);
   Verdict.p "a completed bracket leaves the census global as it found it"
     (List.is_empty !Cs.volatility_census);
   Verdict.p "collection is off outside every bracket" (not !Cs.volatility_census_enabled)

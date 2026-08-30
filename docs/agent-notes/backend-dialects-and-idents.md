@@ -11,10 +11,12 @@ files.
   `acc[k] = acc[k] + f(i)` device-memory RMW can leave only the last iteration (fingerprint: loss
   ≈ correct/batch_size), and gh-ocannl-731 showed that codegen's replacement scope-local
   accumulator can instead diverge by a data-independent additive constant.
-  `volatile_serial_accumulation` in `arrayjit/lib/c_syntax.ml` (Metal sets it) therefore qualifies
-  both the RMW pointer shadow and reduction-shaped scope locals, and the volatility census
-  (`Context.routine.volatility`) reports per routine which accumulators it pinned. Standalone
-  repros: `bench_metal_bug.ml` (RMW form) and `bench_metal_bug_local.ml` (localized form, plus a
+  `volatile_serial_accumulation` in `arrayjit/lib/c_syntax.ml` (Metal sets it) therefore renders
+  device reads inside the accumulating update and its controlling guards through expression-level
+  `volatile` pointer casts; accumulator declarations, opening reads, vectorized/packed paths and MMA
+  reads stay plain (gh-ocannl-820). The volatility census (`Context.routine.volatility`) reports per
+  routine which localized sites and device-memory RMWs received that form. Standalone repros:
+  `bench_metal_bug.ml` (RMW form) and `bench_metal_bug_local.ml` (localized form, plus a
   one-factor-at-a-time matrix and the tax measurement) under `benchmarks/runners/ocannl/`; executed
   guards: `scalar_rmw_accumulation.ml`, `reduction_accumulator_residency.ml`, and `rope_test.ml`.
   Suspect this class first for a Metal-only accumulation bug that disappears under shader
@@ -29,8 +31,8 @@ files.
   miscompiled. So the only reproducer-backed narrowing axis excludes accumulations that read no
   device memory, which are rare and usually constant-folded — measured, the tax is 1.06x on a
   memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x on a single-threaded
-  scalar-loss reduction. The `volatile`-source form costs 1.03x on that last shape and is the open
-  lead for a cheaper workaround.
+  scalar-loss reduction. The `volatile`-source form costs 1.03x on that last shape; gh-ocannl-820
+  adopted its expression-level equivalent after the matrix stayed green row-for-row.
 - Metal `Where` must stay a short-circuiting ternary: MSL `select` is a function call that
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:
