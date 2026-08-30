@@ -585,12 +585,13 @@ let () =
           let lv = arr.(ord.(i)) in
           let sample slot timing =
             attempt lv (fun () ->
-                let ms =
+                let timing_result =
                   Autotune.time_routine ~tag_failures:true ~timing ~repeats:tuner_repeats
                     !(lv.lv_ctx) lv.lv_routine
                 in
-                let dt = ms /. 1000. in
-                if Float.(dt < !slot) then slot := dt)
+                if not timing_result.Autotune.contended then
+                  let dt = timing_result.ms /. 1000. in
+                  if Float.(dt < !slot) then slot := dt)
           in
           sample lv.lv_iso Autotune.Isolated;
           sample lv.lv_queued Autotune.Queued
@@ -642,7 +643,15 @@ let () =
       time_round lives;
       List.iter lives ~f:(fun lv ->
           if (not !(lv.lv_failed)) && not (List.is_empty !(lv.lv_times)) then
-            record_result lv (report lv));
+            if Float.is_finite !(lv.lv_iso) && Float.is_finite !(lv.lv_queued) then
+              record_result lv (report lv)
+            else (
+              lv.lv_failed := true;
+              fail "%s / %s: every %s tuner timing was refused for host contention" lv.lv_tag
+                lv.lv_label
+                (if Float.is_finite !(lv.lv_iso) then "queued"
+                 else if Float.is_finite !(lv.lv_queued) then "isolated"
+                 else "isolated and queued")));
       List.iter lives ~f:release
     end
   in

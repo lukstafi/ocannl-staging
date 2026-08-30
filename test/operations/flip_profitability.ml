@@ -106,6 +106,16 @@ let () =
     (match unmeasured with Autotune.Unmeasured -> true | _ -> false);
   V.p "unmeasured keeps the enablement prior"
     (match resolves unmeasured with `Enablement -> true | `Cost -> false);
+  let contention_affected =
+    {
+      (searched ~best_ms:1.0 ~mma_timed:4 ~mma_best_ms:0.5) with
+      Autotune.timings_contended = 1;
+    }
+  in
+  V.p "an incomplete contention-affected search contributes no profitability evidence"
+    (match Autotune.family_profit_of_reports [ contention_affected ] with
+    | Autotune.Unmeasured -> true
+    | _ -> false);
   (* The verdict must not depend on cache state. A warm run's report comes from the replay path,
      whose COUNTERS describe this call (all zero, nothing was timed here) while its TIMES are the
      storing search's — so it must reach the verdict that search reached, or the same workload would

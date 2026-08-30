@@ -55,6 +55,10 @@ let string s =
     booleans the wire format carried before, kept for readers that predate the field; they are NOT
     complements, and deriving the state from them is the mistake the outcome type exists to stop.
 
+    [timings_contended] is the number of timing windows refused because host contention dominated
+    their samples (gh-ocannl-855). A nonzero count means the finite winner, if any, came from an
+    incomplete candidate set and was deliberately not written to the schedule cache.
+
     [tensorized] and [tensorization] are the two halves of the honesty of a tensorized timing
     (gh-ocannl-626). [tensorized] says the crowned SCHEDULE carries a [Tensorize]; [tensorization]
     says what the EMISSION did, as the {!Ir.C_syntax.tensorization_name} of the compiled routine's
@@ -65,12 +69,12 @@ let string s =
     with [tensorized: true] and a [tensorization] other than ["tensorized"] measured scalar code
     under a tensorized label; [orchestrate.py] marks that cell rather than letting the number stand.
 *)
-let tune_arm ~name ~state ~searched ~cache_hit ~timing ~best_ms ~best_label ~tensorized
-    ~tensorization ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms
-    ~terminal_failure =
+let tune_arm ~name ~state ~searched ~cache_hit ~timing ~timings_contended ~best_ms ~best_label
+    ~tensorized ~tensorization ~mma_statements ~mma_scalar_fallbacks ~mma_seeded ~mma_timed
+    ~mma_best_ms ~terminal_failure =
   Printf.sprintf
-    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"timing":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-    (string name) (string state) searched cache_hit (string timing) (num best_ms)
+    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"timing":"%s","timings_contended":%d,"best_ms":%s,"best_label":"%s","tensorized":%b,"tensorization":%s,"mma_statements":%d,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
+    (string name) (string state) searched cache_hit (string timing) timings_contended (num best_ms)
     (string best_label) tensorized
     (Option.value_map tensorization ~default:"null" ~f:(fun t -> Printf.sprintf {|"%s"|} (string t)))
     mma_statements mma_scalar_fallbacks mma_seeded mma_timed (num mma_best_ms)
