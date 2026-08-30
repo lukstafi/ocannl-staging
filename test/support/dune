@@ -32,6 +32,7 @@
  (modules
   test_utils
   agent_notes_scan
+  dead_export_scan
   codegen_text_scan
   config_key_scan
   cache_dir_scan
