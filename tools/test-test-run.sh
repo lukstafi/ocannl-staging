@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hand-run tests for `group_alive` in tools/test-run.sh -- the predicate the
-# three group probes there ask "is anything in this process group still
-# running?" -- and for the three sentences `stop` prints about a surviving
+# two callers there ask "is anything in this process group still running?" --
+# and for the two sentences `stop` prints about a surviving
 # process group, which are what that predicate is for (gh-ocannl-742).
 #
 #   tools/test-test-run.sh          # run every leg
@@ -201,7 +201,7 @@ trap 'exit 143' TERM
 # have to FORGE a run directory's leader token, and a token spelled differently
 # from the one the shipping script recomputes would leave every one of them
 # falling through to "nothing left to signal" -- passing no leg, but testing
-# none of the three sentences either.
+# neither sentence either.
 for fn in group_alive ps_token; do
   sed -n "/^$fn() {/,/^}/p" "$SRC" >"$TMP/$fn.sh"
   g_lines="$(wc -l <"$TMP/$fn.sh" | tr -d ' ')"
@@ -402,13 +402,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Legs 6-8: the three sentences `stop` prints about a surviving process group
+# Legs 6-7: the two sentences `stop` prints about a surviving process group
 # ---------------------------------------------------------------------------
-# `group_alive` exists to keep these three apart, so they are driven for real:
-# `tools/test-run.sh stop last` against a FORGED run directory -- the metadata a
-# launch records (cmd, cap, wt, log, pgid, gtoken) written by hand around a
-# process group this harness controls -- and the answer read from what stop
-# actually printed.
+# They are driven for real: `tools/test-run.sh stop last` against a FORGED run
+# directory -- the metadata a launch records (cmd, cap, wt, log, pgid, gtoken)
+# written by hand around a process group this harness controls -- and the answer
+# read from what stop actually printed.
 #
 # Nothing of the ambient run history is touched: OCANNL_TOOL_TEST_RUNS is
 # pointed at this run's temp dir, so the `last` pointer these legs move is the
@@ -423,10 +422,9 @@ fi
 # no `exit` file: a run with any of those is managed or finished, and the group
 # branch is the one reached by a run whose supervisor and wrapper are both gone
 # while its process group is not.
-l_ignored="stop: a group whose leader ignores TERM is reported as ignoring it"
+l_ignored="stop: a group whose leader ignores TERM is reported with the unreaped-exits caveat"
 l_killed="stop: that escalation kills the whole group, not just its leader"
 l_took="stop: a group whose leader takes the TERM is reported as TERMed, not as ignoring it"
-l_corpses="stop: a reachable group with nothing running is reported as holding only corpses"
 
 SRC_ROOT="$(cd -P "$HERE/.." && pwd -P)"
 STOP_RUNS="$TMP/runs"
@@ -576,8 +574,8 @@ stop_probe() { # <tag> <leader body> <script> <pointer key>
 }
 said() { # <label> <the whole line stop must have printed>
   # The WHOLE output, not a substring of it, and a clean exit with it: these
-  # three legs exist to keep the three sentences apart, and a containment test
-  # would pass all three for a stop that printed two of them at once (Codex
+  # two legs exist to keep the two sentences apart, and a containment test
+  # would pass both for a stop that printed two of them at once (Codex
   # round 1, P2).
   if [ "${stop_rc:-1}" = 0 ] && [ "$stop_out" = "$2" ]; then
     report 0 "$1"
@@ -592,7 +590,6 @@ if [ -n "$stop_skip" ]; then
   skip "$l_ignored" "$stop_skip"
   skip "$l_killed" "$stop_skip"
   skip "$l_took" "$stop_skip"
-  skip "$l_corpses" "$stop_skip"
 else
   stop_key="$(key_for "$SRC_ROOT")"
 
@@ -600,7 +597,8 @@ else
   # Leg 6: the leader ignores TERM
   # -------------------------------------------------------------------------
   if stop_probe ignores "$body_ignores" "$SRC" "$stop_key"; then
-    said "$l_ignored" "orphaned process group $stop_pg ignored TERM; escalated to KILL"
+    said "$l_ignored" \
+      "orphaned process group $stop_pg survived TERM (possibly only as unreaped exited processes); escalated to KILL"
     # The sentence is a claim about what stop DID, so the doing is checked too:
     # an escalation that only announced itself would leave the group holding the
     # worktree lock, which is the whole reason stop reaches for KILL here.
@@ -639,53 +637,6 @@ else
     said "$l_took" "sent TERM to the orphaned process group $stop_pg; re-run stop to confirm"
   else
     report 1 "$l_took" "$stop_err"
-  fi
-  end_leader
-
-  # -------------------------------------------------------------------------
-  # Leg 8: reachable, but nothing in it is running
-  # -------------------------------------------------------------------------
-  # The state this sentence describes cannot be built from outside on this
-  # kernel, and on no kernel portably: the branch opens only for a group whose
-  # recorded LEADER passes group_verified, proc_alive filters state Z, and a
-  # live non-zombie leader is itself a running member -- so the natural way in
-  # is the census losing a race with a leader that exits between the two
-  # probes, or a platform whose states no reader here can see. (Darwin's killpg
-  # answers ESRCH for a corpses-only group anyway, closing the branch before
-  # the wording is chosen.)
-  #
-  # So the predicate is forced, exactly as leg 4 forces the signal probe: a copy
-  # of the shipping script with `return 1` inserted as group_alive's first
-  # statement. What is under test here is the SENTENCE -- the one gh-ocannl-742
-  # added, and the one whose absence let a group of corpses be reported as a
-  # runaway dune ignoring TERM -- not the predicate, which legs 2-5 own. The
-  # copy is asserted to differ by that one line and nothing else, or a leg
-  # passing on a script that no longer resembles the shipping one is possible.
-  FORCED_ROOT="$TMP/forced"
-  FORCED="$FORCED_ROOT/tools/test-run.sh"
-  forced_mark="  return 1   # test-test-run.sh leg 8: forced dead"
-  mkdir -p "$FORCED_ROOT/tools"
-  awk -v mark="$forced_mark" '
-    { print }
-    /^group_alive\(\) \{/ && !seen { print mark; seen = 1 }' "$SRC" >"$FORCED"
-  chmod +x "$FORCED"
-  src_n="$(wc -l <"$SRC" | tr -d ' ')"
-  forced_n="$(wc -l <"$FORCED" | tr -d ' ')"
-  forced_hits="$(grep -c 'leg 8: forced dead' "$FORCED" | tr -d ' ')"
-  forced_first="$(sed -n '/^group_alive() {/{n;p;}' "$FORCED")"
-  forced_key="$(key_for "$FORCED_ROOT")"
-  if [ "$forced_n" != "$((src_n + 1))" ] || [ "$forced_hits" != 1 ] \
-     || [ "$forced_first" != "$forced_mark" ] || [ -z "$forced_key" ]; then
-    report 1 "$l_corpses" \
-      "the forced copy of $SRC is not the shipping text plus exactly the forcing line"
-  # The leader IGNORES TERM here: the group has to still be REACHABLE when the
-  # wording is chosen, and it is the forced predicate, not a real death, that
-  # makes stop call it corpses.
-  elif stop_probe corpses "$body_ignores" "$FORCED" "$forced_key"; then
-    said "$l_corpses" \
-      "process group $stop_pg holds only unreaped exited processes; nothing of the run was still running"
-  else
-    report 1 "$l_corpses" "$stop_err"
   fi
   end_leader
 fi

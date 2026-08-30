@@ -1250,19 +1250,12 @@ case $sub in
       # every stop two seconds.
       group_alive "$pg" && sleep 2
       if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
-        # Something is still there. Whether it is WORK or only corpses decides
-        # the sentence; the KILL goes out either way, and the state is read
-        # first because the KILL is what makes the answer stale.
-        if group_alive "$pg"; then still=running; else still=corpses; fi
+        # Something is still there. It may be running work or only unreaped
+        # corpses; the KILL goes out either way, and one sentence covers both
+        # because a second census can distinguish them only through a race.
         kill -KILL -- "-$pg" 2>/dev/null
-        if [ "$still" = running ]; then
-          echo "orphaned process group $pg ignored TERM; escalated to KILL"
-        else
-          # Not "cleared": only the parent that forked them can reap corpses,
-          # and here there is no parent left to do it.
-          echo "process group $pg holds only unreaped exited processes;" \
-               "nothing of the run was still running"
-        fi
+        echo "orphaned process group $pg survived TERM (possibly only as" \
+             "unreaped exited processes); escalated to KILL"
       else
         echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
       fi

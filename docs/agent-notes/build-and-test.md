@@ -403,7 +403,7 @@ that they earn a lookup rather than always-loaded space.
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
   cleanup assertion pass vacuously.
-  The same harness drives `stop` itself, since the predicate exists to keep three sentences apart:
+  The same harness drives `stop` itself, keeping its two surviving-group sentences apart:
   a FORGED run directory (`cmd`, `cap`, `wt`, `log`, `pgid`, `gtoken`, and deliberately no
   `pid`/`wpid`/`exit`, so the surviving-group branch is the one reached), pointed at by `last` under
   a private `OCANNL_TOOL_TEST_RUNS` so the ambient run history is never touched, with the pointer's
@@ -412,13 +412,13 @@ that they earn a lookup rather than always-loaded space.
   actually killed the WHOLE group, since announcing a KILL it did not send would leave the worktree
   lock held — and one whose leader takes the TERM, reported as TERMed with a re-run asked for. The
   two legs differ by one `trap` and nothing else, so a `stop` that worded them alike fails exactly
-  one, and each is matched against stop's whole output rather than a substring of it: three legs
-  keeping three sentences apart all pass a containment test against a stop that prints two at once.
+  one, and each is matched against stop's whole output rather than a substring of it: both wording
+  legs pass a containment test against a stop that prints both sentences at once.
   Every fixture group holds TWO processes for the same reason — with only its leader in it, the
   incorrect leader-only `kill -KILL "$pg"` passes for a group kill while real dune children would
   survive it. And the leader is recorded for cleanup BETWEEN the fork and the checks, not after
   them: job control has just put that child out of reach of a signal aimed at the harness, so an
-  interrupt in that window otherwise leaves the group running past the run (all three: Codex round
+  interrupt in that window otherwise leaves the group running past the run (both: Codex round
   1 on staging#505, each reproduced against a mutated copy before being fixed). The sentence is
   matched against stop's STDOUT alone, with stderr kept and shown only on failure: a diagnostic on
   stderr is not part of the answer, and merging the two made a passing `stop` fail an exact match.
@@ -434,13 +434,11 @@ that they earn a lookup rather than always-loaded space.
   All four `/proc`-reading shell tools here (`tools/test-run.sh`, `scripts/setup-ocaml-env.sh` and
   both hand-run harnesses) use the grouped form; the plain one leaked the message into a caller
   that captured stderr.
-  The third sentence, the corpses-only one, has no constructible state: the branch opens only for a
-  leader that passes `group_verified`, `proc_alive` filters state Z, and a live non-zombie leader is
-  itself a running member — in the field it is reached by the census losing a race with a leader
-  that exits between the two probes. That leg therefore FORCES the predicate, the way the zombie leg
-  forces the signal probe: a copy of the shipping script with `return 1` inserted as `group_alive`'s
-  first statement, asserted to be that one line and nothing else, so what is under test is the
-  sentence rather than the predicate legs 2-5 own.
+  The former corpses-only sentence had no constructible state: its branch opened only for a leader
+  that passed `group_verified`, while `proc_alive` rejects a zombie leader and a live leader is
+  itself running work. It was deleted in gh-ocannl-832; the surviving-processes sentence now warns
+  that the group may hold only unreaped exits, and the harness pins that combined wording without a
+  copy of the shipping script whose predicate is artificially forced.
 - **Promote through `tools/promote.sh` during a merge, on every platform.** Promotion writes the
   WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
   add` is committed with its PRE-promotion content, and nothing local objects — every later `dune
