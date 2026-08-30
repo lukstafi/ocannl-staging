@@ -318,6 +318,28 @@ trap 'exit 143' TERM HUP
 # copy prevents the outer SSH and inner command caps from drifting apart.
 capped() { perl -e "$capped_perl" -- "$cap" "$@"; }
 
+# Configuration from the SSH service or the selected switch must not outrank
+# the pushed tree's ocannl_config. Print names for provenance, never values;
+# later commands inject only the backend named on this invocation.
+ambient_ocannl_names=$(env | sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
+  fail "cannot inspect ambient OCANNL configuration"
+if [ -n "$ambient_ocannl_names" ]; then
+  echo "remote-verify: clearing ambient OCANNL variables:"
+  old_ifs=$IFS
+  IFS='
+'
+  for name in $ambient_ocannl_names; do
+    echo "  $name"
+    unset "$name" || fail "cannot clear ambient variable $name"
+  done
+  IFS=$old_ifs
+fi
+remaining_ocannl_names=$(env | sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
+  fail "cannot verify ambient OCANNL configuration cleanup"
+[ -z "$remaining_ocannl_names" ] ||
+  fail "ambient OCANNL variables remain after cleanup: $remaining_ocannl_names"
+echo "remote-verify: ambient OCANNL configuration: cleared"
+
 staging_url_matches() {
   case $1 in
     https://github.com/lukstafi/ocannl-staging | \
@@ -377,6 +399,39 @@ fi
 opam_switch=$(cd "$repo" && capped opam switch show --safe) ||
   fail "cannot resolve the opam switch selected by $repo"
 [ -n "$opam_switch" ] || fail "the remote checkout has no selected opam switch"
+switch_environment=$(capped opam exec --switch="$opam_switch" -- env) ||
+  fail "cannot inspect the selected opam switch environment"
+switch_ocannl_names=$(printf '%s\n' "$switch_environment" |
+  sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
+  fail "cannot identify OCANNL configuration from the selected opam switch"
+if [ -n "$switch_ocannl_names" ]; then
+  echo "remote-verify: stripping OCANNL variables injected by opam switch $opam_switch:"
+  old_ifs=$IFS
+  IFS='
+'
+  for name in $switch_ocannl_names; do echo "  $name"; done
+  IFS=$old_ifs
+fi
+
+opam_exec() {
+  old_ifs=$IFS
+  IFS='
+'
+  for name in $switch_ocannl_names; do
+    set -- -u "$name" "$@"
+  done
+  IFS=$old_ifs
+  capped opam exec --switch="$opam_switch" -- env "$@"
+}
+
+sanitized_switch_environment=$(opam_exec env) ||
+  fail "cannot verify the sanitized opam switch environment"
+remaining_switch_ocannl_names=$(printf '%s\n' "$sanitized_switch_environment" |
+  sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
+  fail "cannot inspect the sanitized opam switch environment"
+[ -z "$remaining_switch_ocannl_names" ] ||
+  fail "opam switch OCANNL variables remain after sanitization: $remaining_switch_ocannl_names"
+echo "remote-verify: opam switch OCANNL configuration: stripped"
 
 actual_box=$(hostname 2>/dev/null || uname -n)
 echo "=== remote-verify provenance ==="
@@ -421,11 +476,9 @@ echo "=== end provenance ==="
 
 cd "$wt" || fail "cannot enter $wt"
 
-opam_exec() { capped opam exec --switch="$opam_switch" -- "$@"; }
-
 dune_build() {
   if [ -n "$backend" ]; then
-    OCANNL_BACKEND=$backend opam_exec dune build -j "$jobs" "$@"
+    opam_exec env "OCANNL_BACKEND=$backend" dune build -j "$jobs" "$@"
   else
     opam_exec dune build -j "$jobs" "$@"
   fi
@@ -494,7 +547,7 @@ while [ $# -gt 0 ]; do
       ;;
     run)
       echo "remote-verify: probe ($backend): $value"
-      OCANNL_BACKEND=$backend opam_exec sh -c "$value" || exit $?
+      opam_exec env "OCANNL_BACKEND=$backend" sh -c "$value" || exit $?
       assert_backend
       echo "remote-verify: probe: PASS with resolved backend configuration $backend"
       echo "remote-verify: probe backend execution: see the probe's own output above"

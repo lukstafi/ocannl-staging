@@ -1009,8 +1009,11 @@ that they earn a lookup rather than always-loaded space.
   worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
   that switch, and removes and prunes the worktree before its exit sentinel. The individual
   commands and the whole SSH trip have separate process-group caps; the latter also bounds setup
-  and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses. A
-  worktree root nested under any outer Dune root is refused: without that
+  and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
+  Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
+  selected switch are printed and stripped inside `opam exec`, so only the requested backend can
+  override the pushed tree's configuration. A worktree root nested under any outer Dune root is
+  refused: without that
   boundary Dune can build the parent checkout while this script reports the detached commit.
   `--expect-lib cudajit|hipjit` asserts all three
   pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
