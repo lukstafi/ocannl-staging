@@ -154,6 +154,12 @@ let module_values structure =
               _;
             } ->
             found := (module_name, values_bound_by_structure items) :: !found
+        | Pstr_recmodule bindings ->
+            List.iter bindings ~f:(fun binding ->
+                match (binding.pmb_name.txt, binding.pmb_expr.pmod_desc) with
+                | Some module_name, Pmod_structure items ->
+                    found := (module_name, values_bound_by_structure items) :: !found
+                | _ -> ())
         | _ -> ());
         super#structure_item item
     end
@@ -168,6 +174,18 @@ let module_expr_binds module_values module_expr name =
       List.Assoc.find module_values module_name ~equal:String.equal
       |> Option.value_map ~default:false ~f:(fun values -> List.mem values name ~equal:String.equal)
   | _ -> false
+
+let module_expr_may_shadow_ignore module_values module_expr =
+  match module_expr.pmod_desc with
+  | Pmod_ident { txt = Lident name; _ } when String.equal name "Base" || String.equal name "Stdlib"
+    ->
+      false
+  | Pmod_ident { txt = Lident module_name; _ } -> (
+      match List.Assoc.find module_values module_name ~equal:String.equal with
+      | Some values -> List.mem values "ignore" ~equal:String.equal
+      | None -> true)
+  | Pmod_structure _ -> module_expr_binds module_values module_expr "ignore"
+  | _ -> true
 
 let direct_discard ~unqualified_ignore_visible name expression =
   match expression.pexp_desc with
@@ -199,11 +217,11 @@ let function_params expression =
   in
   peel [] expression
 
-let rec function_paths ~ignore_is_shadowed expression =
+let rec function_paths ~module_values ~ignore_is_shadowed expression =
   let params, tail = function_params expression in
   let rec returned_paths ~ignore_is_shadowed expression =
     match expression.pexp_desc with
-    | Pexp_function _ -> function_paths ~ignore_is_shadowed expression
+    | Pexp_function _ -> function_paths ~module_values ~ignore_is_shadowed expression
     | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
         returned_paths ~ignore_is_shadowed inner
     | Pexp_ifthenelse (_, then_, else_) ->
@@ -227,10 +245,7 @@ let rec function_paths ~ignore_is_shadowed expression =
           body
     | Pexp_open (open_declaration, body) ->
         let opened_may_shadow =
-          match open_declaration.popen_expr.pmod_desc with
-          | Pmod_ident { txt = Lident name; _ } ->
-              not (String.equal name "Base" || String.equal name "Stdlib")
-          | _ -> true
+          module_expr_may_shadow_ignore module_values open_declaration.popen_expr
         in
         returned_paths ~ignore_is_shadowed:(ignore_is_shadowed || opened_may_shadow) body
     | Pexp_letop { let_; ands; body } ->
@@ -495,7 +510,8 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~module_values ~dsl name
           | Pexp_open (open_declaration, body) ->
               (* A local open can replace both unqualified [ignore] and the target name. *)
               self#module_expr open_declaration.popen_expr;
-              within_ignore_shadow true (fun () ->
+              within_ignore_shadow
+                (module_expr_may_shadow_ignore module_values open_declaration.popen_expr) (fun () ->
                   within_shadow (module_expr_binds module_values open_declaration.popen_expr name)
                     (fun () -> self#expression body))
           | Pexp_object class_structure ->
@@ -618,6 +634,11 @@ let args_in_source ~source content =
         match item.pstr_desc with
         | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
             within_module name (fun () -> super#structure_item item)
+        | Pstr_recmodule bindings ->
+            List.iter bindings ~f:(fun binding ->
+                match binding.pmb_name.txt with
+                | Some name -> within_module name (fun () -> self#module_expr binding.pmb_expr)
+                | None -> self#module_expr binding.pmb_expr)
         | Pstr_extension (({ txt = ("op" | "cd") as extension; _ }, _), _) ->
             let saved = !dsl_context in
             dsl_context := if String.equal extension "op" then Op_dsl else Cd_dsl;
@@ -646,7 +667,8 @@ let args_in_source ~source content =
                 not (List.mem definitions arg.definition ~equal:String.equal));
           let binding_found = ref [] in
           List.iter named ~f:(fun (definition, expression) ->
-              List.iter (function_paths ~ignore_is_shadowed:!top_ignore_shadowed expression)
+              List.iter
+                (function_paths ~module_values ~ignore_is_shadowed:!top_ignore_shadowed expression)
                 ~f:(fun (params, tail, path_ignore_is_shadowed) ->
                   List.iteri params ~f:(fun position param ->
                       match param.pparam_desc with

@@ -110,6 +110,9 @@ let f ?(feature = true) () = ignore feature|ocaml}
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
+  case "a local Base open preserves standard ignore"
+    {ocaml|let f ?(feature = true) () = let open Base in ignore feature|ocaml} ~implemented:false
+    ~honest:false;
   case "a local open can shadow the optional value itself"
     {ocaml|module Defaults = struct let feature = false end
 let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
@@ -157,4 +160,11 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
   case "a later definition replaces the earlier inventory entry"
     {ocaml|let f ?(feature = true) () = enable feature
 let f ?(feature = true) () = ignore feature|ocaml}
+    ~implemented:false ~honest:false;
+  case ~argument:"feature" "recursive-module definitions retain qualification"
+    {ocaml|module rec A : sig val f : ?feature:bool -> unit -> unit end = struct
+  let f ?(feature = true) () = ignore feature
+end and B : sig val f : ?other:bool -> unit -> unit end = struct
+  let f ?(other = true) () = enable other
+end|ocaml}
     ~implemented:false ~honest:false

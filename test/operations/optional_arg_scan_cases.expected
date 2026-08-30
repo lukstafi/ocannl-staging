@@ -58,6 +58,8 @@ a preceding Stdlib.ignore alias remains a discard: implementation classified: tr
 a preceding Stdlib.ignore alias remains a discard: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
+a local Base open preserves standard ignore: implementation classified: true
+a local Base open preserves standard ignore: honesty classified: true
 a local open can shadow the optional value itself: implementation classified: true
 a local open can shadow the optional value itself: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
@@ -90,3 +92,5 @@ an optional function exported through a tuple is inventoried: implementation cla
 an optional function exported through a tuple is inventoried: honesty classified: true
 a later definition replaces the earlier inventory entry: implementation classified: true
 a later definition replaces the earlier inventory entry: honesty classified: true
+recursive-module definitions retain qualification: implementation classified: true
+recursive-module definitions retain qualification: honesty classified: true
