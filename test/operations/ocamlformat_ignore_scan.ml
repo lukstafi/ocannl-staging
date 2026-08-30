@@ -163,14 +163,15 @@ let describe_status = function
   | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
   | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n
 
-let run_child ~root ~exe paths =
+let run_child ?manifest_data ~root ~exe paths =
   let capture suffix = Stdlib.Filename.temp_file "fmt_ignore_control" suffix in
   let out_path = capture ".out" and err_path = capture ".err" in
   let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
   let out = open_capture out_path and err = open_capture err_path in
   let paths = List.map paths ~f:(Stdlib.Filename.concat root) in
   let manifest = Stdlib.Filename.concat root "declared-sources.manifest" in
-  Out_channel.write_all manifest ~data:(String.concat ~sep:"\n" paths ^ "\n");
+  let manifest_data = Option.value manifest_data ~default:(String.concat ~sep:"\n" paths ^ "\n") in
+  Out_channel.write_all manifest ~data:manifest_data;
   let ignore_file = Stdlib.Filename.concat root ".ocamlformat-ignore" in
   (* Exercise the shipping scan over a declared-input root with no Git metadata. [--scan-only]
      suppresses only the parent's control driver; without it every child would recursively stage
@@ -227,7 +228,12 @@ let control () =
   let stale_artifact = run (a ^ "\n" ^ b ^ "\n" ^ undeclared ^ "\n") in
   let malformed_manifest =
     write_file (Stdlib.Filename.concat root ignore) (a ^ "\n" ^ b ^ "\n");
-    run_child ~root ~exe [ a; b; "missing source.ml" ]
+    (* Root both tokens in this unique fixture. A relative second token would be resolved against
+       the scan action's build directory and could become valid after an unrelated [source.ml] is
+       added there, turning this designed refusal into a false failure. *)
+    let missing = Stdlib.Filename.concat root "missing" in
+    let source = Stdlib.Filename.concat root "source.ml" in
+    run_child ~root ~exe [ a; b ] ~manifest_data:(missing ^ " " ^ source ^ "\n")
   in
   printf
     "Synthetic controls invoke the shipping scanner over a complete fixture and over each\n\
@@ -262,7 +268,7 @@ let control () =
        ~messages:
          [
            "declared-source manifest entry `missing` is not a readable regular file";
-           "source.ml` is not a readable regular file";
+           "declared-source manifest entry `source.ml` is not a readable regular file";
          ]
        malformed_manifest);
   remove_tree root
