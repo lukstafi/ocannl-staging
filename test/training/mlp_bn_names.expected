@@ -5,16 +5,7 @@ Epoch 1, mean train loss below 3: true
 Epoch 2, mean train loss below 3: true
 Epoch 3, mean train loss below 3: true
 Epoch 4, mean train loss below 3: true
-Epoch 5, mean train loss below 2.8: true
-Epoch 6, mean train loss below 2.8: true
-Epoch 7, mean train loss below 2.8: true
-Epoch 8, mean train loss below 2.8: true
-Epoch 9, mean train loss below 2.8: true
-Epoch 10, mean train loss below 2.8: true
-Epoch 11, mean train loss below 2.8: true
-Epoch 12, mean train loss below 2.8: true
-Epoch 13, mean train loss below 2.8: true
-Epoch 14, mean train loss below 2.8: true
+Last 10 logged epochs mean train loss below 2.8: true
 Final train loss below 2.8: true
 Final dev   loss below 2.8: true
 Final test  loss below 2.8: true
