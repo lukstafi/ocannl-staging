@@ -1,12 +1,12 @@
 (* Configuration names used outside OCaml stay tied to [Utils.known_config_keys].
 
    The source forms are deliberately narrow and syntactic. Shell and Python scripts contribute every
-   qualified command-line spelling accepted by [Utils.cmdline_var_names] when followed by [=], and
-   every [OCANNL_<KEY>=] token, including tokens in comments and quoted command strings -- those are
-   still instructions or commands a reader can reuse. Markdown contributes an inline code span whose
-   whole rendered content is one assignment in a bare or prefixed form. Fenced code and longer
-   snippets describe arbitrary APIs and expression languages, so treating every equals sign in them
-   as configuration would make the scan unusable.
+   qualified command-line token accepted through [Utils.cmdline_var_prefixes], and every
+   [OCANNL_<KEY>=] token, including tokens in comments and quoted command strings -- those are still
+   instructions or commands a reader can reuse. Markdown contributes an inline code span whose whole
+   rendered content is one assignment in a bare or prefixed form. Fenced code and longer snippets
+   describe arbitrary APIs and expression languages, so treating every equals sign in them as
+   configuration would make the scan unusable.
 
    gh-ocannl-790. *)
 
@@ -15,7 +15,15 @@ open Stdio
 module Markdown = Test_utils.Agent_notes_scan
 
 type kind = Cli_flag | Environment_assignment | Markdown_assignment
-type occurrence = { path : string; line : int; key : string; spelling : string; kind : kind }
+
+type occurrence = {
+  path : string;
+  line : int;
+  key : string;
+  spelling : string;
+  kind : kind;
+  spaced_bare : bool;
+}
 
 let lowercase_key_char c = Char.is_lowercase c || Char.is_digit c || Char.equal c '_'
 let uppercase_key_char c = Char.is_uppercase c || Char.is_digit c || Char.equal c '_'
@@ -31,7 +39,7 @@ let non_config_env_key key =
    with a sentinel key, then ask the same function whether each observed name is one it accepts.
    This still finds a REMOVED key: only the grammar comes from the registry owner, never the key
    population. *)
-let cli_prefixes =
+let cli_name_prefixes =
   let sentinel = "configusagescankey" in
   Utils.cmdline_var_names ~qualified_only:true sentinel
   |> List.filter_map ~f:(fun name ->
@@ -43,15 +51,47 @@ let cli_prefixes =
 
 let cli_key_char c = Char.is_alpha c || Char.is_digit c || Char.equal c '_' || Char.equal c '-'
 
-let cli_key_of_name name =
-  List.find_map cli_prefixes ~f:(fun prefix ->
-      Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
+let cli_token_char c =
+  cli_key_char c || List.mem [ '='; '.'; '/'; ':'; '+'; '$'; '{'; '}' ] c ~equal:Char.equal
+
+let syntactic_cli_key_of_name name =
+  List.find_map cli_name_prefixes ~f:(fun name_prefix ->
+      Option.bind (String.chop_prefix name ~prefix:name_prefix) ~f:(fun raw_key ->
           if String.is_empty raw_key || not (String.for_all raw_key ~f:cli_key_char) then None
           else
             let key = String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_' in
-            if List.mem (Utils.cmdline_var_names ~qualified_only:true key) name ~equal:String.equal
-            then Some key
-            else None))
+            Option.some_if
+              (List.mem (Utils.cmdline_var_names ~qualified_only:true key) name ~equal:String.equal)
+              key))
+
+let known_cli_key token =
+  Set.to_list Utils.known_config_keys
+  |> List.filter ~f:(fun key ->
+      List.exists (Utils.cmdline_var_prefixes ~qualified_only:true key) ~f:(fun prefix ->
+          String.is_prefix token ~prefix))
+  (* The runtime accepts prefix-overlapping keys too. Attribute the token to the most specific one;
+     existence is the property this scan needs, and a removed token with no surviving parse still
+     reaches the unknown branch below. *)
+  |> List.max_elt ~compare:(fun a b -> Int.compare (String.length a) (String.length b))
+
+let unknown_cli_key ~name_prefix token =
+  let rest = String.drop_prefix token (String.length name_prefix) in
+  let stop = ref 0 in
+  while !stop < String.length rest && cli_key_char rest.[!stop] do
+    Int.incr stop
+  done;
+  String.prefix rest !stop |> String.lowercase |> String.tr ~target:'-' ~replacement:'_'
+
+let cli_key_of_token token =
+  List.find_map cli_name_prefixes ~f:(fun name_prefix ->
+      Option.bind (String.chop_prefix token ~prefix:name_prefix) ~f:(fun rest ->
+          if String.is_empty rest || not (String.for_all rest ~f:cli_token_char) then None
+          else
+            match String.lsplit2 token ~on:'=' with
+            | Some (name, _) -> syntactic_cli_key_of_name name
+            | None ->
+                Some
+                  (Option.value (known_cli_key token) ~default:(unknown_cli_key ~name_prefix token))))
 
 let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~normalize ~kind
     content =
@@ -77,19 +117,56 @@ let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~
               let spelling = String.sub line ~pos:start ~len:(!key_stop - start + 1) in
               match normalize raw_key with
               | None -> from next found
-              | Some key -> from next ({ path; line = index + 1; key; spelling; kind } :: found)
+              | Some key ->
+                  from next
+                    ({ path; line = index + 1; key; spelling; kind; spaced_bare = false } :: found)
             else from next found
       in
       from 0 [])
   |> List.concat
 
 let script_occurrences ~path content =
-  List.concat_map cli_prefixes ~f:(fun prefix ->
-      prefixed_occurrences
-        ~start_ok:(fun line start -> start = 0 || not (Char.equal line.[start - 1] '-'))
-        ~path ~prefix ~key_char:cli_key_char
-        ~normalize:(fun raw_key -> cli_key_of_name (prefix ^ raw_key))
-        ~kind:Cli_flag content)
+  let cli_occurrences =
+    String.split_lines content
+    |> List.mapi ~f:(fun index line ->
+        List.concat_map cli_name_prefixes ~f:(fun name_prefix ->
+            let rec from pos found =
+              match String.substr_index line ~pos ~pattern:name_prefix with
+              | None -> List.rev found
+              | Some start
+                when start > 0
+                     && (Char.is_alphanum line.[start - 1]
+                        || Char.equal line.[start - 1] '_'
+                        || Char.equal line.[start - 1] '-') ->
+                  from (start + 1) found
+              | Some start ->
+                  let stop = ref (start + String.length name_prefix) in
+                  while !stop < String.length line && cli_token_char line.[!stop] do
+                    Int.incr stop
+                  done;
+                  let next = max (start + 1) !stop in
+                  if !stop = start + String.length name_prefix then from next found
+                  else
+                    let spelling = String.sub line ~pos:start ~len:(!stop - start) in
+                    let key =
+                      Option.value_exn (cli_key_of_token spelling)
+                        ~message:"scanner-produced CLI token must parse"
+                    in
+                    from next
+                      ({
+                         path;
+                         line = index + 1;
+                         key;
+                         spelling;
+                         kind = Cli_flag;
+                         spaced_bare = false;
+                       }
+                      :: found)
+            in
+            from 0 []))
+    |> List.concat
+  in
+  cli_occurrences
   @ prefixed_occurrences ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
       ~normalize:(fun key -> if non_config_env_key key then None else Some (String.lowercase key))
       ~kind:Environment_assignment content
@@ -106,22 +183,79 @@ let assignment_key ~key_char ~normalize rendered =
       normalize raw_key
   | _ -> None
 
-let one_assignment rendered =
+(* These files discuss spellings known to be invalid. Counts stop a second obsolete instruction in
+   the same file from borrowing the intended historical exception. This list lives beside the
+   spaced-form classifier so a spaced repetition is admitted to the scan and then changes its count,
+   rather than disappearing as ordinary non-config prose. *)
+let historical_invalid_config_mentions =
+  [
+    ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap", 1);
+    ("docs/agent-notes/conventions.md", "private_bytes_cap", 1);
+    ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
+    ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
+    ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
+  ]
+
+let tracked_historical_config path key =
+  List.exists historical_invalid_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
+      String.equal path tracked_path && String.equal key tracked_key)
+
+(* Whitespace makes bare assignments common in non-config prose. Pin every CURRENT config use of
+   that form by file/key/count: a later key removal still scans the old site, while a newly added
+   registered use must declare itself here. Prefixed CLI and environment forms are unambiguous and
+   do not need this judgment list. *)
+let spaced_config_mentions =
+  [
+    ( "docs/proposals/fix-inline-complex-computations-default-doc.md",
+      "inline_complex_computations",
+      1 );
+    ("docs/proposals/gh-ocannl-344.md", "large_models", 2);
+    ("docs/proposals/gh-ocannl-351.md", "inline_complex_computations", 2);
+    ("docs/proposals/task-73617488.md", "virtualize_max_visits", 3);
+  ]
+
+let tracked_spaced_config path key =
+  List.exists spaced_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
+      String.equal path tracked_path && String.equal key tracked_key)
+
+let control_fixture path = String.equal path "config_usage_scan_bogus.fixture"
+
+let one_assignment ~path rendered =
   match String.lsplit2 rendered ~on:'=' with
-  | Some (name, value)
-    when (not (String.is_empty name)) && not (String.exists value ~f:Char.is_whitespace) -> (
-      match cli_key_of_name name with
-      | Some key -> Some key
-      | None -> (
-          match String.chop_prefix name ~prefix:"OCANNL_" with
-          | Some key when String.for_all key ~f:uppercase_key_char && not (non_config_env_key key)
-            ->
-              Some (String.lowercase key)
-          | _ ->
-              assignment_key ~key_char:lowercase_key_char
-                ~normalize:(fun key -> Some (normalize_key key))
-                rendered))
-  | _ -> None
+  | Some (raw_name, raw_value) -> (
+      let name = String.strip raw_name in
+      let value = String.strip raw_value in
+      let spaced = not (String.equal raw_name name && String.equal raw_value value) in
+      if String.is_empty name || String.exists value ~f:Char.is_whitespace then None
+      else
+        match cli_key_of_token (name ^ "=" ^ value) with
+        | Some key -> Some (key, false)
+        | None -> (
+            match String.chop_prefix name ~prefix:"OCANNL_" with
+            | Some key
+              when (not (String.is_empty key))
+                   && String.for_all key ~f:uppercase_key_char
+                   && not (non_config_env_key key) ->
+                Some (String.lowercase key, false)
+            | _ ->
+                Option.bind
+                  (assignment_key ~key_char:lowercase_key_char
+                     ~normalize:(fun key -> Some (normalize_key key))
+                     (name ^ "=" ^ value))
+                  ~f:(fun key ->
+                    if
+                      (not spaced)
+                      || Set.mem Utils.known_config_keys key
+                      || tracked_spaced_config path key || control_fixture path
+                      || tracked_historical_config path key
+                    then
+                      Some
+                        ( key,
+                          spaced
+                          && (not (control_fixture path))
+                          && not (tracked_historical_config path key) )
+                    else None)))
+  | None -> ( match cli_key_of_token rendered with Some key -> Some (key, false) | None -> None)
 
 let markdown_occurrences ~path content =
   let scan = Markdown.inert_by_line content in
@@ -141,8 +275,15 @@ let markdown_occurrences ~path content =
           else
             let spelling = String.sub line ~pos:start ~len:(stop - start) in
             let rendered = Markdown.code_span_content spelling in
-            Option.map (one_assignment rendered) ~f:(fun key ->
-                { path; line = lineno; key; spelling = rendered; kind = Markdown_assignment })))
+            Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
+                {
+                  path;
+                  line = lineno;
+                  key;
+                  spelling = rendered;
+                  kind = Markdown_assignment;
+                  spaced_bare;
+                })))
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
    list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
@@ -184,18 +325,6 @@ let non_config_assignment_mentions =
     ("docs/syntax_extensions.md", "stride");
   ]
 
-(* These files discuss spellings known to be invalid. The exception is site-specific so repeating
-   one in current documentation still fails, and it is usage-checked so deleting the historical
-   mention makes the exception stale rather than leaving an escape hatch. *)
-let historical_invalid_config_mentions =
-  [
-    ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap");
-    ("docs/agent-notes/conventions.md", "private_bytes_cap");
-    ("docs/proposals/gh-ocannl-409.md", "bacend");
-    ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory");
-    ("docs/proposals/gh-ocannl-409.md", "randomness_lib");
-  ]
-
 let mention_site path key = path ^ "\000" ^ key
 
 let non_config_assignment_sites =
@@ -204,7 +333,11 @@ let non_config_assignment_sites =
 
 let historical_invalid_config_sites =
   Set.of_list (module String)
-  @@ List.map historical_invalid_config_mentions ~f:(fun (path, key) -> mention_site path key)
+  @@ List.map historical_invalid_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
+
+let spaced_config_sites =
+  Set.of_list (module String)
+  @@ List.map spaced_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
 
 let kind_name = function
   | Cli_flag -> "command-line flag"
@@ -213,13 +346,23 @@ let kind_name = function
 
 let check ~repository_census occurrences =
   let seen_non_config = ref (Set.empty (module String)) in
-  let seen_historical = ref (Set.empty (module String)) in
+  let seen_historical = Hashtbl.create (module String) in
+  let seen_spaced_config = Hashtbl.create (module String) in
   List.iter occurrences ~f:(fun occurrence ->
+      (if occurrence.spaced_bare then
+         let site = mention_site occurrence.path occurrence.key in
+         if Set.mem spaced_config_sites site then Hashtbl.incr seen_spaced_config site
+         else
+           Verdict.fail
+             (Printf.sprintf
+                "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
+                 spaced_config_mentions"
+                occurrence.path occurrence.line occurrence.spelling));
       if Set.mem Utils.known_config_keys occurrence.key then ()
       else if Set.mem non_config_assignment_sites (mention_site occurrence.path occurrence.key) then
         seen_non_config := Set.add !seen_non_config (mention_site occurrence.path occurrence.key)
       else if Set.mem historical_invalid_config_sites (mention_site occurrence.path occurrence.key)
-      then seen_historical := Set.add !seen_historical (mention_site occurrence.path occurrence.key)
+      then Hashtbl.incr seen_historical (mention_site occurrence.path occurrence.key)
       else
         Verdict.fail
           (Printf.sprintf "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys"
@@ -247,15 +390,33 @@ let check ~repository_census occurrences =
            (stale_non_config
            |> List.map ~f:(fun (path, key) -> path ^ ":" ^ key)
            |> String.concat ~sep:", "));
-    let stale_historical =
-      List.filter historical_invalid_config_mentions ~f:(fun (path, key) ->
-          not (Set.mem !seen_historical (mention_site path key)))
+    let drifted_historical =
+      List.filter_map historical_invalid_config_mentions ~f:(fun (path, key, expected) ->
+          let actual =
+            Hashtbl.find seen_historical (mention_site path key) |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
-    if not (List.is_empty stale_historical) then
+    if not (List.is_empty drifted_historical) then
       Verdict.fail
-        (Printf.sprintf "historical invalid-config exemptions no scanned mention uses: %s"
-           (stale_historical
-           |> List.map ~f:(fun (path, key) -> path ^ ":" ^ key)
+        (Printf.sprintf "historical invalid-config exemption occurrence counts drifted: %s"
+           (drifted_historical
+           |> List.map ~f:(fun (path, key, expected, actual) ->
+               Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
+           |> String.concat ~sep:", "));
+    let drifted_spaced =
+      List.filter_map spaced_config_mentions ~f:(fun (path, key, expected) ->
+          let actual =
+            Hashtbl.find seen_spaced_config (mention_site path key) |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
+    in
+    if not (List.is_empty drifted_spaced) then
+      Verdict.fail
+        (Printf.sprintf "spaced config-mention occurrence counts drifted: %s"
+           (drifted_spaced
+           |> List.map ~f:(fun (path, key, expected, actual) ->
+               Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", ")))
 
 let file_kind path = if String.is_suffix path ~suffix:".md" then `Markdown else `Shell
@@ -291,11 +452,17 @@ let live workspace_root paths =
         else None)
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
-  let under root = List.filter files ~f:(fun (path, _) -> String.is_prefix path ~prefix:root) in
+  let scripts =
+    List.filter files ~f:(fun (path, _) ->
+        String.is_suffix path ~suffix:".sh" || String.is_suffix path ~suffix:".py")
+  in
+  let scripts_under root =
+    List.filter scripts ~f:(fun (path, _) -> String.is_prefix path ~prefix:root)
+  in
   let markdown = List.filter files ~f:(fun (path, _) -> String.is_suffix path ~suffix:".md") in
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
-    ~f:(fun root -> not (List.is_empty (under root)));
+    ~f:(fun root -> not (List.is_empty (scripts_under root)));
   Verdict.p "the scan reaches AGENTS.md, root README, docs, and benchmark README"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.equal path "README.md")

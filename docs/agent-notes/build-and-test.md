@@ -74,18 +74,21 @@ that they earn a lookup rather than always-loaded space.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
   `benchmarks/`; its prose corpus is `AGENTS.md`, the root and benchmark READMEs, and every `*.md`
-  under `docs/`. A script token contributes a key when it has a qualified command-line spelling
-  accepted by `Utils.cmdline_var_names` followed by `=`, or the environment form
+  under `docs/`. A script token contributes a key when it has a qualified command-line spelling and
+  value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>=`; the explicit open namespaces `OCANNL_TOOL_*` and
   `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key only when an inline
-  code span consists entirely of one bare or prefixed assignment (an empty example value is still
-  a key mention). That boundary leaves fenced
+  code span consists entirely of one bare or prefixed assignment (whitespace around `=` and an empty
+  example value do not hide the key). Because spaced assignments are pervasive in code prose, each
+  current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
+  that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked
   against `Utils.known_config_keys`; an explicit, usage-checked file/key judgment list identifies
   bare assignments that are tensor fields, dimensions, or report notation, and equally narrow
-  exceptions retain prose whose subject is a historical invalid spelling. The checked-in fixture
-  gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it, so a
-  clean live corpus is not its only evidence that the rule has teeth.
+  exceptions retain prose whose subject is a historical invalid spelling. Historical exceptions
+  pin their occurrence count, so repeating an obsolete instruction cannot widen one. The checked-in
+  fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
+  so a clean live corpus is not its only evidence that the rule has teeth.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to
