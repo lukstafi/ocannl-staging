@@ -201,7 +201,8 @@ echo "scratch:          $scratch"
 echo "host toolchain:   GCC 13 x86_64-linux-gnu (Ubuntu CI proxy)"
 echo "real host:        x86_64 Linux with Debian-family apt indexes"
 echo "test runner:      tools/test-run.sh from the resolved repository"
-echo "environment:      clear OCANNL config (preserve OCANNL_TOOL_*) and compiler selectors"
+echo "environment:      clear OCANNL config, compiler selectors, and LD_* overrides"
+echo "                  preserve OCANNL_TOOL_* harness controls"
 if [ "$aarch64_clang" -eq 1 ]; then
   echo "cross toolchain:  clang 21 --target=aarch64-linux-gnu"
   echo "assembly dialect: Apple NEON (-mllvm -aarch64-neon-syntax=apple)"
@@ -446,6 +447,30 @@ echo "ci-compiler-test: ambient OCANNL configuration: cleared"
 # the fetched drivers to a caller-owned toolchain or headers just as surely.
 unset GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH LIBRARY_PATH SDKROOT MACOSX_DEPLOYMENT_TARGET
 unset AARCH64_CROSS_GCC
+
+# Treat the dynamic loader as part of the toolchain boundary too. Clear the
+# family, rather than today's two common members: LD_PRELOAD/LD_LIBRARY_PATH
+# can replace compiler dependencies, while LD_AUDIT and friends can perturb
+# both the compiler and the generated shared object. The clang wrapper exports
+# its one derived scratch path internally after this cleanup.
+ambient_loader_names=()
+while IFS='=' read -r name _; do
+  case $name in LD_*) ambient_loader_names+=("$name") ;; esac
+done < <(env)
+if [ "${#ambient_loader_names[@]}" -gt 0 ]; then
+  echo "ci-compiler-test: clearing ambient dynamic-loader variables:"
+  for name in "${ambient_loader_names[@]}"; do
+    echo "  $name"
+    unset "$name" || die "cannot clear ambient loader variable $name"
+  done
+fi
+remaining_loader_names=()
+while IFS='=' read -r name _; do
+  case $name in LD_*) remaining_loader_names+=("$name") ;; esac
+done < <(env)
+[ "${#remaining_loader_names[@]}" -eq 0 ] ||
+  die "ambient loader variables remain after cleanup: ${remaining_loader_names[*]}"
+echo "ci-compiler-test: ambient dynamic-loader overrides: cleared"
 
 rm -f "$gcc_log"
 [ -z "$clang_log" ] || rm -f "$clang_log"
