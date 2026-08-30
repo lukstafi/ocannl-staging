@@ -90,17 +90,26 @@ let unknown_cli_key ~name_prefix token =
 
 (* A qualified spelling can be ambiguous when a runtime value separator is also a legal key
    character: [backend_cuda=true] can mean key [backend] with value [cuda=true], or a key named
-   [backend_cuda]. Prefer the explicit syntactic name so a removed longer key cannot be absorbed by
-   a surviving prefix. The exceptional runtime-value reading is a counted site judgment. Store the
-   suffix separately so this declaration does not scan itself as another command-line occurrence. *)
+   [backend_cuda]. The no-equals separators have the same problem. Prefer the explicit syntactic
+   name so a removed longer key cannot be absorbed by a surviving prefix. Exceptional runtime-value
+   readings are counted site judgments. Store suffixes separately so these declarations do not scan
+   themselves as more command-line occurrences. *)
 let ambiguous_cli_value_mentions =
-  [ ("docs/agent-notes/build-and-test.md", "backend_cuda=true", "backend", 1) ]
+  [
+    ("arrayjit/lib/utils.ml", "--ocannl_", "log_level_1", "log_level", 1);
+    ("docs/agent-notes/build-and-test.md", "--ocannl_", "backend_cuda=true", "backend", 1);
+    ("test/operations/config_var_spellings.ml", "--ocannl_", "log_level_0", "log_level", 1);
+    ("test/operations/dune", "--ocannl_", "log_level_0", "log_level", 3);
+    ( "test/operations/dune",
+      "--ocannl-",
+      "print-decimals-precision-7",
+      "print_decimals_precision",
+      1 );
+  ]
 
 let declared_ambiguous_cli_value_key ~path token =
-  List.find_map ambiguous_cli_value_mentions ~f:(fun (tracked_path, suffix, key, _) ->
-      Option.some_if
-        (String.equal path tracked_path && String.equal token ("--ocannl_" ^ suffix))
-        key)
+  List.find_map ambiguous_cli_value_mentions ~f:(fun (tracked_path, prefix, suffix, key, _) ->
+      Option.some_if (String.equal path tracked_path && String.equal token (prefix ^ suffix)) key)
 
 let cli_key_of_token ~path token =
   List.find_map cli_name_prefixes ~f:(fun name_prefix ->
@@ -114,8 +123,12 @@ let cli_key_of_token ~path token =
                 | Some key ->
                     Option.first_some (declared_ambiguous_cli_value_key ~path token) (Some key)
                 | None -> known_cli_key token)
-            | None ->
-                Option.first_some (known_cli_key token) (Some (unknown_cli_key ~name_prefix token))))
+            | None -> (
+                match syntactic_cli_key_of_name token with
+                | Some key when Set.mem Utils.known_config_keys key -> Some key
+                | Some key ->
+                    Option.first_some (declared_ambiguous_cli_value_key ~path token) (Some key)
+                | None -> Some (unknown_cli_key ~name_prefix token))))
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -670,8 +683,8 @@ let ambiguous_cli_value_site path spelling key = path ^ "\000" ^ spelling ^ "\00
 
 let ambiguous_cli_value_sites =
   Set.of_list (module String)
-  @@ List.map ambiguous_cli_value_mentions ~f:(fun (path, suffix, key, _) ->
-      ambiguous_cli_value_site path ("--ocannl_" ^ suffix) key)
+  @@ List.map ambiguous_cli_value_mentions ~f:(fun (path, prefix, suffix, key, _) ->
+      ambiguous_cli_value_site path (prefix ^ suffix) key)
 
 let kind_name = function
   | Cli_flag -> "command-line flag"
@@ -821,8 +834,8 @@ let check ~repository_census occurrences =
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_ambiguous_cli_value =
-      List.filter_map ambiguous_cli_value_mentions ~f:(fun (path, suffix, key, expected) ->
-          let spelling = "--ocannl_" ^ suffix in
+      List.filter_map ambiguous_cli_value_mentions ~f:(fun (path, prefix, suffix, key, expected) ->
+          let spelling = prefix ^ suffix in
           let actual =
             Hashtbl.find seen_ambiguous_cli_value (ambiguous_cli_value_site path spelling key)
             |> Option.value ~default:0
@@ -846,6 +859,18 @@ let file_kind path =
   then `Config
   else `Script
 
+let dedup_occurrences occurrences =
+  let seen = Hash_set.create (module String) in
+  List.filter occurrences ~f:(fun occurrence ->
+      let id =
+        Printf.sprintf "%s\000%d\000%s\000%s" occurrence.path occurrence.line occurrence.key
+          occurrence.spelling
+      in
+      if Hash_set.mem seen id then false
+      else (
+        Hash_set.add seen id;
+        true))
+
 let occurrences_of_file ~reported_path path =
   let content = In_channel.read_all path in
   let primary =
@@ -860,7 +885,11 @@ let occurrences_of_file ~reported_path path =
         config_file_occurrences
           ~include_commented:(String.equal reported_path "ocannl_config.for_debug")
           ~path:reported_path content
-    | `Dune | `Reference | `Script -> script_occurrences ~path:reported_path content
+    | `Reference ->
+        dedup_occurrences
+          (script_occurrences ~path:reported_path content
+          @ markdown_occurrences ~allow_bare:true ~path:reported_path content)
+    | `Dune | `Script -> script_occurrences ~path:reported_path content
   in
   primary
   @ prefix_free_occurrences_for ~path:reported_path

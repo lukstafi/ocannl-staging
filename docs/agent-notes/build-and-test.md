@@ -84,17 +84,17 @@ that they earn a lookup rather than always-loaded space.
   `*.ml`/`*.mli` sources under `arrayjit/lib/`, `tensor/`, and `lib/`. Its prose corpus is `AGENTS.md`,
   the root README, and every `*.md` under `docs/`
   and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
-  `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in
-  `ocannl_config.reference`; workflow YAML under `.github/workflows/` contributes unambiguous
-  prefixed tokens. A script or Dune-action
+  `ocannl_config` files join too, as do `ocannl_config.for_debug` and both prefixed tokens and
+  whole-span inline assignments in `ocannl_config.reference`; workflow YAML under
+  `.github/workflows/` contributes unambiguous prefixed tokens. A script or Dune-action
   token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>` beginning and ending at identifier boundaries (with or without an assignment); the
   explicit open namespaces `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config.
-  The explicit name before `=` normally wins over a shorter registered-key prefix. The inherently
-  ambiguous alternate-value spelling `--ocannl_backend_cuda=true` is a file/token/key/count-pinned
-  judgment meaning key `backend` with value cuda=true; any other such ambiguity fails as the
-  longer explicit name.
+  The explicit token name normally wins over a shorter registered-key prefix. Inherently ambiguous
+  alternate-value spellings such as `--ocannl_backend_cuda=true` are file/token/key/count-pinned
+  judgments (that example means key `backend` with value cuda=true); any other such ambiguity,
+  including a no-equals separator, fails as the longer explicit name.
   Supported prefix-free
   config flags occupy the host application's namespace, so their current documentation sites are
   separately file/key/count-pinned and disappear when the runtime's per-key qualified-only policy
