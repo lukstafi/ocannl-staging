@@ -4098,10 +4098,11 @@
 ; prose are consumers of the key registry too. The OCaml-source scanners cannot see either, so a
 ; rename otherwise leaves them behind until a reviewer remembers the site.
 ;
-; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/:
-; those are the three checked-in script roots, and naming them separately makes a vanished root
-; fail the scan's non-vacuity claim. Qualified command-line spellings and value separators accepted
-; by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>=` assignments, are consumers.
+; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/, plus
+; user-facing `*.ml` help text under tools/ and benchmarks/: the three checked-in script roots and
+; both OCaml roots have non-vacuity claims. Qualified command-line spellings and value separators
+; accepted by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are
+; consumers.
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
 ; application and cannot safely be claimed globally.
 ; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
@@ -4110,11 +4111,12 @@
 ; tokens, and elsewhere a bare assignment may occupy the whole inline span (with optional whitespace
 ; around `=`). Every checked-in dune file contributes action arguments, and every checked-in
 ; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
-; assignment keys; the five checked-in config roots are named in the non-vacuity floor so Dune's
-; generated local copy cannot satisfy it. Prefixed token examples in ocannl_config.reference join
-; too. Non-config judgments, spaced bare config mentions, and intentional-invalid exemptions pin
-; file/key occurrence counts. The checked-in fixture carries one unknown key in every accepted
-; syntax, and the control requires refusal with exit 1.
+; assignment keys (including commented ready-to-enable assignments in the latter); the five
+; checked-in config roots are named in the non-vacuity floor so Dune's generated local copy cannot
+; satisfy it. Prefixed token examples in ocannl_config.reference join too. Non-config judgments,
+; spaced bare config mentions, and intentional-invalid exemptions pin file/key occurrence counts.
+; The checked-in fixture carries one unknown key in every accepted syntax, and the control requires
+; refusal with exit 1.
 
 (executable
  (name config_usage_scan)
@@ -4138,10 +4140,12 @@
   (glob_files_rec ../../ocannl_config)
   (glob_files_rec ../../tools/*.sh)
   (glob_files_rec ../../tools/*.py)
+  (glob_files_rec ../../tools/*.ml)
   (glob_files_rec ../../scripts/*.sh)
   (glob_files_rec ../../scripts/*.py)
   (glob_files_rec ../../benchmarks/*.sh)
-  (glob_files_rec ../../benchmarks/*.py))
+  (glob_files_rec ../../benchmarks/*.py)
+  (glob_files_rec ../../benchmarks/*.ml))
  (action
   (with-stdout-to
    %{target}

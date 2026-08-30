@@ -2,11 +2,11 @@
 
    The source forms are deliberately narrow and syntactic. Shell and Python scripts contribute every
    qualified command-line token accepted through [Utils.cmdline_var_prefixes], and every
-   [OCANNL_<KEY>=] token, including tokens in comments and quoted command strings -- those are still
-   instructions or commands a reader can reuse. Markdown contributes an inline code span whose whole
-   rendered content is one assignment in a bare or prefixed form. Fenced code and longer snippets
-   describe arbitrary APIs and expression languages, so treating every equals sign in them as
-   configuration would make the scan unusable.
+   identifier-delimited [OCANNL_<KEY>] token, including tokens in comments and quoted command
+   strings -- those are still instructions or commands a reader can reuse. Markdown contributes an
+   inline code span whose whole rendered content is one assignment in a bare or prefixed form.
+   Fenced code and longer snippets describe arbitrary APIs and expression languages, so treating
+   every equals sign in them as configuration would make the scan unusable.
 
    gh-ocannl-790. *)
 
@@ -18,6 +18,7 @@ type kind =
   | Cli_flag
   | Prefix_free_cli_flag
   | Environment_assignment
+  | Standalone_environment_mention
   | Markdown_assignment
   | Config_file_assignment
 
@@ -226,13 +227,57 @@ let script_occurrences ~path content =
             from 0 []))
     |> List.concat
   in
-  cli_occurrences
-  @ prefixed_occurrences
+  let environment_assignments =
+    prefixed_occurrences
       ~start_ok:(fun line start ->
         start = 0 || not (Char.is_alphanum line.[start - 1] || Char.equal line.[start - 1] '_'))
       ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
       ~normalize:(fun key -> if non_config_env_key key then None else Some (String.lowercase key))
       ~kind:Environment_assignment content
+  in
+  let standalone_environment_mentions =
+    String.split_lines content
+    |> List.mapi ~f:(fun index line ->
+        let rec from pos found =
+          match String.substr_index line ~pos ~pattern:"OCANNL_" with
+          | None -> List.rev found
+          | Some start
+            when start > 0 && (Char.is_alphanum line.[start - 1] || Char.equal line.[start - 1] '_')
+            ->
+              from (start + 1) found
+          | Some start ->
+              let key_start = start + String.length "OCANNL_" in
+              let key_stop = ref key_start in
+              while !key_stop < String.length line && uppercase_key_char line.[!key_stop] do
+                Int.incr key_stop
+              done;
+              let next = max (start + 1) !key_stop in
+              if
+                !key_stop = key_start
+                || !key_stop < String.length line
+                   && (Char.is_alphanum line.[!key_stop]
+                      || Char.equal line.[!key_stop] '_'
+                      || Char.equal line.[!key_stop] '=')
+              then from next found
+              else
+                let raw_key = String.sub line ~pos:key_start ~len:(!key_stop - key_start) in
+                if non_config_env_key raw_key then from next found
+                else
+                  from next
+                    ({
+                       path;
+                       line = index + 1;
+                       key = String.lowercase raw_key;
+                       spelling = String.sub line ~pos:start ~len:(!key_stop - start);
+                       kind = Standalone_environment_mention;
+                       spaced_bare = false;
+                     }
+                    :: found)
+        in
+        from 0 [])
+    |> List.concat
+  in
+  cli_occurrences @ environment_assignments @ standalone_environment_mentions
 
 let same_range (a, b) (x, y) = Int.equal a x && Int.equal b y
 
@@ -257,7 +302,7 @@ let historical_invalid_config_mentions =
     ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
     ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
     ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
-    ("test/operations/dune", "backedn", 1);
+    ("test/operations/dune", "backedn", 3);
     ("test/operations/dune", "not_a_real_key", 1);
     ("test/operations/startup_streams/ocannl_config", "definitely_not_a_config_key", 1);
   ]
@@ -382,19 +427,27 @@ let normalize_config_file_key raw_key =
     String.drop_prefix key 6 |> String.strip ~drop:(fun c -> Char.equal c '_')
   else key
 
-let config_file_occurrences ~path content =
+let config_file_occurrences ?(include_commented = false) ~path content =
   String.split_lines content
   |> List.filter_mapi ~f:(fun index line ->
       let rendered = String.strip line in
+      let commented = String.is_prefix rendered ~prefix:"#" in
+      let candidate =
+        if include_commented then
+          Option.value (String.chop_prefix rendered ~prefix:"#") ~default:rendered |> String.strip
+        else rendered
+      in
       if
-        String.is_empty rendered || String.is_prefix line ~prefix:"#"
-        || String.is_prefix line ~prefix:"~~"
+        String.is_empty candidate
+        || ((not include_commented) && String.is_prefix rendered ~prefix:"#")
+        || String.is_prefix candidate ~prefix:"~~"
       then None
       else
-        Option.bind (String.lsplit2 line ~on:'=') ~f:(fun (raw_key, value) ->
+        Option.bind (String.lsplit2 candidate ~on:'=') ~f:(fun (raw_key, value) ->
             let key = normalize_config_file_key raw_key in
             Option.some_if
-              (not (String.is_empty key || String.is_empty value))
+              ((not (String.is_empty key || String.is_empty value))
+              && ((not commented) || String.for_all key ~f:lowercase_key_char))
               {
                 path;
                 line = index + 1;
@@ -403,6 +456,30 @@ let config_file_occurrences ~path content =
                 kind = Config_file_assignment;
                 spaced_bare = false;
               }))
+
+(* Standalone environment names are unambiguous enough to scan throughout command-like text, but
+   OCANNL-prefixed C feature macros and synthetic parser-test variables deliberately share the
+   namespace. Pin those judgments by file/key/count so the exception cannot absorb a second site. *)
+let non_config_environment_mentions =
+  [
+    ("benchmarks/report-gh550-cuda.md", "550_no_release", 1);
+    ("docs/agent-notes/backend-precision-and-simd.md", "half_fma", 3);
+    ("docs/agent-notes/backend-precision-and-simd.md", "vec_widen_", 1);
+    ("docs/agent-notes/backend-precision-and-simd.md", "vec_narrow_", 1);
+    ("docs/agent-notes/backend-precision-and-simd.md", "vec_widen_half", 1);
+    ("docs/agent-notes/backend-precision-and-simd.md", "has_elementwise_fma", 3);
+    ("docs/proposals/gh-ocannl-163.md", "has_avx2", 1);
+    ("docs/proposals/gh-ocannl-163.md", "has_neon", 1);
+    ("docs/proposals/gh-ocannl-164.md", "has_avx2", 6);
+    ("docs/proposals/gh-ocannl-164.md", "has_neon", 6);
+    ("docs/proposals/gh-ocannl-575-narrow-register-tiling.md", "half_fma", 4);
+    ("docs/research/ggml-lessons.md", "has_elementwise_fma", 1);
+    ("docs/research/ggml-lessons.md", "has_avx2", 2);
+    ("docs/research/ggml-lessons.md", "has_neon", 1);
+    ("ocannl_config.reference", "print", 2);
+    ("test/operations/dune", "dashed_only_key", 4);
+    ("test/operations/dune", "demo_key", 6);
+  ]
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
    list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
@@ -451,6 +528,10 @@ let non_config_assignment_sites =
   Set.of_list (module String)
   @@ List.map non_config_assignment_mentions ~f:(fun (path, key, _) -> mention_site path key)
 
+let non_config_environment_sites =
+  Set.of_list (module String)
+  @@ List.map non_config_environment_mentions ~f:(fun (path, key, _) -> mention_site path key)
+
 let historical_invalid_config_sites =
   Set.of_list (module String)
   @@ List.map historical_invalid_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
@@ -467,11 +548,13 @@ let kind_name = function
   | Cli_flag -> "command-line flag"
   | Prefix_free_cli_flag -> "prefix-free command-line flag"
   | Environment_assignment -> "environment assignment"
+  | Standalone_environment_mention -> "environment-variable mention"
   | Markdown_assignment -> "documentation assignment"
   | Config_file_assignment -> "configuration-file assignment"
 
 let check ~repository_census occurrences =
   let seen_non_config = Hashtbl.create (module String) in
+  let seen_non_config_environment = Hashtbl.create (module String) in
   let seen_historical = Hashtbl.create (module String) in
   let seen_spaced_config = Hashtbl.create (module String) in
   let seen_prefix_free = Hashtbl.create (module String) in
@@ -497,6 +580,8 @@ let check ~repository_census occurrences =
                  occurrence.path occurrence.line occurrence.spelling)
       | _ -> ());
       if Set.mem Utils.known_config_keys occurrence.key then ()
+      else if Set.mem non_config_environment_sites (mention_site occurrence.path occurrence.key)
+      then Hashtbl.incr seen_non_config_environment (mention_site occurrence.path occurrence.key)
       else if Set.mem non_config_assignment_sites (mention_site occurrence.path occurrence.key) then
         Hashtbl.incr seen_non_config (mention_site occurrence.path occurrence.key)
       else if Set.mem historical_invalid_config_sites (mention_site occurrence.path occurrence.key)
@@ -507,6 +592,32 @@ let check ~repository_census occurrences =
              occurrence.path occurrence.line (kind_name occurrence.kind) occurrence.spelling
              occurrence.key));
   if repository_census then (
+    let newly_real_environment =
+      List.filter non_config_environment_mentions ~f:(fun (_, key, _) ->
+          Set.mem Utils.known_config_keys key)
+    in
+    if not (List.is_empty newly_real_environment) then
+      Verdict.fail
+        (Printf.sprintf
+           "non-config environment exemptions now name registered config keys -- remove: %s"
+           (newly_real_environment
+           |> List.map ~f:(fun (path, key, _) -> path ^ ":" ^ key)
+           |> String.concat ~sep:", "));
+    let drifted_non_config_environment =
+      List.filter_map non_config_environment_mentions ~f:(fun (path, key, expected) ->
+          let actual =
+            Hashtbl.find seen_non_config_environment (mention_site path key)
+            |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
+    in
+    if not (List.is_empty drifted_non_config_environment) then
+      Verdict.fail
+        (Printf.sprintf "non-config environment-mention occurrence counts drifted: %s"
+           (drifted_non_config_environment
+           |> List.map ~f:(fun (path, key, expected, actual) ->
+               Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
+           |> String.concat ~sep:", "));
     let newly_real =
       List.filter non_config_assignment_mentions ~f:(fun (_, key, _) ->
           Set.mem Utils.known_config_keys key)
@@ -594,7 +705,10 @@ let occurrences_of_file ~reported_path path =
           || String.equal reported_path "benchmarks/README.md"
         in
         markdown_occurrences ~allow_bare ~path:reported_path content
-    | `Config -> config_file_occurrences ~path:reported_path content
+    | `Config ->
+        config_file_occurrences
+          ~include_commented:(String.equal reported_path "ocannl_config.for_debug")
+          ~path:reported_path content
     | `Dune | `Reference | `Script -> script_occurrences ~path:reported_path content
   in
   primary
@@ -611,7 +725,7 @@ let fixture path config_path =
     @ prefix_free_occurrences_for ~path:reported_path
         ~keys:[ "definitely_not_a_prefix_free_config_key" ]
         content
-    @ config_file_occurrences
+    @ config_file_occurrences ~include_commented:true
         ~path:(Stdlib.Filename.basename config_path)
         (In_channel.read_all config_path))
 
@@ -635,7 +749,11 @@ let live workspace_root paths =
           || (String.is_prefix relative ~prefix:"tools/"
              || String.is_prefix relative ~prefix:"scripts/"
              || String.is_prefix relative ~prefix:"benchmarks/")
-             && (String.is_suffix relative ~suffix:".sh" || String.is_suffix relative ~suffix:".py")
+             && (String.is_suffix relative ~suffix:".sh"
+                || String.is_suffix relative ~suffix:".py"
+                || (String.is_prefix relative ~prefix:"tools/"
+                   || String.is_prefix relative ~prefix:"benchmarks/")
+                   && String.is_suffix relative ~suffix:".ml")
         then Some (relative, path)
         else None)
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -651,6 +769,11 @@ let live workspace_root paths =
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
     ~f:(fun root -> not (List.is_empty (scripts_under root)));
+  Verdict.p "the scan reaches OCaml help text under tools and benchmarks"
+    (List.exists files ~f:(fun (path, _) ->
+         String.is_prefix path ~prefix:"tools/" && String.is_suffix path ~suffix:".ml")
+    && List.exists files ~f:(fun (path, _) ->
+        String.is_prefix path ~prefix:"benchmarks/" && String.is_suffix path ~suffix:".ml"));
   Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")
@@ -687,18 +810,22 @@ let live workspace_root paths =
         Poly.equal o.kind Cli_flag || Poly.equal o.kind Prefix_free_cli_flag)
   in
   let env_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Environment_assignment) in
+  let standalone_env_count =
+    List.count occurrences ~f:(fun o -> Poly.equal o.kind Standalone_environment_mention)
+  in
   let markdown_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Markdown_assignment) in
   let config_count =
     List.count occurrences ~f:(fun o -> Poly.equal o.kind Config_file_assignment)
   in
   eprintf
-    "config usage scan: %d files, %d command-line flags, %d environment assignments, %d \
-     documentation assignments, %d config-file assignments\n"
-    (List.length files) cli_count env_count markdown_count config_count;
+    "config usage scan: %d files, %d command-line flags, %d environment assignments, %d standalone \
+     environment mentions, %d documentation assignments, %d config-file assignments\n"
+    (List.length files) cli_count env_count standalone_env_count markdown_count config_count;
   if not (Verdict.any_failed ()) then (
     printf
-      "OK: qualified OCANNL command-line flags and OCANNL_<KEY>= assignments in scripts under \
-       tools/, scripts/, and benchmarks/ name registered keys.\n";
+      "OK: qualified OCANNL command-line flags and OCANNL_<KEY> environment mentions in scripts \
+       and user-facing OCaml help text under tools/, scripts/, and benchmarks/ name registered \
+       keys.\n";
     printf
       "OK: inline key=value assignments in scanned Markdown name registered keys or explicit \
        non-config notation.\n";
