@@ -367,8 +367,9 @@ val to_host : t -> Ir.Tnode.t -> Ir.Ndarray.t
 
 val from_host : t -> Ir.Tnode.t -> Ir.Ndarray.t -> t
 (** Uploads the host buffer into the node's device buffer (allocating it if needed) and returns a
-    context in which the node is marked initialized. Raises if this lineage placed the node [Local]:
-    no routine reads the uploaded buffer. *)
+    context in which the node is marked initialized and this explicit write supersedes any compiled
+    reader/writer frontier entry for the node. Raises if this lineage placed the node [Local]: no
+    routine reads the uploaded buffer. *)
 
 val get_values : t -> Ir.Tnode.t -> float array
 (** Retrieves all (unpadded) values of the node via an on-demand device-to-host transfer. *)

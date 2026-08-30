@@ -453,6 +453,22 @@ let hardware_limits ctx =
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }
 
+(* A completed/enqueued write outside [Context.run] supersedes the compiled access history for its
+   destination nodes. Future routines compiled from the returned context must observe the external
+   value, not wait for an older writer that the caller deliberately replaced; likewise an older
+   unexecuted reader cannot impose a WAR edge on a write that already happened. The merge-buffer
+   frontier is separate storage and is deliberately unaffected. *)
+let record_external_writes ctx nodes =
+  let frontier =
+    Set.fold nodes ~init:ctx.frontier ~f:(fun frontier tn ->
+        {
+          frontier with
+          last_writer = Map.remove frontier.last_writer tn;
+          last_readers = Map.remove frontier.last_readers tn;
+        })
+  in
+  mark_initialized { ctx with frontier } nodes
+
 (* {2 On-demand host access (gh-ocannl-333)}
 
    All CPU-side value access goes through these context-mediated transfers. There is no host copy
@@ -637,7 +653,7 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
             (c, ()));
       }
   in
-  mark_initialized { ctx with wrapped } (Set.singleton (module Tn) tn)
+  record_external_writes { ctx with wrapped } (Set.singleton (module Tn) tn)
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
@@ -707,14 +723,14 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
         Ir.Task.run r.BI.schedule;
         let dst = { dst with wrapped = rewrap r.BI.context } in
         match into_merge_buffer with
-        | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
+        | BI.No -> record_external_writes dst (Set.singleton (module Tn) tn)
         | BI.Copy -> record_merge_transfer dst ~name:r.BI.name)
     | None ->
         if not (Map.mem sctx.BI.ctx_buffers tn) then
           host_roundtrip "the node is absent from the source context"
         else if not (Map.mem dctx.BI.ctx_buffers tn) then
           (* Present in [src], absent in [dst]: allocate in [dst] and schedule the copy. *)
-          mark_initialized
+          record_external_writes
             { dst with wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx) }
             (Set.singleton (module Tn) tn)
         else

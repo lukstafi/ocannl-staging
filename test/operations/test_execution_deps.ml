@@ -200,7 +200,7 @@ let test_merge_buffer_read_dependency () =
   Train.set_materialized merge_value.Tensor.value;
   Train.set_materialized merge_output.Tensor.value;
   Train.set_materialized destination_tick.Tensor.value;
-  let source_ctx, source_writer =
+  let source_ctx, _source_writer =
     Train.to_routine (Context.auto ()) IDX.empty (Train.forward merge_value)
   in
   let destination_ctx, destination_tick_writer =
@@ -215,7 +215,10 @@ let test_merge_buffer_read_dependency () =
    with Failure msg ->
      Verdict.p "merge transfer refuses an unexecuted source writer"
        (String.is_substring msg ~substring:"before source writer"));
-  ignore (Context.run source_ctx source_writer : Context.t);
+  (* A synchronous explicit write supersedes that compiled writer in the returned context. The
+     transfer must now accept this source, and the final values distinguish the upload from the
+     never-run writer's [11; 22]. *)
+  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
   let merge_ctx =
     Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:destination_ctx
       merge_value.Tensor.value
@@ -236,7 +239,7 @@ let test_merge_buffer_read_dependency () =
   Verdict.p "merge consumer reads the transferred values"
     (Array.equal Float.equal
        (Context.get_values consumer_ctx merge_output.Tensor.value)
-       [| 11.; 22. |])
+       [| 5.; 6. |])
 
 let () =
   test_raw_dependency ();
