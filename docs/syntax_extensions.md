@@ -217,7 +217,7 @@ Using [inline declarations](#inline-declarations), this becomes more concise:
 
 When there is a function directly under the `%op` extension point, like in the example above, or directly under a function taking a unit parameter `()`, the function parameter (to the right of `()`) should be a tensor. That's because `%op` uses this tensor's (value's) label to enrich the label of the resulting tensor.
 
-When the declaration is followed by a literal float, the float provides the initial value to initialize the tensor. Otherwise, the tensor value cells are initialized randomly with uniform distribution.
+When the declaration is followed by a literal float, the float provides the initial value to initialize the tensor. Otherwise, the tensor value cells are initialized with the default parameter initialization: a centered, scaled packed `uniform ()` over `[-0.25, 0.25)` (`Operation.centered_uniform_param_init` with `scale = 0.5`), configurable by setting the reference `TDSL.default_param_init`.
 
 ## The syntax for %cd
 
@@ -352,7 +352,7 @@ Both `%cd` and `%op` syntaxes support inline declarations of tensors. For `%op` 
 
 A declaration site uses the record syntax. The key difference between the two extensions:
 
-- **`%op`**: `{ tensor_name = init_expr }` allows initialization expressions, or `{ tensor_name }` for default initialization (uniform random)
+- **`%op`**: `{ tensor_name = init_expr }` allows initialization expressions, or `{ tensor_name }` for default initialization (centered scaled packed `uniform ()` over `[-0.25, 0.25)`, configurable via `TDSL.default_param_init`)
 - **`%cd`**: `{ tensor_name }` requires self-referential syntax (the field name must match the field value identifier), no separate initialization expressions are allowed
 
 Both syntaxes support additional record fields that map directly to labeled arguments of the tensor creation functions (see `Tensor` module signatures):
@@ -420,9 +420,9 @@ To maintain the familiar concise syntax, yet allow for configurability during in
 
 > **For einops users**: If you're familiar with [einops](https://einops.rocks/), see [einops_comparison.md](einops_comparison.md) for a side-by-side mapping of einops operations to OCANNL's notation.
 
-As we mentioned above, in the `%cd` syntax you can set up an arbitrary assignment with projections derived from a generalized einsum specification, by passing the specification as a string with the `~logic` label. However, both the `%cd` and `%op` syntaxes support built-in operators that take an einsum specification: `+*` binding to `NTDSL.einsum` resp. `TDSL.einsum`, and `++` binding to `NTDSL.einsum1` resp. `TDSL.einsum1`. `+*` is a "ternary" operator, binary wrt. tensor arguments, and `++` is a binary operator, unary postfix wrt. tensor arguments. There are even more einsum operators: binary `@^+` and `+++`; unary `@^^`. When the einsum specification is a literal string, we support two syntax patterns: the string can either directly follow the operator (infix-style notation), or the string can follow the second argument (mixfix-style notation). When the spec string is an identifier, it must directly follow the operator.
+As we mentioned above, in the `%cd` syntax you can set up an arbitrary assignment with projections derived from a generalized einsum specification, by passing the specification as a string with the `~logic` label. However, both the `%cd` and `%op` syntaxes support built-in operators that take an einsum specification: `+*` binding to `NTDSL.einsum` resp. `TDSL.einsum`, and `++` binding to `NTDSL.einsum1` resp. `TDSL.einsum1`. `+*` is a "ternary" operator, binary wrt. tensor arguments, and `++` is a binary operator, unary postfix wrt. tensor arguments. There are even more einsum operators: binary `@^+` binding to `tropical` and `+++` binding to `outer_sum`; unary `@^^` binding to `einmax1` (the operator-to-function tables are `einsum_binary_ops`/`einsum_unary_ops` in `tensor/ppx_shared.ml`). When the einsum specification is a literal string, we support two syntax patterns: the string can either directly follow the operator (infix-style notation), or the string can follow the second argument (mixfix-style notation). When the spec string is an identifier, it must directly follow the operator.
 
-`+*`, `+++` and `++` use addition for the accumulation operation; `@^+` and `@^^` use maximum. You can verify that looking at the definitions of `Operation.einsum`, `Operation.einsum1`, etc. You can find examples of `+*` and `++` behavior in the test suite [einsum_trivia.ml](test/einsum_trivia.ml) and in [nn_blocks.ml](lib/nn_blocks.ml). A frequent use-case for `++` is to sum out all axes of a tensor:
+`+*`, `+++` and `++` use addition for the accumulation operation; `@^+` and `@^^` use maximum. The pairwise operation combined with the accumulation: `+*` multiplies (the classic einsum contraction), `+++` and `@^+` add (so `@^+` is max-reduce with add — the tropical semiring), and the unary `++`/`@^^` reduce their argument directly (add-reduce resp. max-reduce). You can verify that looking at the definitions of `Operation.einsum`, `Operation.einsum1`, etc. You can find examples of `+*` and `++` behavior in the test suite [einsum_trivia.ml](test/einsum_trivia.ml) and in [nn_blocks.ml](lib/nn_blocks.ml). A frequent use-case for `++` is to sum out all axes of a tensor:
 
 ```ocaml
   let%op scalar_loss = (margin_loss ++ "...|... => |->0") /. !..batch_size in
@@ -607,15 +607,21 @@ For example, `[ta; tb]` desugars to ``stack `Output [| ta; tb |]``, which genera
 
 ### Capturing the dimensions of selected axes for further computation or to add shape constraints
 
-The syntaxes `+*`, `++`, and `++^` accept an optional list of strings argument after the
-specification string. When passed, the strings should be some of the identifiers used in the
-specification. Both dimension variable and row variable labels are supported. This will introduce
-bindings for `Indexing.variable_ref` objects at the same point as the inline parameter definition
-bindings, and will pass these objects with the `~capture_dims` argument to `einsum`, `einsum1`,
-resp. `concat`. The bound objects can later be used with `Operation.embed_dim` or its alias
-`Operation.TDSL.O.dim` to embed the solved dimension of the corresponding variable (as a number)
-into a tensor expression. For a row variable, the number will be the product of the dimensions it
-resolved into.
+The einsum operators (`+*`, `@^+`, `+++`, `++`, `@^^`) and the concatenation operator `++^`
+accept an optional list of strings argument after the specification string. When passed, the
+strings should be some of the identifiers used in the specification. Both dimension variable and
+row variable labels are supported. This will introduce bindings for `Indexing.variable_ref`
+objects at the same point as the inline parameter definition bindings, and will pass these
+objects with the `~capture_dims` argument to `einsum`, `einsum1`, resp. `concat`. The bound
+objects can be used to add shape constraints via `Shape.set_dim` and `Shape.set_equal`, or with
+`Operation.embed_dim` or its alias `Operation.TDSL.O.dim` to embed the solved dimension of the
+corresponding variable (as a number) into a tensor expression. For a row variable, the number
+will be the product of the dimensions it resolved into.
+
+Capturing requires the specification to be a **literal string**: every capture pattern in
+`tensor/ppx_op.ml` and `tensor/ppx_cd.ml` matches on a string constant, so
+`x ++ "ab => a" ["b"]` works while `let s = "ab => a" in x ++ s ["b"]` does not expand as a
+capture.
 
 ### Einsum gotchas and idioms
 
