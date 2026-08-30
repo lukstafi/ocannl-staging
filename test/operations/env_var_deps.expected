@@ -9,6 +9,7 @@ Directories whose sources this scan reads:
   test/einsum
   test/gpt2
   test/operations
+  test/operations/atomic_file_rename_scan_fixture
   test/operations/profiles
   test/operations/startup_streams
   test/ppx
@@ -109,6 +110,9 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/gpt2/dune                           @slow
   test/gpt2/dune                           @slow-env_spelling_gate
   test/gpt2/dune                           @slow-gpt2_dry_run
+  test/operations/atomic_file_rename_scan_fixture/dune @runtest
+  test/operations/atomic_file_rename_scan_fixture/dune @runtest-env_spelling_gate
+  test/operations/atomic_file_rename_scan_fixture/dune @scans
   test/operations/dune                     @lifecycle
   test/operations/dune                     @metal-codegen
   test/operations/dune                     @runtest
@@ -219,6 +223,7 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
   test/config/dune: declares OCANNL_BACKEND
   test/einsum/dune: declares OCANNL_BACKEND; markers: none
   test/gpt2/dune: declares OCANNL_BACKEND; markers: none
+  test/operations/atomic_file_rename_scan_fixture/dune: markers: none
   test/operations/dune: declares OCANNL_BACKEND; markers: cc, cuda, metal, none
   test/operations/profiles/dune: markers: none
   test/operations/startup_streams/dune: markers: none

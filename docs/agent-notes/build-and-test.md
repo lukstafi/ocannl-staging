@@ -41,6 +41,11 @@ that they earn a lookup rather than always-loaded space.
   bullets that merely open with the same few words. The second half is not decoration: a rule that
   fires on ordinary writing gets switched off rather than obeyed, so every rule owes a demonstration
   that it does not.
+- A repository scan that parses generated OCaml must derive those outputs from the generator inputs,
+  not name today's targets. `atomic_file_rename_scan` maps the recursively globbed `.mll`/`.mly`
+  inputs into a `%{read-lines:...}` dynamic-dependency manifest; its committed ocamllex fixture
+  carries a forbidden rename that must arrive through that derived set, so either a blind derivation
+  or disconnected scan wiring fails permanently (gh-ocannl-862).
 - GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
   branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
   staging#413) survived nine review rounds, `dune build @check`, its targeted aliases and a

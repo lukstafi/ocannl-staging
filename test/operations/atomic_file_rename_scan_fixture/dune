@@ -1,0 +1,53 @@
+(ocamllex raw_rename)
+
+(copy_files
+ (files ../../config/ocannl_config))
+
+(copy_files
+ (files ../../config/env_spelling_gate.ml))
+
+(test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-env_spelling_gate)))
+
+; The manifest lives in a child directory because Dune evaluates `%{read-lines:...}` while loading
+; the consuming rule. The emitter prefixes each child-relative output with this directory, making
+; every line relative to the parent consumer while the recursive globs stay repository-rooted.
+(rule
+ (alias scans)
+ ; ocannl-backend: none -- links no backend: it only maps generator inputs to output paths.
+ (target generated_sources)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  (:generators
+   (glob_files_rec ../../../*.mll)
+   (glob_files_rec ../../../*.mly)))
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:../atomic_file_rename_scan.exe}
+    --generated-deps
+    atomic_file_rename_scan_fixture
+    %{generators}))))
