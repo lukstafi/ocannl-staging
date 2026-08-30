@@ -1,0 +1,108 @@
+direct, formatted, and `@@` refusal formats are extracted: true
+comments, quoted code, and a dynamic value contribute no diagnostic string constant: true
+Printf substitutions are holes and a stable literal fragment becomes the fragment: true
+an absent fragment is an orphan: true
+the same fragment in a control golden covers it: true
+control matching normalizes line wrapping and repeated whitespace: true
+
+Scanner refusal formats and the permanent control suite assigned to their source:
+atomic_file_rename_scan.ml: `arguments the rule's` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `scan cannot vouch` is catalogued beside atomic_file_rename_scan.expected: true
+cache_dir_ignores.ml: `the repository-root gitignore` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `arguments the rule's` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `gitignore no longer` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `root gitignore pattern` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `sources this check` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `the cache directory` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `no source reads` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `the built-in default` is catalogued beside cache_dir_scan_cases.expected: true
+cache_dir_ignores.ml: `the cache directory` is catalogued beside cache_dir_scan_cases.expected: true
+codegen_text_inventory.ml: `the exclusion for` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `cannot say whether` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `declares module` is catalogued beside codegen_text_scan_cases.expected: true
+config_dep_completeness.ml: `arguments the rule's` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `Dune_stanza_scan.action_heads` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `Dune_stanza_scan` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `which has no` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `change directory without` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `this check cannot` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `classification for and` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `does not declare` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `raw text shows` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `raw text shows` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `raw text runs` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `raw text runs` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `exempted sites that` is catalogued beside dune_scan_cases.expected: true
+dead_export_scan.ml: `mli-less implementation modules` is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: `scan cannot vouch` is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: `OCaml source does` is catalogued beside dead_export_scan.expected: true
+digest_completeness.ml: `which the codegen-stage` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `keys classified more` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `no cache-identity classification` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `Utils.known_config_keys` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `classifications claim cache-key` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `cache-key components no` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `but classified code-borne` is catalogued beside config_scan_lexing.expected: true
+env_var_deps.ml: `arguments the rule's` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the resource-lifecycle instrumentation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Test_utils.Generated` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `comment that does` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `carries a backend` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `one backend marker` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `between stanzas declares` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `times and only` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `running an executable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository-wide scan rule` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository-wide scan rule` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the repository scanner` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `run's generated artifacts` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `serializes its actions` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `has actions on` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `attaches a rule` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository a repo-wide` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository to produce` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `alias does not` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `attaches a rule` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `goldens on the` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `alias <suite>-<name> that` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `env_var` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `declares tracing gates` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the tracing` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `declares the tracing` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the environment variable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `include_subdirs` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `names the module` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reaches the environment` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the configuration` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the configuration` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the configuration` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `scanner refusal` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `scanner-refusal exemptions no` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `exempted declarations no` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `directories exempted from` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the repository's` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Test_utils.Generated.init` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository's census finds` is catalogued beside env_var_deps_control.expected: true
+test_config_consistency.ml: `call-site keys missing` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `sets keys missing` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `payload quoted in` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `scanned files share` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `Utils.settings` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `the empty string` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `string literal in` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `exempted functions that` is catalogued beside config_scan_lexing.expected: true
+verdict_ratchet.ml: `arguments the rule's` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `check cannot vouch` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `prints the claim` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `exempted literals that` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `claim-shaped literal any` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `planted canaries the` is catalogued beside verdict_scan_cases.expected: true

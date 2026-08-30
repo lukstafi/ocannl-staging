@@ -86,6 +86,7 @@ open Base
 open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
+module Refusals = Test_utils.Refusal_control_scan
 
 (* Declarations of a name OCANNL does not read as a configuration key. Keyed by "<dune
    file>:<name>", and each entry earns its place on every run (see the staleness check below): a
@@ -694,6 +695,36 @@ let per_directory_control () =
     (List.equal String.equal (List.rev !seen) [ ""; "child"; "child/grandchild" ]);
   printf "\n"
 
+(* gh-ocannl-800's own negative control. The repository is normally complete, so an empty orphan
+   list there cannot tell the live relationship from one that stopped deciding anything. Put the
+   relationship to one extracted refusal and two synthetic control corpora instead. *)
+let refusal_control () =
+  let source =
+    {ocaml|let fail = Verdict.fail
+let refuse name =
+  fail
+    (Printf.sprintf
+       "%s: appears in no permanent control golden -- add a negative control"
+       name)
+|ocaml}
+  in
+  let diagnostics = Refusals.diagnostics source in
+  let absent =
+    Refusals.orphans ~control_text:"a legitimate control about something else" diagnostics
+  in
+  let covered =
+    Refusals.orphans
+      ~control_text:
+        "the scanner refusal appears in no permanent control golden -- add a negative control"
+      diagnostics
+  in
+  printf
+    "The refusal relationship is put to a synthesized `Verdict.fail` format. Its stable fragment\n\
+     appears in no permanent control golden in the negative arm, and appears in the positive arm.\n\n";
+  Verdict.p "a diagnostic absent from every control golden is an orphan" (List.length absent = 1);
+  Verdict.p "the same diagnostic fragment in a control golden is covered" (List.is_empty covered);
+  printf "\n"
+
 let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -716,6 +747,19 @@ let main () =
     let all = List.filter paths ~f:(fun (path, _) -> String.is_suffix path ~suffix:".ml") in
     let kept = Set.of_list (module String) (Sources.sources_among (List.map all ~f:fst)) in
     List.filter all ~f:(fun (path, _) -> Set.mem kept path)
+  in
+  let expected_files =
+    List.filter paths ~f:(fun (path, _) -> String.is_suffix path ~suffix:".expected")
+  in
+  let control_goldens =
+    List.filter expected_files ~f:(fun (path, on_disk) ->
+        String.is_suffix path ~suffix:"_cases.expected"
+        || String.is_suffix path ~suffix:"_control.expected"
+        || String.is_substring (In_channel.read_all on_disk) ~substring:"Synthetic controls:")
+  in
+  let control_text =
+    String.concat ~sep:"\n"
+      (List.map control_goldens ~f:(fun (_, path) -> In_channel.read_all path))
   in
   let sources =
     List.map source_files ~f:(fun (path, on_disk) -> (String.lowercase path, on_disk))
@@ -838,6 +882,10 @@ let main () =
   let gate_table = ref [] in
   let read_table = ref [] in
   let guard_table = ref [] in
+  (* The scanner sources are derived from the same repo-wide rule property that makes a rule a
+     member of [@scans], but their directory descent comes from [per_directory] below. A new scan
+     therefore joins the diagnostic check with no source list to update. *)
+  let scanner_sources = ref (Set.empty (module String)) in
   (* Every `(env_var ...)` under a sexp, at any depth. *)
   let rec env_vars_in = function
     | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom name ] -> [ name ]
@@ -1044,6 +1092,53 @@ let main () =
          (gh-ocannl-747, Codex P2 round 3). *)
       let all_group_runners = file_stanzas in
       let artifact_subjects = ref [] in
+      (* gh-ocannl-800: collect the executable each repository-wide scan rule runs. Dune's main
+         module contract makes [foo.exe] come from [foo.ml]; the source lookup below holds that
+         relationship against the files this run was actually handed. This is deliberately a
+         callback on the gh-ocannl-813 seam: a scan rule under [(subdir ...)] cannot fall out by
+         needing one more private descent. *)
+      check_per_directory (fun subdir group ->
+          List.iter group ~f:(fun stanza ->
+              if repository_census && is_repo_wide_scan stanza then (
+                let executables =
+                  Scan.sites_of_stanza subdir stanza
+                  |> List.concat_map ~f:(fun site -> site.Scan.executables)
+                  |> List.dedup_and_sort ~compare:String.compare
+                in
+                if List.is_empty executables then
+                  fail
+                    (Printf.sprintf
+                       "%s%s is a repository-wide scan rule and this check cannot name the scanner \
+                        executable it runs -- a scanner source it cannot name is one whose refusal \
+                        diagnostics it cannot cover"
+                       dune_file
+                       (if String.is_empty subdir then "" else " in `(subdir " ^ subdir ^ " ...)`"));
+                List.iter executables ~f:(fun executable ->
+                    let basename = Stdlib.Filename.basename executable in
+                    match String.chop_suffix basename ~suffix:".exe" with
+                    | None ->
+                        fail
+                          (Printf.sprintf
+                             "%s%s runs `%s` from a repository-wide scan rule, which is not an \
+                              executable name this check can relate to a scanner source"
+                             dune_file
+                             (if String.is_empty subdir then ""
+                              else " in `(subdir " ^ subdir ^ " ...)`")
+                             executable)
+                    | Some stem ->
+                        let source =
+                          Scan.in_subdir (Scan.in_subdir dir subdir) (stem ^ ".ml")
+                          |> String.lowercase
+                        in
+                        if List.Assoc.mem sources source ~equal:String.equal then
+                          scanner_sources := Set.add !scanner_sources source
+                        else
+                          fail
+                            (Printf.sprintf
+                               "%s runs the repository scanner `%s`, and this check was handed no \
+                                `%s` source to inspect for refusal diagnostics -- add the \
+                                scanner's directory to the source globs"
+                               dune_file executable source)))));
       (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
          needing it. Both directions, since a declaration nothing reads for is the restatement this
          replaces rather than the relationship. This is the first consumer of the common
@@ -1964,6 +2059,50 @@ let main () =
       per_directory file_stanzas ~checks:(List.rev !directory_checks);
       check_family_members ();
       artifact_by_file := (dune_file, !artifact_subjects) :: !artifact_by_file);
+  (* Every static format a repository scanner hands to [Verdict.fail], related to all permanent
+     control goldens. The filename conventions are the repository's existing control vocabulary; a
+     scan whose live golden embeds its controls announces the same thing with the heading [Synthetic
+     controls:]. Production goldens without either signal cannot accidentally answer. *)
+  let refusal_diagnostics =
+    Set.to_list !scanner_sources
+    |> List.concat_map ~f:(fun source ->
+        match List.Assoc.find sources ~equal:String.equal source with
+        | None -> [] (* already refused at the derivation site above *)
+        | Some on_disk ->
+            Refusals.diagnostics (In_channel.read_all on_disk)
+            |> List.map ~f:(fun diagnostic -> (source, diagnostic)))
+  in
+  let refusal_exemptions : (string * string) list = [] in
+  let exemption_map = Map.of_alist_exn (module String) refusal_exemptions in
+  let refusal_exemptions_used = ref (Set.empty (module String)) in
+  let refusal_key source diagnostic = source ^ ":" ^ diagnostic.Refusals.fragment in
+  let orphan_refusals =
+    List.filter refusal_diagnostics ~f:(fun (source, diagnostic) ->
+        if Refusals.covered ~control_text diagnostic then false
+        else
+          let key = refusal_key source diagnostic in
+          if Map.mem exemption_map key then (
+            refusal_exemptions_used := Set.add !refusal_exemptions_used key;
+            false)
+          else true)
+  in
+  List.iter orphan_refusals ~f:(fun (source, diagnostic) ->
+      fail
+        (Printf.sprintf
+           "%s:%d scanner refusal `%s` appears in no permanent control golden -- exercise that \
+            refusal in a *_cases.expected or *_control.expected test, add it to an embedded \
+            `Synthetic controls:` section, or exempt the exact fragment with a reason"
+           source diagnostic.Refusals.line diagnostic.fragment));
+  let stale_refusal_exemptions =
+    Set.diff
+      (Set.of_list (module String) (List.map refusal_exemptions ~f:fst))
+      !refusal_exemptions_used
+  in
+  if not (Set.is_empty stale_refusal_exemptions) then
+    fail
+      (Printf.sprintf
+         "scanner-refusal exemptions no extracted diagnostic needs any more -- drop them: %s"
+         (String.concat ~sep:", " (Set.to_list stale_refusal_exemptions)));
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
   in
@@ -2241,6 +2380,32 @@ let main () =
     "every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_FILES_PREFIX \
      where dune runs it, and every declaration of it has a caller behind it"
     (!artifact_violations = 0);
+  if repository_census then (
+    printf
+      "\n\
+       Scanner refusal controls (gh-ocannl-800). Sources come from repository-wide scan rules;\n\
+       controls are *_cases.expected, *_control.expected, or a live scan golden with an explicit\n\
+       `Synthetic controls:` section. Printf substitutions do not decide coverage.\n";
+    printf "  statically extracted diagnostics: %d (details on stderr)\n"
+      (List.length refusal_diagnostics);
+    printf "  named exemptions with reasons:\n";
+    if List.is_empty refusal_exemptions then printf "    (none)\n"
+    else List.iter refusal_exemptions ~f:(fun (key, reason) -> printf "    %s -- %s\n" key reason);
+    eprintf "Repository scanner refusal diagnostics (not diffed):\n";
+    List.iter refusal_diagnostics ~f:(fun (source, diagnostic) ->
+        eprintf "  %s:%d  %s%s\n" source diagnostic.Refusals.line diagnostic.fragment
+          (if Refusals.covered ~control_text diagnostic then ""
+           else if Map.mem exemption_map (refusal_key source diagnostic) then " -- EXEMPT"
+           else " -- ORPHAN"));
+    Verdict.p_all ~min:10 "repository-wide scan rules resolve to scanner sources"
+      (Set.to_list !scanner_sources) ~f:(fun source ->
+        List.Assoc.mem sources source ~equal:String.equal);
+    Verdict.p_all ~min:10 "the permanent control-golden corpus is present" control_goldens
+      ~f:(fun (_path, on_disk) -> not (String.is_empty (In_channel.read_all on_disk)));
+    Verdict.p
+      "every statically recoverable scanner refusal diagnostic appears in a control golden or has \
+       a named reasoned exemption"
+      (List.is_empty orphan_refusals && Set.is_empty stale_refusal_exemptions));
   if not (Verdict.any_failed ()) then
     printf
       "\n\
@@ -3929,6 +4094,7 @@ let () =
   match Array.to_list Stdlib.Sys.argv with
   | _ :: [ "--control" ] ->
       per_directory_control ();
+      refusal_control ();
       control ();
       floor_control ();
       guard_control ();

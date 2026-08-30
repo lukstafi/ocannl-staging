@@ -174,6 +174,14 @@ that they earn a lookup rather than always-loaded space.
   applies only when `Config_key_scan.floor_violations` says the run was handed the repository's scan
   roots, and WHICH mode the run was in goes into the golden, so a glob that breaks flips that line
   rather than quietly retiring the floor.
+  gh-ocannl-800 adds the corresponding refusal ratchet. `env_var_deps` derives scanner sources from
+  the repository-wide rules through the shared `per_directory` traversal, extracts literal formats
+  handed to `Verdict.fail` (including `Printf` formats, with substitutions removed), and requires a
+  stable fragment of each in a permanent control golden. `refusal_control_scan_cases.expected` is
+  the reviewable source-to-control-suite catalogue; changing or adding a refusal therefore fails
+  until that golden records it, while the test's absent-fragment arm proves an omitted entry is an
+  orphan. Dynamic strings returned by helpers have no scanner-owned literal to extract and stay
+  outside this syntactic contract; exact exemptions, when one is deliberate, are stale-checked.
   Four shapes such a scan gets wrong quietly, all found in review, and each is a member of a genre
   rather than a one-off. **Identifiers**: a scan that matches a function through the module it
   belongs to must collect the module's local names from BOTH grammars — OCaml spells binding,

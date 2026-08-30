@@ -1764,6 +1764,57 @@
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
+; gh-ocannl-800: static scanner refusal formats are related to permanent control goldens. These
+; cases pin extraction, Printf-hole normalization, the orphan arm, and the covered near miss on
+; synthetic OCaml rather than relying on the currently complete repository relationship.
+
+(test
+ ; ocannl-backend: none -- links no backend: it parses embedded scanner source and compares text.
+ (name refusal_control_scan_cases)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  atomic_file_rename_scan.ml
+  atomic_file_rename_scan.expected
+  cache_dir_ignores.ml
+  cache_dir_scan_cases.expected
+  codegen_text_inventory.ml
+  codegen_text_scan_cases.expected
+  config_dep_completeness.ml
+  dune_scan_cases.expected
+  dead_export_scan.ml
+  dead_export_scan.expected
+  digest_completeness.ml
+  config_scan_lexing.expected
+  env_var_deps.ml
+  env_var_deps_control.expected
+  test_config_consistency.ml
+  verdict_ratchet.ml
+  verdict_scan_cases.expected)
+ (action
+  (run
+   %{test}
+   atomic_file_rename_scan.ml
+   atomic_file_rename_scan.expected
+   cache_dir_ignores.ml
+   cache_dir_scan_cases.expected
+   codegen_text_inventory.ml
+   codegen_text_scan_cases.expected
+   config_dep_completeness.ml
+   dune_scan_cases.expected
+   dead_export_scan.ml
+   dead_export_scan.expected
+   digest_completeness.ml
+   config_scan_lexing.expected
+   env_var_deps.ml
+   env_var_deps_control.expected
+   test_config_consistency.ml
+   config_scan_lexing.expected
+   verdict_ratchet.ml
+   verdict_scan_cases.expected))
+ (modules refusal_control_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
 ; gh-ocannl-689: the marker grammar's closed backend vocabulary, held equal to the backends OCANNL
 ; has. Its own stanza because linking the backend closure is exactly the cost the scanning tests
 ; above are keeping off themselves -- one executable pays it, and `Dune_stanza_scan` keeps depending
@@ -1855,7 +1906,12 @@
   ; ambient variables it reads by name, and a test reading one is exactly the case that goes
   ; stale unnoticed -- `test_cpu_topology` and its hardware hook (Codex P2, round 2 on PR #371).
   (glob_files_rec ../../test/*.ml)
-  (glob_files_rec ../../arrayjit/test/*.ml))
+  (glob_files_rec ../../arrayjit/test/*.ml)
+  ; gh-ocannl-800: the refusal-control corpus. Only `_cases.expected`, `_control.expected`, and a
+  ; live scan golden explicitly headed `Synthetic controls:` count; the broad hand-over means a
+  ; new control joins without a second path list.
+  (glob_files_rec ../../test/*.expected)
+  (glob_files_rec ../../arrayjit/test/*.expected))
  (action
   (with-stdout-to
    %{target}
