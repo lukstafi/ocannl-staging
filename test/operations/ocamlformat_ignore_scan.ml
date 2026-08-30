@@ -81,8 +81,15 @@ let rec regular_files path =
   | _ -> []
   | exception Unix.Unix_error _ -> []
 
-let scan ~path_root ~ignore_file =
-  let arguments = regular_files path_root in
+let scan ~path_root ~ignore_file ~excluded =
+  (* The clean sandbox also contains the action's generated dependencies: this executable, plus the
+     redirected output target while the process is running. The dune action passes both as
+     exclusions. Everything else under [path_root] comes from the declared [source_tree]. *)
+  let excluded = List.map excluded ~f:(relative_to path_root) |> Set.of_list (module String) in
+  let arguments =
+    regular_files path_root
+    |> List.filter ~f:(fun path -> not (Set.mem excluded (relative_to path_root path)))
+  in
   let paths =
     List.map arguments ~f:(fun on_disk -> (relative_to path_root on_disk, on_disk))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -157,7 +164,7 @@ let describe_status = function
   | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
   | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n
 
-let run_child ~root ~exe =
+let run_child ~root ~exe ~excluded =
   let capture suffix = Stdlib.Filename.temp_file "fmt_ignore_control" suffix in
   let out_path = capture ".out" and err_path = capture ".err" in
   let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
@@ -166,7 +173,7 @@ let run_child ~root ~exe =
   (* Exercise the shipping scan over a declared-input root with no Git metadata. [--scan-only]
      suppresses only the parent's control driver; without it every child would recursively stage
      another generation of controls. *)
-  let argv = [| exe; "--scan-only"; root; ignore_file |] in
+  let argv = [| exe; "--scan-only"; root; ignore_file; excluded |] in
   let pid = Unix.create_process exe argv Unix.stdin out err in
   let _, status = Unix.waitpid [] pid in
   Unix.close out;
@@ -190,12 +197,12 @@ let control () =
   let ignore = ".ocamlformat-ignore" in
   List.iter [ a; b ] ~f:(fun path -> write_file (Stdlib.Filename.concat root path) "golden\n");
   write_file (Stdlib.Filename.concat root extra) "fixture\n";
-  (* This file exists in the simulated unsandboxed build root, but deliberately not in the clean
-     declared-input tree presented to the child scanner. *)
-  write_file (Stdlib.Filename.concat fixture undeclared) "stale artifact\n";
+  let excluded = Stdlib.Filename.concat root undeclared in
+  (* Simulate a generated action file that Dune places beside the declared source tree. *)
+  write_file excluded "stale artifact\n";
   let run content =
     write_file (Stdlib.Filename.concat root ignore) content;
-    run_child ~root ~exe
+    run_child ~root ~exe ~excluded
   in
   let report label (status, text) =
     eprintf "the %s control %s. Its captured output:\n%s\n" label (describe_status status) text
@@ -249,14 +256,17 @@ let control () =
   remove_tree fixture
 
 let usage () =
-  eprintf "Usage: %s <declared-source root> <.ocamlformat-ignore> | --control\n" Stdlib.Sys.argv.(0);
+  eprintf
+    "Usage: %s <declared-source root> <.ocamlformat-ignore> <generated exclusions...> | --control\n"
+    Stdlib.Sys.argv.(0);
   Stdlib.exit 2
 
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | [ _; "--control" ] -> control ()
-  | [ _; "--scan-only"; path_root; ignore_file ] -> scan ~path_root ~ignore_file
-  | [ _; path_root; ignore_file ] ->
-      scan ~path_root ~ignore_file;
+  | _ :: "--scan-only" :: path_root :: ignore_file :: excluded ->
+      scan ~path_root ~ignore_file ~excluded
+  | _ :: path_root :: ignore_file :: excluded ->
+      scan ~path_root ~ignore_file ~excluded;
       control ()
   | _ -> usage ()

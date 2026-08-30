@@ -3941,8 +3941,9 @@
  (deps
   ocannl_config
   ; The scanner enumerates this source tree inside a required clean sandbox. That preserves exact
-  ; path boundaries without putting the 37 KB expansion on a spawned command line, and excludes
-  ; stale generated files from existence checks even though test actions are normally unsandboxed.
+  ; path boundaries without putting the 37 KB expansion on a spawned command line. The action's
+  ; only non-source occupants are its executable and output target; both are passed below as
+  ; exclusions so a listed generated path cannot produce a false green.
   (sandbox always)
   (source_tree ../..)
   (:ignore ../../.ocamlformat-ignore)
@@ -3952,7 +3953,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{ignore}))))
+   (run
+    %{dep:ocamlformat_ignore_scan.exe}
+    %{workspace_root}
+    %{ignore}
+    %{target}
+    %{dep:ocamlformat_ignore_scan.exe}))))
 
 (rule
  (alias runtest-ocamlformat_ignore_scan)
