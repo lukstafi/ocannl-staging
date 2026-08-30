@@ -8,6 +8,8 @@
 set -euo pipefail
 
 sweep=$1
+aggregate=$2
+verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-sweep-test.XXXXXX")
 holder_pid=
 wait_prefix=
@@ -41,9 +43,17 @@ git -C "$main" push -q -u origin master
 cat >"$fake_bin/opam" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$SWEEP_TEST_CALLS"
-# Stands in for what a failing dune run writes to the unit's log, so a test can
-# put a chosen failure text in front of `fingerprint` without a GPU.
+# Stands in for what a test run writes to the unit's log. The common output
+# drives failure-fingerprint coverage; the per-backend outputs let the skip
+# aggregation controls distinguish an intersection from a union without GPUs.
 [ -n "${SWEEP_TEST_OPAM_OUT:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT"
+case ${OCANNL_BACKEND:-} in
+  cc) [ -n "${SWEEP_TEST_OPAM_OUT_CC:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT_CC" ;;
+  multidev_cc)
+    [ -n "${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" ] &&
+      printf '%s\n' "$SWEEP_TEST_OPAM_OUT_MULTIDEV_CC"
+    ;;
+esac
 if [ -n "${SWEEP_TEST_WAIT_PREFIX:-}" ]; then
   : >"$SWEEP_TEST_WAIT_PREFIX.ready"
   waited=0
@@ -62,18 +72,24 @@ chmod +x "$fake_bin/opam"
 printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n' >"$state/history.tsv"
 printf '20260820T000000Z\tlocal\tcc\tdeadbee\tpass\t1\t<all>\t0\t-\n' >>"$state/history.tsv"
 
-run_sweep_backend() {
-  local backend=$1
-  shift
+run_sweep_args() {
   HOME=$tmp/home \
   PATH=$fake_bin:$PATH \
   SWEEP_TEST_CALLS=$calls \
   SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-} \
   SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0} \
   SWEEP_TEST_OPAM_OUT=${SWEEP_TEST_OPAM_OUT:-} \
+  SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-} \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-} \
   OCANNL_TOOL_SWEEP_REPO=$main \
   OCANNL_TOOL_SWEEP_STATE=$state \
-    "$sweep" --only "$backend" "$@"
+    "$sweep" "$@"
+}
+
+run_sweep_backend() {
+  local backend=$1
+  shift
+  run_sweep_args --only "$backend" "$@"
 }
 
 run_sweep() { run_sweep_backend cc "$@"; }
@@ -101,6 +117,52 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 [ "$(sed -n '4p' "$calls")" = 'exec -- dune clean' ]
 [ "$(sed -n '5p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '6p' "$calls")" = 'exec -- dune build --force @slow' ]
+
+# Two complete forced units expose only the INTERSECTION of their skip sets.
+# The three absent backends keep this a potential finding rather than a failure:
+# one of them may have evaluated the common claim. A per-backend-only marker
+# must not leak into the report merely because it occurred somewhere.
+common='SKIPPED on fixture (vacuous): common unevaluated claim'
+cc_only='SKIPPED on fixture (vacuous): cc-only unevaluated claim'
+multidev_only='SKIPPED on fixture (vacuous): multidev-only unevaluated claim'
+coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
+$cc_only" \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
+$multidev_only" \
+  run_sweep_args --force --only cc --only multidev_cc)
+coverage_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$coverage" | tail -1)
+[ -f "$coverage_report" ]
+grep -q '^status: partial (2 of 5 known backends completed)$' "$coverage_report"
+grep -q '^missing backends: metal, cuda, hip$' "$coverage_report"
+grep -q '^POTENTIAL: skipped on every completed backend: common unevaluated claim$' \
+  "$coverage_report"
+! grep -q 'cc-only unevaluated claim' "$coverage_report"
+! grep -q 'multidev-only unevaluated claim' "$coverage_report"
+
+# The pure aggregator's complete-backend control is the escalation seam the
+# real sweep reaches only when both remote GPU boxes and all local units pass.
+# All five logs sharing a claim is exit 1 and a FAIL line; removing it from one
+# log proves the same complete census passes rather than treating a union as an
+# intersection.
+aggregate_args=()
+for backend in cc multidev_cc metal cuda hip; do
+  log=$tmp/$backend.log
+  "$verdict_probe" "$backend" >"$log" 2>&1
+  aggregate_args+=(--known "$backend")
+  aggregate_args+=(--run "$backend" "$log")
+done
+set +e
+complete_fail=$("$aggregate" "${aggregate_args[@]}" 2>&1)
+complete_fail_rc=$?
+set -e
+[ "$complete_fail_rc" -eq 1 ]
+grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
+grep -q '^FAIL: skipped on every known backend: common unevaluated claim$' \
+  <<<"$complete_fail"
+
+printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
+complete_pass=$("$aggregate" "${aggregate_args[@]}")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$complete_pass"
 
 # Hold one run after it owns the worktree lock, then replace its history with
 # the old schema. A competing launch must refuse at the lock without migrating
@@ -181,4 +243,4 @@ metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" |
 [ -f "$metal_pass_log" ]
 ! grep -q 'rtc-context' "$metal_pass_log"
 
-printf 'sweep execution accounting and RTC context: PASS\n'
+printf 'sweep execution accounting, RTC context and skip aggregation: PASS\n'

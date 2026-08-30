@@ -207,7 +207,8 @@
   (alias runtest-shell_scripts_parse)
   (alias runtest-optional_arg_inventory)
   (alias runtest-generated_provenance)
-  (alias runtest-verdict_quantified)))
+  (alias runtest-verdict_quantified)
+  (alias runtest-sweep_harness)))
 
 (test
  ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
@@ -4435,16 +4436,28 @@
  (modules sweep_harness_driver)
  (libraries unix))
 
+(executable
+ (name verdict_skip_probe)
+ (modules verdict_skip_probe)
+ (libraries arrayjit.verdict))
+
 (rule
- ; ocannl-backend: none -- the driver invokes a shell harness through fake opam and links no backend.
- (alias runtest)
+ ; ocannl-backend: none -- the harness uses fake opam and a Verdict-only skip probe; neither links a backend.
+ (alias runtest-sweep_harness)
  (package neural_nets_lib)
- (deps ocannl_config ../../tools/sweep.sh sweep_harness.sh)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  ../../tools/aggregate-skips.sh
+  ../../tools/sweep.sh
+  sweep_harness.sh)
  (action
   (run
    %{dep:sweep_harness_driver.exe}
    %{dep:sweep_harness.sh}
-   %{dep:../../tools/sweep.sh})))
+   %{dep:../../tools/sweep.sh}
+   %{dep:../../tools/aggregate-skips.sh}
+   %{dep:verdict_skip_probe.exe})))
 
 ; The atomic-file publication helper under concurrent writers (gh-ocannl-780). Domains, fixed
 ; iteration counts and a bounded spin: no wall-clock dependence, and no backend -- it publishes
