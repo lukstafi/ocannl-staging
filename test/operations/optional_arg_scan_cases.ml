@@ -173,6 +173,10 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
   case "local module opens affect following structure items"
     {ocaml|let f ?(_feature = true) () = let module M = struct open Effects let () = ignore _feature end in ()|ocaml}
     ~implemented:true ~honest:false;
+  case "a known structure open without ignore preserves the standard discard"
+    {ocaml|module Pure = struct let keep x = x end
+let f ?(feature = true) () = let module M = struct open Pure let () = ignore feature end in ()|ocaml}
+    ~implemented:false ~honest:false;
   case "structure opens shadow an outer optional value"
     {ocaml|module Defaults = struct let feature = false end
 let f ?(feature = true) () = let _ = feature in let module M = struct open Defaults let enabled = feature end in M.enabled|ocaml}
@@ -186,6 +190,10 @@ let f ?(feature = true) () = let _ = feature in let module M = struct open Defau
   case "Base.ignore through an operator remains a discard"
     {ocaml|let f ?(feature = true) () = feature |> Base.ignore|ocaml} ~implemented:false
     ~honest:false;
+  case "a shadowed Base.ignore qualifier is a real use"
+    {ocaml|module Base = struct let ignore x = enable x end
+let f ?(_feature = true) () = Base.ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
     ~honest:false;
@@ -208,9 +216,19 @@ let g = ()|ocaml}
 module A = B
 module B = struct let f () = () end|ocaml}
     ~implemented:false ~honest:false;
+  case "an optional function exported through a module include is inventoried"
+    {ocaml|module B = struct let f ?(feature = true) () = ignore feature end
+module A = struct include B end
+module B = struct let f () = () end|ocaml}
+    ~implemented:false ~honest:false;
   case "a nonrecursive binding group shares its preceding alias environment"
     {ocaml|let g ?(feature = true) () = ignore feature
 let g ?(feature = true) () = enable feature and f = g
+let g = ()|ocaml}
+    ~implemented:false ~honest:false;
+  case "a returned local nonrecursive group uses its preceding alias environment"
+    {ocaml|let g ?(feature = true) () = ignore feature
+let make () = let g ?(feature = true) () = enable feature and f = g in f
 let g = ()|ocaml}
     ~implemented:false ~honest:false;
   case "an optional class constructor argument is inventoried"
@@ -226,6 +244,15 @@ let g = ()|ocaml}
     {ocaml|type service = { run : ?feature:bool -> unit -> unit }
 let service = { run = fun ?(feature = true) () -> ignore feature }|ocaml}
     ~implemented:false ~honest:false;
+  case "an exported record callback inherits its enclosing ignore binding"
+    {ocaml|type service = { run : ?_feature:bool -> unit -> unit }
+let service = let ignore x = enable x in { run = fun ?(_feature = true) () -> ignore _feature }|ocaml}
+    ~implemented:true ~honest:false;
+  case "replacing an exported value removes its old nested optional APIs"
+    {ocaml|type service = { run : ?feature:bool -> unit -> unit }
+let service = { run = fun ?(feature = true) () -> ignore feature }
+let service = { run = fun ?(other = true) () -> enable other }|ocaml}
+    ~implemented:true ~honest:true;
   case "an optional function in an exported packed module is inventoried"
     {ocaml|module type S = sig val run : ?feature:bool -> unit -> unit end
 let service = (module struct let run ?(feature = true) () = ignore feature end : S)|ocaml}
