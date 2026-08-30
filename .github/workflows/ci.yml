@@ -292,7 +292,8 @@ jobs:
       run: opam exec -- dune build "@check"
     # One walk, not `dune build` then `dune runtest`: as two commands, the
     # `(test)` stanzas and inline-test runners only start after every file
-    # target -- including the golden-rule test executions `@default` carries --
+    # target -- including the golden-rule test executions `@default` carries and
+    # the cheap cc runtime canaries for every bin/ executable in `@bin-smoke` --
     # has finished, so the serialized `ocannl_training_test` chain runs against
     # an otherwise idle runner. One invocation lets dune schedule that chain
     # concurrently with the rest of the build, overlapping the two phases. A
@@ -311,11 +312,11 @@ jobs:
     # test/*/dune`) over a full second suite.
     #
     # The aliases are QUOTED for the Windows legs, whose default `run:` shell is
-    # PowerShell: unquoted, `@default`/`@runtest`/`@train` are splatted (empty)
+    # PowerShell: unquoted, `@default`/`@runtest`/`@bin-smoke`/`@train` are splatted (empty)
     # variables and the command degrades to a plain `dune build` that compiles
     # everything and runs no tests -- a silent false green. bash and cmd are
     # unaffected.
-    - run: opam exec -- dune build ${{ matrix.suite == 'train' && '"@train"' || '"@default" "@runtest"' }}
+    - run: opam exec -- dune build ${{ matrix.suite == 'train' && '"@train"' || '"@default" "@runtest" "@bin-smoke"' }}
     # `tools/test-run.sh` carries branches that ONLY execute under MSYS: it
     # sources `tools/opam-env.sh` unconditionally and fatally (a dune on PATH
     # does not imply rewritten cygwin paths there), routes dune through

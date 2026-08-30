@@ -101,6 +101,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   arrayjit/test/dune                       @metal-codegen
   arrayjit/test/dune                       @runtest
   arrayjit/test/dune                       @runtest-env_spelling_gate
+  bin/dune                                 @bin-smoke
+  bin/dune                                 @bin-smoke-env_spelling_gate
   test/einsum/dune                         @runtest
   test/einsum/dune                         @runtest-env_spelling_gate
   test/einsum/dune                         @runtest-inline_permuted_view-c_fwd
@@ -212,7 +214,7 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
   arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
   benchmarks/dune: markers: none
   benchmarks/runners/ocannl/dune: nothing that runs a test executable
-  bin/dune: nothing that runs a test executable
+  bin/dune: markers: cc, none
   dune: nothing that runs a test executable
   lib/dune: nothing that runs a test executable
   tensor/dune: nothing that runs a test executable

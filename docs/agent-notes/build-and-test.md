@@ -983,6 +983,12 @@ that they earn a lookup rather than always-loaded space.
 
 ### What CI actually covers
 
+- `dune build @bin-smoke` runs every `bin/` executable sequentially on deliberately tiny workloads
+  with the `cc` backend pinned (gh-ocannl-858). It is an exit-status canary only: its output and
+  timings are not goldens and make no measurement-validity claim. Per-PR CI includes it in the main
+  `@default @runtest` Dune walk, so `@check`'s inability to link or execute an executable no longer
+  leaves first-iteration failures in these tools uncovered. Keep benchmark-reproducibility work in
+  gh-ocannl-743 rather than expanding this alias into a benchmark assertion suite.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.

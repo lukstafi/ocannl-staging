@@ -76,6 +76,10 @@
    cd benchmarks # the nearest ocannl_config, and bin/ has the cwd trap OCANNL_BACKEND=hip
    ../_build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
 
+   Group [smoke] is deliberately outside that measurement vocabulary: its one 2x2 matmul exists only
+   so [@bin-smoke] can start and complete every phase cheaply on the cc backend. Its output is not
+   evidence about the projection-shape question this benchmark measures (gh-ocannl-858).
+
    Three things the output does NOT claim. The launch dimensions are printed only for the arms whose
    lowering this bench transforms itself; the untuned default and a crowned search compile their
    own, so those rows say so rather than reporting a geometry nobody verified. The [bestseed] column
@@ -322,7 +326,8 @@ let () =
         { tag = "E_qkv_rows8_heads1"; bs = [ 8 ]; m = 128; ns = [ 256 ]; ks = [ 256 ] };
         { tag = "E_qkv_rows1_heads1"; bs = []; m = 1024; ns = [ 256 ]; ks = [ 256 ] };
       ]
-    and pk = [ { tag = "P_square1024"; bs = []; m = 1024; ns = [ 1024 ]; ks = [ 1024 ] } ] in
+    and pk = [ { tag = "P_square1024"; bs = []; m = 1024; ns = [ 1024 ]; ks = [ 1024 ] } ]
+    and smoke = [ { tag = "smoke_2x2"; bs = []; m = 2; ns = [ 2 ]; ks = [ 2 ] } ] in
     match group with
     | "a" -> a
     | "b" -> b
@@ -333,6 +338,7 @@ let () =
     | "abd" -> a @ b @ d
     | "abde" -> a @ b @ d @ e
     | "all" -> a @ b @ c @ d @ e @ pk
+    | "smoke" -> smoke
     | g -> invalid_arg ("unknown group " ^ g)
   in
   let sites =
