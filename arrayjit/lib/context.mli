@@ -56,8 +56,9 @@ type routine = private {
       (** A unique integer identifying the routine within its root context's lifetime. *)
   execution_deps : Set.M(Int).t;
       (** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW
-          hazards on tensor nodes at compile time. An empty set means the routine is independent of
-          all previously compiled routines in its lineage. *)
+          hazards on ordinary tensor-node accesses and merge-buffer reads at compile time. An empty
+          set means the routine is independent of all previously compiled routines in its lineage.
+      *)
   mma : Ir.C_syntax.mma_summary;
       (** How this routine's [Tile_mma] statements actually rendered (gh-ocannl-626): the
           {!Ir.C_syntax.mma_census} of this compile, collected by {!compile} itself and summarized
@@ -287,7 +288,9 @@ val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** {2 Execution dependency tracking}
 
     Execution dependencies mirror compilation dependencies: they record which routines must execute
-    before which others based on tensor-node read/write hazards (RAW, WAR, WAW).
+    before which others based on tensor-node read/write hazards (RAW, WAR, WAW). A merge-buffer
+    input participates as a read of its associated tensor node even though the transient merge slab
+    is not an ordinary context input requiring initialization.
 
     Dependencies are scoped to compilation lineage: two routines compiled from the {i same}
     [Context.t] are independent siblings, even if they access the same nodes. Only routines compiled

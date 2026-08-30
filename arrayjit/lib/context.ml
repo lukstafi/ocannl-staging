@@ -182,6 +182,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
                       r.BI.bindings,
                       r.BI.name,
                       r.BI.inputs,
+                      r.BI.merge_buffer_input,
                       r.BI.outputs,
                       mma,
                       peel,
@@ -191,20 +192,31 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
   in
   match backend_outcome with
   | Error failure -> Error failure
-  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma, peel, volatility) ->
+  | Ok
+      ( task,
+        lowered_bindings,
+        name,
+        backend_inputs,
+        merge_buffer_input,
+        backend_outputs,
+        mma,
+        peel,
+        volatility ) ->
       (* Allocate unique ID from shared ledger *)
       let id = ctx.ledger.next_id in
       ctx.ledger.next_id <- id + 1;
 
       (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
-         materialized read-only and read-before-write nodes. [backend_outputs] = all materialized
-         written-to nodes. *)
+         materialized read-only and read-before-write nodes. A merge-buffer input is a real read
+         edge too, even though its transient slab is not an ordinary context input requiring
+         initialization. [backend_outputs] = all materialized written-to nodes. *)
       let frontier = ctx.frontier in
       let empty_int_set = Set.empty (module Int) in
+      let dependency_inputs = Option.fold merge_buffer_input ~init:backend_inputs ~f:Set.add in
 
-      (* RAW: for each backend input, depend on its last writer *)
+      (* RAW: for each ordinary or merge-buffer input, depend on its last writer *)
       let deps =
-        Set.fold backend_inputs ~init:empty_int_set ~f:(fun deps tn ->
+        Set.fold dependency_inputs ~init:empty_int_set ~f:(fun deps tn ->
             match Map.find frontier.last_writer tn with
             | Some writer_id -> Set.add deps writer_id
             | None -> deps)
@@ -231,7 +243,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
       let new_last_readers =
         Set.fold backend_outputs ~init:frontier.last_readers ~f:(fun lr tn -> Map.remove lr tn)
       in
-      let pure_inputs = Set.diff backend_inputs backend_outputs in
+      let pure_inputs = Set.diff dependency_inputs backend_outputs in
       let new_last_readers =
         Set.fold pure_inputs ~init:new_last_readers ~f:(fun lr tn ->
             let existing = Option.value (Map.find lr tn) ~default:empty_int_set in

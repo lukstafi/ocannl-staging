@@ -187,6 +187,49 @@ let test_poisoned_lineage () =
   refuses "copy out" (fun () -> ignore (Context.copy ~src:ctx ~dst:clean l.Tensor.value));
   refuses "copy in" (fun () -> ignore (Context.copy ~src:clean ~dst:ctx l.Tensor.value))
 
+(* Test 8: a merge-buffer input is a real read edge (gh-ocannl-766). The transient merge slab is
+   filled before this consumer is compiled, but the consumer still reads the logical tensor node: a
+   prior writer in the compilation lineage must execute first. The consumer writes a different node,
+   so no ordinary input/output hazard can accidentally supply the dependency. *)
+let test_merge_buffer_read_dependency () =
+  printf "\n=== Test 8: merge-buffer read dependency ===\n";
+  Tensor.unsafe_reinitialize ();
+  let%op merge_value = [ 1.; 2. ] + [ 10.; 20. ] in
+  let%op merge_output = [ 0.; 0. ] + [ 0.; 0. ] in
+  Train.set_materialized merge_value.Tensor.value;
+  Train.set_materialized merge_output.Tensor.value;
+  let writer_ctx, writer =
+    Train.to_routine (Context.auto ()) IDX.empty (Train.forward merge_value)
+  in
+  let src = Context.set_values (Context.auto ()) merge_value.Tensor.value [| 5.; 6. |] in
+  let merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src ~dst:writer_ctx merge_value.Tensor.value
+  in
+  let consumer_comp = [%cd merge_output =: merge_value.merge] in
+  let consumer_comp =
+    {
+      consumer_comp with
+      asgns = Ir.Assignments.Block_comment ("merge_dep_consumer", consumer_comp.asgns);
+    }
+  in
+  let consumer_ctx, consumer = Context.compile merge_ctx consumer_comp IDX.empty in
+  Verdict.p "merge consumer depends on prior writer"
+    (Set.mem consumer.Context.execution_deps writer.Context.routine_id);
+  Verdict.p "cannot run merge consumer before writer" (not (Context.can_run consumer_ctx consumer));
+  (try
+     ignore (Context.run consumer_ctx consumer);
+     Verdict.fail "merge consumer ran before its writer"
+   with Failure msg ->
+     Verdict.p "out-of-order merge consumer is refused by Context.run"
+       (String.is_substring msg ~substring:"unexecuted dependencies"));
+  ignore (Context.run writer_ctx writer : Context.t);
+  Verdict.p "can run merge consumer after writer" (Context.can_run consumer_ctx consumer);
+  let consumer_ctx = Context.run consumer_ctx consumer in
+  Verdict.p "merge consumer reads the transferred values"
+    (Array.equal Float.equal
+       (Context.get_values consumer_ctx merge_output.Tensor.value)
+       [| 5.; 6. |])
+
 let () =
   test_raw_dependency ();
   test_disjoint ();
@@ -194,4 +237,5 @@ let () =
   test_wrong_order_raises ();
   test_reexecution ();
   test_rollback_execution ();
-  test_poisoned_lineage ()
+  test_poisoned_lineage ();
+  test_merge_buffer_read_dependency ()
