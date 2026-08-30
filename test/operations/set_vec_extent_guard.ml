@@ -1,0 +1,88 @@
+(* gh-ocannl-817: settle whether packed uniform can reach [Set_vec_unop] lowering with a symbolic
+   extent, then pin the lowering boundary independently of shape inference.
+
+   The real graph leg asks shape inference to put a gh-490 symbolic dimension on a packed [uniform].
+   Its round-up counter relation is a [Total_elems] constraint, and symbolic dimensions are
+   deliberately outside that arithmetic: the graph is rejected before projections can be derived.
+   The hand-built leg starts from the projections of a valid concrete packed uniform, adds the
+   symbolic-extent metadata that the rejected graph would have carried, and proves the lowerer also
+   refuses it explicitly rather than silently emitting an unguarded vector store. *)
+
+open Base
+open Ocannl
+open Ocannl.Operation.DSL_modules
+module Asgns = Ir.Assignments
+module Idx = Ir.Indexing
+
+let p = Ll_test.p
+
+let rejection f =
+  match f () with
+  | () -> None
+  | exception Row.Shape_error (msg, _) -> Some msg
+  | exception Utils.User_error msg -> Some msg
+
+let says rejection substring =
+  Option.value_map rejection ~default:false ~f:(String.is_substring ~substring)
+
+let rec find_set_vec = function
+  | Asgns.Set_vec_unop { op; lhs; rhs; projections; _ } -> Some (op, lhs, rhs, projections)
+  | Seq (a, b) -> Option.first_some (find_set_vec a) (find_set_vec b)
+  | Block_comment (_, body) -> find_set_vec body
+  | Noop | Accum_op _ | Fetch _ -> None
+
+let () =
+  Tensor.unsafe_reinitialize ();
+  let extent, bindings = Idx.get_static_symbol ~static_range:6 Idx.Empty in
+  let u = TDSL.uniform () () in
+  let%op symbolic_u = u ++ "s=>s" [ "s" ] in
+  Shape.set_sym_dim s extent;
+  let graph_rejection =
+    rejection (fun () ->
+        let comp = Train.forward symbolic_u in
+        ignore
+          (Asgns.to_low_level ~static_indices:(Idx.bound_symbols bindings) comp.Asgns.asgns
+            : Ir.Low_level.t))
+  in
+  p "packed uniform with a symbolic extent is rejected before Set_vec_unop lowering"
+    (Option.is_some graph_rejection);
+  p "the reachability refusal identifies unsupported total-elements arithmetic"
+    (says graph_rejection "Total_elems" && says graph_rejection "symbolic dimensions");
+
+  Tensor.unsafe_reinitialize ();
+  let concrete = TDSL.uniform () ~output_dims:[ 6 ] () in
+  let comp = Train.forward concrete in
+  let op, lhs, rhs, projections = Option.value_exn (find_set_vec comp.Asgns.asgns) in
+  let projections = Lazy.force projections in
+  let iter =
+    match Array.to_list projections.components with
+    | [ [ (_, iter) ] ] -> iter
+    | _ -> failwith "expected concrete packed uniform to have one product iterator"
+  in
+  let guarded_projections = { projections with extent_syms = [ (iter, extent) ] } in
+  let hand_built =
+    Asgns.Set_vec_unop
+      {
+        op;
+        lhs;
+        rhs;
+        projections = lazy guarded_projections;
+        projections_debug = "gh-817 injected symbolic extent";
+      }
+  in
+  let lowering_rejection =
+    rejection (fun () ->
+        ignore
+          (Asgns.to_low_level ~static_indices:(Idx.bound_symbols bindings) hand_built
+            : Ir.Low_level.t))
+  in
+  p "Set_vec_unop lowering explicitly rejects bound symbolic extents"
+    (Option.is_some lowering_rejection);
+  p "the lowering refusal names Set_vec_unop and the symbolic-extent hazard"
+    (says lowering_rejection "Set_vec_unop" && says lowering_rejection "symbolic extent");
+  let maximum_shape = Asgns.to_low_level hand_built in
+  p "the same unbound extent retains maximum-shape vector stores"
+    (Ll_test.count_stmt maximum_shape ~f:(function
+       | Ir.Low_level.Set_from_vec _ -> true
+       | _ -> false)
+    > 0)

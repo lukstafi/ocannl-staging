@@ -807,6 +807,26 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                    "Set_vec_unop (packed uniform): target %{Tn.debug_name lhs} is padded; \
                     materialize the random tensor into an unpadded node and copy it into the \
                     padded one instead"]);
+        (* gh-ocannl-817: a packed vector store cannot be clipped at a runtime extent one lane at a
+           time. Shape inference currently rejects this combination earlier because the packed
+           sampler's round-up [Total_elems] relation cannot include [Row.Sym], but keep the lowering
+           boundary loud: a future projection path must not make the combination reachable as an
+           unguarded wrong-write. An extent absent from [static_indices] deliberately retains the
+           standing maximum-extent semantics, just as [extent_guard] does above. *)
+        let bound_extent_symbols =
+          List.filter_map projections.extent_syms ~f:(fun (_, extent) ->
+              if List.mem static_indices extent ~equal:Indexing.equal_static_symbol then
+                Some (Indexing.symbol_ident extent.static_symbol)
+              else None)
+        in
+        if not (List.is_empty bound_extent_symbols) then
+          raise
+          @@ Utils.User_error
+               [%string
+                 "Set_vec_unop (packed uniform): target %{Tn.debug_name lhs} has bound symbolic \
+                  extent(s) %{String.concat ~sep:\", \" bound_extent_symbols}; packed vector \
+                  stores cannot honor a runtime extent safely. Use a concrete extent or leave the \
+                  extent unbound to generate the declared maximum shape"];
         (* Tail peel: when the target's total element count is not a multiple of [full_length], the
            final counter iteration stores only the remaining lanes of its 128-bit block. *)
         let total_elems = Tn.num_elems lhs in
@@ -825,9 +845,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
            here: every component is a singleton (2) and every level is entered, so [block_iters]
            covers all product iterators. Going through the shared policy anyway means an iterator
            that somehow escaped that would fail the lowering rather than survive as a silently
-           unsubstituted symbol. 4. No [extent_guard] and no gh-504 clamp: symbolic extents and
-           padded-window clamping reach the accumulation walkers only. Wiring either in here would
-           be a behavior change, not a dedup, so this refactor leaves them out. *)
+           unsubstituted symbol. 4. No [extent_guard] and no gh-504 clamp: a bound symbolic extent
+           is rejected above, while padded-window clamping reaches the accumulation walkers only.
+           Wiring either in here would be a behavior change, not a dedup. *)
         let all_prod_iters =
           Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
         in

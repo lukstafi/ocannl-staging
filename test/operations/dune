@@ -1181,6 +1181,18 @@
  (modules virtual_decision_coverage)
  (libraries base ocannl ll_test))
 
+; gh-ocannl-817: real-graph reachability probe plus the explicit Set_vec_unop lowering boundary.
+
+(test
+ ; ocannl-backend: none -- shape inference and assignment lowering only; no routine is linked.
+ (name set_vec_extent_guard)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules set_vec_extent_guard)
+ (libraries base ocannl ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name virtual_uncaptured_loop)
  (package neural_nets_lib)

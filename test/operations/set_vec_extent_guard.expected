@@ -1,0 +1,5 @@
+packed uniform with a symbolic extent is rejected before Set_vec_unop lowering: true
+the reachability refusal identifies unsupported total-elements arithmetic: true
+Set_vec_unop lowering explicitly rejects bound symbolic extents: true
+the lowering refusal names Set_vec_unop and the symbolic-extent hazard: true
+the same unbound extent retains maximum-shape vector stores: true
