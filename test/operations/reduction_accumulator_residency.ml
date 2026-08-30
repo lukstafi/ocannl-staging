@@ -48,6 +48,14 @@ let cols = 7
 let elem i j = 1.0 +. (10.0 *. Float.of_int i) +. Float.of_int j
 let data = Array.init (rows * cols) ~f:(fun n -> elem (n / cols) (n % cols))
 
+(* A device read rendered through Metal's expression-level volatile pointer cast has [ident)[idx]]
+   rather than [ident[idx]]. Count both as one semantic node access. *)
+let count_node_accesses source ident =
+  List.sum
+    (module Int)
+    [ ident ^ "["; ident ^ ")[" ]
+    ~f:(fun pattern -> List.length (String.substr_index_all source ~may_overlap:false ~pattern))
+
 let x =
   TDSL.ndarray data ~label:[ "resx" ] ~batch_dims:[] ~input_dims:[] ~output_dims:[ rows; cols ] ()
 
@@ -293,10 +301,94 @@ let () =
   Verdict.p "partial-cell localized reduction preserves the live whole-node zero"
     (Array.equal Float.equal got [| 36.0; 0.0 |]);
   let source = Test_utils.Generated.read "res_partial" in
-  let accesses =
-    String.substr_index_all source ~may_overlap:false ~pattern:"res_partial_out[" |> List.length
-  in
+  let accesses = count_node_accesses source "res_partial_out" in
   Verdict.p "partial-cell reduction retains zero store, opening read, and closing store"
+    (accesses = 3)
+
+(* Covering the node is not enough when an enclosing loop repeats the same cells outside the scope
+   the localizer can form. Here [k] repeats every [out[j]] cell, while only the inner [i] reduction
+   can localize. Forwarding zero into that inner scope would reset each cell once per [k] instead of
+   accumulating both slices. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9860 () in
+  let src = node ~dims:[| 2; 2; 2 |] "res_repeat_src" in
+  let out = node ~dims:[| 2 |] "res_repeat_out" in
+  List.iter [ src; out ] ~f:Ll_test.materialize;
+  let k = Ll_test.sym () and j = Ll_test.sym () and i = Ll_test.sym () in
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell
+      (Ll_test.add (Ll_test.get out out_cell)
+         (Ll_test.get src [| Ll_test.iter k; Ll_test.iter j; Ll_test.iter i |]))
+  in
+  let program =
+    LL.Seq (LL.Zero_out out, Ll_test.loop_n k 2 (Ll_test.loop_n j 2 (Ll_test.loop_n i 2 update)))
+  in
+  let optimized = Ll_test.optimize ~materialized:[ src; out ] ~name:"res_repeat" program in
+  let ctx, routine = Ll_test.link ~name:"res_repeat" optimized in
+  let values = Array.init 8 ~f:(fun n -> Float.of_int (n + 1)) in
+  let ctx = Ll_test.run_linked (ctx, routine) ~seed:[ (src, values); (out, [| -7.0; -9.0 |]) ] in
+  Verdict.p "repeated covering reduction preserves accumulation across the outer loop"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 14.0; 22.0 |]);
+  let source = Test_utils.Generated.read "res_repeat" in
+  let accesses = count_node_accesses source "res_repeat_out" in
+  Verdict.p "repeated covering reduction retains zero store, opening read, and closing store"
+    (accesses = 3)
+
+(* A symbolic extent guard can make a statically covering output loop execute only a prefix. The
+   serial renderer fuses this exact [j < extent] shape into the loop header, so the DSE predicate
+   itself must reject the guarded affine write; relying on the ordinary [If] rendering boundary is
+   insufficient. The untouched row starts nonzero to make a dropped whole-node zero observable. *)
+let () =
+  let module LL = Ir.Low_level in
+  let module Idx = Ir.Indexing in
+  let node = Ll_test.node_factory ~first_id:9880 () in
+  let src = node ~dims:[| 2; 2 |] "res_extent_src" in
+  let out = node ~dims:[| 2 |] "res_extent_out" in
+  List.iter [ src; out ] ~f:Ll_test.materialize;
+  let j = Ll_test.sym () and i = Ll_test.sym () in
+  let extent, bindings =
+    (Idx.get_static_symbol ~static_range:2 Idx.Empty : Idx.static_symbol * Idx.unit_bindings)
+  in
+  extent.Idx.used_as_extent <- true;
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell
+      (Ll_test.add (Ll_test.get out out_cell)
+         (Ll_test.get src [| Ll_test.iter j; Ll_test.iter i |]))
+  in
+  let iprec = Ir.Ops.index_prec () in
+  let guard =
+    LL.Binop
+      ( Ir.Ops.Cmplt,
+        (LL.Embed_index (Ll_test.iter j), iprec),
+        (LL.Embed_index (Idx.Iterator extent.static_symbol), iprec) )
+  in
+  let program =
+    LL.Seq
+      ( LL.Zero_out out,
+        Ll_test.loop_n j 2 (LL.If { cond = (guard, iprec); body = Ll_test.loop_n i 2 update }) )
+  in
+  let optimized =
+    Ll_test.optimize ~materialized:[ src; out ] ~static_indices:(Idx.bound_symbols bindings)
+      ~name:"res_extent" program
+  in
+  let ctx, routine =
+    Context.compile ~name:"res_extent" ~prelowered:optimized
+      ~lowered_transform:(fun x -> [ x ])
+      (Context.auto ()) Ir.Assignments.empty_comp bindings
+  in
+  Idx.find_exn routine.Context.bindings extent := 1;
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:[ (src, [| 1.0; 2.0; 4.0; 8.0 |]); (out, [| -7.0; -9.0 |]) ]
+  in
+  Verdict.p "symbolically guarded coverage preserves the whole-node zero"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 3.0; 0.0 |]);
+  let source = Test_utils.Generated.read "res_extent" in
+  let accesses = count_node_accesses source "res_extent_out" in
+  Verdict.p "symbolically guarded coverage retains zero store, opening read, and closing store"
     (accesses = 3)
 
 (* Cross-statement CSE lifts a shared scope out of both users as [Declare_local; body]. That form

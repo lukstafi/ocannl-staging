@@ -35,6 +35,10 @@ index-only reduction: no rmw shadow declaration, by the census and by the text: 
 index-only accumulation is censused plain because it emits no device read: true
 partial-cell localized reduction preserves the live whole-node zero: true
 partial-cell reduction retains zero store, opening read, and closing store: true
+repeated covering reduction preserves accumulation across the outer loop: true
+repeated covering reduction retains zero store, opening read, and closing store: true
+symbolically guarded coverage preserves the whole-node zero: true
+symbolically guarded coverage retains zero store, opening read, and closing store: true
 cross-statement CSE produces one lifted accumulator declaration: true
 lifted accumulator executes once for both users: true
 lifted accumulator contributes exactly one census site: true

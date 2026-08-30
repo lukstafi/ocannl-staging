@@ -3451,6 +3451,7 @@ module C_syntax (B : C_syntax_config) = struct
   type localized_zero_seed = {
     lzs_tn : Tn.t;
     lzs_idcs : Indexing.axis_index array;
+    lzs_repeated : Indexing.symbol list;
     mutable lzs_consumed : bool;
   }
 
@@ -3481,9 +3482,10 @@ module C_syntax (B : C_syntax_config) = struct
     stmt body
 
   (* The principled DSE condition for forwarding [Zero_out tn] into [next]: [next]'s only accesses
-     of [tn] are one same-statement, same-cell read-modify-write pair, and that statement's affine
-     write map covers the whole node over its enclosing loop box. The localizer is still the final
-     authority: this merely offers it a zero seed, and the store is dropped only if it accepts. *)
+     of [tn] are one unconditional, same-statement, same-cell read-modify-write pair, and that
+     statement's affine write map covers the whole node over its enclosing loop box. Loops omitted
+     from the map are recorded as repeated-cell dimensions; the localizer remains the final
+     authority and may consume the seed only when its accepted scope includes all of them. *)
   let localized_zero_seed_candidate (tn : Tn.t) (next : Low_level.t) : localized_zero_seed option =
     if has_opaque_zero_forwarding_effect next then None
     else
@@ -3494,8 +3496,9 @@ module C_syntax (B : C_syntax_config) = struct
       in
       match accesses with
       | [ ({ Affine.a_write = false; _ } as read); ({ a_write = true; _ } as write) ]
-        when write.a_rmw && (not read.a_dynamic) && (not write.a_dynamic) && (not read.a_whole)
-             && (not write.a_whole) && (not read.a_vec_last) && (not write.a_vec_last)
+        when write.a_rmw && (not read.a_guarded) && (not write.a_guarded) && (not read.a_dynamic)
+             && (not write.a_dynamic) && (not read.a_whole) && (not write.a_whole)
+             && (not read.a_vec_last) && (not write.a_vec_last)
              && Affine.same_statement read.a_path write.a_path
              && Option.exists read.a_stmt_write ~f:(same_map write.a_map)
              && same_map read.a_map write.a_map ->
@@ -3504,9 +3507,31 @@ module C_syntax (B : C_syntax_config) = struct
                 if Indexing.equal_symbol symbol bound then Some range else None)
           in
           if Affine.covers_box ~range ~dims:(Lazy.force tn.Tn.dims) write.a_map then
-            Some { lzs_tn = tn; lzs_idcs = write.a_map; lzs_consumed = false }
+            let repeated =
+              List.filter_map write.a_loops ~f:(fun (symbol, (lo, hi)) ->
+                  Option.some_if
+                    (hi > lo
+                    && not
+                         (Array.exists write.a_map ~f:(Indexing.axis_index_mentions_symbol symbol))
+                    )
+                    symbol)
+            in
+            Some
+              { lzs_tn = tn; lzs_idcs = write.a_map; lzs_repeated = repeated; lzs_consumed = false }
           else None
       | _ -> None
+
+  (* Take one top-level statement without flattening the suffix. Optimized programs are commonly
+     right-associated [Seq] trees, so this is constant work there; a left-associated prefix costs
+     only the depth of that prefix and the residual tree retains the original suffix wholesale. *)
+  let rec take_first_statement = function
+    | Low_level.Seq (left, right) ->
+        let first, left_rest = take_first_statement left in
+        let rest =
+          match left_rest with None -> right | Some left_rest -> Low_level.Seq (left_rest, right)
+        in
+        (first, Some rest)
+    | statement -> (statement, None)
 
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
      first): maintained by [serial_loop] below, consulted by the [Set] case's
@@ -3773,40 +3798,35 @@ module C_syntax (B : C_syntax_config) = struct
             let d1, d2 =
               match c1 with
               | Zero_out tn -> (
-                  match Low_level.flat_lines [ c2 ] with
-                  | next :: rest -> (
-                      match localized_zero_seed_candidate tn next with
-                      | None ->
-                          (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2)
-                      | Some seed ->
-                          let saved = !current_localized_zero_seed in
-                          current_localized_zero_seed := Some seed;
-                          let next_doc =
-                            Exn.protect
-                              ~f:(fun () -> pp_ll ~log_set_locals ~in_loop next)
-                              ~finally:(fun () -> current_localized_zero_seed := saved)
-                          in
-                          let zero_doc =
-                            if seed.lzs_consumed then begin
-                              (* Preserve the occurrence-level first-touch fact: a later [Zero_out]
-                                 is a genuine re-zero even though this one emitted no statement. *)
-                              Hash_set.add zero_out_seen tn.Tn.uid;
-                              empty
-                            end
-                            else pp_ll ~log_set_locals ~in_loop c1
-                          in
-                          let rest_doc =
-                            match rest with
-                            | [] -> empty
-                            | _ -> pp_ll ~log_set_locals ~in_loop (Low_level.unflat_lines rest)
-                          in
-                          let tail =
-                            if PPrint.is_empty next_doc then rest_doc
-                            else if PPrint.is_empty rest_doc then next_doc
-                            else next_doc ^^ hardline ^^ rest_doc
-                          in
-                          (zero_doc, tail))
-                  | [] -> (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2))
+                  let next, rest = take_first_statement c2 in
+                  match localized_zero_seed_candidate tn next with
+                  | None -> (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2)
+                  | Some seed ->
+                      let saved = !current_localized_zero_seed in
+                      current_localized_zero_seed := Some seed;
+                      let next_doc =
+                        Exn.protect
+                          ~f:(fun () -> pp_ll ~log_set_locals ~in_loop next)
+                          ~finally:(fun () -> current_localized_zero_seed := saved)
+                      in
+                      let zero_doc =
+                        if seed.lzs_consumed then begin
+                          (* Preserve the occurrence-level first-touch fact: a later [Zero_out] is a
+                             genuine re-zero even though this one emitted no statement. *)
+                          Hash_set.add zero_out_seen tn.Tn.uid;
+                          empty
+                        end
+                        else pp_ll ~log_set_locals ~in_loop c1
+                      in
+                      let rest_doc =
+                        Option.value_map rest ~default:empty ~f:(pp_ll ~log_set_locals ~in_loop)
+                      in
+                      let tail =
+                        if PPrint.is_empty next_doc then rest_doc
+                        else if PPrint.is_empty rest_doc then next_doc
+                        else next_doc ^^ hardline ^^ rest_doc
+                      in
+                      (zero_doc, tail))
               | _ -> (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2)
             in
             (* Avoid extra hardlines if one side is empty *)
@@ -4934,14 +4954,30 @@ module C_syntax (B : C_syntax_config) = struct
                   let rebuild_hook b =
                     Low_level.For_loop { index = i; from_; to_; body = b; axis }
                   in
+                  let rec loop_symbols = function
+                    | Low_level.For_loop { index; body; _ } -> index :: loop_symbols body
+                    | If { body; _ } -> loop_symbols body
+                    | Seq (left, right) -> loop_symbols left @ loop_symbols right
+                    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_local _
+                    | Set_dynamic _ | Set_from_vec _ | Declare_local _ | Workgroup_barrier
+                    | Tile_mma _ ->
+                        []
+                  in
+                  let localized_symbols = i :: loop_symbols (rebuild Low_level.Noop) in
                   let scope_body =
                     let opening =
                       match !current_localized_zero_seed with
                       | Some seed
                         when Tn.equal seed.lzs_tn tn
                              && Array.equal Indexing.equal_axis_index seed.lzs_idcs idcs ->
-                          seed.lzs_consumed <- true;
-                          Low_level.Constant 0.0
+                          if
+                            List.for_all seed.lzs_repeated ~f:(fun repeated ->
+                                List.mem localized_symbols repeated ~equal:Indexing.equal_symbol)
+                          then begin
+                            seed.lzs_consumed <- true;
+                            Low_level.Constant 0.0
+                          end
+                          else Low_level.Get (tn, idcs)
                       | _ -> Low_level.Get (tn, idcs)
                     in
                     Low_level.Seq
