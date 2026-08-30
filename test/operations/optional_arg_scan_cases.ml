@@ -110,6 +110,10 @@ let f ?(feature = true) () = ignore feature|ocaml}
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
+  case "a local open can shadow the optional value itself"
+    {ocaml|module Defaults = struct let feature = false end
+let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
+    ~implemented:false ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -141,9 +145,16 @@ let f ?(feature = true) () = ignore feature|ocaml}
   case ~argument:"feature" "optional closures returned through control flow are inventoried"
     {ocaml|let make flag = if flag then (fun ?(feature = true) () -> ignore feature) else (fun ?(feature = true) () -> ignore feature)|ocaml}
     ~implemented:false ~honest:false;
+  case "a returned optional closure inherits its enclosing ignore binding"
+    {ocaml|let make () = let ignore x = enable x in fun ?(_feature = true) () -> ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "an optional closure returned normally from try is inventoried"
     {ocaml|let make () = try (fun ?(feature = true) () -> ignore feature) with _ -> raise Exit|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "an optional function exported through a tuple is inventoried"
     {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}
+    ~implemented:false ~honest:false;
+  case "a later definition replaces the earlier inventory entry"
+    {ocaml|let f ?(feature = true) () = enable feature
+let f ?(feature = true) () = ignore feature|ocaml}
     ~implemented:false ~honest:false

@@ -58,6 +58,8 @@ a preceding Stdlib.ignore alias remains a discard: implementation classified: tr
 a preceding Stdlib.ignore alias remains a discard: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
+a local open can shadow the optional value itself: implementation classified: true
+a local open can shadow the optional value itself: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
 underscore label makes an unimplemented option caller-visible: honesty classified: true
 implemented underscore label is stale: implementation classified: true
@@ -80,7 +82,11 @@ a constrained optional function is inventoried: implementation classified: true
 a constrained optional function is inventoried: honesty classified: true
 optional closures returned through control flow are inventoried: implementation classified: true
 optional closures returned through control flow are inventoried: honesty classified: true
+a returned optional closure inherits its enclosing ignore binding: implementation classified: true
+a returned optional closure inherits its enclosing ignore binding: honesty classified: true
 an optional closure returned normally from try is inventoried: implementation classified: true
 an optional closure returned normally from try is inventoried: honesty classified: true
 an optional function exported through a tuple is inventoried: implementation classified: true
 an optional function exported through a tuple is inventoried: honesty classified: true
+a later definition replaces the earlier inventory entry: implementation classified: true
+a later definition replaces the earlier inventory entry: honesty classified: true
