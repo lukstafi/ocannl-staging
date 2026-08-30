@@ -123,6 +123,9 @@ let f ?(feature = true) () = ignore feature|ocaml}
     {ocaml|module Defaults = struct let feature = false end
 let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
     ~implemented:false ~honest:false;
+  case "a named local module can shadow the optional value"
+    {ocaml|let f ?(feature = true) () = let _ = feature in let module Defaults = struct let feature = false end in let open Defaults in feature|ocaml}
+    ~implemented:false ~honest:false;
   case "module opens resolve against their lexical path"
     {ocaml|module Earlier = struct
   module Defaults = struct let feature = false end
@@ -200,6 +203,11 @@ let f ?(feature = true) () = let _ = feature in let module M = struct open Defau
 let f = g
 let g = ()|ocaml}
     ~implemented:false ~honest:false;
+  case "an optional function exported through a module alias is inventoried"
+    {ocaml|module B = struct let f ?(feature = true) () = ignore feature end
+module A = B
+module B = struct let f () = () end|ocaml}
+    ~implemented:false ~honest:false;
   case "a nonrecursive binding group shares its preceding alias environment"
     {ocaml|let g ?(feature = true) () = ignore feature
 let g ?(feature = true) () = enable feature and f = g
@@ -217,6 +225,10 @@ let g = ()|ocaml}
   case "an optional callback in an exported record is inventoried"
     {ocaml|type service = { run : ?feature:bool -> unit -> unit }
 let service = { run = fun ?(feature = true) () -> ignore feature }|ocaml}
+    ~implemented:false ~honest:false;
+  case "an optional function in an exported packed module is inventoried"
+    {ocaml|module type S = sig val run : ?feature:bool -> unit -> unit end
+let service = (module struct let run ?(feature = true) () = ignore feature end : S)|ocaml}
     ~implemented:false ~honest:false;
   case "a class-level underscore binding forwarded later is a real use"
     {ocaml|class c ?(feature = true) = let _v = feature in object method run = enable _v end|ocaml}
@@ -240,6 +252,11 @@ let service = { run = fun ?(feature = true) () -> ignore feature }|ocaml}
     {ocaml|let f ?(feature = true) () = enable feature
 let f ?(feature = true) () = ignore feature|ocaml}
     ~implemented:false ~honest:false;
+  case "a match binder shadows a preceding optional function alias"
+    {ocaml|let g ?(feature = true) () = ignore feature
+let make ?(marker = true) x = if marker then (match x with g -> g) else (match x with g -> g)
+let g = ()|ocaml}
+    ~implemented:true ~honest:true;
   case "a dynamic binary capture operand generates no read"
     {ocaml|let%op f ?(stride = 1) kernel dynamic_dims = let _ = stride in let ( +* ) x y = x, y in kernel +* kernel "stride*o+k => o" dynamic_dims|ocaml}
     ~implemented:false ~honest:false;
