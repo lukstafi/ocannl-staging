@@ -109,6 +109,8 @@ let prefix_free_config_mentions =
     ("docs/agent-notes/conventions.md", "backend", 1);
     ("docs/proposals/gh-ocannl-409.md", "backend", 3);
     ("tools/calibrate_bandwidth.ml", "backend", 1);
+    ("tools/fit_envelope.ml", "backend", 6);
+    ("bin/bench_args.ml", "backend", 1);
   ]
 
 let prefix_free_names key =
@@ -834,6 +836,9 @@ let live workspace_root paths =
                       || String.is_prefix relative ~prefix:"lib/")
                       && (String.is_suffix relative ~suffix:".ml"
                          || String.is_suffix relative ~suffix:".mli")))
+          || String.is_prefix relative ~prefix:".github/workflows/"
+             && (String.is_suffix relative ~suffix:".yml"
+                || String.is_suffix relative ~suffix:".yaml")
         then Some (relative, path)
         else None)
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -865,6 +870,10 @@ let live workspace_root paths =
       List.exists files ~f:(fun (path, _) ->
           String.is_prefix path ~prefix:root
           && (String.is_suffix path ~suffix:".ml" || String.is_suffix path ~suffix:".mli")));
+  Verdict.p "the scan reaches GitHub workflow guidance"
+    (List.exists files ~f:(fun (path, _) ->
+         String.is_prefix path ~prefix:".github/workflows/"
+         && (String.is_suffix path ~suffix:".yml" || String.is_suffix path ~suffix:".yaml")));
   Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")

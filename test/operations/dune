@@ -4108,7 +4108,8 @@
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
 ; application and cannot safely be claimed globally.
 ; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
-; under docs/ and benchmarks/.
+; under docs/ and benchmarks/. Workflow `*.yml`/`*.yaml` under .github/workflows/ contributes
+; unambiguous prefixed tokens too.
 ; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
 ; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
 ; occupy the whole inline span (with optional whitespace around `=` or in its value). Every
@@ -4136,6 +4137,8 @@
   ../../README.md
   ../../ocannl_config.for_debug
   ../../ocannl_config.reference
+  (glob_files_rec ../../.github/workflows/*.yml)
+  (glob_files_rec ../../.github/workflows/*.yaml)
   (glob_files_rec ../../.claude/skills/*.md)
   (glob_files_rec ../../docs/*.md)
   (glob_files_rec ../../benchmarks/*.md)
@@ -4176,17 +4179,26 @@
   (setenv
    OCANNL_LOG_CONFIG_SOURCING
    false
-   (with-stderr-to
-    %{target}
-    (ignore-stdout
-     (with-accepted-exit-codes
-      1
-      (run
-       %{dep:config_usage_scan.exe}
-       --fixture
-       %{dep:config_usage_scan_bogus.fixture}
-       %{dep:config_usage_scan_bogus_config.fixture}
-       %{dep:config_usage_scan_multiline_bogus.fixture})))))))
+   (setenv
+    OCANNL_NO_CONFIG_FILE
+    false
+    (setenv
+     OCANNL_SUPPRESS_WELCOME_MESSAGE
+     true
+     (setenv
+      OCANNL_PROFILE
+      ""
+      (with-stderr-to
+       %{target}
+       (ignore-stdout
+        (with-accepted-exit-codes
+         1
+         (run
+          %{dep:config_usage_scan.exe}
+          --fixture
+          %{dep:config_usage_scan_bogus.fixture}
+          %{dep:config_usage_scan_bogus_config.fixture}
+          %{dep:config_usage_scan_multiline_bogus.fixture}))))))))))
 
 (rule
  (alias runtest-config_usage_scan)

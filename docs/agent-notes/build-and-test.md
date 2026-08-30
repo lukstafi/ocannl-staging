@@ -80,7 +80,8 @@ that they earn a lookup rather than always-loaded space.
   the root README, and every `*.md` under `docs/`
   and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
   `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in
-  `ocannl_config.reference`. A script or Dune-action
+  `ocannl_config.reference`; workflow YAML under `.github/workflows/` contributes unambiguous
+  prefixed tokens. A script or Dune-action
   token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>` beginning and ending at identifier boundaries (with or without an assignment); the
