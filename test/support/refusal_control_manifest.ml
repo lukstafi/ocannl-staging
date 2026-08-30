@@ -86,6 +86,33 @@ let raw_entries =
         "[scanner-refusal:c4c555263d62473311fe0cfc7f769958] stanza inline-test library";
         "[scanner-refusal:bdc9f2c15b8f17359eec6d359dfefbdd] that floor applies";
       ] );
+    ( "config_usage_scan.ml",
+      [
+        "[scanner-refusal:c3c197ff4ebefffc309c70638cde9747] bare config mention";
+        "[scanner-refusal:200477f5fecf3e08ff5055af77a00298] prefix-free config flag";
+        "[scanner-refusal:8acb2b9087cf4a7e4112382c5e058e1a] Utils.known_config_keys";
+        "[scanner-refusal:085d7b5a19f012e46728008a42120c74] non-config environment exemptions";
+        "[scanner-refusal:5d123838dd21fb3fd4a7529e51b8a74f] non-config environment-mention occurrence";
+        "[scanner-refusal:3252eebc4149f3005426dbd4385702c1] non-config assignment exemptions";
+        "[scanner-refusal:4f2e0da970aa70c6ff3549e9e435561f] non-config assignment exemption";
+        "[scanner-refusal:2908ea301f2b18efa6c95e6ab0302abf] historical invalid-config exemption";
+        "[scanner-refusal:a8470894db3dec591875de5cebd230c6] spaced config-mention occurrence";
+        "[scanner-refusal:8c14e661ffe9cdf859b5111394d557a8] prefix-free config-mention occurrence";
+        "[scanner-refusal:7c5c4cc0bd161e76fe99e9983d2db70f] command-line value occurrence";
+        "[scanner-refusal:e592c4ffcb391edf546553bd50accc7a] runtime value separator";
+        "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";
+        "[scanner-refusal:ed12f66c93e310aaa2996f755dd93a06] config-usage refusal control";
+        "[scanner-refusal:76078f2cfdfe324da2bc29249943c6a9] scripts and benchmarks";
+        "[scanner-refusal:bf02240774c91428eb2d9e12479f6ade] under tools benchmarks";
+        "[scanner-refusal:c70062d940bba6a9b13ae0e4dd0aea0f] reaches OCaml tutorial";
+        "[scanner-refusal:e58cf294bf65466dac521681df692812] OCaml implementation diagnostics";
+        "[scanner-refusal:f484855a1cb36781d8658f3b8ad41c91] GitHub workflow guidance";
+        "[scanner-refusal:4ad6b6a11faf600e54da5c072a3bfede] AGENTS.md";
+        "[scanner-refusal:a51b0bb0846baca8ae1abb956920d3a6] reaches Dune actions";
+        "[scanner-refusal:65a1d9a747256ef8ae0066af6a4ff523] ocannl_config";
+        "[scanner-refusal:e457cc60db51565a141d184de6993035] ocannl_config.reference";
+        "[scanner-refusal:e325a76c47f652bc02203717ce08c44a] checked-in debug config";
+      ] );
     ( "dead_export_scan.ml",
       [
         "[scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules";

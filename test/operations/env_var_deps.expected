@@ -130,6 +130,9 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-codegen_text_inventory
   test/operations/dune                     @runtest-codegen_text_inventory_control
   test/operations/dune                     @runtest-config_dep_completeness
+  test/operations/dune                     @runtest-config_usage_scan
+  test/operations/dune                     @runtest-config_usage_scan_control
+  test/operations/dune                     @runtest-config_usage_scan_refusal_control
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
   test/operations/dune                     @runtest-config_var_warnings
@@ -220,6 +223,7 @@ Backend declarations, by dune file. Every stanza that runs an executable either 
 inside its parentheses. What is held here is which WORDS a file's markers use, not how many
 stanzas carry each: the per-stanza reasons live next to the stanzas, where the next author
 will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665).
+  .claude/dune: nothing that runs a test executable
   arrayjit/lib/dune: nothing that runs a test executable
   arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
   benchmarks/dune: markers: none
@@ -257,7 +261,7 @@ every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_
 Scanner refusal controls (gh-ocannl-800). Sources come from repository-wide scan rules;
 controls are *_cases.expected, *_control.expected, or a live scan golden with an explicit
 `Synthetic controls:` section. Printf substitutions do not decide coverage.
-  statically extracted diagnostics: 251 (details on stderr)
+  statically extracted diagnostics: 275 (details on stderr)
   named exemptions with reasons:
     (none)
 repository-wide scan rules resolve to scanner sources: true

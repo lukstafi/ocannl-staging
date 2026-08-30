@@ -1,0 +1,3 @@
+The multiline command must refuse its key: `dune build
+--ocannl_definitely_not_a_multiline_config_key=true
+--display short`

@@ -69,18 +69,18 @@ module Slab = struct
     set_ctx device.dev.primary_context;
     let key = (device.device_id, pool_id) in
     let size_in_bytes = max 1 size_in_bytes in
-    (* Free-first replacement avoids requiring both merge slabs to fit. Invalidate every software
-       ownership claim before the fallible free/allocation sequence, so an error leaves no freed
-       pointer or stale capacity reachable. [opt_alloc_merge_buffer] recommits after success. *)
+    (* Free-first replacement avoids requiring both merge slabs to fit. Invalidate the complete
+       ownership transaction before the fallible free/allocation sequence. *)
     Option.iter (Hashtbl.find pools key) ~f:(fun (old, _) ->
-        Hashtbl.remove pools key;
-        if Int.equal pool_id merge_buffer_pool_id then (
-          device.merge_buffer := None;
-          device.merge_buffer_capacity <- 0;
-          device.updating_for_merge_buffer <- None);
+        if Int.equal pool_id merge_buffer_pool_id then
+          invalidate_merge_slab device ~remove_slab_claim:(fun () -> Hashtbl.remove pools key)
+        else Hashtbl.remove pools key;
         Cu.Deviceptr.mem_free old);
     let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes in
-    Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
+    if Int.equal pool_id merge_buffer_pool_id then
+      commit_merge_slab device ~size_in_bytes ~install_slab_claim:(fun () ->
+          Hashtbl.set pools ~key ~data:(ptr, size_in_bytes))
+    else Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
 
   let free_pool =
     Some
@@ -303,10 +303,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   (* The merge buffer is the device's reserved single-tenant pool (id [merge_buffer_pool_id]); grow
      it in place when a larger node arrives ([Slab.alloc_pool] overwrites the reserved entry). *)
   let opt_alloc_merge_buffer ~size_in_bytes (device : device) : unit =
-    if device.merge_buffer_capacity < size_in_bytes then (
-      Slab.alloc_pool device ~pool_id:merge_buffer_pool_id ~size_in_bytes ~alignment:1;
-      device.merge_buffer_capacity <- size_in_bytes);
-    device.merge_buffer := Some { pool_id = merge_buffer_pool_id; offset = 0 }
+    if device.merge_buffer_capacity < size_in_bytes then
+      Slab.alloc_pool device ~pool_id:merge_buffer_pool_id ~size_in_bytes ~alignment:1
 
   let%track4_sexp finalize_device (device : device) =
     Cu.Context.set_current device.dev.primary_context;

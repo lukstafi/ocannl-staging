@@ -1,0 +1,25 @@
+the scan reaches script files under tools, scripts, and benchmarks: true
+the scan reaches OCaml help text under tools, benchmarks, and bin: true
+the scan reaches OCaml tutorial and test help text: true
+the scan reaches OCaml implementation diagnostics: true
+the scan reaches GitHub workflow guidance: true
+the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown: true
+the scan reaches Dune actions: true
+the scan reaches every checked-in ocannl_config root: true
+the scan reaches ocannl_config.reference examples: true
+the scan reaches the checked-in debug config template: true
+OK: qualified OCANNL command-line flags and OCANNL_<KEY> environment mentions in scripts and user-facing OCaml help text under tools/, scripts/, and benchmarks/ name registered keys.
+OK: inline key=value assignments in scanned Markdown name registered keys or explicit non-config notation.
+OK: configuration tokens in Dune actions and checked-in ocannl_config files name registered keys or counted intentional-invalid controls.
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:76078f2cfdfe324da2bc29249943c6a9] scripts and benchmarks
+  [scanner-refusal:bf02240774c91428eb2d9e12479f6ade] under tools benchmarks
+  [scanner-refusal:c70062d940bba6a9b13ae0e4dd0aea0f] reaches OCaml tutorial
+  [scanner-refusal:e58cf294bf65466dac521681df692812] OCaml implementation diagnostics
+  [scanner-refusal:f484855a1cb36781d8658f3b8ad41c91] GitHub workflow guidance
+  [scanner-refusal:4ad6b6a11faf600e54da5c072a3bfede] AGENTS.md
+  [scanner-refusal:a51b0bb0846baca8ae1abb956920d3a6] reaches Dune actions
+  [scanner-refusal:65a1d9a747256ef8ae0066af6a4ff523] ocannl_config
+  [scanner-refusal:e457cc60db51565a141d184de6993035] ocannl_config.reference
+  [scanner-refusal:e325a76c47f652bc02203717ce08c44a] checked-in debug config

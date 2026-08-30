@@ -110,6 +110,9 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-codegen_text_inventory_control)
   (alias runtest-agent_notes_structure)
+  (alias runtest-config_usage_scan)
+  (alias runtest-config_usage_scan_control)
+  (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-refusal_control_scan_cases)))
@@ -207,6 +210,9 @@
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
   (alias runtest-codegen_text_inventory_control)
+  (alias runtest-config_usage_scan)
+  (alias runtest-config_usage_scan_control)
+  (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
@@ -1818,6 +1824,9 @@
   config_dep_completeness.ml
   dune_scan_cases.expected
   config_dep_completeness.expected
+  config_usage_scan.ml
+  config_usage_scan.expected
+  config_usage_scan_refusal_control.expected
   dead_export_scan.ml
   dead_export_scan.expected
   dead_export_scan_control.expected
@@ -1851,6 +1860,8 @@
    codegen_text_scan_cases.expected,codegen_text_inventory_control.expected,codegen_text_inventory.expected
    config_dep_completeness.ml
    dune_scan_cases.expected,config_dep_completeness.expected
+   config_usage_scan.ml
+   config_usage_scan.expected,config_usage_scan_refusal_control.expected
    dead_export_scan.ml
    dead_export_scan.expected,dead_export_scan_control.expected
    digest_completeness.ml
@@ -4440,6 +4451,153 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff shell_scripts_parse.expected shell_scripts_parse.actual)))
+
+; gh-ocannl-790: command-line configuration flags in shell scripts and configuration assignments in
+; prose are consumers of the key registry too. The OCaml-source scanners cannot see either, so a
+; rename otherwise leaves them behind until a reviewer remembers the site.
+;
+; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/, plus
+; user-facing `*.ml` help text under tools/, benchmarks/, bin/, and test/ (excluding generated
+; `*.pp.ml`/`*.pp.mli` renderings), plus implementation `*.ml`/`*.mli` under arrayjit/lib/, tensor/,
+; and lib/:
+; the three checked-in script roots and the OCaml roots have non-vacuity claims. Qualified
+; command-line spellings and value separators accepted by
+; Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are consumers.
+; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
+; application and cannot safely be claimed globally; the runtime's per-key qualified-only policy
+; decides whether those spellings exist.
+; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
+; under docs/ and benchmarks/. Workflow `*.yml`/`*.yaml` under .github/workflows/ contributes
+; unambiguous prefixed tokens too.
+; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
+; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
+; occupy the whole inline span (case-insensitively, with optional whitespace around `=` or in its
+; value). Embedded prefixed tokens and the outer bare assignment are both checked. Every
+; checked-in dune file contributes action arguments, and every checked-in
+; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
+; assignment keys, retaining empty keys for registry rejection (and including commented
+; ready-to-enable assignments in the latter); the five
+; checked-in config roots are named in the non-vacuity floor so Dune's generated local copy cannot
+; satisfy it. Prefixed tokens and whole-span inline assignments in ocannl_config.reference join too.
+; Non-config judgments,
+; spaced bare config mentions, ambiguous alternate-value spellings, and intentional-invalid
+; exemptions pin file/key occurrence counts.
+; The checked-in fixture carries one unknown key in every accepted syntax, and the control requires
+; refusal with exit 1.
+
+(executable
+ (name config_usage_scan)
+ (modules config_usage_scan)
+ (libraries base stdio arrayjit.utils test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads shell scripts and Markdown as text.
+ (target config_usage_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../AGENTS.md
+  ../../README.md
+  ../../ocannl_config.for_debug
+  ../../ocannl_config.reference
+  (glob_files_rec ../../.github/workflows/*.yml)
+  (glob_files_rec ../../.github/workflows/*.yaml)
+  (glob_files_rec ../../.claude/skills/*.md)
+  (glob_files_rec ../../docs/*.md)
+  (glob_files_rec ../../benchmarks/*.md)
+  (glob_files_rec ../../dune)
+  (glob_files_rec ../../ocannl_config)
+  (glob_files_rec ../../tools/*.sh)
+  (glob_files_rec ../../tools/*.py)
+  (glob_files_rec ../../tools/*.ml)
+  (glob_files_rec ../../scripts/*.sh)
+  (glob_files_rec ../../scripts/*.py)
+  (glob_files_rec ../../benchmarks/*.sh)
+  (glob_files_rec ../../benchmarks/*.py)
+  (glob_files_rec ../../benchmarks/*.ml)
+  (glob_files_rec ../../bin/*.ml)
+  (glob_files_rec ../../test/*.ml)
+  (glob_files_rec ../../arrayjit/lib/*.ml)
+  (glob_files_rec ../../arrayjit/lib/*.mli)
+  (glob_files_rec ../../tensor/*.ml)
+  (glob_files_rec ../../tensor/*.mli)
+  (glob_files_rec ../../lib/*.ml)
+  (glob_files_rec ../../lib/*.mli))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:config_usage_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ ; ocannl-backend: none -- runs the same text scanner on a synthetic unknown key and requires its
+ ; refusal; it links no backend and runs no OCANNL program.
+ (target config_usage_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  config_usage_scan_bogus.fixture
+  config_usage_scan_bogus_config.fixture
+  config_usage_scan_multiline_bogus.fixture)
+ (action
+  (setenv
+   OCANNL_LOG_CONFIG_SOURCING
+   false
+   (setenv
+    OCANNL_NO_CONFIG_FILE
+    false
+    (setenv
+     OCANNL_SUPPRESS_WELCOME_MESSAGE
+     true
+     (setenv
+      OCANNL_PROFILE
+      ""
+      (with-stderr-to
+       %{target}
+       (ignore-stdout
+        (with-accepted-exit-codes
+         1
+         (run
+          %{dep:config_usage_scan.exe}
+          --fixture
+          %{dep:config_usage_scan_bogus.fixture}
+          %{dep:config_usage_scan_bogus_config.fixture}
+          %{dep:config_usage_scan_multiline_bogus.fixture}))))))))))
+
+(rule
+ (alias runtest-config_usage_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan.expected config_usage_scan.actual)))
+
+(rule
+ (alias runtest-config_usage_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan_control.expected config_usage_scan_control.actual)))
+
+(rule
+ ; ocannl-backend: none -- drives every direct config-usage refusal through injected state.
+ (target config_usage_scan_refusal_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  config_usage_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:config_usage_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-config_usage_scan_refusal_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan_refusal_control.expected config_usage_scan_refusal_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached.

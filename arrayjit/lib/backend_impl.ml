@@ -156,19 +156,19 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
   let alloc_pool ?mode:_ device ~pool_id ~size_in_bytes ~alignment:_ =
     let key = (device.device_id, pool_id) in
     with_pools (fun () ->
-        (* The reserved merge pool is the only id replaced in place. Drop its table/capacity claim
-           before freeing and allocating the replacement: growth must not require old+new bytes to
-           fit simultaneously, and a failed replacement must not leave a freed pointer or stale
-           capacity reachable. The caller restores the merge metadata only after this succeeds. *)
+        (* The reserved merge pool is the only id replaced in place. Invalidate its complete
+           ownership transaction before the fallible free/allocation sequence: growth must not
+           require old+new bytes to fit simultaneously, and failure must leave no stale claim. *)
         Option.iter (Hashtbl.find pools key) ~f:(fun old ->
-            Hashtbl.remove pools key;
-            if Int.equal pool_id merge_buffer_pool_id then (
-              device.merge_buffer := None;
-              device.merge_buffer_capacity <- 0;
-              device.updating_for_merge_buffer <- None);
+            if Int.equal pool_id merge_buffer_pool_id then
+              invalidate_merge_slab device ~remove_slab_claim:(fun () -> Hashtbl.remove pools key)
+            else Hashtbl.remove pools key;
             Option.iter Raw.free_pool_raw ~f:(fun memfree -> memfree old));
         let ptr = Raw.alloc_pool_raw ~size_in_bytes in
-        Hashtbl.set pools ~key ~data:ptr)
+        if Int.equal pool_id merge_buffer_pool_id then
+          commit_merge_slab device ~size_in_bytes ~install_slab_claim:(fun () ->
+              Hashtbl.set pools ~key ~data:ptr)
+        else Hashtbl.set pools ~key ~data:ptr)
 
   (* Always [Some]: even backends whose raw allocations are reclaimed by GC ([free_pool_raw = None])
      must drop the private table entry on finalization, otherwise [pools] keeps a strong reference

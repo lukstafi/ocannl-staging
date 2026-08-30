@@ -292,7 +292,6 @@ let exempt_zero_reference_exports =
     "Utils.artifacts_subdir";
     "Utils.captured_log_processors";
     "Utils.clean_filename";
-    "Utils.cmdline_var_prefixes";
     "Utils.config_table_of_lines";
     "Utils.default_indent";
     "Utils.describe_config_source";
@@ -323,7 +322,6 @@ let exempt_zero_reference_exports =
     "Utils.performance_profile_payload";
     "Utils.profile_ineligible_keys";
     "Utils.profile_lookup";
-    "Utils.qualified_only_config_keys";
     "Utils.read_cmdline_or_env_var";
     "Utils.reproducible_profile_payload";
     "Utils.same_env_name";

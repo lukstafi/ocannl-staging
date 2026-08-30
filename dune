@@ -5,13 +5,13 @@
 ; (Codex review round 3 on PR #454). Naming `.github` here puts it in the scan, which is what makes
 ; "a new script is covered the day it lands" true rather than nearly true.
 ;
-; `:standard` first, so this ADDS to the default rather than replacing it. Only `.github` is named:
-; `.claude/worktrees/` holds entire checkouts of this repository -- dune would descend into them and
-; build a second copy of the tree -- and no other dot-directory here holds anything dune should read.
-; `.github` itself contains only workflows and issue templates, no dune file, so nothing new is
-; built; it becomes visible, not compiled.
+; `:standard` first, so this ADDS to the default rather than replacing it. `.github` itself contains
+; only workflows and issue templates, no dune file, so nothing new is built; it becomes visible, not
+; compiled. `.claude` is visible only so config_usage_scan can depend on checked-in skill Markdown;
+; its own dune file admits `skills/` alone. In particular, `.claude/worktrees/` can hold entire
+; checkouts of this repository and MUST stay outside Dune's source tree.
 
-(dirs :standard .github)
+(dirs :standard .github .claude)
 
 ; Warning 50 is ocamlformat's refusal criterion, spelled as a compiler check.
 ; ocamlformat declines to format a file whose doc comments the compiler cannot
