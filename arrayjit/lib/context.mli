@@ -56,8 +56,9 @@ type routine = private {
       (** A unique integer identifying the routine within its root context's lifetime. *)
   execution_deps : Set.M(Int).t;
       (** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW
-          hazards on tensor nodes at compile time. An empty set means the routine is independent of
-          all previously compiled routines in its lineage. *)
+          hazards on ordinary tensor-node accesses plus the transfer routine supplying any
+          merge-buffer read. An empty set means the routine is independent of all previously
+          compiled or transferred routines in its lineage. *)
   mma : Ir.C_syntax.mma_summary;
       (** How this routine's [Tile_mma] statements actually rendered (gh-ocannl-626): the
           {!Ir.C_syntax.mma_census} of this compile, collected by {!compile} itself and summarized
@@ -287,7 +288,10 @@ val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** {2 Execution dependency tracking}
 
     Execution dependencies mirror compilation dependencies: they record which routines must execute
-    before which others based on tensor-node read/write hazards (RAW, WAR, WAW).
+    before which others based on tensor-node read/write hazards (RAW, WAR, WAW). A merge-buffer
+    input depends on the transfer routine that filled the transient merge slab, not on a writer of
+    the associated node's ordinary context buffer; the slab is not an ordinary input requiring
+    initialization.
 
     Dependencies are scoped to compilation lineage: two routines compiled from the {i same}
     [Context.t] are independent siblings, even if they access the same nodes. Only routines compiled
@@ -310,11 +314,15 @@ val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t
 (** Copies the node's device buffer from [src] into [dst] (default [~into_merge_buffer:No]), or into
     [dst]'s stream's merge buffer for [~into_merge_buffer:Copy], returning the updated destination
     context. When both contexts come from the same backend the copy stays on-device via the
-    backend's [device_to_device] transfer machinery (for [Copy], the returned context carries the
-    merge-buffer node against which the next [compile] of merge-consuming code is statically
-    verified); a cross-backend copy falls back to a host round-trip ([Copy] raises). Nodes absent
-    from [src]'s device buffers fall back to the host round-trip as well, serving host-init literals
-    and for-print proxies. *)
+    backend's [device_to_device] transfer machinery (for [Copy], the source node's latest compiled
+    writer must have an effective executed or externally written value, and the returned context
+    carries both the merge-buffer node and the completed transfer's execution-ledger entry against
+    which the next [compile] of merge-consuming code is verified). A later [Copy] refuses while a
+    consumer of the current transfer is pending; after those consumers execute, replacing the slab
+    invalidates their old transfer dependency so they cannot silently re-run against new bytes. A
+    cross-backend copy falls back to a host round-trip ([Copy] raises). Nodes absent from [src]'s
+    device buffers fall back to the host round-trip as well, serving host-init literals and
+    for-print proxies. *)
 
 (** {2 On-demand host access}
 
@@ -362,8 +370,9 @@ val to_host : t -> Ir.Tnode.t -> Ir.Ndarray.t
 
 val from_host : t -> Ir.Tnode.t -> Ir.Ndarray.t -> t
 (** Uploads the host buffer into the node's device buffer (allocating it if needed) and returns a
-    context in which the node is marked initialized. Raises if this lineage placed the node [Local]:
-    no routine reads the uploaded buffer. *)
+    context in which the node is marked initialized and this explicit write supersedes any compiled
+    reader/writer frontier entry for the node. Raises if this lineage placed the node [Local]: no
+    routine reads the uploaded buffer. *)
 
 val get_values : t -> Ir.Tnode.t -> float array
 (** Retrieves all (unpadded) values of the node via an on-demand device-to-host transfer. *)

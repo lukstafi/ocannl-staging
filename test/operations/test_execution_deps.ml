@@ -187,6 +187,120 @@ let test_poisoned_lineage () =
   refuses "copy out" (fun () -> ignore (Context.copy ~src:ctx ~dst:clean l.Tensor.value));
   refuses "copy in" (fun () -> ignore (Context.copy ~src:clean ~dst:ctx l.Tensor.value))
 
+(* Test 8: a merge-buffer input is a real read edge on the transfer that filled the transient slab
+   (gh-ocannl-766), not on a writer of the destination's ordinary tensor buffer. The source and
+   destination have separate ledgers, and the consumer writes a third node, so an ordinary
+   input/output hazard cannot accidentally supply either ordering. *)
+let test_merge_buffer_read_dependency () =
+  printf "\n=== Test 8: merge-buffer read dependency ===\n";
+  Tensor.unsafe_reinitialize ();
+  let%op merge_value = [ 0.; 0. ] + [ 0.; 0. ] in
+  let%op source_values = [ 1.; 2. ] + [ 10.; 20. ] in
+  let%op merge_output = [ 0.; 0. ] + [ 0.; 0. ] in
+  let%op destination_tick = [ 40.; 2. ] + [ 1.; 0. ] in
+  Train.set_materialized merge_value.Tensor.value;
+  Train.set_materialized merge_output.Tensor.value;
+  Train.set_materialized destination_tick.Tensor.value;
+  let source_write = [%cd merge_value =: source_values] in
+  let named_source_write name =
+    { source_write with asgns = Ir.Assignments.Block_comment (name, source_write.asgns) }
+  in
+  let source_root = Context.auto () in
+  let source_ctx, source_writer =
+    Context.compile source_root (named_source_write "merge_source_writer_1") IDX.empty
+  in
+  let source_ctx, _future_source_writer =
+    Context.compile source_ctx (named_source_write "merge_source_writer_2") IDX.empty
+  in
+  let sibling_source_ctx, _sibling_source_writer =
+    Context.compile source_root (named_source_write "merge_source_writer_sibling") IDX.empty
+  in
+  let destination_ctx, destination_tick_writer =
+    Train.to_routine (Context.auto ()) IDX.empty (Train.forward destination_tick)
+  in
+  let destination_ctx = Context.run destination_ctx destination_tick_writer in
+  (try
+     ignore
+       (Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:destination_ctx
+          merge_value.Tensor.value);
+     Verdict.fail "merge transfer ran before its source writer"
+   with Failure msg ->
+     Verdict.p "merge transfer refuses an unexecuted source writer"
+       (String.is_substring msg ~substring:"before source writer"));
+  (* The compile frontier names the later, unexecuted writer, but re-running the earlier writer is
+     what actually refreshes the source buffer. Merge readiness follows that execution state. *)
+  ignore (Context.run source_ctx source_writer : Context.t);
+  (* The sibling compile owns a different buffer for the same tnode. The shared ledger's executed
+     writer from the first branch must not make this untouched sibling source look ready. *)
+  (try
+     ignore
+       (Context.copy ~into_merge_buffer:Copy ~src:sibling_source_ctx ~dst:destination_ctx
+          merge_value.Tensor.value);
+     Verdict.fail "merge transfer used an executed writer from a sibling buffer"
+   with Failure msg ->
+     Verdict.p "merge transfer scopes runtime writers to the source buffer"
+       (String.is_substring msg ~substring:"before source writer"));
+  let merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:destination_ctx
+      merge_value.Tensor.value
+  in
+  let consumer_comp = [%cd merge_output =: merge_value.merge] in
+  let consumer_comp =
+    {
+      consumer_comp with
+      asgns = Ir.Assignments.Block_comment ("merge_dep_consumer", consumer_comp.asgns);
+    }
+  in
+  let consumer_ctx, consumer = Context.compile merge_ctx consumer_comp IDX.empty in
+  Verdict.p "merge consumer has exactly the transfer dependency"
+    (Set.length consumer.Context.execution_deps = 1
+    && not (Set.mem consumer.Context.execution_deps destination_tick_writer.Context.routine_id));
+  Verdict.p "merge consumer can run after the transfer" (Context.can_run consumer_ctx consumer);
+  (* An explicit write supersedes both compiled source writers. It can feed the next transfer, but
+     not until the current transfer generation's consumer executes. *)
+  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
+  (try
+     ignore
+       (Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:consumer_ctx
+          merge_value.Tensor.value);
+     Verdict.fail "merge transfer overwrote a generation with a pending consumer"
+   with Failure msg ->
+     Verdict.p "merge overwrite refuses a pending consumer"
+       (String.is_substring msg ~substring:"pending consumers"));
+  let consumer_ctx = Context.run consumer_ctx consumer in
+  Verdict.p "first merge consumer reads the executed writer's values"
+    (Array.equal Float.equal
+       (Context.get_values consumer_ctx merge_output.Tensor.value)
+       [| 11.; 22. |]);
+  (* A write-free failure rollback removes the optimistic execution claim and its runtime-writer
+     mapping. The explicit value that preceded the failed run remains a valid transfer source. *)
+  ignore (Context.run source_ctx source_writer : Context.t);
+  Context.rollback_execution source_ctx source_writer.Context.routine_id;
+  let rollback_merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:consumer_ctx merge_value.Tensor.value
+  in
+  Verdict.p "overwriting invalidates the old merge consumer"
+    (not (Context.can_run consumer_ctx consumer));
+  let abandoned_ctx, abandoned = Context.compile rollback_merge_ctx consumer_comp IDX.empty in
+  Verdict.p "rolled-back writer does not block the prior source value"
+    (Context.can_run abandoned_ctx abandoned);
+  (* Releasing an undispatched candidate unregisters its pending merge read. It must not strand the
+     lineage's single-tenant slab forever. *)
+  Context.release abandoned_ctx;
+  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
+  let replacement_merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:rollback_merge_ctx
+      merge_value.Tensor.value
+  in
+  let replacement_ctx, replacement =
+    Context.compile replacement_merge_ctx consumer_comp IDX.empty
+  in
+  let replacement_ctx = Context.run replacement_ctx replacement in
+  Verdict.p "replacement merge consumer reads the explicit upload"
+    (Array.equal Float.equal
+       (Context.get_values replacement_ctx merge_output.Tensor.value)
+       [| 5.; 6. |])
+
 let () =
   test_raw_dependency ();
   test_disjoint ();
@@ -194,4 +308,5 @@ let () =
   test_wrong_order_raises ();
   test_reexecution ();
   test_rollback_execution ();
-  test_poisoned_lineage ()
+  test_poisoned_lineage ();
+  test_merge_buffer_read_dependency ()
