@@ -1,0 +1,16 @@
+a source-generation input with the wrong suffix is refused: true
+a missing generated corpus section is refused: true
+an empty corpus section is refused: true
+a corpus section after sources is refused: true
+a corpus without the generators header is refused: true
+an empty OCaml source corpus reaches its refusal: true
+an invalid OCaml source reaches the parse refusal: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:7191f5e19a3640926ad61aeb2d7a349e] source-generation input has
+  [scanner-refusal:c045a29a4e2f18a646143f07d6ec923b] missing corpus section
+  [scanner-refusal:b5717d7e9eb6f55e37e9f5f57d114fc1] present and nonempty
+  [scanner-refusal:5b91d4ebbeebe59d5615dd99fe73edfd] unexpected corpus section
+  [scanner-refusal:bccd646d58b5010b1fe4eee6abe7eb53] corpus arguments must
+  [scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's
+  [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch

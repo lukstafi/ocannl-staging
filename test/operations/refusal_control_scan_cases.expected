@@ -1,4 +1,4 @@
-direct, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats are extracted: true
+direct, `failwith`, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats are extracted: true
 comments, quoted code, and a dynamic value contribute no diagnostic string constant: true
 Printf substitutions are holes and a stable literal fragment becomes the fragment: true
 an absent fragment is an orphan: true
@@ -9,14 +9,19 @@ a second identical diagnostic cannot reuse the consumed claim execution: true
 
 Scanner refusal formats and the permanent control suite assigned to their source:
 atomic_file_rename_scan.ml has exactly the explicitly assigned refusal controls: true
-atomic_file_rename_scan.ml: [scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's (direct failure) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:77ea18b8b8167a5861a77a9a6bbe45bf] unrelated rename spelling (claim) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:298ab0be4c86a0dabfaeeddc5e67bd29] contributes its derived (claim) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:dfeaf03eef363cf0944237d1f754cb5a] generated-source negative control (claim) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:16447aab0e906595f837aaa44096abbc] Atomic_file (claim) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:698fae6b12a0d52a71f789bc962a882b] raw rename exemption (claim) is catalogued beside atomic_file_rename_scan.expected: true
-atomic_file_rename_scan.ml: [scanner-refusal:ed6060063668d409574488fcb7fc8897] exemption matches exactly (claim) is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:7191f5e19a3640926ad61aeb2d7a349e] source-generation input has (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:c045a29a4e2f18a646143f07d6ec923b] missing corpus section (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:b5717d7e9eb6f55e37e9f5f57d114fc1] present and nonempty (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:5b91d4ebbeebe59d5615dd99fe73edfd] unexpected corpus section (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:bccd646d58b5010b1fe4eee6abe7eb53] corpus arguments must (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:77ea18b8b8167a5861a77a9a6bbe45bf] unrelated rename spelling (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:298ab0be4c86a0dabfaeeddc5e67bd29] contributes its derived (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:dfeaf03eef363cf0944237d1f754cb5a] generated-source negative control (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:16447aab0e906595f837aaa44096abbc] Atomic_file (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:698fae6b12a0d52a71f789bc962a882b] raw rename exemption (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
+atomic_file_rename_scan.ml: [scanner-refusal:ed6060063668d409574488fcb7fc8897] exemption matches exactly (claim) is catalogued beside atomic_file_rename_scan.expected, atomic_file_rename_scan_control.expected: true
 agent_notes_structure.ml has exactly the explicitly assigned refusal controls: true
 agent_notes_structure.ml: [scanner-refusal:bc4968cf04b3b7f3212afef877977199] handed the notes (claim) is catalogued beside agent_notes_structure.expected: true
 agent_notes_structure.ml: [scanner-refusal:2ac555c09ba6fe90fc6321fecba16cab] the notes' bullets (claim) is catalogued beside agent_notes_structure.expected: true
@@ -65,12 +70,12 @@ config_dep_completeness.ml: [scanner-refusal:328553bf93b184a97ab7d44d97c369a4] e
 config_dep_completeness.ml: [scanner-refusal:c4c555263d62473311fe0cfc7f769958] stanza inline-test library (claim) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
 config_dep_completeness.ml: [scanner-refusal:bdc9f2c15b8f17359eec6d359dfefbdd] that floor applies (claim) is catalogued beside dune_scan_cases.expected, config_dep_completeness.expected: true
 dead_export_scan.ml has exactly the explicitly assigned refusal controls: true
-dead_export_scan.ml: [scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules (direct failure) is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:085de8c521f251df70b65fc6454dfdad] OCaml source does (direct failure) is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export (claim) is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions (claim) is catalogued beside dead_export_scan.expected: true
-dead_export_scan.ml: [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains (claim) is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: [scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules (direct failure) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
+dead_export_scan.ml: [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch (direct failure) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
+dead_export_scan.ml: [scanner-refusal:085de8c521f251df70b65fc6454dfdad] OCaml source does (direct failure) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
+dead_export_scan.ml: [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export (claim) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
+dead_export_scan.ml: [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions (claim) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
+dead_export_scan.ml: [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains (claim) is catalogued beside dead_export_scan.expected, dead_export_scan_control.expected: true
 digest_completeness.ml has exactly the explicitly assigned refusal controls: true
 digest_completeness.ml: [scanner-refusal:7cab0a5763f4811f331a4aab327c6784] which the codegen-stage (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
 digest_completeness.ml: [scanner-refusal:fc3ef3788212f2d1f5a9d9a46be3ca38] keys classified more (direct failure) is catalogued beside config_scan_lexing.expected, digest_completeness.expected: true
@@ -85,6 +90,7 @@ env_var_deps.ml: [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in c
 env_var_deps.ml: [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true

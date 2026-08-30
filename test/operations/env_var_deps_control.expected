@@ -9,6 +9,7 @@ appears in no permanent control golden in the negative arm, and appears in the p
 a diagnostic absent from every control golden is an orphan: true
 the same diagnostic fragment in a control golden is covered: true
 a scanner absent from the manifest is detected by the population equality: true
+repo-relative scanner paths keep equal basenames distinct: true
 
 The rule is put to a stanza this repository does not contain: an `(executable)` whose one
 module calls `Test_utils.Generated.init`, run by a rule that does or does not declare
@@ -114,6 +115,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from
   [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment
   [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality
+  [scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths
   [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's
   [scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation
   [scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated

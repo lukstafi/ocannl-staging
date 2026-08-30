@@ -101,7 +101,9 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
+  (alias runtest-dead_export_scan_control)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
@@ -185,7 +187,9 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
+  (alias runtest-dead_export_scan_control)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
@@ -1782,6 +1786,7 @@
   ocannl_config
   atomic_file_rename_scan.ml
   atomic_file_rename_scan.expected
+  atomic_file_rename_scan_control.expected
   agent_notes_structure.ml
   agent_notes_structure.expected
   backend_golden_family_scan.ml
@@ -1797,6 +1802,7 @@
   config_dep_completeness.expected
   dead_export_scan.ml
   dead_export_scan.expected
+  dead_export_scan_control.expected
   digest_completeness.ml
   config_scan_lexing.expected
   digest_completeness.expected
@@ -1816,7 +1822,7 @@
   (run
    %{test}
    atomic_file_rename_scan.ml
-   atomic_file_rename_scan.expected
+   atomic_file_rename_scan.expected,atomic_file_rename_scan_control.expected
    agent_notes_structure.ml
    agent_notes_structure.expected
    backend_golden_family_scan.ml
@@ -1828,7 +1834,7 @@
    config_dep_completeness.ml
    dune_scan_cases.expected,config_dep_completeness.expected
    dead_export_scan.ml
-   dead_export_scan.expected
+   dead_export_scan.expected,dead_export_scan_control.expected
    digest_completeness.ml
    config_scan_lexing.expected,digest_completeness.expected
    env_var_deps.ml
@@ -2064,6 +2070,26 @@
  (action
   (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
 
+(rule
+ ; ocannl-backend: none -- runs only synthetic argument-validation refusals in the scanner executable.
+ (target atomic_file_rename_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  atomic_file_rename_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:atomic_file_rename_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-atomic_file_rename_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff atomic_file_rename_scan_control.expected atomic_file_rename_scan_control.actual)))
+
 ; gh-ocannl-806: modules without interfaces implicitly export every top-level binding. The live
 ; scan ratchets every source-declared value in direct modules under arrayjit/lib and tensor against
 ; external qualified, aliased, opened, or included references. The matching policy is pure in
@@ -2105,6 +2131,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff dead_export_scan.expected dead_export_scan.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scanner's three synthetic direct-refusal branches.
+ (target dead_export_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  dead_export_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:dead_export_scan.exe} --refusal-control))))
+
+(rule
+ (alias runtest-dead_export_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff dead_export_scan_control.expected dead_export_scan_control.actual)))
 
 ; gh-ocannl-802: a per-backend golden family covers the backend vocabulary derived from
 ; `Backends.all_of_backend`, and goldens copied from another backend carry a visible provenance

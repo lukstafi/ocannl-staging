@@ -3,9 +3,6 @@ named dead-export exemptions are unique: true
 every named dead-export exemption remains necessary: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:ab97825eb17bf92bf92973b99e0849ff] mli-less implementation modules
-  [scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch
-  [scanner-refusal:085de8c521f251df70b65fc6454dfdad] OCaml source does
   [scanner-refusal:e8c85fd2a3138c8fe3283ab67595826c] zero-reference implicit export
   [scanner-refusal:8e094223fc3e55912db0c3f53c9fcaca] named dead-export exemptions
   [scanner-refusal:e32dfff95d976581bde669214a7e6415] dead-export exemption remains

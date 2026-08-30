@@ -4,16 +4,22 @@
 
     This table is inventory, not evidence. [print] emits a claim marker only when Verdict recorded a
     successful execution of the claim's diagnostic format, and emits a direct-failure marker only
-    when the exact control line assigned below was observed. Adding a row here therefore cannot make
-    its own golden pass. *)
+    when the exact negative-control line assigned below was observed or the caught branch recorded
+    its format through [observe_failure]. Adding a row here therefore cannot make its own golden
+    pass. *)
 
 open Base
 open Stdio
 
-let entries =
+let raw_entries =
   [
     ( "atomic_file_rename_scan.ml",
       [
+        "[scanner-refusal:7191f5e19a3640926ad61aeb2d7a349e] source-generation input has";
+        "[scanner-refusal:c045a29a4e2f18a646143f07d6ec923b] missing corpus section";
+        "[scanner-refusal:b5717d7e9eb6f55e37e9f5f57d114fc1] present and nonempty";
+        "[scanner-refusal:5b91d4ebbeebe59d5615dd99fe73edfd] unexpected corpus section";
+        "[scanner-refusal:bccd646d58b5010b1fe4eee6abe7eb53] corpus arguments must";
         "[scanner-refusal:fb72b56980e9afc888059f90e9734599] arguments the rule's";
         "[scanner-refusal:20f449385ebca8a7a25b2d306c8e0f44] scan cannot vouch";
         "[scanner-refusal:77ea18b8b8167a5861a77a9a6bbe45bf] unrelated rename spelling";
@@ -104,6 +110,7 @@ let entries =
         "[scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from";
         "[scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment";
         "[scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality";
+        "[scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths";
         "[scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's";
         "[scanner-refusal:1356c3ade8d75f4aeb6332c69e239db3] the resource-lifecycle instrumentation";
         "[scanner-refusal:09e01a62cce1d340393a2244ed33ea10] Test_utils.Generated";
@@ -292,17 +299,14 @@ let entries =
       ] );
   ]
 
+let entries =
+  List.map raw_entries ~f:(fun (source, markers) -> ("test/operations/" ^ source, markers))
+
 let markers source = List.Assoc.find_exn entries source ~equal:String.equal
 let sources = List.map entries ~f:fst
 
-let direct_evidence =
+let raw_direct_evidence =
   [
-    ( "atomic_file_rename_scan.ml:fb72b56980e9afc888059f90e9734599",
-      "arrayjit/lib/atomic_file.ml: Stdlib.Sys.rename -- implements Atomic_file's single commit \
-       primitive; every other OCaml publisher routes through this module" );
-    ( "atomic_file_rename_scan.ml:20f449385ebca8a7a25b2d306c8e0f44",
-      "arrayjit/lib/atomic_file.ml: Stdlib.Sys.rename -- implements Atomic_file's single commit \
-       primitive; every other OCaml publisher routes through this module" );
     ( "cache_dir_ignores.ml:e2e9d19ffe2ad7688396847bd1ee643a",
       "ok: built-in default -- another key's default is not this one's" );
     ( "cache_dir_ignores.ml:0f307832357ee7ca58b9798a86530dac",
@@ -356,12 +360,6 @@ let direct_evidence =
       "ok: raw stanzas -- a tool only reading them is the same text" );
     ( "config_dep_completeness.ml:328553bf93b184a97ab7d44d97c369a4",
       "ok: raw stanzas -- a library's preprocessor is not a test-running rule" );
-    ( "dead_export_scan.ml:ab97825eb17bf92bf92973b99e0849ff",
-      "named dead-export exemptions are unique: true" );
-    ( "dead_export_scan.ml:20f449385ebca8a7a25b2d306c8e0f44",
-      "named dead-export exemptions are unique: true" );
-    ( "dead_export_scan.ml:085de8c521f251df70b65fc6454dfdad",
-      "named dead-export exemptions are unique: true" );
     ( "digest_completeness.ml:7cab0a5763f4811f331a4aab327c6784",
       "ok: key list -- a list written at the iteration" );
     ( "digest_completeness.ml:fc3ef3788212f2d1f5a9d9a46be3ca38",
@@ -547,8 +545,18 @@ let direct_evidence =
     ("verdict_ratchet.ml:e1354d390a356f0c79420c25232b0b42", "ok: claim shape -- the planted canary");
   ]
 
+let direct_evidence =
+  List.map raw_direct_evidence ~f:(fun (key, evidence) -> ("test/operations/" ^ key, evidence))
+
+let observed_failures = Hash_set.create (module String)
 let observed_output = Hash_set.create (module String)
 let failure_key ~source ~identity = source ^ ":" ^ identity
+
+let observe_failure ~source ~format =
+  let identity =
+    Stdlib.Digest.string (Refusal_control_scan.normalize format) |> Stdlib.Digest.to_hex
+  in
+  Hash_set.add observed_failures (failure_key ~source ~identity)
 
 let observe_output text =
   String.split_lines text |> List.map ~f:String.strip
@@ -582,9 +590,18 @@ let evidence_observed ~passed_labels evidence =
 let print source =
   let source_path =
     if Stdlib.Sys.file_exists source then source
-    else Stdlib.Filename.concat "test/operations" source
+    else
+      let basename = Stdlib.Filename.basename source in
+      if Stdlib.Sys.file_exists basename then basename
+      else Stdlib.Filename.concat "test/operations" source
   in
-  let source = Stdlib.Filename.basename source in
+  let normalized = String.substr_replace_all source ~pattern:"\\" ~with_:"/" in
+  let source =
+    match String.substr_index normalized ~pattern:"test/operations/" with
+    | Some position -> String.drop_prefix normalized position
+    | None when String.mem normalized '/' -> normalized
+    | None -> "test/operations/" ^ normalized
+  in
   let diagnostics = Refusal_control_scan.diagnostics (In_channel.read_all source_path) in
   let expected = markers source in
   let passed_labels = ref (Verdict.passed_labels ()) in
@@ -604,6 +621,7 @@ let print source =
             let key = failure_key ~source ~identity:diagnostic.Refusal_control_scan.identity in
             let assigned_evidence = List.Assoc.find direct_evidence key ~equal:String.equal in
             if
-              Option.value_map assigned_evidence ~default:false
-                ~f:(evidence_observed ~passed_labels:(Verdict.passed_labels ()))
+              Hash_set.mem observed_failures key
+              || Option.value_map assigned_evidence ~default:false
+                   ~f:(evidence_observed ~passed_labels:(Verdict.passed_labels ()))
             then printf "  %s\n" marker)

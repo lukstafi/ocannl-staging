@@ -32,6 +32,7 @@ let paired got want = Verdict.p_all2 "paired" got want ~f:Int.equal
 
 let concise ok = Verdict.p "valid" ok
 let concise_fail () = Verdict.fail "bad key"
+let exception_fail () = failwith "stopped"
 
 let prose = "Verdict.fail \"quoted code is not an application\""
 let dynamic reason = Verdict.fail reason
@@ -39,11 +40,12 @@ let dynamic reason = Verdict.fail reason
   in
   let diagnostics = Scan.diagnostics source in
   let fragments = List.map diagnostics ~f:(fun diagnostic -> diagnostic.Scan.fragment) in
-  Verdict.p_all ~min:8
-    "direct, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats are extracted"
+  Verdict.p_all ~min:9
+    "direct, `failwith`, formatted, `@@`, quantified, `p_all2`, `pf`, and short refusal formats \
+     are extracted"
     diagnostics ~f:(fun diagnostic -> not (String.is_empty diagnostic.Scan.fragment));
   Verdict.p "comments, quoted code, and a dynamic value contribute no diagnostic string constant"
-    (List.length diagnostics = 8);
+    (List.length diagnostics = 9);
   Verdict.p "Printf substitutions are holes and a stable literal fragment becomes the fragment"
     (List.mem fragments "formatted_relationship" ~equal:String.equal);
   let one = List.hd_exn diagnostics in
@@ -80,9 +82,10 @@ let dynamic reason = Verdict.fail reason
       let control_text = controls |> List.map ~f:In_channel.read_all |> String.concat ~sep:"\n" in
       let diagnostics = Scan.diagnostics (In_channel.read_all source) in
       let extracted = List.map diagnostics ~f:Scan.marker in
+      let source_key = "test/operations/" ^ source in
       Verdict.p
         (Printf.sprintf "%s has exactly the explicitly assigned refusal controls" source)
-        (List.equal String.equal extracted (Manifest.markers source));
+        (List.equal String.equal extracted (Manifest.markers source_key));
       diagnostics
       |> List.iter ~f:(fun diagnostic ->
           Verdict.p

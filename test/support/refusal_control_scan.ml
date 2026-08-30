@@ -121,6 +121,7 @@ let last_name expression = Option.bind (Read.longident_of expression) ~f:List.la
 let refusal_callees =
   [
     "fail";
+    "failwith";
     "p";
     "pf";
     "p_all";
@@ -187,7 +188,10 @@ let diagnostics content =
                 match fragment_of_format format with
                 | Some fragment ->
                     let identity = Digest.string (normalize format) |> Digest.to_hex in
-                    let kind = if String.equal callee "fail" then Fail else Claim in
+                    let kind =
+                      if List.mem [ "fail"; "failwith" ] callee ~equal:String.equal then Fail
+                      else Claim
+                    in
                     found :=
                       {
                         line = expression.pexp_loc.loc_start.pos_lnum;

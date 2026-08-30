@@ -109,7 +109,76 @@ let emit_generated_dependencies prefix arguments =
   List.map arguments ~f:(fun source -> Stdlib.Filename.concat prefix (generated_output source))
   |> List.sort ~compare:String.compare |> List.iter ~f:print_endline
 
+let require_sources ~fail sources =
+  if List.is_empty sources then (
+    fail "no OCaml sources among the arguments -- the rule's glob matches nothing";
+    false)
+  else true
+
+let references_or_refusal ~fail ~source contents =
+  match rename_references ~source contents with
+  | references -> references
+  | exception exn ->
+      fail
+        (Printf.sprintf "%s does not parse as OCaml, so this scan cannot vouch for it: %s" source
+           (Exn.to_string exn));
+      []
+
+let refusal_control () =
+  let source = "test/operations/atomic_file_rename_scan.ml" in
+  let case label ~format run =
+    let refused =
+      match run () with
+      | _ -> false
+      | exception Failure _ ->
+          Test_utils.Refusal_control_manifest.observe_failure ~source ~format;
+          true
+    in
+    Verdict.p label refused
+  in
+  case "a source-generation input with the wrong suffix is refused"
+    ~format:"source-generation input has no .mll or .mly suffix: %s" (fun () ->
+      generated_output "fixture.ml");
+  case "a missing generated corpus section is refused" ~format:"missing corpus section %s"
+    (fun () -> parse_corpus [ "--generators"; "fixture.mll" ]);
+  case "an empty corpus section is refused"
+    ~format:"each corpus section must be present and nonempty" (fun () ->
+      parse_corpus [ "--generators"; "--generated"; "fixture.ml"; "--sources"; "fixture.ml" ]);
+  case "a corpus section after sources is refused"
+    ~format:"unexpected corpus section after --sources" (fun () ->
+      parse_corpus
+        [
+          "--generators";
+          "fixture.mll";
+          "--generated";
+          "fixture.ml";
+          "--sources";
+          "fixture.ml";
+          "--extra";
+        ]);
+  case "a corpus without the generators header is refused"
+    ~format:"corpus arguments must begin with --generators" (fun () -> parse_corpus []);
+  let direct_case label ~format run =
+    let refused = ref false in
+    let fail _message =
+      refused := true;
+      Test_utils.Refusal_control_manifest.observe_failure ~source ~format
+    in
+    run fail;
+    Verdict.p label !refused
+  in
+  direct_case "an empty OCaml source corpus reaches its refusal"
+    ~format:"no OCaml sources among the arguments -- the rule's glob matches nothing" (fun fail ->
+      ignore (require_sources ~fail [] : bool));
+  direct_case "an invalid OCaml source reaches the parse refusal"
+    ~format:"%s does not parse as OCaml, so this scan cannot vouch for it: %s" (fun fail ->
+      ignore (references_or_refusal ~fail ~source:"bad.ml" "let =" : reference list));
+  Test_utils.Refusal_control_manifest.print source
+
 let () =
+  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+    refusal_control ();
+    Stdlib.exit 0);
   if Array.length Stdlib.Sys.argv >= 3 && String.equal Stdlib.Sys.argv.(1) "--generated-deps" then (
     Array.to_list (Array.subo Stdlib.Sys.argv ~pos:3)
     |> emit_generated_dependencies Stdlib.Sys.argv.(2);
@@ -134,19 +203,11 @@ let () =
   in
   let on_disk = Map.of_alist_reduce (module String) arguments ~f:(fun first _ -> first) in
   let sources = Read.sources_among (List.map arguments ~f:fst) in
-  if List.is_empty sources then (
-    Verdict.fail "no OCaml sources among the arguments -- the rule's glob matches nothing";
-    Stdlib.exit 1);
+  if not (require_sources ~fail:Verdict.fail sources) then Stdlib.exit 1;
   let references =
     List.concat_map sources ~f:(fun source ->
         let path = Map.find_exn on_disk source in
-        match rename_references ~source (In_channel.read_all path) with
-        | references -> references
-        | exception exn ->
-            Verdict.fail
-              (Printf.sprintf "%s does not parse as OCaml, so this scan cannot vouch for it: %s"
-                 source (Exn.to_string exn));
-            [])
+        references_or_refusal ~fail:Verdict.fail ~source (In_channel.read_all path))
   in
   let generated_control_references, references =
     List.partition_tf references ~f:(fun reference ->

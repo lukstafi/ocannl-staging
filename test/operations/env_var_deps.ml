@@ -725,6 +725,11 @@ let refuse name =
   Verdict.p "the same diagnostic fragment in a control golden is covered" (List.is_empty covered);
   Verdict.p "a scanner absent from the manifest is detected by the population equality"
     (not (List.equal String.equal [ "scanner_a.ml" ] [ "scanner_a.ml"; "scanner_b.ml" ]));
+  let same_basename = [ "a/scanner.ml"; "b/scanner.ml" ] in
+  Verdict.p "repo-relative scanner paths keep equal basenames distinct"
+    (Set.length (Set.of_list (module String) same_basename) = 2
+    && Set.length (Set.of_list (module String) (List.map same_basename ~f:Stdlib.Filename.basename))
+       = 1);
   printf "\n"
 
 let main () =
@@ -2384,10 +2389,8 @@ let main () =
      where dune runs it, and every declaration of it has a caller behind it"
     (!artifact_violations = 0);
   if repository_census then (
-    let scanner_basenames =
-      Set.to_list !scanner_sources
-      |> List.map ~f:Stdlib.Filename.basename
-      |> List.sort ~compare:String.compare
+    let derived_scanner_sources =
+      Set.to_list !scanner_sources |> List.sort ~compare:String.compare
     in
     let manifest_sources = List.sort Refusal_manifest.sources ~compare:String.compare in
     printf
@@ -2410,7 +2413,7 @@ let main () =
       (Set.to_list !scanner_sources) ~f:(fun source ->
         List.Assoc.mem sources source ~equal:String.equal);
     Verdict.p "the refusal-control manifest source set equals the derived scanner census"
-      (List.equal String.equal manifest_sources scanner_basenames);
+      (List.equal String.equal manifest_sources derived_scanner_sources);
     Verdict.p_all ~min:10 "the permanent control-golden corpus is present" control_goldens
       ~f:(fun (_path, on_disk) -> not (String.is_empty (In_channel.read_all on_disk)));
     Verdict.p
