@@ -120,8 +120,8 @@ trap cleanup EXIT
 extract_claims() {
   awk '
     index($0, "SKIPPED on ") == 1 { human++ }
-    index($0, "OCANNL_VERDICT_SKIP\t") == 1 {
-      record = substr($0, length("OCANNL_VERDICT_SKIP\t") + 1)
+    index($0, "OCANNL_TOOL_VERDICT_SKIP\t") == 1 {
+      record = substr($0, length("OCANNL_TOOL_VERDICT_SKIP\t") + 1)
       fields = split(record, part, "\t")
       machine++
       if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1

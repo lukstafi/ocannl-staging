@@ -136,10 +136,10 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # must not leak into the report merely because it occurred somewhere. A skip
 # whose gate belongs to the environment occurs in both logs too, but its
 # explicit scope keeps it out of this backend-coverage question.
-common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tcommon unevaluated claim'
-cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
-multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
-environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
+common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcommon unevaluated claim'
+cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
+multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
+environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_TOOL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
 coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
 $cc_only
 $environment" \

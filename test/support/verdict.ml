@@ -201,7 +201,7 @@ type skip_aggregation = [ `Backend | `Environment ]
     [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is
     free — and announces the skip on stderr, naming the claim. [grep SKIPPED] over a run then
     enumerates exactly what that hardware did not verify. A second
-    [OCANNL_VERDICT_SKIP<TAB>scope<TAB>executable<TAB>claim] record on stderr is the
+    [OCANNL_TOOL_VERDICT_SKIP<TAB>scope<TAB>executable<TAB>claim] record on stderr is the
     machine-readable form; the executable identity keeps equal labels in different test legs
     distinct when sweep logs are intersected across backends. [scope] is [backend] by default. Pass
     [~aggregation:`Environment] when the leg is gated by a host or configuration capability rather
@@ -228,7 +228,7 @@ let skipped ?(aggregation = (`Backend : skip_aggregation)) ~backend name =
      basename is stable across worktrees and machines; pairing it with the claim prevents equal
      labels in different tests from being conflated. [String.escaped] keeps each field on one TSV
      line even if a computed label contains a control character. *)
-  Stdio.eprintf "OCANNL_VERDICT_SKIP\t%s\t%s\t%s\n%!"
+  Stdio.eprintf "OCANNL_TOOL_VERDICT_SKIP\t%s\t%s\t%s\n%!"
     (match aggregation with `Backend -> "backend" | `Environment -> "environment")
     (Stdlib.String.escaped (Stdlib.Filename.basename Stdlib.Sys.executable_name))
     (Stdlib.String.escaped name);
