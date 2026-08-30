@@ -1140,6 +1140,17 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-805: the post-virtual_llc decision-coverage seam. The negative control injects raw
+; hand-built IR directly into the validator; the normal leg runs the same shape through optimize.
+
+(test
+ ; ocannl-backend: none -- hand-built IR is optimized and inspected, never linked or executed.
+ (name virtual_decision_coverage)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules virtual_decision_coverage)
+ (libraries base ocannl ll_test))
+
 (test
  (name virtual_uncaptured_loop)
  (package neural_nets_lib)

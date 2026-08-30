@@ -2376,6 +2376,89 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
   in
   (result, spliced_reads)
 
+(** gh-ocannl-805: the decision-coverage seam between [virtual_llc] and cleanup. Every explicit
+    tensor-buffer read that will survive cleanup must already have a placement verdict. Cleanup may
+    resolve a [Never_virtual] verdict to [Local] / [On_device], and may commit setter-only
+    candidates [Virtual] while dropping their stores; it must not be the first phase to decide a
+    surviving read. Otherwise its source-order walk can drop an undecided node's setter as [Virtual]
+    before reaching the read that asks for [Never_virtual], turning one missing virtualizer arm into
+    an order-dependent provenance collision.
+
+    The survival qualification is load-bearing. [virtual_llc] intentionally leaves a virtual
+    candidate's setter in the intermediate IR, including its self-read, for cleanup to drop as a
+    whole without visiting the right-hand side. This walk mirrors that keep/drop decision without
+    mutating placements, and inspects a guard condition only when some statement in its body will
+    survive (cleanup elides an empty guard before visiting its condition).
+
+    [Local_scope] is not itself a tensor-buffer read -- it is the replacement for an inlined one --
+    but its body may read other tensor buffers, so descend into it. [Get_merge_buffer] reads the
+    transient merge buffer rather than its tnode's context buffer and therefore carries no placement
+    obligation. The match is intentionally exhaustive: a new IR constructor has to state whether and
+    where it can contain a surviving read. *)
+let validate_virtualization_decision_coverage (plc : Tn.Placements.t) (llc : t) : unit =
+  let undecided = ref (Set.empty (module Tn)) in
+  let check tn =
+    if Option.is_none (Tn.Placements.get plc tn) then undecided := Set.add !undecided tn
+  in
+  let rec proc (llc : t) : bool =
+    match llc with
+    | Noop -> false
+    | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> true
+    | Seq (a, b) ->
+        let a_survives = proc a in
+        let b_survives = proc b in
+        a_survives || b_survives
+    | For_loop { body; _ } -> proc body
+    | Zero_out tn -> Tn.Placements.known_non_virtual plc tn
+    | Set { tn; llsc; _ } ->
+        let survives = Tn.Placements.known_non_virtual plc tn in
+        if survives then scalar llsc;
+        survives
+    | Set_from_vec { tn; arg = llsc, _; _ } ->
+        let survives = Tn.Placements.known_non_virtual plc tn in
+        if survives then scalar llsc;
+        survives
+    | Set_local (_, llsc) ->
+        scalar llsc;
+        true
+    | Set_dynamic { dyn_value = dyn, _; llsc; _ } ->
+        scalar dyn;
+        scalar llsc;
+        true
+    | If { cond = c, _; body } ->
+        let survives = proc body in
+        if survives then scalar c;
+        survives
+    | Tile_mma { fallback; _ } ->
+        ignore (proc fallback : bool);
+        true
+  and scalar (llsc : scalar_t) : unit =
+    match llsc with
+    | Get (tn, _) -> check tn
+    | Get_dynamic { tn; dyn_value = dyn, _; _ } ->
+        check tn;
+        scalar dyn
+    | Local_scope { id; body; _ } ->
+        if not (Tn.Placements.known_non_virtual plc id.tn) then ignore (proc body : bool)
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  ignore (proc llc : bool);
+  if not (Set.is_empty !undecided) then
+    let names = List.map (Set.to_list !undecided) ~f:Tn.debug_name |> String.concat ~sep:", " in
+    invalid_arg
+      [%string
+        "Low_level.virtual_llc decision-coverage seam: the post-pass code retains a tensor read \
+         with no virtualization decision for %{names}. Every surviving Get / Get_dynamic must be \
+         decided before cleanup."]
+
 (** gh-ocannl-681: the scope-TARGET contract, companion to the scope-BODY contract
     {!validate_scope_bodies} enforces. A [Local_scope] over [X] denotes THE INLINED COMPUTATION OF
     [X], so it means something only while [X] is virtual. Over a materialized [X] the body is not
@@ -6653,6 +6736,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   let virtual_llc_result, spliced_reads =
     virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
   in
+  validate_virtualization_decision_coverage input_ctx.placements virtual_llc_result;
   let llc =
     hoist_cross_statement_cse @@ eliminate_common_subexpressions
     @@ rewrite_one_hot_reductions ~static_indices
