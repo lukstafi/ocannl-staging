@@ -1,3 +1,8 @@
+The per-directory seam is put to a root stanza and two nested `(subdir ...)` groups. The
+checker plugged into it contains no traversal of its own.
+
+a newly plugged-in check receives the root and every nested directory without adding descent: true
+
 The rule is put to a stanza this repository does not contain: an `(executable)` whose one
 module calls `Test_utils.Generated.init`, run by a rule that does or does not declare
 `(env_var OCANNL_BUILD_FILES_PREFIX)`. Nothing else differs between the two runs.
