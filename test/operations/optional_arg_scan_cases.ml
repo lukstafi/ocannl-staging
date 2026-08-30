@@ -7,13 +7,17 @@
 open Base
 module Scan = Test_utils.Optional_arg_scan
 
-let one source =
-  match Scan.args_in_source ~source:"fixture.ml" source with
-  | [ arg ] -> arg
-  | args -> failwith (Printf.sprintf "expected one optional argument, got %d" (List.length args))
+let one ?argument source =
+  let args = Scan.args_in_source ~source:"fixture.ml" source in
+  match argument with
+  | Some label -> List.find_exn args ~f:(fun arg -> String.equal arg.Scan.label label)
+  | None -> (
+      match args with
+      | [ arg ] -> arg
+      | _ -> failwith (Printf.sprintf "expected one optional argument, got %d" (List.length args)))
 
-let case label source ~implemented ~honest =
-  let arg = one source in
+let case ?argument label source ~implemented ~honest =
+  let arg = one ?argument source in
   Verdict.p
     (label ^ ": implementation classified")
     (match (arg.Scan.implementation, implemented) with
@@ -31,11 +35,23 @@ let () =
   case "legacy convolution padding is a ppx-generated use"
     {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
+  case "a shadowed op spec coefficient does not use the outer option"
+    {ocaml|let%op f ?(stride = 1) x = let stride = 2 in x ++ "stride*o+k => o"|ocaml}
+    ~implemented:false ~honest:false;
+  case "an unrelated string in an op body does not use the option"
+    {ocaml|let%op f ?(stride = 1) x = ignore "stride*o+k => o"; x|ocaml} ~implemented:false
+    ~honest:false;
+  case ~argument:"scale" "a later optional default uses an earlier option"
+    {ocaml|let f ?(scale = 2) ?(fallback = scale) () = fallback|ocaml} ~implemented:true
+    ~honest:true;
   case "ordinary label discarded through let-wildcard is rejected"
     {ocaml|let f ?(feature = true) () = let _ = feature in ()|ocaml} ~implemented:false
     ~honest:false;
   case "ordinary label discarded through ignore is rejected"
     {ocaml|let f ?(feature = true) () = ignore feature|ocaml} ~implemented:false ~honest:false;
+  case "ordinary label discarded through named throwaway is rejected"
+    {ocaml|let f ?(feature = true) () = let _unused = feature in ()|ocaml} ~implemented:false
+    ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}

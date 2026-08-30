@@ -68,10 +68,11 @@ let pattern_binds pattern name =
   iterator#pattern pattern;
   !found
 
-let rec wildcard_pattern pattern =
+let rec throwaway_pattern pattern =
   match pattern.ppat_desc with
   | Ppat_any -> true
-  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> wildcard_pattern inner
+  | Ppat_var { txt; _ } -> String.is_prefix txt ~prefix:"_"
+  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> throwaway_pattern inner
   | _ -> false
 
 let flatten_ident expression =
@@ -128,26 +129,38 @@ let has_unmarked_convolution text =
       else (Some char, false))
   |> snd
 
-let dsl_generated_use name tail =
-  let found = ref false in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
+let string_constant expression =
+  match expression.pexp_desc with
+  | Pexp_constant (Pconst_string (text, _, _)) -> Some text
+  | _ -> None
 
-      method! expression expression =
-        (match expression.pexp_desc with
-        | Pexp_constant (Pconst_string (text, _, _))
-          when mentions_word text name
-               || (String.equal name "use_padding" && has_unmarked_convolution text) ->
-            found := true
-        | _ -> ());
-        super#expression expression
-    end
-  in
-  (match tail with
-  | Expression expression -> iterator#expression expression
-  | Cases cases -> iterator#cases cases);
-  !found
+let einsum_operators = [ "+*"; "@^+"; "+++"; "++"; "@^^" ]
+
+(* The spec is the right operand's callee in [x ++ "spec" dims] / [x +* "spec" y], and its first
+   direct argument in the inline-tensor form [x +* kernel "spec" dims]. Restricting generated reads
+   to this exact operator position keeps a diagnostic string from lending an option a use. *)
+let einsum_spec expression =
+  match expression.pexp_desc with
+  | Pexp_apply (operator, [ (_, _left); (_, right) ]) -> (
+      let is_einsum =
+        match flatten_ident operator with
+        | Some path ->
+            Option.value_map (List.last path) ~default:false ~f:(fun name ->
+                List.mem einsum_operators name ~equal:String.equal)
+        | None -> false
+      in
+      if not is_einsum then None
+      else
+        match string_constant right with
+        | Some _ as spec -> spec
+        | None -> (
+            match right.pexp_desc with
+            | Pexp_apply (callee, arguments) -> (
+                match string_constant callee with
+                | Some _ as spec -> spec
+                | None -> List.find_map arguments ~f:(fun (_, arg) -> string_constant arg))
+            | _ -> None))
+  | _ -> None
 
 let meaningfully_used ~dsl name tail =
   let meaningful = ref false in
@@ -168,7 +181,13 @@ let meaningfully_used ~dsl name tail =
             self#expression case.pc_rhs)
 
       method! expression expression =
-        if not !shadowed then
+        if not !shadowed then (
+          if dsl then
+            Option.iter (einsum_spec expression) ~f:(fun spec ->
+                if
+                  mentions_word spec name
+                  || (String.equal name "use_padding" && has_unmarked_convolution spec)
+                then meaningful := true);
           match expression.pexp_desc with
           | Pexp_ident _ -> (
               match direct_name expression with
@@ -188,7 +207,7 @@ let meaningfully_used ~dsl name tail =
               in
               List.iter bindings ~f:(fun binding ->
                   let discarded =
-                    wildcard_pattern binding.pvb_pat
+                    throwaway_pattern binding.pvb_pat
                     && Option.value_map (direct_name binding.pvb_expr) ~default:false
                          ~f:(String.equal name)
                   in
@@ -209,13 +228,33 @@ let meaningfully_used ~dsl name tail =
               self#expression from_;
               self#expression to_;
               within_shadow (pattern_binds pattern name) (fun () -> self#expression body)
-          | _ -> super#expression expression
+          | _ -> super#expression expression)
     end
   in
   (match tail with
   | Expression expression -> iterator#expression expression
   | Cases cases -> iterator#cases cases);
-  !meaningful || (dsl && dsl_generated_use name tail)
+  !meaningful
+
+let implementation_of ~dsl ~params ~position ~tail pattern =
+  match pattern_name pattern with
+  | None -> Unimplemented
+  | Some name ->
+      (* An earlier parameter is in scope in every later default until a later parameter shadows it;
+         that shadowing parameter's own default is still evaluated before its pattern binds. *)
+      let rec used_after = function
+        | [] -> meaningfully_used ~dsl name tail
+        | param :: later -> (
+            match param.pparam_desc with
+            | Pparam_newtype _ -> used_after later
+            | Pparam_val (_, default, pattern) ->
+                let used_in_default =
+                  Option.value_map default ~default:false ~f:(fun expression ->
+                      meaningfully_used ~dsl name (Expression expression))
+                in
+                used_in_default || if pattern_binds pattern name then false else used_after later)
+      in
+      if used_after (List.drop params (position + 1)) then Implemented else Unimplemented
 
 let args_in_source ~source content =
   let found = ref [] in
@@ -256,15 +295,12 @@ let args_in_source ~source content =
           | None -> ()
           | Some definition ->
               let params, tail = function_params binding.pvb_expr in
-              List.iter params ~f:(fun param ->
+              List.iteri params ~f:(fun position param ->
                   match param.pparam_desc with
                   | Pparam_val (Asttypes.Optional label, _, pattern) ->
                       let implementation =
-                        match pattern_name pattern with
-                        | Some name when meaningfully_used ~dsl:(!dsl_extension_depth > 0) name tail
-                          ->
-                            Implemented
-                        | _ -> Unimplemented
+                        implementation_of ~dsl:(!dsl_extension_depth > 0) ~params ~position ~tail
+                          pattern
                       in
                       found :=
                         { source; definition = qualify definition; label; implementation } :: !found
