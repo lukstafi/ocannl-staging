@@ -74,6 +74,8 @@ module names introduced by preceding opens are resolved: implementation classifi
 module names introduced by preceding opens are resolved: honesty classified: true
 the nearest lexical module wins over an ancestor: implementation classified: true
 the nearest lexical module wins over an ancestor: honesty classified: true
+a later open wins over an older root module: implementation classified: true
+a later open wins over an older root module: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
 underscore label makes an unimplemented option caller-visible: honesty classified: true
 implemented underscore label is stale: implementation classified: true
@@ -104,12 +106,16 @@ an optional argument on a destructured returned local function is inventoried: i
 an optional argument on a destructured returned local function is inventoried: honesty classified: true
 an optional function exported through a top-level alias is inventoried: implementation classified: true
 an optional function exported through a top-level alias is inventoried: honesty classified: true
+a nonrecursive binding group shares its preceding alias environment: implementation classified: true
+a nonrecursive binding group shares its preceding alias environment: honesty classified: true
 an optional class constructor argument is inventoried: implementation classified: true
 an optional class constructor argument is inventoried: honesty classified: true
 an optional method argument is inventoried: implementation classified: true
 an optional method argument is inventoried: honesty classified: true
 an optional method on an exported object value is inventoried: implementation classified: true
 an optional method on an exported object value is inventoried: honesty classified: true
+an optional callback in an exported record is inventoried: implementation classified: true
+an optional callback in an exported record is inventoried: honesty classified: true
 a class-level underscore binding forwarded later is a real use: implementation classified: true
 a class-level underscore binding forwarded later is a real use: honesty classified: true
 a constrained optional function is inventoried: implementation classified: true

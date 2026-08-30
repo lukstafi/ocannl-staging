@@ -219,11 +219,15 @@ let module_values structure =
   !found
 
 let module_candidates ~module_path ~opened_paths path =
-  let rec lexical_candidates prefix =
-    (prefix @ path)
-    :: (match List.drop_last prefix with None -> [] | Some parent -> lexical_candidates parent)
+  let rec ancestor_candidates prefix =
+    match List.drop_last prefix with
+    | None -> []
+    | Some parent -> (parent @ path) :: ancestor_candidates parent
   in
-  lexical_candidates module_path @ List.map opened_paths ~f:(fun opened -> opened @ path)
+  let opened_candidates = List.map opened_paths ~f:(fun opened -> opened @ path) in
+  match module_path with
+  | [] -> opened_candidates @ [ path ]
+  | _ -> ((module_path @ path) :: opened_candidates) @ ancestor_candidates module_path
 
 let lookup_module_exports module_values ~module_path ~opened_paths ~position path =
   module_candidates ~module_path ~opened_paths path
@@ -476,7 +480,7 @@ let rec function_paths ?(locals = []) ~module_values ~module_path ~opened_paths 
               case.pc_rhs)
     | Class _ -> []
   in
-  (params, tail, ignore_is_shadowed, opened_paths) :: nested
+  (params, tail, module_path, ignore_is_shadowed, opened_paths) :: nested
 
 (** Whether [name] is used for anything except a direct discard in [tail]. The small lexical-scope
     walk is what keeps a nested [let name = ...] or [fun name -> ...] from lending a false use to
@@ -917,12 +921,12 @@ let method_optional_args ~source ~definition ~dsl ~module_values ~module_path ~o
           let definition = definition ^ "#" ^ method_name in
           List.concat_map
             (function_paths ~module_values ~module_path ~opened_paths ~ignore_is_shadowed expression)
-            ~f:(fun (params, tail, path_ignore_is_shadowed, path_opened_paths) ->
+            ~f:(fun (params, tail, path_module_path, path_ignore_is_shadowed, path_opened_paths) ->
               List.filter_mapi params ~f:(fun position param ->
                   match param.pparam_desc with
                   | Pparam_val (Optional label, _, pattern) ->
                       let implementation =
-                        implementation_of ~dsl ~module_values ~module_path
+                        implementation_of ~dsl ~module_values ~module_path:path_module_path
                           ~opened_paths:path_opened_paths
                           ~ignore_is_shadowed:path_ignore_is_shadowed ~params ~position ~tail
                           pattern
@@ -1040,6 +1044,43 @@ let object_method_optional_args ~source ~definition ~dsl ~module_values ~module_
   in
   walk ~opened_paths ~ignore_is_shadowed expression
 
+let record_field_optional_args ~source ~definition ~dsl ~module_values ~module_path ~opened_paths
+    ~ignore_is_shadowed ~locals expression =
+  let rec walk expression =
+    match expression.pexp_desc with
+    | Pexp_record (fields, _) ->
+        List.concat_map fields ~f:(fun (field, expression) ->
+            let field_name =
+              match ident_path field.txt with
+              | Some path -> String.concat ~sep:"." path
+              | None -> "<field>"
+            in
+            let definition = definition ^ "." ^ field_name in
+            List.concat_map
+              (function_paths ~locals ~module_values ~module_path ~opened_paths ~ignore_is_shadowed
+                 expression)
+              ~f:(fun
+                  (params, tail, path_module_path, path_ignore_is_shadowed, path_opened_paths) ->
+                List.filter_mapi params ~f:(fun position param ->
+                    match param.pparam_desc with
+                    | Pparam_val (Optional label, _, pattern) ->
+                        let implementation =
+                          implementation_of ~dsl ~module_values ~module_path:path_module_path
+                            ~opened_paths:path_opened_paths
+                            ~ignore_is_shadowed:path_ignore_is_shadowed ~params ~position ~tail
+                            pattern
+                        in
+                        Some { source; definition; label; implementation }
+                    | _ -> None)))
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> walk inner
+    | Pexp_ifthenelse (_, then_, else_) -> walk then_ @ Option.value_map else_ ~default:[] ~f:walk
+    | Pexp_match (_, cases) -> List.concat_map cases ~f:(fun case -> walk case.pc_rhs)
+    | Pexp_try (body, cases) -> walk body @ List.concat_map cases ~f:(fun case -> walk case.pc_rhs)
+    | Pexp_let (_, _, body) | Pexp_sequence (_, body) -> walk body
+    | _ -> []
+  in
+  walk expression
+
 let rec named_expressions pattern expression =
   match (pattern.ppat_desc, expression.pexp_desc) with
   | Ppat_var { txt; _ }, _ -> [ (txt, expression) ]
@@ -1066,6 +1107,7 @@ let args_in_source ~source content =
   let top_ignore_shadowed = ref false in
   let top_opened_paths = ref [] in
   let top_function_bindings = ref [] in
+  let defer_top_bindings = ref false in
   let within_module name f =
     let saved = !module_path in
     let saved_ignore = !top_ignore_shadowed in
@@ -1097,6 +1139,18 @@ let args_in_source ~source content =
           { arg with implementation }
           :: List.filter !into ~f:(fun candidate -> not (same_optional candidate arg))
   in
+  let install_top_bindings bindings =
+    let bound_names = List.concat_map bindings ~f:(fun binding -> pattern_names binding.pvb_pat) in
+    top_function_bindings :=
+      List.filter !top_function_bindings ~f:(fun (name, _, _, _, _) ->
+          not (List.mem bound_names name ~equal:String.equal));
+    top_function_bindings :=
+      List.concat_map bindings ~f:(fun binding ->
+          List.map (local_named_expressions binding.pvb_pat binding.pvb_expr)
+            ~f:(fun (name, result) ->
+              (name, result, List.rev !module_path, !top_ignore_shadowed, !top_opened_paths)))
+      @ !top_function_bindings
+  in
   let iterator =
     object (self)
       inherit Ast_traverse.iter as super
@@ -1104,20 +1158,36 @@ let args_in_source ~source content =
       method! structure items =
         if !local_expression_depth > 0 then super#structure items
         else
-          List.iter items ~f:(fun item ->
-              self#structure_item item;
-              match item.pstr_desc with
-              | Pstr_value (_, bindings) ->
-                  Option.iter (ignore_binding_state bindings) ~f:(fun state ->
-                      top_ignore_shadowed := state)
-              | Pstr_open open_declaration ->
-                  let newly_opened =
-                    module_expr_opened_paths module_values ~module_path:(List.rev !module_path)
-                      ~opened_paths:!top_opened_paths open_declaration.popen_expr
-                  in
-                  top_opened_paths := newly_opened @ !top_opened_paths;
-                  if structure_item_may_shadow_ignore item then top_ignore_shadowed := true
-              | _ -> if structure_item_may_shadow_ignore item then top_ignore_shadowed := true)
+          let rec walk = function
+            | [] -> ()
+            | item :: rest -> (
+                (match item.pstr_desc with
+                | Pstr_value (_, bindings) ->
+                    let saved_defer = !defer_top_bindings in
+                    defer_top_bindings := true;
+                    Exn.protect
+                      ~f:(fun () -> self#structure_item item)
+                      ~finally:(fun () -> defer_top_bindings := saved_defer);
+                    install_top_bindings bindings
+                | _ -> self#structure_item item);
+                match item.pstr_desc with
+                | Pstr_value (_, bindings) ->
+                    Option.iter (ignore_binding_state bindings) ~f:(fun state ->
+                        top_ignore_shadowed := state);
+                    walk rest
+                | Pstr_open open_declaration ->
+                    let newly_opened =
+                      module_expr_opened_paths module_values ~module_path:(List.rev !module_path)
+                        ~opened_paths:!top_opened_paths open_declaration.popen_expr
+                    in
+                    top_opened_paths := newly_opened @ !top_opened_paths;
+                    if structure_item_may_shadow_ignore item then top_ignore_shadowed := true;
+                    walk rest
+                | _ ->
+                    if structure_item_may_shadow_ignore item then top_ignore_shadowed := true;
+                    walk rest)
+          in
+          walk items
 
       method! structure_item item =
         match item.pstr_desc with
@@ -1177,13 +1247,14 @@ let args_in_source ~source content =
                 (function_paths ~module_values ~module_path:(List.rev !module_path)
                    ~locals:!top_function_bindings ~opened_paths:!top_opened_paths
                    ~ignore_is_shadowed:!top_ignore_shadowed expression)
-                ~f:(fun (params, tail, path_ignore_is_shadowed, path_opened_paths) ->
+                ~f:(fun
+                    (params, tail, path_module_path, path_ignore_is_shadowed, path_opened_paths) ->
                   List.iteri params ~f:(fun position param ->
                       match param.pparam_desc with
                       | Pparam_val (Asttypes.Optional label, _, pattern) ->
                           let implementation =
                             implementation_of ~dsl:!dsl_context ~module_values
-                              ~module_path:(List.rev !module_path) ~opened_paths:path_opened_paths
+                              ~module_path:path_module_path ~opened_paths:path_opened_paths
                               ~ignore_is_shadowed:path_ignore_is_shadowed ~params ~position ~tail
                               pattern
                           in
@@ -1195,18 +1266,16 @@ let args_in_source ~source content =
                    ~dsl:!dsl_context ~module_values ~module_path:(List.rev !module_path)
                    ~opened_paths:!top_opened_paths ~ignore_is_shadowed:!top_ignore_shadowed
                    expression)
+                ~f:(add_optional binding_found);
+              List.iter
+                (record_field_optional_args ~source ~definition:(qualify definition)
+                   ~dsl:!dsl_context ~module_values ~module_path:(List.rev !module_path)
+                   ~opened_paths:!top_opened_paths ~ignore_is_shadowed:!top_ignore_shadowed
+                   ~locals:!top_function_bindings expression)
                 ~f:(add_optional binding_found));
           found := !binding_found @ !found);
-        if !local_expression_depth = 0 then (
-          let bound_names = pattern_names binding.pvb_pat in
-          top_function_bindings :=
-            List.filter !top_function_bindings ~f:(fun (name, _, _, _, _) ->
-                not (List.mem bound_names name ~equal:String.equal));
-          top_function_bindings :=
-            List.map (local_named_expressions binding.pvb_pat binding.pvb_expr)
-              ~f:(fun (name, result) ->
-                (name, result, List.rev !module_path, !top_ignore_shadowed, !top_opened_paths))
-            @ !top_function_bindings);
+        if !local_expression_depth = 0 && not !defer_top_bindings then
+          install_top_bindings [ binding ];
         super#value_binding binding
     end
   in

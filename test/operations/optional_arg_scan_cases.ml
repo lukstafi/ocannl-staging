@@ -148,6 +148,12 @@ module Inner = struct
   let f ?(feature = true) () = let _ = feature in let open Defaults in feature
 end|ocaml}
     ~implemented:true ~honest:true;
+  case "a later open wins over an older root module"
+    {ocaml|module Defaults = struct let other = false end
+module Outer = struct module Defaults = struct let feature = false end end
+open Outer
+let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
+    ~implemented:false ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -194,6 +200,11 @@ let f ?(feature = true) () = let _ = feature in let module M = struct open Defau
 let f = g
 let g = ()|ocaml}
     ~implemented:false ~honest:false;
+  case "a nonrecursive binding group shares its preceding alias environment"
+    {ocaml|let g ?(feature = true) () = ignore feature
+let g ?(feature = true) () = enable feature and f = g
+let g = ()|ocaml}
+    ~implemented:false ~honest:false;
   case "an optional class constructor argument is inventoried"
     {ocaml|class c ?(feature = true) = object method run = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
@@ -202,6 +213,10 @@ let g = ()|ocaml}
     ~implemented:false ~honest:false;
   case "an optional method on an exported object value is inventoried"
     {ocaml|let service = object method run ?(feature = true) () = ignore feature end|ocaml}
+    ~implemented:false ~honest:false;
+  case "an optional callback in an exported record is inventoried"
+    {ocaml|type service = { run : ?feature:bool -> unit -> unit }
+let service = { run = fun ?(feature = true) () -> ignore feature }|ocaml}
     ~implemented:false ~honest:false;
   case "a class-level underscore binding forwarded later is a real use"
     {ocaml|class c ?(feature = true) = let _v = feature in object method run = enable _v end|ocaml}
