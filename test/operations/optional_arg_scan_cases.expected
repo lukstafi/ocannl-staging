@@ -54,16 +54,22 @@ an earlier ignore parameter makes its call a real use: implementation classified
 an earlier ignore parameter makes its call a real use: honesty classified: true
 a preceding top-level ignore binding makes its call a real use: implementation classified: true
 a preceding top-level ignore binding makes its call a real use: honesty classified: true
+opening standard Base resets a preceding custom ignore: implementation classified: true
+opening standard Base resets a preceding custom ignore: honesty classified: true
 a preceding Stdlib.ignore alias remains a discard: implementation classified: true
 a preceding Stdlib.ignore alias remains a discard: honesty classified: true
 a local Stdlib.ignore alias remains a discard: implementation classified: true
 a local Stdlib.ignore alias remains a discard: honesty classified: true
 a local Base.ignore alias remains a discard: implementation classified: true
 a local Base.ignore alias remains a discard: honesty classified: true
+a shadowed Base.ignore alias is a real use: implementation classified: true
+a shadowed Base.ignore alias is a real use: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
 a local Base open preserves standard ignore: implementation classified: true
 a local Base open preserves standard ignore: honesty classified: true
+opening a shadowed Base exposes its effectful ignore: implementation classified: true
+opening a shadowed Base exposes its effectful ignore: honesty classified: true
 a local open can shadow the optional value itself: implementation classified: true
 a local open can shadow the optional value itself: honesty classified: true
 a named local module can shadow the optional value: implementation classified: true
@@ -122,6 +128,8 @@ a returned local nonrecursive group uses its preceding alias environment: implem
 a returned local nonrecursive group uses its preceding alias environment: honesty classified: true
 an optional class constructor argument is inventoried: implementation classified: true
 an optional class constructor argument is inventoried: honesty classified: true
+a same-named value does not replace a public class API: implementation classified: true
+a same-named value does not replace a public class API: honesty classified: true
 an optional method argument is inventoried: implementation classified: true
 an optional method argument is inventoried: honesty classified: true
 an optional method on an exported object value is inventoried: implementation classified: true
@@ -146,8 +154,12 @@ an optional closure returned normally from try is inventoried: implementation cl
 an optional closure returned normally from try is inventoried: honesty classified: true
 an optional function exported through a tuple is inventoried: implementation classified: true
 an optional function exported through a tuple is inventoried: honesty classified: true
+an optional callback nested in an exported tuple value is inventoried: implementation classified: true
+an optional callback nested in an exported tuple value is inventoried: honesty classified: true
 a later definition replaces the earlier inventory entry: implementation classified: true
 a later definition replaces the earlier inventory entry: honesty classified: true
+an interface excludes private implementation helpers: implementation classified: true
+an interface excludes private implementation helpers: honesty classified: true
 a match binder shadows a preceding optional function alias: implementation classified: true
 a match binder shadows a preceding optional function alias: honesty classified: true
 a dynamic binary capture operand generates no read: implementation classified: true

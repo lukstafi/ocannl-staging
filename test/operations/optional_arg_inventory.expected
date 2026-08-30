@@ -104,7 +104,6 @@ non-discard use; `unimplemented` must therefore be visible to callers as an unde
   lib/parallel.ml:data_parallel ?weight_decay -- implemented
   lib/persistence.ml:load ?mmap -- implemented
   lib/persistence.ml:load ?prefix_namespace -- implemented
-  lib/persistence.ml:open_reader ?mmap -- implemented
   lib/persistence.ml:restore ?mmap -- implemented
   lib/persistence.ml:save ?alignment -- implemented
   lib/precision_policy.ml:apply ?except -- implemented

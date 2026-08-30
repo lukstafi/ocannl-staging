@@ -7,8 +7,8 @@
 open Base
 module Scan = Test_utils.Optional_arg_scan
 
-let one ?argument source =
-  let args = Scan.args_in_source ~source:"fixture.ml" source in
+let one ?argument ?interface source =
+  let args = Scan.args_in_source ?interface ~source:"fixture.ml" source in
   match argument with
   | Some label -> List.find_exn args ~f:(fun arg -> String.equal arg.Scan.label label)
   | None -> (
@@ -16,8 +16,8 @@ let one ?argument source =
       | [ arg ] -> arg
       | _ -> failwith (Printf.sprintf "expected one optional argument, got %d" (List.length args)))
 
-let case ?argument label source ~implemented ~honest =
-  let arg = one ?argument source in
+let case ?argument ?interface label source ~implemented ~honest =
+  let arg = one ?argument ?interface source in
   Verdict.p
     (label ^ ": implementation classified")
     (match (arg.Scan.implementation, implemented) with
@@ -103,6 +103,11 @@ let () =
     {ocaml|let ignore x = if x then enable ()
 let f ?(_feature = true) () = ignore _feature|ocaml}
     ~implemented:true ~honest:false;
+  case "opening standard Base resets a preceding custom ignore"
+    {ocaml|let ignore x = enable x
+open Base
+let f ?(feature = true) () = ignore feature|ocaml}
+    ~implemented:false ~honest:false;
   case "a preceding Stdlib.ignore alias remains a discard"
     {ocaml|let ignore = Stdlib.ignore
 let f ?(feature = true) () = ignore feature|ocaml}
@@ -113,12 +118,20 @@ let f ?(feature = true) () = ignore feature|ocaml}
   case "a local Base.ignore alias remains a discard"
     {ocaml|let f ?(feature = true) () = let ignore = Base.ignore in ignore feature|ocaml}
     ~implemented:false ~honest:false;
+  case "a shadowed Base.ignore alias is a real use"
+    {ocaml|module Base = struct let ignore x = enable x end
+let f ?(_feature = true) () = let ignore = Base.ignore in ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
   case "a local Base open preserves standard ignore"
     {ocaml|let f ?(feature = true) () = let open Base in ignore feature|ocaml} ~implemented:false
     ~honest:false;
+  case "opening a shadowed Base exposes its effectful ignore"
+    {ocaml|module Base = struct let ignore x = enable x end
+let f ?(_feature = true) () = let open Base in ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "a local open can shadow the optional value itself"
     {ocaml|module Defaults = struct let feature = false end
 let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
@@ -234,6 +247,10 @@ let g = ()|ocaml}
   case "an optional class constructor argument is inventoried"
     {ocaml|class c ?(feature = true) = object method run = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
+  case "a same-named value does not replace a public class API"
+    {ocaml|class c ?(feature = true) = object method run = ignore feature end
+let c = 0|ocaml}
+    ~implemented:false ~honest:false;
   case "an optional method argument is inventoried"
     {ocaml|class c = object method run ?(feature = true) () = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
@@ -275,10 +292,18 @@ let service = (module struct let run ?(feature = true) () = ignore feature end :
   case ~argument:"feature" "an optional function exported through a tuple is inventoried"
     {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}
     ~implemented:false ~honest:false;
+  case "an optional callback nested in an exported tuple value is inventoried"
+    {ocaml|let service = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml} ~implemented:false
+    ~honest:false;
   case "a later definition replaces the earlier inventory entry"
     {ocaml|let f ?(feature = true) () = enable feature
 let f ?(feature = true) () = ignore feature|ocaml}
     ~implemented:false ~honest:false;
+  case ~interface:{ocaml|val public : ?feature:bool -> unit -> unit|ocaml}
+    "an interface excludes private implementation helpers"
+    {ocaml|let private_helper ?(private_feature = true) () = ignore private_feature
+let public ?(feature = true) () = enable feature|ocaml}
+    ~implemented:true ~honest:true;
   case "a match binder shadows a preceding optional function alias"
     {ocaml|let g ?(feature = true) () = ignore feature
 let make ?(marker = true) x = if marker then (match x with g -> g) else (match x with g -> g)

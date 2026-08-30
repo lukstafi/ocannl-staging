@@ -2081,7 +2081,8 @@
 
 ; gh-ocannl-811: every optional argument accepted by a lib/ entry point either affects the body or
 ; exposes its not-yet-implemented status in the caller-visible label (`?_feature`). The recursive
-; glob is the inventory boundary: a new lib source joins on the same change that creates it.
+; globs are the inventory boundary: a new lib source joins on the same change that creates it, and
+; an adjacent interface restricts the census to the entries callers can actually name.
 
 (executable
  (name optional_arg_inventory)
@@ -2094,7 +2095,8 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
-  (glob_files_rec ../../lib/*.ml))
+  (glob_files_rec ../../lib/*.ml)
+  (glob_files_rec ../../lib/*.mli))
  (action
   (with-stdout-to
    %{target}

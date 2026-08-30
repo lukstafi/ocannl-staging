@@ -24,10 +24,15 @@ let () =
   if List.is_empty sources then Verdict.fail "the lib/ source glob handed the inventory nothing";
   let args =
     List.concat_map sources ~f:(fun source ->
-        Scan.args_in_source ~source (read (Map.find_exn on_disk source)))
+        let interface =
+          String.chop_suffix source ~suffix:".ml"
+          |> Option.bind ~f:(fun stem -> Map.find on_disk (stem ^ ".mli"))
+          |> Option.map ~f:read
+        in
+        Scan.args_in_source ?interface ~source (read (Map.find_exn on_disk source)))
     |> List.sort ~compare:(fun a b -> String.compare (Scan.render a) (Scan.render b))
   in
-  eprintf "Scanned %d lib/ sources and found %d optional arguments.\n" (List.length sources)
+  eprintf "Scanned %d lib/ sources and found %d public optional arguments.\n" (List.length sources)
     (List.length args);
   print_endline
     "Optional arguments accepted by lib/ entry points. `implemented` means the bound value has a\n\
