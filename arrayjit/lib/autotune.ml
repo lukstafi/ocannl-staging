@@ -3462,6 +3462,15 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                           time_routine ~tag_failures:true ~timing ~repeats c.cctx c.routine)
                     with
                     | Ok { contended = true; _ } ->
+                        (* The family counters answer whether a candidate compiled and reached a
+                           timing window, independently of whether that window yielded a usable
+                           verdict. Keep that accounting stable under contention; the aggregate
+                           [timings_contended] counter says why this particular timing cannot be
+                           admitted. *)
+                        (match spec with
+                        | Fiss (F_sketch _) -> Int.incr n_fiss_sketch_timed
+                        | Fiss (F_split _) -> Int.incr n_sr_timed
+                        | _ -> ());
                         Int.incr n_timings_contended;
                         (* Unlike a launch/compile decline, contention is not a property of this
                            schedule. An equivalent later seed is a useful retry, not a dedup. *)

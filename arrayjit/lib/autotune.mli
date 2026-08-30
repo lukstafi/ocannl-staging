@@ -640,6 +640,8 @@ type report = {
   fiss_sketch_timed : int;
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
+          Includes completed timing windows refused for host contention; [timings_contended]
+          identifies those unusable verdicts.
       *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
@@ -650,7 +652,9 @@ type report = {
           [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
-          composite), those that compiled and were actually timed. *)
+          composite), those that compiled and were actually timed. Includes completed timing
+          windows refused for host contention; [timings_contended] identifies those unusable
+          verdicts. *)
   mma_candidates : int;
       (** Candidates whose label promises a tensorized ([Schedule.Tensorize]) pipeline that the
           search put through candidate compile: whole-routine and per-fission-segment sketch seeds,
