@@ -1,0 +1,27 @@
+The CLI form must be refused: --ocannl_definitely_not_a_config_key=true
+The environment form must be refused: OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true
+The bare documentation form must be refused: `definitely_not_a_config_key=true`
+The CLI documentation form must be refused: `--ocannl_definitely_not_a_config_key=true`
+The environment documentation form must be refused: `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true`
+The uppercase dashed CLI form must be refused: `--OCANNL-DEFINITELY-NOT-A-CONFIG-KEY=true`
+The one-dash CLI form must be refused: `-ocannl-definitely-not-a-config-key=true`
+The empty-value documentation form must be refused: `definitely_not_a_config_key=`
+The underscore value-separator form must be refused: `--ocannl_definitely_not_a_config_key_value`
+The dash value-separator form must be refused: `--ocannl-definitely-not-a-config-key-value`
+The no-value-separator form must be refused: `--ocannl_definitelynotaconfigkeyvalue`
+The spaced documentation form must be refused: `definitely_not_a_config_key = true`
+This larger identifier is not an OCANNL variable and must be ignored: MY_OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true
+An environment assignment in a command span must be refused: `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=true dune build`
+A qualified CLI token in a command span must be refused: `dune build --ocannl-definitely-not-a-third-config-key=true`
+Fenced prefixed tokens must be refused too:
+```bash
+OCANNL_DEFINITELY_NOT_A_FOURTH_CONFIG_KEY=true dune build
+dune build --ocannl-definitely-not-a-fifth-config-key=true
+```
+The prefix-free removal control must be refused: --definitely_not_a_prefix_free_config_key=true
+The standalone environment removal control must be refused: OCANNL_DEFINITELY_NOT_A_STANDALONE_CONFIG_KEY
+The multi-word value must not hide its key: `definitely_not_a_multiword_config_key = one | two`
+The mixed-case config spelling must be refused: `Definitely_Not_A_Mixed_Case_Key=cc`
+The prefixed value must not hide the outer key: `definitely_not_an_outer_config_key=$OCANNL_BACKEND`
+The surviving backend prefix must not hide a removed longer key: --ocannl_backend_variant=true
+Nor may a no-equals value separator hide it: --ocannl_backend_variant-cuda

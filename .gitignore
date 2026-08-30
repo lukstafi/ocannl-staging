@@ -109,6 +109,7 @@ docs/*.blg
 
 # Claude Code: share project settings and skills; everything else under .claude is local.
 /.claude/*
+!/.claude/dune
 !/.claude/settings.json
 !/.claude/skills/
 /.test-run.lock*

@@ -76,6 +76,53 @@ that they earn a lookup rather than always-loaded space.
   contain is the one most in need of a fixture, since nothing in the tree will contradict the
   implementation's guess about it; a survey reporting zero of something is a hole in the fixtures,
   not permission to leave that case undefined.
+- Configuration consumers outside typed config call sites are covered by `config_usage_scan`
+  (gh-ocannl-790). Its
+  script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
+  `benchmarks/`; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
+  `test/` joins it (generated `*.pp.ml`/`*.pp.mli` renderings are excluded), as do implementation
+  `*.ml`/`*.mli` sources under `arrayjit/lib/`, `tensor/`, and `lib/`. Its prose corpus is `AGENTS.md`,
+  the root README, and every `*.md` under `docs/`
+  and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
+  `ocannl_config` files join too, as do `ocannl_config.for_debug` and both prefixed tokens and
+  whole-span inline assignments in `ocannl_config.reference`; workflow YAML under
+  `.github/workflows/` contributes unambiguous prefixed tokens. A script or Dune-action
+  token contributes a key when it has a qualified command-line spelling and
+  value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
+  `OCANNL_<KEY>` beginning and ending at identifier boundaries (with or without an assignment); the
+  explicit open namespaces `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config.
+  The explicit token name normally wins over a shorter registered-key prefix. Inherently ambiguous
+  alternate-value spellings such as `--ocannl_backend_cuda=true` are file/token/key/count-pinned
+  judgments (that example means key `backend` with value cuda=true); any other such ambiguity,
+  including a no-equals separator, fails as the longer explicit name.
+  Supported prefix-free
+  config flags occupy the host application's namespace, so their current documentation sites are
+  separately file/key/count-pinned and disappear when the runtime's per-key qualified-only policy
+  says so. Prose contributes a key
+  when an inline code span (including each physical segment of a multiline span) or fenced line
+  contains either unambiguous prefixed form; a bare
+  assignment contributes only when it occupies the whole inline span outside benchmark reports
+  (case is normalized like a config file, and whitespace around `=`, within the value, or an empty
+  example value does not hide the key). An outer bare assignment and prefixed tokens embedded in its
+  value are both consumers. Config files contribute each uncommented assignment with a nonempty
+  value after applying
+  `Utils.parse_config_lines`' key normalization: case folding, leading-dash stripping, and the
+  optional `ocannl_` prefix. An empty normalized key is retained so registry lookup rejects it. The explicitly included
+  `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Comment
+  markers are recognized against the raw line, matching the runtime parser, so leading whitespace
+  does not turn an active invalid key into a silently ignored comment. Because spaced assignments are
+  pervasive in code prose, each
+  current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
+  that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
+  programs and longer expressions to their own languages. Every config-shaped token is checked
+  against `Utils.known_config_keys`; an explicit file/key/count judgment list identifies bare
+  assignments that are tensor fields, dimensions, or report notation, and equally narrow counted
+  exceptions retain historical invalid spellings and deliberate invalid test controls. Disappearance
+  or repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
+  fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
+  so a clean live corpus is not its only evidence that the rule has teeth.
+  The non-vacuity floor names every checked-in config-file root; Dune's generated local
+  `test/operations/ocannl_config` copy therefore cannot mask a lost recursive-glob dependency.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to

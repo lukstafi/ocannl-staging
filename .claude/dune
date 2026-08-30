@@ -1,0 +1,5 @@
+; Keep `.claude/worktrees/` out of Dune's source tree: it can hold complete nested checkouts. The
+; checked-in skill Markdown is data for config_usage_scan; settings and session-local directories
+; have no build inputs.
+
+(dirs skills)

@@ -127,6 +127,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-cache_dir_ignores
   test/operations/dune                     @runtest-codegen_text_inventory
   test/operations/dune                     @runtest-config_dep_completeness
+  test/operations/dune                     @runtest-config_usage_scan
+  test/operations/dune                     @runtest-config_usage_scan_control
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
   test/operations/dune                     @runtest-config_var_warnings
@@ -216,6 +218,7 @@ Backend declarations, by dune file. Every stanza that runs an executable either 
 inside its parentheses. What is held here is which WORDS a file's markers use, not how many
 stanzas carry each: the per-stanza reasons live next to the stanzas, where the next author
 will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665).
+  .claude/dune: nothing that runs a test executable
   arrayjit/lib/dune: nothing that runs a test executable
   arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
   benchmarks/dune: markers: none
