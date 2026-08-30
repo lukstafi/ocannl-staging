@@ -28,8 +28,9 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 (* Progress markers on stderr: the test's stdout is captured into [.exe.output], but stderr reaches
    dune's log, so a crash (e.g. in a native worker thread) is attributable in CI. *)
 let phase name = Stdio.eprintf "cpu_parallel phase: %s\n%!" name
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+
+open Verdict.Claims
+
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name

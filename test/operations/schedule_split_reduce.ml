@@ -31,8 +31,8 @@ module Asgns = Ir.Assignments
 module IDX = Train.IDX
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+
+open Verdict.Claims
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a

@@ -16,9 +16,8 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 open Stdio
 module Tn = Ir.Tnode
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
 let n = 12
 let k = 16
 

@@ -38,9 +38,8 @@
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
 let n = 128
 let beam_width = 2
 

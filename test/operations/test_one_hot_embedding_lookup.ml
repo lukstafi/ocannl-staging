@@ -116,8 +116,7 @@ let build_embedding id_values =
   let%op embedded = c * one_hot in
   (ids, embedded)
 
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+open Verdict.Claims
 
 let () =
   (* --- Forward equivalence + observability (in-range indices) --- Run first so the forward comp is

@@ -40,8 +40,8 @@ module Numerics = Ir.Numerics
 (* Before any backend touch: the pure-f16 leg's probe override (read per call, env is live). *)
 let () = Unix.putenv "OCANNL_CC_FP16_ARITHMETIC" "native"
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+
+open Verdict.Claims
 
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then

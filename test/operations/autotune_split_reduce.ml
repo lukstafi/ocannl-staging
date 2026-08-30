@@ -27,9 +27,7 @@ module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+open Verdict.Claims
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead

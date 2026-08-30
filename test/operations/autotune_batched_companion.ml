@@ -20,12 +20,7 @@ open Ocannl.Operation.DSL_modules
 module Sched = Ir.Schedule
 module LL = Ir.Low_level
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
-let p_empty = Verdict.p_empty
-let p_all = Verdict.p_all
-let p_none = Verdict.p_none
+open Verdict.Claims
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead

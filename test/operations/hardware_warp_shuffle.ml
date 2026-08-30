@@ -37,8 +37,9 @@ module Idx = Ir.Indexing
 module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_none = Verdict.p_none
+
+open Verdict.Claims
+
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_gpu = Ir.Schedule.backend_is_gpu backend_name
@@ -52,10 +53,6 @@ type rival_values = { once_narrowed : float; storage_tree : float; per_step : fl
 type rival_fixture = { n : int; term : int -> float; narrow : float -> float }
 
 let values { once_narrowed; storage_tree; per_step } = [ once_narrowed; storage_tree; per_step ]
-
-let unordered_pairs xs =
-  List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
-
 let warp_size = 32
 
 (* Host image of the renderer's descending [shfl_xor] offsets. Only the lower half needs updating:
@@ -384,12 +381,10 @@ let claim_narrow_refused =
    it on every GPU backend, is refused by the warp-shuffle rendering (GPU) or runs serially (CPU)"
 
 let () =
-  p_none "the bf16 single-warp rival-rendering values are pairwise distinct"
-    (unordered_pairs (values bf16_1w_values))
-    ~f:(fun (a, b) -> Float.equal a b);
-  p_none "the bf16 four-warp rival-rendering values are pairwise distinct"
-    (unordered_pairs (values bf16_4w_values))
-    ~f:(fun (a, b) -> Float.equal a b);
+  p_pairwise_distinct "the bf16 single-warp rival-rendering values are pairwise distinct"
+    (values bf16_1w_values) ~equal:Float.equal ~to_string:Float.to_string;
+  p_pairwise_distinct "the bf16 four-warp rival-rendering values are pairwise distinct"
+    (values bf16_4w_values) ~equal:Float.equal ~to_string:Float.to_string;
   if widens_bf16 then begin
     p claim_bf16_1w
       (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" bf16_1w_fixture) bf16_1w_values.once_narrowed);
@@ -572,12 +567,10 @@ let () =
   Exn.protect
     ~finally:(fun () -> Numerics.set_policy saved)
     ~f:(fun () ->
-      p_none "the f16 single-warp rival-rendering values are pairwise distinct"
-        (unordered_pairs (values f16_1w_values))
-        ~f:(fun (a, b) -> Float.equal a b);
-      p_none "the f16 four-warp rival-rendering values are pairwise distinct"
-        (unordered_pairs (values f16_4w_values))
-        ~f:(fun (a, b) -> Float.equal a b);
+      p_pairwise_distinct "the f16 single-warp rival-rendering values are pairwise distinct"
+        (values f16_1w_values) ~equal:Float.equal ~to_string:Float.to_string;
+      p_pairwise_distinct "the f16 four-warp rival-rendering values are pairwise distinct"
+        (values f16_4w_values) ~equal:Float.equal ~to_string:Float.to_string;
       Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
       p claim_f16_wide_1w
         (Float.equal

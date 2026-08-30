@@ -32,8 +32,9 @@ module Asgns = Ir.Assignments
 module Idx = Ir.Indexing
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+
+open Verdict.Claims
+
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 

@@ -348,6 +348,27 @@ let claim_kind_of_path path =
       | _ -> None)
   | _ -> None
 
+let opens_verdict_claims module_expr =
+  match module_expr.pmod_desc with
+  | Pmod_ident { txt; _ } -> (
+      try List.equal String.equal (Ppxlib.Longident.flatten_exn txt) [ "Verdict"; "Claims" ]
+      with _ -> false)
+  | _ -> false
+
+(* [open Verdict.Claims] is the migration target of gh-ocannl-815. Model its bindings explicitly so
+   helper-following does not lose sight of an unqualified [p]/[claim]/[pass_fail] call when the file
+   deletes its local aliases. Ordinary value bindings are prepended later and therefore shadow these
+   exactly as they do in OCaml. *)
+let opened_claim_bindings line =
+  [ ("p", P); ("pf", Pf); ("pass_fail", Pass_fail); ("claim", Claim); ("claimf", Claimf) ]
+  |> List.map ~f:(fun (name, claim_kind) ->
+      { name; line; dependencies = []; unguarded = []; claim_kind = Some claim_kind })
+
+let open_claims environment declaration =
+  if opens_verdict_claims declaration.popen_expr then
+    List.rev_append (opened_claim_bindings declaration.popen_loc.loc_start.pos_lnum) environment
+  else environment
+
 let lookup environment name =
   List.find environment ~f:(fun binding -> String.equal binding.name name)
 
@@ -467,6 +488,9 @@ let quantified_claims structure =
         List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
         let local = List.filter_map bindings ~f:(make_binding environment) in
         scan_expression (List.rev_append local environment) body
+    | Pexp_open (declaration, body) ->
+        scan_module environment declaration.popen_expr;
+        scan_expression (open_claims environment declaration) body
     | _ ->
         let iterator =
           object
@@ -494,6 +518,9 @@ let quantified_claims structure =
            | Pstr_recmodule bindings ->
                List.iter bindings ~f:(fun binding -> scan_module environment binding.pmb_expr);
                environment
+           | Pstr_open declaration ->
+               scan_module environment declaration.popen_expr;
+               open_claims environment declaration
            | _ ->
                let iterator =
                  object
@@ -645,6 +672,18 @@ let quantified_helper_controls =
       {ocaml|let p = Verdict.p
 let close got want = Array.for_all2_exn got want ~f:Float.equal
 let () = p "the values agree" (close got want)|ocaml},
+      [ "close" ] );
+    ( "refuses an unguarded helper behind an open of Verdict.Claims",
+      {ocaml|open Verdict.Claims
+let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = p "the values agree" (close got want)|ocaml},
+      [ "close" ] );
+    ( "keeps an open of Verdict.Claims inside its local scope",
+      {ocaml|let close got want = Array.for_all2_exn got want ~f:Float.equal
+let guarded () =
+  let open Verdict.Claims in
+  p "the values agree" (close got want)
+let () = p "unrelated local function" true|ocaml},
       [ "close" ] );
     ( "refuses a sibling for_all helper through an intermediate result binding",
       {ocaml|let agrees xs = List.for_all xs ~f:Fn.id

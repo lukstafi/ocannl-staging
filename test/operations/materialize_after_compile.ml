@@ -19,9 +19,8 @@ open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module SC = Ir.Schedule_cache
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a -. b) < 1e-4)
 let n = 8
 

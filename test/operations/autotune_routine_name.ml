@@ -25,10 +25,8 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
 module Cal = Ir.Cost_model.Calibration
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
-let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 (* Small, but wide enough that the preset candidates bind a hardware dimension and are therefore
