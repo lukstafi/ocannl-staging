@@ -3797,12 +3797,19 @@ module C_syntax (B : C_syntax_config) = struct
         with
         | Some doc -> doc
         | None ->
+            let render_in_order left right =
+              (* Rendering mutates occurrence-level state such as [zero_out_seen]; tuple component
+                 evaluation order is unspecified, so spell the program order explicitly. *)
+              let left_doc = pp_ll ~log_set_locals ~in_loop left in
+              let right_doc = pp_ll ~log_set_locals ~in_loop right in
+              (left_doc, right_doc)
+            in
             let d1, d2 =
               match c1 with
               | Zero_out tn -> (
                   let next, rest = take_first_statement c2 in
                   match localized_zero_seed_candidate tn next with
-                  | None -> (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2)
+                  | None -> render_in_order c1 c2
                   | Some seed ->
                       let saved = !current_localized_zero_seed in
                       current_localized_zero_seed := Some seed;
@@ -3829,7 +3836,7 @@ module C_syntax (B : C_syntax_config) = struct
                         else next_doc ^^ hardline ^^ rest_doc
                       in
                       (zero_doc, tail))
-              | _ -> (pp_ll ~log_set_locals ~in_loop c1, pp_ll ~log_set_locals ~in_loop c2)
+              | _ -> render_in_order c1 c2
             in
             (* Avoid extra hardlines if one side is empty *)
             if PPrint.is_empty d1 then d2
