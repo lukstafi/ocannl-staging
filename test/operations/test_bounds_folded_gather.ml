@@ -30,8 +30,8 @@ let cvals = Array.init (embed * vocab) ~f:Float.of_int
 let id_ints = [ 1; 3; 0; 5 ]
 let batch = List.length id_ints
 let approx a b = Float.(abs (a - b) < 1e-4)
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
+
+open Verdict.Claims
 
 (* emb[b,o] = C[o, ids[b]] = o*vocab + ids[b] *)
 let expected =

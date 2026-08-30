@@ -31,10 +31,8 @@ module Idx = Ir.Indexing
 module Sched = Ir.Schedule
 module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
-let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name

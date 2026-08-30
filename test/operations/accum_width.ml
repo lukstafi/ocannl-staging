@@ -37,9 +37,9 @@ module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
-let p_none = Verdict.p_none
+
+open Verdict.Claims
+
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
@@ -48,9 +48,6 @@ type rival_values = { once_narrowed : float; per_step : float }
 type rival_fixture = { initial : float; increment : float; terms : int; narrow : float -> float }
 
 let values { once_narrowed; per_step } = [ once_narrowed; per_step ]
-
-let unordered_pairs xs =
-  List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
 
 let render_rivals { initial; increment; terms; narrow } =
   let increments = List.init terms ~f:(fun _ -> increment) in
@@ -351,12 +348,10 @@ let f16_matmul ~name () =
   run ~name mc
 
 let () =
-  p_none "the fp8 scalar rival-rendering values are pairwise distinct"
-    (unordered_pairs (values fp8_values))
-    ~f:(fun (a, b) -> Float.equal a b);
-  p_none "the f16 scalar rival-rendering values are pairwise distinct"
-    (unordered_pairs (values f16_values))
-    ~f:(fun (a, b) -> Float.equal a b);
+  p_pairwise_distinct "the fp8 scalar rival-rendering values are pairwise distinct"
+    (values fp8_values) ~equal:Float.equal ~to_string:Float.to_string;
+  p_pairwise_distinct "the f16 scalar rival-rendering values are pairwise distinct"
+    (values f16_values) ~equal:Float.equal ~to_string:Float.to_string;
   let wide16 =
     Float.equal (f16_sum ~name:"aw_f16_auto" ~first_id:9740 ()) f16_values.once_narrowed
   in

@@ -23,10 +23,8 @@
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
-let p_all2 = Verdict.p_all2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let skipped = Verdict.skipped ~backend:backend_name

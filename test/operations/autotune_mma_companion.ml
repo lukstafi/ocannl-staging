@@ -12,10 +12,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
-let p_all = Verdict.p_all
-let p_all2 = Verdict.p_all2
+open Verdict.Claims
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }

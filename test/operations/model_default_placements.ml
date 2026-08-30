@@ -19,9 +19,8 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all2 = Verdict.p_all2
 let approx a b = Float.(abs (a -. b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
