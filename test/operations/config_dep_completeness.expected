@@ -15,6 +15,7 @@ tensor/dune: nothing that runs a test executable
 test/config/dune: exe-running rules
 test/einsum/dune: tests, inline-test libraries, exe-running rules
 test/gpt2/dune: tests, exe-running rules
+test/operations/atomic_file_rename_scan_fixture/dune: tests, exe-running rules
 test/operations/dune: tests, inline-test libraries, exe-running rules
 test/operations/profiles/dune: tests, exe-running rules
 test/operations/startup_streams/dune: tests, exe-running rules
