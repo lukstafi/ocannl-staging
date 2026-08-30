@@ -76,34 +76,39 @@ let nvrtc ~cuda_include_options ~arch_options ~with_device_debug =
    on 262144 threads x 128 fixed-count terms and 1.006x on one thread x 1048576 runtime-bound terms
    (GPU-clock medians, 21 rotated interleaved repeats).
 
-   Use the modern split properties rather than deprecated [fastMathEnabled=false]. The legacy
-   spelling also changes [mathFloatingPointFunctions] from Fast to Precise; [Math_mode_safe] plus
-   [Math_functions_fast] blocks unsafe arithmetic reassociation while retaining the existing fast
-   function family. Both writes are explicit so an SDK default change cannot move either half. *)
+   On macOS 15 and later, use the modern split properties rather than deprecated
+   [fastMathEnabled=false]. The legacy spelling also changes [mathFloatingPointFunctions] from Fast
+   to Precise; [Math_mode_safe] plus [Math_functions_fast] blocks unsafe arithmetic reassociation
+   while retaining the existing fast function family. Both modern writes are explicit so an SDK
+   default change cannot move either half. On macOS 14 the split selectors do not exist, so the
+   caller requests the legacy safe fallback explicitly. *)
+type metal_math_api = Modern_split | Legacy
+
 type metal_option =
   | Language_version_3_1
   | Language_version_3_2
+  | Fast_math_enabled of bool
   | Math_mode_safe
   | Math_functions_fast
-  | Enable_logging of bool
+  | Enable_logging
 
 let equal_metal_option a b =
   match (a, b) with
   | Language_version_3_1, Language_version_3_1
   | Language_version_3_2, Language_version_3_2
   | Math_mode_safe, Math_mode_safe
-  | Math_functions_fast, Math_functions_fast ->
+  | Math_functions_fast, Math_functions_fast
+  | Enable_logging, Enable_logging ->
       true
-  | Enable_logging a, Enable_logging b -> Bool.equal a b
+  | Fast_math_enabled a, Fast_math_enabled b -> Bool.equal a b
   | _ -> false
 
-let metal ~routine_logging =
-  [
-    (if routine_logging then Language_version_3_2 else Language_version_3_1);
-    Math_mode_safe;
-    Math_functions_fast;
-    Enable_logging routine_logging;
-  ]
+let metal ~routine_logging ~math_api =
+  [ (if routine_logging then Language_version_3_2 else Language_version_3_1) ]
+  @ (match math_api with
+    | Modern_split -> [ Math_mode_safe; Math_functions_fast ]
+    | Legacy -> [ Fast_math_enabled false ])
+  @ if routine_logging then [ Enable_logging ] else []
 
 let render_metal options =
   String.concat " "
@@ -111,9 +116,10 @@ let render_metal options =
        (function
          | Language_version_3_1 -> "language-version=3.1"
          | Language_version_3_2 -> "language-version=3.2"
+         | Fast_math_enabled enabled -> "fast-math-enabled=" ^ Bool.to_string enabled
          | Math_mode_safe -> "math-mode=safe"
          | Math_functions_fast -> "math-functions=fast"
-         | Enable_logging enabled -> "enable-logging=" ^ Bool.to_string enabled)
+         | Enable_logging -> "enable-logging=true")
        options)
 
 (* One line, for diagnostics that have to travel through a log or an exception message: a compile's

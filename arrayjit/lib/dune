@@ -135,7 +135,7 @@
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL_METAL_BACKEND))
  (modules metal_backend builtins_metal)
- (libraries base metal utils ir)
+ (libraries base metal metal.runtime utils ir)
  (preprocess
   (pps
    ppx_compare

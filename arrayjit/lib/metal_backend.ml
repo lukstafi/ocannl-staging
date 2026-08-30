@@ -1175,9 +1175,27 @@ module Impl = struct
           ^^ rparen ^^ semi)
   end
 
+  let split_math_options_available =
+    (* These instance methods were added in macOS 15. Query the runtime class rather than the host
+       OS version: this is the capability whose absence matters, and keeps macOS 14 on the legacy
+       safe spelling without ever sending an unavailable selector. *)
+    let compile_options_class = Runtime.Objc.get_class "MTLCompileOptions" in
+    let has_instance_method selector =
+      Runtime.Objc.msg_send ~self:compile_options_class
+        ~cmd:(Runtime.selector "instancesRespondToSelector:")
+        ~typ:Runtime.Objc.(_SEL @-> returning bool)
+        (Runtime.selector selector)
+    in
+    lazy (has_instance_method "setMathMode:" && has_instance_method "setMathFloatingPointFunctions:")
+
   let%diagn_sexp compile_metal_source ~name ~source ~device =
-    let option_state = Compiler_options.metal ~routine_logging:(Utils.debug_log_from_routines ()) in
     let options = Me.CompileOptions.init () in
+    let math_api =
+      if Lazy.force split_math_options_available then Compiler_options.Modern_split else Legacy
+    in
+    let option_state =
+      Compiler_options.metal ~routine_logging:(Utils.debug_log_from_routines ()) ~math_api
+    in
     List.iter option_state ~f:(function
       | Compiler_options.Language_version_3_1 ->
           (* Version 3.1 is required for the [bfloat] type (bfloat16 precision). *)
@@ -1186,11 +1204,12 @@ module Impl = struct
       | Language_version_3_2 ->
           Me.CompileOptions.set_language_version options
             Me.CompileOptions.LanguageVersion.version_3_2
+      | Fast_math_enabled enabled -> Me.CompileOptions.set_fast_math_enabled options enabled
       | Math_mode_safe -> Me.CompileOptions.set_math_mode options Me.CompileOptions.MathMode.Safe
       | Math_functions_fast ->
           Me.CompileOptions.set_math_floating_point_functions options
             Me.CompileOptions.MathFloatingPointFunctions.Fast
-      | Enable_logging enabled -> Me.CompileOptions.set_enable_logging options enabled);
+      | Enable_logging -> Me.CompileOptions.set_enable_logging options true);
     [%log "metal options", (Compiler_options.render_metal option_state : string)];
 
     if Utils.settings.output_debug_files_in_build_directory then (
