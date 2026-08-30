@@ -1534,6 +1534,20 @@ class CellTimeoutTest(unittest.TestCase):
             orchestrate._defer_depth = 0
             orchestrate._deferred_signal = None
 
+    def test_a_held_termination_does_not_replace_an_orchestrator_cleanup_failure(self):
+        self.assertEqual(orchestrate._defer_depth, 0)
+        self.assertIsNone(orchestrate._deferred_signal)
+        try:
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
+                with orchestrate._deferring_cancellation():
+                    orchestrate._deferred_signal = signal.SIGTERM
+                    raise cell_group.CleanupFailed("SURVIVORS still hold the device")
+            self.assertIn("SURVIVORS", str(raised.exception))
+            self.assertNotIn("killed first", str(raised.exception))
+        finally:
+            orchestrate._defer_depth = 0
+            orchestrate._deferred_signal = None
+
     def test_the_tinygrad_cache_probe_collects_helpers_it_spawned(self):
         # This probe was the final raw subprocess.run site in the matrix sweep.  Importing a
         # framework can itself create helpers, so a direct-child timeout is not enough.
@@ -2187,7 +2201,7 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertIsNotNone(holder.returncode, "the kill left the cell's leader unreaped")
 
     @unittest.skipUnless(os.name == "posix", "the cancellation is delivered by a signal here")
-    def test_a_cancelled_supporting_command_says_its_group_outlived_the_kill(self):
+    def test_a_cancelled_supporting_command_preserves_its_cleanup_failure(self):
         # The other exit from `_run_supporting`, and the same survivor its ordinary path stops
         # the sweep over. Here the sweep is already leaving, so there is nothing to stop -- but a
         # cancellation that reports a clean exit over a process still holding the device is how
@@ -2208,12 +2222,11 @@ class CellTimeoutTest(unittest.TestCase):
                     lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
-            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             signal.setitimer(signal.ITIMER_REAL, 1.0)
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
                 orchestrate.run_supporting(self.python("import time; time.sleep(300)"))
 
-        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
 
     @unittest.skipUnless(os.name == "posix", "process groups are a POSIX notion here")
     def test_a_successful_cell_whose_leftovers_were_killed_still_handles_the_cache(self):
@@ -2348,7 +2361,7 @@ class CellTimeoutTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.name == "posix", "the interrupt path needs POSIX signals")
-    def test_an_interrupted_cell_with_a_survivor_says_so(self):
+    def test_an_interrupted_cell_preserves_its_cleanup_failure(self):
         # The interrupt branch exits rather than records, so its print is the operator's only
         # chance to hear that something still holds the device -- while the cancellation's own
         # message says the cell was killed, and the retry they are about to start would be
@@ -2370,13 +2383,12 @@ class CellTimeoutTest(unittest.TestCase):
                     lambda _proc, _allow_zombie_gone=False: cell_group.SURVIVORS,
                 )
             )
-            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(cell_group.CleanupFailed) as raised:
                 orchestrate.run_cell(
                     "interrupted over a survivor", self.python("import time; time.sleep(300)")
                 )
 
-        self.assertIn("SURVIVED SIGKILL", out.getvalue())
+        self.assertIn("SURVIVED SIGKILL", str(raised.exception))
 
     def test_the_cache_is_quarantined_even_if_the_cell_log_cannot_be_written(self):
         # The kill is what tore the cache, so undoing it must not sit behind fallible code: the

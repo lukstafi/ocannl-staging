@@ -370,6 +370,20 @@ def _raise_deferred():
     )
 
 
+def _deliver_or_annotate_deferred():
+    """Keep a cleanup failure authoritative; otherwise deliver the held cancellation."""
+    global _deferred_signal
+    if _deferred_signal is None:
+        return
+    active = sys.exc_info()[1]
+    if isinstance(active, cell_group.CleanupFailed):
+        signum, _deferred_signal = _deferred_signal, None
+        if hasattr(active, "add_note"):
+            active.add_note(f"signal {signum} was also received while cleanup was failing")
+        return
+    _raise_deferred()
+
+
 @contextlib.contextmanager
 def _deferring_cancellation():
     """Hold SIGINT/SIGTERM until this block (and any enclosing one) is done, then re-raise."""
@@ -383,7 +397,7 @@ def _deferring_cancellation():
         # is already unwinding with another exception, which used to strand the held cancellation
         # until some later child (or forever, if this was the last one).
         if _defer_depth == 0:
-            _raise_deferred()
+            _deliver_or_annotate_deferred()
 
 
 @contextlib.contextmanager
@@ -450,12 +464,10 @@ def _run_supporting(cmd, cwd, env, capture_output, check, timeout):
                 # told the group was killed, and it was not: a cancellation that reports a clean
                 # exit over a process still holding the device is how the next run gets measured
                 # against it (gh-ocannl-760 review).
-                print(
-                    "!!! a member of the process group of "
-                    f"{cmd[0]}: {_remaining_note(remaining)} ({remaining.value}) — clear "
-                    "the "
-                    "survivors before re-running anything on this box",
-                    flush=True,
+                raise cell_group.CleanupFailed(
+                    "orchestrate: a member of the process group of "
+                    f"{cmd[0]}: {_remaining_note(remaining)} ({remaining.value}) — clear the "
+                    "survivors before re-running anything on this box"
                 )
         raise
     initial = _group_observation(proc)
@@ -470,7 +482,7 @@ def _run_supporting(cmd, cwd, env, capture_output, check, timeout):
             # shared by every row the sweep is about to produce — there is no subset of the
             # results to disbelieve, and a cap cannot bound damage that is already in all of
             # them (gh-ocannl-760 review).
-            raise SystemExit(
+            raise cell_group.CleanupFailed(
                 f"orchestrate: {cmd[0]}: {_remaining_note(remaining)} ({remaining.value}). "
                 "Every cell of this sweep could be measured against it, so "
                 "nothing is dispatched: clear the survivors and re-run."
@@ -537,6 +549,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         # cache it was writing gets the same treatment. Ctrl-C on a wedged beam cell is the
         # likeliest way anyone meets this bug by hand, and a retry over the cache that kill left
         # behind is not the pass it claims to be (gh-ocannl-760 review).
+        cleanup_failure = None
         if proc is not None:
             _, outlived = kill_cell_group(proc)
             if outlived is not cell_group.GONE:
@@ -544,13 +557,14 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
                 # only chance to hear it: the cancellation's own message says the cell was
                 # killed, and a retry started over a survivor that still holds the device
                 # would be measured against it (gh-ocannl-760 review).
-                print(
-                    f"!!! {label}: {_remaining_note(outlived)} ({outlived.value}) — "
-                    "clear the survivors before re-running anything on this box",
-                    flush=True,
+                cleanup_failure = cell_group.CleanupFailed(
+                    f"{label}: {_remaining_note(outlived)} ({outlived.value}) — clear the "
+                    "survivors before re-running anything on this box"
                 )
             if on_incomplete:
                 print(f"!!! {label} interrupted; {on_incomplete(True)}", flush=True)
+        if cleanup_failure is not None:
+            raise cleanup_failure
         raise
     stdout = stdout or ""
     leftovers = ""
@@ -608,6 +622,8 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         if cache_note:
             note += f"; {cache_note}"
         print(f"!!! {label} {note}", flush=True)
+        if remaining is not cell_group.GONE and _deferred_signal is not None:
+            raise cell_group.CleanupFailed(note)
         return None, note
     if stuck is not cell_group.GONE:
         # The cell ran to completion — it may even have printed a result line — but something it
@@ -629,6 +645,8 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         if stuck_cache_note:
             note += f"; {stuck_cache_note}"
         print(f"!!! {label} {note}", flush=True)
+        if _deferred_signal is not None:
+            raise cell_group.CleanupFailed(note)
         return None, note
     if proc.returncode != 0 or line is None:
         print(stdout[-4000:])
