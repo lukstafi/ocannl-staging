@@ -1,0 +1,3 @@
+FAIL: config_usage_scan_bogus.fixture:1: shell flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:2: documentation assignment `definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAILED: 2 checks did not hold.

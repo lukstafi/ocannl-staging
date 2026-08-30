@@ -121,6 +121,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-cache_dir_ignores
   test/operations/dune                     @runtest-codegen_text_inventory
   test/operations/dune                     @runtest-config_dep_completeness
+  test/operations/dune                     @runtest-config_usage_scan
+  test/operations/dune                     @runtest-config_usage_scan_control
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
   test/operations/dune                     @runtest-config_var_warnings

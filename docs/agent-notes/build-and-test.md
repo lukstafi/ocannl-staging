@@ -71,6 +71,17 @@ that they earn a lookup rather than always-loaded space.
   contain is the one most in need of a fixture, since nothing in the tree will contradict the
   implementation's guess about it; a survey reporting zero of something is a hole in the fixtures,
   not permission to leave that case undefined.
+- Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
+  shell corpus is every `*.sh` recursively under `tools/`, `scripts/`, and `benchmarks/`; its prose
+  corpus is `AGENTS.md` and every `*.md` recursively under `docs/`. A shell token contributes a key
+  when it has the command-line form `--ocannl_<key>=`, while prose contributes a key only when an
+  inline code span consists entirely of `<key>=<value>` (optionally `ocannl_<key>=<value>`). The latter
+  boundary leaves fenced programs and longer expressions to their own languages. Both are checked
+  against `Utils.known_config_keys`; an explicit, usage-checked file/key judgment list identifies
+  bare assignments that are tensor fields, dimensions, or report notation, and equally narrow
+  exceptions retain prose whose subject is a historical invalid spelling. The checked-in fixture
+  gives both readers a bogus key and the Dune rule requires the scanner to exit 1 on it, so a clean
+  live corpus is not its only evidence that the rule has teeth.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to

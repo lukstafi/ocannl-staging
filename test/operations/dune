@@ -78,7 +78,7 @@
   (alias slow-hip_scratch_budget)
   (alias slow-hip_scratch_tune_survives)))
 
-; The repo-wide scans, as one family (gh-ocannl-703). These seven parse the repository's own
+; The repo-wide scans, as one family (gh-ocannl-703). These parse the repository's own
 ; sources, dune files and documentation rather than compiling anything, so they are cheap -- and
 ; they are the ones a small targeted change trips: add a config key, add a dune stanza, print a
 ; claim. Before this alias the only way to run them was the whole directory, which is the expensive
@@ -105,6 +105,8 @@
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
+  (alias runtest-config_usage_scan)
+  (alias runtest-config_usage_scan_control)
   (alias runtest-shell_scripts_parse)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
@@ -195,6 +197,8 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-config_usage_scan)
+  (alias runtest-config_usage_scan_control)
   (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
@@ -4089,6 +4093,71 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff shell_scripts_parse.expected shell_scripts_parse.actual)))
+
+; gh-ocannl-790: command-line configuration flags in shell scripts and configuration assignments in
+; prose are consumers of the key registry too. The OCaml-source scanners cannot see either, so a
+; rename otherwise leaves them behind until a reviewer remembers the site.
+;
+; Shell scope is every `*.sh` recursively under tools/, scripts/, and benchmarks/: those are the
+; three checked-in script roots, and naming them separately makes a vanished root fail the scan's
+; non-vacuity claim. Documentation scope is AGENTS.md plus every `*.md` recursively under docs/.
+; Markdown contributes only an inline code span that is exactly `key=value`; fenced examples and
+; longer snippets describe unrelated languages. The checked-in fixture carries an unknown key in
+; both accepted syntaxes, and the control below requires the executable to refuse it with exit 1.
+
+(executable
+ (name config_usage_scan)
+ (modules config_usage_scan)
+ (libraries base stdio arrayjit.utils test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads shell scripts and Markdown as text.
+ (target config_usage_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../AGENTS.md
+  (glob_files_rec ../../docs/*.md)
+  (glob_files_rec ../../tools/*.sh)
+  (glob_files_rec ../../scripts/*.sh)
+  (glob_files_rec ../../benchmarks/*.sh))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:config_usage_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ ; ocannl-backend: none -- runs the same text scanner on a synthetic unknown key and requires its
+ ; refusal; it links no backend and runs no OCANNL program.
+ (target config_usage_scan_control.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config config_usage_scan_bogus.fixture)
+ (action
+  (with-stderr-to
+   %{target}
+   (ignore-stdout
+    (with-accepted-exit-codes
+     1
+     (run
+      %{dep:config_usage_scan.exe}
+      --fixture
+      %{dep:config_usage_scan_bogus.fixture}))))))
+
+(rule
+ (alias runtest-config_usage_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan.expected config_usage_scan.actual)))
+
+(rule
+ (alias runtest-config_usage_scan_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff config_usage_scan_control.expected config_usage_scan_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached.
