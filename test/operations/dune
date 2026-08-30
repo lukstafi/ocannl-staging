@@ -4429,7 +4429,9 @@
   (diff config_usage_scan_control.expected config_usage_scan_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
-; the harness through a fake opam, so no backend or OCANNL executable is reached.
+; the harness through a fake opam, so no backend or OCANNL executable is reached. It shares a lock
+; with atomic_file_race: both generate concurrent filesystem load, while that stress test's readers
+; deliberately have a fixed ceiling and must not mistake a second filesystem stressor for a stall.
 
 (executable
  (name sweep_harness_driver)
@@ -4445,6 +4447,7 @@
  ; ocannl-backend: none -- the harness uses fake opam and a Verdict-only skip probe; neither links a backend.
  (alias runtest-sweep_harness)
  (package neural_nets_lib)
+ (locks ocannl_filesystem_stress_test)
  (deps
   (alias runtest-env_spelling_gate)
   ocannl_config
@@ -4467,6 +4470,7 @@
  ; ocannl-backend: none -- links arrayjit.utils and races the filesystem helper; it compiles nothing.
  (name atomic_file_race)
  (package neural_nets_lib)
+ (locks ocannl_filesystem_stress_test)
  (deps
   ocannl_config
   (glob_files_rec ../../.gitignore))
