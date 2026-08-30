@@ -3799,6 +3799,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           in
           let fiss_single_results = ref [] in
           let sr_single_results = ref [] in
+          let update_sr_composite_eligible () =
+            sr_composite_eligible :=
+              List.count sr_sites ~f:(fun s ->
+                  List.exists !sr_single_results ~f:(fun (s2, _, _) ->
+                      Idx.equal_symbol s2.sr_axis s.sr_axis))
+              >= 2
+          in
           List.iter seed_specs ~f:(fun spec ->
               let result = try_spec spec in
               (match (spec, result) with
@@ -3808,7 +3815,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
               | Fiss (F_split { sites = [ (s, b) ] }), Some (_, ms) ->
                   Int.incr n_sr_timed;
-                  sr_single_results := (s, b, ms) :: !sr_single_results
+                  sr_single_results := (s, b, ms) :: !sr_single_results;
+                  (* Keep the live report honest if a later seed dies before the post-seed
+                     recombination step. Eligibility is about usable singles already collected,
+                     not about whether control reached composite proposal. *)
+                  update_sr_composite_eligible ()
               | Fiss (F_split _), Some _ -> Int.incr n_sr_timed
               | _ -> ());
               Option.iter result ~f:admit);

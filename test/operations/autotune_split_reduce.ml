@@ -337,7 +337,9 @@ let () =
          else r.Autotune.split_reduce_candidates >= 2);
       p "best-timed singles recombined into a composite"
         (if is_cpu then
-           r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
+           r.Autotune.split_reduce_timed
+             - (if r.Autotune.split_reduce_composite_timed then 1 else 0)
+           = r.Autotune.split_reduce_candidates
            && Bool.equal r.Autotune.split_reduce_composite_timed
                 r.Autotune.split_reduce_composite_eligible
          else r.Autotune.split_reduce_timed > 0)
@@ -444,7 +446,9 @@ let () =
          when EACH site contributed a usable best-timed single. Under contention a refused single
          cannot staff that composite, but still counts as reaching the timing window. *)
       p "the interchanged bias-gradient candidate reaches timing"
-        (r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
+        (r.Autotune.split_reduce_timed
+           - (if r.Autotune.split_reduce_composite_timed then 1 else 0)
+         = r.Autotune.split_reduce_candidates
         && Bool.equal r.Autotune.split_reduce_composite_timed
              r.Autotune.split_reduce_composite_eligible)
   | None ->
