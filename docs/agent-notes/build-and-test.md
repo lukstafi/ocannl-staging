@@ -1061,6 +1061,20 @@ that they earn a lookup rather than always-loaded space.
   unpiped ssh output with a convenience pipe: the verifier source travels on a separate remote file
   descriptor while child stdin is `/dev/null`, and the far-side sentinel is the build verdict plus
   cleanup, and the local sentinel is ssh's transport verdict.
+- `tools/ci-compiler-test.sh` is the cheap local proxy for a compiler-sensitive Ubuntu CI failure
+  (gh-ocannl-846): it downloads the GCC 13 packages with `apt-get download`, extracts them into a
+  scratch prefix with `dpkg-deb -x`, and runs exactly one named `runtest-` alias in a fresh Dune
+  build directory with `OCANNL_CC_BACKEND_COMPILER_COMMAND` pointing at a logging wrapper. A pass
+  requires that wrapper to have been invoked, so an irrelevant alias or a cached action cannot be
+  certified. `--aarch64-clang` additionally unpacks clang 21 and arm64 cross headers and sets
+  `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
+  NEON assembly dialect; today `cc_march_census` is the test that consumes that hook. The real
+  download is deliberately Linux/Debian-family-only; `--dry-run` validates and prints the complete
+  staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
+  GCC patch release is whichever candidate the configured apt indexes serve (the exact version and
+  target are printed and major 13 is enforced), and the clang leg has a Linux cross sysroot rather
+  than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
+  than replacing either.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
