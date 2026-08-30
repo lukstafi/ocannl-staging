@@ -157,9 +157,8 @@ let () =
   let ctx = Context.run ctx routine in
   let got_c1 = Context.get_values ctx c1.Tensor.value in
   let got_c2 = Context.get_values ctx c2.Tensor.value in
-  p "default annotator combo values correct"
-    (Array.for_all2_exn got_c1 expected_c ~f:approx
-    && Array.for_all2_exn got_c2 expected_c2 ~f:approx);
+  p_all2 "default annotator add-nest values correct" got_c1 expected_c ~f:approx;
+  p_all2 "default annotator multiply-nest values correct" got_c2 expected_c2 ~f:approx;
   p "default annotator schedules both nests" (!sched_len = 4);
   (let src = Generated.read "combo_default" in
    let has s = String.is_substring src ~substring:s in

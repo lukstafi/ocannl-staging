@@ -78,9 +78,8 @@ let () =
   let ctx_s = Context.run ctx_s routine_s in
   let got_c1s = Context.get_values ctx_s c1s.Tensor.value in
   let got_c2s = Context.get_values ctx_s c2s.Tensor.value in
-  p "serial combo values correct"
-    (Array.for_all2_exn got_c1s expected_c1 ~f:approx
-    && Array.for_all2_exn got_c2s expected_c2 ~f:approx);
+  p_all2 "serial add-nest values correct" got_c1s expected_c1 ~f:approx;
+  p_all2 "serial multiply-nest values correct" got_c2s expected_c2 ~f:approx;
 
   (* --- Grid+Workgroup annotated twin (unequal Grid extents: 4 vs 6 => guard on the 4-nest) --- *)
   let%op c1a = a + b in
@@ -95,8 +94,8 @@ let () =
   let ctx_a = Context.run ctx_a routine_a in
   let got_c1a = Context.get_values ctx_a c1a.Tensor.value in
   let got_c2a = Context.get_values ctx_a c2a.Tensor.value in
-  p "annotated combo values match the serial twin"
-    (Array.for_all2_exn got_c1a got_c1s ~f:approx && Array.for_all2_exn got_c2a got_c2s ~f:approx);
+  p_all2 "annotated add-nest values match the serial twin" got_c1a got_c1s ~f:approx;
+  p_all2 "annotated multiply-nest values match the serial twin" got_c2a got_c2s ~f:approx;
   (let src = Generated.read "combo_annot" in
    let has s = String.is_substring src ~substring:s in
    let structure_ok =

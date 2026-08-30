@@ -246,9 +246,8 @@ let () =
   let r2, r1 =
     match !reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two reports"
   in
-  p "tuned routine values correct"
-    (Array.for_all2_exn got1 expected_c ~f:approx
-    && Array.for_all2_exn got_mm1 mm_expected ~f:approx);
+  p_all2 "tuned elementwise values correct" got1 expected_c ~f:approx;
+  p_all2 "tuned matmul values correct" got_mm1 mm_expected ~f:approx;
   p "first tune call searches (cache miss)" (completed r1);
   p "first tune call timed at least the baseline" (r1.Autotune.candidates_timed >= 1);
   p "a completed search carries no terminal failure" (Option.is_none (Autotune.terminal_failure r1));
@@ -352,9 +351,8 @@ let () =
   winner_contract ~which:"searched report" r1;
   winner_contract ~which:"second report" r2;
   p "second report names its winner" (not (String.is_empty r2.Autotune.best_label));
-  p "cached schedule replays to correct values"
-    (Array.for_all2_exn got2 expected_c ~f:approx
-    && Array.for_all2_exn got_mm2 mm_expected ~f:approx);
+  p_all2 "cached schedule replays to correct elementwise values" got2 expected_c ~f:approx;
+  p_all2 "cached schedule replays to correct matmul values" got_mm2 mm_expected ~f:approx;
 
   (* --- gh-ocannl-559: with the search off (config [autotune_search], which the [reproducible]
      profile sets), nothing is timed. A committed cache entry still replays -- a pinned schedule is
@@ -379,16 +377,16 @@ let () =
     (r3.Autotune.candidates_timed = 0 && r3.Autotune.rounds_run = 0
     && List.is_empty r3.Autotune.best_schedule
     && String.is_empty r3.Autotune.best_label);
-  p "search off without a cache returns the correct untuned routine"
-    (Array.for_all2_exn got3 expected_c ~f:approx
-    && Array.for_all2_exn got_mm3 mm_expected ~f:approx);
+  p_all2 "search off without a cache returns correct untuned elementwise values" got3 expected_c
+    ~f:approx;
+  p_all2 "search off without a cache returns correct untuned matmul values" got_mm3 mm_expected
+    ~f:approx;
   let cache_committed = first_cacheable || (completed r2 && r2.Autotune.timings_contended = 0) in
   let r4, got4, got_mm4 = tune_no_search ~cache_dir () in
   p "search off replays exactly when a complete search committed a cache entry"
     (Bool.equal (replayed r4) cache_committed && r4.Autotune.candidates_timed = 0);
-  p "cache replay under search off gives correct values"
-    (Array.for_all2_exn got4 expected_c ~f:approx
-    && Array.for_all2_exn got_mm4 mm_expected ~f:approx);
+  p_all2 "cache replay under search off gives correct elementwise values" got4 expected_c ~f:approx;
+  p_all2 "cache replay under search off gives correct matmul values" got_mm4 mm_expected ~f:approx;
   (* gh-ocannl-644, gh-ocannl-677: what a call did about searching is ONE state, and the states a
      measurement harness must tell apart are reached right here -- a completed search, a cached
      winner replayed, and a call that neither searched nor replayed because the search is off and

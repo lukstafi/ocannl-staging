@@ -301,9 +301,9 @@ let () =
         ~name:"mm_tf32_k24_mma" c_k24_mma
     in
     let src_k24 = Generated.read "mm_tf32_k24_mma" in
-    p "tf32 k=24 divergent tile matches and emits"
-      (Array.for_all2_exn got_k24 want_k24 ~f:approx_rel
-      && List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+    p_all2 "tf32 k=24 divergent tile matches the serial twin" got_k24 want_k24 ~f:approx_rel;
+    p "tf32 k=24 divergent tile emits the wmma intrinsic"
+      (List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
       && String.is_substring src_k24 ~substring:"tile_mma 16x32x24 (wmma-tf32)");
     p "tf32 k=24 autotune seeds tensorized candidates" !k24_seeded;
 
@@ -322,9 +322,9 @@ let () =
     let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
     let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
     let src_t = Generated.read "mm_tf32_ta_mma" in
-    p "tf32 transposed-A matmul matches and emits"
-      (Array.for_all2_exn got_t want_t ~f:approx_rel
-      && List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+    p_all2 "tf32 transposed-A matmul matches the serial twin" got_t want_t ~f:approx_rel;
+    p "tf32 transposed-A matmul emits the expected wmma layout"
+      (List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
       && String.is_substring src_t ~substring:"matrix_a, 16, 16, 8"
       && String.is_substring src_t ~substring:"col_major"
       && String.is_substring src_t ~substring:"(wmma-tf32)");
@@ -335,9 +335,11 @@ let () =
     skipped "tf32 policy-off autotune omits tensorized candidates";
     skipped "tf32 policy-on matmul matches the serial twin within tolerance";
     skipped "tf32 policy-on renders and records wmma tf32";
-    skipped "tf32 k=24 divergent tile matches and emits";
+    skipped "tf32 k=24 divergent tile matches the serial twin";
+    skipped "tf32 k=24 divergent tile emits the wmma intrinsic";
     skipped "tf32 k=24 autotune seeds tensorized candidates";
-    skipped "tf32 transposed-A matmul matches and emits");
+    skipped "tf32 transposed-A matmul matches the serial twin";
+    skipped "tf32 transposed-A matmul emits the expected wmma layout");
 
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
@@ -540,11 +542,16 @@ let () =
      covered it — either way, no register tiling and a recorded fallback. CPU-only: on the GPU
      backends [narrow_compute_f32] does not touch f16 compute and the leg above already pins the
      wide rendering. --- *)
-  (let claim_ncf32 =
+  (let claim_ncf32_value =
+     "Fp16_wide with narrow_compute_f32 off matches the independent wide reference"
+   in
+   let claim_ncf32_structure =
      "Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile \
       accumulator)"
    in
-   if on_gpu then skipped claim_ncf32
+   if on_gpu then (
+     skipped claim_ncf32_value;
+     skipped claim_ncf32_structure)
    else begin
      Numerics.set_policy
        { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
@@ -556,12 +563,12 @@ let () =
      (* Compared against the independent wide reference, on the width-sensitive inputs: the
         fallback's localized accumulator staying half — not merely differing from a serial twin
         rendered the same way — is what this must catch (Codex P1 round 3 on PR #477). *)
-     p claim_ncf32
+     p_all2 claim_ncf32_value got_hn wide_ref_hw ~f:Float.equal;
+     p claim_ncf32_structure
        ((not (List.is_empty census_hn))
        && List.for_all census_hn
             ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
-       && (not (String.is_substring src ~substring:"Tile_mma register tiling"))
-       && Array.for_all2_exn got_hn wide_ref_hw ~f:Float.equal)
+       && not (String.is_substring src ~substring:"Tile_mma register tiling"))
    end);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on

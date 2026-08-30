@@ -12,7 +12,8 @@ pre-filter scored the sketch candidates: true
 pre-filter pruned the worse-scored sketches before timing: true
 pruned search timed fewer candidates than the full search: true
 baseline still timed under aggressive pruning: true
-tuned values correct with and without the pre-filter: true
+tuned values correct without the pre-filter: true
+tuned values correct with the pre-filter: true
 model_default returns a working routine with correct values: true
 model_default scored candidates (default pipeline included): true
 model_default reports a choice with its model score: true

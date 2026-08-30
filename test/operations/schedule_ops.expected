@@ -6,7 +6,8 @@ swap values correct: true
 swap reorders the loop bounds: true
 vectorized retype values correct: true
 vectorized retype structure as expected: true
-default annotator combo values correct: true
+default annotator add-nest values correct: true
+default annotator multiply-nest values correct: true
 default annotator schedules both nests: true
 default annotator structure as expected: true
 default annotator matmul values match the serial twin: true
