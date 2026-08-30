@@ -1288,7 +1288,8 @@ that they earn a lookup rather than always-loaded space.
   not replay its stderr, and failed or interrupted units are refused because they may not have
   reached every test. An intersection over only the completed backends is a loud `POTENTIAL` report;
   it becomes `FAIL` only when every backend in the sweep's own unit vocabulary completed, while the
-  sweep itself still exits zero so later units and their history rows are never suppressed.
+  sweep itself still exits zero so later units and their history rows are never suppressed. A
+  `--ref` predating the machine record is refused when its human skip lines have no paired records.
 - An unreachable machine records `skip (unreachable)`, and a sweep of skips is not a failure. It is
   not the expected steady state either: both GPU boxes are cabled and Wake-on-LAN armed, and wake
   over Ethernet from sleep and from full shutdown alike, so a run that is meant to cover CUDA or HIP

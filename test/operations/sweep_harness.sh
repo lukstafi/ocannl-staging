@@ -122,9 +122,9 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # The three absent backends keep this a potential finding rather than a failure:
 # one of them may have evaluated the common claim. A per-backend-only marker
 # must not leak into the report merely because it occurred somewhere.
-common=$'OCANNL_VERDICT_SKIP\tfixture.exe\tcommon unevaluated claim'
-cc_only=$'OCANNL_VERDICT_SKIP\tfixture.exe\tcc-only unevaluated claim'
-multidev_only=$'OCANNL_VERDICT_SKIP\tfixture.exe\tmultidev-only unevaluated claim'
+common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tcommon unevaluated claim'
+cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tcc-only unevaluated claim'
+multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_VERDICT_SKIP\tfixture.exe\tmultidev-only unevaluated claim'
 coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
 $cc_only" \
   SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
@@ -200,7 +200,34 @@ extract_error=$(PATH=$fail_bin:$PATH "$aggregate" \
 extract_error_rc=$?
 set -e
 [ "$extract_error_rc" -eq 2 ]
-grep -q '^aggregate-skips: cannot extract skip records from ' <<<"$extract_error"
+grep -q '^aggregate-skips: cannot extract compatible skip records from ' <<<"$extract_error"
+
+# A supported `sweep.sh --ref` may target a commit from before Verdict emitted
+# machine records. Its legacy human line is evidence of a skip, not evidence of
+# execution; a human/machine count mismatch must make the whole log incompatible.
+printf 'SKIPPED on cc (vacuous): common unevaluated claim\n' >"$tmp/legacy-cc.log"
+set +e
+legacy_error=$("$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/legacy-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+legacy_error_rc=$?
+set -e
+[ "$legacy_error_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot extract compatible skip records from ' <<<"$legacy_error"
+
+# A successful analysis whose destination stops accepting bytes is still a
+# harness failure. A read-only descriptor makes the first report write fail
+# deterministically without relying on a device Dune's sandbox may deny; the
+# explicit success exit below it must not erase that error.
+: >"$tmp/read-only-report"
+exec 8<"$tmp/read-only-report"
+set +e
+"$aggregate" "${aggregate_args[@]}" >&8 2>"$tmp/report-write.err"
+report_write_rc=$?
+set -e
+exec 8<&-
+[ "$report_write_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot write report$' "$tmp/report-write.err"
 
 # Hold one run after it owns the worktree lock, then replace its history with
 # the old schema. A competing launch must refuse at the lock without migrating

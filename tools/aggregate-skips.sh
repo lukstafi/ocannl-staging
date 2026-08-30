@@ -4,6 +4,8 @@
 # A claim absent from one COMPLETE backend log was evaluated there; a claim
 # present in every complete log was not.  The caller owns completeness -- the
 # sweep passes only successful forced full-suite units, never incremental logs.
+# A legacy human SKIPPED line without its paired machine record makes the log
+# incompatible rather than turning an old --ref run into false empty evidence.
 #
 # Usage:
 #   tools/aggregate-skips.sh \
@@ -23,6 +25,10 @@ run_logs=()
 die() {
   echo "aggregate-skips: $*" >&2
   exit 2
+}
+
+report_line() {
+  printf '%s\n' "$1" || die "cannot write report"
 }
 
 while [ $# -gt 0 ]; do
@@ -79,10 +85,10 @@ done
 # macOS's Bash 3.2 treats an empty [@] expansion as unbound under nounset even
 # after [a=()]. Handle it before ANY expansion of run_backends or run_logs.
 if [ ${#run_backends[@]} -eq 0 ]; then
-  echo "completed backends: <none>"
-  echo "missing backends: $(join_by_comma "${known[@]}")"
-  echo "status: insufficient (0 of ${#known[@]} known backends completed; need at least 2)"
-  echo "result: NOT AGGREGATED"
+  report_line "completed backends: <none>"
+  report_line "missing backends: $(join_by_comma "${known[@]}")"
+  report_line "status: insufficient (0 of ${#known[@]} known backends completed; need at least 2)"
+  report_line "result: NOT AGGREGATED"
   exit 0
 fi
 
@@ -91,16 +97,16 @@ for backend in "${known[@]}"; do
   contains "$backend" "${run_backends[@]}" || missing+=("$backend")
 done
 
-echo "completed backends: $(join_by_comma "${run_backends[@]}")"
+report_line "completed backends: $(join_by_comma "${run_backends[@]}")"
 if [ ${#missing[@]} -eq 0 ]; then
-  echo "missing backends: <none>"
+  report_line "missing backends: <none>"
 else
-  echo "missing backends: $(join_by_comma "${missing[@]}")"
+  report_line "missing backends: $(join_by_comma "${missing[@]}")"
 fi
 
 if [ ${#run_backends[@]} -lt 2 ]; then
-  echo "status: insufficient (${#run_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
-  echo "result: NOT AGGREGATED"
+  report_line "status: insufficient (${#run_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
+  report_line "result: NOT AGGREGATED"
   exit 0
 fi
 
@@ -111,18 +117,23 @@ trap cleanup EXIT
 
 extract_claims() {
   awk '
+    index($0, "SKIPPED on ") == 1 { human++ }
     index($0, "OCANNL_VERDICT_SKIP\t") == 1 {
       key = substr($0, length("OCANNL_VERDICT_SKIP\t") + 1)
-      if (index(key, "\t") > 1) print key
+      if (index(key, "\t") > 1) {
+        machine++
+        print key
+      } else malformed = 1
     }
+    END { if (malformed || human != machine) exit 3 }
   ' "$1" | LC_ALL=C sort -u
 }
 
 extract_claims "${run_logs[0]}" >"$tmp/common" ||
-  die "cannot extract skip records from ${run_logs[0]}"
+  die "cannot extract compatible skip records from ${run_logs[0]}"
 for ((i = 1; i < ${#run_logs[@]}; i++)); do
   extract_claims "${run_logs[$i]}" >"$tmp/next" ||
-    die "cannot extract skip records from ${run_logs[$i]}"
+    die "cannot extract compatible skip records from ${run_logs[$i]}"
   LC_ALL=C comm -12 "$tmp/common" "$tmp/next" >"$tmp/intersection" ||
     die "cannot intersect skip records"
   mv "$tmp/intersection" "$tmp/common" || die "cannot advance skip intersection"
@@ -130,24 +141,26 @@ done
 
 common_count=$(wc -l <"$tmp/common" | tr -d ' ') || die "cannot count common skip records"
 if [ ${#missing[@]} -eq 0 ]; then
-  echo "status: complete (${#run_backends[@]} of ${#known[@]} known backends completed)"
+  report_line "status: complete (${#run_backends[@]} of ${#known[@]} known backends completed)"
   if [ "$common_count" -eq 0 ]; then
-    echo "result: PASS -- no claim was skipped on every known backend"
+    report_line "result: PASS -- no claim was skipped on every known backend"
     exit 0
   fi
-  echo "result: FAIL -- $common_count claim(s) skipped on every known backend"
+  report_line "result: FAIL -- $common_count claim(s) skipped on every known backend"
   while IFS=$'\t' read -r test_id claim; do
-    printf 'FAIL: skipped on every known backend: %s: %s\n' "$test_id" "$claim"
+    printf 'FAIL: skipped on every known backend: %s: %s\n' "$test_id" "$claim" ||
+      die "cannot write report"
   done <"$tmp/common"
   exit 1
 fi
 
-echo "status: partial (${#run_backends[@]} of ${#known[@]} known backends completed)"
+report_line "status: partial (${#run_backends[@]} of ${#known[@]} known backends completed)"
 if [ "$common_count" -eq 0 ]; then
-  echo "result: CLEAR across completed backends -- absent backends remain unknown"
+  report_line "result: CLEAR across completed backends -- absent backends remain unknown"
 else
-  echo "result: POTENTIAL -- $common_count claim(s) skipped on every completed backend; absent backends remain unknown"
+  report_line "result: POTENTIAL -- $common_count claim(s) skipped on every completed backend; absent backends remain unknown"
   while IFS=$'\t' read -r test_id claim; do
-    printf 'POTENTIAL: skipped on every completed backend: %s: %s\n' "$test_id" "$claim"
+    printf 'POTENTIAL: skipped on every completed backend: %s: %s\n' "$test_id" "$claim" ||
+      die "cannot write report"
   done <"$tmp/common"
 fi
