@@ -204,6 +204,27 @@ let p_exists ?(min = 1) name xs ~f =
     else if min <= 1 then p name false
     else short_fail name (Printf.sprintf "only %d of %d match" witnesses min)
 
+(** [p_pairwise_distinct name xs ~equal ~to_string] claims that [xs] contains at least two elements
+    and that no two of them are equal. It reports the first colliding pair in source order directly:
+    [<claim> (collision: x = y): false]. [to_string] is evaluated only on a collision, so a passing
+    claim pays only for the comparisons and keeps the same stdout line as {!p}.
+
+    This is the guarded form of building every unordered pair and passing it to {!p_none}. The
+    source-population floor belongs here rather than on the derived pairs: zero source elements
+    produce zero pairs, but one source element does too, and neither is evidence of distinctness
+    (gh-ocannl-815). *)
+let p_pairwise_distinct name xs ~equal ~to_string =
+  let rec first_collision = function
+    | [] -> None
+    | x :: rest -> (
+        match List.find rest ~f:(equal x) with
+        | Some y -> Some (x, y)
+        | None -> first_collision rest)
+  in
+  match first_collision xs with
+  | Some (x, y) -> short_fail name (Printf.sprintf "collision: %s = %s" (to_string x) (to_string y))
+  | None -> quantified ~min:2 name xs (fun () -> true)
+
 type skip_aggregation = [ `Backend | `Environment ]
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
@@ -259,6 +280,26 @@ let pass_fail ?detail label b =
 (** Whether any check has failed so far. For a test that wants to say something extra about a bad
     run; the exit status is taken care of without it. *)
 let any_failed () = !failures > 0
+
+(** The claim surface intended for [open Verdict.Claims]. Keeping the open-oriented names in one
+    module means a new combinator is exposed to every migrated test by changing this file alone; the
+    top-level bindings above remain for compatibility with qualified call sites. State and
+    scanner-control helpers deliberately stay outside this module. *)
+module Claims = struct
+  let fail = fail
+  let claim = claim
+  let p = p
+  let pf = pf
+  let claimf = claimf
+  let p_all = p_all
+  let p_all2 = p_all2
+  let p_none = p_none
+  let p_empty = p_empty
+  let p_exists = p_exists
+  let p_pairwise_distinct = p_pairwise_distinct
+  let skipped = skipped
+  let pass_fail = pass_fail
+end
 
 (* Registered at module initialization, so it covers every test that links this module — including
    one whose checks are all in the middle of the file, or that ends by raising. Calling [exit] from

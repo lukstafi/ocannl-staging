@@ -27,6 +27,7 @@
    checked by running `p` beside each combinator in two children and comparing what each wrote. *)
 
 open Base
+open Verdict.Claims
 
 let describe_status = function
   | Unix.WEXITED n -> Printf.sprintf "exited %d" n
@@ -77,6 +78,7 @@ let odd n = n % 2 = 1
 (* The executed-parity shape `p_all2` serves: a readback and the reference it is checked against. *)
 let got = [| 1.0; 2.0; 3.0 |]
 let want = [| 1.0; 2.0; 3.0 |]
+let distinct = [ 2; 4; 6 ]
 
 let () =
   let mode =
@@ -100,11 +102,15 @@ let () =
         (Array.to_list [| 1.0; 2.0 |])
         ~f:Float.is_finite;
       Verdict.p_all2 "the readback matches the reference cell for cell" got want ~f:Float.equal;
-      Verdict.p_all2 ~min:3 "all three cells match the reference" got want ~f:Float.equal
+      Verdict.p_all2 ~min:3 "all three cells match the reference" got want ~f:Float.equal;
+      p_pairwise_distinct "the three source values are pairwise distinct" distinct ~equal:Int.equal
+        ~to_string:Int.to_string
   (* === Shape: what a non-empty collection prints, compared against [p]'s own line. === *)
   | "shape_p" -> Verdict.p "the claim" true
   | "shape_p_all" -> Verdict.p_all "the claim" seeds ~f:even
   | "shape_p_all2" -> Verdict.p_all2 "the claim" got want ~f:Float.equal
+  | "shape_p_pairwise_distinct" ->
+      p_pairwise_distinct "the claim" distinct ~equal:Int.equal ~to_string:Int.to_string
   | "shape_p_false" -> Verdict.p "the claim" false
   | "shape_p_all_false" -> Verdict.p_all "the claim" seeds ~f:odd
   | "shape_p_all2_false" -> Verdict.p_all2 "the claim" got [| 1.0; 9.0; 3.0 |] ~f:Float.equal
@@ -129,6 +135,15 @@ let () =
       Verdict.p_all2 "the readback matches the reference cell for cell" [||] want ~f:Float.equal
   | "all2_short" ->
       Verdict.p_all2 ~min:3 "all three cells match the reference" [| 1.0 |] [| 1.0 |] ~f:Float.equal
+  | "pairwise_empty" ->
+      p_pairwise_distinct "the source values are pairwise distinct" [] ~equal:Int.equal
+        ~to_string:Int.to_string
+  | "pairwise_singleton" ->
+      p_pairwise_distinct "the source values are pairwise distinct" [ 7 ] ~equal:Int.equal
+        ~to_string:Int.to_string
+  | "pairwise_collision" ->
+      p_pairwise_distinct "the source values are pairwise distinct" [ 7; 11; 7 ] ~equal:Int.equal
+        ~to_string:Int.to_string
   | "refusals" ->
       refused "an `every` claim over an empty collection fails rather than passing vacuously"
         ~line:"every seed is even (empty): false" (run_child "all_empty");
@@ -159,6 +174,14 @@ let () =
         (run_child "all2_length_left_empty");
       refused "a pair below its stated floor fails, naming the shortfall"
         ~line:"all three cells match the reference (only 1 of 3): false" (run_child "all2_short");
+      refused "pairwise distinctness refuses an empty source population"
+        ~line:"the source values are pairwise distinct (empty): false" (run_child "pairwise_empty");
+      refused "pairwise distinctness requires at least two source values"
+        ~line:"the source values are pairwise distinct (only 1 of 2): false"
+        (run_child "pairwise_singleton");
+      refused "pairwise distinctness reports the first colliding pair directly"
+        ~line:"the source values are pairwise distinct (collision: 7 = 7): false"
+        (run_child "pairwise_collision");
       (* The conversion is golden-neutral exactly to the extent that this holds. *)
       let _, plain_true, _ = run_child "shape_p" in
       let _, all_true, _ = run_child "shape_p_all" in
@@ -167,6 +190,9 @@ let () =
       let _, all2_true, _ = run_child "shape_p_all2" in
       Verdict.p "a satisfied executed-parity claim prints what `Verdict.p` prints"
         (String.equal plain_true all2_true);
+      let _, pairwise_true, _ = run_child "shape_p_pairwise_distinct" in
+      Verdict.p "a satisfied pairwise-distinct claim prints what `Verdict.p` prints"
+        (String.equal plain_true pairwise_true);
       let _, plain_false, _ = run_child "shape_p_false" in
       let _, all_false, _ = run_child "shape_p_all_false" in
       Verdict.p "a non-empty collection that refutes the claim prints what `Verdict.p` prints"

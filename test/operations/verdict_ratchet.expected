@@ -32,6 +32,8 @@ Helper-wrapped quantified claims exempted because emptiness is their passing mea
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
+refuses an unguarded helper behind an open of Verdict.Claims: true
+keeps an open of Verdict.Claims inside its local scope: true
 refuses a sibling for_all helper through an intermediate result binding: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a quantifier written in pipeline style: true
