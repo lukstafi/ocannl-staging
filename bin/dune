@@ -1,3 +1,26 @@
+(copy_files
+ (files ../test/config/ocannl_config))
+
+(copy_files
+ (files ../test/config/env_spelling_gate.ml))
+
+; `@bin-smoke` is a cached build entry point like every test-family alias, so rejected legacy
+; OCANNL environment spellings need an always-rerun gate of their own (gh-ocannl-652). Keeping the
+; gate on a prerequisite alias makes it complete before any smoke command starts.
+
+(executable
+ (name env_spelling_gate)
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable names.
+ (alias bin-smoke-env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 ; The commandline split every tool here needs: positional geometry beside the library's
 ; --ocannl_* configuration flags (gh-ocannl-634). A library rather than a module shared by
 ; (modules ...) lists, because dune allows a module in only one stanza, and because two test
@@ -41,7 +64,7 @@
  (public_name compilation_speed_benchmark)
  (name compilation_speed)
  (modules compilation_speed)
- (libraries ocannl base stdio time_now dataprep bench_out)
+ (libraries ocannl base stdio time_now dataprep bench_args bench_out)
  (preprocess
   (pps ppx_here ppx_sexp_conv ppx_string ppx_ocannl ppx_minidebug ppx_here))
  (modes exe))
@@ -55,6 +78,30 @@
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
+
+; Runtime canary for every user-facing executable in this directory (gh-ocannl-858). This checks
+; only that each tool starts and completes: the workloads are intentionally too small to support
+; any claim about the measurements, whose hermeticity and validity belong to gh-ocannl-743. One
+; sequential action keeps CPU and linker pressure bounded on shared and CI machines. The alias is
+; included in the main CI Dune walk; keeping it outside `runtest` also makes the policy and its cost
+; visible at the call site as `dune build @bin-smoke`.
+
+(rule
+ ; ocannl-backend: cc -- every command pins the runtime canary to the cheap CPU backend.
+ (alias bin-smoke)
+ (package neural_nets_lib)
+ (deps
+  (alias bin-smoke-env_spelling_gate)
+  ocannl_config)
+ (action
+  (progn
+   (run %{exe:compilation_speed.exe} 1 --ocannl_backend=cc)
+   (run %{exe:schedule_bench.exe} 2 1 2 2 1 --ocannl_backend=cc)
+   (run %{exe:cpu_vectorization_bench.exe} 2 1 --ocannl_backend=cc)
+   (run %{exe:narrow_storage_bench.exe} 2 1 1 --ocannl_backend=cc)
+   (run %{exe:narrow_gebp_bench.exe} f32 2 1 1 1 --ocannl_backend=cc)
+   (run %{exe:device_props.exe} --ocannl_backend=cc)
+   (run %{exe:projection_shape_bench.exe} 2 2 smoke fwd seeds --ocannl_backend=cc))))
 
 (executable
  (package neural_nets_lib)

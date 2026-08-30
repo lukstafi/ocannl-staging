@@ -7,8 +7,7 @@ open Nn_blocks.DSL_modules
 
 (* FIXME: expose backend by name from Context *)
 
-let benchmark_overhead _backend_name () =
-  let n_data = 20 in
+let benchmark_overhead _backend_name n_data () =
   let ctx = Context.auto () in
   CDSL.disable_all_debugs ();
   Stdio.prerr_endline @@ "\n\n****** Benchmarking " ^ Context.backend_name ctx ^ " ******";
@@ -19,9 +18,10 @@ let benchmark_overhead _backend_name () =
   let ctx = Train.init_params ctx IDX.empty f in
   let f_ctx, f_routine = Train.to_routine ctx IDX.empty update_f in
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
-  (* [printf_tree] renders straight to stdout, and the loop below compiles 20 fresh routines before
-     anything else is printed. Unflushed, that tree waits for process exit and the run looks like it
-     produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the end. *)
+  (* [printf_tree] renders straight to stdout, and the loop below compiles [n_data] fresh routines
+     before anything else is printed. Unflushed, that tree waits for process exit and the run looks
+     like it produced nothing while it compiles (gh-ocannl-829). Same for the two renderings at the
+     end. *)
   Bench_out.flush ();
 
   let xs = Array.init n_data ~f:Float.(fun i -> of_int i - (of_int n_data /. 2.)) in
@@ -75,6 +75,12 @@ let benchmarks =
   ]
 
 let () =
-  List.map benchmarks ~f:(fun bench -> bench ())
+  (* Keep the default measurement unchanged, while letting the runtime-smoke alias exercise the
+     fresh-derived-context path with one point (gh-ocannl-858). This is a positive count because the
+     summary indexes the sampled arrays; [0] would only move the first failure from the compile loop
+     to an array access at the end. *)
+  let args = Bench_args.create "compilation_speed" in
+  let n_data = Bench_args.int args 0 ~name:"points" ~default:20 in
+  List.map benchmarks ~f:(fun bench -> bench n_data ())
   |> PrintBox_utils.table |> PrintBox_text.output Stdio.stdout;
   Bench_out.flush ()
