@@ -1066,9 +1066,12 @@ that they earn a lookup rather than always-loaded space.
   scratch prefix with `dpkg-deb -x`, and runs exactly one named `runtest-` alias in a fresh Dune
   build directory with `OCANNL_CC_BACKEND_COMPILER_COMMAND` pointing at a logging wrapper. A pass
   requires that wrapper to have been invoked, so an irrelevant alias or a cached action cannot be
-  certified. `--aarch64-clang` additionally unpacks clang 21 and arm64 cross headers and sets
+  certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient `OCANNL_*`
+  configuration and generic compiler/header selectors are cleared before the explicit settings are
+  injected. `--aarch64-clang` additionally unpacks clang 21 and arm64 cross headers and sets
   `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
-  NEON assembly dialect; today `cc_march_census` is the test that consumes that hook. The real
+  NEON assembly dialect, with the Debian cross-header directory passed explicitly through
+  `-isystem`; today `cc_march_census` is the test that consumes that hook. The real
   download is deliberately Linux/Debian-family-only; `--dry-run` validates and prints the complete
   staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
   GCC patch release is whichever candidate the configured apt indexes serve (the exact version and

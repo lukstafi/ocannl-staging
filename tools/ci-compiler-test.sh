@@ -14,6 +14,7 @@
 #                     every fetch/extract/test step without fetching or running.
 #   --keep            Keep the scratch directory (otherwise cleanup precedes
 #                     the exit sentinel).
+#   --cap SECONDS     Named-test wall-clock cap; 0 disables it (default: 3600).
 #   -j, --jobs N      Dune concurrency, 1..4 (default: 4).
 #
 # Examples:
@@ -57,6 +58,7 @@ dry_run=0
 keep=0
 aarch64_clang=0
 jobs=4
+cap=3600
 alias_name=
 
 while [ $# -gt 0 ]; do
@@ -72,6 +74,11 @@ while [ $# -gt 0 ]; do
     --keep)
       keep=1
       shift
+      ;;
+    --cap)
+      [ $# -ge 2 ] || die "--cap needs a value"
+      cap=$2
+      shift 2
       ;;
     -j | --jobs)
       [ $# -ge 2 ] || die "$1 needs a value"
@@ -89,6 +96,7 @@ while [ $# -gt 0 ]; do
 done
 
 case $jobs in 1 | 2 | 3 | 4) ;; *) die "jobs must be between 1 and 4" ;; esac
+case $cap in '' | *[!0-9]*) die "cap must be a non-negative integer" ;; esac
 case $alias_name in
   @*/runtest-?*) ;;
   '') usage ;;
@@ -151,8 +159,11 @@ else
 fi
 echo "test alias:       $alias_name"
 echo "dune jobs:        $jobs"
+echo "test cap:         ${cap}s"
 echo "scratch:          $scratch"
 echo "host toolchain:   GCC 13 x86_64-linux-gnu (Ubuntu CI proxy)"
+echo "test runner:      tools/test-run.sh from the resolved repository"
+echo "environment:      clear ambient OCANNL_* and generic compiler selectors"
 if [ "$aarch64_clang" -eq 1 ]; then
   echo "cross toolchain:  clang 21 --target=aarch64-linux-gnu"
   echo "assembly dialect: Apple NEON (-mllvm -aarch64-neon-syntax=apple)"
@@ -172,18 +183,21 @@ if [ "$dry_run" -eq 1 ]; then
     print_command apt-get download "${clang_packages[@]}" "${arm64_packages[@]}"
     echo "ci-compiler-test: planned cross invocation:"
     print_command "$prefix/usr/bin/clang-21" --target=aarch64-linux-gnu \
-      "--sysroot=$prefix" -mllvm -aarch64-neon-syntax=apple
+      "--sysroot=$prefix" -isystem "$prefix/usr/aarch64-linux-gnu/include" \
+      -mllvm -aarch64-neon-syntax=apple
   fi
   echo "ci-compiler-test: planned isolated test invocation:"
   if [ "$aarch64_clang" -eq 1 ]; then
     print_command env OCANNL_BACKEND=cc \
-      "OCANNL_CC_BACKEND_COMPILER_COMMAND=$wrapper_dir/gcc-13" \
-      "AARCH64_CROSS_GCC=$wrapper_dir/clang-aarch64" \
-      "DUNE_BUILD_DIR=$build_dir" dune build -j "$jobs" "$alias_name"
+      "OCANNL_CC_BACKEND_COMPILER_COMMAND=$(shell_quote "$wrapper_dir/gcc-13")" \
+      "AARCH64_CROSS_GCC=$(shell_quote "$wrapper_dir/clang-aarch64")" \
+      "DUNE_BUILD_DIR=$build_dir" "$repo/tools/test-run.sh" run --cap "$cap" \
+      build -j "$jobs" "$alias_name"
   else
     print_command env OCANNL_BACKEND=cc \
-      "OCANNL_CC_BACKEND_COMPILER_COMMAND=$wrapper_dir/gcc-13" \
-      "DUNE_BUILD_DIR=$build_dir" dune build -j "$jobs" "$alias_name"
+      "OCANNL_CC_BACKEND_COMPILER_COMMAND=$(shell_quote "$wrapper_dir/gcc-13")" \
+      "DUNE_BUILD_DIR=$build_dir" "$repo/tools/test-run.sh" run --cap "$cap" \
+      build -j "$jobs" "$alias_name"
   fi
   echo "ci-compiler-test: dry-run: PASS (arguments and scratch staging only)"
   exit 0
@@ -224,6 +238,7 @@ fi
 
 gcc_log="$scratch/gcc-invocations.log"
 gcc_wrapper="$wrapper_dir/gcc-13"
+gcc_command=$(shell_quote "$gcc_wrapper")
 quoted_gcc=$(shell_quote "$gcc_binary")
 quoted_gcc_log=$(shell_quote "$gcc_log")
 printf '%s\n' '#!/bin/sh' 'set -u' \
@@ -249,12 +264,17 @@ if [ "$aarch64_clang" -eq 1 ]; then
   [ -x "$clang_binary" ] || die "extracted clang 21 binary was not found at $clang_binary"
   clang_log="$scratch/clang-aarch64-invocations.log"
   clang_wrapper="$wrapper_dir/clang-aarch64"
+  clang_command=$(shell_quote "$clang_wrapper")
+  cross_include="$prefix/usr/aarch64-linux-gnu/include"
+  [ -d "$cross_include" ] ||
+    die "arm64 cross headers were not extracted at $cross_include"
   quoted_clang=$(shell_quote "$clang_binary")
   quoted_clang_log=$(shell_quote "$clang_log")
   quoted_prefix=$(shell_quote "$prefix")
+  quoted_cross_include=$(shell_quote "$cross_include")
   printf '%s\n' '#!/bin/sh' 'set -u' \
     "printf '%s\\n' \"\$*\" >>$quoted_clang_log" \
-    "exec $quoted_clang --target=aarch64-linux-gnu --sysroot=$quoted_prefix -mllvm -aarch64-neon-syntax=apple \"\$@\"" \
+    "exec $quoted_clang --target=aarch64-linux-gnu --sysroot=$quoted_prefix -isystem $quoted_cross_include -mllvm -aarch64-neon-syntax=apple \"\$@\"" \
     >"$clang_wrapper" || die "cannot write clang wrapper"
   chmod +x "$clang_wrapper" || die "cannot make clang wrapper executable"
   clang_version=$($clang_binary --version 2>/dev/null | sed -n '1p') ||
@@ -274,7 +294,7 @@ if [ "$aarch64_clang" -eq 1 ]; then
   echo "cross compiler version: $clang_version"
   echo "cross compiler target:  $clang_target"
   echo "cross compiler wrapper: $clang_wrapper"
-  echo "cross compiler flags:   --target=aarch64-linux-gnu --sysroot=$prefix -mllvm -aarch64-neon-syntax=apple"
+  echo "cross compiler flags:   --target=aarch64-linux-gnu --sysroot=$prefix -isystem $cross_include -mllvm -aarch64-neon-syntax=apple"
 fi
 echo "source tree:            $repo"
 echo "source commit:          $(git -C "$repo" rev-parse HEAD)"
@@ -286,20 +306,43 @@ eval "$opam_environment"
 opam_switch=$(cd "$repo" && opam switch show --safe) || die "cannot identify the selected opam switch"
 echo "ci-compiler-test: opam switch: $opam_switch"
 
+# Explicit compiler and backend settings must be the only OCANNL environment
+# configuration that reaches the test. Print names, never values: a profile or
+# compiler flag from the caller (or injected by the selected opam switch) would
+# otherwise outrank the checked-in test configuration and falsify provenance.
+ambient_ocannl_names=()
+while IFS='=' read -r name _; do
+  case $name in OCANNL_*) ambient_ocannl_names+=("$name") ;; esac
+done < <(env)
+if [ "${#ambient_ocannl_names[@]}" -gt 0 ]; then
+  echo "ci-compiler-test: clearing ambient OCANNL variables:"
+  for name in "${ambient_ocannl_names[@]}"; do
+    echo "  $name"
+    unset "$name" || die "cannot clear ambient variable $name"
+  done
+fi
+remaining_ocannl_names=$(env | sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
+  die "cannot verify ambient OCANNL cleanup"
+[ -z "$remaining_ocannl_names" ] ||
+  die "ambient OCANNL variables remain after cleanup: $remaining_ocannl_names"
+echo "ci-compiler-test: ambient OCANNL configuration: cleared"
+
+# These generic compiler selectors are not OCANNL settings, but can redirect
+# the fetched drivers to a caller-owned toolchain or headers just as surely.
+unset GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH SDKROOT MACOSX_DEPLOYMENT_TARGET
+unset AARCH64_CROSS_GCC
+
 rm -f "$gcc_log"
 [ -z "$clang_log" ] || rm -f "$clang_log"
 echo "ci-compiler-test: test (unpiped): $alias_name"
 if [ "$aarch64_clang" -eq 1 ]; then
-  env -u GCC_EXEC_PREFIX -u COMPILER_PATH -u CPATH -u C_INCLUDE_PATH -u SDKROOT \
-    -u MACOSX_DEPLOYMENT_TARGET OCANNL_BACKEND=cc \
-    "OCANNL_CC_BACKEND_COMPILER_COMMAND=$gcc_wrapper" \
-    "AARCH64_CROSS_GCC=$clang_wrapper" "DUNE_BUILD_DIR=$build_dir" \
-    dune build -j "$jobs" "$alias_name" || exit $?
+  OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
+    AARCH64_CROSS_GCC="$clang_command" DUNE_BUILD_DIR="$build_dir" \
+    "$repo/tools/test-run.sh" run --cap "$cap" build -j "$jobs" "$alias_name" || exit $?
 else
-  env -u GCC_EXEC_PREFIX -u COMPILER_PATH -u CPATH -u C_INCLUDE_PATH -u SDKROOT \
-    -u MACOSX_DEPLOYMENT_TARGET -u AARCH64_CROSS_GCC OCANNL_BACKEND=cc \
-    "OCANNL_CC_BACKEND_COMPILER_COMMAND=$gcc_wrapper" "DUNE_BUILD_DIR=$build_dir" \
-    dune build -j "$jobs" "$alias_name" || exit $?
+  OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
+    DUNE_BUILD_DIR="$build_dir" "$repo/tools/test-run.sh" run --cap "$cap" \
+    build -j "$jobs" "$alias_name" || exit $?
 fi
 
 [ -s "$gcc_log" ] ||
