@@ -3471,6 +3471,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                         | Fiss (F_sketch _) -> Int.incr n_fiss_sketch_timed
                         | Fiss (F_split _) -> Int.incr n_sr_timed
                         | _ -> ());
+                        if spec_expects_mma spec then Int.incr n_mma_timed;
                         Int.incr n_timings_contended;
                         (* Unlike a launch/compile decline, contention is not a property of this
                            schedule. An equivalent later seed is a useful retry, not a dedup. *)

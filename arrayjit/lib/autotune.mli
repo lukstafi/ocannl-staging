@@ -662,10 +662,12 @@ type report = {
           same point as [mma_timed], so the two always describe the same population. *)
   mma_timed : int;
       (** Of [mma_candidates], those that compiled and were actually timed (dedup'd duplicates
-          excluded — an identical candidate was already timed). [mma_candidates > 0] with
-          [mma_timed = 0] means the search never measured a tensorized pipeline at all, the state
-          gh-ocannl-521 recorded for every GPU backend: candidates are cheap to enumerate and were
-          being rejected in bulk at candidate compile. *)
+          excluded — an identical candidate was already timed). Includes completed timing windows
+          refused for host contention; [timings_contended] identifies those unusable verdicts.
+          [mma_candidates > 0] with [mma_timed = 0] means the search never reached a timing window
+          for a tensorized pipeline at all, the state gh-ocannl-521 recorded for every GPU backend:
+          candidates are cheap to enumerate and were being rejected in bulk at candidate compile.
+      *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
