@@ -7,4 +7,4 @@ extent=7 rejected: Indexing: bound value 7 for symbolic extent i1 exceeds its de
 timing measurement binds the extent at its upper bound: 6
 tuned routine at extent=6: total=6.0
 tuned routine at extent=3: total=3.0
-second tune hits the extent-value-independent cache entry: true
+second tune replays the extent-independent key exactly after contention-free timing: true

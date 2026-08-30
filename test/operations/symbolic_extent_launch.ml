@@ -47,7 +47,8 @@ let () =
   (* Autotuning an extent-parameterized routine (gh-490 stage 3): measurement binds extents at their
      upper bound, the schedule-cache identity is extent-value-independent (the extent is a kernel
      parameter, not part of the lowered program), so one tuned entry serves every extent -- a second
-     tune of the same program hits the cache. *)
+     tune of the same program hits the cache when the first measurement set was complete, and
+     retries the same extent-independent key after a contention refusal. *)
   let cache_dir = "autotune_cache_symbolic_extent" in
   let comp = fwd_comp in
   let report1 = ref None in
@@ -77,7 +78,11 @@ let () =
       ~report:(fun r -> report2 := Some r)
       hctx comp bindings
   in
-  Verdict.p "second tune hits the extent-value-independent cache entry"
+  let r1 = Option.value_exn ~here:[%here] !report1 in
+  Verdict.p "second tune replays the extent-independent key exactly after contention-free timing"
     (match !report2 with
-    | Some r -> ( match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false)
+    | Some r ->
+        Bool.equal
+          (match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false)
+          (r1.Autotune.timings_contended = 0)
     | None -> false)
