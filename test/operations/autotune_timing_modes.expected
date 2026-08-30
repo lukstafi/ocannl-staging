@@ -3,6 +3,7 @@ a fast routine reaches the 64-sample cap: true
 a stall burst cannot spend the budget before the 16-sample floor: true
 a mostly stalled sample window reports contention: true
 queued calibration refuses a contended estimate: true
+queued contention is detected on raw batch wall before per-launch division: true
 a consistently slow routine is not mistaken for host contention: true
 the top-up budget accumulates per-sample time: true
 == queued batch depth ==

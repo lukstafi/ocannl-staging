@@ -49,6 +49,7 @@ type outcome =
    kernel and wait — and because it is what every schedule crowned before gh-ocannl-755 was ranked
    by. *)
 type timing_mode = Isolated | Queued
+type timing_sample = { per_launch_ms : float; contention_ms : float }
 
 (* A timing can produce a numeric minimum and still fail to establish that the minimum is
    representative: under host contention most samples can be orders of magnitude above the one clean
@@ -68,6 +69,7 @@ let timing_of_setting s =
 type report = {
   outcome : outcome;
   candidates_timed : int;
+  timings_contended : int;
   candidates_failed : int;
   baseline_declined : bool;
   declines : decline_summary list;
@@ -128,6 +130,7 @@ let no_search_report ~timing =
   {
     outcome = Search_disabled;
     candidates_timed = 0;
+    timings_contended = 0;
     candidates_failed = 0;
     baseline_declined = false;
     declines = [];
@@ -265,14 +268,14 @@ let max_timing_runs = 64
 
 (* This is a refusal threshold, not an estimate of ordinary jitter. One slow outlier says nothing
    about the minimum; a MAJORITY this far above it says the sample window was mostly measuring host
-   stalls. The 8x gap is deliberately far below the 200-350x failure that prompted gh-ocannl-855 and
-   far above the small spread a steady sample population presents. *)
-let contention_ratio = 8.
+   stalls. A 2x majority threshold catches a fixed 20 ms host stall on a calibrated ~10 ms queued
+   batch, while a consistently slow routine has no dispersion and remains valid. *)
+let contention_ratio = 2.
 
-(* The policy seam shared by calibration and the timed loop. [sample] returns one per-launch time:
-   isolated mode's batch has depth 1, while queued mode divides the batch wall by its depth before
-   it gets here. The budget therefore accumulates the quantity being sampled, not batch wall time; a
-   deep queue and a host stall cannot spend the budget on 200 launches at once. The sample floor
+(* The policy seam shared by calibration and the timed loop. The budget accumulates [per_launch_ms],
+   the quantity being ranked; contention is detected independently on [contention_ms], the raw batch
+   wall before queued mode divides it by depth. A deep queue therefore neither spends the budget on
+   200 launches at once nor divides a fixed host stall out of the refusal signal. The sample floor
    keeps a burst from ending the min-of-N after the caller's usual three repeats. *)
 let sample_min ~repeats ~sample =
   let samples = ref [] in
@@ -282,13 +285,20 @@ let sample_min ~repeats ~sample =
     !count < Int.max min_timing_samples (Int.max 1 repeats)
     || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
   do
-    let dt = sample () in
-    samples := dt :: !samples;
-    total := !total +. dt;
+    let ({ per_launch_ms; _ } as timing_sample) = sample () in
+    samples := timing_sample :: !samples;
+    total := !total +. per_launch_ms;
     Int.incr count
   done;
-  let ms = List.fold !samples ~init:Float.infinity ~f:Float.min in
-  let stalled = List.count !samples ~f:(fun dt -> Float.(dt > ms * contention_ratio)) in
+  let ms =
+    List.fold !samples ~init:Float.infinity ~f:(fun best s -> Float.min best s.per_launch_ms)
+  in
+  let contention_floor =
+    List.fold !samples ~init:Float.infinity ~f:(fun best s -> Float.min best s.contention_ms)
+  in
+  let stalled =
+    List.count !samples ~f:(fun s -> Float.(s.contention_ms > contention_floor * contention_ratio))
+  in
   { ms; contended = stalled * 2 >= !count; samples = !count }
 
 (* Queued mode's batch depth is calibrated per candidate rather than fixed. A fixed depth is either
@@ -394,14 +404,21 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
         match timing with
         | Isolated -> (None, Some 1)
         | Queued ->
-            let estimate = sample_min ~repeats:queue_calibration_runs ~sample:(fun () -> batch 1) in
+            let estimate =
+              sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
+                  let wall = batch 1 in
+                  { per_launch_ms = wall; contention_ms = wall })
+            in
             (Some estimate, queued_batch_depth estimate)
       in
       !on_batch_depth depth
         ~calibration_samples:(Option.value_map calibration ~default:0 ~f:(fun r -> r.samples));
       match depth with
       | None -> Option.value_exn calibration
-      | Some depth -> sample_min ~repeats ~sample:(fun () -> batch depth /. Float.of_int depth))
+      | Some depth ->
+          sample_min ~repeats ~sample:(fun () ->
+              let wall = batch depth in
+              { per_launch_ms = wall /. Float.of_int depth; contention_ms = wall }))
 
 (* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
    a single work-item — every nest a serial scalar loop, at one lane's throughput. Such a candidate
@@ -2918,6 +2935,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                        this key was measured under this objective. *)
                     timing;
                     candidates_timed = 0;
+                    timings_contended = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
                     baseline_declined = Option.is_some baseline_decline;
@@ -3034,6 +3052,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
            its rank, so every timed candidate beats it and the search never returns it (see the
            fallback at the end), and a declined baseline ranks the same way. *)
         let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
+        let baseline_contended = ref false in
         let baseline_ms =
           match baseline with
           | Some b when baseline_dispatched -> (
@@ -3078,6 +3097,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               with
               | { ms; contended = false; _ } -> ms
               | { contended = true; _ } ->
+                  baseline_contended := true;
                   logf "baseline timing refused: host contention dominated the sample window";
                   Float.infinity
               | exception Outcome.Raised_at (phase, exn, backtrace) ->
@@ -3120,6 +3140,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                   (Printf.sprintf
                      "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)" backend)));
         let n_timed = ref (if baseline_timed then 1 else 0) in
+        let n_timings_contended = ref (if !baseline_contended then 1 else 0) in
         (* Live search state for an honest partial report. Each counter starts at the amount of work
            completed so far and is updated at its ordinary accounting site below. [best_so_far] is
            updated after every successful timing, including midway through seed enumeration. *)
@@ -3274,6 +3295,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               outcome = Search_died failure;
               timing;
               candidates_timed = !n_timed;
+              timings_contended = !n_timings_contended;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
               declines = summaries;
@@ -3436,6 +3458,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                           time_routine ~tag_failures:true ~timing ~repeats c.cctx c.routine)
                     with
                     | Ok { contended = true; _ } ->
+                        Int.incr n_timings_contended;
                         logf
                           "%s: NOT TIMED, host contention dominated the sample window (digest %s)"
                           (spec_label spec) (dshort c.digest_after);
@@ -3962,6 +3985,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               outcome = Searched;
               timing;
               candidates_timed = !n_timed;
+              timings_contended = !n_timings_contended;
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
               declines = decline_summaries declines;

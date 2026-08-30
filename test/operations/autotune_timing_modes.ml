@@ -26,7 +26,7 @@ let backend () = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~def
 
 (* {1 Sampling policy, with an injected clock} *)
 
-let sample_from values fallback =
+let sample_from_samples values fallback =
   let rest = ref values and calls = ref 0 in
   let sample () =
     Int.incr calls;
@@ -37,6 +37,11 @@ let sample_from values fallback =
     | [] -> fallback
   in
   (sample, calls)
+
+let same_sample ms : Autotune.timing_sample = { per_launch_ms = ms; contention_ms = ms }
+
+let sample_from values fallback =
+  sample_from_samples (List.map values ~f:same_sample) (same_sample fallback)
 
 let () =
   Stdio.printf "== contention-robust sample budgeting ==\n";
@@ -55,6 +60,12 @@ let () =
   p "a mostly stalled sample window reports contention" burst.contended;
   p "queued calibration refuses a contended estimate"
     (Option.is_none (Autotune.queued_batch_depth burst));
+  let stalled : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 30. } in
+  let clean : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 10. } in
+  let sample, _ = sample_from_samples (List.init 63 ~f:(fun _ -> stalled)) clean in
+  let queued_burst = Autotune.sample_min ~repeats:3 ~sample in
+  p "queued contention is detected on raw batch wall before per-launch division"
+    queued_burst.contended;
   let sample, _ = sample_from [] 20. in
   let slow = Autotune.sample_min ~repeats:3 ~sample in
   p "a consistently slow routine is not mistaken for host contention"

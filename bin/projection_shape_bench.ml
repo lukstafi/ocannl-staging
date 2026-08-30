@@ -637,7 +637,15 @@ let () =
       time_round lives;
       List.iter lives ~f:(fun lv ->
           if (not !(lv.lv_failed)) && not (List.is_empty !(lv.lv_times)) then
-            record_result lv (report lv));
+            if Float.is_finite !(lv.lv_iso) && Float.is_finite !(lv.lv_queued) then
+              record_result lv (report lv)
+            else (
+              lv.lv_failed := true;
+              fail "%s / %s: every %s tuner timing was refused for host contention" lv.lv_tag
+                lv.lv_label
+                (if Float.is_finite !(lv.lv_iso) then "queued"
+                 else if Float.is_finite !(lv.lv_queued) then "isolated"
+                 else "isolated and queued")));
       List.iter lives ~f:release
     end
   in

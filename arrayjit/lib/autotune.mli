@@ -558,11 +558,18 @@ type timing_mode =
           step presents — it queues every kernel of a layer and synchronizes at the end, so no
           kernel in it pays a round trip of its own. *)
 
+type timing_sample = {
+  per_launch_ms : float;  (** The quantity the sampling budget accumulates and the minimum ranks. *)
+  contention_ms : float;
+      (** Raw wall time used only for contention detection. Under {!Queued} this is the whole batch
+          before division by its depth, so a fixed host stall is not divided out of the signal. *)
+}
+
 type timing_result = {
   ms : float;
       (** The minimum per-launch sample. Callers must use it only when [contended = false]. *)
   contended : bool;
-      (** At least half the sample window was more than 8x slower than its minimum. This is a
+      (** At least half the sample window was more than 2x slower than its minimum. This is a
           refusal signal: the window mostly measured host stalls, so the autotuner does not rank or
           cache the number (gh-ocannl-855). *)
   samples : int;
@@ -593,6 +600,11 @@ type report = {
           this count is not comparable across a CPU and a GPU backend: every serial-form candidate
           the CPU backends legitimately time is refused on GPU, and the refusals are counted in
           [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
+  timings_contended : int;
+      (** Baseline and candidate timing windows refused because host contention dominated their
+          samples (gh-ocannl-855). Zero on cache replay and search-disabled calls, which time
+          nothing in this process. Lets a completed search distinguish transient measurement refusal
+          from structural candidate declines and retry when appropriate. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
           serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
@@ -1071,11 +1083,11 @@ val queued_batch_depth : timing_result -> int option
     at 1 turns a queued search back into an isolated one. Returns [None] for a contended estimate,
     refusing to turn a stall-inflated calibration into depth 1. *)
 
-val sample_min : repeats:int -> sample:(unit -> float) -> timing_result
-(** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). [sample]
-    returns one per-launch time. Takes at least 16 samples, then tops up until their accumulated
-    per-sample time reaches ~25 ms or 64 samples have been taken. Reports [contended] when at least
-    half the samples exceed the minimum by 8x. Exposed so tests can inject a deterministic clock. *)
+val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
+(** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
+    16 samples, then tops up until their accumulated [per_launch_ms] reaches ~25 ms or 64 samples
+    have been taken. Reports [contended] when at least half the raw [contention_ms] samples exceed
+    their minimum by 2x. Exposed so tests can inject a deterministic clock. *)
 
 val timing_string : timing_mode -> string
 (** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component
