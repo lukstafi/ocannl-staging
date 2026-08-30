@@ -1003,6 +1003,17 @@ that they earn a lookup rather than always-loaded space.
   (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
   gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
+- `tools/remote-verify.sh` is the one-off counterpart to the scheduled sweep for a pushed branch:
+  it fetches that branch on a named box, resolves one commit, creates a fresh detached worktree,
+  runs `opam exec -- dune build @check` and any named test aliases or runnable probes, and removes
+  and prunes the worktree before its exit sentinel. `--expect-lib cudajit|hipjit` asserts all three
+  pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
+  backend's absent `.cmi`). A test, probe or `--record-golden` trip also requires a backend and
+  asserts `_build/default/test/config/ocannl_backend.txt`; an `@check`-only trip says explicitly
+  that it compiled code and executed no backend. Golden mode prints the corrected `.actual`
+  contents and an apply-ready patch before cleanup destroys the remote worktree. Do not replace
+  its unpiped ssh output with a convenience pipe: the far-side sentinel is the build verdict plus
+  cleanup, and the local sentinel is ssh's transport verdict.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
