@@ -320,6 +320,61 @@ let () =
        (String.is_substring source ~substring:"device volatile float*")
        volatility.requested)
 
+(* A data-dependent guard can be the accumulating loop's only device read: [if mask[i] then
+   local += 1]. The scope remains reduction-shaped because the guard does not observe the local.
+   Metal must cast that controlling read even though the update expression itself dereferences no
+   node pointer (Codex P1, review round 3 on #553). *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9840 ~dims:[| 8 |] () in
+  let mask = node "res_guard_mask"
+  and out = node ~dims:[| 1 |] "res_guard_out"
+  and tmp = node ~dims:[| 1 |] "res_guard_tmp" in
+  List.iter [ mask; out ] ~f:Ll_test.materialize;
+  Ll_test.virtualize tmp;
+  let i = Ll_test.sym () in
+  let id = LL.get_scope tmp in
+  let body =
+    LL.Seq
+      ( LL.Set_local (id, Ll_test.c 0.0),
+        Ll_test.loop_n i 8
+          (LL.If
+             {
+               cond = (Ll_test.get mask [| Ll_test.iter i |], Ir.Ops.single);
+               body = LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.c 1.0));
+             }) )
+  in
+  let program =
+    Ll_test.set out [| Ll_test.fixed 0 |]
+      (LL.Local_scope
+         { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation })
+  in
+  let optimized = Ll_test.optimize ~materialized:[ mask; out ] ~name:"res_guarded" program in
+  Verdict.p "conditional reduction retains its scope-local accumulator"
+    (Ll_test.count_scopes optimized.LL.llc = 1);
+  let ctx, routine = Ll_test.link ~name:"res_guarded" optimized in
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:
+        [
+          (mask, [| 1.0; 0.0; 1.0; 1.0; 0.0; 0.0; 1.0; 0.0 |]);
+          (out, [| -1.0 |]);
+        ]
+  in
+  Verdict.p "conditional reduction matches the selected-term reference"
+    Float.(equal (Context.get_values ctx out).(0) 4.0);
+  let volatility = routine.Context.volatility in
+  Verdict.p "conditional reduction contributes exactly one census site"
+    (volatility.Ir.C_syntax.volatile_accumulations + volatility.plain_accumulations = 1);
+  Verdict.p "conditional reduction census follows the controlling read"
+    (Bool.equal (volatility.volatile_accumulations = 1) volatility.requested
+    && Bool.equal (volatility.plain_accumulations = 1) (not volatility.requested));
+  let source = Test_utils.Generated.read "res_guarded" in
+  Verdict.p "conditional reduction casts its controlling device read"
+    (Bool.equal
+       (String.is_substring source ~substring:"volatile float*)res_guard_mask")
+       volatility.requested)
+
 (* {1 The volatility census's own bracket}
 
    [with_volatility_census] is what makes the census a property of the compiled routine rather than

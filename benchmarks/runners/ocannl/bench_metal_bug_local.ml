@@ -6,7 +6,8 @@
    last iteration. After the serial-reduction localizer (gh-ocannl-693) that statement shape is gone
    from most kernels — the accumulator lives in a scope local and the node is stored once — and the
    same compiler pass can corrupt THAT form instead. OCANNL works around it with expression-level
-   volatile pointer casts on device reads inside accumulating updates on Metal
+   volatile pointer casts on device reads inside accumulating updates and their controlling guards
+   on Metal
    ([volatile_serial_accumulation] in arrayjit/lib/c_syntax.ml).
 
    This program has two halves, and no OCANNL dependency at all:

@@ -329,7 +329,7 @@ type volatility_site =
   | Plain_accumulator of string
       (** A reduction-shaped scope local whose reads stay plain — either this backend does not
           request the workaround, or no materialized device read was emitted in its accumulating
-          update. The accumulator itself stays register-resident in both cases. *)
+          loop. The accumulator itself stays register-resident in both cases. *)
   | Volatile_rmw_reads of string
       (** A device-memory read-modify-write at an address invariant across an enclosing serial loop,
           whose device reads use expression-level [volatile] pointer casts. *)
@@ -632,12 +632,13 @@ module type C_syntax_config = sig
       identically, and so does moving the preceding store to an unrelated cell. What does remove it,
       besides the qualifier, is having the accumulating loop read no device pointer at all.
 
-      When [true]: device reads in reduction-shaped scope-local updates, and in [Set] statements
-      that read the written node at an index invariant across at least one enclosing serial [for]
-      loop, use expression-level [volatile] pointer casts. The cast exists only while rendering the
-      accumulating update: accumulator declarations, opening reads, vectorized/packed paths and MMA
-      reads stay plain. Pointwise updates and non-accumulator locals stay untouched. Both decisions
-      are reported per routine by the volatility census ({!volatility_summary}).
+      When [true]: device reads in reduction-shaped scope-local updates and their controlling
+      guards, and in [Set] statements that read the written node at an index invariant across at
+      least one enclosing serial [for] loop, use expression-level [volatile] pointer casts. The cast
+      exists only while rendering the accumulating expression: accumulator declarations, opening
+      reads, vectorized/packed paths and MMA reads stay plain. Pointwise updates and non-accumulator
+      locals stay untouched. Both decisions are reported per routine by the volatility census
+      ({!volatility_summary}).
 
       The form matters: qualifying the accumulator itself cost 1.06x on a memory-bound per-thread
       reduction, 2.15x on an accumulator-bound dependency chain and 4.1x on a long single-threaded
@@ -2132,14 +2133,14 @@ module C_syntax (B : C_syntax_config) = struct
       volatility_events := Accumulation id :: !volatility_events
     end
 
-  let with_volatile_accumulation_reads ?scope_id enabled f =
+  let with_volatile_accumulation_reads ?(scope_ids = []) enabled f =
     let saved = !volatile_accumulation_reads in
     let saved_scopes = !volatile_accumulation_scope_stack in
     let saved_observers = !volatile_read_observers in
     let emitted = ref false in
     volatile_accumulation_reads := saved || enabled;
     if enabled then begin
-      Option.iter scope_id ~f:(fun id -> volatile_accumulation_scope_stack := id :: saved_scopes);
+      volatile_accumulation_scope_stack := scope_ids @ saved_scopes;
       volatile_read_observers := emitted :: saved_observers
     end;
     let restore () =
@@ -2153,6 +2154,57 @@ module C_syntax (B : C_syntax_config) = struct
   let record_volatile_read () =
     List.iter !volatile_read_observers ~f:(fun seen -> seen := true);
     List.iter !volatile_accumulation_scope_stack ~f:(Hash_set.add volatile_accumulation_scopes)
+
+  (* Accumulator locals whose updates are controlled by a statement subtree. A materialized read in
+     an [If] condition around [Set_local (id, id + constant)] is the accumulating loop's ONLY
+     device read, so it needs the same expression-level cast as a read in the update itself. Walk
+     nested scalar scopes too: an [If] can control a statement whose value owns the accumulator. *)
+  let controlled_accumulation_scope_ids body =
+    let seen = Hash_set.create (module Int) in
+    let ids = ref [] in
+    let add (id : Low_level.scope_id) value =
+      if
+        Hash_set.mem accum_scope_ids id.scope_id
+        && Option.is_some (Low_level.accum_local_update_op ~id value)
+        && not (Hash_set.mem seen id.scope_id)
+      then begin
+        Hash_set.add seen id.scope_id;
+        ids := id.scope_id :: !ids
+      end
+    in
+    let rec scalar = function
+      | Low_level.Local_scope { body; _ } -> stmt body
+      | Get_dynamic { dyn_value = value, _; _ } -> scalar value
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          scalar a;
+          scalar b;
+          scalar c
+      | Binop (_, (a, _), (b, _)) ->
+          scalar a;
+          scalar b
+      | Unop (_, (a, _)) -> scalar a
+      | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          ()
+    and stmt = function
+      | Low_level.Seq (a, b) ->
+          stmt a;
+          stmt b
+      | For_loop { body; _ } | If { body; _ } -> stmt body
+      | Set_local (id, value) ->
+          add id value;
+          scalar value
+      | Set { llsc; _ } -> scalar llsc
+      | Set_dynamic { dyn_value = value, _; llsc; _ } ->
+          scalar value;
+          scalar llsc
+      | Set_from_vec { arg = value, _; _ } -> scalar value
+      | Tile_mma { fallback; _ } -> stmt fallback
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+      | Workgroup_barrier ->
+          ()
+    in
+    stmt body;
+    List.rev !ids
 
   let pp_device_read_ptr tn ident_doc =
     let open PPrint in
@@ -5289,8 +5341,8 @@ module C_syntax (B : C_syntax_config) = struct
           && Option.is_some (Low_level.accum_local_update_op ~id value)
         in
         let (local_defs, value_doc), _ =
-          with_volatile_accumulation_reads ~scope_id:id.Low_level.scope_id volatile_reads (fun () ->
-              pp_scalar value_prec value)
+          with_volatile_accumulation_reads ~scope_ids:[ id.Low_level.scope_id ] volatile_reads
+            (fun () -> pp_scalar value_prec value)
         in
         let value_doc =
           wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc
@@ -5864,8 +5916,19 @@ module C_syntax (B : C_syntax_config) = struct
                     fallback_or_tiled ())))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
-           [if] tests exactly that. *)
-        let local_defs, cond_doc = pp_scalar (comp_prec cprec) c in
+           [if] tests exactly that. A guard controlling a recognized scope-local accumulation is
+           part of its accumulating loop: when the guard is its only materialized read, excluding
+           it would remove the Metal workaround altogether (gh-ocannl-820, Codex P1 round 3 on
+           #553). Keep the context expression-local, and only while already inside a serial loop. *)
+        let controlled_scopes =
+          if B.volatile_serial_accumulation && not (List.is_empty !serial_loop_stack) then
+            controlled_accumulation_scope_ids body
+          else []
+        in
+        let (local_defs, cond_doc), _ =
+          with_volatile_accumulation_reads ~scope_ids:controlled_scopes
+            (not (List.is_empty controlled_scopes)) (fun () -> pp_scalar (comp_prec cprec) c)
+        in
         let local_defs = pp_local_defs local_defs in
         let body_doc = pp_ll ~log_set_locals ~in_loop:true body in
         let if_doc =

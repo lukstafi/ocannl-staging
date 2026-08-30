@@ -35,6 +35,11 @@ lifted accumulator executes once for both users: true
 lifted accumulator contributes exactly one census site: true
 lifted accumulator census follows its emitted volatile read: true
 lifted accumulating read uses the backend-requested form: true
+conditional reduction retains its scope-local accumulator: true
+conditional reduction matches the selected-term reference: true
+conditional reduction contributes exactly one census site: true
+conditional reduction census follows the controlling read: true
+conditional reduction casts its controlling device read: true
 an inner bracket summarizes only its own sites: true
 the enclosing bracket sees both, in emission order: true
 an inner bracket reports the capability of the compile it bracketed: true
