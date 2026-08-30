@@ -1414,6 +1414,73 @@ let marker_backends = [ "none"; "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ]
     grammar that fails for a reason nobody can see in a diff. *)
 let marker_separators = [ "--"; "\xe2\x80\x94" ]
 
+type marker_malformed =
+  | Repeated_sentinel
+  | Missing_reason_separator
+  | Short_reason of string
+  | Declaration_error of string
+
+type 'a marker_text =
+  | Not_a_marker
+  | Parsed_marker of 'a
+  | Malformed_marker_text of marker_malformed list
+
+let marker_malformed_reason ~sentinel ~separator_subject ~grammar = function
+  | Repeated_sentinel ->
+      Printf.sprintf
+        "two `%s` declarations in one comment -- the second would be read as part of the first's \
+         reason; put each on its own line"
+        sentinel
+  | Missing_reason_separator ->
+      Printf.sprintf "no `--` separating the %s from the reason -- the grammar is `; %s`"
+        separator_subject grammar
+  | Short_reason reason ->
+      Printf.sprintf "the reason `%s` is one word -- say why, not what" reason
+  | Declaration_error why -> why
+
+(** [parse_marker_text] is the grammar shared by every machine-checked Dune comment marker.
+
+    A marker announces itself by containing [sentinel] anywhere in a [;] comment. It contains that
+    sentinel exactly once, separates its declaration from a reason with the earliest admitted
+    spelling of [--] or an em dash, and gives a reason of at least two words. [parse_declaration]
+    owns only the convention-specific declaration to the left of that separator.
+
+    Nothing malformed is normalised: a second sentinel, a missing separator, or a one-word reason is
+    returned as [Malformed_marker_text]. This is the common outer grammar; the contained-marker
+    contract below adds comment, stanza, and subject attribution. *)
+let parse_marker_text ~sentinel ~parse_declaration text =
+  let trimmed = String.strip text in
+  match String.substr_index trimmed ~pattern:sentinel with
+  | None -> Not_a_marker
+  | Some at -> (
+      let rest = String.strip (String.subo trimmed ~pos:(at + String.length sentinel)) in
+      if Option.is_some (String.substr_index rest ~pattern:sentinel) then
+        Malformed_marker_text [ Repeated_sentinel ]
+      else
+        let split =
+          List.filter_map marker_separators ~f:(fun separator ->
+              Option.map (String.substr_index rest ~pattern:separator) ~f:(fun index ->
+                  (index, separator)))
+          |> List.min_elt ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+          |> Option.map ~f:(fun (index, separator) ->
+              ( String.strip (String.sub rest ~pos:0 ~len:index),
+                String.strip (String.subo rest ~pos:(index + String.length separator)) ))
+        in
+        (match split with
+        | None -> Malformed_marker_text [ Missing_reason_separator ]
+        | Some (declaration, reason) ->
+            if
+              List.length
+                (String.split_on_chars reason ~on:[ ' '; '\t' ]
+                |> List.filter ~f:(Fn.non String.is_empty))
+              < 2
+            then
+              Malformed_marker_text [ Short_reason reason ]
+            else (
+              match parse_declaration ~declaration ~reason with
+              | Ok marker -> Parsed_marker marker
+              | Error why -> Malformed_marker_text (List.map why ~f:(fun s -> Declaration_error s)))))
+
 type marker_body = { backend : string; reason : string }
 (** [backend] is the comma-separated list as normalised by {!parse_marker}: the words with their
     spacing removed, so a caller can split it on [','] without re-trimming. *)
@@ -1443,89 +1510,54 @@ type marker =
     job is to be checkable, so an empty entry between commas, a backend named twice, or a second
     declaration sharing the line are all {!Malformed} rather than normalised away — silently reading
     [cc,] as [cc] would hand back a clean answer for a marker its author got wrong. *)
-let parse_marker text =
-  let trimmed = String.strip text in
-  match String.substr_index trimmed ~pattern:marker_sentinel with
-  | None -> None
-  | Some at ->
-      (* Announced anywhere in the comment, read from there on: `; NOTE ocannl-backend: …` is a
-         marker someone has annotated, not prose that happens to contain the sentinel. *)
-      let rest = String.strip (String.subo trimmed ~pos:(at + String.length marker_sentinel)) in
-      (* The EARLIEST separator, not the first spelling that occurs anywhere: a reason containing
-         one spelling would otherwise be cut at it while the real separator, written in the other,
-         sat further left -- and the backend position would swallow half the sentence. *)
-      let split =
-        List.filter_map marker_separators ~f:(fun separator ->
-            Option.map (String.substr_index rest ~pattern:separator) ~f:(fun index ->
-                (index, separator)))
-        |> List.min_elt ~compare:(fun (a, _) (b, _) -> Int.compare a b)
-        |> Option.map ~f:(fun (index, separator) ->
-            ( String.strip (String.sub rest ~pos:0 ~len:index),
-              String.strip (String.subo rest ~pos:(index + String.length separator)) ))
-      in
-      Some
-        (* A SECOND sentinel in the same comment is refused before anything is read out of the
-           first. Reading from the earliest one and letting the rest fall into the reason would
-           absorb a whole second declaration into prose -- and the accounting check below cannot see
-           it, since both occurrences ARE in a comment this scan places. One comment, one
-           declaration; a second one goes on its own line, inside the stanza it is about. *)
-        (if Option.is_some (String.substr_index rest ~pattern:marker_sentinel) then
-           Malformed
-             (Printf.sprintf
-                "two `%s` declarations in one comment -- the second would be read as part of the \
-                 first's reason; put each on its own line"
-                marker_sentinel)
-         else
-           match split with
-           | None ->
-               Malformed
-                 (Printf.sprintf
-                    "no `--` separating the backend from the reason -- the grammar is `; %s <%s> \
-                     -- <reason>`"
-                    marker_sentinel
-                    (String.concat ~sep:"|" marker_backends))
-           | Some (backend, reason) ->
-               (* A stanza may name more than one backend -- `data_parallel` runs the same model on
-                  cc and on multidev_cc -- and writing both is more truthful than picking one.
-                  `none` makes no such pair: a run either depends on the configured backend or it
-                  does not.
+let parse_backend_declaration ~declaration:backend ~reason =
+  (* A stanza may name more than one backend -- `data_parallel` runs the same model on cc and on
+     multidev_cc -- and writing both is more truthful than picking one. `none` makes no such pair.
 
-                  Every rejection below is a rejection rather than a normalisation. Dropping an
-                  empty entry would read `cc,` and `cc,,metal` as a clean `cc`/`cc,metal`, and
-                  deduplicating would read `cc,cc` as `cc` -- in both cases silently repairing a
-                  typo in the one place whose entire purpose is to be wrong out loud (Codex P2,
-                  round 1). *)
-               let named = String.split backend ~on:',' |> List.map ~f:String.strip in
-               if String.is_empty backend then Malformed "no backend named before the reason"
-               else if List.exists named ~f:String.is_empty then
-                 Malformed
-                   (Printf.sprintf
-                      "`%s` has an empty entry between commas -- name each backend, or drop the \
-                       comma"
-                      backend)
-               else if
-                 List.exists named ~f:(fun word ->
-                     not (List.mem marker_backends word ~equal:String.equal))
-               then
-                 Malformed
-                   (Printf.sprintf "`%s` is not one of %s" backend
-                      (String.concat ~sep:", " marker_backends))
-               else if List.contains_dup named ~compare:String.compare then
-                 Malformed (Printf.sprintf "`%s` names the same backend twice" backend)
-               else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
-                 Malformed
-                   (Printf.sprintf
-                      "`%s` says both that the run depends on a backend and that it depends on none"
-                      backend)
-               else if
-                 List.length
-                   (String.split_on_chars reason ~on:[ ' '; '\t' ]
-                   |> List.filter ~f:(Fn.non String.is_empty))
-                 < 2
-               then
-                 Malformed
-                   (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
-               else Marker { backend = String.concat ~sep:"," named; reason })
+     Every rejection is a rejection rather than a normalisation. Dropping an empty entry would read
+     `cc,` and `cc,,metal` as a clean `cc`/`cc,metal`, and deduplicating would read `cc,cc` as `cc`
+     -- silently repairing a typo in the one place whose purpose is to be wrong out loud. *)
+  let named = String.split backend ~on:',' |> List.map ~f:String.strip in
+  if String.is_empty backend then Error [ "no backend named before the reason" ]
+  else if List.exists named ~f:String.is_empty then
+    Error
+      [
+        Printf.sprintf
+          "`%s` has an empty entry between commas -- name each backend, or drop the comma" backend;
+      ]
+  else if
+    List.exists named ~f:(fun word -> not (List.mem marker_backends word ~equal:String.equal))
+  then
+    Error
+      [
+        Printf.sprintf "`%s` is not one of %s" backend
+          (String.concat ~sep:", " marker_backends);
+      ]
+  else if List.contains_dup named ~compare:String.compare then
+    Error [ Printf.sprintf "`%s` names the same backend twice" backend ]
+  else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
+    Error
+      [
+        Printf.sprintf
+          "`%s` says both that the run depends on a backend and that it depends on none" backend;
+      ]
+  else Ok { backend = String.concat ~sep:"," named; reason }
+
+let parse_marker text =
+  match
+    parse_marker_text ~sentinel:marker_sentinel ~parse_declaration:parse_backend_declaration text
+  with
+  | Not_a_marker -> None
+  | Parsed_marker marker -> Some (Marker marker)
+  | Malformed_marker_text malformed ->
+      Some
+        (Malformed
+           (List.map malformed
+              ~f:(marker_malformed_reason ~sentinel:marker_sentinel ~separator_subject:"backend"
+                    ~grammar:
+                      (Printf.sprintf "%s <%s> -- <reason>" marker_sentinel
+                         (String.concat ~sep:"|" marker_backends)))
+           |> String.concat ~sep:"; "))
 
 type marked_stanza = {
   marked_head : string;  (** the atom the stanza opens with, or ["<not a stanza>"] *)
@@ -1605,6 +1637,142 @@ let marked_stanzas content =
   in
   List.concat (List.map2_exn raw parsed ~f:(go ""))
 
+(** A successfully parsed marker and the stanza whose parentheses contain it. *)
+type 'a contained_marker = {
+  contained_line : int;
+  contained_text : string;
+  contained_value : 'a;
+  containing_stanza : marked_stanza;
+}
+
+(** A stanza paired with the valid markers the contained-marker contract attributed to it. *)
+type 'a marker_stanza = {
+  marker_stanza : marked_stanza;
+  stanza_markers : 'a contained_marker list;
+}
+
+(** Every refusal the generic contained-marker contract can make.
+
+    Convention-specific declaration errors arrive as [Malformed_marker]; the other constructors
+    are the reusable structural contract. A well-formed marker must be in a Dune comment, inside
+    one stanza, and accepted by that convention's [belongs] predicate. *)
+type marker_issue =
+  | Malformed_marker of {
+      issue_line : int;
+      issue_text : string;
+      issue_malformed : marker_malformed;
+    }
+  | Marker_outside_stanza of { issue_line : int; issue_text : string }
+  | Marker_in_wrong_stanza of {
+      issue_line : int;
+      issue_text : string;
+      issue_stanza : marked_stanza;
+      issue_why : string;
+    }
+  | Marker_outside_comment of { issue_text_occurrences : int; issue_comment_occurrences : int }
+
+type 'a marker_contract = {
+  contract_stanzas : 'a marker_stanza list;
+  contract_issues : marker_issue list;
+  contract_text_occurrences : int;
+  contract_comment_occurrences : int;
+}
+
+let sentinel_occurrences ~sentinel text =
+  let rec count from found =
+    match String.substr_index text ~pos:from ~pattern:sentinel with
+    | None -> found
+    | Some at -> count (at + String.length sentinel) (found + 1)
+  in
+  if String.is_empty sentinel then 0 else count 0 0
+
+(** [contained_marker_contract] applies the complete reusable marker contract to one Dune file.
+
+    [parse_declaration] receives the containing stanza, the convention-specific declaration, and
+    the already-validated reason. [belongs] states which containing stanza may carry the parsed
+    marker. The result always retains every stanza; invalid markers become issues and are not
+    attributed as valid markers.
+
+    Sentinel accounting deliberately compares the dumb text count with the lexer-derived comment
+    count. This makes a marker in a quoted action argument or ordinary field a refusal rather than
+    invisible text. Comments inside a [(subdir ...)] wrapper but no child stanza likewise become
+    [Marker_outside_stanza], because {!marked_stanzas} attributes by actual parentheses. *)
+let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
+  let stanzas = marked_stanzas content in
+  let _, comments = read_raw content in
+  let comment_occurrences =
+    List.sum (module Int) comments ~f:(fun comment ->
+        sentinel_occurrences ~sentinel comment.comment_text)
+  in
+  let issues = ref [] in
+  let markers = ref [] in
+  let stanza_of_comment line text =
+    List.find stanzas ~f:(fun stanza ->
+        List.exists stanza.marked_comments ~f:(fun (candidate_line, candidate_text) ->
+            Int.equal line candidate_line && String.equal text candidate_text))
+  in
+  List.iter comments ~f:(fun comment ->
+      let line = line_of content comment.comment_start in
+      let text = comment.comment_text in
+      if sentinel_occurrences ~sentinel text > 0 then
+        match stanza_of_comment line text with
+        | None -> issues := Marker_outside_stanza { issue_line = line; issue_text = text } :: !issues
+        | Some stanza -> (
+            match
+              parse_marker_text ~sentinel ~parse_declaration:(parse_declaration stanza) text
+            with
+            | Not_a_marker -> ()
+            | Malformed_marker_text malformed ->
+                List.iter malformed ~f:(fun issue_malformed ->
+                    issues :=
+                      Malformed_marker { issue_line = line; issue_text = text; issue_malformed }
+                      :: !issues)
+            | Parsed_marker value -> (
+                match belongs stanza value with
+                | Error reasons ->
+                    List.iter reasons ~f:(fun issue_why ->
+                        issues :=
+                          Marker_in_wrong_stanza
+                            {
+                              issue_line = line;
+                              issue_text = text;
+                              issue_stanza = stanza;
+                              issue_why;
+                            }
+                          :: !issues)
+                | Ok () ->
+                    markers :=
+                      {
+                        contained_line = line;
+                        contained_text = text;
+                        contained_value = value;
+                        containing_stanza = stanza;
+                      }
+                      :: !markers)));
+  let text_occurrences = sentinel_occurrences ~sentinel content in
+  if not (Int.equal text_occurrences comment_occurrences) then
+    issues :=
+      Marker_outside_comment
+        {
+          issue_text_occurrences = text_occurrences;
+          issue_comment_occurrences = comment_occurrences;
+        }
+      :: !issues;
+  let markers = List.rev !markers in
+  {
+    contract_stanzas =
+      List.map stanzas ~f:(fun marker_stanza ->
+          {
+            marker_stanza;
+            stanza_markers =
+              List.filter markers ~f:(fun marker ->
+                  phys_equal marker.containing_stanza marker_stanza);
+          });
+    contract_issues = List.rev !issues;
+    contract_text_occurrences = text_occurrences;
+    contract_comment_occurrences = comment_occurrences;
+  }
+
 (** How gh-ocannl-659's rule reads ONE stanza: whether it is subject to the rule, and which of the
     two declarations it carries.
 
@@ -1615,8 +1783,6 @@ let marked_stanzas content =
     same shape gh-ocannl-603 asks for on [config_dep_completeness]'s resolution half). *)
 type backend_rule =
   | Runs_nothing  (** not subject to the rule, and carrying no marker: nothing to say of it *)
-  | Marker_without_run of int
-      (** a marker, at that line, on a stanza that runs nothing — it declares nothing there *)
   | Declares_variable  (** subject, and declares [(env_var OCANNL_BACKEND)] *)
   | Names_backend of int * marker_body  (** subject, and carrying exactly one well-formed marker *)
   | Declares_and_names of int * marker_body
@@ -1625,68 +1791,31 @@ type backend_rule =
   | Names_twice of int  (** subject, and carrying more than one marker: the line of the second *)
   | Names_neither  (** subject, and carrying neither — the hole gh-ocannl-659 closed *)
 
-(** The markers a stanza encloses that announce themselves and do not parse, each with its line and
-    the comment's text.
+(** Apply the shared contained-marker contract to the backend declaration. A marker on a stanza
+    that runs nothing is a wrong-stanza issue and is not handed to {!backend_rule_of}. *)
+let backend_marker_contract content =
+  contained_marker_contract content ~sentinel:marker_sentinel
+    ~parse_declaration:(fun _stanza -> parse_backend_declaration)
+    ~belongs:(fun stanza _marker ->
+      if List.is_empty stanza.marked_sites then
+        Error [ "the containing stanza runs no executable" ]
+      else Ok ())
 
-    Reported apart from {!backend_rule_of} rather than folded into it, because they are a different
-    failure: a marker the grammar declines is the check going blind to a declaration its author
-    believed they had made, and it can sit on a stanza whose other marker is perfectly well formed.
-    A malformed marker is NOT one of the markers {!backend_rule_of} counts — a stanza carrying only
-    one is reported both as malformed and as declaring neither, which is what is true of it. *)
-let malformed_markers stanza =
-  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
-      match parse_marker text with
-      | Some (Malformed why) -> Some (line, text, why)
-      | Some (Marker _) | None -> None)
-
-(** The lines of every comment in [stanza] that {!parse_marker} recognises AT ALL, well formed or
-    not — the population a check has to account for, so that a marker attributed to a stanza is not
-    then reported as sitting inside none. *)
-let marker_lines stanza =
-  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
-      Option.map (parse_marker text) ~f:(fun _ -> line))
-
-let backend_rule_of stanza =
+let backend_rule_of marked =
+  let stanza = marked.marker_stanza in
   let well_formed =
-    List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
-        match parse_marker text with
-        | Some (Marker m) -> Some (line, m)
-        | Some (Malformed _) | None -> None)
+    List.map marked.stanza_markers ~f:(fun marker ->
+        (marker.contained_line, marker.contained_value))
   in
   let subject = not (List.is_empty stanza.marked_sites) in
   match (subject, stanza.marked_declares_backend, well_formed) with
-  | false, _, (line, _) :: _ -> Marker_without_run line
   | false, _, [] -> Runs_nothing
+  | false, _, _ :: _ -> assert false
   | true, _, _ :: (line, _) :: _ -> Names_twice line
   | true, true, [ (line, m) ] -> Declares_and_names (line, m)
   | true, true, [] -> Declares_variable
   | true, false, [ (line, m) ] -> Names_backend (line, m)
   | true, false, [] -> Names_neither
-
-(** Every comment in [content] that announces itself as a marker, with its line — the population
-    {!marked_stanzas} has to account for. A marker the walk attributes to no stanza is one whose
-    author believed they had declared something, so it is reported rather than passed over. *)
-let marker_comments content =
-  let _, comments = read_raw content in
-  List.filter_map comments ~f:(fun c ->
-      if String.is_substring c.comment_text ~substring:marker_sentinel then
-        Some (line_of content c.comment_start, c.comment_text)
-      else None)
-
-(** How many times the sentinel occurs in [content] AS TEXT, comments and everything else alike.
-
-    The dumbest possible reading, and its dumbness is the point: {!marker_comments} finds the
-    sentinel where the lexer says a comment is, and this finds it wherever it is. A marker written
-    into a quoted argument, or into a stanza field, or into a comment this lexer failed to place, is
-    the difference between the two — and a difference is exactly the shape of "the author declared
-    something the check did not read". *)
-let sentinel_occurrences content =
-  let rec count from found =
-    match String.substr_index content ~pos:from ~pattern:marker_sentinel with
-    | None -> found
-    | Some at -> count (at + 1) (found + 1)
-  in
-  count 0 0
 
 (** {1 The artifact-directory declaration (gh-ocannl-723)}
 

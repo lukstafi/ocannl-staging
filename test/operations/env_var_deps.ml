@@ -919,51 +919,61 @@ let main () =
       let content = In_channel.read_all on_disk in
       let stanzas = Scan.stanzas content in
       (* gh-ocannl-659: the exclusive or, over every stanza that runs an executable. *)
-      let marked = Scan.marked_stanzas content in
-      let attributed = ref [] in
+      let marker_contract = Scan.backend_marker_contract content in
+      let marked =
+        List.map marker_contract.Scan.contract_stanzas ~f:(fun m -> m.Scan.marker_stanza)
+      in
       let words = ref (Set.empty (module String)) in
       let any_declared = ref false in
-      List.iter marked ~f:(fun stanza ->
-          (* A `(rule ...)` has no `(name ...)`, so it is named by what it runs -- which is what the
-             reader has to go and look at anyway. *)
-          let what =
-            if not (String.is_empty stanza.Scan.marked_name) then stanza.Scan.marked_name
-            else
-              match
-                List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name)
-                |> List.dedup_and_sort ~compare:String.compare
-              with
-              | [] -> "<unnamed>"
-              | names -> "running " ^ String.concat ~sep:", " names
-          in
-          let where =
-            Printf.sprintf "%s:%d, the %s %s" dune_file stanza.Scan.marked_line
-              stanza.Scan.marked_head what
-          in
+      let what_of_stanza stanza =
+        (* A `(rule ...)` has no `(name ...)`, so it is named by what it runs -- which is what the
+           reader has to go and look at anyway. *)
+        if not (String.is_empty stanza.Scan.marked_name) then stanza.Scan.marked_name
+        else
+          match
+            List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name)
+            |> List.dedup_and_sort ~compare:String.compare
+          with
+          | [] -> "<unnamed>"
+          | names -> "running " ^ String.concat ~sep:", " names
+      in
+      let where_of_stanza stanza =
+        Printf.sprintf "%s:%d, the %s %s" dune_file stanza.Scan.marked_line stanza.Scan.marked_head
+          (what_of_stanza stanza)
+      in
+      List.iter marker_contract.Scan.contract_issues ~f:(function
+        | Scan.Malformed_marker
+            { issue_line = line; issue_text = text; issue_malformed = malformed } ->
+            let why =
+              Scan.marker_malformed_reason ~sentinel:Scan.marker_sentinel
+                ~separator_subject:"backend"
+                ~grammar:
+                  (Printf.sprintf "%s <%s> -- <reason>" Scan.marker_sentinel
+                     (String.concat ~sep:"|" Scan.marker_backends))
+                malformed
+            in
+            Int.incr xor_violations;
+            fail
+              (Printf.sprintf
+                 "%s:%d has a `%s` comment that does not parse as a marker: %s. The line reads \
+                  `;%s`"
+                 dune_file line Scan.marker_sentinel why text)
+        | Scan.Marker_in_wrong_stanza { issue_line = line; issue_stanza = stanza; _ } ->
+            Int.incr xor_violations;
+            fail
+              (Printf.sprintf
+                 "%s carries a backend marker at line %d and runs no executable -- the marker \
+                  belongs on the stanza that RUNS it, which for an `(executable)` is its companion \
+                  rule, the same placement as the `%s` dep"
+                 (where_of_stanza stanza) line Scan.config_file)
+        | Scan.Marker_outside_stanza _ | Scan.Marker_outside_comment _ -> ());
+      List.iter marker_contract.Scan.contract_stanzas ~f:(fun marked_stanza ->
+          let stanza = marked_stanza.Scan.marker_stanza in
+          let where = where_of_stanza stanza in
           (* The rule itself is [Scan.backend_rule_of]: this check owns the wording of the
              diagnostics and the tallies, and the DECISION lives with the scan so that it can be put
              to a stanza the repository does not contain (gh-ocannl-690). *)
-          List.iter (Scan.marker_lines stanza) ~f:(fun line -> attributed := line :: !attributed);
-          List.iter (Scan.malformed_markers stanza) ~f:(fun (line, text, why) ->
-              Int.incr xor_violations;
-              fail
-                (Printf.sprintf
-                   "%s:%d has a `%s` comment that does not parse as a marker: %s. The line reads \
-                    `;%s`"
-                   dune_file line Scan.marker_sentinel why text));
-          match Scan.backend_rule_of stanza with
-          (* A marker on a stanza that runs nothing declares nothing. An `(executable)` has no
-             `deps` field at all, which is why its companion rule is where both the `ocannl_config`
-             dep and this marker go -- putting it on the executable reads as a declaration and is
-             not one. *)
-          | Scan.Marker_without_run line ->
-              Int.incr xor_violations;
-              fail
-                (Printf.sprintf
-                   "%s carries a backend marker at line %d and runs no executable -- the marker \
-                    belongs on the stanza that RUNS it, which for an `(executable)` is its \
-                    companion rule, the same placement as the `%s` dep"
-                   where line Scan.config_file)
+          match Scan.backend_rule_of marked_stanza with
           | Scan.Runs_nothing -> ()
           | Scan.Names_twice line ->
               Int.incr xor_violations;
@@ -1004,43 +1014,25 @@ let main () =
                     <%s> -- <reason>` if it names one or links none"
                    where Scan.backend_env_var Scan.backend_env_var Scan.marker_sentinel
                    (String.concat ~sep:"|" Scan.marker_backends)));
-      (* Every marker in the file, against the ones a stanza claimed. A marker the walk attributed
-         to nothing is one whose author believed they had declared something. *)
-      let attributed = Set.of_list (module Int) !attributed in
-      List.iter (Scan.marker_comments content) ~f:(fun (line, text) ->
-          if not (Set.mem attributed line) then (
+      List.iter marker_contract.Scan.contract_issues ~f:(function
+        | Scan.Marker_outside_stanza { issue_line = line; issue_text = text } ->
             Int.incr marker_holes;
             fail
               (Printf.sprintf
                  "%s:%d has a backend marker that sits inside no stanza -- a comment between \
                   stanzas declares nothing; move it inside the parentheses of the stanza it is \
                   about. The line reads `;%s`"
-                 dune_file line text)));
-      (* And every marker in the file against every occurrence of the sentinel ANYWHERE in it: the
-         difference between the two is a marker the comment lexer did not place -- written into a
-         quoted argument, into a stanza field, or into a comment shape this scan reads differently
-         than dune does. *)
-      let in_comments =
-        List.sum
-          (module Int)
-          (Scan.marker_comments content)
-          ~f:(fun (_, text) ->
-            let rec count from found =
-              match String.substr_index text ~pos:from ~pattern:Scan.marker_sentinel with
-              | None -> found
-              | Some at -> count (at + 1) (found + 1)
-            in
-            count 0 0)
-      in
-      let in_text = Scan.sentinel_occurrences content in
-      if in_text <> in_comments then (
-        Int.incr marker_holes;
-        fail
-          (Printf.sprintf
-             "%s spells `%s` %d times and only %d of them are in a comment this scan places -- a \
-              marker outside a comment declares nothing, and one in a comment this scan cannot see \
-              is one it will not read"
-             dune_file Scan.marker_sentinel in_text in_comments));
+                 dune_file line text)
+        | Scan.Marker_outside_comment
+            { issue_text_occurrences = in_text; issue_comment_occurrences = in_comments } ->
+            Int.incr marker_holes;
+            fail
+              (Printf.sprintf
+                 "%s spells `%s` %d times and only %d of them are in a comment this scan places -- \
+                  a marker outside a comment declares nothing, and one in a comment this scan \
+                  cannot see is one it will not read"
+                 dune_file Scan.marker_sentinel in_text in_comments)
+        | Scan.Malformed_marker _ | Scan.Marker_in_wrong_stanza _ -> ());
       (* The floor under the walk, read by the second reader that shares none of its classification
          machinery: a stanza the walk stops seeing is a stanza the rule above stops applying to,
          which looks exactly like a file with nothing to check (the gh-ocannl-665 argument, and
@@ -1426,17 +1418,19 @@ let main () =
          scan passed (Codex P2, round 1). Whatever stanza carries the marker is the member -- every
          unit of it, since a marker is a statement about the stanza. *)
       let metal_stanzas =
-        List.filter marked ~f:(fun stanza ->
-            match Scan.backend_rule_of stanza with
+        List.filter_map marker_contract.Scan.contract_stanzas ~f:(fun marked_stanza ->
+            let stanza = marked_stanza.Scan.marker_stanza in
+            match Scan.backend_rule_of marked_stanza with
             | Scan.Names_backend (_, body) | Scan.Declares_and_names (_, body) ->
                 (* The marker admits several words, comma-separated, where a stanza honestly names
                    two backends -- so membership is "names metal among them", not "is spelled
                    metal". *)
-                List.mem (String.split body.Scan.backend ~on:',') "metal" ~equal:String.equal
-            | Scan.Runs_nothing | Scan.Marker_without_run _ | Scan.Declares_variable
-            | Scan.Names_twice _ | Scan.Names_neither ->
-                false)
-        |> List.map ~f:(fun m -> (m.Scan.marked_subdir, m.Scan.marked_sexp))
+                if List.mem (String.split body.Scan.backend ~on:',') "metal" ~equal:String.equal
+                then Some (stanza.Scan.marked_subdir, stanza.Scan.marked_sexp)
+                else None
+            | Scan.Runs_nothing | Scan.Declares_variable | Scan.Names_twice _ | Scan.Names_neither
+              ->
+                None)
       in
       let metal_members =
         List.filter units ~f:(fun u ->

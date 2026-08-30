@@ -267,6 +267,24 @@ ok: backend rule -- a launcher pointed at a sibling directory keeps its floor
 ok: backend marker sentinel -- in a comment
 ok: backend marker sentinel -- inside a quoted argument, where it declares nothing
 ok: backend marker sentinel -- none at all
+ok: contained marker contract -- a valid contained marker
+ok: contained marker contract -- annotated prose before the sentinel remains a marker
+ok: contained marker contract -- the earliest admitted separator wins
+ok: contained marker contract -- the shared separator grammar refuses a malformed marker
+ok: contained marker contract -- the shared reason grammar refuses a one-word reason
+ok: contained marker contract -- two declarations in one comment are refused before either is parsed
+ok: contained marker contract -- a marker outside every stanza
+ok: contained marker contract -- a marker inside a convention-specific wrong stanza
+ok: contained marker contract -- a sentinel outside a comment
+
+Contained-marker refusal diagnostics exercised by the cases above:
+  the shared separator grammar refuses a malformed marker -- malformed at line 2: no `--` separating the value from the reason -- the grammar is `; ocannl-test-marker: <value> -- <reason>`
+  the shared reason grammar refuses a one-word reason -- malformed at line 2: the reason `fixture` is one word -- say why, not what
+  two declarations in one comment are refused before either is parsed -- malformed at line 2: two `ocannl-test-marker:` declarations in one comment -- the second would be read as part of the first's reason; put each on its own line
+  a marker outside every stanza -- outside every stanza at line 1
+  a marker inside a convention-specific wrong stanza -- wrong library stanza at line 2: the marker belongs on a rule
+  a sentinel outside a comment -- 1 sentinel(s) in text but 0 in comments
+
 ok: refused -- a marker nested inside a stanza
 ok: refused -- a block comment
 ok: refused -- a datum comment

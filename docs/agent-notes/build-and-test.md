@@ -379,6 +379,11 @@ that they earn a lookup rather than always-loaded space.
   the dumbest possible substring scan, must have been read as a marker attributed to a stanza that
   runs something. That is what catches the marker written into a quoted argument, into a field, or
   into a stanza that runs nothing — cases where the author believed they had declared something.
+  `Dune_stanza_scan.contained_marker_contract` owns that reusable outer contract (gh-ocannl-863):
+  one sentinel per comment, the earliest admitted reason separator, a multi-word reason, raw-text
+  sentinel accounting, parenthesis containment, and a convention-supplied wrong-stanza predicate.
+  A new Dune comment convention supplies only its declaration parser and subject rule; it does not
+  reimplement those refusal classes.
   (iv) READ THE DECLARATION FROM THE FIELD THE ACTION RUNS UNDER, never from the stanza at large. A
   stanza can carry several dependency fields and dune reruns an action under exactly one of them —
   an inline-test library declares under `(inline_tests (deps …))`, and `(preprocessor_deps (env_var
@@ -1001,8 +1006,11 @@ that they earn a lookup rather than always-loaded space.
   backend (gh-ocannl-802). A member copied from a shared golden rather than recorded on its own
   backend carries a marker inside the dune rule that references its family:
   `; ocannl-golden-recorded-on: <member>.expected <- <backend> -- <reason>`. The scan validates the
-  marker and prints the member into its golden without failing on it; remove the marker after a run
-  on the member's own backend re-records it.
+  declaration and family relationship on top of `Dune_stanza_scan.contained_marker_contract`, so
+  its outer grammar, containment, wrong-stanza refusal and sentinel accounting are the same contract
+  as `ocannl-backend` rather than a second implementation. The scan prints the member into its
+  golden without failing on it; remove the marker after a run on the member's own backend re-records
+  it.
 - Gating a new slow test is the same conversion with `slow-` names: replace the `(test)` stanza
   with an `(executable)` plus a `(rule (alias slow-<name>) …)` that runs the exe and diffs
   `<name>.expected`, put `(alias slow-env_spelling_gate)` first in the rule's `(deps …)` so the
