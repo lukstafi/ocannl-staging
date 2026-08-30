@@ -486,6 +486,23 @@ let equal_device d1 d2 = d1.device_id = d2.device_id
 (** Pool id 0 on every device is reserved for the (single-tenant) merge buffer. *)
 let merge_buffer_pool_id = 0
 
+(** Invalidate every software ownership claim for the reserved merge slab as one transaction.
+    [remove_slab_claim] drops the backend-private pool-table entry and must not perform the fallible
+    raw free: callers free the previously-found slab only after this function has made it
+    unreachable. The writer is recommitted separately, after the replacement copy is scheduled. *)
+let invalidate_merge_slab device ~remove_slab_claim =
+  remove_slab_claim ();
+  device.merge_buffer := None;
+  device.merge_buffer_capacity <- 0;
+  device.updating_for_merge_buffer <- None
+
+(** Commit a successfully allocated reserved merge slab and its backend-private table entry as one
+    transaction. The writer marker stays invalid until the copy into this slab is scheduled. *)
+let commit_merge_slab device ~size_in_bytes ~install_slab_claim =
+  install_slab_claim ();
+  device.merge_buffer := Some { pool_id = merge_buffer_pool_id; offset = 0 };
+  device.merge_buffer_capacity <- size_in_bytes
+
 type ('dev, 'runner, 'event) context = {
   device : ('dev, 'runner, 'event) device;
   parent : ('dev, 'runner, 'event) context option;
