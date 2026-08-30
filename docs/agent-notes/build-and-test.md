@@ -1041,7 +1041,9 @@ that they earn a lookup rather than always-loaded space.
   `.github/actions/pin-revisions/resolve.sh`, and `tools/test-pin-revisions.sh` exercises that exact
   production script with fake opam 2.5.2 and git outputs: sorting, duplicates, local-pin exclusion,
   color suppression, empty registries and failed resolutions all have fault-injected negative
-  controls. Both workflows use exact-key restores only: cache
+  controls. CI runs the harness once on its Ubuntu main leg because this is POSIX action plumbing,
+  not an OCaml test or a repository scan, and the fixtures need neither setup-ocaml nor network.
+  Both workflows use exact-key restores only: cache
   lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
   older switch. And both install non-Windows depexts unconditionally after restore, because those
   are system packages absent from `_opam` (gh-ocannl-809).
