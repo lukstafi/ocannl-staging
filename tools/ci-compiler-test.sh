@@ -116,6 +116,7 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-ci-compiler.XXXXXX" 2>/dev/null) || 
 [ -n "$scratch" ] && [ -d "$scratch" ] || die "cannot create a scratch directory"
 
 finished=0
+active_child=
 finish() {
   main_rc=$1
   [ "$finished" -eq 0 ] || exit "$main_rc"
@@ -137,8 +138,42 @@ finish() {
   exit "$main_rc"
 }
 trap 'finish $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
+
+forward_signal() {
+  signal_rc=$1
+  trap - HUP INT TERM
+  if [ -n "$active_child" ]; then
+    kill -s TERM "$active_child" 2>/dev/null || true
+    wait "$active_child" 2>/dev/null || true
+    active_child=
+  fi
+  exit "$signal_rc"
+}
+trap 'forward_signal 130' INT
+trap 'forward_signal 143' TERM HUP
+
+# Every potentially long child is attached and reaped. This makes the signal
+# traps above an ownership boundary: scratch cannot disappear while a fetch,
+# extraction, or the capped test harness still has it open.
+run_tracked() {
+  "$@" &
+  active_child=$!
+  wait "$active_child"
+  tracked_rc=$?
+  active_child=
+  return "$tracked_rc"
+}
+
+run_tracked_in() {
+  tracked_dir=$1
+  shift
+  (cd "$tracked_dir" && exec "$@") &
+  active_child=$!
+  wait "$active_child"
+  tracked_rc=$?
+  active_child=
+  return "$tracked_rc"
+}
 
 deb_dir="$scratch/debs"
 prefix="$scratch/prefix"
@@ -183,7 +218,10 @@ if [ "$dry_run" -eq 1 ]; then
   print_command dpkg-deb -x '<each downloaded .deb>' "$prefix"
   if [ "$aarch64_clang" -eq 1 ]; then
     echo "ci-compiler-test: planned package download (aarch64 clang proxy):"
-    print_command apt-get download "${clang_packages[@]}" "${arm64_packages[@]}"
+    echo "  source: isolated https://apt.llvm.org/<VERSION_CODENAME>/ index with pinned signing key"
+    print_command apt-get '<isolated apt.llvm.org options>' update
+    print_command apt-get '<isolated apt.llvm.org options>' download "${clang_packages[@]}"
+    print_command apt-get download "${arm64_packages[@]}"
     echo "ci-compiler-test: planned cross invocation:"
     echo "  loader path: derived from the extracted libLLVM.so.21 multiarch directory"
     print_command "$prefix/usr/bin/clang-21" --target=aarch64-linux-gnu \
@@ -214,26 +252,77 @@ fi
 for command_name in apt-get dpkg-deb git opam sed; do
   command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
 done
+if [ "$aarch64_clang" -eq 1 ]; then
+  for command_name in curl sha256sum; do
+    command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
+  done
+fi
 
 download_packages() {
   label=$1
   shift
   echo "ci-compiler-test: apt download ($label):"
   print_command apt-get download "$@"
-  (cd "$deb_dir" && apt-get download "$@") ||
+  run_tracked_in "$deb_dir" apt-get download "$@" ||
     die "apt-get could not download the $label packages"
 }
 
 download_packages "GCC 13 host" "${gcc_packages[@]}"
 if [ "$aarch64_clang" -eq 1 ]; then
-  download_packages "clang 21 and arm64 sysroot" "${clang_packages[@]}" "${arm64_packages[@]}"
+  os_release=/etc/os-release
+  [ -f "$os_release" ] || die "cannot identify the Debian-family release: $os_release is absent"
+  llvm_codename=$(sed -n 's/^VERSION_CODENAME=//p' "$os_release" | sed -n '1p')
+  llvm_codename=${llvm_codename#\"}
+  llvm_codename=${llvm_codename%\"}
+  case $llvm_codename in
+    '' | *[!a-z0-9]*) die "unsupported VERSION_CODENAME for apt.llvm.org: $llvm_codename" ;;
+  esac
+  llvm_apt="$scratch/llvm-apt"
+  llvm_lists="$llvm_apt/lists"
+  llvm_archives="$llvm_apt/archives"
+  llvm_sourceparts="$llvm_apt/sourceparts"
+  llvm_trustedparts="$llvm_apt/trusted.gpg.d"
+  llvm_source="$llvm_apt/llvm.list"
+  llvm_key="$llvm_trustedparts/apt.llvm.org.asc"
+  mkdir -p "$llvm_lists/partial" "$llvm_archives/partial" "$llvm_sourceparts" \
+    "$llvm_trustedparts" || die "cannot stage the isolated apt.llvm.org index"
+  llvm_url="https://apt.llvm.org/$llvm_codename/"
+  llvm_suite="llvm-toolchain-$llvm_codename-21"
+  printf 'deb %s %s main\n' "$llvm_url" "$llvm_suite" >"$llvm_source" ||
+    die "cannot write the isolated apt.llvm.org source"
+  echo "ci-compiler-test: fetching pinned apt.llvm.org signing key"
+  run_tracked curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o "$llvm_key" ||
+    die "cannot fetch the apt.llvm.org signing key"
+  llvm_key_sha=$(sha256sum "$llvm_key" | sed -n 's/ .*//p') ||
+    die "cannot hash the apt.llvm.org signing key"
+  expected_llvm_key_sha=8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d
+  [ "$llvm_key_sha" = "$expected_llvm_key_sha" ] ||
+    die "apt.llvm.org signing key digest changed: $llvm_key_sha (expected $expected_llvm_key_sha)"
+  llvm_apt_options=(
+    -o "Dir::Etc::sourcelist=$llvm_source"
+    -o "Dir::Etc::sourceparts=$llvm_sourceparts"
+    -o "Dir::Etc::trusted=/dev/null"
+    -o "Dir::Etc::trustedparts=$llvm_trustedparts"
+    -o "Dir::State::lists=$llvm_lists"
+    -o "Dir::Cache::archives=$llvm_archives"
+    -o APT::Get::List-Cleanup=0
+  )
+  echo "ci-compiler-test: apt.llvm.org source: $llvm_url $llvm_suite (isolated scratch index)"
+  echo "ci-compiler-test: apt.llvm.org key sha256: $llvm_key_sha"
+  run_tracked apt-get "${llvm_apt_options[@]}" update ||
+    die "cannot update the isolated apt.llvm.org index for $llvm_codename"
+  echo "ci-compiler-test: apt download (clang 21):"
+  print_command apt-get "${llvm_apt_options[@]}" download "${clang_packages[@]}"
+  run_tracked_in "$deb_dir" apt-get "${llvm_apt_options[@]}" download "${clang_packages[@]}" ||
+    die "apt-get could not download clang 21 from apt.llvm.org"
+  download_packages "arm64 sysroot" "${arm64_packages[@]}"
 fi
 
 set -- "$deb_dir"/*.deb
 [ -e "$1" ] || die "apt-get reported success but downloaded no .deb files"
 for deb in "$@"; do
   echo "ci-compiler-test: extracting $(basename "$deb")"
-  dpkg-deb -x "$deb" "$prefix" || die "cannot extract $deb"
+  run_tracked dpkg-deb -x "$deb" "$prefix" || die "cannot extract $deb"
 done
 
 gcc_binary="$prefix/usr/bin/x86_64-linux-gnu-gcc-13"
@@ -355,18 +444,18 @@ echo "ci-compiler-test: ambient OCANNL configuration: cleared"
 
 # These generic compiler selectors are not OCANNL settings, but can redirect
 # the fetched drivers to a caller-owned toolchain or headers just as surely.
-unset GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH SDKROOT MACOSX_DEPLOYMENT_TARGET
+unset GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH LIBRARY_PATH SDKROOT MACOSX_DEPLOYMENT_TARGET
 unset AARCH64_CROSS_GCC
 
 rm -f "$gcc_log"
 [ -z "$clang_log" ] || rm -f "$clang_log"
 echo "ci-compiler-test: test (unpiped): $alias_name"
 if [ "$aarch64_clang" -eq 1 ]; then
-  OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
+  run_tracked env OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
     AARCH64_CROSS_GCC="$clang_command" DUNE_BUILD_DIR="$build_dir" \
     "$repo/tools/test-run.sh" run --cap "$cap" build -j "$jobs" "$alias_name" || exit $?
 else
-  OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
+  run_tracked env OCANNL_BACKEND=cc OCANNL_CC_BACKEND_COMPILER_COMMAND="$gcc_command" \
     DUNE_BUILD_DIR="$build_dir" "$repo/tools/test-run.sh" run --cap "$cap" \
     build -j "$jobs" "$alias_name" || exit $?
 fi

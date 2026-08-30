@@ -1069,8 +1069,9 @@ that they earn a lookup rather than always-loaded space.
   certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient OCANNL
   configuration and generic compiler/header selectors are cleared before the explicit settings are
   injected, while the harness-control `OCANNL_TOOL_*` namespace is preserved. `--aarch64-clang`
-  additionally unpacks clang 21 and arm64 cross headers, derives `LD_LIBRARY_PATH` from the unpacked
-  `libLLVM.so.21`, and sets
+  additionally creates an isolated scratch apt index for the host's `VERSION_CODENAME` at
+  apt.llvm.org (with the signing key's SHA-256 pinned in the script), then unpacks clang 21 and
+  arm64 cross headers, derives `LD_LIBRARY_PATH` from the unpacked `libLLVM.so.21`, and sets
   `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
   NEON assembly dialect, with the Debian cross-header directory passed explicitly through
   `-isystem`; today `cc_march_census` is the test that consumes that hook. The real
@@ -1079,7 +1080,8 @@ that they earn a lookup rather than always-loaded space.
   GCC patch release is whichever candidate the configured apt indexes serve (the exact version and
   target are printed and major 13 is enforced), and the clang leg has a Linux cross sysroot rather
   than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
-  than replacing either.
+  than replacing either. Fetches, extraction and the test harness are attached children: an outer
+  cancellation forwards `TERM` and reaps the active child before scratch cleanup.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
