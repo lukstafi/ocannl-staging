@@ -3267,7 +3267,8 @@ let simplify_llc static_indices llc =
               loop_scalar (unroll_pow ~base:v1_scalar ~exp:(Float.to_int c), prec)
           | _ -> result)
     | Binop (Add, (Binop (Mul, llv1, llv2), prec12), llv3)
-    | Binop (Add, llv3, (Binop (Mul, llv1, llv2), prec12)) ->
+    | Binop (Add, llv3, (Binop (Mul, llv1, llv2), prec12))
+      when Ops.is_float prec ->
         (* TODO: this is tentative. *)
         loop_scalar @@ (Ternop (FMA, llv1, llv2, llv3), Ops.promote_prec prec12 prec)
     | Binop (op, llv1, llv2) ->
