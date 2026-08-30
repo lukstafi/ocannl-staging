@@ -269,7 +269,7 @@ let () =
   let claim = "queued timing either reports contention or dispatches more launches than isolated" in
   if que.contended || iso.contended || batches_here then
     p claim (que.contended || iso.contended || que.dispatches > iso.dispatches)
-  else Verdict.skipped ~backend:(backend ()) claim;
+  else Verdict.skipped ~aggregation:`Environment ~backend:(backend ()) claim;
   (* Per launch, not per batch. The two sides refuse mirror errors, and they are anchored on
      different quantities because of it.
 
