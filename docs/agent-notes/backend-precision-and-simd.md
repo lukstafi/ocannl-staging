@@ -1071,8 +1071,10 @@ files.
   difference. Keep readbacks outside the timed region; the `cc` scheduler is synchronous, so no
   separate await is needed.
 
-- **Every GPU backend compiles with fast math**: CUDA passes `--use_fast_math`, HIP `-ffast-math`,
-  and MSL defaults it on — `cc` is the exception (opt-in `cc_backend_fast_math`). HIP additionally
+- **CUDA and HIP compile with fast-math umbrellas; Metal pins safe arithmetic while retaining fast
+  math functions**: CUDA passes `--use_fast_math`, HIP `-ffast-math`, and Metal selects
+  `MathMode.Safe` plus `MathFloatingPointFunctions.Fast` (measured below). `cc` is the exception
+  (opt-in `cc_backend_fast_math`). HIP additionally
   passes `-fno-associative-math` **after** the umbrella flag: fast math had let hiprtc reorder
   ordinary scalar bf16/f16 recurrences differently across loop, unrolled and scope-local spellings,
   defeating `accum_prec`'s promised per-update storage rounding (gh-ocannl-735). This must be a
@@ -1111,11 +1113,20 @@ files.
     carries an `rtc-context` block (`tools/sweep.sh`'s `rtc_context_cmd`) with the box's toolkit and
     driver versions, the include-slot discovery input, and the builder's option POLICY from the
     GPU-free test — whose include and arch slots are test sentinels, not that box's values.
-  - **Metal is the remaining unguarded one.** MSL defaults fast math on, `metal_backend.ml` passes no
-    reassociation guard, and — unlike CUDA — nobody has run the probe against it, so "it passes
-    today" is all that is known. Its MSL options are also still assembled inline in
-    `metal_backend.ml` rather than in `Compiler_options`, so no GPU-free test pins them and a sweep
-    cannot print them (gh-ocannl-784 residual, Mac-box work).
+  - **Metal is guarded by `MathMode.Safe`, with fast math functions retained** (gh-ocannl-848).
+    Measured on M4 Max, macOS 26.6.2 / Metal 4, MSL 3.1: Default, Fast and Relaxed all changed the
+    cancellation probe [(a+b)-a] from strict 0 to [b] = 1; Safe preserved 0. All modes kept three
+    128-term reduction spellings bit-exactly sequential and a runtime `-INFINITY` mask at zero.
+    The exact production setter sequence (Safe followed by Fast functions) measured 0.991x default
+    for 262144 threads x 128 fixed-count terms and 1.006x for one thread x 1048576 runtime-bound
+    terms (GPU-clock medians, 21 rotated interleaved repeats). The legacy
+    `fastMathEnabled=false` also selects Precise functions, so the production state instead pins
+    the two modern properties separately on macOS 15+. macOS 14 lacks those selectors; the backend
+    detects the Objective-C methods before constructing the pure state and uses
+    `fastMathEnabled=false` there as the safe, compatible fallback. `Compiler_options.metal` owns
+    both ordered property sequences; `test_metal_compile_options` pins both API/debug variants
+    GPU-free and
+    `benchmarks/runners/ocannl/metal_reassoc_probe.ml` is the rerunnable measurement.
 - **`__FAST_MATH__` audit**: negating one component of a fast-math umbrella can *unset the macro*
   while leaving the remaining optimizations on — clang defines `__FAST_MATH__` only when the whole
   bundle is in force, so HIP's `-fno-associative-math` (and `-fhonor-infinities`) turn it off. No
