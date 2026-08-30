@@ -3935,23 +3935,33 @@
  (libraries base stdio unix arrayjit.verdict))
 
 (rule
+ (target ocamlformat_ignore_sources.manifest)
+ (package neural_nets_lib)
+ (deps
+  ; Dune's own echo writes the large source-tree expansion into a file without putting it on a
+  ; spawned process's command line. Passing the expansion directly to the scanner exceeds native
+  ; Windows' CreateProcess limit as the repository grows.
+  (:sources (source_tree ../..)))
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "%{sources}"))))
+
+(rule
  ; ocannl-backend: none -- reads path lists and file existence only, and links no backend.
  (target ocamlformat_ignore_scan.actual)
  (package neural_nets_lib)
  (deps
   ocannl_config
-  ; Materialize the declared source tree in dune's build root, so existence checks operate only on
-  ; declared inputs and work in release/opam source archives with no `.git` metadata. This also
-  ; makes deleting any listed path invalidate the rule, not only deleting a PPX golden.
-  (:sources (source_tree ../..))
   (:ignore ../../.ocamlformat-ignore)
+  (:manifest ocamlformat_ignore_sources.manifest)
   ; This focused glob is the independent discovery edge for new PPX goldens and marks the rule as
-  ; a scans-family member; the executable derives the same population from `%{sources}`.
+  ; a scans-family member; the executable derives the same population from the source manifest.
   (glob_files_rec ../../test/ppx/*_expected.ml))
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{ignore} %{sources}))))
+   (run %{dep:ocamlformat_ignore_scan.exe} %{workspace_root} %{ignore} %{manifest}))))
 
 (rule
  (alias runtest-ocamlformat_ignore_scan)

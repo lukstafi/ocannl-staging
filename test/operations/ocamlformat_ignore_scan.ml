@@ -72,12 +72,15 @@ let lines_of content =
 
 let report_details details = List.iter details ~f:(eprintf "%s\n")
 
-let scan ~path_root arguments =
+let scan ~path_root ~ignore_file ~manifest_file =
+  let arguments =
+    String.split_on_chars (In_channel.read_all manifest_file) ~on:[ ' '; '\t'; '\r'; '\n' ]
+    |> List.filter ~f:(Fn.non String.is_empty)
+  in
   let paths =
     List.map arguments ~f:(fun on_disk -> (relative_to path_root on_disk, on_disk))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
-  let ignore_file = List.Assoc.find paths ".ocamlformat-ignore" ~equal:String.equal in
   let goldens =
     List.filter_map paths ~f:(fun (path, _) -> Option.some_if (is_ppx_golden path) path)
     |> List.dedup_and_sort ~compare:String.compare
@@ -91,49 +94,51 @@ let scan ~path_root arguments =
         | _ -> false
         | exception Unix.Unix_error _ -> false)
   in
-  match ignore_file with
-  | None ->
-      Verdict.fail
-        "the repository-root .ocamlformat-ignore is not among the scan arguments -- the dune rule \
-         no longer hands the correspondence file to its checker"
-  | Some ignore_file ->
-      let content = In_channel.read_all ignore_file in
-      let lines = lines_of content in
-      let nonempty, empty =
-        List.partition_tf lines ~f:(fun { entry; _ } -> not (String.is_empty entry))
-      in
-      let entries = List.map nonempty ~f:(fun { entry; _ } -> entry) in
-      let entry_set = Set.of_list (module String) entries in
-      let trailing_newline =
-        (not (String.is_empty content)) && String.is_suffix content ~suffix:"\n"
-      in
-      if not trailing_newline then
-        eprintf
-          ".ocamlformat-ignore does not end in a newline; appending a path would concatenate it \
-           with the final entry\n";
-      Verdict.p ".ocamlformat-ignore ends in a newline" trailing_newline;
-      report_details
-        (List.map empty ~f:(fun { number; _ } ->
-             Printf.sprintf
-               ".ocamlformat-ignore:%d: blank line; each line must contain exactly one path" number));
-      Verdict.p_empty "every .ocamlformat-ignore line contains exactly one path" ~over:lines empty;
-      let missing_entries =
-        List.filter nonempty ~f:(fun { entry; _ } -> not (declared_file entry))
-      in
-      report_details
-        (List.map missing_entries ~f:(fun { number; entry } ->
-             Printf.sprintf ".ocamlformat-ignore:%d: listed path `%s` is not a declared source file"
-               number entry));
-      Verdict.p_all "every .ocamlformat-ignore entry names an existing file" nonempty
-        ~f:(fun { entry; _ } -> declared_file entry);
-      let unlisted = List.filter goldens ~f:(fun path -> not (Set.mem entry_set path)) in
-      report_details
-        (List.map unlisted ~f:(fun path ->
-             Printf.sprintf "%s is a ppx-expectation golden missing from .ocamlformat-ignore" path));
-      Verdict.p_all "every ppx-expectation golden is listed in .ocamlformat-ignore" goldens
-        ~f:(Set.mem entry_set);
-      eprintf "Scanned %d ignore entries and %d ppx-expectation goldens.\n" (List.length entries)
-        (List.length goldens)
+  let malformed_manifest = List.filter paths ~f:(fun (path, _) -> not (declared_file path)) in
+  report_details
+    (List.map malformed_manifest ~f:(fun (path, _) ->
+         Printf.sprintf
+           "declared-source manifest entry `%s` is not a readable regular file; the manifest must \
+            preserve each Dune source path as one entry"
+           path));
+  Verdict.p_all "every declared-source manifest entry names a regular file" paths
+    ~f:(fun (path, _) -> declared_file path);
+  if List.is_empty malformed_manifest then (
+    let content = In_channel.read_all ignore_file in
+    let lines = lines_of content in
+    let nonempty, empty =
+      List.partition_tf lines ~f:(fun { entry; _ } -> not (String.is_empty entry))
+    in
+    let entries = List.map nonempty ~f:(fun { entry; _ } -> entry) in
+    let entry_set = Set.of_list (module String) entries in
+    let trailing_newline =
+      (not (String.is_empty content)) && String.is_suffix content ~suffix:"\n"
+    in
+    if not trailing_newline then
+      eprintf
+        ".ocamlformat-ignore does not end in a newline; appending a path would concatenate it with \
+         the final entry\n";
+    Verdict.p ".ocamlformat-ignore ends in a newline" trailing_newline;
+    report_details
+      (List.map empty ~f:(fun { number; _ } ->
+           Printf.sprintf
+             ".ocamlformat-ignore:%d: blank line; each line must contain exactly one path" number));
+    Verdict.p_empty "every .ocamlformat-ignore line contains exactly one path" ~over:lines empty;
+    let missing_entries = List.filter nonempty ~f:(fun { entry; _ } -> not (declared_file entry)) in
+    report_details
+      (List.map missing_entries ~f:(fun { number; entry } ->
+           Printf.sprintf ".ocamlformat-ignore:%d: listed path `%s` is not a declared source file"
+             number entry));
+    Verdict.p_all "every .ocamlformat-ignore entry names an existing file" nonempty
+      ~f:(fun { entry; _ } -> declared_file entry);
+    let unlisted = List.filter goldens ~f:(fun path -> not (Set.mem entry_set path)) in
+    report_details
+      (List.map unlisted ~f:(fun path ->
+           Printf.sprintf "%s is a ppx-expectation golden missing from .ocamlformat-ignore" path));
+    Verdict.p_all "every ppx-expectation golden is listed in .ocamlformat-ignore" goldens
+      ~f:(Set.mem entry_set);
+    eprintf "Scanned %d ignore entries and %d ppx-expectation goldens.\n" (List.length entries)
+      (List.length goldens))
 
 let write_file path data =
   let rec mkdirs dir =
@@ -164,10 +169,13 @@ let run_child ~root ~exe paths =
   let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
   let out = open_capture out_path and err = open_capture err_path in
   let paths = List.map paths ~f:(Stdlib.Filename.concat root) in
+  let manifest = Stdlib.Filename.concat root "declared-sources.manifest" in
+  Out_channel.write_all manifest ~data:(String.concat ~sep:"\n" paths ^ "\n");
+  let ignore_file = Stdlib.Filename.concat root ".ocamlformat-ignore" in
   (* Exercise the shipping scan over a declared-input root with no Git metadata. [--scan-only]
      suppresses only the parent's control driver; without it every child would recursively stage
      another generation of controls. *)
-  let argv = Array.of_list (exe :: "--scan-only" :: root :: paths) in
+  let argv = [| exe; "--scan-only"; root; ignore_file; manifest |] in
   let pid = Unix.create_process exe argv Unix.stdin out err in
   let _, status = Unix.waitpid [] pid in
   Unix.close out;
@@ -217,6 +225,10 @@ let control () =
   let unterminated = run (a ^ "\n" ^ b) in
   let blank_line = run (a ^ "\n\n" ^ b ^ "\n") in
   let stale_artifact = run (a ^ "\n" ^ b ^ "\n" ^ undeclared ^ "\n") in
+  let malformed_manifest =
+    write_file (Stdlib.Filename.concat root ignore) (a ^ "\n" ^ b ^ "\n");
+    run_child ~root ~exe [ a; b; "missing source.ml" ]
+  in
   printf
     "Synthetic controls invoke the shipping scanner over a complete fixture and over each\n\
      malformed shape; refusal output is captured and matched below.\n\n";
@@ -245,19 +257,27 @@ let control () =
     (refused "stale artifact"
        ~messages:[ "listed path `build/stale_expected.ml` is not a declared source file" ]
        stale_artifact);
+  Verdict.p "a declared-source manifest that loses a path boundary is refused"
+    (refused "malformed manifest"
+       ~messages:
+         [
+           "declared-source manifest entry `missing` is not a readable regular file";
+           "source.ml` is not a readable regular file";
+         ]
+       malformed_manifest);
   remove_tree root
 
 let usage () =
-  eprintf "Usage: %s <workspace_root> <.ocamlformat-ignore and ppx goldens...> | --control\n"
+  eprintf "Usage: %s <workspace_root> <.ocamlformat-ignore> <source manifest> | --control\n"
     Stdlib.Sys.argv.(0);
   Stdlib.exit 2
 
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | [ _; "--control" ] -> control ()
-  | _ :: "--scan-only" :: path_root :: arguments when not (List.is_empty arguments) ->
-      scan ~path_root arguments
-  | _ :: path_root :: arguments when not (List.is_empty arguments) ->
-      scan ~path_root arguments;
+  | [ _; "--scan-only"; path_root; ignore_file; manifest_file ] ->
+      scan ~path_root ~ignore_file ~manifest_file
+  | [ _; path_root; ignore_file; manifest_file ] ->
+      scan ~path_root ~ignore_file ~manifest_file;
       control ()
   | _ -> usage ()
