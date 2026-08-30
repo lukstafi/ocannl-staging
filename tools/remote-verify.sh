@@ -472,9 +472,11 @@ if [ -L "$wt/ocannl_config" ]; then
   fail "pushed root ocannl_config must not be a symlink"
 elif [ -e "$wt/ocannl_config" ]; then
   [ -f "$wt/ocannl_config" ] || fail "pushed root ocannl_config is not a regular file"
+  config_boundary_kind=pushed
   config_boundary="$wt/ocannl_config (from pushed commit)"
 else
   touch "$wt/ocannl_config" || fail "cannot create an empty root ocannl_config boundary"
+  config_boundary_kind=empty
   config_boundary="$wt/ocannl_config (empty boundary created by remote-verify)"
 fi
 echo "worktree:      $wt"
@@ -484,6 +486,21 @@ echo "config boundary: $config_boundary"
 echo "=== end provenance ==="
 
 cd "$wt" || fail "cannot enter $wt"
+
+assert_source_state() {
+  state_context=$1
+  observed_sha=$(git rev-parse HEAD) || fail "cannot read HEAD $state_context"
+  [ "$observed_sha" = "$full_sha" ] ||
+    fail "HEAD changed to $observed_sha $state_context (expected $full_sha)"
+  observed_status=$(git status --porcelain) || fail "cannot read worktree status $state_context"
+  [ -z "$observed_status" ] || fail "source changed $state_context: $observed_status"
+  [ -f ocannl_config ] && [ ! -L ocannl_config ] ||
+    fail "root ocannl_config boundary changed type $state_context"
+  if [ "$config_boundary_kind" = empty ]; then
+    [ ! -s ocannl_config ] || fail "empty root ocannl_config boundary was rewritten $state_context"
+  fi
+  echo "remote-verify: source assertion: PASS ($state_context; commit=$full_sha; clean; boundary=$config_boundary_kind)"
+}
 
 dune_build() {
   if [ -n "$backend" ]; then
@@ -540,6 +557,7 @@ dune_build @check || exit $?
 echo "remote-verify: @check: PASS (compilation only; no backend execution claimed)"
 assert_backend
 assert_optional_library
+assert_source_state "after @check and provenance checks"
 
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || fail "internal operation argument is incomplete"
@@ -613,18 +631,15 @@ while [ $# -gt 0 ]; do
         echo "remote-verify: golden: RECORDED and re-run PASS ($value; original dune exit=$build_rc)"
         git reset -q --hard "$full_sha" || fail "cannot restore source after recording $value"
         git clean -q -fd || fail "cannot remove untracked source after recording $value"
-        restored_sha=$(git rev-parse HEAD) || fail "cannot read restored worktree HEAD"
-        [ "$restored_sha" = "$full_sha" ] ||
-          fail "golden cleanup restored $restored_sha instead of $full_sha"
-        restored_status=$(git status --porcelain) || fail "cannot read restored worktree status"
-        [ -z "$restored_status" ] || fail "golden cleanup left tracked or untracked source changes"
-        echo "remote-verify: golden source restore: PASS (exact commit $full_sha, clean)"
+        assert_source_state "after restoring recorded golden $value"
       fi
       ;;
     *) fail "internal unknown operation: $kind" ;;
   esac
+  assert_source_state "after $kind $value"
 done
 
+assert_source_state "before final certification"
 echo "remote-verify: verified box=$actual_box commit=$full_sha backend=${backend:-not-run}"
 exit 0
 REMOTE_VERIFY

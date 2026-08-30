@@ -1028,7 +1028,9 @@ that they earn a lookup rather than always-loaded space.
   contents and an apply-ready patch, then re-runs the alias before accepting it so a second failing
   dependency cannot hide behind a promotable diff; after reporting it, the script resets tracked
   files, removes untracked files, and proves the worktree clean at the resolved commit before
-  running another operation. Do not replace its
+  running another operation. Every path also reasserts exact HEAD, clean tracked/untracked source,
+  and the unchanged configuration boundary after each operation and before the final certificate;
+  a nominally successful probe that edits its checkout therefore fails loudly. Do not replace its
   unpiped ssh output with a convenience pipe: the far-side sentinel is the build verdict plus
   cleanup, and the local sentinel is ssh's transport verdict.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
