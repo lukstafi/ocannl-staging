@@ -43,6 +43,9 @@ let () =
   case "a qualified custom operator does not generate a use"
     {ocaml|let%op f ?(stride = 1) x = let _ = stride in My.( ++ ) x "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
+  case "an einsum-shaped argument outside a unary PPX spec position is not a generated use"
+    {ocaml|let%op f ?(stride = 1) x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o"|ocaml}
+    ~implemented:false ~honest:false;
   case "legacy convolution padding is a ppx-generated use"
     {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
@@ -87,6 +90,9 @@ let () =
     ~implemented:true ~honest:false;
   case "a later ignore parameter makes its call a real use"
     {ocaml|let f ?(_feature = true) ignore = ignore _feature|ocaml} ~implemented:true ~honest:false;
+  case "an earlier ignore parameter makes its call a real use"
+    {ocaml|let f ignore ?(_feature = true) () = ignore _feature|ocaml} ~implemented:true
+    ~honest:false;
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
@@ -100,6 +106,9 @@ let () =
   case "a let-operator binder does not pretend the outer option is used"
     {ocaml|let f ?(feature = true) () = let* feature = source in if feature then 1 else 0|ocaml}
     ~implemented:false ~honest:false;
+  case "local module value bindings shadow sequentially"
+    {ocaml|let f ?(feature = true) () = let _ = feature in let module M = struct let feature = false let enabled = feature end in M.enabled|ocaml}
+    ~implemented:false ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
     ~honest:false;
@@ -108,6 +117,9 @@ let () =
     ~honest:false;
   case "a constrained optional function is inventoried"
     {ocaml|let f = (fun ?(feature = true) () -> ignore feature : ?feature:bool -> unit -> unit)|ocaml}
+    ~implemented:false ~honest:false;
+  case ~argument:"feature" "optional closures returned through control flow are inventoried"
+    {ocaml|let make flag = if flag then (fun ?(feature = true) () -> ignore feature) else (fun ?(feature = true) () -> ignore feature)|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "an optional function exported through a tuple is inventoried"
     {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}

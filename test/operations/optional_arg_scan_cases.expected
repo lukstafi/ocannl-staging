@@ -12,6 +12,8 @@ a concat coefficient is a ppx-generated use: implementation classified: true
 a concat coefficient is a ppx-generated use: honesty classified: true
 a qualified custom operator does not generate a use: implementation classified: true
 a qualified custom operator does not generate a use: honesty classified: true
+an einsum-shaped argument outside a unary PPX spec position is not a generated use: implementation classified: true
+an einsum-shaped argument outside a unary PPX spec position is not a generated use: honesty classified: true
 legacy convolution padding is a ppx-generated use: implementation classified: true
 legacy convolution padding is a ppx-generated use: honesty classified: true
 a shadowed op spec coefficient does not use the outer option: implementation classified: true
@@ -44,6 +46,8 @@ ignore shadowing survives underscore-local forwarding analysis: implementation c
 ignore shadowing survives underscore-local forwarding analysis: honesty classified: true
 a later ignore parameter makes its call a real use: implementation classified: true
 a later ignore parameter makes its call a real use: honesty classified: true
+an earlier ignore parameter makes its call a real use: implementation classified: true
+an earlier ignore parameter makes its call a real use: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true
@@ -54,11 +58,15 @@ a nested shadow does not pretend the outer option is used: implementation classi
 a nested shadow does not pretend the outer option is used: honesty classified: true
 a let-operator binder does not pretend the outer option is used: implementation classified: true
 a let-operator binder does not pretend the outer option is used: honesty classified: true
+local module value bindings shadow sequentially: implementation classified: true
+local module value bindings shadow sequentially: honesty classified: true
 comments and strings do not pretend the option is used: implementation classified: true
 comments and strings do not pretend the option is used: honesty classified: true
 an optional argument on a directly returned closure is inventoried: implementation classified: true
 an optional argument on a directly returned closure is inventoried: honesty classified: true
 a constrained optional function is inventoried: implementation classified: true
 a constrained optional function is inventoried: honesty classified: true
+optional closures returned through control flow are inventoried: implementation classified: true
+optional closures returned through control flow are inventoried: honesty classified: true
 an optional function exported through a tuple is inventoried: implementation classified: true
 an optional function exported through a tuple is inventoried: honesty classified: true

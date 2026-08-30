@@ -140,6 +140,32 @@ let function_params expression =
   in
   peel [] expression
 
+let rec function_paths expression =
+  let params, tail = function_params expression in
+  let rec returned_paths expression =
+    match expression.pexp_desc with
+    | Pexp_function _ -> function_paths expression
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_paths inner
+    | Pexp_ifthenelse (_, then_, else_) ->
+        returned_paths then_ @ Option.value_map else_ ~default:[] ~f:returned_paths
+    | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+        List.concat_map cases ~f:(fun case -> returned_paths case.pc_rhs)
+    | Pexp_let (_, _, body)
+    | Pexp_letmodule (_, _, body)
+    | Pexp_letexception (_, body)
+    | Pexp_open (_, body)
+    | Pexp_sequence (_, body) ->
+        returned_paths body
+    | Pexp_letop { body; _ } -> returned_paths body
+    | _ -> []
+  in
+  let nested =
+    match tail with
+    | Expression body -> returned_paths body
+    | Cases cases -> List.concat_map cases ~f:(fun case -> returned_paths case.pc_rhs)
+  in
+  (params, tail) :: nested
+
 (** Whether [name] is used for anything except a direct discard in [tail]. The small lexical-scope
     walk is what keeps a nested [let name = ...] or [fun name -> ...] from lending a false use to
     the outer optional argument. *)
@@ -183,23 +209,27 @@ let string_constant expression =
 let einsum_spec expression =
   match expression.pexp_desc with
   | Pexp_apply (operator, [ (_, _left); (_, right) ]) -> (
-      let is_einsum =
+      let operator_kind =
         match operator.pexp_desc with
-        | Pexp_ident { txt = Lident name; _ } ->
-            List.mem Einsum_parser.operators_with_generated_specs name ~equal:String.equal
-        | _ -> false
+        | Pexp_ident { txt = Lident name; _ }
+          when List.mem Einsum_parser.binary_operators_with_generated_specs name ~equal:String.equal
+          ->
+            `Binary
+        | Pexp_ident { txt = Lident name; _ }
+          when List.mem Einsum_parser.unary_operators_with_generated_specs name ~equal:String.equal
+               || String.equal name Einsum_parser.concat_operator_with_generated_specs ->
+            `Unary
+        | _ -> `Other
       in
-      if not is_einsum then None
-      else
-        match string_constant right with
-        | Some _ as spec -> spec
-        | None -> (
-            match right.pexp_desc with
-            | Pexp_apply (callee, arguments) -> (
-                match string_constant callee with
-                | Some _ as spec -> spec
-                | None -> List.find_map arguments ~f:(fun (_, arg) -> string_constant arg))
-            | _ -> None))
+      match (operator_kind, string_constant right, right.pexp_desc) with
+      | `Unary, (Some _ as spec), _ -> spec
+      | `Unary, None, Pexp_apply (callee, _) -> string_constant callee
+      | `Unary, None, _ -> None
+      | `Binary, None, Pexp_apply (callee, arguments) -> (
+          match string_constant callee with
+          | Some _ as spec -> spec
+          | None -> ( match arguments with (_, first) :: _ -> string_constant first | [] -> None))
+      | (`Binary | `Other), _, _ -> None)
   | _ -> None
 
 let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
@@ -234,6 +264,31 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
   let iterator =
     object (self)
       inherit Ast_traverse.iter as super
+
+      method! structure items =
+        let rec walk = function
+          | [] -> ()
+          | { pstr_desc = Pstr_value (recursive, bindings); _ } :: rest ->
+              let binds_name =
+                List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat name)
+              in
+              let binds_ignore =
+                List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat "ignore")
+              in
+              within_ignore_shadow
+                (match recursive with Recursive -> binds_ignore | Nonrecursive -> false)
+                (fun () ->
+                  within_shadow
+                    (match recursive with Recursive -> binds_name | Nonrecursive -> false)
+                    (fun () ->
+                      List.iter bindings ~f:(fun binding -> self#expression binding.pvb_expr)));
+              within_ignore_shadow binds_ignore (fun () ->
+                  within_shadow binds_name (fun () -> walk rest))
+          | item :: rest ->
+              self#structure_item item;
+              walk rest
+        in
+        walk items
 
       method! case case =
         within_ignore_shadow (pattern_binds case.pc_lhs "ignore") (fun () ->
@@ -370,7 +425,14 @@ let implementation_of ~dsl ~params ~position ~tail pattern =
               if pattern_binds pattern name then false
               else used_after (ignore_is_shadowed || pattern_binds pattern "ignore") later)
     in
-    used_after false (List.drop params (position + 1))
+    let ignore_is_shadowed =
+      List.take params (position + 1)
+      |> List.exists ~f:(fun param ->
+          match param.pparam_desc with
+          | Pparam_val (_, _, pattern) -> pattern_binds pattern "ignore"
+          | Pparam_newtype _ -> false)
+    in
+    used_after ignore_is_shadowed (List.drop params (position + 1))
   in
   if List.exists names ~f:name_used then Implemented else Unimplemented
 
@@ -402,6 +464,28 @@ let args_in_source ~source content =
     module_path := saved
   in
   let qualify name = String.concat ~sep:"." (List.rev (name :: !module_path)) in
+  let add_optional arg =
+    match
+      List.find !found ~f:(fun previous ->
+          String.equal previous.source arg.source
+          && String.equal previous.definition arg.definition
+          && String.equal previous.label arg.label)
+    with
+    | None -> found := arg :: !found
+    | Some previous ->
+        let implementation =
+          match (previous.implementation, arg.implementation) with
+          | Implemented, _ | _, Implemented -> Implemented
+          | Unimplemented, Unimplemented -> Unimplemented
+        in
+        found :=
+          { arg with implementation }
+          :: List.filter !found ~f:(fun candidate ->
+              not
+                (String.equal candidate.source arg.source
+                && String.equal candidate.definition arg.definition
+                && String.equal candidate.label arg.label))
+  in
   let iterator =
     object
       inherit Ast_traverse.iter as super
@@ -427,17 +511,17 @@ let args_in_source ~source content =
         if !local_expression_depth = 0 then
           List.iter (named_expressions binding.pvb_pat binding.pvb_expr)
             ~f:(fun (definition, expression) ->
-              let params, tail = function_params expression in
-              List.iteri params ~f:(fun position param ->
-                  match param.pparam_desc with
-                  | Pparam_val (Asttypes.Optional label, _, pattern) ->
-                      let implementation =
-                        implementation_of ~dsl:(!dsl_extension_depth > 0) ~params ~position ~tail
-                          pattern
-                      in
-                      found :=
-                        { source; definition = qualify definition; label; implementation } :: !found
-                  | _ -> ()));
+              List.iter (function_paths expression) ~f:(fun (params, tail) ->
+                  List.iteri params ~f:(fun position param ->
+                      match param.pparam_desc with
+                      | Pparam_val (Asttypes.Optional label, _, pattern) ->
+                          let implementation =
+                            implementation_of ~dsl:(!dsl_extension_depth > 0) ~params ~position
+                              ~tail pattern
+                          in
+                          add_optional
+                            { source; definition = qualify definition; label; implementation }
+                      | _ -> ())));
         super#value_binding binding
     end
   in

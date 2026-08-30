@@ -51,11 +51,12 @@ that they earn a lookup rather than always-loaded space.
   value uses `?feature`; both mismatches fail. `Optional_arg_scan` parses the source and distinguishes
   real uses from `let _ = feature` / an unused `let _unused = feature` / calls to the unshadowed
   standard `ignore`, including later and nested optional defaults, destructured option patterns,
-  functions exported through tuple destructuring, directly returned optional closures, and the
-  identifiers that actual unqualified structure- or expression-level `%op`/`%cd` einsum and concat
-  operands turn into generated coefficient / legacy-`use_padding` reads under the same lexical
-  scope. `optional_arg_scan_cases.expected` ratchets the violating discard forms plus their nearest
-  honest counterparts so losing a control is itself a golden change (gh-ocannl-811). Optimizer
+  functions exported through tuple destructuring, optional closures returned directly or through
+  result-position control flow, sequential bindings inside local modules, and the identifiers that
+  exact unqualified structure- or expression-level `%op`/`%cd` einsum and concat operands turn into
+  generated coefficient / legacy-`use_padding` reads under the same lexical scope.
+  `optional_arg_scan_cases.expected` ratchets the violating discard forms plus their nearest honest
+  counterparts so losing a control is itself a golden change (gh-ocannl-811). Optimizer
   forwarders still need executed oracles — syntactic use proves only that the value was forwarded.
 - GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
   branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
