@@ -74,12 +74,15 @@ that they earn a lookup rather than always-loaded space.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
   `benchmarks/`; its prose corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
-  and `benchmarks/`; all checked-in `dune` and `ocannl_config` files join too, as do prefixed-token
-  examples in `ocannl_config.reference`. A script or Dune-action
+  and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
+  `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in
+  `ocannl_config.reference`. A script or Dune-action
   token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>=` beginning at an identifier boundary; the explicit open namespaces
-  `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key
+  `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Supported prefix-free
+  config flags occupy the host application's namespace, so their current documentation sites are
+  separately file/key/count-pinned. Prose contributes a key
   when an inline code span or fenced line contains either unambiguous prefixed form; a bare
   assignment contributes only when it occupies the whole inline span outside benchmark reports
   (whitespace around `=` and an empty example value do not hide the key). Config files contribute

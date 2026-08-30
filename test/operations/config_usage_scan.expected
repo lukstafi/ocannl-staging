@@ -1,8 +1,9 @@
 the scan reaches script files under tools, scripts, and benchmarks: true
-the scan reaches AGENTS.md, root README, docs, and benchmark Markdown: true
+the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown: true
 the scan reaches Dune actions: true
 the scan reaches every checked-in ocannl_config root: true
 the scan reaches ocannl_config.reference examples: true
+the scan reaches the checked-in debug config template: true
 OK: qualified OCANNL command-line flags and OCANNL_<KEY>= assignments in scripts under tools/, scripts/, and benchmarks/ name registered keys.
 OK: inline key=value assignments in scanned Markdown name registered keys or explicit non-config notation.
 OK: configuration tokens in Dune actions and checked-in ocannl_config files name registered keys or counted intentional-invalid controls.

@@ -210,6 +210,7 @@ Backend declarations, by dune file. Every stanza that runs an executable either 
 inside its parentheses. What is held here is which WORDS a file's markers use, not how many
 stanzas carry each: the per-stanza reasons live next to the stanzas, where the next author
 will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665).
+  .claude/dune: nothing that runs a test executable
   arrayjit/lib/dune: nothing that runs a test executable
   arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
   benchmarks/dune: markers: none

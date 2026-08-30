@@ -14,7 +14,12 @@ open Base
 open Stdio
 module Markdown = Test_utils.Agent_notes_scan
 
-type kind = Cli_flag | Environment_assignment | Markdown_assignment | Config_file_assignment
+type kind =
+  | Cli_flag
+  | Prefix_free_cli_flag
+  | Environment_assignment
+  | Markdown_assignment
+  | Config_file_assignment
 
 type occurrence = {
   path : string;
@@ -92,6 +97,62 @@ let cli_key_of_token token =
             | None ->
                 Some
                   (Option.value (known_cli_key token) ~default:(unknown_cli_key ~name_prefix token))))
+
+(* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
+   globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
+   places that deliberately document OCANNL's supported prefix-free form. The spelling grammar still
+   comes from the runtime helper, and the key remains literal here so removing it from the registry
+   makes the old occurrence fail. *)
+let prefix_free_config_mentions =
+  [
+    ("docs/agent-notes/conventions.md", "backend", 1);
+    ("docs/proposals/gh-ocannl-409.md", "backend", 3);
+  ]
+
+let prefix_free_names key =
+  let qualified = Utils.cmdline_var_names ~qualified_only:true key in
+  Utils.cmdline_var_names key
+  |> List.filter ~f:(fun name -> not (List.mem qualified name ~equal:String.equal))
+
+let prefix_free_occurrences_for ~path ~keys content =
+  String.split_lines content
+  |> List.mapi ~f:(fun index line ->
+      List.concat_map keys ~f:(fun key ->
+          List.concat_map (prefix_free_names key) ~f:(fun name ->
+              let rec from pos found =
+                match String.substr_index line ~pos ~pattern:name with
+                | None -> List.rev found
+                | Some start
+                  when start > 0
+                       && (Char.is_alphanum line.[start - 1]
+                          || Char.equal line.[start - 1] '_'
+                          || Char.equal line.[start - 1] '-') ->
+                    from (start + 1) found
+                | Some start ->
+                    let stop = ref (start + String.length name) in
+                    while !stop < String.length line && cli_token_char line.[!stop] do
+                      Int.incr stop
+                    done;
+                    let spelling = String.sub line ~pos:start ~len:(!stop - start) in
+                    from
+                      (max (start + 1) !stop)
+                      ({
+                         path;
+                         line = index + 1;
+                         key;
+                         spelling;
+                         kind = Prefix_free_cli_flag;
+                         spaced_bare = false;
+                       }
+                      :: found)
+              in
+              from 0 [])))
+  |> List.concat
+
+let tracked_prefix_free_keys path =
+  List.filter_map prefix_free_config_mentions ~f:(fun (tracked_path, key, _) ->
+      Option.some_if (String.equal path tracked_path) key)
+  |> List.dedup_and_sort ~compare:String.compare
 
 let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~normalize ~kind
     content =
@@ -350,6 +411,7 @@ let config_file_occurrences ~path content =
    second same-file use all fail. *)
 let non_config_assignment_mentions =
   [
+    (".claude/skills/slipshow/SKILL.md", "title", 1);
     ("README.md", "i", 1);
     ("benchmarks/README.md", "lr", 1);
     ("docs/agent-notes/build-and-test.md", "execution", 3);
@@ -397,8 +459,13 @@ let spaced_config_sites =
   Set.of_list (module String)
   @@ List.map spaced_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
 
+let prefix_free_config_sites =
+  Set.of_list (module String)
+  @@ List.map prefix_free_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
+
 let kind_name = function
   | Cli_flag -> "command-line flag"
+  | Prefix_free_cli_flag -> "prefix-free command-line flag"
   | Environment_assignment -> "environment assignment"
   | Markdown_assignment -> "documentation assignment"
   | Config_file_assignment -> "configuration-file assignment"
@@ -407,6 +474,7 @@ let check ~repository_census occurrences =
   let seen_non_config = Hashtbl.create (module String) in
   let seen_historical = Hashtbl.create (module String) in
   let seen_spaced_config = Hashtbl.create (module String) in
+  let seen_prefix_free = Hashtbl.create (module String) in
   List.iter occurrences ~f:(fun occurrence ->
       (if occurrence.spaced_bare then
          let site = mention_site occurrence.path occurrence.key in
@@ -417,6 +485,17 @@ let check ~repository_census occurrences =
                 "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
                  spaced_config_mentions"
                 occurrence.path occurrence.line occurrence.spelling));
+      (match occurrence.kind with
+      | Prefix_free_cli_flag ->
+          let site = mention_site occurrence.path occurrence.key in
+          if Set.mem prefix_free_config_sites site then Hashtbl.incr seen_prefix_free site
+          else if repository_census then
+            Verdict.fail
+              (Printf.sprintf
+                 "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
+                  prefix_free_config_mentions"
+                 occurrence.path occurrence.line occurrence.spelling)
+      | _ -> ());
       if Set.mem Utils.known_config_keys occurrence.key then ()
       else if Set.mem non_config_assignment_sites (mention_site occurrence.path occurrence.key) then
         Hashtbl.incr seen_non_config (mention_site occurrence.path occurrence.key)
@@ -480,6 +559,20 @@ let check ~repository_census occurrences =
            (drifted_spaced
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
+           |> String.concat ~sep:", "));
+    let drifted_prefix_free =
+      List.filter_map prefix_free_config_mentions ~f:(fun (path, key, expected) ->
+          let actual =
+            Hashtbl.find seen_prefix_free (mention_site path key) |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
+    in
+    if not (List.is_empty drifted_prefix_free) then
+      Verdict.fail
+        (Printf.sprintf "prefix-free config-mention occurrence counts drifted: %s"
+           (drifted_prefix_free
+           |> List.map ~f:(fun (path, key, expected, actual) ->
+               Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", ")))
 
 let file_kind path =
@@ -487,20 +580,27 @@ let file_kind path =
   if String.is_suffix path ~suffix:".md" then `Markdown
   else if String.equal path "ocannl_config.reference" then `Reference
   else if String.equal basename "dune" then `Dune
-  else if String.equal basename "ocannl_config" then `Config
+  else if String.equal basename "ocannl_config" || String.equal basename "ocannl_config.for_debug"
+  then `Config
   else `Script
 
 let occurrences_of_file ~reported_path path =
   let content = In_channel.read_all path in
-  match file_kind reported_path with
-  | `Markdown ->
-      let allow_bare =
-        (not (String.is_prefix reported_path ~prefix:"benchmarks/"))
-        || String.equal reported_path "benchmarks/README.md"
-      in
-      markdown_occurrences ~allow_bare ~path:reported_path content
-  | `Config -> config_file_occurrences ~path:reported_path content
-  | `Dune | `Reference | `Script -> script_occurrences ~path:reported_path content
+  let primary =
+    match file_kind reported_path with
+    | `Markdown ->
+        let allow_bare =
+          (not (String.is_prefix reported_path ~prefix:"benchmarks/"))
+          || String.equal reported_path "benchmarks/README.md"
+        in
+        markdown_occurrences ~allow_bare ~path:reported_path content
+    | `Config -> config_file_occurrences ~path:reported_path content
+    | `Dune | `Reference | `Script -> script_occurrences ~path:reported_path content
+  in
+  primary
+  @ prefix_free_occurrences_for ~path:reported_path
+      ~keys:(tracked_prefix_free_keys reported_path)
+      content
 
 let fixture path config_path =
   let reported_path = Stdlib.Filename.basename path in
@@ -508,6 +608,9 @@ let fixture path config_path =
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
     @ markdown_occurrences ~allow_bare:true ~path:reported_path content
+    @ prefix_free_occurrences_for ~path:reported_path
+        ~keys:[ "definitely_not_a_prefix_free_config_key" ]
+        content
     @ config_file_occurrences
         ~path:(Stdlib.Filename.basename config_path)
         (In_channel.read_all config_path))
@@ -521,6 +624,9 @@ let live workspace_root paths =
         if
           String.equal relative "AGENTS.md" || String.equal relative "README.md"
           || String.equal relative "ocannl_config.reference"
+          || String.equal relative "ocannl_config.for_debug"
+          || String.is_prefix relative ~prefix:".claude/skills/"
+             && String.is_suffix relative ~suffix:".md"
           || (String.is_prefix relative ~prefix:"docs/" && String.is_suffix relative ~suffix:".md")
           || String.is_prefix relative ~prefix:"benchmarks/"
              && String.is_suffix relative ~suffix:".md"
@@ -545,8 +651,9 @@ let live workspace_root paths =
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
     ~f:(fun root -> not (List.is_empty (scripts_under root)));
-  Verdict.p "the scan reaches AGENTS.md, root README, docs, and benchmark Markdown"
+  Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
+    && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")
     && List.exists markdown ~f:(fun (path, _) -> String.equal path "README.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:"docs/")
     && List.exists markdown ~f:(fun (path, _) ->
@@ -569,11 +676,16 @@ let live workspace_root paths =
           && String.equal (Stdlib.Filename.basename path) "ocannl_config"));
   Verdict.p "the scan reaches ocannl_config.reference examples"
     (List.exists files ~f:(fun (path, _) -> String.equal path "ocannl_config.reference"));
+  Verdict.p "the scan reaches the checked-in debug config template"
+    (List.exists files ~f:(fun (path, _) -> String.equal path "ocannl_config.for_debug"));
   let occurrences =
     List.concat_map files ~f:(fun (reported_path, path) -> occurrences_of_file ~reported_path path)
   in
   check ~repository_census:true occurrences;
-  let cli_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Cli_flag) in
+  let cli_count =
+    List.count occurrences ~f:(fun o ->
+        Poly.equal o.kind Cli_flag || Poly.equal o.kind Prefix_free_cli_flag)
+  in
   let env_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Environment_assignment) in
   let markdown_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Markdown_assignment) in
   let config_count =
