@@ -73,7 +73,13 @@ let () =
   let sample, calls = sample_from [] 0.5 in
   let budgeted = Autotune.sample_min ~repeats:3 ~sample in
   p "the top-up budget accumulates per-sample time"
-    (!calls = 50 && budgeted.samples = 50 && Float.equal budgeted.ms 0.5 && not budgeted.contended)
+    (!calls = 50 && budgeted.samples = 50 && Float.equal budgeted.ms 0.5 && not budgeted.contended);
+  p "a complete measurement set with a winner is cacheable"
+    (Autotune.search_measurements_cacheable ~nothing_timed:false ~timings_contended:0);
+  p "a contention-refused window prevents caching an incomplete winner"
+    (not (Autotune.search_measurements_cacheable ~nothing_timed:false ~timings_contended:1));
+  p "a search with no measured winner remains uncacheable"
+    (not (Autotune.search_measurements_cacheable ~nothing_timed:true ~timings_contended:0))
 
 (* {1 The calibration policy, without a device} *)
 

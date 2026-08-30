@@ -6,6 +6,9 @@ queued calibration refuses a contended estimate: true
 queued contention is detected on raw batch wall before per-launch division: true
 a consistently slow routine is not mistaken for host contention: true
 the top-up budget accumulates per-sample time: true
+a complete measurement set with a winner is cacheable: true
+a contention-refused window prevents caching an incomplete winner: true
+a search with no measured winner remains uncacheable: true
 == queued batch depth ==
 every calibration estimate gets the depth the policy owes it: true
 no calibration estimate ever yields a depth below 1: true

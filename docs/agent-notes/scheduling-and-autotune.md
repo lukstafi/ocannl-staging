@@ -582,8 +582,9 @@ files.
   window contended when at least half its raw wall samples exceed their minimum by 2x. Queued mode
   tests that dispersion on BATCH wall before dividing the ranked and budgeted samples by depth, so
   the division cannot hide a fixed host stall. A queued calibration carrying that mark yields no
-  depth, and the search neither ranks nor caches a contended timing; `report.timings_contended`
-  records every refusal so an all-contention fallback is diagnosable and retryable. Falling back to
+  depth, and the search neither ranks a contended timing nor caches any winner from a search with
+  one or more contention refusals; `report.timings_contended` records every refusal so the
+  incomplete candidate set is diagnosable and a later cache-cold call retries it. Falling back to
   depth 1 would silently change the queued objective back into the isolated one.
   **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
   `Keyed "timing"`), which is the one place this differs from its `autotune_*` neighbours: those

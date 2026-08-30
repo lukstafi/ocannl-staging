@@ -12,30 +12,26 @@ first tune call searches (cache miss): true
 first tune call timed at least the baseline: true
 a completed search carries no terminal failure: true
 decline census sums to candidates_failed: true
-second tune call hits the schedule cache: true
-cache-hit report has no declines: true
+second tune call replays exactly when the first search had no contention refusals: true
+a replayed second report has no declines: true
 searched report labels a winner exactly when it has a winning time: PASS
 searched report's tensorized flag agrees with the schedule it carries: PASS
 searched report's scalar fallbacks do not exceed its Tile_mma statements: PASS
 searched report's best tensorized time undercuts the winner only inside the beam's progress band: PASS
 searched report's tensorizing winner was itself timed in the tensorized family: PASS
-cache-hit report labels a winner exactly when it has a winning time: PASS
-cache-hit report's tensorized flag agrees with the schedule it carries: PASS
-cache-hit report's scalar fallbacks do not exceed its Tile_mma statements: PASS
-cache-hit report's best tensorized time undercuts the winner only inside the beam's progress band: PASS
-cache-hit report's tensorizing winner was itself timed in the tensorized family: PASS
-cache-hit report names the replayed winner: true
+second report labels a winner exactly when it has a winning time: PASS
+second report's tensorized flag agrees with the schedule it carries: PASS
+second report's scalar fallbacks do not exceed its Tile_mma statements: PASS
+second report's best tensorized time undercuts the winner only inside the beam's progress band: PASS
+second report's tensorizing winner was itself timed in the tensorized family: PASS
+second report names its winner: true
 cached schedule replays to correct values: true
 search off without a cache times nothing: true
 search off without a cache returns the correct untuned routine: true
-search off still replays a committed cache entry: true
+search off replays exactly when a complete search committed a cache entry: true
 cache replay under search off gives correct values: true
-state: completed search       -> searched
-state: cache replay           -> cache-replay
-state: search off, no cache   -> search-disabled
-state: search off, cached     -> cache-replay
-the four calls report, by name, exactly the three states they reach: true
+the four calls report outcomes consistent with contention-aware cacheability: true
 a report that neither searched nor replayed timed nothing: true
-search off replays the default cache directory when asked for it: true
+search off replays the chosen default cache exactly after a complete search: true
 search off ignores the unchosen default cache directory: true
 the ignored-cache fallback is still a correct routine: true

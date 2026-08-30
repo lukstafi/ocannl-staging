@@ -301,6 +301,13 @@ let sample_min ~repeats ~sample =
   in
   { ms; contended = stalled * 2 >= !count; samples = !count }
 
+(* A usable winner drawn from an incomplete measurement set may ship for this call, but must not
+   become the answer to every later call through the schedule cache. A later idle process needs to
+   retry any schedule whose timing was refused for contention. Kept as a policy seam so the cache
+   gate is pinned without manufacturing a contended device run. *)
+let search_measurements_cacheable ~nothing_timed ~timings_contended =
+  (not nothing_timed) && timings_contended = 0
+
 (* Queued mode's batch depth is calibrated per candidate rather than fixed. A fixed depth is either
    too shallow to amortize the round trip on a fast kernel, or minutes of uninterruptible dispatches
    on a slow one — and the tuner meets both within one search. [queued_batch_ms] is the wall time
@@ -3940,7 +3947,16 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
              schedule. *)
           let nothing_timed = Float.is_inf best_ms in
           (if use_cache then
-             if nothing_timed then logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
+             if not
+                  (search_measurements_cacheable ~nothing_timed
+                     ~timings_contended:!n_timings_contended)
+             then
+               if nothing_timed then
+                 logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
+               else
+                 logf
+                   "%d timing window(s) were refused for host contention: storing no cache entry"
+                   !n_timings_contended
              else
                let saved, segments, finer_fission =
                  let best_c = Option.value_exn best_c ~message:timed_winner_exists in

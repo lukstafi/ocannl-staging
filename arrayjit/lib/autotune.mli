@@ -1095,6 +1095,12 @@ val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
     have been taken. Reports [contended] when at least half the raw [contention_ms] samples exceed
     their minimum by 2x. Exposed so tests can inject a deterministic clock. *)
 
+val search_measurements_cacheable : nothing_timed:bool -> timings_contended:int -> bool
+(** Pure cache-policy seam (gh-ocannl-855). A search result is cacheable only when at least one
+    candidate was timed and no timing window was refused for host contention. The current call may
+    still ship its best usable candidate, but an incomplete measurement set must be retried by a
+    later cache-cold search. *)
+
 val timing_string : timing_mode -> string
 (** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component
     carries, what a report's mode is rendered as, and the round trip of {!timing_of_setting}. *)
