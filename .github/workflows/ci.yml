@@ -285,11 +285,11 @@ jobs:
       if: steps.opam-cache.outputs.cache-hit != 'true'
       shell: bash
       run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
-    - name: Check non-default module log level
+    - name: Check non-default module log level and trace semantics
       if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main'
       env:
         OCANNL_LOG_LEVEL_CC_BACKEND: 3
-      run: opam exec -- dune build "@check"
+      run: opam exec -- dune build "@check" "@test/operations/runtest-cc_backend_trace_name"
     # One walk, not `dune build` then `dune runtest`: as two commands, the
     # `(test)` stanzas and inline-test runners only start after every file
     # target -- including the golden-rule test executions `@default` carries --

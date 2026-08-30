@@ -209,6 +209,34 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-859: `@check` proves that a non-default ppx_minidebug gate compiles, but not that a
+; trace expression resolved the intended binding. The ordinary level-0 suite records an explicit
+; skip; the Ubuntu/OCaml 5.5 level-3 CI gate builds this focused alias in the same dune invocation
+; as `@check`, then executes one cc routine and checks the semantic value in its `work` trace.
+
+(test
+ ; ocannl-backend: cc -- Context.cpu selects cc directly; the action also enables its routine log.
+ (name cc_backend_trace_name)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_LOG_LEVEL_CC_BACKEND))
+ (modules cc_backend_trace_name)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (action
+  (run
+   %{test}
+   "--ocannl_build_files_prefix=cc_backend_trace_name"
+   "--ocannl_clean_up_log_files_on_startup=true"
+   "--ocannl_debug_backend=flushing"
+   "--ocannl_debug_log_from_routines=true"
+   "--ocannl_debug_log_to_stream_files=true"
+   "--ocannl_log_file_stem=cc_backend_trace_name"
+   "--ocannl_log_main_domain_to_stdout=false"
+   "--ocannl_log_level=3")))
+
 (executable
  (name micrograd_demo_logging)
  (package neural_nets_lib)
