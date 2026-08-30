@@ -58,7 +58,7 @@
 (executables
  (names bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
  (modules bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
- (libraries metal ctypes)
+ (libraries metal metal.runtime ctypes)
  (enabled_if
   (= %{system} macosx))
  (modes exe))

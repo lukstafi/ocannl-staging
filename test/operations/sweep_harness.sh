@@ -144,7 +144,7 @@ holder_pid=
 # them is separately covered on their hardware boxes.
 nvrtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
 nvrtc options: -I/usr/local/cuda/include --use_fast_math
-metal options: language-version=3.1 math-mode=safe math-functions=fast enable-logging=false'
+metal options: language-version=3.1 math-mode=safe math-functions=fast'
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$nvrtc_failure \
   run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"
@@ -168,7 +168,7 @@ grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
 # stopped at the log and never reached the file callers diff.
 grep -q '^nvrtc options: -I/usr/local/cuda/include --use_fast_math$' \
   "${metal_log%.log}.fingerprint"
-grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast enable-logging=false$' \
+grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast$' \
   "${metal_log%.log}.fingerprint"
 
 # And a GREEN unit must NOT pay for it -- the same backend, so the only thing
