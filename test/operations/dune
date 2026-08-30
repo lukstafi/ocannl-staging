@@ -4103,11 +4103,11 @@
 ; fail the scan's non-vacuity claim. Qualified command-line spellings and value separators accepted
 ; by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>=` assignments, are consumers.
 ; Documentation scope is AGENTS.md, the root and benchmark READMEs, and every `*.md`
-; under docs/. Markdown contributes only an inline code span that is exactly one bare or prefixed
-; assignment, allowing whitespace around `=`; fenced examples and longer snippets describe
-; unrelated languages. Non-config judgments, spaced bare config mentions, and historical-invalid
-; exemptions pin file/key occurrence counts. The checked-in fixture carries one unknown key in every
-; accepted syntax, and the control requires refusal with exit 1.
+; under docs/. Markdown contributes prefixed tokens from any inline code span, while a bare
+; assignment must occupy the whole span (with optional whitespace around `=`); fenced examples
+; describe unrelated languages. Non-config judgments, spaced bare config mentions, and
+; historical-invalid exemptions pin file/key occurrence counts. The checked-in fixture carries one
+; unknown key in every accepted syntax, and the control requires refusal with exit 1.
 
 (executable
  (name config_usage_scan)

@@ -11,3 +11,5 @@ The dash value-separator form must be refused: `--ocannl-definitely-not-a-config
 The no-value-separator form must be refused: `--ocannl_definitelynotaconfigkeyvalue`
 The spaced documentation form must be refused: `definitely_not_a_config_key = true`
 This larger identifier is not an OCANNL variable and must be ignored: MY_OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true
+An environment assignment in a command span must be refused: `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=true dune build`
+A qualified CLI token in a command span must be refused: `dune build --ocannl-definitely-not-a-third-config-key=true`

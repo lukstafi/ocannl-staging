@@ -139,7 +139,7 @@ let script_occurrences ~path content =
                         || Char.equal line.[start - 1] '_'
                         || Char.equal line.[start - 1] '-') ->
                   from (start + 1) found
-              | Some start ->
+              | Some start -> (
                   let stop = ref (start + String.length name_prefix) in
                   while !stop < String.length line && cli_token_char line.[!stop] do
                     Int.incr stop
@@ -148,20 +148,19 @@ let script_occurrences ~path content =
                   if !stop = start + String.length name_prefix then from next found
                   else
                     let spelling = String.sub line ~pos:start ~len:(!stop - start) in
-                    let key =
-                      Option.value_exn (cli_key_of_token spelling)
-                        ~message:"scanner-produced CLI token must parse"
-                    in
-                    from next
-                      ({
-                         path;
-                         line = index + 1;
-                         key;
-                         spelling;
-                         kind = Cli_flag;
-                         spaced_bare = false;
-                       }
-                      :: found)
+                    match cli_key_of_token spelling with
+                    | None -> from next found
+                    | Some key ->
+                        from next
+                          ({
+                             path;
+                             line = index + 1;
+                             key;
+                             spelling;
+                             kind = Cli_flag;
+                             spaced_bare = false;
+                           }
+                          :: found))
             in
             from 0 []))
     |> List.concat
@@ -270,23 +269,31 @@ let markdown_occurrences ~path content =
       |> List.filter ~f:(fun range ->
           (not (List.mem (comments lineno) range ~equal:same_range))
           && not (List.mem (fences lineno) range ~equal:same_range))
-      |> List.filter_map ~f:(fun (start, stop) ->
+      |> List.concat_map ~f:(fun (start, stop) ->
           (* A multiline span arrives as one range per physical line. A complete [key=value] mention
              is one inline span, so both delimiters must be on this line. *)
           if stop <= start || not (Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
-          then None
+          then []
           else
             let spelling = String.sub line ~pos:start ~len:(stop - start) in
             let rendered = Markdown.code_span_content spelling in
-            Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
-                {
-                  path;
-                  line = lineno;
-                  key;
-                  spelling = rendered;
-                  kind = Markdown_assignment;
-                  spaced_bare;
-                })))
+            let prefixed =
+              script_occurrences ~path rendered
+              |> List.map ~f:(fun occurrence ->
+                  { occurrence with line = lineno; kind = Markdown_assignment; spaced_bare = false })
+            in
+            if not (List.is_empty prefixed) then prefixed
+            else
+              Option.to_list
+              @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
+                  {
+                    path;
+                    line = lineno;
+                    key;
+                    spelling = rendered;
+                    kind = Markdown_assignment;
+                    spaced_bare;
+                  })))
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
    list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
