@@ -45,11 +45,18 @@ let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
 
 type rival_values = { once_narrowed : float; per_step : float }
+type rival_fixture = { initial : float; increment : float; terms : int; narrow : float -> float }
 
 let values { once_narrowed; per_step } = [ once_narrowed; per_step ]
 
 let unordered_pairs xs =
   List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
+
+let render_rivals { initial; increment; terms; narrow } =
+  let increments = List.init terms ~f:(fun _ -> increment) in
+  let once_narrowed = narrow (List.fold increments ~init:initial ~f:( +. )) in
+  let per_step = List.fold increments ~init:initial ~f:(fun acc x -> narrow (acc +. x)) in
+  { once_narrowed; per_step }
 
 (* Where the serial legs widen bf16 accumulators (see the header): CPU policy or CUDA's mma
    mirror. *)
@@ -204,8 +211,24 @@ let claim_wgreduce =
 let claim_fp8 =
   "fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16)"
 
-let fp8_values = { once_narrowed = 20.0; per_step = 16.0 }
-let f16_values = { once_narrowed = 2056.0; per_step = 2048.0 }
+let fp8_fixture =
+  {
+    initial = 16.0;
+    increment = 0.5;
+    terms = 8;
+    narrow = (fun x -> Ir.Ops.fp8_to_single (Ir.Ops.single_to_fp8 x));
+  }
+
+let f16_fixture =
+  {
+    initial = 2048.0;
+    increment = 1.0;
+    terms = 8;
+    narrow = (fun x -> Ir.Ops.half_to_single (Ir.Ops.single_to_half x));
+  }
+
+let fp8_values = render_rivals fp8_fixture
+let f16_values = render_rivals f16_fixture
 
 (* === fp8 accumulates wide on every backend (gh-ocannl-663) === *)
 (* No backend has an fp8 accumulator format (its arithmetic bridges through float per operator
@@ -216,7 +239,7 @@ let f16_values = { once_narrowed = 2056.0; per_step = 2048.0 }
    the wide accumulator reaches 20, exactly representable. *)
 let fp8_sum ~name ~first_id () =
   let fp8 = Ir.Ops.fp8 in
-  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id ~dims:[| 8 |] () in
+  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id ~dims:[| fp8_fixture.terms |] () in
   let f8acc = f8node ~dims:[| 1 |] (name ^ "_acc") in
   let f8xs = f8node (name ^ "_xs") in
   Ll_test.materialize f8acc;
@@ -230,10 +253,17 @@ let fp8_sum ~name ~first_id () =
            (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
            (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
   in
-  let f8o = Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name (Ll_test.loop_n f8i 8 f8upd) in
+  let f8o =
+    Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name
+      (Ll_test.loop_n f8i fp8_fixture.terms f8upd)
+  in
   let f8vals =
     Ll_test.execute ~name f8o
-      ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
+      ~seed:
+        [
+          (f8acc, [| fp8_fixture.initial |]);
+          (f8xs, Array.create ~len:fp8_fixture.terms fp8_fixture.increment);
+        ]
       ~read:[ f8acc ]
   in
   (List.hd_exn f8vals).(0)
@@ -253,7 +283,7 @@ let fp8_leg () =
    backend exercising it would update these legs, not violate the policy. *)
 let f16_sum ~name ~first_id () =
   let half = Ir.Ops.half in
-  let hnode = Ll_test.node_factory ~prec:half ~first_id ~dims:[| 8 |] () in
+  let hnode = Ll_test.node_factory ~prec:half ~first_id ~dims:[| f16_fixture.terms |] () in
   let hacc = hnode ~dims:[| 1 |] (name ^ "_acc") in
   let hxs = hnode (name ^ "_xs") in
   Ll_test.materialize hacc;
@@ -267,10 +297,16 @@ let f16_sum ~name ~first_id () =
            (Ll_test.get hacc [| Ll_test.fixed 0 |], half),
            (Ll_test.get hxs [| Ll_test.iter hi |], half) ))
   in
-  let ho = Ll_test.optimize ~materialized:[ hacc; hxs ] ~name (Ll_test.loop_n hi 8 hupd) in
+  let ho =
+    Ll_test.optimize ~materialized:[ hacc; hxs ] ~name (Ll_test.loop_n hi f16_fixture.terms hupd)
+  in
   let hvals =
     Ll_test.execute ~name ho
-      ~seed:[ (hacc, [| 2048.0 |]); (hxs, Array.create ~len:8 1.0) ]
+      ~seed:
+        [
+          (hacc, [| f16_fixture.initial |]);
+          (hxs, Array.create ~len:f16_fixture.terms f16_fixture.increment);
+        ]
       ~read:[ hacc ]
   in
   (List.hd_exn hvals).(0)

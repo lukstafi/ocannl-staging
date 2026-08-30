@@ -49,11 +49,40 @@ let half = Ir.Ops.half
 let skipped = Verdict.skipped ~backend:backend_name
 
 type rival_values = { once_narrowed : float; storage_tree : float; per_step : float }
+type rival_fixture = { n : int; term : int -> float; narrow : float -> float }
 
 let values { once_narrowed; storage_tree; per_step } = [ once_narrowed; storage_tree; per_step ]
 
 let unordered_pairs xs =
   List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
+
+let warp_size = 32
+
+(* Host image of the renderer's descending [shfl_xor] offsets. Only the lower half needs updating:
+   those are exactly the lanes that can feed lane 0 at the next offset. [narrow] models the
+   plausible-wrong spelling whose staging register lives at storage precision. *)
+let reduce_storage_tree ~narrow terms =
+  let lanes = Array.of_list terms in
+  let offset = ref (Array.length lanes / 2) in
+  while !offset > 0 do
+    for lane = 0 to !offset - 1 do
+      lanes.(lane) <- narrow (lanes.(lane) +. lanes.(lane + !offset))
+    done;
+    offset := !offset / 2
+  done;
+  lanes.(0)
+
+let render_rivals { n; term; narrow } =
+  if n % warp_size <> 0 || not (Int.is_pow2 (n / warp_size)) then
+    invalid_arg "warp-shuffle rival fixture must contain a power-of-two number of whole warps";
+  let terms = List.init n ~f:term in
+  let once_narrowed = narrow (List.fold terms ~init:0.0 ~f:( +. )) in
+  let per_step = List.fold terms ~init:0.0 ~f:(fun acc x -> narrow (acc +. x)) in
+  let partials =
+    List.chunks_of terms ~length:warp_size |> List.map ~f:(reduce_storage_tree ~narrow)
+  in
+  let storage_tree = reduce_storage_tree ~narrow partials in
+  { once_narrowed; storage_tree; per_step }
 
 (* Which backends resolve a bf16 accumulator ABOVE its storage width (gh-ocannl-663), restated here
    rather than derived from the backend so a regression in it is detectable: the CPU backends
@@ -303,21 +332,23 @@ let () =
    computes the same number its serial rendering does, and a residency that stays narrow is refused
    rather than shuffled at a width no builtin overload covers.
 
-   The terms [1 + (k mod 7)/128] are each exact in bf16 and discriminate all three renderings: over
-   32 lanes the exact f32 total 32.703125 narrows once to 32.75, while a tree staged at bf16 gives
-   32.5 and a per-step read-modify-write of the bf16 cell gives 32.25. Every f32 partial sum here is
-   a multiple of 1/128 below 2^15, so the tree's reassociation costs nothing and the claim is
-   bitwise rather than approximate. The 128-lane version repeats the pattern — exact total
-   130.9609375, narrowed once 131.0, against 130.0 for a bf16 tree and 128.0 for per-step narrowing
-   — and it is the one that also stages per-warp partials, so it pins the shared slots' element type
-   too. *)
+   The terms [1 + (k mod 11)/128] are each exact in bf16 and discriminate all three renderings: over
+   32 lanes the exact f32 total 33.2109375 narrows once to 33.25, while a tree staged at bf16 gives
+   33 and a per-step read-modify-write of the bf16 cell gives 32.75. Every f32 partial sum here is a
+   multiple of 1/128 below 2^15, so the tree's reassociation costs nothing and the claim is bitwise
+   rather than approximate. The 128-lane version repeats the pattern — exact total 132.890625,
+   narrowed once 133.0, against 132.0 for a bf16 tree and 129.0 for per-step narrowing — and it is
+   the one that also stages per-warp partials, so it pins the shared slots' element type too. *)
 
-let bf16_term k = 1.0 +. (Float.of_int (k % 7) /. 128.0)
-let bf16_1w_values = { once_narrowed = 32.75; storage_tree = 32.5; per_step = 32.25 }
-let bf16_4w_values = { once_narrowed = 131.0; storage_tree = 130.0; per_step = 128.0 }
+let bf16_term k = 1.0 +. (Float.of_int (k % 11) /. 128.0)
+let narrow_bf16 x = Ir.Ops.bfloat16_to_single (Ir.Ops.single_to_bfloat16 x)
+let bf16_1w_fixture = { n = 32; term = bf16_term; narrow = narrow_bf16 }
+let bf16_4w_fixture = { n = 128; term = bf16_term; narrow = narrow_bf16 }
+let bf16_1w_values = render_rivals bf16_1w_fixture
+let bf16_4w_values = render_rivals bf16_4w_fixture
 
-let bf16_sum ~name ~n =
-  let x = NTDSL.init ~l:(name ^ "_x") ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) () in
+let bf16_sum ~name ({ n; term; _ } : rival_fixture) =
+  let x = NTDSL.init ~l:(name ^ "_x") ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> term idcs.(0)) () in
   let%op s = x ++ "i=>0" in
   Tn.update_prec s.Tensor.value bf16;
   run ~name
@@ -338,11 +369,11 @@ let bf16_sum ~name ~n =
 
 let claim_bf16_1w =
   "a bf16 single-warp Workgroup_reduce accumulates at the widened residency (32 terms narrow once \
-   to 32.75, not the 32.5 a bf16-staged tree or the 32.25 a per-step narrowing gives)"
+   to 33.25, not the 33 a bf16-staged tree or the 32.75 a per-step narrowing gives)"
 
 let claim_bf16_4w =
   "a bf16 four-warp Workgroup_reduce stages its per-warp partials at the widened residency (128 \
-   terms narrow once to 131, not the 130 a bf16-staged tree or the 128 a per-step narrowing gives)"
+   terms narrow once to 133, not the 132 a bf16-staged tree or the 129 a per-step narrowing gives)"
 
 let claim_bf16_types =
   "the emitted shuffle declares its staging register and its per-warp slots at the residency type, \
@@ -361,9 +392,9 @@ let () =
     ~f:(fun (a, b) -> Float.equal a b);
   if widens_bf16 then begin
     p claim_bf16_1w
-      (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" ~n:32) bf16_1w_values.once_narrowed);
+      (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" bf16_1w_fixture) bf16_1w_values.once_narrowed);
     p claim_bf16_4w
-      (Float.equal (bf16_sum ~name:"bf16_4warp_wshfl" ~n:128) bf16_4w_values.once_narrowed)
+      (Float.equal (bf16_sum ~name:"bf16_4warp_wshfl" bf16_4w_fixture) bf16_4w_values.once_narrowed)
   end
   else begin
     skipped claim_bf16_1w;
@@ -484,10 +515,11 @@ let () =
    residency staging, the same once-narrowed value, on backends where f16 is the storage precision a
    model actually trains in.
 
-   The terms [1 + (k mod 11)/1024] are the f16 analogue of the bf16 legs' [1 + (k mod 7)/128]:
+   The terms [1 + (k mod 11)/1024] are the f16 analogue of the bf16 legs' [1 + (k mod 11)/128]:
    1/1024 is ulp(1) at f16's 10 stored mantissa bits as 1/128 is at bf16's 7, so each term is exact
-   in f16, while the partial sums are not — and the modulus is 11 rather than 7 because at f16's
-   finer grid a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value.
+   in f16, while the partial sums are not. The 11-cycle is load-bearing at both widths: at f16's
+   finer grid a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value;
+   at bf16, deriving the actual XOR-tree association exposes the same collision for its old 7-cycle.
    Over 32 lanes the exact f32 total 32.1513671875 narrows once to 32.15625, against 32.125 for a
    tree staged at f16 and 32.09375 for a per-step read-modify-write of the f16 cell; over 128 lanes
    the totals are 128.625 / 128.5 / 128.125, and that case also stages per-warp partials, pinning
@@ -495,11 +527,14 @@ let () =
    tree's reassociation is exact and the claims are bitwise rather than approximate. *)
 
 let f16_term k = 1.0 +. (Float.of_int (k % 11) /. 1024.0)
-let f16_1w_values = { once_narrowed = 32.15625; storage_tree = 32.125; per_step = 32.09375 }
-let f16_4w_values = { once_narrowed = 128.625; storage_tree = 128.5; per_step = 128.125 }
+let narrow_f16 x = Ir.Ops.half_to_single (Ir.Ops.single_to_half x)
+let f16_1w_fixture = { n = 32; term = f16_term; narrow = narrow_f16 }
+let f16_4w_fixture = { n = 128; term = f16_term; narrow = narrow_f16 }
+let f16_1w_values = render_rivals f16_1w_fixture
+let f16_4w_values = render_rivals f16_4w_fixture
 
-let f16_sum ~name ~n =
-  let x = NTDSL.init ~l:(name ^ "_x") ~prec:half ~o:[ n ] ~f:(fun idcs -> f16_term idcs.(0)) () in
+let f16_sum ~name ({ n; term; _ } : rival_fixture) =
+  let x = NTDSL.init ~l:(name ^ "_x") ~prec:half ~o:[ n ] ~f:(fun idcs -> term idcs.(0)) () in
   let%op s = x ++ "i=>0" in
   Tn.update_prec s.Tensor.value half;
   run ~name
@@ -545,9 +580,13 @@ let () =
         ~f:(fun (a, b) -> Float.equal a b);
       Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
       p claim_f16_wide_1w
-        (Float.equal (f16_sum ~name:"f16_wide_1warp_wshfl" ~n:32) f16_1w_values.once_narrowed);
+        (Float.equal
+           (f16_sum ~name:"f16_wide_1warp_wshfl" f16_1w_fixture)
+           f16_1w_values.once_narrowed);
       p claim_f16_wide_4w
-        (Float.equal (f16_sum ~name:"f16_wide_4warp_wshfl" ~n:128) f16_4w_values.once_narrowed);
+        (Float.equal
+           (f16_sum ~name:"f16_wide_4warp_wshfl" f16_4w_fixture)
+           f16_4w_values.once_narrowed);
       if on_gpu then begin
         let src = Generated.read "f16_wide_4warp_wshfl" in
         let has sub = String.is_substring src ~substring:sub in

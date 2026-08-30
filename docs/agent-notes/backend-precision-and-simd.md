@@ -590,16 +590,17 @@ files.
   RNG: **the shuffle may widen only where the serial path widens**, so the two renderings consult
   one shared predicate, `C_syntax.accum_pinned_to_storage_prec`, rather than each deciding for
   itself. Extend that predicate, not one call site, if another such body class appears. Tests:
-  `hardware_warp_shuffle.ml`'s bf16 legs — 32 lanes of `1 + (k mod 7)/128` separate the three
-  candidate renderings as 32.75 / 32.5 / 32.25 (once-narrowed f32 tree, tree staged at bf16,
-  per-step read-modify-write), and 128 lanes give 131 / 130 / 128 while also pinning the shared
+  `hardware_warp_shuffle.ml`'s bf16 legs — 32 lanes of `1 + (k mod 11)/128` separate the three
+  candidate renderings as 33.25 / 33 / 32.75 (once-narrowed f32 tree, tree staged at bf16,
+  per-step read-modify-write), and 128 lanes give 133 / 132 / 129 while also pinning the shared
   slots' element type; its `Fp16_wide` twin legs — the f16 analogue `1 + (k mod 11)/1024`, giving
   32.15625 / 32.125 / 32.09375 and 128.625 / 128.5 / 128.125 — execute the same rendering under
   the wide policy on every backend, and are the legs that actually run the two-phase staging on
-  Metal (whose bf16 legs are skipped by design). The modulus rises from 7 to 11 because at f16's
-  finer grid a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value:
-  when transplanting a discrimination like this to another width, recheck it rather than assuming
-  the constants carry over. Plus the default-policy f16 leg and the bf16 RNG leg for the two
+  Metal (whose bf16 legs are skipped by design). The 11-cycle is load-bearing at both widths: at
+  f16 a 7-cycle leaves the four-warp staging indistinguishable from the once-narrowed value, and
+  deriving the actual XOR-tree association exposed the same collision in the old bf16 fixture.
+  When transplanting a discrimination like this, derive it rather than assuming the constants or
+  association carry over. Plus the default-policy f16 leg and the bf16 RNG leg for the two
   refusals, and
   `reduction_forms.ml`'s `retype-workgroup-reduce` member, whose availability now asks
   `expected_residency` instead of naming f32.
