@@ -4129,5 +4129,9 @@ let () =
       floor_control ();
       guard_control ();
       family_control ();
-      Refusal_manifest.print "env_var_deps.ml"
+      (* Dune's repository-wide rule hands the same source to [main] as [./env_var_deps.ml]
+         after a full build has materialized the local build-tree copy. Exercise that spelling here
+         too: the manifest identity is repository-relative even when the file used to extract the
+         diagnostics is local to the action's cwd. *)
+      Refusal_manifest.print "./env_var_deps.ml"
   | _ -> main ()

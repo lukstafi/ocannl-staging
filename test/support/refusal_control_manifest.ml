@@ -583,8 +583,9 @@ let print source =
   let source =
     match String.substr_index normalized ~pattern:"test/operations/" with
     | Some position -> String.drop_prefix normalized position
-    | None when String.mem normalized '/' -> normalized
-    | None -> "test/operations/" ^ normalized
+    | None ->
+        let local = "test/operations/" ^ Stdlib.Filename.basename normalized in
+        if List.Assoc.mem entries local ~equal:String.equal then local else normalized
   in
   let diagnostics = Refusal_control_scan.diagnostics (In_channel.read_all source_path) in
   let expected = markers source in
