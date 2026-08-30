@@ -602,3 +602,15 @@ files.
   template every report starts from, `Autotune.no_search_report`, therefore takes `~timing` — it is
   a function of the objective rather than a constant, which is the only reason the field can be
   plain (the option it briefly had existed solely to let that constant exist).
+- The schedule-cache directory carries one key-regime stamp, independent of the serialized entry's
+  `entry_version` (gh-ocannl-835). Bump `Schedule_cache.cache_regime_version` whenever
+  `key_components` changes: the next cache-open deletes every `.sexp` entry under an older or
+  absent stamp, then atomically publishes the current stamp; there is deliberately no migration
+  arm per historical regime. Every lookup and store takes the same permanent-file `lockf` plus an
+  in-process mutex through the entry I/O, so participating processes cannot write a current entry
+  under a sweep, and a binary seeing a newer or malformed stamp refuses cache I/O without changing
+  the directory. The lock file stays in place to avoid the unlink/recreate inode race and the OS
+  releases its record lock on process death. A process killed before stamp publication leaves the
+  old stamp and the next opener retries; power-loss durability is the filesystem's, not an fsync
+  guarantee. Pre-gh-835 binaries do not take the lock and must not share a live cache directory
+  during an upgrade.

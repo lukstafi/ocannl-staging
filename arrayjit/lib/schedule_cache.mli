@@ -264,15 +264,35 @@ val cache_key :
     Callers time kernels on a concrete device, so include anything else that distinguishes
     performance environments in [backend] (e.g. a device id) if needed. *)
 
+val cache_regime_version : int
+(** Version of the filename-key regime recorded once per cache directory (gh-ocannl-835). Bump it
+    when the schema of {!key_components} changes. This is independent of {!entry_version}, which
+    versions the payload stored at one key. *)
+
+val regime_stamp_filename : string
+(** The directory-local file containing {!cache_regime_version}. Exposed as part of the on-disk
+    cache format, including for tools and synthetic cache-directory tests; callers should not edit a
+    live cache's stamp. *)
+
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Publication goes
     through {!Utils.Atomic_file}, so concurrent writers tolerate each other (last write wins) and a
     failed write or commit removes its own staging artifact and leaves an earlier complete entry
-    intact. A filesystem refusal is not propagated: the cache is an optimization, and an entry that
-    could not be written is a future miss rather than a failed run. *)
+    intact. Before writing, cache-open serializes participating processes on a permanent lock file:
+    an older or absent regime stamp sweeps every [.sexp] entry and is atomically replaced by the
+    current stamp; a malformed or newer stamp refuses the operation without changing its stamp or
+    entries. Holding that lock through the write prevents a concurrent regime transition from
+    deleting the new entry. A filesystem refusal is not propagated: the cache is an optimization,
+    and an entry that could not be written is a future miss rather than a failed run. *)
 
 val lookup : dir:string -> key:string -> entry option
-(** [None] on missing file, unparsable content, or version/digest mismatch.
+(** [None] on missing file, unparsable content, version/digest mismatch, or a refused cache-open.
 
-    Together with {!store} this is where the cache directory's crash-stale staging files are swept
-    ({!Utils.Atomic_file.cleanup_stale_once}), once per directory per process. *)
+    Together with {!store} this participates in the same permanent record lock and regime-stamp
+    protocol described there, and sweeps the cache directory's crash-stale staging files
+    ({!Utils.Atomic_file.cleanup_stale_once}) once per directory per process. Every participating
+    reader and writer holds the lock through its entry I/O, so same-version processes race benignly
+    and an older participating binary refuses after a newer one advances the stamp. The OS releases
+    the record lock on process death; the lock file is never unlinked, avoiding an inode-replacement
+    race. A binary predating this protocol does not participate and must not share a live directory
+    during an upgrade. *)
