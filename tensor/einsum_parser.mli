@@ -11,6 +11,15 @@ include module type of Einsum_types
 exception Parse_error of string
 (** Exception raised when parsing fails. *)
 
+val binary_operators_with_generated_specs : string list
+val unary_operators_with_generated_specs : string list
+val concat_operator_with_generated_specs : string
+
+val operators_with_generated_specs : string list
+(** The unqualified DSL operators whose literal specifications the OCANNL PPXs pass through
+    identifier substitution. The PPX dispatch tables and source-policy scans share these values so
+    adding a syntax form cannot silently update only one consumer. *)
+
 val is_multichar : string -> bool
 (** Determine if a spec uses multichar mode. Multichar mode is triggered by presence of: ',', '*',
     '+', '^', '&' *)

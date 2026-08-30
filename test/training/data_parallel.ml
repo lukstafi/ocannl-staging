@@ -30,7 +30,8 @@ let make_batch label rows =
 let inputs () = make_batch "inputs" [ [| 1. |]; [| 2. |]; [| 3. |]; [| 4. |] ]
 let targets () = make_batch "targets" [ [| 2. |]; [| 4. |]; [| 6. |]; [| 8. |] ]
 
-let run ~n_shards : float array =
+let run ?(momentum = 0.0) ?(weight_decay = 0.0) ?(steps = 1) ?(print_loss = true) ~n_shards () :
+    float array =
   Tensor.unsafe_reinitialize ();
   Utils.settings.fixed_state_for_init <- Some 1;
   (* Deterministic, id-independent parameter init so the two runs start identically regardless of
@@ -42,14 +43,60 @@ let run ~n_shards : float array =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => |->0"]
   in
-  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~n_shards ~bindings:IDX.empty
-    ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
+  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~momentum ~weight_decay
+    ~n_shards ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
-      h.Parallel.step ();
-      Stdio.printf "n_shards=%d: loss=%.4f\n" n_shards (h.Parallel.owner_loss_value ());
+      for _ = 1 to steps do
+        h.Parallel.step ()
+      done;
+      if print_loss then
+        Stdio.printf "n_shards=%d: loss=%.4f\n" n_shards (h.Parallel.owner_loss_value ());
       h.Parallel.sync_params_to_host ();
       Array.concat_map h.Parallel.owner_params ~f:(fun p -> h.Parallel.read_values p))
     ()
+
+let only_value = function
+  | [| value |] -> value
+  | values ->
+      failwith (Printf.sprintf "expected one optimizer parameter, got %d" (Array.length values))
+
+(* For this model, d(loss)/dw = 2 * sum(x^2) * (w - 2) = 60 * (w - 2). Keeping the host recurrence
+   beside the executed wrapper test makes a dropped forwarding option fail against an independent
+   value, not merely against another invocation of the same code. *)
+let optimizer_oracle ~momentum ~weight_decay ~steps =
+  let w = ref 0.5 in
+  let buffer = ref 0.0 in
+  for _ = 1 to steps do
+    let delta = (60.0 *. (!w -. 2.0)) +. (weight_decay *. !w) in
+    let delta =
+      if Float.(momentum > 0.0) then (
+        buffer := (momentum *. !buffer) +. delta;
+        !buffer)
+      else delta
+    in
+    w := !w -. (0.05 *. delta)
+  done;
+  !w
+
+let optimizer_option_case label ~momentum ~weight_decay ~baseline =
+  let steps = 2 in
+  let actual = run ~momentum ~weight_decay ~steps ~print_loss:false ~n_shards:1 () |> only_value in
+  let expected = optimizer_oracle ~momentum ~weight_decay ~steps in
+  let oracle_error = Float.abs (actual -. expected) in
+  let effect_size = Float.abs (actual -. baseline) in
+  Stdio.eprintf
+    "Parallel.data_parallel %s (not part of the golden): expected %.8g, got %.8g; oracle error \
+     %.3e; option effect %.3e\n\
+     %!"
+    label expected actual oracle_error effect_size;
+  Verdict.pass_fail
+    ("data_parallel forwards " ^ label ^ ": matches the host oracle")
+    Float.(oracle_error < 1e-4)
+    ~detail:(fun () -> Printf.sprintf "absolute error %.3e" oracle_error);
+  Verdict.pass_fail
+    ("data_parallel forwards " ^ label ^ ": non-default changes the result")
+    Float.(effect_size > 1e-3)
+    ~detail:(fun () -> Printf.sprintf "absolute difference %.3e" effect_size)
 
 (* Exercise multi-step training through [set_batch]: a second step on a fresh batch must keep
    training (finite loss, parameter still moving toward the target). *)
@@ -144,8 +191,8 @@ let seed_singleton_preserved () : bool =
   phys_equal before (Tensor.get_random_seed ())
 
 let () =
-  let p1 = run ~n_shards:1 in
-  let p2 = run ~n_shards:2 in
+  let p1 = run ~n_shards:1 () in
+  let p2 = run ~n_shards:2 () in
   (* Exact parameter digits to stderr (gh-ocannl-725): the two runs reach w by summing the same
      gradient terms in DIFFERENT orders -- that is the whole point of the comparison -- so the last
      of six printed decimals of a single-precision value near 5.0 is within one ulp of flipping.
@@ -161,6 +208,9 @@ let () =
     (Array.length p1 = 1 && Float.(abs (p1.(0) - expected_w) < 1e-4));
   let close = Array.for_all2_exn p1 p2 ~f:(fun a b -> Float.(abs (a - b) < 1e-4)) in
   Verdict.p "data-parallel parity with single-shard baseline" close;
+  let optimizer_baseline = run ~steps:2 ~print_loss:false ~n_shards:1 () |> only_value in
+  optimizer_option_case "momentum" ~momentum:0.9 ~weight_decay:0.0 ~baseline:optimizer_baseline;
+  optimizer_option_case "weight decay" ~momentum:0.0 ~weight_decay:0.1 ~baseline:optimizer_baseline;
   Verdict.p "driver routes per-shard seed into RNG" (driver_routes_seed_into_shards ());
   Verdict.p "shards seeded distinctly (base_seed + i)" (shards_seeded_distinctly ());
   Verdict.p "global random-seed singleton preserved across data_parallel"

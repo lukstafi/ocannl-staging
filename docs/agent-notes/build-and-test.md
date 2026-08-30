@@ -46,6 +46,19 @@ that they earn a lookup rather than always-loaded space.
   inputs into a `%{read-lines:...}` dynamic-dependency manifest; its committed ocamllex fixture
   carries a forbidden rename that must arrive through that derived set, so either a blind derivation
   or disconnected scan wiring fails permanently (gh-ocannl-862).
+- Public optional arguments in `lib/` follow the caller-visible underscore policy enforced by
+  `optional_arg_inventory`: a discard-only value is exposed as `?_feature`, while an implemented
+  value uses `?feature`; both mismatches fail. `Optional_arg_scan` parses the source and distinguishes
+  real uses from `let _ = feature` / an unused `let _unused = feature` / calls to the unshadowed
+  standard `ignore`, including later and nested optional defaults, destructured option patterns,
+  functions exported through tuple destructuring, optional closures returned directly or through
+  result-position control flow, sequential top-level and local-module bindings, and the identifiers
+  that exact unqualified structure- or expression-level `%op`/`%cd` einsum operands (plus `%op`'s
+  concat) with the PPX's `=>` dispatch guard turn into generated coefficient /
+  legacy-`use_padding` reads under the same lexical scope.
+  `optional_arg_scan_cases.expected` ratchets the violating discard forms plus their nearest honest
+  counterparts so losing a control is itself a golden change (gh-ocannl-811). Optimizer
+  forwarders still need executed oracles — syntactic use proves only that the value was forwarded.
 - GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
   branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
   staging#413) survived nine review rounds, `dune build @check`, its targeted aliases and a

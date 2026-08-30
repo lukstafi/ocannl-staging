@@ -109,7 +109,8 @@
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
   (alias runtest-ocamlformat_ignore_scan)
-  (alias runtest-shell_scripts_parse)))
+  (alias runtest-shell_scripts_parse)
+  (alias runtest-optional_arg_inventory)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
 ; check, a different question: `scans` collects the tests that read the REPOSITORY, these collect
@@ -204,6 +205,7 @@
   (alias runtest-config_usage_scan_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
+  (alias runtest-optional_arg_inventory)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
 
@@ -366,18 +368,17 @@
   (pps ppx_here ppx_ocannl)))
 
 ; sgd_variants drives Train.sgd_one across its option matrix -- momentum, nesterov, weight decay,
-; grad_scale and a gate that actually closes -- against a host simulation of the update rule. The
-; rest of the suite only ever runs sgd on its defaults. Seven compiles of four training steps each,
-; so it takes the shared training lock like memory_budget does: its process-local OpenMP pool must
-; not overlap another training test's.
+; grad_scale and a gate that actually closes -- then drives a non-default momentum through all four
+; public SGD construction paths against a host simulation of the update rule. It pins Context.cpu,
+; and takes the shared training lock like memory_budget: its process-local OpenMP pool must not
+; overlap another training test's.
 
 (test
+ ; ocannl-backend: cc -- every execution context is an explicit Context.cpu ().
  (name sgd_variants)
  (package neural_nets_lib)
  (locks ocannl_training_test)
- (deps
-  ocannl_config
-  (env_var OCANNL_BACKEND))
+ (deps ocannl_config)
  (modules sgd_variants)
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
@@ -1769,6 +1770,14 @@
  (modules config_scan_lexing)
  (libraries base stdio test_utils arrayjit.verdict))
 
+(test
+ ; ocannl-backend: none -- links no backend: it parses embedded OCaml snippets.
+ (name optional_arg_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules optional_arg_scan_cases)
+ (libraries base test_utils arrayjit.verdict))
+
 ; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
 ; it rather than on whatever the repository's dune files happen to say today.
 
@@ -2073,6 +2082,37 @@
  (name config_dep_completeness)
  (modules config_dep_completeness)
  (libraries base stdio test_utils arrayjit.verdict))
+
+; gh-ocannl-811: every optional argument accepted by a lib/ entry point either affects the body or
+; exposes its not-yet-implemented status in the caller-visible label (`?_feature`). The recursive
+; globs are the inventory boundary: a new lib source joins on the same change that creates it, and
+; an adjacent interface restricts the census to the entries callers can actually name.
+
+(executable
+ (name optional_arg_inventory)
+ (modules optional_arg_inventory)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it parses lib/ sources handed over by the glob.
+ (target optional_arg_inventory.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../lib/*.ml)
+  (glob_files_rec ../../lib/*.mli))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:optional_arg_inventory.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-optional_arg_inventory)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff optional_arg_inventory.expected optional_arg_inventory.actual)))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files as text.

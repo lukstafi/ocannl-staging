@@ -10,6 +10,14 @@ include Einsum_types
 
 exception Parse_error of string
 
+let binary_operators_with_generated_specs = [ "+*"; "@^+"; "+++" ]
+let unary_operators_with_generated_specs = [ "++"; "@^^" ]
+let concat_operator_with_generated_specs = "++^"
+
+let operators_with_generated_specs =
+  binary_operators_with_generated_specs @ unary_operators_with_generated_specs
+  @ [ concat_operator_with_generated_specs ]
+
 (* Helper to determine if input uses multichar mode *)
 let is_multichar = Lexer.is_multichar
 

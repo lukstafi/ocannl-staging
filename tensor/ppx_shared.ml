@@ -579,16 +579,19 @@ let assignment_ops =
 let einsum_binary_ops =
   Hashtbl.of_alist_exn
     (module String)
-    [
-      ("+*", fun loc -> [%expr einsum]);
-      ("@^+", fun loc -> [%expr tropical]);
-      ("+++", fun loc -> [%expr outer_sum]);
-    ]
+    (List.map Einsum_parser.binary_operators_with_generated_specs ~f:(function
+      | "+*" -> ("+*", fun loc -> [%expr einsum])
+      | "@^+" -> ("@^+", fun loc -> [%expr tropical])
+      | "+++" -> ("+++", fun loc -> [%expr outer_sum])
+      | operator -> failwith ("missing PPX binary einsum handler for " ^ operator)))
 
 let einsum_unary_ops =
   Hashtbl.of_alist_exn
     (module String)
-    [ ("++", fun loc -> [%expr einsum1]); ("@^^", fun loc -> [%expr einmax1]) ]
+    (List.map Einsum_parser.unary_operators_with_generated_specs ~f:(function
+      | "++" -> ("++", fun loc -> [%expr einsum1])
+      | "@^^" -> ("@^^", fun loc -> [%expr einmax1])
+      | operator -> failwith ("missing PPX unary einsum handler for " ^ operator)))
 
 let is_primitive_op op_ident =
   List.exists ~f:(Fn.flip Hashtbl.mem op_ident) [ ternary_ops; unary_ops; binary_ops ]
