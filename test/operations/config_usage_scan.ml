@@ -167,7 +167,10 @@ let script_occurrences ~path content =
     |> List.concat
   in
   cli_occurrences
-  @ prefixed_occurrences ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
+  @ prefixed_occurrences
+      ~start_ok:(fun line start ->
+        start = 0 || not (Char.is_alphanum line.[start - 1] || Char.equal line.[start - 1] '_'))
+      ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
       ~normalize:(fun key -> if non_config_env_key key then None else Some (String.lowercase key))
       ~kind:Environment_assignment content
 

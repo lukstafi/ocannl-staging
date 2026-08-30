@@ -10,3 +10,4 @@ The underscore value-separator form must be refused: `--ocannl_definitely_not_a_
 The dash value-separator form must be refused: `--ocannl-definitely-not-a-config-key-value`
 The no-value-separator form must be refused: `--ocannl_definitelynotaconfigkeyvalue`
 The spaced documentation form must be refused: `definitely_not_a_config_key = true`
+This larger identifier is not an OCANNL variable and must be ignored: MY_OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true

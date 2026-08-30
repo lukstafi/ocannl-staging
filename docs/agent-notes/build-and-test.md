@@ -76,8 +76,9 @@ that they earn a lookup rather than always-loaded space.
   `benchmarks/`; its prose corpus is `AGENTS.md`, the root and benchmark READMEs, and every `*.md`
   under `docs/`. A script token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
-  `OCANNL_<KEY>=`; the explicit open namespaces `OCANNL_TOOL_*` and
-  `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key only when an inline
+  `OCANNL_<KEY>=` beginning at an identifier boundary; the explicit open namespaces
+  `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key
+  only when an inline
   code span consists entirely of one bare or prefixed assignment (whitespace around `=` and an empty
   example value do not hide the key). Because spaced assignments are pervasive in code prose, each
   current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
