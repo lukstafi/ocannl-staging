@@ -61,6 +61,9 @@ let () =
   case "an expression-level op extension enables generated uses"
     {ocaml|let f ?(stride = 1) x = [%op x ++ "stride*o+k => o"]|ocaml} ~implemented:true
     ~honest:true;
+  case "an oc anti-quotation does not generate einsum coefficient reads"
+    {ocaml|let%op f ?(stride = 1) x = let _ = stride in [%oc let ( ++ ) x _ = x in x ++ "stride*o+k => o"]|ocaml}
+    ~implemented:false ~honest:false;
   case "ordinary label discarded through let-wildcard is rejected"
     {ocaml|let f ?(feature = true) () = let _ = feature in ()|ocaml} ~implemented:false
     ~honest:false;
@@ -100,6 +103,9 @@ let () =
   case "an optional argument on a directly returned closure is inventoried"
     {ocaml|let make () = fun ?(feature = true) () -> ignore feature|ocaml} ~implemented:false
     ~honest:false;
+  case "a constrained optional function is inventoried"
+    {ocaml|let f = (fun ?(feature = true) () -> ignore feature : ?feature:bool -> unit -> unit)|ocaml}
+    ~implemented:false ~honest:false;
   case ~argument:"feature" "an optional function exported through a tuple is inventoried"
     {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}
     ~implemented:false ~honest:false

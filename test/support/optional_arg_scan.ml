@@ -130,6 +130,7 @@ type function_tail = Expression of expression | Cases of case list
 let function_params expression =
   let rec peel params expression =
     match expression.pexp_desc with
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> peel params inner
     | Pexp_function (more, _, body) -> (
         let params = params @ more in
         match body with
@@ -222,6 +223,12 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
     f ();
     dsl_mode := saved
   in
+  let without_dsl f =
+    let saved = !dsl_mode in
+    dsl_mode := false;
+    f ();
+    dsl_mode := saved
+  in
   let within_ignore_shadow shadows f =
     let saved = !ignore_shadowed in
     ignore_shadowed := saved || shadows;
@@ -245,6 +252,9 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
                 if List.mem (generated_reads_in_einsum spec) name ~equal:String.equal then
                   meaningful := true);
           match expression.pexp_desc with
+          | Pexp_extension ({ txt = "oc"; _ }, _) ->
+              (* [%oc] is an anti-quotation boundary: the OCANNL PPXs preserve its payload. *)
+              without_dsl (fun () -> super#expression expression)
           | Pexp_extension ({ txt = "op" | "cd"; _ }, _) ->
               within_dsl true (fun () -> super#expression expression)
           | Pexp_ident _ -> (

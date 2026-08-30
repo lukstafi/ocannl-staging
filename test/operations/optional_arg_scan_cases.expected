@@ -24,6 +24,8 @@ a nested optional default sees the outer option before shadowing: implementation
 a nested optional default sees the outer option before shadowing: honesty classified: true
 an expression-level op extension enables generated uses: implementation classified: true
 an expression-level op extension enables generated uses: honesty classified: true
+an oc anti-quotation does not generate einsum coefficient reads: implementation classified: true
+an oc anti-quotation does not generate einsum coefficient reads: honesty classified: true
 ordinary label discarded through let-wildcard is rejected: implementation classified: true
 ordinary label discarded through let-wildcard is rejected: honesty classified: true
 ordinary label discarded through ignore is rejected: implementation classified: true
@@ -54,5 +56,7 @@ comments and strings do not pretend the option is used: implementation classifie
 comments and strings do not pretend the option is used: honesty classified: true
 an optional argument on a directly returned closure is inventoried: implementation classified: true
 an optional argument on a directly returned closure is inventoried: honesty classified: true
+a constrained optional function is inventoried: implementation classified: true
+a constrained optional function is inventoried: honesty classified: true
 an optional function exported through a tuple is inventoried: implementation classified: true
 an optional function exported through a tuple is inventoried: honesty classified: true
