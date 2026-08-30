@@ -110,6 +110,9 @@ let f ?(feature = true) () = ignore feature|ocaml}
   case "a local Stdlib.ignore alias remains a discard"
     {ocaml|let f ?(feature = true) () = let ignore = Stdlib.ignore in ignore feature|ocaml}
     ~implemented:false ~honest:false;
+  case "a local Base.ignore alias remains a discard"
+    {ocaml|let f ?(feature = true) () = let ignore = Base.ignore in ignore feature|ocaml}
+    ~implemented:false ~honest:false;
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
@@ -138,6 +141,13 @@ let f ?(feature = true) () = let _ = feature in let open Defaults in feature|oca
 open Outer
 let f ?(feature = true) () = let _ = feature in let open Defaults in feature|ocaml}
     ~implemented:false ~honest:false;
+  case "the nearest lexical module wins over an ancestor"
+    {ocaml|module Defaults = struct let feature = false end
+module Inner = struct
+  module Defaults = struct let other = false end
+  let f ?(feature = true) () = let _ = feature in let open Defaults in feature
+end|ocaml}
+    ~implemented:true ~honest:true;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -179,12 +189,23 @@ let f ?(feature = true) () = let _ = feature in let module M = struct open Defau
   case "an optional argument on a destructured returned local function is inventoried"
     {ocaml|let make () = let g, _ = ((fun ?(feature = true) () -> ignore feature), 0) in g|ocaml}
     ~implemented:false ~honest:false;
+  case "an optional function exported through a top-level alias is inventoried"
+    {ocaml|let g ?(feature = true) () = ignore feature
+let f = g
+let g = ()|ocaml}
+    ~implemented:false ~honest:false;
   case "an optional class constructor argument is inventoried"
     {ocaml|class c ?(feature = true) = object method run = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
   case "an optional method argument is inventoried"
     {ocaml|class c = object method run ?(feature = true) () = ignore feature end|ocaml}
     ~implemented:false ~honest:false;
+  case "an optional method on an exported object value is inventoried"
+    {ocaml|let service = object method run ?(feature = true) () = ignore feature end|ocaml}
+    ~implemented:false ~honest:false;
+  case "a class-level underscore binding forwarded later is a real use"
+    {ocaml|class c ?(feature = true) = let _v = feature in object method run = enable _v end|ocaml}
+    ~implemented:true ~honest:true;
   case "a constrained optional function is inventoried"
     {ocaml|let f = (fun ?(feature = true) () -> ignore feature : ?feature:bool -> unit -> unit)|ocaml}
     ~implemented:false ~honest:false;
