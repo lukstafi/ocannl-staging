@@ -18,7 +18,12 @@
 
 module Me = Metal
 
-type math_policy = Default | Legacy_fast of bool | Mode of Me.CompileOptions.MathMode.t
+type math_policy =
+  | Default
+  | Legacy_fast of bool
+  | Mode of Me.CompileOptions.MathMode.t
+  | Production_safe_fast
+
 type variant = { label : string; policy : math_policy }
 
 let variants =
@@ -29,12 +34,16 @@ let variants =
     { label = "mode=fast"; policy = Mode Fast };
     { label = "mode=relaxed"; policy = Mode Relaxed };
     { label = "mode=safe"; policy = Mode Safe };
+    { label = "production-safe-fast"; policy = Production_safe_fast };
   ]
 
 let apply_policy options = function
   | Default -> ()
   | Legacy_fast enabled -> Me.CompileOptions.set_fast_math_enabled options enabled
   | Mode mode -> Me.CompileOptions.set_math_mode options mode
+  | Production_safe_fast ->
+      Me.CompileOptions.set_math_mode options Safe;
+      Me.CompileOptions.set_math_floating_point_functions options Fast
 
 let repeated_statements =
   String.concat "" (List.init 128 (fun i -> Printf.sprintf "  acc += in[%d];\n" i))
@@ -188,7 +197,7 @@ let () =
       Printf.printf "%-19s %12lx %12lx %12lx %12lx %12lx\n" variant.label (float_bits counted)
         (float_bits runtime) (float_bits repeated) (float_bits cancel) (float_bits inf_mask);
       (match variant.policy with
-      | Legacy_fast false | Mode Safe ->
+      | Legacy_fast false | Mode Safe | Production_safe_fast ->
           if counted <> 1.0 || runtime <> 1.0 || repeated <> 1.0 || cancel <> 0.0 || inf_mask <> 0.0
           then incr safety_failures
       | Default | Legacy_fast true | Mode Fast | Mode Relaxed -> ());
@@ -227,7 +236,7 @@ let () =
             (t /. baseline))
         variants)
     shapes;
-  if !safety_failures = 0 then Printf.printf "\nVERDICT: both safe spellings preserved all values\n"
+  if !safety_failures = 0 then Printf.printf "\nVERDICT: all safe spellings preserved all values\n"
   else (
     Printf.eprintf "\nVERDICT: %d safe spelling(s) changed a required value\n" !safety_failures;
     exit 1)

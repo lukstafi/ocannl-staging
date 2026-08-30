@@ -72,8 +72,9 @@ let nvrtc ~cuda_include_options ~arch_options ~with_device_debug =
    with benchmarks/runners/ocannl/metal_reassoc_probe.ml. Default, Fast and Relaxed all rewrote
    [(a+b)-a] from the strict result 0 to [b] = 1, while Safe preserved 0. Three 128-term reduction
    spellings remained bit-exactly sequential and the runtime [-INFINITY] mask remained zero under
-   every mode. Safe cost 1.005x default on 262144 threads x 128 fixed-count terms and 1.002x on one
-   thread x 1048576 runtime-bound terms (GPU-clock medians, 21 rotated interleaved repeats).
+   every mode. The exact production sequence (Safe followed by Fast functions) cost 0.991x default
+   on 262144 threads x 128 fixed-count terms and 1.006x on one thread x 1048576 runtime-bound terms
+   (GPU-clock medians, 21 rotated interleaved repeats).
 
    Use the modern split properties rather than deprecated [fastMathEnabled=false]. The legacy
    spelling also changes [mathFloatingPointFunctions] from Fast to Precise; [Math_mode_safe] plus
