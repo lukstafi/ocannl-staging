@@ -942,7 +942,16 @@ let main () =
           (what_of_stanza stanza)
       in
       List.iter marker_contract.Scan.contract_issues ~f:(function
-        | Scan.Malformed_marker { issue_line = line; issue_text = text; issue_why = why } ->
+        | Scan.Malformed_marker
+            { issue_line = line; issue_text = text; issue_malformed = malformed } ->
+            let why =
+              Scan.marker_malformed_reason ~sentinel:Scan.marker_sentinel
+                ~separator_subject:"backend"
+                ~grammar:
+                  (Printf.sprintf "%s <%s> -- <reason>" Scan.marker_sentinel
+                     (String.concat ~sep:"|" Scan.marker_backends))
+                malformed
+            in
             Int.incr xor_violations;
             fail
               (Printf.sprintf

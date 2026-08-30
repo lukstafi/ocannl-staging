@@ -1078,17 +1078,30 @@ let sentinel_counting_cases =
    The synthetic sentinel keeps these controls independent of either current consumer; the callback
    below owns only the declaration and which stanza may carry it. *)
 let contained_marker_sentinel = "ocannl-test-marker:"
+let contained_marker_grammar = contained_marker_sentinel ^ " <value> -- <reason>"
 
 let contained_marker_contract source =
   Scan.contained_marker_contract source ~sentinel:contained_marker_sentinel
-    ~separator_subject:"value"
-    ~grammar:(contained_marker_sentinel ^ " <value> -- <reason>")
-    ~parse_declaration:(fun ~declaration ~reason ->
+    ~parse_declaration:(fun _stanza ~declaration ~reason ->
       if String.equal declaration "valid" then Ok (declaration ^ "|" ^ reason)
       else Error [ Printf.sprintf "the value `%s` is not valid" declaration ])
     ~belongs:(fun stanza _marker ->
       if String.equal stanza.Scan.marked_head "rule" then Ok ()
       else Error [ "the marker belongs on a rule" ])
+
+let render_contained_issue = function
+  | Scan.Malformed_marker { issue_line; issue_malformed; _ } ->
+      Printf.sprintf "malformed at line %d: %s" issue_line
+        (Scan.marker_malformed_reason ~sentinel:contained_marker_sentinel
+           ~separator_subject:"value" ~grammar:contained_marker_grammar issue_malformed)
+  | Scan.Marker_outside_stanza { issue_line; _ } ->
+      Printf.sprintf "outside every stanza at line %d" issue_line
+  | Scan.Marker_in_wrong_stanza { issue_line; issue_stanza; issue_why; _ } ->
+      Printf.sprintf "wrong %s stanza at line %d: %s" issue_stanza.Scan.marked_head issue_line
+        issue_why
+  | Scan.Marker_outside_comment { issue_text_occurrences; issue_comment_occurrences } ->
+      Printf.sprintf "%d sentinel(s) in text but %d in comments" issue_text_occurrences
+        issue_comment_occurrences
 
 let render_contained_marker_contract source =
   let contract = contained_marker_contract source in
@@ -1098,18 +1111,7 @@ let render_contained_marker_contract source =
             Printf.sprintf "marker at line %d in %s: %s" marker.Scan.contained_line
               marked.Scan.marker_stanza.Scan.marked_head marker.Scan.contained_value))
   in
-  markers
-  @ List.map contract.Scan.contract_issues ~f:(function
-    | Scan.Malformed_marker { issue_line; issue_why; _ } ->
-        Printf.sprintf "malformed at line %d: %s" issue_line issue_why
-    | Scan.Marker_outside_stanza { issue_line; _ } ->
-        Printf.sprintf "outside every stanza at line %d" issue_line
-    | Scan.Marker_in_wrong_stanza { issue_line; issue_stanza; issue_why; _ } ->
-        Printf.sprintf "wrong %s stanza at line %d: %s" issue_stanza.Scan.marked_head issue_line
-          issue_why
-    | Scan.Marker_outside_comment { issue_text_occurrences; issue_comment_occurrences } ->
-        Printf.sprintf "%d sentinel(s) in text but %d in comments" issue_text_occurrences
-          issue_comment_occurrences)
+  markers @ List.map contract.Scan.contract_issues ~f:render_contained_issue
 
 let contained_marker_cases =
   [
@@ -1118,6 +1120,16 @@ let contained_marker_cases =
  ; ocannl-test-marker: valid -- explains the fixture
  (action (echo ok)))|dune},
       [ "marker at line 2 in rule: valid|explains the fixture" ] );
+    ( "annotated prose before the sentinel remains a marker",
+      {dune|(rule
+ ; NOTE ocannl-test-marker: valid -- explains the fixture
+ (action (echo ok)))|dune},
+      [ "marker at line 2 in rule: valid|explains the fixture" ] );
+    ( "the earliest admitted separator wins",
+      {dune|(rule
+ ; ocannl-test-marker: valid — explains -- the fixture
+ (action (echo ok)))|dune},
+      [ "marker at line 2 in rule: valid|explains -- the fixture" ] );
     ( "the shared separator grammar refuses a malformed marker",
       {dune|(rule
  ; ocannl-test-marker: valid explains the fixture
@@ -1656,9 +1668,10 @@ let () =
       in
       check ("contained marker contract -- " ^ name) expected found);
   printf "\nContained-marker refusal diagnostics exercised by the cases above:\n";
-  List.tl_exn contained_marker_cases
-  |> List.iter ~f:(fun (name, source, _expected) ->
-      List.iter (render_contained_marker_contract source) ~f:(fun diagnostic ->
+  List.iter contained_marker_cases ~f:(fun (name, source, _expected) ->
+      let contract = contained_marker_contract source in
+      List.map contract.Scan.contract_issues ~f:render_contained_issue
+      |> List.iter ~f:(fun diagnostic ->
           printf "  %s -- %s\n" name diagnostic));
   printf "\n";
   List.iter (nested_marker_case :: refused_cases) ~f:(fun (name, source) ->
