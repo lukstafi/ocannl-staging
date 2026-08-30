@@ -32,6 +32,11 @@ let () =
     ~implemented:true ~honest:true;
   case "an op spec coefficient is a ppx-generated use"
     {ocaml|let%op f ?(stride = 1) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true ~honest:true;
+  case "an op axis label is not a ppx-generated use"
+    {ocaml|let%op f ?(o = 1) x = x ++ "i => o"|ocaml} ~implemented:false ~honest:false;
+  case "an op dilation coefficient is a ppx-generated use"
+    {ocaml|let%op f ?(dilation = 1) x = x ++ "o<+dilation*k => o"|ocaml} ~implemented:true
+    ~honest:true;
   case "legacy convolution padding is a ppx-generated use"
     {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
@@ -72,6 +77,9 @@ let () =
   case "a nested shadow does not pretend the outer option is used"
     {ocaml|let f ?(feature = 2) () = let g feature = feature + 1 in g 3|ocaml} ~implemented:false
     ~honest:false;
+  case "a let-operator binder does not pretend the outer option is used"
+    {ocaml|let f ?(feature = true) () = let* feature = source in if feature then 1 else 0|ocaml}
+    ~implemented:false ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
     ~honest:false;

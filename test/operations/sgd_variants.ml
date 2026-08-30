@@ -1,4 +1,4 @@
-(* Executed oracle for SGD's option matrix and every public optimizer construction entry point
+(* Executed oracle for SGD's option matrix and every core optimizer construction entry point
    (gh-ocannl-772, gh-ocannl-811).
 
    Every other training test runs sgd on its defaults, so [momentum], [nesterov], [grad_scale] and a
@@ -17,6 +17,10 @@
    the host rule, AND requires the two device results to differ. The last condition is the
    forwarding oracle: a wrapper that accepts but drops the option still takes ordinary SGD steps,
    but it cannot pass by matching its own default.
+
+   [Parallel.data_parallel], whose execution harness lives in [test/training/data_parallel.ml],
+   separately runs its public momentum and weight-decay forwarders against the same kind of host
+   recurrence and nondefault-vs-default discriminator.
 
    The oracle discriminates: perturbing the momentum the device is given (0.9 -> 0.45) fails all
    four momentum-bearing cases with errors of 0.09 to 1.3, against a 1e-4 tolerance. *)

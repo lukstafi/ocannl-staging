@@ -132,7 +132,8 @@
 (test
  ; ocannl-backend: cc,multidev_cc -- every entry point names its backend,
  ; `Parallel.data_parallel ~backend_name:"cc"` or `"multidev_cc"`, so get_backend never falls
- ; through to the configured one. Dropping a `~backend_name` here would make it selecting.
+ ; through to the configured one. Dropping a `~backend_name` here would make it selecting. Its
+ ; cc legs also execute non-default momentum and weight decay against a host optimizer recurrence.
  (name data_parallel)
  (package neural_nets_lib)
  (modules data_parallel)

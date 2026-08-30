@@ -145,32 +145,34 @@ let function_params expression =
 (** Whether [name] is used for anything except a direct discard in [tail]. The small lexical-scope
     walk is what keeps a nested [let name = ...] or [fun name -> ...] from lending a false use to
     the outer optional argument. *)
-let is_word_char = function 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
-
-let mentions_word text word =
-  String.substr_index_all text ~may_overlap:false ~pattern:word
-  |> List.exists ~f:(fun index ->
-      let before = index = 0 || not (is_word_char text.[index - 1]) in
-      let after_index = index + String.length word in
-      let after = after_index = String.length text || not (is_word_char text.[after_index]) in
-      before && after)
-
-(* The legacy convolution spelling omits the padding marker: [stride*o+k], against explicit
-   [stride*o<+k] / [stride*o=+k]. The ppx turns that omission into a runtime read of [use_padding]
-   (tensor/ppx_shared.ml), so it is a source-level use even though the identifier is generated only
-   after this scan runs. *)
-let has_unmarked_convolution text =
-  String.to_list text
-  |> List.fold ~init:(None, false) ~f:(fun (previous_non_space, found) char ->
-      if found then (previous_non_space, true)
-      else if Char.is_whitespace char then (previous_non_space, false)
-      else if Char.equal char '+' then
-        ( Some char,
-          not
-            (Option.value_map previous_non_space ~default:false ~f:(fun previous ->
-                 Char.equal previous '<' || Char.equal previous '=')) )
-      else (Some char, false))
-  |> snd
+let generated_reads_in_einsum spec =
+  let found = ref [] in
+  let add_nonliteral value =
+    match Int.of_string value with _ -> () | exception _ -> found := value :: !found
+  in
+  let add_axis = function
+    | Einsum_parser.Affine_spec { stride; conv; _ } ->
+        add_nonliteral stride;
+        Option.iter conv ~f:(fun conv ->
+            add_nonliteral conv.dilation;
+            match conv.use_padding with `Unspecified -> found := "use_padding" :: !found | _ -> ())
+    | Label _ | Fixed_index _ | Concat_spec _ -> ()
+  in
+  let add_parsed parsed =
+    List.iter
+      (parsed.Einsum_parser.given_batch @ parsed.given_input @ parsed.given_output
+     @ parsed.given_beg_batch @ parsed.given_beg_input @ parsed.given_beg_output)
+      ~f:add_axis
+  in
+  (try
+     let rhs, lhs = Einsum_parser.einsum_of_spec spec in
+     List.iter rhs ~f:add_parsed;
+     add_parsed lhs
+   with Einsum_parser.Parse_error _ -> (
+     (* This mirrors the PPX fallback for a one-sided axis-label specification. *)
+     try add_parsed (Einsum_parser.axis_labels_of_spec spec)
+     with Einsum_parser.Parse_error _ -> ()));
+  List.dedup_and_sort !found ~compare:String.compare
 
 let string_constant expression =
   match expression.pexp_desc with
@@ -234,10 +236,8 @@ let rec meaningfully_used ~dsl name tail =
         if not !shadowed then (
           if !dsl_mode then
             Option.iter (einsum_spec expression) ~f:(fun spec ->
-                if
-                  mentions_word spec name
-                  || (String.equal name "use_padding" && has_unmarked_convolution spec)
-                then meaningful := true);
+                if List.mem (generated_reads_in_einsum spec) name ~equal:String.equal then
+                  meaningful := true);
           match expression.pexp_desc with
           | Pexp_extension ({ txt = "op" | "cd"; _ }, _) ->
               within_dsl true (fun () -> super#expression expression)
@@ -291,6 +291,14 @@ let rec meaningfully_used ~dsl name tail =
                       if !visible then Option.iter default ~f:self#expression;
                       if !visible && pattern_binds pattern name then visible := false);
               if !visible then self#function_body body
+          | Pexp_letop { let_; ands; body } ->
+              self#expression let_.pbop_exp;
+              List.iter ands ~f:(fun binding -> self#expression binding.pbop_exp);
+              let binds =
+                pattern_binds let_.pbop_pat name
+                || List.exists ands ~f:(fun binding -> pattern_binds binding.pbop_pat name)
+              in
+              within_shadow binds (fun () -> self#expression body)
           | Pexp_for (pattern, from_, to_, _, body) ->
               self#expression from_;
               self#expression to_;
