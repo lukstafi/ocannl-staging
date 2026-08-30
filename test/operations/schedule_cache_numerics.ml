@@ -81,7 +81,6 @@ let () =
   let tune_comp = named "scn_matmul" (Train.forward mc) in
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
-  let is_gpu = Sched.backend_is_gpu backend in
 
   (* --- The key is a function of the policy --- *)
   let base = Numerics.get () in
@@ -127,14 +126,16 @@ let () =
   let r, got = tune () in
   p "the cold call ran a search rather than replaying" (completed r);
   p_all2 "the cold search computes correct values" got mm_expected ~f:approx;
-  (* On a GPU backend a search that timed nothing stores nothing (gh-ocannl-532), so the replay
-     assertions below are conditioned on an entry actually having been written. *)
+  (* A search that timed nothing (gh-ocannl-532), or refused any window for contention
+     (gh-ocannl-855), stores nothing, so the replay assertions are conditioned on an entry actually
+     having been written. *)
   let stored_a = entry_count () = 1 in
-  p "the search stored exactly one entry (or timed nothing, on GPU)"
-    (stored_a || (is_gpu && entry_count () = 0));
-  let r, got = tune () in
-  p "the entry replays under the policy that wrote it" (Bool.equal (replayed r) stored_a);
+  p "the search stores exactly when it timed a complete candidate set"
+    (Bool.equal stored_a (r.Autotune.candidates_timed > 0 && r.Autotune.timings_contended = 0));
+  let r_a2, got = tune () in
+  p "the entry replays under the policy that wrote it" (Bool.equal (replayed r_a2) stored_a);
   p_all2 "the replayed routine computes correct values" got mm_expected ~f:approx;
+  let stored_a_after_retry = stored_a || r_a2.Autotune.timings_contended = 0 in
 
   (* --- Regime B: the same code, the same directory, the other policy --- *)
   Numerics.set_policy policy_b;
@@ -147,5 +148,6 @@ let () =
   (* --- The regimes coexist rather than overwriting each other --- *)
   Numerics.set_policy policy_a;
   let r, _got = tune () in
-  p "regime B's search did not overwrite regime A's winner" (Bool.equal (replayed r) stored_a);
+  p "regime B's search did not overwrite regime A's winner"
+    (Bool.equal (replayed r) stored_a_after_retry);
   Numerics.set_policy base

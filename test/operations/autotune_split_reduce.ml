@@ -435,12 +435,14 @@ let () =
         (if is_cpu then r.Autotune.split_reduce_candidates = 4
          else r.Autotune.split_reduce_candidates >= 2);
       (* The gh-537 assertion: TIMED, not merely seeded — seeded-but-never-timed is exactly the
-         failure mode gh-476 paid a sweep to discover. Sharper than [timed > 0], which the loss site
-         alone would satisfy: [candidates + 1] is every single plus the composite, and the composite
-         is only proposed when EACH site contributed a best-timed single — so it holds only if the
-         interchanged bias-gradient candidate compiled and ran. *)
+         failure mode gh-476 paid a sweep to discover. Every single must reach a timing window. With
+         no contention, [candidates + 1] additionally pins the composite, which is only proposed
+         when EACH site contributed a usable best-timed single. Under contention a refused single
+         cannot staff that composite, but still counts as reaching the timing window. *)
       p "the interchanged bias-gradient candidate reaches timing"
-        (r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1)
+        (r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
+        && (r.Autotune.timings_contended > 0
+           || r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1))
   | None ->
       p "conv-gradient split-reduce candidates seeded" false;
       p "the interchanged bias-gradient candidate reaches timing" false);

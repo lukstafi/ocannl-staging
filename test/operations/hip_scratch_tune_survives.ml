@@ -151,7 +151,7 @@ let () =
     let ctx = Context.run ctx routine in
     (Option.value_exn ~here:[%here] !r, Context.get_values ctx total.Tensor.value)
   in
-  let _populate, _ = tune_cached () in
+  let populate, _ = tune_cached () in
   let hit, hit_got = tune_cached () in
   let hit_scratch_count =
     List.sum
@@ -162,7 +162,8 @@ let () =
            | _ -> false))
       ~f:(fun d -> d.Autotune.count)
   in
-  p "scratch/tune: the second run replays from the cache" (replayed hit);
+  p "scratch/tune: the second run replays exactly after contention-free timing"
+    (Bool.equal (replayed hit) (populate.Autotune.timings_contended = 0));
   p "scratch/tune: a cache hit still reports the declined baseline"
     (Bool.equal hit.Autotune.baseline_declined r.Autotune.baseline_declined);
   p "scratch/tune: the cache-hit census accounts for that decline, and only it"
