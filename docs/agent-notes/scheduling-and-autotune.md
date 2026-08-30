@@ -585,7 +585,9 @@ files.
   depth, and the search neither ranks a contended timing nor caches any winner from a search with
   one or more contention refusals; `report.timings_contended` records every refusal so the
   incomplete candidate set is diagnosable and a later cache-cold call retries it. Falling back to
-  depth 1 would silently change the queued objective back into the isolated one.
+  depth 1 would silently change the queued objective back into the isolated one. Downstream,
+  `family_profit_of_report` treats such a partial report as `Unmeasured`, and benchmark JSON carries
+  the refusal count on each tune arm so an artifact never presents it as a complete measurement.
   **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
   `Keyed "timing"`), which is the one place this differs from its `autotune_*` neighbours: those
   change how carefully the SAME quantity is measured, so either process's winner answers the

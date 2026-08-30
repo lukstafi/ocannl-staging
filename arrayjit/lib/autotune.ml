@@ -1903,7 +1903,8 @@ let flip_profit_margin () =
 let family_profit_of_report ?margin (r : report) =
   let margin = match margin with Some m -> m | None -> flip_profit_margin () in
   if
-    (not (Float.is_finite r.mma_best_ms))
+    r.timings_contended > 0
+    || (not (Float.is_finite r.mma_best_ms))
     || (not (Float.is_finite r.best_ms))
     || Float.(r.best_ms <= 0.)
   then Unmeasured

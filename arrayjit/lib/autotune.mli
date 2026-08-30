@@ -922,6 +922,8 @@ val family_profit_of_report : ?margin:float -> report -> family_profit
 val family_profit_of_reports : ?margin:float -> report list -> family_profit
 (** What completed searches measured about the tensorized family's profitability on this device
     (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config [tune_flip_profit_margin].
+    A report with any [timings_contended] contributes [Unmeasured]: its finite minima cover an
+    incomplete candidate set and cannot safely price the family.
     Over several reports the most favourable evidence wins — the expressibility prior is deleted
     only by evidence that contradicts it, never by the absence of a confirmation. A failing arm's
     report counts: its timings are measurements of the family even though its [best_ms] is not

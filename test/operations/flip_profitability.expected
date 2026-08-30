@@ -11,6 +11,7 @@ a family that lost by 1% is still within profit: true
 a family that lost by 1% keeps the enablement prior: true
 an arm that timed no tensorized candidate measures nothing: true
 unmeasured keeps the enablement prior: true
+an incomplete contention-affected search contributes no profitability evidence: true
 a cache replay reaches the verdict of the search that stored it: true
 and a replay of a search that timed none still measures nothing: true
 a stored tensorized best survives the entry round-trip: true
