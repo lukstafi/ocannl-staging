@@ -205,11 +205,15 @@ let test_merge_buffer_read_dependency () =
   let named_source_write name =
     { source_write with asgns = Ir.Assignments.Block_comment (name, source_write.asgns) }
   in
+  let source_root = Context.auto () in
   let source_ctx, source_writer =
-    Context.compile (Context.auto ()) (named_source_write "merge_source_writer_1") IDX.empty
+    Context.compile source_root (named_source_write "merge_source_writer_1") IDX.empty
   in
   let source_ctx, _future_source_writer =
     Context.compile source_ctx (named_source_write "merge_source_writer_2") IDX.empty
+  in
+  let sibling_source_ctx, _sibling_source_writer =
+    Context.compile source_root (named_source_write "merge_source_writer_sibling") IDX.empty
   in
   let destination_ctx, destination_tick_writer =
     Train.to_routine (Context.auto ()) IDX.empty (Train.forward destination_tick)
@@ -226,6 +230,16 @@ let test_merge_buffer_read_dependency () =
   (* The compile frontier names the later, unexecuted writer, but re-running the earlier writer is
      what actually refreshes the source buffer. Merge readiness follows that execution state. *)
   ignore (Context.run source_ctx source_writer : Context.t);
+  (* The sibling compile owns a different buffer for the same tnode. The shared ledger's executed
+     writer from the first branch must not make this untouched sibling source look ready. *)
+  (try
+     ignore
+       (Context.copy ~into_merge_buffer:Copy ~src:sibling_source_ctx ~dst:destination_ctx
+          merge_value.Tensor.value);
+     Verdict.fail "merge transfer used an executed writer from a sibling buffer"
+   with Failure msg ->
+     Verdict.p "merge transfer scopes runtime writers to the source buffer"
+       (String.is_substring msg ~substring:"before source writer"));
   let merge_ctx =
     Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:destination_ctx
       merge_value.Tensor.value
@@ -258,11 +272,26 @@ let test_merge_buffer_read_dependency () =
     (Array.equal Float.equal
        (Context.get_values consumer_ctx merge_output.Tensor.value)
        [| 11.; 22. |]);
-  let replacement_merge_ctx =
+  (* A write-free failure rollback removes the optimistic execution claim and its runtime-writer
+     mapping. The explicit value that preceded the failed run remains a valid transfer source. *)
+  ignore (Context.run source_ctx source_writer : Context.t);
+  Context.rollback_execution source_ctx source_writer.Context.routine_id;
+  let rollback_merge_ctx =
     Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:consumer_ctx merge_value.Tensor.value
   in
   Verdict.p "overwriting invalidates the old merge consumer"
     (not (Context.can_run consumer_ctx consumer));
+  let abandoned_ctx, abandoned = Context.compile rollback_merge_ctx consumer_comp IDX.empty in
+  Verdict.p "rolled-back writer does not block the prior source value"
+    (Context.can_run abandoned_ctx abandoned);
+  (* Releasing an undispatched candidate unregisters its pending merge read. It must not strand the
+     lineage's single-tenant slab forever. *)
+  Context.release abandoned_ctx;
+  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
+  let replacement_merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:rollback_merge_ctx
+      merge_value.Tensor.value
+  in
   let replacement_ctx, replacement =
     Context.compile replacement_merge_ctx consumer_comp IDX.empty
   in
