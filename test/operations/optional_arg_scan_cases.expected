@@ -1,0 +1,58 @@
+ordinary optional argument affects its result: implementation classified: true
+ordinary optional argument affects its result: honesty classified: true
+forwarding an optional argument is a use: implementation classified: true
+forwarding an optional argument is a use: honesty classified: true
+an op spec coefficient is a ppx-generated use: implementation classified: true
+an op spec coefficient is a ppx-generated use: honesty classified: true
+an op axis label is not a ppx-generated use: implementation classified: true
+an op axis label is not a ppx-generated use: honesty classified: true
+an op dilation coefficient is a ppx-generated use: implementation classified: true
+an op dilation coefficient is a ppx-generated use: honesty classified: true
+a concat coefficient is a ppx-generated use: implementation classified: true
+a concat coefficient is a ppx-generated use: honesty classified: true
+a qualified custom operator does not generate a use: implementation classified: true
+a qualified custom operator does not generate a use: honesty classified: true
+legacy convolution padding is a ppx-generated use: implementation classified: true
+legacy convolution padding is a ppx-generated use: honesty classified: true
+a shadowed op spec coefficient does not use the outer option: implementation classified: true
+a shadowed op spec coefficient does not use the outer option: honesty classified: true
+an unrelated string in an op body does not use the option: implementation classified: true
+an unrelated string in an op body does not use the option: honesty classified: true
+a later optional default uses an earlier option: implementation classified: true
+a later optional default uses an earlier option: honesty classified: true
+a nested optional default sees the outer option before shadowing: implementation classified: true
+a nested optional default sees the outer option before shadowing: honesty classified: true
+an expression-level op extension enables generated uses: implementation classified: true
+an expression-level op extension enables generated uses: honesty classified: true
+ordinary label discarded through let-wildcard is rejected: implementation classified: true
+ordinary label discarded through let-wildcard is rejected: honesty classified: true
+ordinary label discarded through ignore is rejected: implementation classified: true
+ordinary label discarded through ignore is rejected: honesty classified: true
+ordinary label discarded through the pipe operator is rejected: implementation classified: true
+ordinary label discarded through the pipe operator is rejected: honesty classified: true
+ordinary label discarded through the apply operator is rejected: implementation classified: true
+ordinary label discarded through the apply operator is rejected: honesty classified: true
+ordinary label discarded through named throwaway is rejected: implementation classified: true
+ordinary label discarded through named throwaway is rejected: honesty classified: true
+an underscore-prefixed local forwarded later is a real use: implementation classified: true
+an underscore-prefixed local forwarded later is a real use: honesty classified: true
+a locally shadowed ignore is a real use: implementation classified: true
+a locally shadowed ignore is a real use: honesty classified: true
+a later ignore parameter makes its call a real use: implementation classified: true
+a later ignore parameter makes its call a real use: honesty classified: true
+a locally opened ignore can be effectful: implementation classified: true
+a locally opened ignore can be effectful: honesty classified: true
+underscore label makes an unimplemented option caller-visible: implementation classified: true
+underscore label makes an unimplemented option caller-visible: honesty classified: true
+implemented underscore label is stale: implementation classified: true
+implemented underscore label is stale: honesty classified: true
+a nested shadow does not pretend the outer option is used: implementation classified: true
+a nested shadow does not pretend the outer option is used: honesty classified: true
+a let-operator binder does not pretend the outer option is used: implementation classified: true
+a let-operator binder does not pretend the outer option is used: honesty classified: true
+comments and strings do not pretend the option is used: implementation classified: true
+comments and strings do not pretend the option is used: honesty classified: true
+an optional argument on a directly returned closure is inventoried: implementation classified: true
+an optional argument on a directly returned closure is inventoried: honesty classified: true
+an optional function exported through a tuple is inventoried: implementation classified: true
+an optional function exported through a tuple is inventoried: honesty classified: true

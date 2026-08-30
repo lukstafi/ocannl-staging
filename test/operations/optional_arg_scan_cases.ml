@@ -37,6 +37,12 @@ let () =
   case "an op dilation coefficient is a ppx-generated use"
     {ocaml|let%op f ?(dilation = 1) x = x ++ "o<+dilation*k => o"|ocaml} ~implemented:true
     ~honest:true;
+  case "a concat coefficient is a ppx-generated use"
+    {ocaml|let%op f ?(stride = 1) x = (x, x) ++^ "stride*o+k; i => o"|ocaml} ~implemented:true
+    ~honest:true;
+  case "a qualified custom operator does not generate a use"
+    {ocaml|let%op f ?(stride = 1) x = let _ = stride in My.( ++ ) x "stride*o+k => o"|ocaml}
+    ~implemented:false ~honest:false;
   case "legacy convolution padding is a ppx-generated use"
     {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
@@ -70,6 +76,14 @@ let () =
   case "an underscore-prefixed local forwarded later is a real use"
     {ocaml|let f ?(feature = 1) () = let _value = feature in helper _value|ocaml} ~implemented:true
     ~honest:true;
+  case "a locally shadowed ignore is a real use"
+    {ocaml|let f ?(_feature = true) () = let ignore x = if x then enable () in ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
+  case "a later ignore parameter makes its call a real use"
+    {ocaml|let f ?(_feature = true) ignore = ignore _feature|ocaml} ~implemented:true ~honest:false;
+  case "a locally opened ignore can be effectful"
+    {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -85,4 +99,7 @@ let () =
     ~honest:false;
   case "an optional argument on a directly returned closure is inventoried"
     {ocaml|let make () = fun ?(feature = true) () -> ignore feature|ocaml} ~implemented:false
-    ~honest:false
+    ~honest:false;
+  case ~argument:"feature" "an optional function exported through a tuple is inventoried"
+    {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}
+    ~implemented:false ~honest:false
