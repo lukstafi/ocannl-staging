@@ -38,6 +38,7 @@ module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_none = Verdict.p_none
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_gpu = Ir.Schedule.backend_is_gpu backend_name
@@ -46,6 +47,13 @@ let single = Ir.Ops.single
 let bf16 = Ir.Ops.bfloat16
 let half = Ir.Ops.half
 let skipped = Verdict.skipped ~backend:backend_name
+
+type rival_values = { once_narrowed : float; storage_tree : float; per_step : float }
+
+let values { once_narrowed; storage_tree; per_step } = [ once_narrowed; storage_tree; per_step ]
+
+let unordered_pairs xs =
+  List.concat_mapi xs ~f:(fun i x -> List.map (List.drop xs (i + 1)) ~f:(fun y -> (x, y)))
 
 (* Which backends resolve a bf16 accumulator ABOVE its storage width (gh-ocannl-663), restated here
    rather than derived from the backend so a regression in it is detectable: the CPU backends
@@ -305,6 +313,8 @@ let () =
    too. *)
 
 let bf16_term k = 1.0 +. (Float.of_int (k % 7) /. 128.0)
+let bf16_1w_values = { once_narrowed = 32.75; storage_tree = 32.5; per_step = 32.25 }
+let bf16_4w_values = { once_narrowed = 131.0; storage_tree = 130.0; per_step = 128.0 }
 
 let bf16_sum ~name ~n =
   let x = NTDSL.init ~l:(name ^ "_x") ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) () in
@@ -343,9 +353,17 @@ let claim_narrow_refused =
    it on every GPU backend, is refused by the warp-shuffle rendering (GPU) or runs serially (CPU)"
 
 let () =
+  p_none "the bf16 single-warp rival-rendering values are pairwise distinct"
+    (unordered_pairs (values bf16_1w_values))
+    ~f:(fun (a, b) -> Float.equal a b);
+  p_none "the bf16 four-warp rival-rendering values are pairwise distinct"
+    (unordered_pairs (values bf16_4w_values))
+    ~f:(fun (a, b) -> Float.equal a b);
   if widens_bf16 then begin
-    p claim_bf16_1w (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" ~n:32) 32.75);
-    p claim_bf16_4w (Float.equal (bf16_sum ~name:"bf16_4warp_wshfl" ~n:128) 131.0)
+    p claim_bf16_1w
+      (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" ~n:32) bf16_1w_values.once_narrowed);
+    p claim_bf16_4w
+      (Float.equal (bf16_sum ~name:"bf16_4warp_wshfl" ~n:128) bf16_4w_values.once_narrowed)
   end
   else begin
     skipped claim_bf16_1w;
@@ -477,6 +495,8 @@ let () =
    tree's reassociation is exact and the claims are bitwise rather than approximate. *)
 
 let f16_term k = 1.0 +. (Float.of_int (k % 11) /. 1024.0)
+let f16_1w_values = { once_narrowed = 32.15625; storage_tree = 32.125; per_step = 32.09375 }
+let f16_4w_values = { once_narrowed = 128.625; storage_tree = 128.5; per_step = 128.125 }
 
 let f16_sum ~name ~n =
   let x = NTDSL.init ~l:(name ^ "_x") ~prec:half ~o:[ n ] ~f:(fun idcs -> f16_term idcs.(0)) () in
@@ -517,9 +537,17 @@ let () =
   Exn.protect
     ~finally:(fun () -> Numerics.set_policy saved)
     ~f:(fun () ->
+      p_none "the f16 single-warp rival-rendering values are pairwise distinct"
+        (unordered_pairs (values f16_1w_values))
+        ~f:(fun (a, b) -> Float.equal a b);
+      p_none "the f16 four-warp rival-rendering values are pairwise distinct"
+        (unordered_pairs (values f16_4w_values))
+        ~f:(fun (a, b) -> Float.equal a b);
       Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
-      p claim_f16_wide_1w (Float.equal (f16_sum ~name:"f16_wide_1warp_wshfl" ~n:32) 32.15625);
-      p claim_f16_wide_4w (Float.equal (f16_sum ~name:"f16_wide_4warp_wshfl" ~n:128) 128.625);
+      p claim_f16_wide_1w
+        (Float.equal (f16_sum ~name:"f16_wide_1warp_wshfl" ~n:32) f16_1w_values.once_narrowed);
+      p claim_f16_wide_4w
+        (Float.equal (f16_sum ~name:"f16_wide_4warp_wshfl" ~n:128) f16_4w_values.once_narrowed);
       if on_gpu then begin
         let src = Generated.read "f16_wide_4warp_wshfl" in
         let has sub = String.is_substring src ~substring:sub in
