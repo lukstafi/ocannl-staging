@@ -235,7 +235,11 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
      kernel parameter). An unbound extent symbol keeps the maximum-extent semantics: the loop covers
      the whole (max-sized) buffer, exactly as if the extent were written concretely. *)
   let extent_guard ~(projections : Indexing.projections) ~index ~iter body =
-    match List.Assoc.find projections.extent_syms ~equal:Indexing.equal_symbol iter with
+    match
+      List.Assoc.find projections.extent_syms
+        ~equal:(Option.equal Indexing.equal_symbol)
+        (Some iter)
+    with
     | Some sym when List.mem static_indices sym ~equal:Indexing.equal_static_symbol ->
         let iprec = Ops.index_prec () in
         let cond =

@@ -277,8 +277,10 @@ files.
   neither the extent guard nor the clamp is wired in. A bound gh-490 extent is explicitly rejected
   before the nest (gh-ocannl-817): packed uniform's round-up `Total_elems` constraint already keeps
   the shape out of derived projections, and the lowering refusal keeps a future path from turning
-  that current solver limitation into an unguarded wrong-write. An unbound extent retains the
-  standing maximum-shape semantics; padded-window clamping remains unreachable by construction.
+  that current solver limitation into an unguarded wrong-write. Projection metadata retains a
+  maximum-one symbolic axis without an iterator, so runtime zero cannot escape the refusal through
+  `Fixed_idx 0`. An unbound extent retains the standing maximum-shape semantics; padded-window
+  clamping remains unreachable by construction.
 - A lowering-time reader of `Indexing.variable_ref` must force a dims lazy (or otherwise finish
   inference) FIRST: forcing dims is what runs `Shape.finish_inference` and fills row-var-bound refs
   (`..d..` captures such as layer norm's `/. dim d`). "Inference is already forced by now" is not an

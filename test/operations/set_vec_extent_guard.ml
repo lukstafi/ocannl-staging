@@ -31,6 +31,12 @@ let rec find_set_vec = function
   | Block_comment (_, body) -> find_set_vec body
   | Noop | Accum_op _ | Fetch _ -> None
 
+let rec find_accum_projections = function
+  | Asgns.Accum_op { projections; _ } -> Some projections
+  | Seq (a, b) -> Option.first_some (find_accum_projections a) (find_accum_projections b)
+  | Block_comment (_, body) -> find_accum_projections body
+  | Noop | Set_vec_unop _ | Fetch _ -> None
+
 let () =
   Tensor.unsafe_reinitialize ();
   let extent, bindings = Idx.get_static_symbol ~static_range:6 Idx.Empty in
@@ -59,7 +65,7 @@ let () =
     | [ [ (_, iter) ] ] -> iter
     | _ -> failwith "expected concrete packed uniform to have one product iterator"
   in
-  let guarded_projections = { projections with extent_syms = [ (iter, extent) ] } in
+  let guarded_projections = { projections with extent_syms = [ (Some iter, extent) ] } in
   let hand_built =
     Asgns.Set_vec_unop
       {
@@ -85,4 +91,38 @@ let () =
     (Ll_test.count_stmt maximum_shape ~f:(function
        | Ir.Low_level.Set_from_vec _ -> true
        | _ -> false)
-    > 0)
+    > 0);
+
+  Tensor.unsafe_reinitialize ();
+  let singleton_extent, singleton_bindings = Idx.get_static_symbol ~static_range:1 Idx.Empty in
+  let%op singleton_source = { singleton_source = 0.5 } in
+  let%op singleton_symbolic = (2. *. singleton_source) ++ "z=>z" [ "z" ] in
+  Shape.set_sym_dim z singleton_extent;
+  let singleton_comp = Train.forward singleton_symbolic in
+  let singleton_projections =
+    Option.value_exn (find_accum_projections singleton_comp.Asgns.asgns) |> Lazy.force
+  in
+  p "a maximum-one symbolic axis retains extent metadata without an iterator"
+    (List.exists singleton_projections.extent_syms ~f:(fun (iter, sym) ->
+         Option.is_none iter && Idx.equal_static_symbol sym singleton_extent));
+  p "zero is a valid runtime binding for a maximum-one extent"
+    (Result.is_ok (Result.try_with (fun () -> Idx.validate_bound_value singleton_extent 0)));
+  let singleton_set_vec =
+    Asgns.Set_vec_unop
+      {
+        op;
+        lhs;
+        rhs;
+        projections = lazy { projections with extent_syms = singleton_projections.extent_syms };
+        projections_debug = "gh-817 maximum-one symbolic extent";
+      }
+  in
+  let singleton_rejection =
+    rejection (fun () ->
+        ignore
+          (Asgns.to_low_level
+             ~static_indices:(Idx.bound_symbols singleton_bindings)
+             singleton_set_vec
+            : Ir.Low_level.t))
+  in
+  p "Set_vec_unop rejects a bound maximum-one symbolic extent" (Option.is_some singleton_rejection)
