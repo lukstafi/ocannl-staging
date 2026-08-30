@@ -28,11 +28,16 @@ each carrying its assertion separately through `Verdict.claim`/`claimf`:
   test/operations/observable_grads.ml:%s placement: %s; in context: %b; observable intent:  -- `in context` is legitimately false for a virtualized leg, so the row describes; the assertion is `observable intent`, claimed beside it
 
 Helper-wrapped quantified claims exempted because emptiness is their passing meaning:
-  (none: every helper-wrapped quantifier in a claim must witness a population)
+  test/operations/ocamlformat_ignore_scan.ml:refused -- the message list is an optional strengthening of the child-exit refusal: an empty list deliberately means that the nonzero status alone is the passing evidence
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
 refuses a sibling for_all helper through an intermediate result binding: true
+refuses a helper that returns a fully applied quantified local binding: true
+refuses a quantifier written in pipeline style: true
+keeps helper resolution inside its lexical scope: true
+refuses a reversed length upper bound masquerading as a witness: true
+preserves positive polarity through comparison with false: true
 refuses an is_empty helper whose claim can pass on an empty source: true
 refuses a negated exists helper with the same empty-population hole: true
 accepts the explicit non-empty guard installed by the parity sweep: true

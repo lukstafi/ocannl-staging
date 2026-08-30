@@ -62,13 +62,14 @@ let quantifier_name = function
   | Not_exists -> "not exists"
 
 type quantifier = { kind : quantifier_kind; populations : Set.M(String).t }
+type claim_kind = P | Pf | Pass_fail | Claim | Claimf
 
 type helper_binding = {
   name : string;
   line : int;
-  expression : expression;
-  dependencies : Set.M(String).t;
+  dependencies : helper_binding list;
   unguarded : quantifier list;
+  claim_kind : claim_kind option;
 }
 
 type quantified_claim = {
@@ -129,6 +130,13 @@ let populations arguments count =
   |> List.filter_map ~f:population_name
   |> Set.of_list (module String)
 
+let collection_quantifier callee =
+  if is_collection_call callee ~member:"for_all" then Some (For_all, 1)
+  else if is_collection_call callee ~member:"for_all2_exn" then Some (For_all2, 2)
+  else if is_collection_call callee ~member:"is_empty" then Some (Is_empty, 1)
+  else if is_collection_call callee ~member:"exists" then Some (Not_exists, 1)
+  else None
+
 let quantifiers_in expr =
   let found = ref [] in
   let positive = ref true in
@@ -144,6 +152,25 @@ let quantifiers_in expr =
             positive := not previous;
             self#expression argument;
             positive := previous
+        | Pexp_apply (pipe, [ (Asttypes.Nolabel, population); (Asttypes.Nolabel, piped_call) ])
+          when is_name pipe "|>" -> (
+            match piped_call.pexp_desc with
+            | Pexp_apply (callee, arguments) -> (
+                match collection_quantifier callee with
+                | Some (kind, count)
+                  when (!positive && not (Poly.equal kind Not_exists))
+                       || ((not !positive) && Poly.equal kind Not_exists) ->
+                    found :=
+                      {
+                        kind;
+                        populations =
+                          populations ((Asttypes.Nolabel, population) :: arguments) count;
+                      }
+                      :: !found;
+                    self#expression population;
+                    List.iter arguments ~f:(fun (_, argument) -> self#expression argument)
+                | _ -> super#expression expr)
+            | _ -> super#expression expr)
         | Pexp_apply (callee, arguments) ->
             let add kind count =
               found := { kind; populations = populations arguments count } :: !found
@@ -168,7 +195,13 @@ let quantifiers_in expr =
 let rec returned_quantifiers expr =
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> returned_quantifiers body
-  | Pexp_let (_, _, body) -> returned_quantifiers body
+  | Pexp_let (_, bindings, body) ->
+      let returned_names = returned_value_names body in
+      returned_quantifiers body
+      @ List.concat_map bindings ~f:(fun binding ->
+          match helper_name binding.pvb_pat with
+          | Some name when Set.mem returned_names name -> returned_quantifiers binding.pvb_expr
+          | _ -> [])
   | Pexp_sequence (_, result) -> returned_quantifiers result
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers inner
   | Pexp_ifthenelse (_, yes, no) ->
@@ -180,9 +213,35 @@ let rec returned_quantifiers expr =
          || is_collection_call callee ~member:"for_all2_exn"
          || is_collection_call callee ~member:"is_empty"
          || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
-         || is_name callee "<>" ->
+         || is_name callee "<>" || is_name callee "|>" ->
       quantifiers_in expr
   | _ -> []
+
+and returned_value_names expr =
+  match expr.pexp_desc with
+  | Pexp_ident { txt = Ppxlib.Longident.Lident name; _ } -> Set.singleton (module String) name
+  | Pexp_function (_, _, Pfunction_body body) -> returned_value_names body
+  | Pexp_let (_, _, body) -> returned_value_names body
+  | Pexp_sequence (_, result) -> returned_value_names result
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_value_names inner
+  | Pexp_ifthenelse (_, yes, no) ->
+      Set.union (returned_value_names yes)
+        (Option.value_map no ~default:(Set.empty (module String)) ~f:returned_value_names)
+  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+      List.fold cases
+        ~init:(Set.empty (module String))
+        ~f:(fun names case -> Set.union names (returned_value_names case.pc_rhs))
+  | Pexp_apply (callee, arguments)
+    when is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
+         || is_name callee "<>" ->
+      List.fold arguments
+        ~init:(Set.empty (module String))
+        ~f:(fun names (_, argument) -> Set.union names (returned_value_names argument))
+  | Pexp_apply (callee, _) -> (
+      match Sources.longident_of callee with
+      | Some [ name ] -> Set.singleton (module String) name
+      | _ -> Set.empty (module String))
+  | _ -> Set.empty (module String)
 
 let is_partial_quantifier expr =
   match expr.pexp_desc with
@@ -229,80 +288,50 @@ let rec required_nonempty expr =
       | _ -> none ())
   | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ]) when is_name op "&&" ->
       Set.union (required_nonempty left) (required_nonempty right)
-  | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
-    when is_name op "=" || is_name op ">" || is_name op ">=" -> (
+  | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ]) when is_name op "="
+    -> (
       match
         (length_population left, int_literal right, int_literal left, length_population right)
       with
       | Some population, Some n, _, _ when n > 0 -> Set.singleton (module String) population
       | _, _, Some n, Some population when n > 0 -> Set.singleton (module String) population
       | _ -> none ())
+  | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ]) -> (
+      match
+        ( Sources.longident_of op,
+          length_population left,
+          int_literal right,
+          int_literal left,
+          length_population right )
+      with
+      | Some _, Some population, Some n, _, _
+        when (is_name op ">" && n >= 0) || (is_name op ">=" && n > 0) ->
+          Set.singleton (module String) population
+      | Some _, _, _, Some n, Some population
+        when (is_name op "<" && n >= 0) || (is_name op "<=" && n > 0) ->
+          Set.singleton (module String) population
+      | _ -> none ())
   | Pexp_ifthenelse (condition, yes, Some no) when bool_literal no false ->
       Set.union (required_nonempty condition) (required_nonempty yes)
   | _ -> none ()
 
-let names_in ?(positive_only = false) expr =
+let names_in expr =
   let names = ref (Set.empty (module String)) in
-  let positive = ref true in
   let iterator =
-    object (self)
+    object
       inherit Ast_traverse.iter as super
       method! attribute _ = ()
       method! value_binding _ = ()
 
       method! expression expr =
-        match expr.pexp_desc with
-        | Pexp_function _ -> ()
-        | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
-            let previous = !positive in
-            positive := not previous;
-            self#expression argument;
-            positive := previous
-        | _ ->
-            (match Sources.longident_of expr with
-            | Some [ name ] when (not positive_only) || !positive -> names := Set.add !names name
-            | _ -> ());
-            super#expression expr
+        (match expr.pexp_desc with Pexp_function _ -> () | _ -> super#expression expr);
+        match Sources.longident_of expr with
+        | Some [ name ] -> names := Set.add !names name
+        | _ -> ()
     end
   in
   iterator#expression expr;
   !names
-
-let bindings_of structure =
-  let found = ref [] in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-      method! attribute _ = ()
-
-      method! value_binding value =
-        (match helper_name value.pvb_pat with
-        | None -> ()
-        | Some name ->
-            let guards = required_nonempty value.pvb_expr in
-            let unguarded =
-              if is_function value.pvb_expr || is_partial_quantifier value.pvb_expr then
-                List.filter (returned_quantifiers value.pvb_expr) ~f:(fun quantifier ->
-                    Set.is_empty quantifier.populations
-                    || Set.is_empty (Set.inter guards quantifier.populations))
-              else []
-            in
-            found :=
-              {
-                name;
-                line = value.pvb_loc.loc_start.pos_lnum;
-                expression = value.pvb_expr;
-                dependencies = names_in (function_body value.pvb_expr);
-                unguarded;
-              }
-              :: !found);
-        super#value_binding value
-    end
-  in
-  iterator#structure structure;
-  List.rev !found
-
-type claim_kind = P | Pf | Pass_fail | Claim | Claimf
 
 let claim_kind_of_path path =
   match path with
@@ -316,92 +345,180 @@ let claim_kind_of_path path =
       | _ -> None)
   | _ -> None
 
-let claim_aliases bindings =
-  let aliases = Hashtbl.create (module String) in
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    List.iter bindings ~f:(fun binding ->
-        if not (Hashtbl.mem aliases binding.name) then
-          let kind =
-            match Sources.longident_of binding.expression with
-            | Some [ alias ] -> Hashtbl.find aliases alias
-            | Some path -> claim_kind_of_path path
-            | None -> None
-          in
-          Option.iter kind ~f:(fun kind ->
-              changed := true;
-              Hashtbl.set aliases ~key:binding.name ~data:kind))
-  done;
-  aliases
+let lookup environment name =
+  List.find environment ~f:(fun binding -> String.equal binding.name name)
+
+let positive_names expr =
+  let names = ref (Set.empty (module String)) in
+  let rec visit positive expr =
+    let visit_arguments positive arguments =
+      List.iter arguments ~f:(fun (_, argument) -> visit positive argument)
+    in
+    match expr.pexp_desc with
+    | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+        visit (not positive) argument
+    | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+      when is_name callee "=" || is_name callee "<>" || is_name callee "equal" -> (
+        let equal = not (is_name callee "<>") in
+        match
+          ( bool_literal left true,
+            bool_literal left false,
+            bool_literal right true,
+            bool_literal right false )
+        with
+        | true, _, _, _ -> visit (Bool.equal positive equal) right
+        | _, true, _, _ -> visit (Bool.equal positive (not equal)) right
+        | _, _, true, _ -> visit (Bool.equal positive equal) left
+        | _, _, _, true -> visit (Bool.equal positive (not equal)) left
+        | _ -> visit_arguments positive [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    | Pexp_function _ -> ()
+    | _ ->
+        (match Sources.longident_of expr with
+        | Some [ name ] when positive -> names := Set.add !names name
+        | _ -> ());
+        let iterator =
+          object
+            inherit Ast_traverse.iter as super
+            method! attribute _ = ()
+            method! expression child = visit positive child
+            method children child = super#expression child
+          end
+        in
+        iterator#children expr
+  in
+  visit true expr;
+  !names
+
+let claim_kind environment callee =
+  match Sources.longident_of callee with
+  | Some [ alias ] -> lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
+  | Some path -> claim_kind_of_path path
+  | None -> None
+
+let make_binding environment value =
+  helper_name value.pvb_pat
+  |> Option.map ~f:(fun name ->
+      let guards = required_nonempty value.pvb_expr in
+      let unguarded =
+        if is_function value.pvb_expr || is_partial_quantifier value.pvb_expr then
+          List.filter (returned_quantifiers value.pvb_expr) ~f:(fun quantifier ->
+              Set.is_empty quantifier.populations
+              || Set.is_empty (Set.inter guards quantifier.populations))
+        else []
+      in
+      let dependencies =
+        names_in (function_body value.pvb_expr)
+        |> Set.to_list
+        |> List.filter_map ~f:(lookup environment)
+      in
+      let claim_kind =
+        match Sources.longident_of value.pvb_expr with
+        | Some [ alias ] ->
+            lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
+        | Some path -> claim_kind_of_path path
+        | None -> None
+      in
+      { name; line = value.pvb_loc.loc_start.pos_lnum; dependencies; unguarded; claim_kind })
 
 let quantified_claims structure =
-  let bindings = bindings_of structure in
-  let by_name = Hashtbl.create (module String) in
-  List.iter bindings ~f:(fun binding -> Hashtbl.add_multi by_name ~key:binding.name ~data:binding);
-  let aliases = claim_aliases bindings in
-  let origins ~before names =
-    let rec visit seen ~before name =
-      if Set.mem seen name then []
+  let origins bindings =
+    let rec visit seen binding =
+      let key = binding.name ^ ":" ^ Int.to_string binding.line in
+      if Set.mem seen key then []
       else
-        let seen = Set.add seen name in
-        let visible =
-          Hashtbl.find_multi by_name name |> List.filter ~f:(fun binding -> binding.line <= before)
-        in
-        let visible =
-          match List.max_elt visible ~compare:(fun a b -> Int.compare a.line b.line) with
-          | None -> []
-          | Some latest -> List.filter visible ~f:(fun binding -> binding.line = latest.line)
-        in
-        visible
-        |> List.concat_map ~f:(fun binding ->
-            let direct = if List.is_empty binding.unguarded then [] else [ binding ] in
-            direct
-            @ (Set.to_list binding.dependencies
-              |> List.concat_map ~f:(visit seen ~before:binding.line)))
+        let seen = Set.add seen key in
+        let direct = if List.is_empty binding.unguarded then [] else [ binding ] in
+        direct @ List.concat_map binding.dependencies ~f:(visit seen)
     in
-    Set.to_list names
-    |> List.concat_map ~f:(visit (Set.empty (module String)) ~before)
+    List.concat_map bindings ~f:(visit (Set.empty (module String)))
     |> List.dedup_and_sort ~compare:(fun a b -> Int.compare a.line b.line)
   in
   let found = ref [] in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-      method! attribute _ = ()
-
-      method! expression expr =
-        (match expr.pexp_desc with
-        | Pexp_apply (callee, arguments) ->
-            let kind =
-              match Sources.longident_of callee with
-              | Some [ alias ] -> Hashtbl.find aliases alias
-              | Some path -> claim_kind_of_path path
-              | None -> None
-            in
-            Option.iter kind ~f:(fun _ ->
-                match List.last (unlabelled arguments) with
-                | None -> ()
-                | Some boolean ->
-                    List.iter
-                      (origins ~before:expr.pexp_loc.loc_start.pos_lnum
-                         (names_in ~positive_only:true boolean))
-                      ~f:(fun binding ->
-                        found :=
-                          {
-                            helper = binding.name;
-                            helper_line = binding.line;
-                            claim_line = expr.pexp_loc.loc_start.pos_lnum;
-                            quantifiers =
-                              List.map binding.unguarded ~f:(fun quantifier -> quantifier.kind)
-                              |> List.dedup_and_sort ~compare:Poly.compare;
-                          }
-                          :: !found))
-        | _ -> ());
-        super#expression expr
-    end
+  let record_claim environment expr =
+    match expr.pexp_desc with
+    | Pexp_apply (callee, arguments) ->
+        Option.iter (claim_kind environment callee) ~f:(fun _ ->
+            match List.last (unlabelled arguments) with
+            | None -> ()
+            | Some boolean ->
+                positive_names boolean |> Set.to_list
+                |> List.filter_map ~f:(lookup environment)
+                |> origins
+                |> List.iter ~f:(fun binding ->
+                    found :=
+                      {
+                        helper = binding.name;
+                        helper_line = binding.line;
+                        claim_line = expr.pexp_loc.loc_start.pos_lnum;
+                        quantifiers =
+                          List.map binding.unguarded ~f:(fun quantifier -> quantifier.kind)
+                          |> List.dedup_and_sort ~compare:Poly.compare;
+                      }
+                      :: !found))
+    | _ -> ()
   in
-  iterator#structure structure;
+  let rec scan_expression environment expr =
+    record_claim environment expr;
+    match expr.pexp_desc with
+    | Pexp_let (_, bindings, body) ->
+        List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
+        let local = List.filter_map bindings ~f:(make_binding environment) in
+        scan_expression (List.rev_append local environment) body
+    | _ ->
+        let iterator =
+          object
+            inherit Ast_traverse.iter as super
+            method! attribute _ = ()
+            method! expression child = scan_expression environment child
+            method! structure nested = scan_structure environment nested
+            method children child = super#expression child
+          end
+        in
+        iterator#children expr
+  and scan_structure environment items =
+    ignore
+      (List.fold items ~init:environment ~f:(fun environment item ->
+           match item.pstr_desc with
+           | Pstr_value (_, bindings) ->
+               List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
+               List.rev_append (List.filter_map bindings ~f:(make_binding environment)) environment
+           | Pstr_eval (expr, _) ->
+               scan_expression environment expr;
+               environment
+           | Pstr_module binding ->
+               scan_module environment binding.pmb_expr;
+               environment
+           | Pstr_recmodule bindings ->
+               List.iter bindings ~f:(fun binding -> scan_module environment binding.pmb_expr);
+               environment
+           | _ ->
+               let iterator =
+                 object
+                   inherit Ast_traverse.iter as super
+                   method! attribute _ = ()
+                   method! expression expr = scan_expression environment expr
+                   method! structure nested = scan_structure environment nested
+                   method! structure_item item = super#structure_item item
+                 end
+               in
+               iterator#structure_item item;
+               environment))
+  and scan_module environment module_expr =
+    match module_expr.pmod_desc with
+    | Pmod_structure nested -> scan_structure environment nested
+    | _ ->
+        let iterator =
+          object
+            inherit Ast_traverse.iter as super
+            method! attribute _ = ()
+            method! expression expr = scan_expression environment expr
+            method! structure nested = scan_structure environment nested
+            method! module_expr module_expr = super#module_expr module_expr
+          end
+        in
+        iterator#module_expr module_expr
+  in
+  scan_structure [] structure;
   List.rev !found
   |> List.dedup_and_sort ~compare:(fun a b ->
       match Int.compare a.claim_line b.claim_line with
@@ -507,7 +624,12 @@ let canary_sites =
    Keyed by [<repository-relative path>:<helper name>], and stale-checked below. The exemption is on
    the helper rather than every claim that calls it: the helper is the unit whose boolean semantics
    decide what empty means, and every call reaches the same decision. *)
-let exempt_quantified_helpers : (string * string) list = []
+let exempt_quantified_helpers =
+  [
+    ( "test/operations/ocamlformat_ignore_scan.ml:refused",
+      "the message list is an optional strengthening of the child-exit refusal: an empty list \
+       deliberately means that the nonzero status alone is the passing evidence" );
+  ]
 
 (* Synthetic inputs state the helper rule independently of whatever helpers happen to be in the
    repository today. The first four are negative controls: the rule must return an offender for
@@ -526,6 +648,31 @@ let () = p "the values agree" (close got want)|ocaml},
 let ok = agrees samples
 let () = Verdict.claim "every sample agrees" ok|ocaml},
       [ "agrees" ] );
+    ( "refuses a helper that returns a fully applied quantified local binding",
+      {ocaml|let close xs =
+  let ok = List.for_all xs ~f:Fn.id in
+  ok
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "close" ] );
+    ( "refuses a quantifier written in pipeline style",
+      {ocaml|let close xs = xs |> List.for_all ~f:Fn.id
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "close" ] );
+    ( "keeps helper resolution inside its lexical scope",
+      {ocaml|let close xs = List.for_all xs ~f:Fn.id
+let unrelated () =
+  let close xs = (not (List.is_empty xs)) && List.for_all xs ~f:Fn.id in
+  close samples
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "close" ] );
+    ( "refuses a reversed length upper bound masquerading as a witness",
+      {ocaml|let close xs = 4 > List.length xs && List.for_all xs ~f:Fn.id
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "close" ] );
+    ( "preserves positive polarity through comparison with false",
+      {ocaml|let close xs = List.for_all xs ~f:Fn.id
+let () = Verdict.p "every sample agrees" (not (Bool.equal (close samples) false))|ocaml},
+      [ "close" ] );
     ( "refuses an is_empty helper whose claim can pass on an empty source",
       {ocaml|let no_bad xs = List.is_empty (List.filter xs ~f:bad)
 let () = Verdict.p "no sample is bad" (no_bad samples)|ocaml},
