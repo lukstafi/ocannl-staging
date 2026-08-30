@@ -79,10 +79,12 @@ that they earn a lookup rather than always-loaded space.
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>=` beginning at an identifier boundary; the explicit open namespaces
   `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key
-  when an inline code span contains either unambiguous prefixed form; a bare assignment contributes
-  only when it occupies the whole span outside benchmark reports (whitespace around `=` and an empty
-  example value do not hide the key). Config files contribute each uncommented assignment line.
-  Because spaced assignments are pervasive in code prose, each
+  when an inline code span or fenced line contains either unambiguous prefixed form; a bare
+  assignment contributes only when it occupies the whole inline span outside benchmark reports
+  (whitespace around `=` and an empty example value do not hide the key). Config files contribute
+  each nonempty uncommented assignment after applying `Utils.parse_config_lines`' key normalization:
+  case folding, leading-dash stripping, and the optional `ocannl_` prefix. Because spaced
+  assignments are pervasive in code prose, each
   current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
   that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked

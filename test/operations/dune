@@ -4103,9 +4103,10 @@
 ; fail the scan's non-vacuity claim. Qualified command-line spellings and value separators accepted
 ; by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>=` assignments, are consumers.
 ; Documentation scope is AGENTS.md, the root README, and every `*.md` under docs/ and benchmarks/.
-; Benchmark reports contribute only prefixed tokens; elsewhere a bare assignment may occupy the
-; whole span (with optional whitespace around `=`). Every checked-in dune file contributes action
-; arguments, and every checked-in ocannl_config contributes its assignment lines. Non-config
+; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
+; tokens, and elsewhere a bare assignment may occupy the whole inline span (with optional whitespace
+; around `=`). Every checked-in dune file contributes action arguments, and every checked-in
+; ocannl_config contributes its runtime-normalized assignment keys. Non-config
 ; judgments, spaced bare config mentions, and intentional-invalid exemptions pin file/key occurrence
 ; counts. The checked-in fixture carries one unknown key in every accepted syntax, and the control
 ; requires refusal with exit 1.
@@ -4143,7 +4144,10 @@
  ; refusal; it links no backend and runs no OCANNL program.
  (target config_usage_scan_control.actual)
  (package neural_nets_lib)
- (deps ocannl_config config_usage_scan_bogus.fixture)
+ (deps
+  ocannl_config
+  config_usage_scan_bogus.fixture
+  config_usage_scan_bogus_config.fixture)
  (action
   (with-stderr-to
    %{target}
@@ -4153,7 +4157,8 @@
      (run
       %{dep:config_usage_scan.exe}
       --fixture
-      %{dep:config_usage_scan_bogus.fixture}))))))
+      %{dep:config_usage_scan_bogus.fixture}
+      %{dep:config_usage_scan_bogus_config.fixture}))))))
 
 (rule
  (alias runtest-config_usage_scan)

@@ -266,54 +266,79 @@ let markdown_occurrences ~allow_bare ~path content =
   let scan = Markdown.inert_by_line content in
   let comments line = Markdown.spans_at scan.comment_ranges line in
   let fences line = Markdown.spans_at scan.fence_ranges line in
-  Markdown.lines content
-  |> List.concat_map ~f:(fun (lineno, line) ->
-      Markdown.spans_at scan.ranges lineno
-      |> List.filter ~f:(fun range ->
-          (not (List.mem (comments lineno) range ~equal:same_range))
-          && not (List.mem (fences lineno) range ~equal:same_range))
-      |> List.concat_map ~f:(fun (start, stop) ->
-          (* A multiline span arrives as one range per physical line. A complete [key=value] mention
-             is one inline span, so both delimiters must be on this line. *)
-          if stop <= start || not (Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
-          then []
-          else
-            let spelling = String.sub line ~pos:start ~len:(stop - start) in
-            let rendered = Markdown.code_span_content spelling in
-            let prefixed =
-              script_occurrences ~path rendered
-              |> List.map ~f:(fun occurrence ->
-                  { occurrence with line = lineno; kind = Markdown_assignment; spaced_bare = false })
-            in
-            if not (List.is_empty prefixed) then prefixed
-            else if allow_bare then
-              Option.to_list
-              @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
-                  {
-                    path;
-                    line = lineno;
-                    key;
-                    spelling = rendered;
-                    kind = Markdown_assignment;
-                    spaced_bare;
-                  })
-            else []))
+  let as_markdown lineno occurrence =
+    { occurrence with line = lineno; kind = Markdown_assignment; spaced_bare = false }
+  in
+  let lines = Markdown.lines content in
+  let inline =
+    lines
+    |> List.concat_map ~f:(fun (lineno, line) ->
+        Markdown.spans_at scan.ranges lineno
+        |> List.filter ~f:(fun range ->
+            (not (List.mem (comments lineno) range ~equal:same_range))
+            && not (List.mem (fences lineno) range ~equal:same_range))
+        |> List.concat_map ~f:(fun (start, stop) ->
+            (* A multiline span arrives as one range per physical line. A complete [key=value]
+               mention is one inline span, so both delimiters must be on this line. *)
+            if stop <= start || not (Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
+            then []
+            else
+              let spelling = String.sub line ~pos:start ~len:(stop - start) in
+              let rendered = Markdown.code_span_content spelling in
+              let prefixed =
+                script_occurrences ~path rendered |> List.map ~f:(as_markdown lineno)
+              in
+              if not (List.is_empty prefixed) then prefixed
+              else if allow_bare then
+                Option.to_list
+                @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
+                    {
+                      path;
+                      line = lineno;
+                      key;
+                      spelling = rendered;
+                      kind = Markdown_assignment;
+                      spaced_bare;
+                    })
+              else []))
+  in
+  let fenced =
+    lines
+    |> List.concat_map ~f:(fun (lineno, line) ->
+        if List.is_empty (fences lineno) then []
+        else script_occurrences ~path line |> List.map ~f:(as_markdown lineno))
+  in
+  inline @ fenced
+
+(* Keep this normalization beside [Utils.parse_config_lines]: config files accept case-insensitive
+   keys, leading dashes/spaces, and an optional [ocannl_] prefix. The registry population remains
+   independent so a removed normalized key still fails here. *)
+let normalize_config_file_key raw_key =
+  let key =
+    String.lowercase @@ String.strip raw_key ~drop:(fun c -> Char.equal c '-' || Char.equal c ' ')
+  in
+  if String.is_prefix key ~prefix:"ocannl" then
+    String.drop_prefix key 6 |> String.strip ~drop:(fun c -> Char.equal c '_')
+  else key
 
 let config_file_occurrences ~path content =
   String.split_lines content
   |> List.filter_mapi ~f:(fun index line ->
       let rendered = String.strip line in
-      if String.is_empty rendered || Char.equal rendered.[0] '#' then None
+      if
+        String.is_empty rendered || String.is_prefix line ~prefix:"#"
+        || String.is_prefix line ~prefix:"~~"
+      then None
       else
-        Option.bind (String.lsplit2 rendered ~on:'=') ~f:(fun (raw_key, _) ->
-            let key = String.strip raw_key in
+        Option.bind (String.lsplit2 line ~on:'=') ~f:(fun (raw_key, value) ->
+            let key = normalize_config_file_key raw_key in
             Option.some_if
-              ((not (String.is_empty key)) && String.for_all key ~f:lowercase_key_char)
+              (not (String.is_empty key || String.is_empty value))
               {
                 path;
                 line = index + 1;
                 key;
-                spelling = key ^ "=";
+                spelling = String.strip raw_key ^ "=";
                 kind = Config_file_assignment;
                 spaced_bare = false;
               }))
@@ -476,12 +501,15 @@ let occurrences_of_file ~reported_path path =
   | `Config -> config_file_occurrences ~path:reported_path content
   | `Dune | `Script -> script_occurrences ~path:reported_path content
 
-let fixture path =
+let fixture path config_path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
-    @ markdown_occurrences ~allow_bare:true ~path:reported_path content)
+    @ markdown_occurrences ~allow_bare:true ~path:reported_path content
+    @ config_file_occurrences
+        ~path:(Stdlib.Filename.basename config_path)
+        (In_channel.read_all config_path))
 
 let live workspace_root paths =
   let base = Test_utils.Dune_stanza_scan.base_dir workspace_root in
@@ -553,9 +581,9 @@ let live workspace_root paths =
 
 let () =
   match Array.to_list Stdlib.Sys.argv with
-  | _ :: [ "--fixture"; path ] -> fixture path
+  | _ :: [ "--fixture"; path; config_path ] -> fixture path config_path
   | _ :: workspace_root :: paths when not (List.is_empty paths) -> live workspace_root paths
   | argv ->
-      eprintf "Usage: %s <workspace_root> <files...> | %s --fixture <file>\n" (List.hd_exn argv)
-        (List.hd_exn argv);
+      eprintf "Usage: %s <workspace_root> <files...> | %s --fixture <file> <config-file>\n"
+        (List.hd_exn argv) (List.hd_exn argv);
       Stdlib.exit 1
