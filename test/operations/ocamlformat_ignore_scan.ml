@@ -7,8 +7,9 @@
    stopped being ignored.
 
    This scan holds both directions directly: every [test/ppx/*_expected.ml] handed over by dune is
-   an entry, and every entry names a file in the source worktree. It also requires one nonempty path
-   per line and a final newline, so the append failure is refused at the boundary that enabled it.
+   an entry, and every entry names a file in dune's declared source tree. It also requires one
+   nonempty path per line and a final newline, so the append failure is refused at the boundary that
+   enabled it.
 
    The live tree is normally valid, so its refusals are otherwise dead code. [control] builds a
    synthetic tree, invokes this executable as a child, and asserts both exit status and diagnostic
@@ -71,18 +72,7 @@ let lines_of content =
 
 let report_details details = List.iter details ~f:(eprintf "%s\n")
 
-let find_source_root () =
-  let rec loop dir =
-    if Stdlib.Sys.file_exists (Stdlib.Filename.concat dir ".git") then dir
-    else
-      let parent = Stdlib.Filename.dirname dir in
-      if String.equal parent dir then
-        failwith "ocamlformat_ignore_scan: no source-worktree .git found above the rule directory"
-      else loop parent
-  in
-  loop (Stdlib.Sys.getcwd ())
-
-let scan ~source_root ~path_root arguments =
+let scan ~path_root arguments =
   let paths =
     List.map arguments ~f:(fun on_disk -> (relative_to path_root on_disk, on_disk))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -120,13 +110,13 @@ let scan ~source_root ~path_root arguments =
       Verdict.p_empty "every .ocamlformat-ignore line contains exactly one path" ~over:lines empty;
       let missing_entries =
         List.filter nonempty ~f:(fun { entry; _ } ->
-            not (Stdlib.Sys.file_exists (Stdlib.Filename.concat source_root entry)))
+            not (Stdlib.Sys.file_exists (Stdlib.Filename.concat path_root entry)))
       in
       report_details
         (List.map missing_entries ~f:(fun { number; entry } ->
              Printf.sprintf ".ocamlformat-ignore:%d: listed path `%s` does not exist" number entry));
       Verdict.p_all "every .ocamlformat-ignore entry names an existing file" nonempty
-        ~f:(fun { entry; _ } -> Stdlib.Sys.file_exists (Stdlib.Filename.concat source_root entry));
+        ~f:(fun { entry; _ } -> Stdlib.Sys.file_exists (Stdlib.Filename.concat path_root entry));
       let unlisted = List.filter goldens ~f:(fun path -> not (Set.mem entry_set path)) in
       report_details
         (List.map unlisted ~f:(fun path ->
@@ -165,7 +155,10 @@ let run_child ~root ~exe paths =
   let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
   let out = open_capture out_path and err = open_capture err_path in
   let paths = List.map paths ~f:(Stdlib.Filename.concat root) in
-  let argv = Array.of_list (exe :: "--scan-fixture" :: root :: root :: paths) in
+  (* Exercise the shipping scan over a declared-input root with no Git metadata. [--scan-only]
+     suppresses only the parent's control driver; without it every child would recursively stage
+     another generation of controls. *)
+  let argv = Array.of_list (exe :: "--scan-only" :: root :: paths) in
   let pid = Unix.create_process exe argv Unix.stdin out err in
   let _, status = Unix.waitpid [] pid in
   Unix.close out;
@@ -183,8 +176,10 @@ let control () =
   in
   let root = Stdlib.Filename.temp_dir "fmt_ignore_control" "" in
   let a = "test/ppx/a_expected.ml" and b = "test/ppx/b_expected.ml" in
+  let extra = "fixtures/format_hostile.ml" in
   let ignore = ".ocamlformat-ignore" in
   List.iter [ a; b ] ~f:(fun path -> write_file (Stdlib.Filename.concat root path) "golden\n");
+  write_file (Stdlib.Filename.concat root extra) "fixture\n";
   let paths = [ ignore; a; b ] in
   let run content =
     write_file (Stdlib.Filename.concat root ignore) content;
@@ -206,14 +201,16 @@ let control () =
     if not ok then report label (status, text);
     ok
   in
-  let legitimate = run (a ^ "\n" ^ b ^ "\n") in
+  (* [extra] is deliberately not one of the arguments: it proves existence is checked against the
+     declared root, not only against the PPX-golden dependency list. *)
+  let legitimate = run (a ^ "\n" ^ b ^ "\n" ^ extra ^ "\n") in
   let concatenated = run (a ^ b ^ "\n") in
   let unterminated = run (a ^ "\n" ^ b) in
   let blank_line = run (a ^ "\n\n" ^ b ^ "\n") in
   printf
     "Synthetic controls invoke the shipping scanner over a complete fixture and over each\n\
      malformed shape; refusal output is captured and matched below.\n\n";
-  Verdict.p "a complete newline-terminated one-path-per-line fixture passes"
+  Verdict.p "a complete fixture with an extra existing path and no Git metadata passes"
     (passed "legitimate" legitimate);
   Verdict.p
     "a concatenated append is refused in both directions, naming the nonexistent entry and omitted \
@@ -243,9 +240,9 @@ let usage () =
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | [ _; "--control" ] -> control ()
-  | _ :: "--scan-fixture" :: source_root :: path_root :: arguments ->
-      scan ~source_root ~path_root arguments
+  | _ :: "--scan-only" :: path_root :: arguments when not (List.is_empty arguments) ->
+      scan ~path_root arguments
   | _ :: path_root :: arguments when not (List.is_empty arguments) ->
-      scan ~source_root:(find_source_root ()) ~path_root arguments;
+      scan ~path_root arguments;
       control ()
   | _ -> usage ()
