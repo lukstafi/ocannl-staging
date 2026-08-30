@@ -1,0 +1,8 @@
+the seam rejects a surviving read with no virtualization decision: true
+the seam refusal names the pass boundary: true
+the seam refusal names the undecided node: true
+the seam refusal states the missing decision: true
+the seam refusal states which reads carry the obligation: true
+normal optimization virtualizes the producer: true
+normal optimization replaces the candidate read: true
+normal optimization decides the source read nested in the inlined body: true

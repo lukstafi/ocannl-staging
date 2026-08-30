@@ -809,6 +809,14 @@ val specialize_proc : optimize_ctx -> analysis -> optimized
     hermetic [optimize_ctx] forks (see [copy_optimize_ctx]) produce hermetic [optimized] results —
     the traced store is record-copied per call. *)
 
+val validate_virtualization_decision_coverage : Tnode.Placements.t -> t -> unit
+(** The gh-ocannl-805 seam assertion run after virtualization and before cleanup: every
+    tensor-buffer read ([Get] / [Get_dynamic]) in a statement cleanup will keep, including reads
+    inside a kept inlined [Local_scope] body, must name a node with a placement decision. Reads in a
+    virtual candidate's setter are excluded because cleanup drops the whole setter without visiting
+    its right-hand side. Exposed so hand-built-IR tests can inject the otherwise-unreachable
+    negative control directly at this boundary. *)
+
 val analysis_cache_stats : unit -> int * int
 (** gh-560: [(hits, misses)] of the process-global analysis cache consulted by [optimize]: sibling
     candidate compiles of one routine share one [analyze_proc] result — keyed by a canonical digest
