@@ -122,9 +122,9 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # The three absent backends keep this a potential finding rather than a failure:
 # one of them may have evaluated the common claim. A per-backend-only marker
 # must not leak into the report merely because it occurred somewhere.
-common='SKIPPED on fixture (vacuous): common unevaluated claim'
-cc_only='SKIPPED on fixture (vacuous): cc-only unevaluated claim'
-multidev_only='SKIPPED on fixture (vacuous): multidev-only unevaluated claim'
+common=$'OCANNL_VERDICT_SKIP\tfixture.exe\tcommon unevaluated claim'
+cc_only=$'OCANNL_VERDICT_SKIP\tfixture.exe\tcc-only unevaluated claim'
+multidev_only=$'OCANNL_VERDICT_SKIP\tfixture.exe\tmultidev-only unevaluated claim'
 coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
 $cc_only" \
   SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
@@ -134,7 +134,7 @@ coverage_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$coverage" | tail -1)
 [ -f "$coverage_report" ]
 grep -q '^status: partial (2 of 5 known backends completed)$' "$coverage_report"
 grep -q '^missing backends: metal, cuda, hip$' "$coverage_report"
-grep -q '^POTENTIAL: skipped on every completed backend: common unevaluated claim$' \
+grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common unevaluated claim$' \
   "$coverage_report"
 ! grep -q 'cc-only unevaluated claim' "$coverage_report"
 ! grep -q 'multidev-only unevaluated claim' "$coverage_report"
@@ -157,12 +157,50 @@ complete_fail_rc=$?
 set -e
 [ "$complete_fail_rc" -eq 1 ]
 grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
-grep -q '^FAIL: skipped on every known backend: common unevaluated claim$' \
+grep -q '^FAIL: skipped on every known backend: verdict_skip_probe.exe: common unevaluated claim$' \
   <<<"$complete_fail"
 
 printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
 complete_pass=$("$aggregate" "${aggregate_args[@]}")
 grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$complete_pass"
+
+# Equal human labels in two DIFFERENT executables are different test legs. Copy
+# the real probe under another basename so this control reaches the production
+# identity emission rather than restating its record format in the fixture.
+other_probe=$tmp/other_skip_probe.exe
+cp "$verdict_probe" "$other_probe"
+"$verdict_probe" cc >"$tmp/identity-cc.log" 2>&1
+"$other_probe" metal >"$tmp/identity-metal.log" 2>&1
+identity_clear=$("$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$identity_clear"
+
+# Zero successful units is routine when every selected backend is unavailable
+# or red. This runs under macOS's stock Bash 3.2 in the local suite and pins the
+# nounset-safe branch before any empty-array expansion.
+empty=$("$aggregate" --known cc --known metal)
+grep -q '^completed backends: <none>$' <<<"$empty"
+grep -q '^result: NOT AGGREGATED$' <<<"$empty"
+
+# Evidence-processing errors are harness failures (exit 2), never an empty set
+# that can read as CLEAR/PASS. Fault-inject sort, the last command of the
+# extraction pipeline, so pipefail must reach the explicit error conversion.
+fail_bin=$tmp/fail-bin
+mkdir -p "$fail_bin"
+cat >"$fail_bin/sort" <<'EOF'
+#!/bin/sh
+exit 7
+EOF
+chmod +x "$fail_bin/sort"
+set +e
+extract_error=$(PATH=$fail_bin:$PATH "$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+extract_error_rc=$?
+set -e
+[ "$extract_error_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot extract skip records from ' <<<"$extract_error"
 
 # Hold one run after it owns the worktree lock, then replace its history with
 # the old schema. A competing launch must refuse at the lock without migrating

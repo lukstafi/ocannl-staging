@@ -199,7 +199,10 @@ let p_exists ?(min = 1) name xs ~f =
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
     [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is
     free — and announces the skip on stderr, naming the claim. [grep SKIPPED] over a run then
-    enumerates exactly what that hardware did not verify.
+    enumerates exactly what that hardware did not verify. A second
+    [OCANNL_VERDICT_SKIP<TAB>executable<TAB>claim] record on stderr is the machine-readable form;
+    the executable identity keeps equal labels in different test legs distinct when sweep logs are
+    intersected across backends.
 
     Use it in place of a bare [p name true]: that line is byte-identical to a verified run's, so
     neither the transcript nor a reviewer can tell the claim was never evaluated — which is how a
@@ -214,6 +217,14 @@ let p_exists ?(min = 1) name xs ~f =
     reporting a verdict is not a reason to link OCANNL's configuration machinery. *)
 let skipped ~backend name =
   Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend name;
+  (* A second, machine-oriented record gives cross-run consumers a stable test-leg identity without
+     changing the human line above (the documented [grep SKIPPED] convention). The executable
+     basename is stable across worktrees and machines; pairing it with the claim prevents equal
+     labels in different tests from being conflated. [String.escaped] keeps each field on one TSV
+     line even if a computed label contains a control character. *)
+  Stdio.eprintf "OCANNL_VERDICT_SKIP\t%s\t%s\n%!"
+    (Stdlib.String.escaped (Stdlib.Filename.basename Stdlib.Sys.executable_name))
+    (Stdlib.String.escaped name);
   p name true
 
 (** [pass_fail label b] prints [label: PASS] or [label: FAIL], and fails the run in the latter case.

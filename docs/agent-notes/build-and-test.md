@@ -1282,8 +1282,8 @@ that they earn a lookup rather than always-loaded space.
   default 90 minutes).
   When the execution column was introduced, existing `pass` rows became `legacy-pass` with
   `execution=unknown`; old incremental evidence is retained, but cannot masquerade as a forced run.
-- A forced full-suite sweep also intersects the `Verdict.skipped` claim labels from every successful
-  unit through `tools/aggregate-skips.sh` (gh-ocannl-792), writing
+- A forced full-suite sweep also intersects the `Verdict.skipped` executable-and-claim keys from
+  every successful unit through `tools/aggregate-skips.sh` (gh-ocannl-792), writing
   `logs/<stamp>-skip-coverage.txt`. Incremental logs are refused because a cached Dune action does
   not replay its stderr, and failed or interrupted units are refused because they may not have
   reached every test. An intersection over only the completed backends is a loud `POTENTIAL` report;
