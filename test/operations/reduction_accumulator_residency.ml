@@ -11,8 +11,9 @@
 
    The claims are therefore both structural and executed:
 
-   - the emitted f32 kernel opens the accumulator into a local, updates the local inside the
-   reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop; - the
+   - the emitted f32 kernel forwards the lowered zero-init directly into a local, updates the local
+   inside the reduction loop, and writes the node once — the dead device zeroing store and the
+   opening node read are both absent, with no [acc[k] = ... acc[k] ...] inside the loop; - the
    workaround decision agrees with what the compile REPORTED (gh-ocannl-782): the routine's
    volatility census names the local, says whether its accumulating device reads use the workaround,
    and says whether this backend asked for the workaround at all — so the expectation is read off
@@ -46,6 +47,14 @@ let cols = 7
 (* Discriminating producer: varies with both symbols, never zero. *)
 let elem i j = 1.0 +. (10.0 *. Float.of_int i) +. Float.of_int j
 let data = Array.init (rows * cols) ~f:(fun n -> elem (n / cols) (n % cols))
+
+(* A device read rendered through Metal's expression-level volatile pointer cast has [ident)[idx]]
+   rather than [ident[idx]]. Count both as one semantic node access. *)
+let count_node_accesses source ident =
+  List.sum
+    (module Int)
+    [ ident ^ "["; ident ^ ")[" ]
+    ~f:(fun pattern -> List.length (String.substr_index_all source ~may_overlap:false ~pattern))
 
 let x =
   TDSL.ndarray data ~label:[ "resx" ] ~batch_dims:[] ~input_dims:[] ~output_dims:[ rows; cols ] ()
@@ -117,16 +126,16 @@ let () =
 
   (* Structural: the localized form. The scope local is [v<scope_id>_<ident>], where [<ident>] is
      the code name codegen derived for the node -- not predictable from the tensor's label (it goes
-     through a blacklist and a dot-stripping pass), so it is READ OFF the opening init rather than
-     guessed: the only statement of the shape [v<n>_<ident> = <ident>[...]] is the scope's opening
-     read of the accumulator cell. If no such statement exists the accumulator was not localized,
-     which is the failure this test exists to catch.
+     through a blacklist and a dot-stripping pass), so it is READ OFF the zero-seeded local rather
+     than guessed. If no statement of the shape [v<n>_<ident> = ...0.0...] exists, the accumulator
+     was not localized with the zero forwarded into it, which is the failure this test exists to
+     catch.
 
      Split on [;] rather than on newlines: the pretty-printer breaks a long value expression across
      lines, so a line-based read of "does this statement touch the node twice" would answer no for
      exactly the wide read-modify-write it is meant to catch. *)
   let normalize st = String.concat ~sep:" " (String.split_on_chars st ~on:[ '\n'; '\t' ]) in
-  let scope_init st =
+  let zero_scope_init st =
     match String.substr_index st ~pattern:" = " with
     | None -> None
     | Some at ->
@@ -145,8 +154,11 @@ let () =
               && String.for_all (String.sub lhs ~pos:1 ~len:(us - 1)) ~f:Char.is_digit
               && not (String.is_empty ident)
             in
-            if is_scope_local && String.is_prefix rhs ~prefix:(ident ^ "[") then
-              Some (lhs, ident, st)
+            if
+              is_scope_local
+              && String.is_substring rhs ~substring:"0.0"
+              && not (String.is_substring rhs ~substring:"[")
+            then Some (lhs, ident, st)
             else None)
   in
   (* The census names the local by the identifier the declaration carries ([scope_local_ident] is
@@ -166,20 +178,21 @@ let () =
     let fail_all () =
       List.iter
         [
-          "accumulator opens into a scope local";
+          "accumulator opens from zero in a scope local";
           "the reduction updates the local, not the node";
           "no statement both reads and writes the node";
+          "the dead zeroing store and opening read are absent";
           "the node is stored exactly once, from the local";
           "the census names the accumulator the kernel declares";
           "the accumulator declaration stays plain";
           "the accumulating loop's volatile-read form is the one the census reports";
-          "the opening read stays plain";
+          "the forwarded zero seed performs no device read";
           "no rmw shadow declaration, by the census and by the text";
         ] ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
     in
-    match List.find_map statements ~f:scope_init with
+    match List.find_map statements ~f:zero_scope_init with
     | None -> fail_all ()
-    | Some (local, ident, opening) ->
+    | Some (local, ident, zero_seed) ->
         let count st pattern =
           List.length (String.substr_index_all st ~may_overlap:false ~pattern)
         in
@@ -190,15 +203,20 @@ let () =
               && count st local >= 2
               && String.is_substring st ~substring:(local ^ " = "))
         in
-        Verdict.p (label ^ ": accumulator opens into a scope local") true;
+        Verdict.p (label ^ ": accumulator opens from zero in a scope local") true;
         (* The accumulation: assigns the local from itself, and never touches the node. *)
         Verdict.p
           (label ^ ": the reduction updates the local, not the node")
           (not (List.is_empty accumulation_updates));
         (* The read-modify-write shape is one statement reading and writing the node. Its absence is
-           what localization buys; the [Zero_out] statement reaches the node once and is not it. *)
+           what localization buys; the access-count claim below separately pins the zero DSE. *)
         Verdict.p_all (label ^ ": no statement both reads and writes the node") statements
           ~f:(fun st -> node_accesses st <= 1);
+        (* Store-to-load forwarding removes both accesses that existed only to carry zero into the
+           local. The sole surviving node subscript is the closing store. *)
+        Verdict.p
+          (label ^ ": the dead zeroing store and opening read are absent")
+          (1 = List.sum (module Int) statements ~f:node_accesses);
         Verdict.p
           (label ^ ": the node is stored exactly once, from the local")
           (1
@@ -237,8 +255,9 @@ let () =
                   (String.is_substring st ~substring:"device volatile float*")
                   (v.Ir.C_syntax.requested && reads_device)));
         Verdict.p
-          (label ^ ": the opening read stays plain")
-          (not (String.is_substring opening ~substring:"volatile"));
+          (label ^ ": the forwarded zero seed performs no device read")
+          ((not (String.is_substring zero_seed ~substring:"["))
+          && not (String.is_substring zero_seed ~substring:"volatile"));
         (* Localization lifted the device-memory read-modify-write the pointer shadow pins, so this
            routine has none — asserted twice over, from the census and from the emitted text, which
            is what makes either one a check rather than a restatement. *)
@@ -254,10 +273,158 @@ let () =
     (r_index_total.Context.volatility.Ir.C_syntax.volatile_accumulations = 0
     && r_index_total.Context.volatility.Ir.C_syntax.plain_accumulations = 1)
 
+(* The covering-write half of the DSE condition: a localized reduction of only [out[0]] does not
+   overwrite [out[1]], so the whole-node [Zero_out] is live and must stay. The producer varies with
+   its loop symbol and never equals the zero/sentinels, while the untouched second cell makes a
+   dropped zero fail even if the accumulated first cell happens to be right. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9810 () in
+  let src = node ~dims:[| 8 |] "res_partial_src" and out = node ~dims:[| 2 |] "res_partial_out" in
+  List.iter [ src; out ] ~f:Ll_test.materialize;
+  let i = Ll_test.sym () in
+  let cell = [| Ll_test.fixed 0 |] in
+  let program =
+    LL.Seq
+      ( LL.Zero_out out,
+        Ll_test.loop_n i 8
+          (Ll_test.set out cell
+             (Ll_test.add (Ll_test.get out cell) (Ll_test.get src [| Ll_test.iter i |]))) )
+  in
+  let optimized = Ll_test.optimize ~materialized:[ src; out ] ~name:"res_partial" program in
+  let ctx, routine = Ll_test.link ~name:"res_partial" optimized in
+  let src_values = Array.init 8 ~f:(fun k -> Float.of_int (k + 1)) in
+  let ctx =
+    Ll_test.run_linked (ctx, routine) ~seed:[ (src, src_values); (out, [| -7.0; -9.0 |]) ]
+  in
+  let got = Context.get_values ctx out in
+  Verdict.p "partial-cell localized reduction preserves the live whole-node zero"
+    (Array.equal Float.equal got [| 36.0; 0.0 |]);
+  let source = Test_utils.Generated.read "res_partial" in
+  let accesses = count_node_accesses source "res_partial_out" in
+  Verdict.p "partial-cell reduction retains zero store, opening read, and closing store"
+    (accesses = 3)
+
+(* Covering the node is not enough when an enclosing loop repeats the same cells outside the scope
+   the localizer can form. Here [k] repeats every [out[j]] cell, while only the inner [i] reduction
+   can localize. Forwarding zero into that inner scope would reset each cell once per [k] instead of
+   accumulating both slices. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9860 () in
+  let src = node ~dims:[| 2; 2; 2 |] "res_repeat_src" in
+  let out = node ~dims:[| 2 |] "res_repeat_out" in
+  List.iter [ src; out ] ~f:Ll_test.materialize;
+  let k = Ll_test.sym () and j = Ll_test.sym () and i = Ll_test.sym () in
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell
+      (Ll_test.add (Ll_test.get out out_cell)
+         (Ll_test.get src [| Ll_test.iter k; Ll_test.iter j; Ll_test.iter i |]))
+  in
+  let program =
+    LL.Seq (LL.Zero_out out, Ll_test.loop_n k 2 (Ll_test.loop_n j 2 (Ll_test.loop_n i 2 update)))
+  in
+  let optimized = Ll_test.optimize ~materialized:[ src; out ] ~name:"res_repeat" program in
+  let ctx, routine = Ll_test.link ~name:"res_repeat" optimized in
+  let values = Array.init 8 ~f:(fun n -> Float.of_int (n + 1)) in
+  let ctx = Ll_test.run_linked (ctx, routine) ~seed:[ (src, values); (out, [| -7.0; -9.0 |]) ] in
+  Verdict.p "repeated covering reduction preserves accumulation across the outer loop"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 14.0; 22.0 |]);
+  let source = Test_utils.Generated.read "res_repeat" in
+  let accesses = count_node_accesses source "res_repeat_out" in
+  Verdict.p "repeated covering reduction retains zero store, opening read, and closing store"
+    (accesses = 3)
+
+(* A dead enclosing loop executes no closing store at all. The ordinary optimizer drops its body, so
+   inject this shape through the same post-optimize seam schedule-minted IR uses: codegen still
+   renders the body, and an inner localizer must not consume the whole-node seed merely because the
+   dead loop is absent from the write map. The nonzero host seed makes dropping [Zero_out]
+   immediately visible. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9870 () in
+  let out = node ~dims:[| 2 |] "res_dead_out" in
+  Ll_test.materialize out;
+  let k = Ll_test.sym () and j = Ll_test.sym () and i = Ll_test.sym () in
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell (Ll_test.add (Ll_test.get out out_cell) (LL.Constant 1.0))
+  in
+  let program =
+    LL.Seq (LL.Zero_out out, Ll_test.loop_n k 0 (Ll_test.loop_n j 2 (Ll_test.loop_n i 2 update)))
+  in
+  let optimized =
+    Ll_test.optimize_scoped ~materialized:[ out ] ~name:"res_dead" ~raw:program program
+  in
+  let ctx, routine = Ll_test.link ~name:"res_dead" optimized in
+  let ctx = Ll_test.run_linked (ctx, routine) ~seed:[ (out, [| -7.0; -9.0 |]) ] in
+  Verdict.p "dead enclosing loop preserves the live whole-node zero"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 0.0; 0.0 |]);
+  let source = Test_utils.Generated.read "res_dead" in
+  Verdict.p "dead enclosing loop retains zero store, opening read, and closing store"
+    (count_node_accesses source "res_dead_out" = 3)
+
+(* A symbolic extent guard can make a statically covering output loop execute only a prefix. The
+   serial renderer fuses this exact [j < extent] shape into the loop header, so the DSE predicate
+   itself must reject the guarded affine write; relying on the ordinary [If] rendering boundary is
+   insufficient. The untouched row starts nonzero to make a dropped whole-node zero observable. *)
+let () =
+  let module LL = Ir.Low_level in
+  let module Idx = Ir.Indexing in
+  let node = Ll_test.node_factory ~first_id:9880 () in
+  let src = node ~dims:[| 2; 2 |] "res_extent_src" in
+  let out = node ~dims:[| 2 |] "res_extent_out" in
+  List.iter [ src; out ] ~f:Ll_test.materialize;
+  let j = Ll_test.sym () and i = Ll_test.sym () in
+  let extent, bindings =
+    (Idx.get_static_symbol ~static_range:2 Idx.Empty : Idx.static_symbol * Idx.unit_bindings)
+  in
+  extent.Idx.used_as_extent <- true;
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell
+      (Ll_test.add (Ll_test.get out out_cell)
+         (Ll_test.get src [| Ll_test.iter j; Ll_test.iter i |]))
+  in
+  let iprec = Ir.Ops.index_prec () in
+  let guard =
+    LL.Binop
+      ( Ir.Ops.Cmplt,
+        (LL.Embed_index (Ll_test.iter j), iprec),
+        (LL.Embed_index (Idx.Iterator extent.static_symbol), iprec) )
+  in
+  let program =
+    LL.Seq
+      ( LL.Zero_out out,
+        Ll_test.loop_n j 2 (LL.If { cond = (guard, iprec); body = Ll_test.loop_n i 2 update }) )
+  in
+  let optimized =
+    Ll_test.optimize ~materialized:[ src; out ] ~static_indices:(Idx.bound_symbols bindings)
+      ~name:"res_extent" program
+  in
+  let ctx, routine =
+    Context.compile ~name:"res_extent" ~prelowered:optimized
+      ~lowered_transform:(fun x -> [ x ])
+      (Context.auto ()) Ir.Assignments.empty_comp bindings
+  in
+  Idx.find_exn routine.Context.bindings extent := 1;
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:[ (src, [| 1.0; 2.0; 4.0; 8.0 |]); (out, [| -7.0; -9.0 |]) ]
+  in
+  Verdict.p "symbolically guarded coverage preserves the whole-node zero"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 3.0; 0.0 |]);
+  let source = Test_utils.Generated.read "res_extent" in
+  let accesses = count_node_accesses source "res_extent_out" in
+  Verdict.p "symbolically guarded coverage retains zero store, opening read, and closing store"
+    (accesses = 3)
+
 (* Cross-statement CSE lifts a shared scope out of both users as [Declare_local; body]. That form
    renders its declaration before its accumulating [Set_local], so the census must retain the site
    until rendering observes whether the update emitted a volatile read (Codex P2, review round 2 on
-   #553). This hand-built leg makes the optimizer produce that exact form and executes both users. *)
+   #553). This hand-built leg makes the optimizer produce that exact form and executes both
+   users. *)
 let () =
   let module LL = Ir.Low_level in
   let node = Ll_test.node_factory ~first_id:9820 ~dims:[| 8 |] () in
@@ -274,21 +441,17 @@ let () =
       LL.Seq
         ( LL.Set_local (id, Ll_test.c 0.0),
           Ll_test.loop_n i 8
-            (LL.Set_local
-               ( id,
-                 Ll_test.add (LL.Get_local id) (Ll_test.get src [| Ll_test.iter i |]) )) )
+            (LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.get src [| Ll_test.iter i |])))
+        )
     in
-    LL.Local_scope
-      { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }
+    LL.Local_scope { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }
   in
   let program =
     LL.Seq
       ( Ll_test.set out_a [| Ll_test.fixed 0 |] scoped,
         Ll_test.set out_b [| Ll_test.fixed 0 |] scoped )
   in
-  let optimized =
-    Ll_test.optimize ~materialized:[ src; out_a; out_b ] ~name:"res_lifted" program
-  in
+  let optimized = Ll_test.optimize ~materialized:[ src; out_a; out_b ] ~name:"res_lifted" program in
   let rec count_declarations = function
     | LL.Declare_local _ -> 1
     | LL.Seq (a, b) -> count_declarations a + count_declarations b
@@ -306,8 +469,7 @@ let () =
   in
   Verdict.p "lifted accumulator executes once for both users"
     Float.(
-      equal (Context.get_values ctx out_a).(0) 36.0
-      && equal (Context.get_values ctx out_b).(0) 36.0);
+      equal (Context.get_values ctx out_a).(0) 36.0 && equal (Context.get_values ctx out_b).(0) 36.0);
   let volatility = routine.Context.volatility in
   Verdict.p "lifted accumulator contributes exactly one census site"
     (volatility.Ir.C_syntax.volatile_accumulations + volatility.plain_accumulations = 1);
@@ -320,10 +482,10 @@ let () =
        (String.is_substring source ~substring:"device volatile float*")
        volatility.requested)
 
-(* A data-dependent guard can be the accumulating loop's only device read: [if mask[i] then
-   local += 1]. The scope remains reduction-shaped because the guard does not observe the local.
-   Metal must cast that controlling read even though the update expression itself dereferences no
-   node pointer (Codex P1, review round 3 on #553). *)
+(* A data-dependent guard can be the accumulating loop's only device read: [if mask[i] then local +=
+   1]. The scope remains reduction-shaped because the guard does not observe the local. Metal must
+   cast that controlling read even though the update expression itself dereferences no node pointer
+   (Codex P1, review round 3 on #553). *)
 let () =
   let module LL = Ir.Low_level in
   let node = Ll_test.node_factory ~first_id:9840 ~dims:[| 8 |] () in
@@ -345,7 +507,8 @@ let () =
              }) )
   in
   let program =
-    Ll_test.set out [| Ll_test.fixed 0 |]
+    Ll_test.set out
+      [| Ll_test.fixed 0 |]
       (LL.Local_scope
          { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation })
   in
@@ -355,11 +518,7 @@ let () =
   let ctx, routine = Ll_test.link ~name:"res_guarded" optimized in
   let ctx =
     Ll_test.run_linked (ctx, routine)
-      ~seed:
-        [
-          (mask, [| 1.0; 0.0; 1.0; 1.0; 0.0; 0.0; 1.0; 0.0 |]);
-          (out, [| -1.0 |]);
-        ]
+      ~seed:[ (mask, [| 1.0; 0.0; 1.0; 1.0; 0.0; 0.0; 1.0; 0.0 |]); (out, [| -1.0 |]) ]
   in
   Verdict.p "conditional reduction matches the selected-term reference"
     Float.(equal (Context.get_values ctx out).(0) 4.0);
