@@ -1007,12 +1007,13 @@ that they earn a lookup rather than always-loaded space.
   it derives the remote pointing to the staging repository by URL, fetches the named branch,
   without rewriting the checkout's `FETCH_HEAD`, resolves one commit, creates a fresh detached
   worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
-  that switch, and removes and prunes the worktree before its exit sentinel. The individual
+  that switch, and removes just that worktree before its exit sentinel (never repository-wide
+  `worktree prune`, which could unregister an unrelated temporarily unavailable worktree). The individual
   commands and the whole SSH trip have separate process-group caps; the latter also bounds setup
   and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
   Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
   selected switch are printed and stripped inside `opam exec`, so only the requested backend can
-  override the pushed tree's configuration. A regular root `ocannl_config` from the pushed commit
+  override the pushed tree's configuration. A regular, non-symlink root `ocannl_config` from the pushed commit
   is the configuration boundary; when the commit has none, the script creates an empty ignored one
   in the disposable worktree so a personal file above it cannot reach root-launched probes. A
   worktree root nested under any outer Dune root is refused: without that

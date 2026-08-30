@@ -37,7 +37,7 @@
 #
 # The output is deliberately unpiped. A failed dune diff must be dune's status,
 # not tail's or tee's. The far side prints an exit sentinel only after removing
-# and pruning the temporary worktree; the local side then prints ssh's status.
+# the temporary worktree; the local side then prints ssh's status.
 #
 # `--run` is intentionally a shell command: device probes often need several
 # build/run arguments. It is executed by `opam exec -- sh -c` from the pinned
@@ -296,12 +296,11 @@ finish() {
     elif [ -d "$wt" ]; then
       rmdir "$wt" 2>/dev/null || cleanup_rc=1
     fi
-    git -C "$repo" worktree prune || cleanup_rc=1
     [ ! -e "$wt" ] || cleanup_rc=1
   fi
 
   if [ "$cleanup_rc" -eq 0 ]; then
-    echo "remote-verify: cleanup: PASS${wt:+ ($wt removed and pruned)}"
+    echo "remote-verify: cleanup: PASS${wt:+ ($wt removed)}"
   else
     echo "remote-verify: cleanup: FAIL ($wt may need manual removal)" >&2
     [ "$main_rc" -ne 0 ] || main_rc=125
@@ -469,9 +468,10 @@ actual_sha=$(git -C "$wt" rev-parse HEAD) || fail "cannot read worktree HEAD"
   fail "worktree commit $actual_sha differs from resolved commit $full_sha"
 worktree_status=$(git -C "$wt" status --porcelain) || fail "cannot read fresh worktree status"
 [ -z "$worktree_status" ] || fail "fresh worktree is not clean"
-if [ -e "$wt/ocannl_config" ]; then
-  [ -f "$wt/ocannl_config" ] && [ ! -L "$wt/ocannl_config" ] ||
-    fail "pushed root ocannl_config is not a regular file"
+if [ -L "$wt/ocannl_config" ]; then
+  fail "pushed root ocannl_config must not be a symlink"
+elif [ -e "$wt/ocannl_config" ]; then
+  [ -f "$wt/ocannl_config" ] || fail "pushed root ocannl_config is not a regular file"
   config_boundary="$wt/ocannl_config (from pushed commit)"
 else
   touch "$wt/ocannl_config" || fail "cannot create an empty root ocannl_config boundary"
