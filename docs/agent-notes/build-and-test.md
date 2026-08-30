@@ -83,10 +83,10 @@ that they earn a lookup rather than always-loaded space.
   current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
   that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked
-  against `Utils.known_config_keys`; an explicit, usage-checked file/key judgment list identifies
-  bare assignments that are tensor fields, dimensions, or report notation, and equally narrow
-  exceptions retain prose whose subject is a historical invalid spelling. Historical exceptions
-  pin their occurrence count, so repeating an obsolete instruction cannot widen one. The checked-in
+  against `Utils.known_config_keys`; an explicit file/key/count judgment list identifies bare
+  assignments that are tensor fields, dimensions, or report notation, and equally narrow counted
+  exceptions retain prose whose subject is a historical invalid spelling. Disappearance or
+  repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
   fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
   so a clean live corpus is not its only evidence that the rule has teeth.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,

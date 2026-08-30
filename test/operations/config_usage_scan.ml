@@ -288,48 +288,48 @@ let markdown_occurrences ~path content =
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
    list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
    as key: exempting [state] everywhere would let a future stale config mention called [state] pass
-   in silence. It is checked in both directions below: an entry whose key becomes real is stale, and
-   every entry must still explain at least one scanned occurrence. *)
+   in silence. Each entry pins its occurrence count: becoming real, disappearing, or gaining a
+   second same-file use all fail. *)
 let non_config_assignment_mentions =
   [
-    ("README.md", "i");
-    ("benchmarks/README.md", "lr");
-    ("docs/agent-notes/build-and-test.md", "execution");
-    ("docs/agent-notes/scheduling-and-autotune.md", "max_chain");
-    ("docs/agent-notes/training-and-performance.md", "declines");
-    ("docs/agent-notes/training-and-performance.md", "state");
-    ("docs/agent-notes/training-and-performance.md", "timed");
-    ("docs/precision_inference.md", "top_down_prec");
-    ("docs/proposals/axis-labels.md", "hidden");
-    ("docs/proposals/axis-labels.md", "name");
-    ("docs/proposals/axis-labels.md", "rgb");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "a");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "a_mc");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "b");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "b_mc");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "c");
-    ("docs/proposals/concat-forward-component-data-propagation.md", "c_mc");
-    ("docs/proposals/fix-centered-init-test-fallout.md", "epsilon");
-    ("docs/proposals/gh-ocannl-255.md", "d");
-    ("docs/proposals/gh-ocannl-263.md", "seq_q");
-    ("docs/proposals/gh-ocannl-308-comment.md", "n");
-    ("docs/proposals/gh-ocannl-420.md", "i");
-    ("docs/proposals/gh-ocannl-536.md", "private_seg_size");
-    ("docs/proposals/total-basis-bcast-if-1.md", "d");
-    ("docs/proposals/watch-ocannl-README-md-369aadb4.md", "batch");
-    ("docs/research/llmc-lessons.md", "accumulate");
-    ("docs/research/llmc-lessons.md", "beta");
-    ("docs/research/lean-attention-feasibility.md", "seq_q");
-    ("docs/syntax_extensions.md", "dilation");
-    ("docs/syntax_extensions.md", "kernel_size");
-    ("docs/syntax_extensions.md", "stride");
+    ("README.md", "i", 1);
+    ("benchmarks/README.md", "lr", 1);
+    ("docs/agent-notes/build-and-test.md", "execution", 3);
+    ("docs/agent-notes/scheduling-and-autotune.md", "max_chain", 1);
+    ("docs/agent-notes/training-and-performance.md", "declines", 1);
+    ("docs/agent-notes/training-and-performance.md", "state", 1);
+    ("docs/agent-notes/training-and-performance.md", "timed", 1);
+    ("docs/precision_inference.md", "top_down_prec", 6);
+    ("docs/proposals/axis-labels.md", "hidden", 1);
+    ("docs/proposals/axis-labels.md", "name", 4);
+    ("docs/proposals/axis-labels.md", "rgb", 1);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "a", 2);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "a_mc", 1);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "b", 2);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "b_mc", 1);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "c", 2);
+    ("docs/proposals/concat-forward-component-data-propagation.md", "c_mc", 1);
+    ("docs/proposals/fix-centered-init-test-fallout.md", "epsilon", 1);
+    ("docs/proposals/gh-ocannl-255.md", "d", 2);
+    ("docs/proposals/gh-ocannl-263.md", "seq_q", 1);
+    ("docs/proposals/gh-ocannl-308-comment.md", "n", 1);
+    ("docs/proposals/gh-ocannl-420.md", "i", 1);
+    ("docs/proposals/gh-ocannl-536.md", "private_seg_size", 1);
+    ("docs/proposals/total-basis-bcast-if-1.md", "d", 1);
+    ("docs/proposals/watch-ocannl-README-md-369aadb4.md", "batch", 2);
+    ("docs/research/llmc-lessons.md", "accumulate", 1);
+    ("docs/research/llmc-lessons.md", "beta", 1);
+    ("docs/research/lean-attention-feasibility.md", "seq_q", 1);
+    ("docs/syntax_extensions.md", "dilation", 2);
+    ("docs/syntax_extensions.md", "kernel_size", 2);
+    ("docs/syntax_extensions.md", "stride", 2);
   ]
 
 let mention_site path key = path ^ "\000" ^ key
 
 let non_config_assignment_sites =
   Set.of_list (module String)
-  @@ List.map non_config_assignment_mentions ~f:(fun (path, key) -> mention_site path key)
+  @@ List.map non_config_assignment_mentions ~f:(fun (path, key, _) -> mention_site path key)
 
 let historical_invalid_config_sites =
   Set.of_list (module String)
@@ -345,7 +345,7 @@ let kind_name = function
   | Markdown_assignment -> "documentation assignment"
 
 let check ~repository_census occurrences =
-  let seen_non_config = ref (Set.empty (module String)) in
+  let seen_non_config = Hashtbl.create (module String) in
   let seen_historical = Hashtbl.create (module String) in
   let seen_spaced_config = Hashtbl.create (module String) in
   List.iter occurrences ~f:(fun occurrence ->
@@ -360,7 +360,7 @@ let check ~repository_census occurrences =
                 occurrence.path occurrence.line occurrence.spelling));
       if Set.mem Utils.known_config_keys occurrence.key then ()
       else if Set.mem non_config_assignment_sites (mention_site occurrence.path occurrence.key) then
-        seen_non_config := Set.add !seen_non_config (mention_site occurrence.path occurrence.key)
+        Hashtbl.incr seen_non_config (mention_site occurrence.path occurrence.key)
       else if Set.mem historical_invalid_config_sites (mention_site occurrence.path occurrence.key)
       then Hashtbl.incr seen_historical (mention_site occurrence.path occurrence.key)
       else
@@ -370,7 +370,7 @@ let check ~repository_census occurrences =
              occurrence.key));
   if repository_census then (
     let newly_real =
-      List.filter non_config_assignment_mentions ~f:(fun (_, key) ->
+      List.filter non_config_assignment_mentions ~f:(fun (_, key, _) ->
           Set.mem Utils.known_config_keys key)
     in
     if not (List.is_empty newly_real) then
@@ -378,17 +378,21 @@ let check ~repository_census occurrences =
         (Printf.sprintf
            "non-config assignment exemptions now name registered config keys -- remove: %s"
            (newly_real
-           |> List.map ~f:(fun (path, key) -> path ^ ":" ^ key)
+           |> List.map ~f:(fun (path, key, _) -> path ^ ":" ^ key)
            |> String.concat ~sep:", "));
-    let stale_non_config =
-      List.filter non_config_assignment_mentions ~f:(fun (path, key) ->
-          not (Set.mem !seen_non_config (mention_site path key)))
+    let drifted_non_config =
+      List.filter_map non_config_assignment_mentions ~f:(fun (path, key, expected) ->
+          let actual =
+            Hashtbl.find seen_non_config (mention_site path key) |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
-    if not (List.is_empty stale_non_config) then
+    if not (List.is_empty drifted_non_config) then
       Verdict.fail
-        (Printf.sprintf "non-config assignment exemptions no scanned mention uses: %s"
-           (stale_non_config
-           |> List.map ~f:(fun (path, key) -> path ^ ":" ^ key)
+        (Printf.sprintf "non-config assignment exemption occurrence counts drifted: %s"
+           (drifted_non_config
+           |> List.map ~f:(fun (path, key, expected, actual) ->
+               Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
     let drifted_historical =
       List.filter_map historical_invalid_config_mentions ~f:(fun (path, key, expected) ->
