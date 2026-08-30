@@ -1453,7 +1453,10 @@ let () =
             Verdict.p name
               ((not (List.is_empty mine))
               && List.for_all mine ~f:(fun r -> Option.is_some r.profile))
-          else Verdict.skipped ~backend:(t.Census.label ^ ", " ^ t.Census.note) name);
+          else
+            Verdict.skipped ~aggregation:`Environment
+              ~backend:(t.Census.label ^ ", " ^ t.Census.note)
+              name);
       Verdict.p_empty
         "every emitted kernel compiles clean at -O2 and -O3 under every accepted -march" ~over:rows
         !failed_compiles;
@@ -1574,8 +1577,8 @@ let () =
         "no accumulator loop is rendered wholly scalar where a named target's ISA has the operation"
       in
       if List.is_empty whole_vector_population then
-        Verdict.skipped ~backend:"no named -march target accepted by this host's toolchain"
-          wholly_scalar_claim
+        Verdict.skipped ~aggregation:`Environment
+          ~backend:"no named -march target accepted by this host's toolchain" wholly_scalar_claim
       else claim_none wholly_scalar_claim whole_vector_population ~f:wholly_scalar;
       (* {b And the half that is.} [scalar_fp_ops = 0] additionally asks that the loop's storage
          BRIDGE compiled whole-vector, and for (fp16 storage, f32 compute) that is the compiler's
@@ -1599,7 +1602,7 @@ let () =
           (List.length bridge_excluded) scalarization_claim;
         List.iter bridge_excluded ~f:(fun r -> Stdio.eprintf "    %s\n" (describe r)));
       if List.is_empty scalarization_population then
-        Verdict.skipped
+        Verdict.skipped ~aggregation:`Environment
           ~backend:
             "no named -march target whose toolchain lowers these loops' storage bridges \
              whole-vector"
@@ -1621,7 +1624,8 @@ let () =
          a fused multiply-add"
       in
       if List.is_empty tile_rows then
-        Verdict.skipped ~backend:"no accepted target serves the Tile_mma rows" tile_claim
+        Verdict.skipped ~aggregation:`Environment
+          ~backend:"no accepted target serves the Tile_mma rows" tile_claim
       else
         claim_all tile_claim tile_rows ~f:(fun r ->
             match counts r with

@@ -39,6 +39,8 @@ STATE=${OCANNL_TOOL_SWEEP_STATE:-$HOME/.ocannl-sweep}
 HISTORY=$STATE/history.tsv
 LOGS=$STATE/logs
 MAIN=${OCANNL_TOOL_SWEEP_REPO:-$HOME/ocannl-staging}
+SWEEP_TOOLS=$(cd "$(dirname "$0")" && pwd)
+AGGREGATE_SKIPS=$SWEEP_TOOLS/aggregate-skips.sh
 REF=origin/master
 TARGET=
 SLOW=0
@@ -86,6 +88,15 @@ UNITS=(
   "rog:cuda:rog-nv-wsl"
   "minix:hip:minix-amd-wsl"
 )
+
+# Successful forced full-suite units are the only logs from which absence of a
+# skip announcement means execution. Incremental Dune runs may serve a cached
+# test without replaying its stderr, and a red or interrupted unit may not have
+# reached every test. Keep the qualifying evidence from THIS invocation rather
+# than recovering it by timestamp from history (two invocations can begin in
+# the same second in the integration harness).
+SKIP_RUN_BACKENDS=()
+SKIP_RUN_LOGS=()
 
 # Errexit is off so that a FAILING TEST does not abort the remaining units --
 # that is the whole point. It must not extend to the harness: anything that
@@ -779,6 +790,10 @@ for unit in "${UNITS[@]}"; do
   esac
   echo "  $machine/$backend: $outcome (${elapsed}s; execution=$execution)"
   record "$machine" "$backend" "$outcome" "$elapsed" "$log" "$execution"
+  if [ "$outcome" = pass ] && [ -z "$TARGET" ]; then
+    SKIP_RUN_BACKENDS+=("$backend")
+    SKIP_RUN_LOGS+=("$log")
+  fi
   # Diagnosis, strictly after the row and the elapsed time it reports: this phase
   # has its own budget, and nothing it does can reach $outcome or $elapsed. It
   # runs before the fingerprint so that what it appends to the log is carried in.
@@ -793,5 +808,38 @@ for unit in "${UNITS[@]}"; do
 done
 
 echo
+if [ "$FORCE" = 1 ] && [ -z "$TARGET" ]; then
+  [ -x "$AGGREGATE_SKIPS" ] || die "skip aggregator is not executable: $AGGREGATE_SKIPS"
+  aggregate_args=()
+  while IFS= read -r backend; do
+    [ -n "$backend" ] && aggregate_args+=(--known "$backend")
+  done <<<"$known_backends"
+  for ((i = 0; i < ${#SKIP_RUN_BACKENDS[@]}; i++)); do
+    aggregate_args+=(--run "${SKIP_RUN_BACKENDS[$i]}" "${SKIP_RUN_LOGS[$i]}")
+  done
+
+  report=$LOGS/$stamp-skip-coverage.txt
+  report_stage=$report.stage.$$
+  scope='@runtest + @train'
+  [ "$SLOW" = 1 ] && scope="$scope + @slow"
+  {
+    echo "skip coverage for $run_sha ($scope; forced execution)"
+    "$AGGREGATE_SKIPS" "${aggregate_args[@]}"
+  } >"$report_stage"
+  aggregate_rc=$?
+  case $aggregate_rc in
+    0 | 1) mv "$report_stage" "$report" || die "cannot publish $report" ;;
+    *) rm -f "$report_stage"; die "skip aggregation failed (exit $aggregate_rc)" ;;
+  esac
+  if [ "$aggregate_rc" -eq 1 ]; then
+    echo "skip coverage: FAIL -- $report"
+    echo "sweep: skip coverage FAIL -- $report" >&2
+  else
+    aggregate_status=$(grep '^status:' "$report" | head -1)
+    echo "skip coverage: ${aggregate_status:-report written} -- $report"
+  fi
+else
+  echo "skip coverage: not aggregated (requires --force with no --target)"
+fi
 echo "history: $HISTORY"
 echo "logs:    $LOGS/$stamp-*"

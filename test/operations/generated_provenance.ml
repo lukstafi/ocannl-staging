@@ -210,7 +210,7 @@ let () =
       match Unix.symlink ~to_dir:true "gp_symlink_target" scoped with
       | exception Unix.Unix_error (err, _, _) ->
           Stdio.eprintf "symbolic links unavailable here (%s)\n" (Unix.error_message err);
-          Verdict.skipped ~backend:backend_name
+          Verdict.skipped ~aggregation:`Environment ~backend:backend_name
             "a symlinked artifact directory is refused rather than followed into"
       | () ->
           let child =
