@@ -14,7 +14,7 @@ open Base
 open Stdio
 module Markdown = Test_utils.Agent_notes_scan
 
-type kind = Cli_flag | Environment_assignment | Markdown_assignment
+type kind = Cli_flag | Environment_assignment | Markdown_assignment | Config_file_assignment
 
 type occurrence = {
   path : string;
@@ -185,10 +185,10 @@ let assignment_key ~key_char ~normalize rendered =
       normalize raw_key
   | _ -> None
 
-(* These files discuss spellings known to be invalid. Counts stop a second obsolete instruction in
-   the same file from borrowing the intended historical exception. This list lives beside the
-   spaced-form classifier so a spaced repetition is admitted to the scan and then changes its count,
-   rather than disappearing as ordinary non-config prose. *)
+(* These sites deliberately retain or exercise spellings known to be invalid. Counts stop a second
+   obsolete instruction or test input in the same file from borrowing the intended exception. This
+   list lives beside the spaced-form classifier so a spaced repetition is admitted to the scan and
+   then changes its count, rather than disappearing as ordinary non-config prose. *)
 let historical_invalid_config_mentions =
   [
     ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap", 1);
@@ -196,6 +196,9 @@ let historical_invalid_config_mentions =
     ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
     ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
     ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
+    ("test/operations/dune", "backedn", 1);
+    ("test/operations/dune", "not_a_real_key", 1);
+    ("test/operations/startup_streams/ocannl_config", "definitely_not_a_config_key", 1);
   ]
 
 let tracked_historical_config path key =
@@ -259,7 +262,7 @@ let one_assignment ~path rendered =
                     else None)))
   | None -> ( match cli_key_of_token rendered with Some key -> Some (key, false) | None -> None)
 
-let markdown_occurrences ~path content =
+let markdown_occurrences ~allow_bare ~path content =
   let scan = Markdown.inert_by_line content in
   let comments line = Markdown.spans_at scan.comment_ranges line in
   let fences line = Markdown.spans_at scan.fence_ranges line in
@@ -283,7 +286,7 @@ let markdown_occurrences ~path content =
                   { occurrence with line = lineno; kind = Markdown_assignment; spaced_bare = false })
             in
             if not (List.is_empty prefixed) then prefixed
-            else
+            else if allow_bare then
               Option.to_list
               @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
                   {
@@ -293,7 +296,27 @@ let markdown_occurrences ~path content =
                     spelling = rendered;
                     kind = Markdown_assignment;
                     spaced_bare;
-                  })))
+                  })
+            else []))
+
+let config_file_occurrences ~path content =
+  String.split_lines content
+  |> List.filter_mapi ~f:(fun index line ->
+      let rendered = String.strip line in
+      if String.is_empty rendered || Char.equal rendered.[0] '#' then None
+      else
+        Option.bind (String.lsplit2 rendered ~on:'=') ~f:(fun (raw_key, _) ->
+            let key = String.strip raw_key in
+            Option.some_if
+              ((not (String.is_empty key)) && String.for_all key ~f:lowercase_key_char)
+              {
+                path;
+                line = index + 1;
+                key;
+                spelling = key ^ "=";
+                kind = Config_file_assignment;
+                spaced_bare = false;
+              }))
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
    list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
@@ -353,6 +376,7 @@ let kind_name = function
   | Cli_flag -> "command-line flag"
   | Environment_assignment -> "environment assignment"
   | Markdown_assignment -> "documentation assignment"
+  | Config_file_assignment -> "configuration-file assignment"
 
 let check ~repository_census occurrences =
   let seen_non_config = Hashtbl.create (module String) in
@@ -433,20 +457,31 @@ let check ~repository_census occurrences =
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", ")))
 
-let file_kind path = if String.is_suffix path ~suffix:".md" then `Markdown else `Shell
+let file_kind path =
+  let basename = Stdlib.Filename.basename path in
+  if String.is_suffix path ~suffix:".md" then `Markdown
+  else if String.equal basename "dune" then `Dune
+  else if String.equal basename "ocannl_config" then `Config
+  else `Script
 
 let occurrences_of_file ~reported_path path =
   let content = In_channel.read_all path in
-  match file_kind path with
-  | `Markdown -> markdown_occurrences ~path:reported_path content
-  | `Shell -> script_occurrences ~path:reported_path content
+  match file_kind reported_path with
+  | `Markdown ->
+      let allow_bare =
+        (not (String.is_prefix reported_path ~prefix:"benchmarks/"))
+        || String.equal reported_path "benchmarks/README.md"
+      in
+      markdown_occurrences ~allow_bare ~path:reported_path content
+  | `Config -> config_file_occurrences ~path:reported_path content
+  | `Dune | `Script -> script_occurrences ~path:reported_path content
 
 let fixture path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
-    @ markdown_occurrences ~path:reported_path content)
+    @ markdown_occurrences ~allow_bare:true ~path:reported_path content)
 
 let live workspace_root paths =
   let base = Test_utils.Dune_stanza_scan.base_dir workspace_root in
@@ -456,8 +491,11 @@ let live workspace_root paths =
         let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
         if
           String.equal relative "AGENTS.md" || String.equal relative "README.md"
-          || String.equal relative "benchmarks/README.md"
           || (String.is_prefix relative ~prefix:"docs/" && String.is_suffix relative ~suffix:".md")
+          || String.is_prefix relative ~prefix:"benchmarks/"
+             && String.is_suffix relative ~suffix:".md"
+          || String.equal (Stdlib.Filename.basename relative) "dune"
+          || String.equal (Stdlib.Filename.basename relative) "ocannl_config"
           || (String.is_prefix relative ~prefix:"tools/"
              || String.is_prefix relative ~prefix:"scripts/"
              || String.is_prefix relative ~prefix:"benchmarks/")
@@ -477,29 +515,41 @@ let live workspace_root paths =
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
     ~f:(fun root -> not (List.is_empty (scripts_under root)));
-  Verdict.p "the scan reaches AGENTS.md, root README, docs, and benchmark README"
+  Verdict.p "the scan reaches AGENTS.md, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.equal path "README.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:"docs/")
-    && List.exists markdown ~f:(fun (path, _) -> String.equal path "benchmarks/README.md"));
+    && List.exists markdown ~f:(fun (path, _) ->
+        String.is_prefix path ~prefix:"benchmarks/"
+        && not (String.equal path "benchmarks/README.md")));
+  Verdict.p "the scan reaches Dune actions and checked-in ocannl_config files"
+    (List.exists files ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "dune")
+    && List.exists files ~f:(fun (path, _) ->
+        String.equal (Stdlib.Filename.basename path) "ocannl_config"));
   let occurrences =
     List.concat_map files ~f:(fun (reported_path, path) -> occurrences_of_file ~reported_path path)
   in
   check ~repository_census:true occurrences;
   let cli_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Cli_flag) in
   let env_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Environment_assignment) in
-  let markdown_count = List.length occurrences - cli_count - env_count in
+  let markdown_count = List.count occurrences ~f:(fun o -> Poly.equal o.kind Markdown_assignment) in
+  let config_count =
+    List.count occurrences ~f:(fun o -> Poly.equal o.kind Config_file_assignment)
+  in
   eprintf
     "config usage scan: %d files, %d command-line flags, %d environment assignments, %d \
-     documentation assignments\n"
-    (List.length files) cli_count env_count markdown_count;
+     documentation assignments, %d config-file assignments\n"
+    (List.length files) cli_count env_count markdown_count config_count;
   if not (Verdict.any_failed ()) then (
     printf
       "OK: qualified OCANNL command-line flags and OCANNL_<KEY>= assignments in scripts under \
        tools/, scripts/, and benchmarks/ name registered keys.\n";
     printf
       "OK: inline key=value assignments in scanned Markdown name registered keys or explicit \
-       non-config notation.\n")
+       non-config notation.\n";
+    printf
+      "OK: configuration tokens in Dune actions and checked-in ocannl_config files name registered \
+       keys or counted intentional-invalid controls.\n")
 
 let () =
   match Array.to_list Stdlib.Sys.argv with

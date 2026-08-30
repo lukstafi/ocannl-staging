@@ -73,21 +73,23 @@ that they earn a lookup rather than always-loaded space.
   not permission to leave that case undefined.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
-  `benchmarks/`; its prose corpus is `AGENTS.md`, the root and benchmark READMEs, and every `*.md`
-  under `docs/`. A script token contributes a key when it has a qualified command-line spelling and
+  `benchmarks/`; its prose corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
+  and `benchmarks/`; all checked-in `dune` and `ocannl_config` files join too. A script or Dune-action
+  token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>=` beginning at an identifier boundary; the explicit open namespaces
   `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key
   when an inline code span contains either unambiguous prefixed form; a bare assignment contributes
-  only when it occupies the whole span (whitespace around `=` and an empty example value do not hide
-  the key). Because spaced assignments are pervasive in code prose, each
+  only when it occupies the whole span outside benchmark reports (whitespace around `=` and an empty
+  example value do not hide the key). Config files contribute each uncommented assignment line.
+  Because spaced assignments are pervasive in code prose, each
   current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
   that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked
   against `Utils.known_config_keys`; an explicit file/key/count judgment list identifies bare
   assignments that are tensor fields, dimensions, or report notation, and equally narrow counted
-  exceptions retain prose whose subject is a historical invalid spelling. Disappearance or
-  repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
+  exceptions retain historical invalid spellings and deliberate invalid test controls. Disappearance
+  or repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
   fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
   so a clean live corpus is not its only evidence that the rule has teeth.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
