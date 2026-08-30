@@ -399,8 +399,9 @@ let () =
           Ir.Indexing.Empty
       in
       let ctx = Context.run ctx routine in
-      Array.for_all2_exn (Context.get_values ctx y.Tensor.value) want2 ~f:(fun a b ->
-          Float.(abs (a - b) < 1e-3))
+      let got = Context.get_values ctx y.Tensor.value in
+      (not (Array.is_empty got))
+      && Array.for_all2_exn got want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
     in
     p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin"
       (List.length !seeds = 2
@@ -828,7 +829,8 @@ let () =
         run_fiss_sched tag y ~conv_sched:(fun site seg ->
             if site.Autotune.c_zeroed then [] else Autotune.sketch_schedule ~p:p_ seg)
       in
-      Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+      (not (Array.is_empty got))
+      && Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
     in
     p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor"
       (List.exists !seeds ~f:(fun s -> s.Autotune.sk_bm = 8)

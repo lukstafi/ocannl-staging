@@ -373,7 +373,9 @@ let () =
       ~seed:[ (src, src_values); (oa, Ll_test.blank 2); (ob, Ll_test.blank 2) ]
       ~read:[ oa; ob ]
   in
-  let both_cells vals = List.for_all vals ~f:(fun a -> Float.equal a.(0) produced) in
+  let both_cells vals =
+    (not (List.is_empty vals)) && List.for_all vals ~f:(fun a -> Float.equal a.(0) produced)
+  in
   p "the retracted read and the materialized reading deliver the same value to both consumers"
     (both_cells (read_both retracted "smr2_retract_run")
     && both_cells (read_both reference "smr2_reference_run"))
