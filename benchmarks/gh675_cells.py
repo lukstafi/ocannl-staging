@@ -58,6 +58,7 @@ FIXTURE = {w: str(HERE / f"fixtures/{w}.safetensors") for w in ("mlp_small", "gp
 DIGESTS = {}  # filled at startup; stamped on every record
 PREWARMED = set()  # workloads whose warm-cache control has been prewarmed IN THIS INVOCATION
 ATTEMPTS = {}  # (arm, workload, repeat) -> prior rows, so a --rerun row says which attempt it is
+_cancellation = cell_group.CancellationDeferral("gh675_cells")
 
 # Every variable that is a TREATMENT in this experiment rather than part of the box. A child
 # inherits the driver's environment, so one of these exported in the operator's shell silently
@@ -122,13 +123,14 @@ def gate():
     for _ in range(24):
         load = float(open("/proc/loadavg").read().split()[0])
         try:
-            probe = cell_group.spawn(
+            _probe, out, _ = run_managed(
                 [NVSMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                timeout=30,
+                context="GPU-utilization probe",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            out, _ = communicate_clean(probe, timeout=30, context="GPU-utilization probe")
             util = out.strip().splitlines()[0]
             util = int(util)
         except Exception as ex:
@@ -157,7 +159,8 @@ def gate():
 def communicate_clean(proc, timeout, context):
     """Wait for one managed child and abort this experiment if its group is not proven gone."""
     try:
-        out, err = proc.communicate(timeout=timeout)
+        with _cancellation.cancellable():
+            out, err = proc.communicate(timeout=timeout)
     except BaseException:
         result = cell_group.terminate(proc, grace=5)
         if result.observation is not cell_group.GONE:
@@ -181,6 +184,14 @@ def communicate_clean(proc, timeout, context):
     return out, err
 
 
+def run_managed(args, timeout, context, **kwargs):
+    """Spawn and wait with cancellation deferred until the group has a cleanup owner."""
+    with _cancellation.deferring():
+        proc = cell_group.spawn(args, **kwargs)
+        out, err = communicate_clean(proc, timeout=timeout, context=context)
+        return proc, out, err
+
+
 def run(cmd, env=None, cwd=None, timeout=None):
     e = base_env()
     if env:
@@ -193,15 +204,16 @@ def run(cmd, env=None, cwd=None, timeout=None):
     # on to the next pair with nothing in its record to show it was measured against them. That is
     # not hypothetical -- it happened while taking these numbers, and a CPU reference taken over
     # the survivors read 340 ms against 0.13 ms once the box was clean.
-    proc = cell_group.spawn(
+    proc, out, err = run_managed(
         TASKSET + cmd,
+        timeout=timeout,
+        context="benchmark cell",
         env=e,
         cwd=cwd or str(HERE),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    out, err = communicate_clean(proc, timeout=timeout, context="benchmark cell")
     wall = time.monotonic() - t0
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     line = None
@@ -541,6 +553,7 @@ def ref_cpu(w, rep):
 
 
 if __name__ == "__main__":
+    _cancellation.install()
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", nargs="+", required=True)
     ap.add_argument("--workloads", nargs="+", default=["mlp_small"])

@@ -13,6 +13,7 @@
  ; orchestrator's own parser has to accept (gh-ocannl-676).
  (deps
   (glob_files *.py)
+  (glob_files test/*.py)
   (glob_files runners/*.py)
   fixtures/DIGESTS.txt
   ../test/operations/bench_result_line.expected

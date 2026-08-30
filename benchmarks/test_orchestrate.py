@@ -17,7 +17,7 @@ import fixture_digest
 import cell_group
 import orchestrate
 from runners import bench_common
-from test_cell_group import CellGroupTest  # imported so unittest.main includes the shared suite
+from test.test_cell_group import CellGroupTest  # imported so unittest.main includes shared tests
 
 HERE = Path(__file__).resolve().parent
 

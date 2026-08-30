@@ -32,6 +32,69 @@ SURVIVORS = Observation.SURVIVORS
 UNKNOWN = Observation.UNKNOWN
 
 
+class CancellationDeferral:
+    """Defer SIGINT/SIGTERM while a managed child has not yet got a safe cleanup path.
+
+    ``deferring`` covers spawn and cleanup; ``cancellable`` opens the one intentional hole around
+    the blocking wait.  Signal masking is deliberately not used because a forked child would
+    inherit the mask and ignore the supervisor's graceful termination phase.
+    """
+
+    def __init__(self, label):
+        self.label = label
+        self.depth = 0
+        self.held_signal = None
+
+    def install(self):
+        def terminate(signum, _frame):
+            if self.depth:
+                self.held_signal = signum
+                return
+            raise SystemExit(f"{self.label}: terminated by signal {signum}")
+
+        def interrupt(signum, _frame):
+            if self.depth:
+                self.held_signal = signum
+                return
+            raise KeyboardInterrupt
+
+        for signum, handler in ((signal.SIGTERM, terminate), (signal.SIGINT, interrupt)):
+            try:
+                signal.signal(signum, handler)
+            except (ValueError, OSError):
+                pass
+
+    def _raise_held(self):
+        if self.held_signal is None:
+            return
+        signum, self.held_signal = self.held_signal, None
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(
+            f"{self.label}: terminated by signal {signum}; the child process group was cleaned "
+            "first"
+        )
+
+    @contextlib.contextmanager
+    def deferring(self):
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+            if self.depth == 0:
+                self._raise_held()
+
+    @contextlib.contextmanager
+    def cancellable(self):
+        held_depth, self.depth = self.depth, 0
+        try:
+            self._raise_held()
+            yield
+        finally:
+            self.depth = held_depth
+
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -258,6 +321,20 @@ class ManagedProcess:
             self.close()
 
 
+def _cleanup_failed_windows_spawn(job, proc):
+    """Clean both possible owners when Windows Job setup fails partway through."""
+    with contextlib.suppress(Exception):
+        job.terminate()
+    job.close()
+    if proc is not None:
+        # Assignment itself can fail, leaving the suspended child outside the empty Job. Killing
+        # the Job then reaches nothing, so the direct process is an independent obligation.
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=1)
+
+
 def spawn(args, **kwargs):
     """Spawn ``args`` isolated from the driver and return its managed group."""
     if os.name == "posix":
@@ -275,12 +352,7 @@ def spawn(args, **kwargs):
             job.assign_and_resume(proc)
             return ManagedProcess(proc=proc, job=job)
         except BaseException:
-            with contextlib.suppress(Exception):
-                job.terminate()
-            job.close()
-            if proc is not None:
-                with contextlib.suppress(Exception):
-                    proc.wait(timeout=1)
+            _cleanup_failed_windows_spawn(job, proc)
             raise
     raise NotImplementedError(f"no child-group implementation for os.name={os.name!r}")
 

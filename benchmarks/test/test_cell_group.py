@@ -7,12 +7,14 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import cell_group
+import gh675_cells
 
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 
 
 class CellGroupTest(unittest.TestCase):
@@ -127,6 +129,51 @@ class CellGroupTest(unittest.TestCase):
                 ):
                     offenders.append(f"{path.name}:{node.lineno} subprocess.{node.func.attr}")
         self.assertEqual(offenders, [], "unmanaged benchmark child sites: " + ", ".join(offenders))
+
+    def test_a_failed_windows_job_assignment_kills_the_unassigned_child_too(self):
+        job = unittest.mock.Mock()
+        child = unittest.mock.Mock()
+
+        cell_group._cleanup_failed_windows_spawn(job, child)
+
+        job.terminate.assert_called_once_with()
+        job.close.assert_called_once_with()
+        child.kill.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=1)
+
+    @unittest.skipUnless(os.name == "posix", "spawn-window signal fixture uses POSIX delivery")
+    def test_the_gh675_spawn_window_defers_cancellation_until_cleanup_is_owned(self):
+        spawned = []
+        real_popen = cell_group.subprocess.Popen
+        cancellation = gh675_cells._cancellation
+        cancellation.depth = 0
+        cancellation.held_signal = None
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous_term)
+        self.addCleanup(signal.signal, signal.SIGINT, previous_int)
+        self.addCleanup(setattr, cancellation, "depth", 0)
+        self.addCleanup(setattr, cancellation, "held_signal", None)
+        cancellation.install()
+
+        def popen_then_cancel(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return proc
+
+        with unittest.mock.patch.object(
+            cell_group.subprocess, "Popen", side_effect=popen_then_cancel
+        ):
+            with self.assertRaises(SystemExit):
+                gh675_cells.run_managed(
+                    self.python("import time; time.sleep(300)"),
+                    timeout=60,
+                    context="cancelled probe",
+                )
+
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(self.wait_gone(spawned[0]), "the spawn-window child outlived cancellation")
 
 
 if __name__ == "__main__":
