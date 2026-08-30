@@ -8,6 +8,15 @@ module Backends = Backends
 module Cc_backend = Cc_backend
 module Builtins_cc = Builtins_cc
 
+module Buffer_key = struct
+  module T = struct
+    type t = int * BI.buffer_loc [@@deriving compare, sexp]
+  end
+
+  include T
+  include Comparator.Make (T)
+end
+
 (* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the backend
    singletons' context types (no existential): [Backends.query]/[Backends.with_backend] dispatch
    generic operations, and [copy] correlates two of them ([Backends.pair_contexts]) to recover type
@@ -19,6 +28,10 @@ type compile_frontier = {
       (** For each tnode, the routine_id of the most recent routine that writes it. *)
   last_readers : Set.M(Int).t Map.M(Tn).t;
       (** For each tnode, the set of routine_ids that read it since the last write. *)
+  merge_buffer_writer : (Tn.t * int) option;
+      (** The node and synthetic routine id of the most recent merge-buffer transfer in this
+          compilation lineage. Unlike [last_writer], this names the transient merge slab write, not
+          a write to the node's ordinary context buffer. *)
 }
 (** Immutable compile-time frontier for execution dependency tracking. Each context carries its own
     frontier; only the context returned by [compile] receives the updated frontier. The original
@@ -27,8 +40,20 @@ type compile_frontier = {
 
 type execution_ledger = {
   mutable next_id : int;
+  mutable next_context_id : int;
   routine_names : string Hashtbl.M(Int).t;
   mutable executed : Set.M(Int).t;
+  mutable current_writers : int Map.M(Buffer_key).t;
+      (** The routine whose execution most recently wrote each concrete ordinary buffer. Unlike the
+          immutable compile frontier, this follows re-execution order without conflating sibling
+          contexts that allocate distinct buffers for the same tnode. External writes remove their
+          buffer. *)
+  merge_buffer_readers : (int * int) list Hashtbl.M(Int).t;
+      (** [(consumer routine id, owning context id)] by synthetic merge-transfer id. Ownership lets
+          [release] unregister an abandoned candidate that can no longer execute. *)
+  mutable current_merge_buffer_writer : int option;
+      (** The synthetic transfer id whose generation currently occupies this lineage's merge slab.
+          Replacing it removes the old id from [executed], invalidating its compiled consumers. *)
   mutable poisoned : (string * exn) option;
       (** Set when a launch or synchronization failed in a way that may have left device buffers of
           this lineage partially written (gh-ocannl-536). [Context.run] marks a routine executed
@@ -41,18 +66,30 @@ type execution_ledger = {
 (** Shared mutable state for execution tracking, allocated once per root context. Shared by
     reference across all contexts derived from the same root. *)
 
-let empty_frontier = { last_writer = Map.empty (module Tn); last_readers = Map.empty (module Tn) }
+let empty_frontier =
+  {
+    last_writer = Map.empty (module Tn);
+    last_readers = Map.empty (module Tn);
+    merge_buffer_writer = None;
+  }
 
 let create_ledger () =
   {
     next_id = 0;
+    next_context_id = 1;
     routine_names = Hashtbl.create (module Int);
     executed = Set.empty (module Int);
+    current_writers = Map.empty (module Buffer_key);
+    merge_buffer_readers = Hashtbl.create (module Int);
+    current_merge_buffer_writer = None;
     poisoned = None;
   }
 
 type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
+  context_id : int;
+      (** Identity of this logical backend-context child, used only to retire ledger registrations
+          when its leaf is released. [run] preserves it; operations that make a child mint one. *)
   ordinal : int;
       (** The backend's device ordinal this context runs on -- what {!Backends.make_context} was
           given. NOT {!Ir.Backend_intf.device.device_id}, which is a process-global counter across
@@ -64,6 +101,19 @@ type t = {
 [@@deriving sexp_of]
 
 let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
+
+let fresh_context_id ledger =
+  let id = ledger.next_context_id in
+  ledger.next_context_id <- id + 1;
+  id
+
+let buffer_key ctx tn =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun _ c ->
+          Option.map (Map.find c.BI.ctx_buffers tn) ~f:(fun loc -> (c.BI.device.device_id, loc)));
+    }
 
 (* The context's backend as a first-class module, for the queries that read nothing FROM the
    context: [classify_failure], [static_properties] and [hardware_limits] are backend-level
@@ -92,12 +142,14 @@ let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.e
 (** Create a context from a backend name *)
 let create_from_backend_name ~ordinal backend_name =
   let backend = Backends.get_backend ~backend_name () in
+  let ledger = create_ledger () in
   {
     wrapped = Backends.make_context ~ordinal backend;
+    context_id = 0;
     ordinal;
     initialized_nodes = Set.empty (module Tn);
     frontier = empty_frontier;
-    ledger = create_ledger ();
+    ledger;
   }
 
 let cuda ?ordinal () = create_from_backend_name ~ordinal:(Option.value ordinal ~default:0) "cuda"
@@ -182,6 +234,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
                       r.BI.bindings,
                       r.BI.name,
                       r.BI.inputs,
+                      r.BI.merge_buffer_input,
                       r.BI.outputs,
                       mma,
                       peel,
@@ -191,23 +244,50 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
   in
   match backend_outcome with
   | Error failure -> Error failure
-  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma, peel, volatility) ->
+  | Ok
+      ( task,
+        lowered_bindings,
+        name,
+        backend_inputs,
+        merge_buffer_input,
+        backend_outputs,
+        mma,
+        peel,
+        volatility ) ->
       (* Allocate unique ID from shared ledger *)
       let id = ctx.ledger.next_id in
       ctx.ledger.next_id <- id + 1;
 
       (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
-         materialized read-only and read-before-write nodes. [backend_outputs] = all materialized
+         materialized read-only and read-before-write nodes. A merge-buffer input is a separate read
+         of the transfer slab: it depends on the synthetic transfer routine recorded by [copy], not
+         on a writer of the node's ordinary context buffer. [backend_outputs] = all materialized
          written-to nodes. *)
       let frontier = ctx.frontier in
       let empty_int_set = Set.empty (module Int) in
 
-      (* RAW: for each backend input, depend on its last writer *)
+      (* RAW: for each ordinary input, depend on its last writer. *)
       let deps =
         Set.fold backend_inputs ~init:empty_int_set ~f:(fun deps tn ->
             match Map.find frontier.last_writer tn with
             | Some writer_id -> Set.add deps writer_id
             | None -> deps)
+      in
+
+      (* The backend's static merge-node check has already established the same node identity on its
+         wrapped context. Mirror that invariant in the execution frontier and attach the consumer to
+         the transfer routine that actually filled the slab. *)
+      let deps =
+        match (merge_buffer_input, frontier.merge_buffer_writer) with
+        | None, _ -> deps
+        | Some input, Some (transferred, transfer_id) when Tn.equal input transferred ->
+            Set.add deps transfer_id
+        | Some input, _ ->
+            failwith
+              (Printf.sprintf
+                 "Context.compile: backend accepted merge-buffer input %s without a matching \
+                  execution-frontier transfer"
+                 (Tn.debug_name input))
       in
 
       (* WAW + WAR: for each backend output, depend on last writer and all last readers *)
@@ -237,10 +317,17 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
             let existing = Option.value (Map.find lr tn) ~default:empty_int_set in
             Map.set lr ~key:tn ~data:(Set.add existing id))
       in
-      let new_frontier = { last_writer = new_last_writer; last_readers = new_last_readers } in
+      let new_frontier =
+        { frontier with last_writer = new_last_writer; last_readers = new_last_readers }
+      in
 
       (* Register in shared ledger *)
       Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
+      let context_id = fresh_context_id ctx.ledger in
+      Option.iter merge_buffer_input ~f:(fun _ ->
+          let _, transfer_id = Option.value_exn ~here:[%here] frontier.merge_buffer_writer in
+          Hashtbl.update ctx.ledger.merge_buffer_readers transfer_id ~f:(fun readers ->
+              (id, context_id) :: Option.value readers ~default:[]));
 
       (* Required inputs for the initialization check below: the backend routine's materialized
          read-only / read-before-write nodes, resolved against this compile's placements (the
@@ -255,7 +342,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
       (* Outputs are all nodes written by the computation *)
       let outputs = backend_outputs in
 
-      let updated_ctx = { ctx with wrapped; frontier = new_frontier } in
+      let updated_ctx = { ctx with wrapped; context_id; frontier = new_frontier } in
 
       let routine =
         {
@@ -310,7 +397,9 @@ let check_not_poisoned ctx = Option.iter (poisoned_failure ctx) ~f:raise
 (** Undoes [run]'s optimistic execution marking for a routine whose failure is known not to have
     written device buffers, so the next candidate does not inherit a dependency that never ran. *)
 let rollback_execution ctx routine_id =
-  ctx.ledger.executed <- Set.remove ctx.ledger.executed routine_id
+  ctx.ledger.executed <- Set.remove ctx.ledger.executed routine_id;
+  ctx.ledger.current_writers <-
+    Map.filter ctx.ledger.current_writers ~f:(fun writer_id -> writer_id <> routine_id)
 
 let poison_lineage ctx ~routine_name exn =
   if Option.is_none ctx.ledger.poisoned then ctx.ledger.poisoned <- Some (routine_name, exn)
@@ -388,6 +477,10 @@ let run ctx routine =
 
   (* Mark executed in shared ledger *)
   ctx.ledger.executed <- Set.add ctx.ledger.executed routine.routine_id;
+  ctx.ledger.current_writers <-
+    Set.fold routine.outputs ~init:ctx.ledger.current_writers ~f:(fun writers tn ->
+        Option.value_map (buffer_key routine.context tn) ~default:writers ~f:(fun key ->
+            Map.set writers ~key ~data:routine.routine_id));
 
   (* Mark outputs as initialized and return updated context *)
   let initialized_nodes = Set.union ctx.initialized_nodes routine.outputs in
@@ -413,6 +506,25 @@ let hardware_limits ctx =
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }
+
+(* A completed/enqueued write outside [Context.run] supersedes the compiled access history for its
+   destination nodes. Future routines compiled from the returned context must observe the external
+   value, not wait for an older writer that the caller deliberately replaced; likewise an older
+   unexecuted reader cannot impose a WAR edge on a write that already happened. The merge-buffer
+   frontier is separate storage and is deliberately unaffected. *)
+let record_external_writes ctx nodes =
+  ctx.ledger.current_writers <-
+    Set.fold nodes ~init:ctx.ledger.current_writers ~f:(fun writers tn ->
+        Option.value_map (buffer_key ctx tn) ~default:writers ~f:(Map.remove writers));
+  let frontier =
+    Set.fold nodes ~init:ctx.frontier ~f:(fun frontier tn ->
+        {
+          frontier with
+          last_writer = Map.remove frontier.last_writer tn;
+          last_readers = Map.remove frontier.last_readers tn;
+        })
+  in
+  mark_initialized { ctx with frontier } nodes
 
 (* {2 On-demand host access (gh-ocannl-333)}
 
@@ -598,7 +710,9 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
             (c, ()));
       }
   in
-  mark_initialized { ctx with wrapped } (Set.singleton (module Tn) tn)
+  record_external_writes
+    { ctx with wrapped; context_id = fresh_context_id ctx.ledger }
+    (Set.singleton (module Tn) tn)
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
@@ -625,6 +739,79 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
              (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
                 (Tn.debug_name tn) what)
   in
+  (* A same-backend merge transfer reads the source node immediately. If that source context was
+     obtained by compiling a writer but the writer has not run, device synchronization has no event
+     to wait for and the transfer would silently copy the old/zero buffer. This is a cross-lineage
+     edge, so it cannot live in the destination routine's integer dependency set; enforce it before
+     scheduling the transfer. *)
+  let check_merge_source_ready () =
+    let current_writer = Option.bind (buffer_key src tn) ~f:(Map.find src.ledger.current_writers) in
+    let pending_writer =
+      match current_writer with
+      | Some writer_id when Set.mem src.ledger.executed writer_id -> None
+      | Some writer_id -> Some writer_id
+      | None when Set.mem src.initialized_nodes tn -> None
+      | None -> (
+          match Map.find src.frontier.last_writer tn with
+          | Some writer_id when not (Set.mem src.ledger.executed writer_id) -> Some writer_id
+          | _ -> None)
+    in
+    match pending_writer with
+    | Some writer_id ->
+        let writer_name =
+          Option.value (Hashtbl.find src.ledger.routine_names writer_id) ~default:"<unknown>"
+        in
+        failwith
+          (Printf.sprintf
+             "Context.copy: cannot fill the merge buffer from node %s before source writer %s \
+              (id=%d) executes"
+             (Tn.debug_name tn) writer_name writer_id)
+    | _ -> ()
+  in
+  (* The merge buffer is single-tenant. Compiling a consumer registers it against the current
+     transfer generation; overwriting before every such reader has executed would leave that
+     consumer runnable while changing the bytes it will read. *)
+  let check_merge_destination_ready () =
+    Option.iter dst.ledger.current_merge_buffer_writer ~f:(fun transfer_id ->
+        let readers =
+          Option.value (Hashtbl.find dst.ledger.merge_buffer_readers transfer_id) ~default:[]
+        in
+        let pending =
+          List.filter_map readers ~f:(fun (reader_id, _) ->
+              if Set.mem dst.ledger.executed reader_id then None else Some reader_id)
+          |> Set.of_list (module Int)
+        in
+        if not (Set.is_empty pending) then
+          let pending_names =
+            Set.to_list pending
+            |> List.map ~f:(fun reader_id ->
+                Printf.sprintf "%s (id=%d)"
+                  (Option.value
+                     (Hashtbl.find dst.ledger.routine_names reader_id)
+                     ~default:"<unknown>")
+                  reader_id)
+            |> String.concat ~sep:", "
+          in
+          failwith
+            (Printf.sprintf
+               "Context.copy: cannot overwrite the merge buffer before pending consumers execute: \
+                %s"
+               pending_names))
+  in
+  (* [Context.copy] schedules transfers eagerly, so by the time it returns this synthetic routine is
+     executed. Keeping its id in the immutable destination frontier still gives a later merge-buffer
+     consumer the real read edge; it also preserves sibling-compilation semantics. *)
+  let record_merge_transfer dst ~name =
+    Option.iter dst.ledger.current_merge_buffer_writer ~f:(fun old_transfer_id ->
+        dst.ledger.executed <- Set.remove dst.ledger.executed old_transfer_id;
+        Hashtbl.remove dst.ledger.merge_buffer_readers old_transfer_id);
+    let transfer_id = dst.ledger.next_id in
+    dst.ledger.next_id <- transfer_id + 1;
+    Hashtbl.set dst.ledger.routine_names ~key:transfer_id ~data:name;
+    dst.ledger.executed <- Set.add dst.ledger.executed transfer_id;
+    dst.ledger.current_merge_buffer_writer <- Some transfer_id;
+    { dst with frontier = { dst.frontier with merge_buffer_writer = Some (tn, transfer_id) } }
+  in
   let same (type d r e) (impl : (d, r, e) Backends.backend_impl) (sctx : (d, r, e) BI.context)
       (dctx : (d, r, e) BI.context) =
     let (module Backend) = impl.Backends.bi_module in
@@ -634,18 +821,29 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
         (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the device
            as usual. For [Copy], the rewrapped [r.context] is what carries [merge_buffer_node = Some
            tn] into the next [compile]'s static merge-node check (gh-ocannl-288). *)
+        (match into_merge_buffer with
+        | BI.No -> ()
+        | BI.Copy ->
+            check_merge_source_ready ();
+            check_merge_destination_ready ());
         Ir.Task.run r.BI.schedule;
-        let dst = { dst with wrapped = rewrap r.BI.context } in
+        let dst =
+          { dst with wrapped = rewrap r.BI.context; context_id = fresh_context_id dst.ledger }
+        in
         match into_merge_buffer with
-        | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
-        | BI.Copy -> dst)
+        | BI.No -> record_external_writes dst (Set.singleton (module Tn) tn)
+        | BI.Copy -> record_merge_transfer dst ~name:r.BI.name)
     | None ->
         if not (Map.mem sctx.BI.ctx_buffers tn) then
           host_roundtrip "the node is absent from the source context"
         else if not (Map.mem dctx.BI.ctx_buffers tn) then
           (* Present in [src], absent in [dst]: allocate in [dst] and schedule the copy. *)
-          mark_initialized
-            { dst with wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx) }
+          record_external_writes
+            {
+              dst with
+              wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx);
+              context_id = fresh_context_id dst.ledger;
+            }
             (Set.singleton (module Tn) tn)
         else
           (* The source and destination buffers are physically the same: nothing to transfer. *)
@@ -713,7 +911,14 @@ let release ctx =
       q =
         (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
           Backends.finalize (module Backend) c);
-    }
+    };
+  Hashtbl.to_alist ctx.ledger.merge_buffer_readers
+  |> List.iter ~f:(fun (transfer_id, readers) ->
+      let remaining =
+        List.filter readers ~f:(fun (_, context_id) -> context_id <> ctx.context_id)
+      in
+      if List.is_empty remaining then Hashtbl.remove ctx.ledger.merge_buffer_readers transfer_id
+      else Hashtbl.set ctx.ledger.merge_buffer_readers ~key:transfer_id ~data:remaining)
 
 (* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
    linking. [Backends.lower_assignments] forks the lineage state itself, so the result is read off a
@@ -748,7 +953,7 @@ let decide_materialized ctx tns =
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in
-  { ctx with wrapped }
+  { ctx with wrapped; context_id = fresh_context_id ctx.ledger }
 
 let decide_inline ctx tns =
   let wrapped, () =
@@ -770,4 +975,4 @@ let decide_inline ctx tns =
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in
-  { ctx with wrapped }
+  { ctx with wrapped; context_id = fresh_context_id ctx.ledger }

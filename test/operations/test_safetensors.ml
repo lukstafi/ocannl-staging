@@ -170,7 +170,8 @@ let () =
   describe "aligned" aligned;
   describe "unaligned" unaligned;
   let decides_by_alignment entries =
-    List.for_all entries ~f:(fun (_, _, mapped, decoded, expected) ->
+    (not (List.is_empty entries))
+    && List.for_all entries ~f:(fun (_, _, mapped, decoded, expected) ->
         Bool.equal mapped expected && Bool.equal decoded (not expected))
   in
   Verdict.p "ingestion maps exactly the element-aligned payloads"

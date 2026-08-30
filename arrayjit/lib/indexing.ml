@@ -216,11 +216,13 @@ type projections = {
           of an operation. *)
   project_rhs : axis_index array array;
       (** [project_rhs.(i)] Produces an index into the [i+1]th argument of an operation. *)
-  extent_syms : (symbol * static_symbol) list;
-      (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value is
-          the axis's runtime extent. The corresponding segment's dimension is the maximum extent
-          (the symbol's declared range); lowering guards the loop body with [iterator < value] when
-          the symbol is among the routine's bindings. *)
+  extent_syms : (symbol option * static_symbol) list;
+      (** gh-490 symbolic extents: associates the product iterator, when there is one, with the
+          static symbol whose bound value is the axis's runtime extent. The corresponding segment's
+          dimension is the maximum extent (the symbol's declared range); lowering guards the loop
+          body with [iterator < value] when the symbol is among the routine's bindings. A
+          maximum-one axis has no iterator and is retained as [None], so consumers that cannot honor
+          dynamic extents can still reject it explicitly (gh-ocannl-817). *)
   debug_info : (projections_debug[@sexp.ignore] [@compare.ignore] [@equal.ignore]);
 }
 [@@deriving compare, equal, sexp]

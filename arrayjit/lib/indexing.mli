@@ -80,7 +80,7 @@ type projections = {
   rhs_dims : int array array;
   project_lhs : axis_index array;
   project_rhs : axis_index array array;
-  extent_syms : (symbol * static_symbol) list;
+  extent_syms : (symbol option * static_symbol) list;
   debug_info : projections_debug;
 }
 [@@deriving compare, equal, sexp]

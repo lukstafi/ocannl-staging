@@ -610,6 +610,12 @@ that they earn a lookup rather than always-loaded space.
   emptiness — "no candidate declines", "no key is undocumented", a scan over a tree that is usually
   clean — and those want a companion claim that the population was there at all, which is what the
   `p_empty ~over` form is.
+  `verdict_ratchet` also follows file-local boolean helpers into `Verdict.p`/`claim`/`pass_fail`
+  (and their format-taking forms): a helper returning `for_all`, `for_all2_exn`, `is_empty`, or a
+  negated `exists` must make non-emptiness part of its passing result. Its exact, stale-checked
+  exemption list is only for helpers whose intended passing meaning allows an empty population;
+  synthetic controls include a child process the shipping ratchet demonstrably refuses
+  (gh-ocannl-801).
 - Guarantees that fire only on an empty collection are never exercised by a green suite, so
   `verdict_quantified` stages them: the satisfied forms run directly, and each refusal runs as a
   CHILD process whose streams the parent captures. Capturing is not tidiness — a refusal prints
@@ -1046,6 +1052,61 @@ that they earn a lookup rather than always-loaded space.
   (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
   gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
+- `tools/remote-verify.sh` is the one-off counterpart to the scheduled sweep for a pushed branch:
+  it derives the remote pointing to the staging repository by URL, fetches the named branch,
+  without rewriting the checkout's `FETCH_HEAD`, resolves one commit, creates a fresh detached
+  worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
+  that switch, and removes just that worktree before its exit sentinel (never repository-wide
+  `worktree prune`, which could unregister an unrelated temporarily unavailable worktree). The individual
+  commands (including worktree add/remove) and the whole SSH trip have separate process-group caps; the latter also bounds setup
+  and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
+  Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
+  selected switch are printed and stripped inside `opam exec`, so only the requested backend can
+  override the pushed tree's configuration. A regular, non-symlink root `ocannl_config` from the pushed commit
+  is the configuration boundary; when the commit has none, the script creates an empty ignored one
+  in the disposable worktree so a personal file above it cannot reach root-launched probes. A
+  worktree root nested under any outer Dune root is refused: without that
+  boundary Dune can build the parent checkout while this script reports the detached commit.
+  `--expect-lib cudajit|hipjit` asserts all three
+  pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
+  backend's absent `.cmi`). A test, probe or `--record-golden` trip also requires a backend and
+  asserts `_build/default/test/config/ocannl_backend.txt`; an unrestricted test alias is reported
+  only as passing under that configuration, since the alias may be backend-independent, while a
+  runnable probe must print its own backend/device evidence. An `@check`-only trip says explicitly
+  that it compiled code and executed no backend. Golden mode prints the corrected `.actual`
+  contents and an apply-ready patch, then re-runs the alias before accepting it so a second failing
+  dependency cannot hide behind a promotable diff. Before reset, source status (with untracked-file
+  reporting forced independently of Git configuration) must name exactly the listed golden
+  destinations, both after promotion and after the re-run. After reporting it, the script resets tracked
+  files, removes untracked files, and proves the worktree clean at the resolved commit before
+  running another operation. Every path also reasserts exact HEAD, clean tracked/untracked source,
+  and the unchanged configuration boundary after each operation and before the final certificate;
+  a nominally successful probe that edits its checkout therefore fails loudly. Do not replace its
+  unpiped ssh output with a convenience pipe: the verifier source travels on a separate remote file
+  descriptor while child stdin is `/dev/null`, and the far-side sentinel is the build verdict plus
+  cleanup, and the local sentinel is ssh's transport verdict.
+- `tools/ci-compiler-test.sh` is the cheap local proxy for a compiler-sensitive Ubuntu CI failure
+  (gh-ocannl-846): it downloads the GCC 13 packages with `apt-get download`, extracts them into a
+  scratch prefix with `dpkg-deb -x`, and runs exactly one named `runtest-` alias in a fresh Dune
+  build directory with `OCANNL_CC_BACKEND_COMPILER_COMMAND` pointing at a logging wrapper. A pass
+  requires that wrapper to have been invoked, so an irrelevant alias or a cached action cannot be
+  certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient OCANNL
+  configuration, generic compiler/header selectors, and the full `LD_*` dynamic-loader override
+  family are cleared before the explicit settings are
+  injected, while the harness-control `OCANNL_TOOL_*` namespace is preserved. `--aarch64-clang`
+  additionally creates an isolated scratch apt index for the host's `VERSION_CODENAME` at
+  apt.llvm.org (with the signing key's SHA-256 pinned in the script), then unpacks clang 21 and
+  arm64 cross headers, derives `LD_LIBRARY_PATH` from the unpacked `libLLVM.so.21`, and sets
+  `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
+  NEON assembly dialect, with the Debian cross-header directory passed explicitly through
+  `-isystem`; today `cc_march_census` is the test that consumes that hook. The real
+  download is deliberately x86_64 Linux/Debian-family-only, since its cc kernels execute on the
+  host; `--dry-run` validates and prints the complete staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
+  GCC patch release is whichever candidate the configured apt indexes serve (the exact version and
+  target are printed and major 13 is enforced), and the clang leg has a Linux cross sysroot rather
+  than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
+  than replacing either. Fetches, extraction and the test harness are attached children: an outer
+  cancellation forwards `TERM` and reaps the active child before scratch cleanup.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the

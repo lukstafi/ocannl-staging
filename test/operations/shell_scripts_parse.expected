@@ -38,11 +38,13 @@ docs/latex/gen-workshop-tex.sh parses: true
 scripts/setup-ocaml-env.sh parses: true
 scripts/test-setup-ocaml-env.sh parses: true
 test/operations/sweep_harness.sh parses: true
+tools/ci-compiler-test.sh parses: true
 tools/ci-times.sh parses: true
 tools/dune-quiet.sh parses: true
 tools/format-sweep.sh parses: true
 tools/opam-env.sh parses: true
 tools/promote.sh parses: true
+tools/remote-verify.sh parses: true
 tools/sweep.sh parses: true
 tools/test-pin-revisions.sh parses: true
 tools/test-promote.sh parses: true

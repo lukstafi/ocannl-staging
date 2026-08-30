@@ -310,9 +310,9 @@ let with_peel_census f =
    residency or performance investigation asks.
 
    Collected where each decision is made (the [Local_scope]/[Declare_local] declarations and their
-   rendered [Set_local] reads for the localized form, [pp_ll]'s [Set] case for the
-   read-modify-write form) and bracketed by {!with_volatility_census}, which {!Context.compile}
-   calls around every routine's codegen, so the summary is a field of the compiled routine.
+   rendered [Set_local] reads for the localized form, [pp_ll]'s [Set] case for the read-modify-write
+   form) and bracketed by {!with_volatility_census}, which {!Context.compile} calls around every
+   routine's codegen, so the summary is a field of the compiled routine.
 
    The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
    recorded on EVERY backend — the classification it needs is computed anyway, so a routine compiled
@@ -2156,9 +2156,9 @@ module C_syntax (B : C_syntax_config) = struct
     List.iter !volatile_accumulation_scope_stack ~f:(Hash_set.add volatile_accumulation_scopes)
 
   (* Accumulator locals whose updates are controlled by a statement subtree. A materialized read in
-     an [If] condition around [Set_local (id, id + constant)] is the accumulating loop's ONLY
-     device read, so it needs the same expression-level cast as a read in the update itself. Walk
-     nested scalar scopes too: an [If] can control a statement whose value owns the accumulator. *)
+     an [If] condition around [Set_local (id, id + constant)] is the accumulating loop's ONLY device
+     read, so it needs the same expression-level cast as a read in the update itself. Walk nested
+     scalar scopes too: an [If] can control a statement whose value owns the accumulator. *)
   let controlled_accumulation_scope_ids body =
     let seen = Hash_set.create (module Int) in
     let ids = ref [] in
@@ -2199,8 +2199,8 @@ module C_syntax (B : C_syntax_config) = struct
           scalar llsc
       | Set_from_vec { arg = value, _; _ } -> scalar value
       | Tile_mma { fallback; _ } -> stmt fallback
-      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-      | Workgroup_barrier ->
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+        ->
           ()
     in
     stmt body;
@@ -3442,6 +3442,99 @@ module C_syntax (B : C_syntax_config) = struct
      [compile_proc]. *)
   let zero_out_seen : int Hash_set.t = Hash_set.create (module Int)
 
+  (* A whole-node zero immediately before a statement can be forwarded into that statement's
+     localized serial accumulator when the statement owns every cell it closes. The affine check
+     below establishes the dead-store side of the rewrite; [try_localize_serial_reduce] marks the
+     seed consumed only after the localization itself has succeeded. Keeping those two decisions
+     separate is load-bearing: a vector/SIMD rendering or any localizer refusal still needs the
+     original [Zero_out] and opening node read. *)
+  type localized_zero_seed = {
+    lzs_tn : Tn.t;
+    lzs_idcs : Indexing.axis_index array;
+    lzs_repeated : Indexing.symbol list;
+    mutable lzs_consumed : bool;
+  }
+
+  let current_localized_zero_seed : localized_zero_seed option ref = ref None
+
+  (* Whether [body] contains an effect whose buffer accesses or ordering are deliberately opaque to
+     the affine access list. A zero store may not move through either one. [Tile_mma] is rejected as
+     a unit even though its fallback has an affine footprint: the selected intrinsic need not
+     execute that fallback's scalar closing store. *)
+  let has_opaque_zero_forwarding_effect (body : Low_level.t) =
+    let rec stmt = function
+      | Low_level.Staged_compilation _ | Workgroup_barrier | Tile_mma _ -> true
+      | Seq (a, b) -> stmt a || stmt b
+      | For_loop { body; _ } | If { body; _ } -> stmt body
+      | Set { llsc; _ } | Set_local (_, llsc) -> scalar llsc
+      | Set_dynamic { dyn_value = value, _; llsc; _ } -> scalar value || scalar llsc
+      | Set_from_vec { arg = value, _; _ } -> scalar value
+      | Noop | Comment _ | Zero_out _ | Declare_local _ -> false
+    and scalar = function
+      | Low_level.Local_scope { body; _ } -> stmt body
+      | Get_dynamic { dyn_value = value, _; _ } -> scalar value
+      | Ternop (_, (a, _), (b, _), (c, _)) -> scalar a || scalar b || scalar c
+      | Binop (_, (a, _), (b, _)) -> scalar a || scalar b
+      | Unop (_, (a, _)) -> scalar a
+      | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          false
+    in
+    stmt body
+
+  (* The principled DSE condition for forwarding [Zero_out tn] into [next]: [next]'s only accesses
+     of [tn] are one unconditional, same-statement, same-cell read-modify-write pair, and that
+     statement's affine write map covers the whole node over its enclosing loop box. Loops omitted
+     from the map are recorded as repeated-cell dimensions; the localizer remains the final
+     authority and may consume the seed only when its accepted scope includes all of them. A dead
+     enclosing loop is rejected because it executes no closing store. *)
+  let localized_zero_seed_candidate (tn : Tn.t) (next : Low_level.t) : localized_zero_seed option =
+    if has_opaque_zero_forwarding_effect next then None
+    else
+      let same_map = Array.equal Indexing.equal_axis_index in
+      let accesses =
+        Low_level.affine_accesses next
+        |> List.filter ~f:(fun access -> Tn.equal access.Affine.a_tn tn)
+      in
+      match accesses with
+      | [ ({ Affine.a_write = false; _ } as read); ({ a_write = true; _ } as write) ]
+        when write.a_rmw && (not read.a_guarded) && (not write.a_guarded) && (not read.a_dynamic)
+             && (not write.a_dynamic) && (not read.a_whole) && (not write.a_whole)
+             && (not read.a_vec_last) && (not write.a_vec_last)
+             && Affine.same_statement read.a_path write.a_path
+             && Option.exists read.a_stmt_write ~f:(same_map write.a_map)
+             && same_map read.a_map write.a_map ->
+          let range symbol =
+            List.find_map write.a_loops ~f:(fun (bound, range) ->
+                if Indexing.equal_symbol symbol bound then Some range else None)
+          in
+          if List.exists write.a_loops ~f:(fun (_, (lo, hi)) -> hi < lo) then None
+          else if Affine.covers_box ~range ~dims:(Lazy.force tn.Tn.dims) write.a_map then
+            let repeated =
+              List.filter_map write.a_loops ~f:(fun (symbol, (lo, hi)) ->
+                  Option.some_if
+                    (hi > lo
+                    && not
+                         (Array.exists write.a_map ~f:(Indexing.axis_index_mentions_symbol symbol))
+                    )
+                    symbol)
+            in
+            Some
+              { lzs_tn = tn; lzs_idcs = write.a_map; lzs_repeated = repeated; lzs_consumed = false }
+          else None
+      | _ -> None
+
+  (* Take one top-level statement without flattening the suffix. Optimized programs are commonly
+     right-associated [Seq] trees, so this is constant work there; a left-associated prefix costs
+     only the depth of that prefix and the residual tree retains the original suffix wholesale. *)
+  let rec take_first_statement = function
+    | Low_level.Seq (left, right) ->
+        let first, left_rest = take_first_statement left in
+        let rest =
+          match left_rest with None -> right | Some left_rest -> Low_level.Seq (left_rest, right)
+        in
+        (first, Some rest)
+    | statement -> (statement, None)
+
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
      first): maintained by [serial_loop] below, consulted by the [Set] case's
      [volatile_serial_accumulation] rule and by [pp_pipelined_rotation]. *)
@@ -3704,8 +3797,47 @@ module C_syntax (B : C_syntax_config) = struct
         with
         | Some doc -> doc
         | None ->
-            let d1 = pp_ll ~log_set_locals ~in_loop c1 in
-            let d2 = pp_ll ~log_set_locals ~in_loop c2 in
+            let render_in_order left right =
+              (* Rendering mutates occurrence-level state such as [zero_out_seen]; tuple component
+                 evaluation order is unspecified, so spell the program order explicitly. *)
+              let left_doc = pp_ll ~log_set_locals ~in_loop left in
+              let right_doc = pp_ll ~log_set_locals ~in_loop right in
+              (left_doc, right_doc)
+            in
+            let d1, d2 =
+              match c1 with
+              | Zero_out tn -> (
+                  let next, rest = take_first_statement c2 in
+                  match localized_zero_seed_candidate tn next with
+                  | None -> render_in_order c1 c2
+                  | Some seed ->
+                      let saved = !current_localized_zero_seed in
+                      current_localized_zero_seed := Some seed;
+                      let next_doc =
+                        Exn.protect
+                          ~f:(fun () -> pp_ll ~log_set_locals ~in_loop next)
+                          ~finally:(fun () -> current_localized_zero_seed := saved)
+                      in
+                      let zero_doc =
+                        if seed.lzs_consumed then begin
+                          (* Preserve the occurrence-level first-touch fact: a later [Zero_out] is a
+                             genuine re-zero even though this one emitted no statement. *)
+                          Hash_set.add zero_out_seen tn.Tn.uid;
+                          empty
+                        end
+                        else pp_ll ~log_set_locals ~in_loop c1
+                      in
+                      let rest_doc =
+                        Option.value_map rest ~default:empty ~f:(pp_ll ~log_set_locals ~in_loop)
+                      in
+                      let tail =
+                        if PPrint.is_empty next_doc then rest_doc
+                        else if PPrint.is_empty rest_doc then next_doc
+                        else next_doc ^^ hardline ^^ rest_doc
+                      in
+                      (zero_doc, tail))
+              | _ -> render_in_order c1 c2
+            in
             (* Avoid extra hardlines if one side is empty *)
             if PPrint.is_empty d1 then d2
             else if PPrint.is_empty d2 then d1
@@ -4831,10 +4963,34 @@ module C_syntax (B : C_syntax_config) = struct
                   let rebuild_hook b =
                     Low_level.For_loop { index = i; from_; to_; body = b; axis }
                   in
+                  let rec loop_symbols = function
+                    | Low_level.For_loop { index; body; _ } -> index :: loop_symbols body
+                    | If { body; _ } -> loop_symbols body
+                    | Seq (left, right) -> loop_symbols left @ loop_symbols right
+                    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_local _
+                    | Set_dynamic _ | Set_from_vec _ | Declare_local _ | Workgroup_barrier
+                    | Tile_mma _ ->
+                        []
+                  in
+                  let localized_symbols = i :: loop_symbols (rebuild Low_level.Noop) in
                   let scope_body =
+                    let opening =
+                      match !current_localized_zero_seed with
+                      | Some seed
+                        when Tn.equal seed.lzs_tn tn
+                             && Array.equal Indexing.equal_axis_index seed.lzs_idcs idcs ->
+                          if
+                            List.for_all seed.lzs_repeated ~f:(fun repeated ->
+                                List.mem localized_symbols repeated ~equal:Indexing.equal_symbol)
+                          then begin
+                            seed.lzs_consumed <- true;
+                            Low_level.Constant 0.0
+                          end
+                          else Low_level.Get (tn, idcs)
+                      | _ -> Low_level.Get (tn, idcs)
+                    in
                     Low_level.Seq
-                      ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
-                        rebuild_hook (rebuild update_code) )
+                      (Low_level.Set_local (id, opening), rebuild_hook (rebuild update_code))
                   in
                   Some
                     (without_census (fun () ->
@@ -5917,9 +6073,9 @@ module C_syntax (B : C_syntax_config) = struct
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
            [if] tests exactly that. A guard controlling a recognized scope-local accumulation is
-           part of its accumulating loop: when the guard is its only materialized read, excluding
-           it would remove the Metal workaround altogether (gh-ocannl-820, Codex P1 round 3 on
-           #553). Keep the context expression-local, and only while already inside a serial loop. *)
+           part of its accumulating loop: when the guard is its only materialized read, excluding it
+           would remove the Metal workaround altogether (gh-ocannl-820, Codex P1 round 3 on #553).
+           Keep the context expression-local, and only while already inside a serial loop. *)
         let controlled_scopes =
           if B.volatile_serial_accumulation && not (List.is_empty !serial_loop_stack) then
             controlled_accumulation_scope_ids body
@@ -5927,10 +6083,23 @@ module C_syntax (B : C_syntax_config) = struct
         in
         let (local_defs, cond_doc), _ =
           with_volatile_accumulation_reads ~scope_ids:controlled_scopes
-            (not (List.is_empty controlled_scopes)) (fun () -> pp_scalar (comp_prec cprec) c)
+            (not (List.is_empty controlled_scopes))
+            (fun () -> pp_scalar (comp_prec cprec) c)
         in
         let local_defs = pp_local_defs local_defs in
-        let body_doc = pp_ll ~log_set_locals ~in_loop:true body in
+        let body_doc =
+          match !current_localized_zero_seed with
+          | Some seed when not seed.lzs_consumed ->
+              (* An [If] reached before localization conditionally guards the closing store, so it
+                 cannot consume a whole-node zero. Guards *inside* a recognized reduction are
+                 rebuilt only after the enclosing loop has already consumed the seed. *)
+              let saved = !current_localized_zero_seed in
+              current_localized_zero_seed := None;
+              Exn.protect
+                ~f:(fun () -> pp_ll ~log_set_locals ~in_loop:true body)
+                ~finally:(fun () -> current_localized_zero_seed := saved)
+          | None | Some _ -> pp_ll ~log_set_locals ~in_loop:true body
+        in
         let if_doc =
           group
             (string "if (" ^^ cond_doc ^^ string ") " ^^ lbrace
@@ -6361,6 +6530,7 @@ module C_syntax (B : C_syntax_config) = struct
     current_simdgroup_fragments := simdgroup_fragments;
     current_swizzled := swizzled;
     current_pipelined := pipelined;
+    current_localized_zero_seed := None;
     (* gh-487 phase 2: which pipelined tiles stage asynchronously — backend hook present, no kernel
        logging (logged [Set]s read the written value back, which an in-flight copy cannot provide),
        and an element size the hardware copies at the alignment plain shared declarations guarantee

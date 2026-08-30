@@ -427,7 +427,10 @@ type 'context routine = {
   inputs : Set.M(Tnode).t;
       (** The materialized read-only and read-before-write (within the routine) non-constant nodes.
           They are inputs in a broad sense, as they could be recurrent nodes or parameters. *)
-  merge_buffer_input : Tnode.t option;  (** Similar to {!field-inputs}, for the merge buffer. *)
+  merge_buffer_input : Tnode.t option;
+      (** Similar to {!field-inputs}, for the merge buffer. The execution-dependency ledger consumes
+          this as a read edge on the transfer that filled the transient slab, but it is not an
+          ordinary context input requiring initialization. *)
   outputs : Set.M(Tnode).t;  (** All the materialized nodes written-to by the routine. *)
 }
 [@@deriving sexp_of]

@@ -1,3 +1,5 @@
+the fp8 scalar rival-rendering values are pairwise distinct: true
+the f16 scalar rival-rendering values are pairwise distinct: true
 the default-policy f16 reduction takes the backend's declared residency (2048 + 1x8: wide 2056 on CPU, per-step 2048 on GPU): true
 Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056): true
 Fp16_wide holds the f32 residency even under narrow_compute_f32=false (2048 + 1x8 gives 2056): true

@@ -2199,30 +2199,35 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
       ~equal:(fun (_, _, s1) (_, _, s2) -> Idx.equal_symbol s1 s2)
       all_product_projs_with_iters
   in
-  (* gh-490 symbolic extents: map each product iterator that iterates a symbolic axis to the axis's
-     static symbol. The product-space entry is the maximum extent; lowering guards loop bodies with
-     [iterator < value] when the symbol is bound. Distinct symbols sharing an iterator cannot arise
-     (a [Sym] unifies only with itself), but check defensively. *)
-  let extent_syms : (Idx.symbol * Idx.static_symbol) list =
+  (* gh-490 symbolic extents: associate each symbolic axis's product iterator with the axis's static
+     symbol. The product-space entry is the maximum extent; lowering guards loop bodies with
+     [iterator < value] when the symbol is bound. A maximum-one axis has no iterator, but retain its
+     symbol under [None] so a consumer such as [Set_vec_unop] can reject the dynamic extent rather
+     than silently treating it as the maximum (gh-ocannl-817). Distinct symbols sharing an iterator
+     cannot arise (a [Sym] unifies only with itself), but check defensively. *)
+  let extent_syms : (Idx.symbol option * Idx.static_symbol) list =
     let all =
       List.filter_map all_dims ~f:(fun dim ->
           match dim with
-          | Row.Sym { sym; _ } -> (
-              match Row.get_product_proj proj_env dim with
-              | Some (p, _) -> (
-                  try Some (Row.proj_to_iterator_exn proj_env p, sym)
-                  with Invalid_argument _ -> None)
-              | None -> None)
+          | Row.Sym { sym; _ } ->
+              let iter =
+                Option.bind (Row.get_product_proj proj_env dim) ~f:(fun (p, _) ->
+                    try Some (Row.proj_to_iterator_exn proj_env p) with Invalid_argument _ -> None)
+              in
+              Some (iter, sym)
           | _ -> None)
-      |> List.dedup_and_sort ~compare:[%compare: Idx.symbol * Idx.static_symbol]
+      |> List.dedup_and_sort ~compare:[%compare: Idx.symbol option * Idx.static_symbol]
     in
     List.iter all ~f:(fun (it, sym) ->
         List.iter all ~f:(fun (it2, sym2) ->
-            if Idx.equal_symbol it it2 && not (Idx.equal_static_symbol sym sym2) then
-              raise
-              @@ Row.Shape_error
-                   ( "derive_projections: distinct symbolic extents share a product iterator",
-                     [ Shape_mismatch (lhs :: rhs) ] )));
+            match (it, it2) with
+            | Some it, Some it2
+              when Idx.equal_symbol it it2 && not (Idx.equal_static_symbol sym sym2) ->
+                raise
+                @@ Row.Shape_error
+                     ( "derive_projections: distinct symbolic extents share a product iterator",
+                       [ Shape_mismatch (lhs :: rhs) ] )
+            | Some _, Some _ | Some _, None | None, Some _ | None, None -> ()));
     all
   in
   (* Most product projections occur as top-level dimensions of the result or operands. Constituents
