@@ -309,10 +309,10 @@ let with_peel_census f =
    routine have, and did any of them escape the workaround" — and that second question is the one a
    residency or performance investigation asks.
 
-   Collected where each decision is made ([pp_scalar]'s [Local_scope] arm for the localized form,
-   [pp_ll]'s [Set] case for the read-modify-write form) and bracketed by {!with_volatility_census},
-   which {!Context.compile} calls around every routine's codegen, so the summary is a field of the
-   compiled routine.
+   Collected where each decision is made (the [Local_scope]/[Declare_local] declarations and their
+   rendered [Set_local] reads for the localized form, [pp_ll]'s [Set] case for the
+   read-modify-write form) and bracketed by {!with_volatility_census}, which {!Context.compile}
+   calls around every routine's codegen, so the summary is a field of the compiled routine.
 
    The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
    recorded on EVERY backend — the classification it needs is computed anyway, so a routine compiled
@@ -2112,6 +2112,25 @@ module C_syntax (B : C_syntax_config) = struct
   let volatile_accumulation_scope_stack : int list ref = ref []
   let volatile_read_observers : bool ref list ref = ref []
   let volatile_accumulation_scopes = Hash_set.create (module Int)
+  let rendered_accumulation_scopes = Hash_set.create (module Int)
+
+  type volatility_event = Accumulation of Low_level.scope_id | Site of volatility_site
+
+  (* Reverse emission order, like [volatility_census] itself. Accumulations stay symbolic until the
+     whole kernel body has rendered: a [Declare_local] precedes the lifted update that decides
+     whether it emitted a volatile read, while an inline [Local_scope] encloses that update. Keeping
+     one event stream preserves their order relative to device-memory RMW sites in both forms. *)
+  let volatility_events : volatility_event list ref = ref []
+
+  let record_accumulation_scope (id : Low_level.scope_id) =
+    if
+      !volatility_census_enabled
+      && Hash_set.mem accum_scope_ids id.scope_id
+      && not (Hash_set.mem rendered_accumulation_scopes id.scope_id)
+    then begin
+      Hash_set.add rendered_accumulation_scopes id.scope_id;
+      volatility_events := Accumulation id :: !volatility_events
+    end
 
   let with_volatile_accumulation_reads ?scope_id enabled f =
     let saved = !volatile_accumulation_reads in
@@ -4991,8 +5010,7 @@ module C_syntax (B : C_syntax_config) = struct
                nothing — the capability short-circuits it — so there is no decision there to report,
                and [volatility_summary.requested] is what says so. *)
             if volatile_read_emitted && !volatility_census_enabled then
-              volatility_census :=
-                (!current_kernel_name, Volatile_rmw_reads (get_ident tn)) :: !volatility_census;
+              volatility_events := Site (Volatile_rmw_reads (get_ident tn)) :: !volatility_events;
             let assignment =
               group
                 (ident_doc ^^ brackets offset_doc ^^ string " ="
@@ -5326,6 +5344,7 @@ module C_syntax (B : C_syntax_config) = struct
           let block_content = local_defs ^^ hardline ^^ assignment in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
     | Declare_local { id = { tn = { storage_prec = _; _ }; _ } as id; needs_init } ->
+        record_accumulation_scope id;
         let scope_prec = scope_prec_of id in
         let num_typ = string (scope_decl_type id) in
         let init_zero =
@@ -5866,6 +5885,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Local_scope
         { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _; mint = _ }
       ->
+        record_accumulation_scope id;
         let scope_prec = scope_prec_of id in
         let num_typ = string (scope_decl_type id) in
         let init_zero =
@@ -5879,13 +5899,6 @@ module C_syntax (B : C_syntax_config) = struct
            body so a [Zero_out] reached through it is never mistaken for the function-scope
            first-touch that the declaration's [= {0}] covers. *)
         let body_doc = pp_ll ~log_set_locals:false ~in_loop:true body in
-        if Hash_set.mem accum_scope_ids id.scope_id && !volatility_census_enabled then
-          volatility_census :=
-            ( !current_kernel_name,
-              if Hash_set.mem volatile_accumulation_scopes id.scope_id then
-                Volatile_accumulation_reads (scope_local_ident id)
-              else Plain_accumulator (scope_local_ident id) )
-            :: !volatility_census;
         let def_doc = decl ^^ hardline ^^ body_doc in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
@@ -6258,6 +6271,8 @@ module C_syntax (B : C_syntax_config) = struct
     volatile_accumulation_scope_stack := [];
     volatile_read_observers := [];
     Hash_set.clear volatile_accumulation_scopes;
+    Hash_set.clear rendered_accumulation_scopes;
+    volatility_events := [];
     (* gh-ocannl-584: scope purity, the pipeline's EXIT gate ([Low_level.optimize_proc] is the entry
        one) — this catches what a schedule transform constructs, which the entry gate cannot see.
        Checked ahead of the schedule validation and NOT transported as an [Illegal_schedule]: an
@@ -6525,6 +6540,16 @@ module C_syntax (B : C_syntax_config) = struct
     (* Render before declarations so accepted marked-fragment regions can suppress their otherwise
        dead scalar local arrays. Declining/debug paths leave the set empty and keep the arrays. *)
     let main_logic_doc = compile_main llc in
+    if !volatility_census_enabled then
+      volatility_census :=
+        List.map !volatility_events ~f:(function
+          | Accumulation id ->
+              ( !current_kernel_name,
+                if Hash_set.mem volatile_accumulation_scopes id.scope_id then
+                  Volatile_accumulation_reads (scope_local_ident id)
+                else Plain_accumulator (scope_local_ident id) )
+          | Site site -> (!current_kernel_name, site))
+        @ !volatility_census;
     let grid_privatized =
       Map.fold !current_grid_private
         ~init:(Set.empty (module Tn))

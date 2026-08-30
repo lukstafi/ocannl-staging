@@ -30,6 +30,11 @@ index-only reduction: the accumulating loop's volatile-read form is the one the 
 index-only reduction: the opening read stays plain: true
 index-only reduction: no rmw shadow declaration, by the census and by the text: true
 index-only accumulation is censused plain because it emits no device read: true
+cross-statement CSE produces one lifted accumulator declaration: true
+lifted accumulator executes once for both users: true
+lifted accumulator contributes exactly one census site: true
+lifted accumulator census follows its emitted volatile read: true
+lifted accumulating read uses the backend-requested form: true
 an inner bracket summarizes only its own sites: true
 the enclosing bracket sees both, in emission order: true
 an inner bracket reports the capability of the compile it bracketed: true

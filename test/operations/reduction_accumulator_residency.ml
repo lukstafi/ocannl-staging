@@ -254,6 +254,72 @@ let () =
     (r_index_total.Context.volatility.Ir.C_syntax.volatile_accumulations = 0
     && r_index_total.Context.volatility.Ir.C_syntax.plain_accumulations = 1)
 
+(* Cross-statement CSE lifts a shared scope out of both users as [Declare_local; body]. That form
+   renders its declaration before its accumulating [Set_local], so the census must retain the site
+   until rendering observes whether the update emitted a volatile read (Codex P2, review round 2 on
+   #553). This hand-built leg makes the optimizer produce that exact form and executes both users. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9820 ~dims:[| 8 |] () in
+  let src = node "res_lift_src"
+  and out_a = node ~dims:[| 1 |] "res_lift_a"
+  and out_b = node ~dims:[| 1 |] "res_lift_b"
+  and tmp = node ~dims:[| 1 |] "res_lift_tmp" in
+  List.iter [ src; out_a; out_b ] ~f:Ll_test.materialize;
+  Ll_test.virtualize tmp;
+  let i = Ll_test.sym () in
+  let scoped =
+    let id = LL.get_scope tmp in
+    let body =
+      LL.Seq
+        ( LL.Set_local (id, Ll_test.c 0.0),
+          Ll_test.loop_n i 8
+            (LL.Set_local
+               ( id,
+                 Ll_test.add (LL.Get_local id) (Ll_test.get src [| Ll_test.iter i |]) )) )
+    in
+    LL.Local_scope
+      { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }
+  in
+  let program =
+    LL.Seq
+      ( Ll_test.set out_a [| Ll_test.fixed 0 |] scoped,
+        Ll_test.set out_b [| Ll_test.fixed 0 |] scoped )
+  in
+  let optimized =
+    Ll_test.optimize ~materialized:[ src; out_a; out_b ] ~name:"res_lifted" program
+  in
+  let rec count_declarations = function
+    | LL.Declare_local _ -> 1
+    | LL.Seq (a, b) -> count_declarations a + count_declarations b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> count_declarations body
+    | LL.Tile_mma { fallback; _ } -> count_declarations fallback
+    | _ -> 0
+  in
+  Verdict.p "cross-statement CSE produces one lifted accumulator declaration"
+    (count_declarations optimized.LL.llc = 1 && Ll_test.count_scopes optimized.LL.llc = 0);
+  let ctx, routine = Ll_test.link ~name:"res_lifted" optimized in
+  let values = Array.init 8 ~f:(fun k -> Float.of_int (k + 1)) in
+  let ctx =
+    Ll_test.run_linked (ctx, routine)
+      ~seed:[ (src, values); (out_a, [| -1.0 |]); (out_b, [| -2.0 |]) ]
+  in
+  Verdict.p "lifted accumulator executes once for both users"
+    Float.(
+      equal (Context.get_values ctx out_a).(0) 36.0
+      && equal (Context.get_values ctx out_b).(0) 36.0);
+  let volatility = routine.Context.volatility in
+  Verdict.p "lifted accumulator contributes exactly one census site"
+    (volatility.Ir.C_syntax.volatile_accumulations + volatility.plain_accumulations = 1);
+  Verdict.p "lifted accumulator census follows its emitted volatile read"
+    (Bool.equal (volatility.volatile_accumulations = 1) volatility.requested
+    && Bool.equal (volatility.plain_accumulations = 1) (not volatility.requested));
+  let source = Test_utils.Generated.read "res_lifted" in
+  Verdict.p "lifted accumulating read uses the backend-requested form"
+    (Bool.equal
+       (String.is_substring source ~substring:"device volatile float*")
+       volatility.requested)
+
 (* {1 The volatility census's own bracket}
 
    [with_volatility_census] is what makes the census a property of the compiled routine rather than
