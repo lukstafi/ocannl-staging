@@ -3485,7 +3485,8 @@ module C_syntax (B : C_syntax_config) = struct
      of [tn] are one unconditional, same-statement, same-cell read-modify-write pair, and that
      statement's affine write map covers the whole node over its enclosing loop box. Loops omitted
      from the map are recorded as repeated-cell dimensions; the localizer remains the final
-     authority and may consume the seed only when its accepted scope includes all of them. *)
+     authority and may consume the seed only when its accepted scope includes all of them. A dead
+     enclosing loop is rejected because it executes no closing store. *)
   let localized_zero_seed_candidate (tn : Tn.t) (next : Low_level.t) : localized_zero_seed option =
     if has_opaque_zero_forwarding_effect next then None
     else
@@ -3506,7 +3507,8 @@ module C_syntax (B : C_syntax_config) = struct
             List.find_map write.a_loops ~f:(fun (bound, range) ->
                 if Indexing.equal_symbol symbol bound then Some range else None)
           in
-          if Affine.covers_box ~range ~dims:(Lazy.force tn.Tn.dims) write.a_map then
+          if List.exists write.a_loops ~f:(fun (_, (lo, hi)) -> hi < lo) then None
+          else if Affine.covers_box ~range ~dims:(Lazy.force tn.Tn.dims) write.a_map then
             let repeated =
               List.filter_map write.a_loops ~f:(fun (symbol, (lo, hi)) ->
                   Option.some_if

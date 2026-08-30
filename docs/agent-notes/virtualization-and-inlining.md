@@ -153,11 +153,12 @@ files.
   accumulator local only when `Low_level.affine_accesses` finds exactly one same-cell RMW pair and
   `Affine.covers_box` proves its closing stores cover the whole node (gh-ocannl-821). The zero store
   is dropped only after `try_localize_serial_reduce` actually accepts, every loop that repeats a
-  cell is inside that accepted scope, and the covering write is unconditional. The last two clauses
-  are distinct from geometric coverage: an enclosing reduction loop can repeat an otherwise
-  covering output nest, and a symbolic-extent guard can make only a prefix execute. A
-  localizer/SIMD decline, partial or conditional coverage, an opaque effect, or an accumulation with
-  no preceding zero retains the original opening value.
+  cell is inside that accepted scope, no enclosing loop is statically dead, and the covering write
+  is unconditional. Those clauses are distinct from geometric coverage: an enclosing reduction
+  loop can repeat an otherwise covering output nest, a dead loop executes no closing store, and a
+  symbolic-extent guard can make only a prefix execute. A localizer/SIMD decline, partial or
+  conditional coverage, an opaque effect, or an accumulation with no preceding zero retains the
+  original opening value.
 - **A virtualization candidate under an `If` is rejected, and the guard's position decides which
   arm rejects it** (gh-ocannl-651). `check_and_store_virtual`'s walk sees only the subtree it is
   handed, so a guard INTERIOR to that subtree hits its own `If` arm while a guard ENCLOSING it is

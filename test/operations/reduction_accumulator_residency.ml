@@ -336,6 +336,35 @@ let () =
   Verdict.p "repeated covering reduction retains zero store, opening read, and closing store"
     (accesses = 3)
 
+(* A dead enclosing loop executes no closing store at all. The ordinary optimizer drops its body, so
+   inject this shape through the same post-optimize seam schedule-minted IR uses: codegen still
+   renders the body, and an inner localizer must not consume the whole-node seed merely because the
+   dead loop is absent from the write map. The nonzero host seed makes dropping [Zero_out]
+   immediately visible. *)
+let () =
+  let module LL = Ir.Low_level in
+  let node = Ll_test.node_factory ~first_id:9870 () in
+  let out = node ~dims:[| 2 |] "res_dead_out" in
+  Ll_test.materialize out;
+  let k = Ll_test.sym () and j = Ll_test.sym () and i = Ll_test.sym () in
+  let out_cell = [| Ll_test.iter j |] in
+  let update =
+    Ll_test.set out out_cell (Ll_test.add (Ll_test.get out out_cell) (LL.Constant 1.0))
+  in
+  let program =
+    LL.Seq (LL.Zero_out out, Ll_test.loop_n k 0 (Ll_test.loop_n j 2 (Ll_test.loop_n i 2 update)))
+  in
+  let optimized =
+    Ll_test.optimize_scoped ~materialized:[ out ] ~name:"res_dead" ~raw:program program
+  in
+  let ctx, routine = Ll_test.link ~name:"res_dead" optimized in
+  let ctx = Ll_test.run_linked (ctx, routine) ~seed:[ (out, [| -7.0; -9.0 |]) ] in
+  Verdict.p "dead enclosing loop preserves the live whole-node zero"
+    (Array.equal Float.equal (Context.get_values ctx out) [| 0.0; 0.0 |]);
+  let source = Test_utils.Generated.read "res_dead" in
+  Verdict.p "dead enclosing loop retains zero store, opening read, and closing store"
+    (count_node_accesses source "res_dead_out" = 3)
+
 (* A symbolic extent guard can make a statically covering output loop execute only a prefix. The
    serial renderer fuses this exact [j < extent] shape into the loop header, so the DSE predicate
    itself must reject the guarded affine write; relying on the ordinary [If] rendering boundary is
