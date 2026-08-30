@@ -207,7 +207,8 @@
   (alias runtest-shell_scripts_parse)
   (alias runtest-optional_arg_inventory)
   (alias runtest-generated_provenance)
-  (alias runtest-verdict_quantified)))
+  (alias runtest-verdict_quantified)
+  (alias runtest-sweep_harness)))
 
 (test
  ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
@@ -4436,23 +4437,38 @@
   (diff config_usage_scan_control.expected config_usage_scan_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
-; the harness through a fake opam, so no backend or OCANNL executable is reached.
+; the harness through a fake opam, so no backend or OCANNL executable is reached. It shares a lock
+; with atomic_file_race: both generate concurrent filesystem load, while that stress test's readers
+; deliberately have a fixed ceiling and must not mistake a second filesystem stressor for a stall.
 
 (executable
  (name sweep_harness_driver)
  (modules sweep_harness_driver)
  (libraries unix))
 
+(executable
+ (name verdict_skip_probe)
+ (modules verdict_skip_probe)
+ (libraries arrayjit.verdict))
+
 (rule
- ; ocannl-backend: none -- the driver invokes a shell harness through fake opam and links no backend.
- (alias runtest)
+ ; ocannl-backend: none -- the harness uses fake opam and a Verdict-only skip probe; neither links a backend.
+ (alias runtest-sweep_harness)
  (package neural_nets_lib)
- (deps ocannl_config ../../tools/sweep.sh sweep_harness.sh)
+ (locks ocannl_filesystem_stress_test)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  ../../tools/aggregate-skips.sh
+  ../../tools/sweep.sh
+  sweep_harness.sh)
  (action
   (run
    %{dep:sweep_harness_driver.exe}
    %{dep:sweep_harness.sh}
-   %{dep:../../tools/sweep.sh})))
+   %{dep:../../tools/sweep.sh}
+   %{dep:../../tools/aggregate-skips.sh}
+   %{dep:verdict_skip_probe.exe})))
 
 ; The atomic-file publication helper under concurrent writers (gh-ocannl-780). Domains, fixed
 ; iteration counts and a bounded spin: no wall-clock dependence, and no backend -- it publishes
@@ -4462,6 +4478,7 @@
  ; ocannl-backend: none -- links arrayjit.utils and races the filesystem helper; it compiles nothing.
  (name atomic_file_race)
  (package neural_nets_lib)
+ (locks ocannl_filesystem_stress_test)
  (deps
   ocannl_config
   (glob_files_rec ../../.gitignore))

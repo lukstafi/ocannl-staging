@@ -8,12 +8,11 @@ let routine_name = "gh859_cc_trace_name"
 let trace_file = "cc_backend_trace_name.log"
 
 let compiled_trace_level () =
-  Option.bind (Stdlib.Sys.getenv_opt trace_gate) ~f:Int.of_string_opt
-  |> Option.value ~default:0
+  Option.bind (Stdlib.Sys.getenv_opt trace_gate) ~f:Int.of_string_opt |> Option.value ~default:0
 
-(* A flushing trace writes a bare result as the first line inside [work]. Keep the assertion on
-   that scope: [link_compiled]'s argument dump also contains [code.name], and accepting an
-   occurrence anywhere in the file would let the wrong-binding regression pass. *)
+(* A flushing trace writes a bare result as the first line inside [work]. Keep the assertion on that
+   scope: [link_compiled]'s argument dump also contains [code.name], and accepting an occurrence
+   anywhere in the file would let the wrong-binding regression pass. *)
 let work_results lines =
   let rec collect acc = function
     | begin_line :: result :: rest
@@ -38,4 +37,4 @@ let run_trace_smoke () =
 
 let () =
   if compiled_trace_level () >= 3 then run_trace_smoke ()
-  else Verdict.skipped ~backend:(trace_gate ^ "<3") claim
+  else Verdict.skipped ~aggregation:`Environment ~backend:(trace_gate ^ "<3") claim

@@ -1282,6 +1282,19 @@ that they earn a lookup rather than always-loaded space.
   default 90 minutes).
   When the execution column was introduced, existing `pass` rows became `legacy-pass` with
   `execution=unknown`; old incremental evidence is retained, but cannot masquerade as a forced run.
+- A forced full-suite sweep also intersects the backend-scoped `Verdict.skipped`
+  executable-and-claim keys from every successful unit through `tools/aggregate-skips.sh`
+  (gh-ocannl-792), writing
+  `logs/<stamp>-skip-coverage.txt`. Incremental logs are refused because a cached Dune action does
+  not replay its stderr, and failed or interrupted units are refused because they may not have
+  reached every test. An intersection over only the completed backends is a loud `POTENTIAL` report;
+  it becomes `FAIL` only when every backend in the sweep's own unit vocabulary completed, while the
+  sweep itself still exits zero so later units and their history rows are never suppressed. A
+  `--ref` predating the machine record is refused when its human skip lines have no paired records.
+  A skip caused by a host or configuration capability rather than the selected backend (a compiler
+  target, preprocessing flag or filesystem feature) uses
+  ``Verdict.skipped ~aggregation:`Environment``: its human stderr line stays visible, while the
+  record's scope keeps it out of the backend intersection.
 - An unreachable machine records `skip (unreachable)`, and a sweep of skips is not a failure. It is
   not the expected steady state either: both GPU boxes are cabled and Wake-on-LAN armed, and wake
   over Ethernet from sleep and from full shutdown alike, so a run that is meant to cover CUDA or HIP

@@ -49,7 +49,6 @@ let nonzero name (a : float array) =
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
 
 module Generated = Test_utils.Generated
@@ -300,7 +299,7 @@ let () =
        let mentions s = String.is_substring msg ~substring:s in
        if mentions "failed to compile" && (mentions "_Float16" || mentions "HALF_T") then (
          Stdio.eprintf "pure-f16 leg unavailable, toolchain rejected the half kernel (%s)\n%!" msg;
-         skipped parity_name;
-         skipped structure_name)
+         Verdict.skipped ~aggregation:`Environment ~backend:backend_name parity_name;
+         Verdict.skipped ~aggregation:`Environment ~backend:backend_name structure_name)
        else raise e);
   Numerics.set_policy saved_policy

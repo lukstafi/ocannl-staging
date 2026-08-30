@@ -7,7 +7,21 @@
 
 set -euo pipefail
 
+# Most assertions below are deliberately quiet shell predicates. If one fails
+# under errexit, name the exact site before cleanup removes its evidence; the
+# expected-error controls temporarily disable errexit and therefore stay quiet.
+on_error() {
+  local rc=$1 line=$2 command=$3
+  case $- in
+    *e*) printf 'sweep_harness: line %s failed (exit %s): %s\n' "$line" "$rc" "$command" >&2 ;;
+  esac
+  return "$rc"
+}
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 sweep=$1
+aggregate=$2
+verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-sweep-test.XXXXXX")
 holder_pid=
 wait_prefix=
@@ -41,9 +55,17 @@ git -C "$main" push -q -u origin master
 cat >"$fake_bin/opam" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$SWEEP_TEST_CALLS"
-# Stands in for what a failing dune run writes to the unit's log, so a test can
-# put a chosen failure text in front of `fingerprint` without a GPU.
+# Stands in for what a test run writes to the unit's log. The common output
+# drives failure-fingerprint coverage; the per-backend outputs let the skip
+# aggregation controls distinguish an intersection from a union without GPUs.
 [ -n "${SWEEP_TEST_OPAM_OUT:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT"
+case ${OCANNL_BACKEND:-} in
+  cc) [ -n "${SWEEP_TEST_OPAM_OUT_CC:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT_CC" ;;
+  multidev_cc)
+    [ -n "${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" ] &&
+      printf '%s\n' "$SWEEP_TEST_OPAM_OUT_MULTIDEV_CC"
+    ;;
+esac
 if [ -n "${SWEEP_TEST_WAIT_PREFIX:-}" ]; then
   : >"$SWEEP_TEST_WAIT_PREFIX.ready"
   waited=0
@@ -62,18 +84,24 @@ chmod +x "$fake_bin/opam"
 printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n' >"$state/history.tsv"
 printf '20260820T000000Z\tlocal\tcc\tdeadbee\tpass\t1\t<all>\t0\t-\n' >>"$state/history.tsv"
 
-run_sweep_backend() {
-  local backend=$1
-  shift
+run_sweep_args() {
   HOME=$tmp/home \
   PATH=$fake_bin:$PATH \
   SWEEP_TEST_CALLS=$calls \
   SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-} \
   SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0} \
   SWEEP_TEST_OPAM_OUT=${SWEEP_TEST_OPAM_OUT:-} \
+  SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-} \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-} \
   OCANNL_TOOL_SWEEP_REPO=$main \
   OCANNL_TOOL_SWEEP_STATE=$state \
-    "$sweep" --only "$backend" "$@"
+    "$sweep" "$@"
+}
+
+run_sweep_backend() {
+  local backend=$1
+  shift
+  run_sweep_args --only "$backend" "$@"
 }
 
 run_sweep() { run_sweep_backend cc "$@"; }
@@ -101,6 +129,124 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 [ "$(sed -n '4p' "$calls")" = 'exec -- dune clean' ]
 [ "$(sed -n '5p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '6p' "$calls")" = 'exec -- dune build --force @slow' ]
+
+# Two complete forced units expose only the INTERSECTION of their skip sets.
+# The three absent backends keep this a potential finding rather than a failure:
+# one of them may have evaluated the common claim. A per-backend-only marker
+# must not leak into the report merely because it occurred somewhere. A skip
+# whose gate belongs to the environment occurs in both logs too, but its
+# explicit scope keeps it out of this backend-coverage question.
+common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcommon unevaluated claim'
+cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
+multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
+environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_TOOL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
+coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
+$cc_only
+$environment" \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
+$multidev_only
+$environment" \
+  run_sweep_args --force --only cc --only multidev_cc)
+coverage_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$coverage" | tail -1)
+[ -f "$coverage_report" ]
+grep -q '^status: partial (2 of 5 known backends completed)$' "$coverage_report"
+grep -q '^missing backends: metal, cuda, hip$' "$coverage_report"
+grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common unevaluated claim$' \
+  "$coverage_report"
+! grep -q 'cc-only unevaluated claim' "$coverage_report"
+! grep -q 'multidev-only unevaluated claim' "$coverage_report"
+! grep -q 'environment-gated claim' "$coverage_report"
+
+# The pure aggregator's complete-backend control is the escalation seam the
+# real sweep reaches only when both remote GPU boxes and all local units pass.
+# All five logs sharing a claim is exit 1 and a FAIL line; removing it from one
+# log proves the same complete census passes rather than treating a union as an
+# intersection.
+aggregate_args=()
+for backend in cc multidev_cc metal cuda hip; do
+  log=$tmp/$backend.log
+  "$verdict_probe" "$backend" >"$log" 2>&1
+  aggregate_args+=(--known "$backend")
+  aggregate_args+=(--run "$backend" "$log")
+done
+set +e
+complete_fail=$("$aggregate" "${aggregate_args[@]}" 2>&1)
+complete_fail_rc=$?
+set -e
+[ "$complete_fail_rc" -eq 1 ]
+grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
+grep -q '^FAIL: skipped on every known backend: verdict_skip_probe.exe: common unevaluated claim$' \
+  <<<"$complete_fail"
+! grep -q 'common environment-gated claim' <<<"$complete_fail"
+
+printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
+complete_pass=$("$aggregate" "${aggregate_args[@]}")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$complete_pass"
+
+# Equal human labels in two DIFFERENT executables are different test legs. Copy
+# the real probe under another basename so this control reaches the production
+# identity emission rather than restating its record format in the fixture.
+other_probe=$tmp/other_skip_probe.exe
+cp "$verdict_probe" "$other_probe"
+"$verdict_probe" cc >"$tmp/identity-cc.log" 2>&1
+"$other_probe" metal >"$tmp/identity-metal.log" 2>&1
+identity_clear=$("$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$identity_clear"
+
+# Zero successful units is routine when every selected backend is unavailable
+# or red. This runs under macOS's stock Bash 3.2 in the local suite and pins the
+# nounset-safe branch before any empty-array expansion.
+empty=$("$aggregate" --known cc --known metal)
+grep -q '^completed backends: <none>$' <<<"$empty"
+grep -q '^result: NOT AGGREGATED$' <<<"$empty"
+
+# Evidence-processing errors are harness failures (exit 2), never an empty set
+# that can read as CLEAR/PASS. Fault-inject sort, the last command of the
+# extraction pipeline, so pipefail must reach the explicit error conversion.
+fail_bin=$tmp/fail-bin
+mkdir -p "$fail_bin"
+cat >"$fail_bin/sort" <<'EOF'
+#!/bin/sh
+exit 7
+EOF
+chmod +x "$fail_bin/sort"
+set +e
+extract_error=$(PATH=$fail_bin:$PATH "$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+extract_error_rc=$?
+set -e
+[ "$extract_error_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot extract compatible skip records from ' <<<"$extract_error"
+
+# A supported `sweep.sh --ref` may target a commit from before Verdict emitted
+# machine records. Its legacy human line is evidence of a skip, not evidence of
+# execution; a human/machine count mismatch must make the whole log incompatible.
+printf 'SKIPPED on cc (vacuous): common unevaluated claim\n' >"$tmp/legacy-cc.log"
+set +e
+legacy_error=$("$aggregate" \
+  --known cc --known metal \
+  --run cc "$tmp/legacy-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+legacy_error_rc=$?
+set -e
+[ "$legacy_error_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot extract compatible skip records from ' <<<"$legacy_error"
+
+# A successful analysis whose destination stops accepting bytes is still a
+# harness failure. A read-only descriptor makes the first report write fail
+# deterministically without relying on a device Dune's sandbox may deny; the
+# explicit success exit below it must not erase that error.
+: >"$tmp/read-only-report"
+exec 8<"$tmp/read-only-report"
+set +e
+"$aggregate" "${aggregate_args[@]}" >&8 2>"$tmp/report-write.err"
+report_write_rc=$?
+set -e
+exec 8<&-
+[ "$report_write_rc" -eq 2 ]
+grep -q '^aggregate-skips: cannot write report$' "$tmp/report-write.err"
 
 # Hold one run after it owns the worktree lock, then replace its history with
 # the old schema. A competing launch must refuse at the lock without migrating
@@ -181,4 +327,4 @@ metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" |
 [ -f "$metal_pass_log" ]
 ! grep -q 'rtc-context' "$metal_pass_log"
 
-printf 'sweep execution accounting and RTC context: PASS\n'
+printf 'sweep execution accounting, RTC context and skip aggregation: PASS\n'
