@@ -576,6 +576,12 @@ files.
   routine slower than 10 ms per launch is measured identically in both modes by construction —
   `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
   counts its own launches, that the reading is per launch rather than per batch.
+  Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall,
+  and every calibration and timed window has a 16-sample floor: a host stall can no longer spend
+  the whole budget and collapse a min-of-N to three samples. `Autotune.timing_result` also marks a
+  window contended when at least half its samples exceed its minimum by 8x. A queued calibration
+  carrying that mark yields no depth, and the search neither ranks nor caches a contended timing;
+  falling back to depth 1 would silently change the queued objective back into the isolated one.
   **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
   `Keyed "timing"`), which is the one place this differs from its `autotune_*` neighbours: those
   change how carefully the SAME quantity is measured, so either process's winner answers the

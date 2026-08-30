@@ -579,12 +579,13 @@ let () =
           let lv = arr.(ord.(i)) in
           let sample slot timing =
             attempt lv (fun () ->
-                let ms =
+                let timing_result =
                   Autotune.time_routine ~tag_failures:true ~timing ~repeats:tuner_repeats
                     !(lv.lv_ctx) lv.lv_routine
                 in
-                let dt = ms /. 1000. in
-                if Float.(dt < !slot) then slot := dt)
+                if not timing_result.Autotune.contended then
+                  let dt = timing_result.ms /. 1000. in
+                  if Float.(dt < !slot) then slot := dt)
           in
           sample lv.lv_iso Autotune.Isolated;
           sample lv.lv_queued Autotune.Queued

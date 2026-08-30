@@ -50,6 +50,12 @@ type outcome =
    by. *)
 type timing_mode = Isolated | Queued
 
+(* A timing can produce a numeric minimum and still fail to establish that the minimum is
+   representative: under host contention most samples can be orders of magnitude above the one clean
+   sample the min-of-N eventually finds. Keep that fact beside the number so calibration and ranking
+   cannot silently consume it as an ordinary measurement (gh-ocannl-855). *)
+type timing_result = { ms : float; contended : bool; samples : int }
+
 let timing_string = function Isolated -> "isolated" | Queued -> "queued"
 
 let timing_of_setting s =
@@ -248,36 +254,60 @@ let set_test_bindings routine =
       | Some range when range > 0 -> r := range / 2
       | _ -> ())
 
-(* Fast routines get extra timed runs beyond [repeats], until this much total measured time (or
-   [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and the
-   winner selection becomes a lottery — a heavier candidate can be crowned by one lucky sample while
-   the true winner's few samples all landed under contention. Noise only ever adds time, so min-of-N
-   converges monotonically to the true best case and more samples strictly reduce mis-selection; for
-   routines slower than [min_timing_ms / repeats] per run nothing changes. *)
+(* Fast routines get extra timed runs beyond [repeats], until this much accumulated PER-SAMPLE time
+   (or [max_timing_runs]); every routine gets [min_timing_samples]. On sub-millisecond kernels a
+   min-of-3 is dominated by launch jitter, and under contention a wall budget used to stop after the
+   three worst samples because each host stall spent the whole budget. Noise only ever adds time, so
+   min-of-N converges monotonically to the true best case and more samples reduce mis-selection. *)
 let min_timing_ms = 25.
+let min_timing_samples = 16
 let max_timing_runs = 64
+
+(* This is a refusal threshold, not an estimate of ordinary jitter. One slow outlier says nothing
+   about the minimum; a MAJORITY this far above it says the sample window was mostly measuring host
+   stalls. The 8x gap is deliberately far below the 200-350x failure that prompted gh-ocannl-855 and
+   far above the small spread a steady sample population presents. *)
+let contention_ratio = 8.
+
+(* The policy seam shared by calibration and the timed loop. [sample] returns one per-launch time:
+   isolated mode's batch has depth 1, while queued mode divides the batch wall by its depth before
+   it gets here. The budget therefore accumulates the quantity being sampled, not batch wall time; a
+   deep queue and a host stall cannot spend the budget on 200 launches at once. The sample floor
+   keeps a burst from ending the min-of-N after the caller's usual three repeats. *)
+let sample_min ~repeats ~sample =
+  let samples = ref [] in
+  let total = ref 0. in
+  let count = ref 0 in
+  while
+    !count < Int.max min_timing_samples (Int.max 1 repeats)
+    || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
+  do
+    let dt = sample () in
+    samples := dt :: !samples;
+    total := !total +. dt;
+    Int.incr count
+  done;
+  let ms = List.fold !samples ~init:Float.infinity ~f:Float.min in
+  let stalled = List.count !samples ~f:(fun dt -> Float.(dt > ms * contention_ratio)) in
+  { ms; contended = stalled * 2 >= !count; samples = !count }
 
 (* Queued mode's batch depth is calibrated per candidate rather than fixed. A fixed depth is either
    too shallow to amortize the round trip on a fast kernel, or minutes of uninterruptible dispatches
    on a slow one — and the tuner meets both within one search. [queued_batch_ms] is the wall time
    one batch aims for: at a ~60 us round trip it keeps the overhead under 1% of the reading, and it
-   puts a queued candidate under the SAME wall-time ceiling as an isolated one, since
-   [min_timing_ms] bounds the accumulated wall in both modes. Not the same wall time: a candidate
-   fast enough that [max_timing_runs] single launches finish well inside the budget gets timed for
-   about 6 ms isolated and about 30 ms queued, so a search over microsecond kernels spends a few
-   milliseconds more per candidate -- immaterial beside the compile each candidate already costs,
-   and it buys a measurement that is not half host round trip. [max_queue_depth] stops a microsecond
-   kernel from minting an unbounded batch. A routine slower than the target gets depth 1 and is then
-   measured exactly as [Isolated] measures it, which is the right degeneracy: there is nothing left
-   to amortize. *)
+   makes each sample long enough to amortize the host round trip. The sampling budget is per-launch,
+   not batch wall (gh-ocannl-855), so [max_timing_runs] rather than [min_timing_ms] bounds the wall
+   cost of queued timing. [max_queue_depth] stops a microsecond kernel from minting an unbounded
+   batch. A genuinely slow routine gets depth 1 and is then measured exactly as [Isolated] measures
+   it; a stall-inflated calibration is refused instead of taking that same path silently. *)
 let queued_batch_ms = 10.
 let max_queue_depth = 200
 
 (* The depth is calibrated from timed single launches, not from the warmup: the warmup absorbs lazy
    initialization and module loading, so on a fast kernel it can overestimate by enough to collapse
-   the depth to 1 and silently turn a queued search into an isolated one. Min over a handful, for
-   the same reason the measurement itself is a min — an overestimate only shortens the batch, but a
-   badly overestimating single sample shortens it a lot. *)
+   the depth to 1 and silently turn a queued search into an isolated one. The shared sampling policy
+   supplies the 16-sample floor; [queue_calibration_runs] remains the caller's ordinary repeat floor
+   and documents that calibration asks the same min-of-N question as the measurement. *)
 let queue_calibration_runs = 3
 
 (* The calibration policy itself, as a function of the estimate, so a test can pin it without a
@@ -291,12 +321,16 @@ let queue_calibration_runs = 3
    is applied to the FLOAT, before the conversion: [Float.iround_up_exn] raises on a value outside
    the integer range, and an estimate of a few times [Float.min_positive_subnormal_value] produces
    exactly such a value — the clamp has to happen while the quantity can still hold it. *)
-let queued_batch_depth ~est_ms =
-  if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
+let queued_batch_depth estimate =
+  if estimate.contended then None
   else
-    let want = queued_batch_ms /. est_ms in
-    if Float.(want >= of_int max_queue_depth) then max_queue_depth
-    else Int.max 1 (Float.iround_up_exn want)
+    let est_ms = estimate.ms in
+    Some
+      (if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
+       else
+         let want = queued_batch_ms /. est_ms in
+         if Float.(want >= of_int max_queue_depth) then max_queue_depth
+         else Int.max 1 (Float.iround_up_exn want))
 
 (* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
    rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
@@ -306,12 +340,14 @@ let queued_batch_depth ~est_ms =
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
 (* Observation seam for the timing tests (gh-ocannl-851), reporting the batch depth each
-   [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] always
-   reports 1. The negative control for a twice-divided queued reading needs the depth the call
-   ACTUALLY used: the call recalibrates independently, so re-applying the policy to an estimate
-   taken outside it guesses wrong exactly on the busy runners the control must survive. Default
-   no-op, no config key selects it. *)
-let on_batch_depth : (int -> unit) ref = ref (fun _depth -> ())
+   [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] reports 1
+   and a contended calibration reports [None]. The negative control for a twice-divided queued
+   reading needs the depth the call ACTUALLY used: the call recalibrates independently, so
+   re-applying the policy to an estimate taken outside it guesses wrong exactly on the busy runners
+   the control must survive. The calibration sample count accompanies it because that loop now has
+   the same variable top-up as timing. Default no-op, no config key selects it. *)
+let on_batch_depth : (int option -> calibration_samples:int -> unit) ref =
+  ref (fun _depth ~calibration_samples:_ -> ())
 
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
@@ -354,35 +390,18 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
         sync !ctx;
         Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6
       in
-      let depth =
+      let calibration, depth =
         match timing with
-        | Isolated -> 1
+        | Isolated -> (None, Some 1)
         | Queued ->
-            let est = ref Float.infinity in
-            for _ = 1 to queue_calibration_runs do
-              let dt = batch 1 in
-              if Float.(dt < !est) then est := dt
-            done;
-            queued_batch_depth ~est_ms:!est
+            let estimate = sample_min ~repeats:queue_calibration_runs ~sample:(fun () -> batch 1) in
+            (Some estimate, queued_batch_depth estimate)
       in
-      !on_batch_depth depth;
-      let best = ref Float.infinity in
-      let total = ref 0. in
-      let count = ref 0 in
-      while
-        !count < max 1 repeats || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
-      do
-        (* [total] accumulates WALL time in both modes, so the top-up bounds how long timing a
-           candidate takes rather than how many launches it makes; [best] minimizes the PER-LAUNCH
-           time, which is the number the two modes disagree about. At [depth = 1] the two are the
-           same quantity and this loop is byte-for-byte the pre-gh-755 one. *)
-        let wall = batch depth in
-        total := !total +. wall;
-        Int.incr count;
-        let dt = wall /. Float.of_int depth in
-        if Float.(dt < !best) then best := dt
-      done;
-      !best)
+      !on_batch_depth depth
+        ~calibration_samples:(Option.value_map calibration ~default:0 ~f:(fun r -> r.samples));
+      match depth with
+      | None -> Option.value_exn calibration
+      | Some depth -> sample_min ~repeats ~sample:(fun () -> batch depth /. Float.of_int depth))
 
 (* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
    a single work-item — every nest a serial scalar loop, at one lane's throughput. Such a candidate
@@ -3057,7 +3076,10 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     Context.check_lineage_runnable b.cctx b.routine);
                 time_routine ~tag_failures:true ~timing ~repeats b.cctx b.routine
               with
-              | ms -> ms
+              | { ms; contended = false; _ } -> ms
+              | { contended = true; _ } ->
+                  logf "baseline timing refused: host contention dominated the sample window";
+                  Float.infinity
               | exception Outcome.Raised_at (phase, exn, backtrace) ->
                   condemn phase exn;
                   emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
@@ -3076,15 +3098,17 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                   Stdlib.Printexc.raise_with_backtrace exn backtrace)
           | _ -> Float.infinity
         in
+        let baseline_timed = baseline_dispatched && Float.is_finite baseline_ms in
         (match baseline_decline with
         | Some classified ->
             logf "baseline: DECLINED at %s %s" (phase_label classified.phase)
               (Outcome.detail_of_cause classified.cause)
         | None ->
-            if baseline_dispatched then (
+            if baseline_timed then (
               logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
               emit_calibration ~backend ~device ~limits ~routine:(Lazy.force routine_name)
                 ~label:"baseline" ~digest:base_digest ~measured_ms:baseline_ms [ base_opt ])
+            else if baseline_dispatched then release_baseline ()
             else (
               (* No calibration row: the model column is only meaningful next to a measurement. *)
               logf
@@ -3095,7 +3119,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                 ~detail:
                   (Printf.sprintf
                      "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)" backend)));
-        let n_timed = ref (if baseline_dispatched then 1 else 0) in
+        let n_timed = ref (if baseline_timed then 1 else 0) in
         (* Live search state for an honest partial report. Each counter starts at the amount of work
            completed so far and is updated at its ordinary accounting site below. [best_so_far] is
            updated after every successful timing, including midway through seed enumeration. *)
@@ -3105,7 +3129,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
            picked from the beam pool (and the beam's own expansions time through the same site), so
            the timing site is the one place every timed candidate passes exactly once. *)
         let label_by_digest = Hashtbl.create (module String) in
-        if baseline_dispatched then Hashtbl.set label_by_digest ~key:base_digest ~data:"baseline";
+        if baseline_timed then Hashtbl.set label_by_digest ~key:base_digest ~data:"baseline";
         let mma_best_ms = ref Float.infinity in
         let winner_label best_c =
           Option.value_map best_c ~default:"" ~f:(fun c ->
@@ -3135,7 +3159,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
         and n_epilogue_sketch_candidates = ref 0
         and n_fiss_sketch_candidates = ref 0
         and n_split_reduce_candidates = ref 0 in
-        let best_so_far = ref (baseline, baseline_ms) in
+        let best_so_far = ref ((if baseline_timed then baseline else None), baseline_ms) in
         let by_time (_, a) (_, b) = Float.compare a b in
         (* gh-ocannl-550: the search's live artifacts are bounded by [beam_width], not by candidates
            processed. [beam] IS the candidate pool — it holds the fastest [beam_width] entries seen
@@ -3155,7 +3179,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
            candidates, its winner replay and its fallback compile against a full device. The tune
            loop is the one place that needs no allocator to fix that: it knows each candidate's
            exact lifetime — timed, then dead unless it is a beam survivor. *)
-        let beam = ref (Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))) in
+        let beam =
+          ref
+            (Option.to_list
+               (Option.map
+                  (if baseline_timed then baseline else None)
+                  ~f:(fun b -> (b, baseline_ms))))
+        in
         (* The beam-expansion round's own bounded accumulator, hoisted to this scope for one reason:
            the exit sweep has to be able to see it. A fatal launch/sync failure part way through a
            round used to abandon up to [beam_width] already-timed survivors that were in neither
@@ -3227,8 +3257,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
         let auto_sched = Sched.automatic_schedule_active ~backend_name:backend in
         let config_seed_is_default = auto_sched && Sched.default_pipeline_fissions () in
         let timed_ms_by_digest = Hashtbl.create (module String) in
-        if baseline_dispatched then
-          Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
+        if baseline_timed then Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
         let default_seed_digest = ref (if auto_sched then None else Some base_digest) in
         let default_ms () = Option.bind !default_seed_digest ~f:(Hashtbl.find timed_ms_by_digest) in
         let partial_emitted = ref false in
@@ -3406,7 +3435,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                         ~candidate:(spec_label spec) (fun () ->
                           time_routine ~tag_failures:true ~timing ~repeats c.cctx c.routine)
                     with
-                    | Ok ms ->
+                    | Ok { contended = true; _ } ->
+                        logf
+                          "%s: NOT TIMED, host contention dominated the sample window (digest %s)"
+                          (spec_label spec) (dshort c.digest_after);
+                        release_candidate c;
+                        None
+                    | Ok { ms; contended = false; _ } ->
                         Int.incr n_timed;
                         Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
                         Hashtbl.set label_by_digest ~key:c.digest_after ~data:(spec_label spec);
@@ -3906,7 +3941,10 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
              match Context.compile ?name search_ctx comp bindings with
              | cctx, croutine ->
                  (match time_routine ~timing ~repeats cctx croutine with
-                 | ms -> logf "untuned-default in-process control: %.4f ms" ms
+                 | { ms; contended = false; _ } ->
+                     logf "untuned-default in-process control: %.4f ms" ms
+                 | { contended = true; _ } ->
+                     logf "untuned-default in-process control: refused (host contention)"
                  | exception exn ->
                      logf "untuned-default control run failed: %s" (Exn.to_string exn));
                  (* A diagnostic's artifacts are dead the moment it has printed its number
