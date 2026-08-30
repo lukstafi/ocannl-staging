@@ -1951,7 +1951,9 @@
  (deps
   (alias runtest-env_spelling_gate))
  (action
-  (diff backend_golden_family_scan.expected backend_golden_family_scan.actual)))
+  (diff
+   backend_golden_family_scan.expected
+   backend_golden_family_scan.actual)))
 
 (executable
  (name config_dep_completeness)
