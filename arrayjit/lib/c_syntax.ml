@@ -309,9 +309,9 @@ let with_peel_census f =
    routine have, and did any of them escape the workaround" — and that second question is the one a
    residency or performance investigation asks.
 
-   Collected where each decision is made ([scope_decl_type] for the localized form, [pp_ll]'s [Set]
-   case for the read-modify-write form) and bracketed by {!with_volatility_census}, which
-   {!Context.compile} calls around every routine's codegen, so the summary is a field of the
+   Collected where each decision is made ([pp_scalar]'s [Local_scope] arm for the localized form,
+   [pp_ll]'s [Set] case for the read-modify-write form) and bracketed by {!with_volatility_census},
+   which {!Context.compile} calls around every routine's codegen, so the summary is a field of the
    compiled routine.
 
    The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
@@ -327,8 +327,9 @@ type volatility_site =
           pointer casts on any device reads in its accumulating loop, by the local's emitted
           identifier: the localized accumulation form (gh-ocannl-731, gh-ocannl-820). *)
   | Plain_accumulator of string
-      (** A reduction-shaped scope local whose reads stay plain — this backend does not request the
-          workaround. The accumulator itself stays register-resident in both cases. *)
+      (** A reduction-shaped scope local whose reads stay plain — either this backend does not
+          request the workaround, or no materialized device read was emitted in its accumulating
+          update. The accumulator itself stays register-resident in both cases. *)
   | Volatile_rmw_reads of string
       (** A device-memory read-modify-write at an address invariant across an enclosing serial loop,
           whose device reads use expression-level [volatile] pointer casts. *)
@@ -2088,16 +2089,7 @@ module C_syntax (B : C_syntax_config) = struct
      accumulation left plain because the backend asks for nothing is exactly what a residency
      investigation wants to see, and the classification it needs was computed for the precision
      decision anyway. *)
-  let scope_decl_type (id : Low_level.scope_id) =
-    let is_accum = Hash_set.mem accum_scope_ids id.scope_id in
-    let protected = B.volatile_serial_accumulation && is_accum in
-    if is_accum && !volatility_census_enabled then
-      volatility_census :=
-        ( !current_kernel_name,
-          if protected then Volatile_accumulation_reads (scope_local_ident id)
-          else Plain_accumulator (scope_local_ident id) )
-        :: !volatility_census;
-    B.typ_of_prec (scope_prec_of id)
+  let scope_decl_type (id : Low_level.scope_id) = B.typ_of_prec (scope_prec_of id)
 
   let wrap_conversion (pre, post) doc =
     let open PPrint in
@@ -2117,20 +2109,42 @@ module C_syntax (B : C_syntax_config) = struct
      accumulation workaround. Bracketed narrowly by the two recognized accumulating-statement arms
      below; in particular the opening read of a localized accumulator is outside it. *)
   let volatile_accumulation_reads = ref false
+  let volatile_accumulation_scope_stack : int list ref = ref []
+  let volatile_read_observers : bool ref list ref = ref []
+  let volatile_accumulation_scopes = Hash_set.create (module Int)
 
-  let with_volatile_accumulation_reads enabled f =
+  let with_volatile_accumulation_reads ?scope_id enabled f =
     let saved = !volatile_accumulation_reads in
+    let saved_scopes = !volatile_accumulation_scope_stack in
+    let saved_observers = !volatile_read_observers in
+    let emitted = ref false in
     volatile_accumulation_reads := saved || enabled;
-    Exn.protect ~f ~finally:(fun () -> volatile_accumulation_reads := saved)
+    if enabled then begin
+      Option.iter scope_id ~f:(fun id -> volatile_accumulation_scope_stack := id :: saved_scopes);
+      volatile_read_observers := emitted :: saved_observers
+    end;
+    let restore () =
+      volatile_accumulation_reads := saved;
+      volatile_accumulation_scope_stack := saved_scopes;
+      volatile_read_observers := saved_observers
+    in
+    let result = Exn.protect ~f ~finally:restore in
+    (result, !emitted)
+
+  let record_volatile_read () =
+    List.iter !volatile_read_observers ~f:(fun seen -> seen := true);
+    List.iter !volatile_accumulation_scope_stack ~f:(Hash_set.add volatile_accumulation_scopes)
 
   let pp_device_read_ptr tn ident_doc =
     let open PPrint in
     if !volatile_accumulation_reads && Tn.Placements.is_materialized_force (placements ()) tn 820
-    then
+    then begin
+      record_volatile_read ();
       let typ =
         "(" ^ B.buffer_prefix ^ "volatile " ^ B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ "*)"
       in
       parens (string typ ^^ ident_doc)
+    end
     else ident_doc
 
   let in_ctx tn = Tn.Placements.is_in_context_force (placements ()) tn 46
@@ -4964,7 +4978,7 @@ module C_syntax (B : C_syntax_config) = struct
         | Some doc -> doc
         | None ->
             let prec, narrowing = store_precs ~store_prec llsc in
-            let local_defs, val_doc =
+            let (local_defs, val_doc), volatile_read_emitted =
               with_volatile_accumulation_reads rmw_volatile_reads (fun () -> pp_scalar prec llsc)
             in
             let val_doc = wrap_conversion narrowing val_doc in
@@ -4976,7 +4990,7 @@ module C_syntax (B : C_syntax_config) = struct
                the accumulator arm, its predicate is not evaluated at all on a backend that requests
                nothing — the capability short-circuits it — so there is no decision there to report,
                and [volatility_summary.requested] is what says so. *)
-            if rmw_volatile_reads && !volatility_census_enabled then
+            if volatile_read_emitted && !volatility_census_enabled then
               volatility_census :=
                 (!current_kernel_name, Volatile_rmw_reads (get_ident tn)) :: !volatility_census;
             let assignment =
@@ -5256,8 +5270,9 @@ module C_syntax (B : C_syntax_config) = struct
           && (not (List.is_empty !serial_loop_stack))
           && Option.is_some (Low_level.accum_local_update_op ~id value)
         in
-        let local_defs, value_doc =
-          with_volatile_accumulation_reads volatile_reads (fun () -> pp_scalar value_prec value)
+        let (local_defs, value_doc), _ =
+          with_volatile_accumulation_reads ~scope_id:id.Low_level.scope_id volatile_reads (fun () ->
+              pp_scalar value_prec value)
         in
         let value_doc =
           wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc
@@ -5864,6 +5879,13 @@ module C_syntax (B : C_syntax_config) = struct
            body so a [Zero_out] reached through it is never mistaken for the function-scope
            first-touch that the declaration's [= {0}] covers. *)
         let body_doc = pp_ll ~log_set_locals:false ~in_loop:true body in
+        if Hash_set.mem accum_scope_ids id.scope_id && !volatility_census_enabled then
+          volatility_census :=
+            ( !current_kernel_name,
+              if Hash_set.mem volatile_accumulation_scopes id.scope_id then
+                Volatile_accumulation_reads (scope_local_ident id)
+              else Plain_accumulator (scope_local_ident id) )
+            :: !volatility_census;
         let def_doc = decl ^^ hardline ^^ body_doc in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
@@ -5880,10 +5902,12 @@ module C_syntax (B : C_syntax_config) = struct
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
         let ptr_doc =
-          if !volatile_accumulation_reads then
+          if !volatile_accumulation_reads then begin
+            record_volatile_read ();
             parens
               (string
                  ("(" ^ B.buffer_prefix ^ "volatile " ^ B.typ_of_prec from_prec ^ "*)merge_buffer"))
+          end
           else string "merge_buffer"
         in
         let expr = string prefix ^^ ptr_doc ^^ brackets offset_doc ^^ string postfix in
@@ -6230,6 +6254,10 @@ module C_syntax (B : C_syntax_config) = struct
        backend ran it. Set here, where the backend is the functor's own. *)
     volatility_requested := B.volatile_serial_accumulation;
     current_placements := Some optimize_ctx.Low_level.placements;
+    volatile_accumulation_reads := false;
+    volatile_accumulation_scope_stack := [];
+    volatile_read_observers := [];
+    Hash_set.clear volatile_accumulation_scopes;
     (* gh-ocannl-584: scope purity, the pipeline's EXIT gate ([Low_level.optimize_proc] is the entry
        one) — this catches what a schedule transform constructs, which the entry gate cannot see.
        Checked ahead of the schedule validation and NOT transported as an [Illegal_schedule]: an

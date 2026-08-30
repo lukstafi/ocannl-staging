@@ -56,9 +56,16 @@ let%op total = x ++ "ij => 0"
 (* Leg 2: reduction over the row axis only — the batch-gradient / contraction shape. *)
 let%op per_col = x ++ "ij => j"
 
+(* Leg 3: an index-only scalar reduction. Its localized update has no materialized device read, so
+   even Metal selects no expression to cast. This is the negative control for the census: requested
+   capability is not the same as an emitted workaround site (Codex P2, review round 1 on #553). *)
+let indices = TDSL.range_of_shape ~batch_dims:[] ~input_dims:[] ~output_dims:[ rows; cols ] ()
+let%op index_total = indices ++ "ij => 0"
+
 let () =
   Train.set_materialized total.Tensor.value;
   Train.set_materialized per_col.Tensor.value;
+  Train.set_materialized index_total.Tensor.value;
   let ctx = Context.auto () in
   let ctx, r_total =
     Context.compile ~name:"res_total" ctx (Train.forward total) Ir.Indexing.Empty
@@ -68,8 +75,13 @@ let () =
     Context.compile ~name:"res_per_col" ctx (Train.forward per_col) Ir.Indexing.Empty
   in
   let ctx = Context.run ctx r_per_col in
+  let ctx, r_index_total =
+    Context.compile ~name:"res_index_total" ctx (Train.forward index_total) Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx r_index_total in
   let got_total = (Context.get_values ctx total.Tensor.value).(0) in
   let got_per_col = Context.get_values ctx per_col.Tensor.value in
+  let got_index_total = (Context.get_values ctx index_total.Tensor.value).(0) in
 
   (* Host reference, same summation order as the emitted nest. *)
   let ref_total =
@@ -93,6 +105,9 @@ let () =
   Verdict.p "row reduction matches host reference"
     (Array.length got_per_col = cols
     && Array.for_all2_exn got_per_col ref_per_col ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  let ref_index_total = Float.of_int (rows * cols * ((rows * cols) - 1) / 2) in
+  Verdict.p "index-only reduction matches host reference"
+    Float.(abs (got_index_total - ref_index_total) < 1e-3);
 
   (* The reference must be able to tell a dropped-iteration kernel apart from a correct one: with
      [rows * cols] terms all distinct and nonzero, a last-iteration-only result is far away. *)
@@ -211,12 +226,16 @@ let () =
         Verdict.p_all
           (label ^ ": the accumulating loop's volatile-read form is the one the census reports")
           accumulations ~f:(fun (_, volatile_reads) ->
-            Bool.equal volatile_reads v.Ir.C_syntax.requested
+            let update_reads_device =
+              List.exists accumulation_updates ~f:(fun st -> String.is_substring st ~substring:"[")
+            in
+            Bool.equal volatile_reads (v.Ir.C_syntax.requested && update_reads_device)
             && (not (List.is_empty accumulation_updates))
             && List.for_all accumulation_updates ~f:(fun st ->
+                let reads_device = String.is_substring st ~substring:"[" in
                 Bool.equal
                   (String.is_substring st ~substring:"device volatile float*")
-                  volatile_reads));
+                  (v.Ir.C_syntax.requested && reads_device)));
         Verdict.p
           (label ^ ": the opening read stays plain")
           (not (String.is_substring opening ~substring:"volatile"));
@@ -229,7 +248,11 @@ let () =
           && not (String.is_substring source ~substring:"__rmw_"))
   in
   check_localized r_total "res_total" "scalar reduction";
-  check_localized r_per_col "res_per_col" "row reduction"
+  check_localized r_per_col "res_per_col" "row reduction";
+  check_localized r_index_total "res_index_total" "index-only reduction";
+  Verdict.p "index-only accumulation is censused plain because it emits no device read"
+    (r_index_total.Context.volatility.Ir.C_syntax.volatile_accumulations = 0
+    && r_index_total.Context.volatility.Ir.C_syntax.plain_accumulations = 1)
 
 (* {1 The volatility census's own bracket}
 

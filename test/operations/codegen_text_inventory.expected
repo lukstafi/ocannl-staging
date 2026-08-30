@@ -183,6 +183,7 @@ test/operations/narrow_storage_compute.ml
     "vector_size"
 test/operations/reduction_accumulator_residency.ml [also pins text this scan cannot name]
     " = "
+    "["
     "] = " ^ ...
     "__rmw_"
     "device volatile float*"

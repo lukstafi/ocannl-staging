@@ -1,5 +1,6 @@
 scalar reduction matches host reference: true
 row reduction matches host reference: true
+index-only reduction matches host reference: true
 reference discriminates a last-iteration-only result: true
 scalar reduction: accumulator opens into a scope local: true
 scalar reduction: the reduction updates the local, not the node: true
@@ -19,6 +20,16 @@ row reduction: the accumulator declaration stays plain: true
 row reduction: the accumulating loop's volatile-read form is the one the census reports: true
 row reduction: the opening read stays plain: true
 row reduction: no rmw shadow declaration, by the census and by the text: true
+index-only reduction: accumulator opens into a scope local: true
+index-only reduction: the reduction updates the local, not the node: true
+index-only reduction: no statement both reads and writes the node: true
+index-only reduction: the node is stored exactly once, from the local: true
+index-only reduction: the census names the accumulator the kernel declares: true
+index-only reduction: the accumulator declaration stays plain: true
+index-only reduction: the accumulating loop's volatile-read form is the one the census reports: true
+index-only reduction: the opening read stays plain: true
+index-only reduction: no rmw shadow declaration, by the census and by the text: true
+index-only accumulation is censused plain because it emits no device read: true
 an inner bracket summarizes only its own sites: true
 the enclosing bracket sees both, in emission order: true
 an inner bracket reports the capability of the compile it bracketed: true

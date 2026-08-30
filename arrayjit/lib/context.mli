@@ -84,7 +84,7 @@ type routine = private {
   volatility : Ir.C_syntax.volatility_summary;
       (** Which of this routine's serial accumulations carry the Metal compiler-bug workaround
           (gh-ocannl-782/820), in which of its two forms, and how many stayed plain because the
-          backend did not request it.
+          backend did not request it or the accumulating update emitted no materialized device read.
 
           A field of the routine, beside {!mma} and {!peel}, because a performance question about a
           Metal reduction starts by asking how many of its accumulation reads carry the workaround,
