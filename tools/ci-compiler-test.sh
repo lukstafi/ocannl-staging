@@ -27,7 +27,9 @@
 # The real fetch is Linux/Debian-family only: it deliberately uses the
 # no-root recipe established by gh-ocannl-752, `apt-get download` followed by
 # `dpkg-deb -x` into a temporary prefix. --dry-run is portable and is the
-# supported way to inspect and validate the staging plan elsewhere.
+# supported way to inspect and validate the staging plan elsewhere. The real
+# host must be x86_64 because the fetched compiler produces executable x86_64
+# cc kernels, not merely cross-compiled assembly.
 #
 # Output is deliberately unpiped. Dune's exit status remains the verdict. The
 # compiler wrappers log every invocation, so a cached build or an alias that
@@ -162,8 +164,9 @@ echo "dune jobs:        $jobs"
 echo "test cap:         ${cap}s"
 echo "scratch:          $scratch"
 echo "host toolchain:   GCC 13 x86_64-linux-gnu (Ubuntu CI proxy)"
+echo "real host:        x86_64 Linux with Debian-family apt indexes"
 echo "test runner:      tools/test-run.sh from the resolved repository"
-echo "environment:      clear ambient OCANNL_* and generic compiler selectors"
+echo "environment:      clear OCANNL config (preserve OCANNL_TOOL_*) and compiler selectors"
 if [ "$aarch64_clang" -eq 1 ]; then
   echo "cross toolchain:  clang 21 --target=aarch64-linux-gnu"
   echo "assembly dialect: Apple NEON (-mllvm -aarch64-neon-syntax=apple)"
@@ -182,6 +185,7 @@ if [ "$dry_run" -eq 1 ]; then
     echo "ci-compiler-test: planned package download (aarch64 clang proxy):"
     print_command apt-get download "${clang_packages[@]}" "${arm64_packages[@]}"
     echo "ci-compiler-test: planned cross invocation:"
+    echo "  loader path: derived from the extracted libLLVM.so.21 multiarch directory"
     print_command "$prefix/usr/bin/clang-21" --target=aarch64-linux-gnu \
       "--sysroot=$prefix" -isystem "$prefix/usr/aarch64-linux-gnu/include" \
       -mllvm -aarch64-neon-syntax=apple
@@ -205,6 +209,8 @@ fi
 
 [ "$(uname -s)" = Linux ] ||
   die "real toolchain fetch is Linux/Debian-family only (this host is $(uname -s)); use --dry-run here"
+[ "$(uname -m)" = x86_64 ] ||
+  die "real GCC 13 execution requires an x86_64 host (this host is $(uname -m)); use --dry-run here"
 for command_name in apt-get dpkg-deb git opam sed; do
   command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
 done
@@ -262,6 +268,9 @@ clang_target=
 if [ "$aarch64_clang" -eq 1 ]; then
   clang_binary="$prefix/usr/bin/clang-21"
   [ -x "$clang_binary" ] || die "extracted clang 21 binary was not found at $clang_binary"
+  llvm_library=$(find "$prefix/usr/lib" -type f -name 'libLLVM.so.21*' -print -quit 2>/dev/null)
+  [ -n "$llvm_library" ] || die "extracted libLLVM.so.21 was not found under $prefix/usr/lib"
+  clang_library_path=$(dirname "$llvm_library")
   clang_log="$scratch/clang-aarch64-invocations.log"
   clang_wrapper="$wrapper_dir/clang-aarch64"
   clang_command=$(shell_quote "$clang_wrapper")
@@ -272,15 +281,18 @@ if [ "$aarch64_clang" -eq 1 ]; then
   quoted_clang_log=$(shell_quote "$clang_log")
   quoted_prefix=$(shell_quote "$prefix")
   quoted_cross_include=$(shell_quote "$cross_include")
+  quoted_clang_library_path=$(shell_quote "$clang_library_path")
   printf '%s\n' '#!/bin/sh' 'set -u' \
+    "export LD_LIBRARY_PATH=$quoted_clang_library_path" \
     "printf '%s\\n' \"\$*\" >>$quoted_clang_log" \
     "exec $quoted_clang --target=aarch64-linux-gnu --sysroot=$quoted_prefix -isystem $quoted_cross_include -mllvm -aarch64-neon-syntax=apple \"\$@\"" \
     >"$clang_wrapper" || die "cannot write clang wrapper"
   chmod +x "$clang_wrapper" || die "cannot make clang wrapper executable"
-  clang_version=$($clang_binary --version 2>/dev/null | sed -n '1p') ||
+  clang_version=$(LD_LIBRARY_PATH="$clang_library_path" "$clang_binary" --version 2>/dev/null | sed -n '1p') ||
     die "extracted clang cannot print its version banner"
   case $clang_version in *"clang version 21."*) ;; *) die "expected clang major 21, got: $clang_version" ;; esac
-  clang_target=$($clang_binary --target=aarch64-linux-gnu -print-target-triple 2>/dev/null) ||
+  clang_target=$(LD_LIBRARY_PATH="$clang_library_path" "$clang_binary" \
+    --target=aarch64-linux-gnu -print-target-triple 2>/dev/null) ||
     die "extracted clang cannot report its aarch64 target"
 fi
 
@@ -293,6 +305,7 @@ if [ "$aarch64_clang" -eq 1 ]; then
   echo "cross compiler binary:  $clang_binary"
   echo "cross compiler version: $clang_version"
   echo "cross compiler target:  $clang_target"
+  echo "cross compiler loader:  LD_LIBRARY_PATH=$clang_library_path"
   echo "cross compiler wrapper: $clang_wrapper"
   echo "cross compiler flags:   --target=aarch64-linux-gnu --sysroot=$prefix -isystem $cross_include -mllvm -aarch64-neon-syntax=apple"
 fi
@@ -311,8 +324,12 @@ echo "ci-compiler-test: opam switch: $opam_switch"
 # compiler flag from the caller (or injected by the selected opam switch) would
 # otherwise outrank the checked-in test configuration and falsify provenance.
 ambient_ocannl_names=()
+ambient_tool_names=()
 while IFS='=' read -r name _; do
-  case $name in OCANNL_*) ambient_ocannl_names+=("$name") ;; esac
+  case $name in
+    OCANNL_TOOL_*) ambient_tool_names+=("$name") ;;
+    OCANNL_*) ambient_ocannl_names+=("$name") ;;
+  esac
 done < <(env)
 if [ "${#ambient_ocannl_names[@]}" -gt 0 ]; then
   echo "ci-compiler-test: clearing ambient OCANNL variables:"
@@ -321,10 +338,19 @@ if [ "${#ambient_ocannl_names[@]}" -gt 0 ]; then
     unset "$name" || die "cannot clear ambient variable $name"
   done
 fi
-remaining_ocannl_names=$(env | sed -n 's/^\(OCANNL_[A-Za-z0-9_]*\)=.*/\1/p') ||
-  die "cannot verify ambient OCANNL cleanup"
-[ -z "$remaining_ocannl_names" ] ||
-  die "ambient OCANNL variables remain after cleanup: $remaining_ocannl_names"
+if [ "${#ambient_tool_names[@]}" -gt 0 ]; then
+  echo "ci-compiler-test: preserving harness-control variables:"
+  for name in "${ambient_tool_names[@]}"; do echo "  $name"; done
+fi
+remaining_ocannl_names=()
+while IFS='=' read -r name _; do
+  case $name in
+    OCANNL_TOOL_*) ;;
+    OCANNL_*) remaining_ocannl_names+=("$name") ;;
+  esac
+done < <(env)
+[ "${#remaining_ocannl_names[@]}" -eq 0 ] ||
+  die "ambient OCANNL variables remain after cleanup: ${remaining_ocannl_names[*]}"
 echo "ci-compiler-test: ambient OCANNL configuration: cleared"
 
 # These generic compiler selectors are not OCANNL settings, but can redirect

@@ -1066,14 +1066,16 @@ that they earn a lookup rather than always-loaded space.
   scratch prefix with `dpkg-deb -x`, and runs exactly one named `runtest-` alias in a fresh Dune
   build directory with `OCANNL_CC_BACKEND_COMPILER_COMMAND` pointing at a logging wrapper. A pass
   requires that wrapper to have been invoked, so an irrelevant alias or a cached action cannot be
-  certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient `OCANNL_*`
+  certified; the run goes through `tools/test-run.sh` with a configurable cap. Ambient OCANNL
   configuration and generic compiler/header selectors are cleared before the explicit settings are
-  injected. `--aarch64-clang` additionally unpacks clang 21 and arm64 cross headers and sets
+  injected, while the harness-control `OCANNL_TOOL_*` namespace is preserved. `--aarch64-clang`
+  additionally unpacks clang 21 and arm64 cross headers, derives `LD_LIBRARY_PATH` from the unpacked
+  `libLLVM.so.21`, and sets
   `AARCH64_CROSS_GCC` to a second logging wrapper using `--target=aarch64-linux-gnu` and Apple's
   NEON assembly dialect, with the Debian cross-header directory passed explicitly through
   `-isystem`; today `cc_march_census` is the test that consumes that hook. The real
-  download is deliberately Linux/Debian-family-only; `--dry-run` validates and prints the complete
-  staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
+  download is deliberately x86_64 Linux/Debian-family-only, since its cc kernels execute on the
+  host; `--dry-run` validates and prints the complete staging plan on macOS and other hosts. This is compiler/codegen evidence, not an OS emulator: the
   GCC patch release is whichever candidate the configured apt indexes serve (the exact version and
   target are printed and major 13 is enforced), and the clang leg has a Linux cross sysroot rather
   than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
