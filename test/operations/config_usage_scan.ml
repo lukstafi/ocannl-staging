@@ -485,6 +485,7 @@ let check ~repository_census occurrences =
 let file_kind path =
   let basename = Stdlib.Filename.basename path in
   if String.is_suffix path ~suffix:".md" then `Markdown
+  else if String.equal path "ocannl_config.reference" then `Reference
   else if String.equal basename "dune" then `Dune
   else if String.equal basename "ocannl_config" then `Config
   else `Script
@@ -499,7 +500,7 @@ let occurrences_of_file ~reported_path path =
       in
       markdown_occurrences ~allow_bare ~path:reported_path content
   | `Config -> config_file_occurrences ~path:reported_path content
-  | `Dune | `Script -> script_occurrences ~path:reported_path content
+  | `Dune | `Reference | `Script -> script_occurrences ~path:reported_path content
 
 let fixture path config_path =
   let reported_path = Stdlib.Filename.basename path in
@@ -519,6 +520,7 @@ let live workspace_root paths =
         let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
         if
           String.equal relative "AGENTS.md" || String.equal relative "README.md"
+          || String.equal relative "ocannl_config.reference"
           || (String.is_prefix relative ~prefix:"docs/" && String.is_suffix relative ~suffix:".md")
           || String.is_prefix relative ~prefix:"benchmarks/"
              && String.is_suffix relative ~suffix:".md"
@@ -550,10 +552,23 @@ let live workspace_root paths =
     && List.exists markdown ~f:(fun (path, _) ->
         String.is_prefix path ~prefix:"benchmarks/"
         && not (String.equal path "benchmarks/README.md")));
-  Verdict.p "the scan reaches Dune actions and checked-in ocannl_config files"
-    (List.exists files ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "dune")
-    && List.exists files ~f:(fun (path, _) ->
-        String.equal (Stdlib.Filename.basename path) "ocannl_config"));
+  Verdict.p "the scan reaches Dune actions"
+    (List.exists files ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "dune"));
+  let config_roots =
+    [
+      "arrayjit/test/";
+      "benchmarks/";
+      "test/config/";
+      "test/operations/profiles/";
+      "test/operations/startup_streams/";
+    ]
+  in
+  Verdict.p_all "the scan reaches every checked-in ocannl_config root" config_roots ~f:(fun root ->
+      List.exists files ~f:(fun (path, _) ->
+          String.is_prefix path ~prefix:root
+          && String.equal (Stdlib.Filename.basename path) "ocannl_config"));
+  Verdict.p "the scan reaches ocannl_config.reference examples"
+    (List.exists files ~f:(fun (path, _) -> String.equal path "ocannl_config.reference"));
   let occurrences =
     List.concat_map files ~f:(fun (reported_path, path) -> occurrences_of_file ~reported_path path)
   in

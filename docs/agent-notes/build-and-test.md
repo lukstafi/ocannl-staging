@@ -74,7 +74,8 @@ that they earn a lookup rather than always-loaded space.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
   `benchmarks/`; its prose corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
-  and `benchmarks/`; all checked-in `dune` and `ocannl_config` files join too. A script or Dune-action
+  and `benchmarks/`; all checked-in `dune` and `ocannl_config` files join too, as do prefixed-token
+  examples in `ocannl_config.reference`. A script or Dune-action
   token contributes a key when it has a qualified command-line spelling and
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>=` beginning at an identifier boundary; the explicit open namespaces
@@ -94,6 +95,8 @@ that they earn a lookup rather than always-loaded space.
   or repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
   fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
   so a clean live corpus is not its only evidence that the rule has teeth.
+  The non-vacuity floor names every checked-in config-file root; Dune's generated local
+  `test/operations/ocannl_config` copy therefore cannot mask a lost recursive-glob dependency.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to
