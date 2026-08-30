@@ -653,13 +653,16 @@ type report = {
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. Includes completed timing
-          windows refused for host contention; [split_reduce_contended] identifies those unusable
-          family verdicts. *)
-  split_reduce_contended : int;
-      (** Of [split_reduce_timed], timing windows refused because host contention dominated their
-          samples. Unlike [timings_contended], this excludes the baseline and other candidate
-          families, so consumers can decide whether a missing split-reduce composite follows from
-          an unusable per-site measurement. Zero on cache replay and search-disabled calls. *)
+          windows refused for host contention. *)
+  split_reduce_composite_eligible : bool;
+      (** Whether at least two split-reduce sites supplied usable best-timed singles, making the
+          multi-site composite eligible for proposal. False on cache replay and search-disabled
+          calls. *)
+  split_reduce_composite_timed : bool;
+      (** Whether the eligible multi-site split-reduce composite compiled and reached a timing
+          window. A completed window refused for contention still counts: the field pins candidate
+          reachability, independently of whether its timing verdict was usable. False when the
+          composite was ineligible, on cache replay, and on search-disabled calls. *)
   mma_candidates : int;
       (** Candidates whose label promises a tensorized ([Schedule.Tensorize]) pipeline that the
           search put through candidate compile: whole-routine and per-fission-segment sketch seeds,

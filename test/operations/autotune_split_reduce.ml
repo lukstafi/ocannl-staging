@@ -338,8 +338,8 @@ let () =
       p "best-timed singles recombined into a composite"
         (if is_cpu then
            r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
-           && (r.Autotune.split_reduce_contended > 0
-              || r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1)
+           && Bool.equal r.Autotune.split_reduce_composite_timed
+                r.Autotune.split_reduce_composite_eligible
          else r.Autotune.split_reduce_timed > 0)
   | None ->
       p "multi-site split-reduce singles seeded" false;
@@ -445,8 +445,8 @@ let () =
          cannot staff that composite, but still counts as reaching the timing window. *)
       p "the interchanged bias-gradient candidate reaches timing"
         (r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
-        && (r.Autotune.split_reduce_contended > 0
-           || r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1))
+        && Bool.equal r.Autotune.split_reduce_composite_timed
+             r.Autotune.split_reduce_composite_eligible)
   | None ->
       p "conv-gradient split-reduce candidates seeded" false;
       p "the interchanged bias-gradient candidate reaches timing" false);
