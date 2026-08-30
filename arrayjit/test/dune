@@ -168,6 +168,14 @@
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
 (test
+ ; ocannl-backend: none -- tests Metal's pure property sequence, without linking Metal.
+ (name test_metal_compile_options)
+ (package arrayjit)
+ (modules test_metal_compile_options)
+ (deps ocannl_config)
+ (libraries base stdio arrayjit.ir arrayjit.verdict))
+
+(test
  (name test_aligned_alloc)
  (package arrayjit)
  (modules test_aligned_alloc)

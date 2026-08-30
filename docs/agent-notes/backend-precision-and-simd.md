@@ -1111,11 +1111,16 @@ files.
     carries an `rtc-context` block (`tools/sweep.sh`'s `rtc_context_cmd`) with the box's toolkit and
     driver versions, the include-slot discovery input, and the builder's option POLICY from the
     GPU-free test — whose include and arch slots are test sentinels, not that box's values.
-  - **Metal is the remaining unguarded one.** MSL defaults fast math on, `metal_backend.ml` passes no
-    reassociation guard, and — unlike CUDA — nobody has run the probe against it, so "it passes
-    today" is all that is known. Its MSL options are also still assembled inline in
-    `metal_backend.ml` rather than in `Compiler_options`, so no GPU-free test pins them and a sweep
-    cannot print them (gh-ocannl-784 residual, Mac-box work).
+  - **Metal is guarded by `MathMode.Safe`, with fast math functions retained** (gh-ocannl-848).
+    Measured on M4 Max, macOS 26.6.2 / Metal 4, MSL 3.1: Default, Fast and Relaxed all changed the
+    cancellation probe [(a+b)-a] from strict 0 to [b] = 1; Safe preserved 0. All modes kept three
+    128-term reduction spellings bit-exactly sequential and a runtime `-INFINITY` mask at zero.
+    Safe + Fast functions measured 1.005x default for 262144 threads x 128 fixed-count terms and
+    1.002x for one thread x 1048576 runtime-bound terms (GPU-clock medians, 21 rotated interleaved
+    repeats). The legacy `fastMathEnabled=false` also selects Precise functions, so the production
+    state instead pins the two modern properties separately. `Compiler_options.metal` owns the
+    ordered property sequence; `test_metal_compile_options` pins both debug variants GPU-free and
+    `benchmarks/runners/ocannl/metal_reassoc_probe.ml` is the rerunnable measurement.
 - **`__FAST_MATH__` audit**: negating one component of a fast-math umbrella can *unset the macro*
   while leaving the remaining optimizations on — clang defines `__FAST_MATH__` only when the whole
   bundle is in force, so HIP's `-fno-associative-math` (and `-fhonor-infinities`) turn it off. No

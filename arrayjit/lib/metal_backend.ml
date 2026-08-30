@@ -1176,15 +1176,22 @@ module Impl = struct
   end
 
   let%diagn_sexp compile_metal_source ~name ~source ~device =
+    let option_state = Compiler_options.metal ~routine_logging:(Utils.debug_log_from_routines ()) in
     let options = Me.CompileOptions.init () in
-    if Utils.debug_log_from_routines () then (
-      Me.CompileOptions.set_language_version options Me.CompileOptions.LanguageVersion.version_3_2;
-      Me.CompileOptions.set_enable_logging options true)
-    else
-      Me.CompileOptions.set_language_version options Me.CompileOptions.LanguageVersion.version_3_1
-      (* Version 3.1 is required for the `bfloat` type (bfloat16 precision). *)
-      (* Logging is disabled by default in CompileOptions, so no need to explicitly set it to
-         false *);
+    List.iter option_state ~f:(function
+      | Compiler_options.Language_version_3_1 ->
+          (* Version 3.1 is required for the [bfloat] type (bfloat16 precision). *)
+          Me.CompileOptions.set_language_version options
+            Me.CompileOptions.LanguageVersion.version_3_1
+      | Language_version_3_2 ->
+          Me.CompileOptions.set_language_version options
+            Me.CompileOptions.LanguageVersion.version_3_2
+      | Math_mode_safe -> Me.CompileOptions.set_math_mode options Me.CompileOptions.MathMode.Safe
+      | Math_functions_fast ->
+          Me.CompileOptions.set_math_floating_point_functions options
+            Me.CompileOptions.MathFloatingPointFunctions.Fast
+      | Enable_logging enabled -> Me.CompileOptions.set_enable_logging options enabled);
+    [%log "metal options", (Compiler_options.render_metal option_state : string)];
 
     if Utils.settings.output_debug_files_in_build_directory then (
       let metal_file = Utils.build_file (name ^ ".metal") in
@@ -1194,7 +1201,10 @@ module Impl = struct
     try Me.Library.on_device device ~source options
     with Failure msg ->
       let error_msg =
-        Printf.sprintf "Metal compilation failed for %s:\n%s\nSource:\n%s" name msg source
+        Printf.sprintf "Metal compilation failed for %s:\n%s\nmetal options: %s\nSource:\n%s" name
+          msg
+          (Compiler_options.render_metal option_state)
+          source
       in
       Stdio.prerr_endline error_msg;
       failwith error_msg
