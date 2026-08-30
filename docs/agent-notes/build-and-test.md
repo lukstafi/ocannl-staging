@@ -75,7 +75,8 @@ that they earn a lookup rather than always-loaded space.
   (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
   `benchmarks/`; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
-  `test/` joins it (generated `*.pp.ml` renderings are excluded). Its prose corpus is `AGENTS.md`,
+  `test/` joins it (generated `*.pp.ml`/`*.pp.mli` renderings are excluded), as do implementation
+  `*.ml`/`*.mli` sources under `arrayjit/lib/`, `tensor/`, and `lib/`. Its prose corpus is `AGENTS.md`,
   the root README, and every `*.md` under `docs/`
   and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
   `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in

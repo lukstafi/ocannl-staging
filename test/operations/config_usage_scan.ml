@@ -521,6 +521,26 @@ let non_config_environment_mentions =
     ("test/operations/tile_mma_narrow.ml", "vec_widen_half", 1);
     ("test/operations/tile_mma_narrow.ml", "vec_narrow_half", 1);
     ("test/operations/tile_mma_narrow.ml", "half_fma", 1);
+    ("arrayjit/lib/builtins_cc.ml", "has_avx2", 2);
+    ("arrayjit/lib/builtins_cc.ml", "has_neon", 2);
+    ("arrayjit/lib/builtins_cc.ml", "has_elementwise_fma", 3);
+    ("arrayjit/lib/builtins_cc.ml", "has_convertvector", 11);
+    ("arrayjit/lib/builtins_cc.ml", "vec_widen_bfloat16", 3);
+    ("arrayjit/lib/builtins_cc.ml", "vec_narrow_bfloat16", 3);
+    ("arrayjit/lib/builtins_cc.ml", "half_fma", 4);
+    ("arrayjit/lib/builtins_cc.ml", "vec_widen_half", 3);
+    ("arrayjit/lib/builtins_cc.ml", "vec_narrow_half", 3);
+    ("arrayjit/lib/c_syntax.ml", "vec_widen_bfloat16", 2);
+    ("arrayjit/lib/c_syntax.ml", "vec_narrow_bfloat16", 1);
+    ("arrayjit/lib/c_syntax.ml", "vec_widen_half", 1);
+    ("arrayjit/lib/c_syntax.ml", "vec_narrow_half", 1);
+    ("arrayjit/lib/c_syntax.ml", "half_fma", 3);
+    ("arrayjit/lib/c_syntax.ml", "has_elementwise_fma", 1);
+    ("arrayjit/lib/cc_backend.ml", "half_fma", 1);
+    ("arrayjit/lib/context.mli", "vec_widen_bfloat16", 1);
+    ("arrayjit/lib/utils.ml", "not_a_key", 2);
+    ("arrayjit/lib/utils.ml", "backedn", 2);
+    ("arrayjit/lib/utils.ml", "print", 1);
   ]
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
@@ -781,7 +801,9 @@ let live workspace_root paths =
     |> List.filter_map ~f:(fun path ->
         let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
         if
-          (not (String.is_suffix relative ~suffix:".pp.ml"))
+          (not
+             (String.is_suffix relative ~suffix:".pp.ml"
+             || String.is_suffix relative ~suffix:".pp.mli"))
           && (String.equal relative "AGENTS.md" || String.equal relative "README.md"
              || String.equal relative "ocannl_config.reference"
              || String.equal relative "ocannl_config.for_debug"
@@ -797,14 +819,21 @@ let live workspace_root paths =
                 || String.is_prefix relative ~prefix:"scripts/"
                 || String.is_prefix relative ~prefix:"benchmarks/"
                 || String.is_prefix relative ~prefix:"bin/"
-                || String.is_prefix relative ~prefix:"test/")
+                || String.is_prefix relative ~prefix:"test/"
+                || String.is_prefix relative ~prefix:"arrayjit/lib/"
+                || String.is_prefix relative ~prefix:"tensor/"
+                || String.is_prefix relative ~prefix:"lib/")
                 && (String.is_suffix relative ~suffix:".sh"
                    || String.is_suffix relative ~suffix:".py"
                    || (String.is_prefix relative ~prefix:"tools/"
                       || String.is_prefix relative ~prefix:"benchmarks/"
                       || String.is_prefix relative ~prefix:"bin/"
-                      || String.is_prefix relative ~prefix:"test/")
-                      && String.is_suffix relative ~suffix:".ml"))
+                      || String.is_prefix relative ~prefix:"test/"
+                      || String.is_prefix relative ~prefix:"arrayjit/lib/"
+                      || String.is_prefix relative ~prefix:"tensor/"
+                      || String.is_prefix relative ~prefix:"lib/")
+                      && (String.is_suffix relative ~suffix:".ml"
+                         || String.is_suffix relative ~suffix:".mli")))
         then Some (relative, path)
         else None)
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -830,6 +859,12 @@ let live workspace_root paths =
          String.is_prefix path ~prefix:"test/training/" && String.is_suffix path ~suffix:".ml")
     && List.exists files ~f:(fun (path, _) ->
         String.is_prefix path ~prefix:"test/operations/" && String.is_suffix path ~suffix:".ml"));
+  let implementation_roots = [ "arrayjit/lib/"; "tensor/"; "lib/" ] in
+  Verdict.p_all "the scan reaches OCaml implementation diagnostics" implementation_roots
+    ~f:(fun root ->
+      List.exists files ~f:(fun (path, _) ->
+          String.is_prefix path ~prefix:root
+          && (String.is_suffix path ~suffix:".ml" || String.is_suffix path ~suffix:".mli")));
   Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")
