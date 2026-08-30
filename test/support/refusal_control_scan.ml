@@ -224,8 +224,20 @@ let format_matches ~format label =
   in
   (not (List.is_empty runs)) && consume 0 runs
 
-let covered ~control_text diagnostic =
-  String.is_substring control_text ~substring:(marker diagnostic)
+let coverage ~control_text diagnostics =
+  let lines = String.split_lines control_text in
+  let remaining = Hashtbl.create (module String) in
+  List.map diagnostics ~f:(fun diagnostic ->
+      let marker = marker diagnostic in
+      let available =
+        Hashtbl.find_or_add remaining marker ~default:(fun () ->
+            List.count lines ~f:(String.is_substring ~substring:marker))
+      in
+      if available = 0 then false
+      else (
+        Hashtbl.set remaining ~key:marker ~data:(available - 1);
+        true))
 
 let orphans ~control_text diagnostics =
-  List.filter diagnostics ~f:(fun diagnostic -> not (covered ~control_text diagnostic))
+  List.zip_exn diagnostics (coverage ~control_text diagnostics)
+  |> List.filter_map ~f:(fun (diagnostic, covered) -> if covered then None else Some diagnostic)

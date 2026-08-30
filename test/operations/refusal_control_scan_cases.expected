@@ -4,6 +4,7 @@ Printf substitutions are holes and a stable literal fragment becomes the fragmen
 an absent fragment is an orphan: true
 the diagnostic's unique marker in a control golden covers it: true
 two diagnostics sharing a display fragment still require distinct controls: true
+one control marker occurrence covers only one identical diagnostic: true
 one observed claim execution is consumed by only one matching diagnostic: true
 a second identical diagnostic cannot reuse the consumed claim execution: true
 
@@ -32,16 +33,16 @@ agent_notes_structure.ml: [scanner-refusal:ec62d0a7d728c7ab15a2c9b8608c6404] eve
 backend_golden_family_scan.ml has exactly the explicitly assigned refusal controls: true
 backend_golden_family_scan.ml: [scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families (claim) is catalogued beside backend_golden_family_scan.expected: true
 cache_dir_ignores.ml has exactly the explicitly assigned refusal controls: true
-cache_dir_ignores.ml: [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:88e191145bdba435fd0fb303d486d684] gitignore no longer (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:a8ea78ba60f371d22646868a36871617] argument (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
-cache_dir_ignores.ml: [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected: true
+cache_dir_ignores.ml: [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:88e191145bdba435fd0fb303d486d684] gitignore no longer (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:a8ea78ba60f371d22646868a36871617] argument (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+cache_dir_ignores.ml: [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
 codegen_text_inventory.ml has exactly the explicitly assigned refusal controls: true
 codegen_text_inventory.ml: [scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for (direct failure) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
 codegen_text_inventory.ml: [scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether (direct failure) is catalogued beside codegen_text_scan_cases.expected, codegen_text_inventory.expected: true
@@ -89,6 +90,7 @@ env_var_deps.ml has exactly the explicitly assigned refusal controls: true
 env_var_deps.ml: [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
+env_var_deps.ml: [scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 env_var_deps.ml: [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's (direct failure) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true

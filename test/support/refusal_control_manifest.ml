@@ -5,8 +5,9 @@
     This table is inventory, not evidence. [print] emits a claim marker only when Verdict recorded a
     successful execution of the claim's diagnostic format, and emits a direct-failure marker only
     when the exact negative-control line assigned below was observed or the caught branch recorded
-    its format through [observe_failure]. Adding a row here therefore cannot make its own golden
-    pass. *)
+    its format through [observe_failure]. The audit consumes marker occurrences as a multiset, so
+    identical formats still need one exercised control apiece. Adding a row here therefore cannot
+    make its own golden pass. *)
 
 open Base
 open Stdio
@@ -109,6 +110,7 @@ let raw_entries =
         "[scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives";
         "[scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from";
         "[scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment";
+        "[scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence";
         "[scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality";
         "[scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths";
         "[scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's";
@@ -309,26 +311,6 @@ let sources = List.map entries ~f:fst
 
 let raw_direct_evidence =
   [
-    ( "cache_dir_ignores.ml:e2e9d19ffe2ad7688396847bd1ee643a",
-      "ok: built-in default -- another key's default is not this one's" );
-    ( "cache_dir_ignores.ml:0f307832357ee7ca58b9798a86530dac",
-      "ok: built-in default -- another key's default is not this one's" );
-    ( "cache_dir_ignores.ml:88e191145bdba435fd0fb303d486d684",
-      "ok: built-in default -- an empty default names no directory" );
-    ( "cache_dir_ignores.ml:3076fb53f1ae34b427f82aaa89404cb3",
-      "ok: glob -- a one-character stem is still the helper's" );
-    ( "cache_dir_ignores.ml:e2fdd92481a66b85f6f54b5c68513edd",
-      "ok: use -- anything else is reported rather than assumed harmless" );
-    ( "cache_dir_ignores.ml:cd6f72db4a56b656b92efd2c4a07945f",
-      "ok: glob -- and a name with no stem at all is not" );
-    ( "cache_dir_ignores.ml:a8ea78ba60f371d22646868a36871617",
-      "ok: use -- an unresolved name is reported by name" );
-    ( "cache_dir_ignores.ml:4168ef8491021497635783bb1f7e4232",
-      "ok: built-in default -- an empty default names no directory" );
-    ( "cache_dir_ignores.ml:298f6bafdca761627eb0f4dfecddf6d3",
-      "ok: built-in default -- the default a search falls back to" );
-    ( "cache_dir_ignores.ml:50ad95ff66f64313a7ce58dadb8aeda9",
-      "ok: use -- an unresolved name is reported by name" );
     ( "codegen_text_inventory.ml:83dfdd0395c402128515f27b2f3b1b1c",
       "ok: source -- a predicate over the backend's NAME pins nothing, however it is spelled" );
     ( "codegen_text_inventory.ml:123bedafe19167d3536ddb2ca1115d21",

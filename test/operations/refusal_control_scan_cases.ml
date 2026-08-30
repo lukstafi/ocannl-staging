@@ -58,6 +58,8 @@ let dynamic reason = Verdict.fail reason
   in
   Verdict.p "two diagnostics sharing a display fragment still require distinct controls"
     (List.length (Scan.orphans ~control_text:(Scan.marker one) [ one; colliding_fragment ]) = 1);
+  Verdict.p "one control marker occurrence covers only one identical diagnostic"
+    (List.length (Scan.orphans ~control_text:(Scan.marker one) [ one; one ]) = 1);
   let valid =
     List.find_exn diagnostics ~f:(fun diagnostic -> String.equal diagnostic.Scan.format "valid")
   in
@@ -83,15 +85,15 @@ let dynamic reason = Verdict.fail reason
       let diagnostics = Scan.diagnostics (In_channel.read_all source) in
       let extracted = List.map diagnostics ~f:Scan.marker in
       let source_key = "test/operations/" ^ source in
+      let coverage = Scan.coverage ~control_text diagnostics in
       Verdict.p
         (Printf.sprintf "%s has exactly the explicitly assigned refusal controls" source)
         (List.equal String.equal extracted (Manifest.markers source_key));
-      diagnostics
-      |> List.iter ~f:(fun diagnostic ->
+      List.iter2_exn diagnostics coverage ~f:(fun diagnostic covered ->
           Verdict.p
             (Printf.sprintf "%s: %s (%s) is catalogued beside %s" source (Scan.marker diagnostic)
                (match diagnostic.Scan.kind with
                | Scan.Fail -> "direct failure"
                | Scan.Claim -> "claim")
                (String.concat ~sep:", " controls))
-            (Scan.covered ~control_text diagnostic)))
+            covered))

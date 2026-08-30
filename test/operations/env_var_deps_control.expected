@@ -8,6 +8,7 @@ appears in no permanent control golden in the negative arm, and appears in the p
 
 a diagnostic absent from every control golden is an orphan: true
 the same diagnostic fragment in a control golden is covered: true
+one control marker occurrence covers only one identical diagnostic: true
 a scanner absent from the manifest is detected by the population equality: true
 repo-relative scanner paths keep equal basenames distinct: true
 
@@ -114,6 +115,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives
   [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from
   [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment
+  [scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence
   [scanner-refusal:e68d9277c8a3a5c061164578baf2f632] the population equality
   [scanner-refusal:87659b49df04eee3fc19350b0be6629a] repo-relative scanner paths
   [scanner-refusal:490ac5e3405d328c2953c38df4f0974b] arguments the rule's

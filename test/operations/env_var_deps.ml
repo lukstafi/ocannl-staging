@@ -718,11 +718,17 @@ let refuse name =
   let covered =
     Refusals.orphans ~control_text:(Refusals.marker (List.hd_exn diagnostics)) diagnostics
   in
+  let duplicate =
+    let diagnostic = List.hd_exn diagnostics in
+    Refusals.orphans ~control_text:(Refusals.marker diagnostic) [ diagnostic; diagnostic ]
+  in
   printf
     "The refusal relationship is put to a synthesized `Verdict.fail` format. Its stable fragment\n\
      appears in no permanent control golden in the negative arm, and appears in the positive arm.\n\n";
   Verdict.p "a diagnostic absent from every control golden is an orphan" (List.length absent = 1);
   Verdict.p "the same diagnostic fragment in a control golden is covered" (List.is_empty covered);
+  Verdict.p "one control marker occurrence covers only one identical diagnostic"
+    (List.length duplicate = 1);
   Verdict.p "a scanner absent from the manifest is detected by the population equality"
     (not (List.equal String.equal [ "scanner_a.ml" ] [ "scanner_a.ml"; "scanner_b.ml" ]));
   let same_basename = [ "a/scanner.ml"; "b/scanner.ml" ] in
@@ -2083,16 +2089,22 @@ let main () =
   let refusal_exemptions : (string * string) list = [] in
   let exemption_map = Map.of_alist_exn (module String) refusal_exemptions in
   let refusal_exemptions_used = ref (Set.empty (module String)) in
-  let refusal_key source diagnostic = source ^ ":" ^ diagnostic.Refusals.identity in
+  let refusal_key source diagnostic =
+    Printf.sprintf "%s:%d:%s" source diagnostic.Refusals.line diagnostic.Refusals.identity
+  in
+  let refusal_coverage =
+    Refusals.coverage ~control_text (List.map refusal_diagnostics ~f:snd)
+  in
   let orphan_refusals =
-    List.filter refusal_diagnostics ~f:(fun (source, diagnostic) ->
-        if Refusals.covered ~control_text diagnostic then false
+    List.zip_exn refusal_diagnostics refusal_coverage
+    |> List.filter_map ~f:(fun ((source, diagnostic), covered) ->
+        if covered then None
         else
           let key = refusal_key source diagnostic in
           if Map.mem exemption_map key then (
             refusal_exemptions_used := Set.add !refusal_exemptions_used key;
-            false)
-          else true)
+            None)
+          else Some (source, diagnostic))
   in
   List.iter orphan_refusals ~f:(fun (source, diagnostic) ->
       fail
@@ -2404,9 +2416,10 @@ let main () =
     if List.is_empty refusal_exemptions then printf "    (none)\n"
     else List.iter refusal_exemptions ~f:(fun (key, reason) -> printf "    %s -- %s\n" key reason);
     eprintf "Repository scanner refusal diagnostics (not diffed):\n";
-    List.iter refusal_diagnostics ~f:(fun (source, diagnostic) ->
+    List.iter2_exn refusal_diagnostics refusal_coverage
+      ~f:(fun (source, diagnostic) covered ->
         eprintf "  %s:%d  %s%s\n" source diagnostic.Refusals.line diagnostic.fragment
-          (if Refusals.covered ~control_text diagnostic then ""
+          (if covered then ""
            else if Map.mem exemption_map (refusal_key source diagnostic) then " -- EXEMPT"
            else " -- ORPHAN"));
     Verdict.p_all ~min:10 "repository-wide scan rules resolve to scanner sources"

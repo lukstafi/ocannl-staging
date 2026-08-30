@@ -100,6 +100,7 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-cache_dir_ignores_control)
   (alias runtest-atomic_file_rename_scan)
   (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
@@ -186,6 +187,7 @@
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
+  (alias runtest-cache_dir_ignores_control)
   (alias runtest-atomic_file_rename_scan)
   (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
@@ -1806,6 +1808,7 @@
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
   cache_dir_ignores.expected
+  cache_dir_ignores_control.expected
   codegen_text_inventory.ml
   codegen_text_scan_cases.expected
   codegen_text_inventory.expected
@@ -1840,7 +1843,7 @@
    backend_golden_family_scan.ml
    backend_golden_family_scan.expected
    cache_dir_ignores.ml
-   cache_dir_scan_cases.expected,cache_dir_ignores.expected
+   cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
    codegen_text_inventory.ml
    codegen_text_scan_cases.expected,codegen_text_inventory.expected
    config_dep_completeness.ml
@@ -2034,6 +2037,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scanner's missing-input refusal controls.
+ (target cache_dir_ignores_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  cache_dir_ignores.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:cache_dir_ignores.exe} --refusal-control))))
+
+(rule
+ (alias runtest-cache_dir_ignores_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff cache_dir_ignores_control.expected cache_dir_ignores_control.actual)))
 
 ; gh-ocannl-803/862: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
 ; recursive over the whole repository, so a new top-level directory joins the scan without another
