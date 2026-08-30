@@ -4098,12 +4098,13 @@
 ; prose are consumers of the key registry too. The OCaml-source scanners cannot see either, so a
 ; rename otherwise leaves them behind until a reviewer remembers the site.
 ;
-; Shell scope is every `*.sh` recursively under tools/, scripts/, and benchmarks/: those are the
-; three checked-in script roots, and naming them separately makes a vanished root fail the scan's
-; non-vacuity claim. Documentation scope is AGENTS.md plus every `*.md` recursively under docs/.
-; Markdown contributes only an inline code span that is exactly `key=value`; fenced examples and
-; longer snippets describe unrelated languages. The checked-in fixture carries an unknown key in
-; both accepted syntaxes, and the control below requires the executable to refuse it with exit 1.
+; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/:
+; those are the three checked-in script roots, and naming them separately makes a vanished root
+; fail the scan's non-vacuity claim. Both `--ocannl_<key>=` flags and `OCANNL_<KEY>=` assignments
+; are consumers. Documentation scope is AGENTS.md plus every `*.md` recursively under docs/.
+; Markdown contributes only an inline code span that is exactly one bare or prefixed assignment;
+; fenced examples and longer snippets describe unrelated languages. The checked-in fixture carries
+; one unknown key in every accepted syntax, and the control requires refusal with exit 1.
 
 (executable
  (name config_usage_scan)
@@ -4119,8 +4120,11 @@
   ../../AGENTS.md
   (glob_files_rec ../../docs/*.md)
   (glob_files_rec ../../tools/*.sh)
+  (glob_files_rec ../../tools/*.py)
   (glob_files_rec ../../scripts/*.sh)
-  (glob_files_rec ../../benchmarks/*.sh))
+  (glob_files_rec ../../scripts/*.py)
+  (glob_files_rec ../../benchmarks/*.sh)
+  (glob_files_rec ../../benchmarks/*.py))
  (action
   (with-stdout-to
    %{target}

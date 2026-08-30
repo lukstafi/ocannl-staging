@@ -1,3 +1,8 @@
-FAIL: config_usage_scan_bogus.fixture:1: shell flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
-FAIL: config_usage_scan_bogus.fixture:2: documentation assignment `definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
-FAILED: 2 checks did not hold.
+FAIL: config_usage_scan_bogus.fixture:1: command-line flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:4: command-line flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:2: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:5: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:3: documentation assignment `definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:4: documentation assignment `--ocannl_definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:5: documentation assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAILED: 7 checks did not hold.

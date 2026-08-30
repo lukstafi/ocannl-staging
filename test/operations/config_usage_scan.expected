@@ -1,4 +1,4 @@
-the scan reaches shell scripts under tools, scripts, and benchmarks: true
+the scan reaches script files under tools, scripts, and benchmarks: true
 the scan reaches AGENTS.md and documentation: true
-OK: shell --ocannl_<key>= flags under tools/, scripts/, and benchmarks/ name registered keys.
+OK: --ocannl_<key>= flags and OCANNL_<KEY>= assignments in scripts under tools/, scripts/, and benchmarks/ name registered keys.
 OK: inline key=value assignments in AGENTS.md and docs/ name registered keys or explicit non-config notation.

@@ -1,2 +1,5 @@
-The shell form must be refused: --ocannl_definitely_not_a_config_key=true
-The documentation form must be refused: `definitely_not_a_config_key=true`
+The CLI form must be refused: --ocannl_definitely_not_a_config_key=true
+The environment form must be refused: OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true
+The bare documentation form must be refused: `definitely_not_a_config_key=true`
+The CLI documentation form must be refused: `--ocannl_definitely_not_a_config_key=true`
+The environment documentation form must be refused: `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true`
