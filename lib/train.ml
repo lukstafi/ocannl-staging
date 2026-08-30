@@ -1475,7 +1475,7 @@ let forward_once ?output_cd_file ?(skip_init = false) ?reinit_all ?(bindings = I
     run_once ?output_cd_file ~skip_init ?reinit_all ~bindings ?budget ?max_candidates ?budget_report
       ~f:forward ctx t
   in
-  (* FIXME: this is going away soon. *)
+  (* gh-ocannl-777's recompute-on-read path should retire this forward-root consumption cleanup. *)
   Tensor.remove_bprop_root t;
   ctx
 

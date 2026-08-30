@@ -46,6 +46,14 @@ that they earn a lookup rather than always-loaded space.
   inputs into a `%{read-lines:...}` dynamic-dependency manifest; its committed ocamllex fixture
   carries a forbidden rename that must arrive through that derived set, so either a blind derivation
   or disconnected scan wiring fails permanently (gh-ocannl-862).
+- Public optional arguments in `lib/` follow the caller-visible underscore policy enforced by
+  `optional_arg_inventory`: a discard-only value is exposed as `?_feature`, while an implemented
+  value uses `?feature`; both mismatches fail. `Optional_arg_scan` parses the source and distinguishes
+  real uses from `let _ = feature` / `ignore feature`, including the identifiers that `%op`'s
+  einsum strings turn into generated coefficient / legacy-`use_padding` reads; and
+  `optional_arg_scan_cases` supplies the violating discard forms plus their nearest honest
+   counterparts (gh-ocannl-811). Optimizer
+   forwarders still need executed oracles — syntactic use proves only that the value was forwarded.
 - GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
   branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
   staging#413) survived nine review rounds, `dune build @check`, its targeted aliases and a

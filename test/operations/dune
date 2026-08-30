@@ -107,7 +107,8 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-agent_notes_structure)
   (alias runtest-ocamlformat_ignore_scan)
-  (alias runtest-shell_scripts_parse)))
+  (alias runtest-shell_scripts_parse)
+  (alias runtest-optional_arg_inventory)))
 
 ; Two focused aggregates beyond `scans` (gh-ocannl-783). Same arrangement and same completeness
 ; check, a different question: `scans` collects the tests that read the REPOSITORY, these collect
@@ -200,6 +201,7 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
+  (alias runtest-optional_arg_inventory)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
 
@@ -1765,6 +1767,14 @@
  (modules config_scan_lexing)
  (libraries base stdio test_utils arrayjit.verdict))
 
+(test
+ ; ocannl-backend: none -- links no backend: it parses embedded OCaml snippets.
+ (name optional_arg_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules optional_arg_scan_cases)
+ (libraries base test_utils arrayjit.verdict))
+
 ; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
 ; it rather than on whatever the repository's dune files happen to say today.
 
@@ -2069,6 +2079,35 @@
  (name config_dep_completeness)
  (modules config_dep_completeness)
  (libraries base stdio test_utils arrayjit.verdict))
+
+; gh-ocannl-811: every optional argument accepted by a lib/ entry point either affects the body or
+; exposes its not-yet-implemented status in the caller-visible label (`?_feature`). The recursive
+; glob is the inventory boundary: a new lib source joins on the same change that creates it.
+
+(executable
+ (name optional_arg_inventory)
+ (modules optional_arg_inventory)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it parses lib/ sources handed over by the glob.
+ (target optional_arg_inventory.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../lib/*.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:optional_arg_inventory.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-optional_arg_inventory)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff optional_arg_inventory.expected optional_arg_inventory.actual)))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files as text.
