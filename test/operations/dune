@@ -1776,6 +1776,8 @@
   ocannl_config
   atomic_file_rename_scan.ml
   atomic_file_rename_scan.expected
+  agent_notes_structure.ml
+  agent_notes_structure.expected
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
   codegen_text_inventory.ml
@@ -1788,6 +1790,10 @@
   config_scan_lexing.expected
   env_var_deps.ml
   env_var_deps_control.expected
+  ocamlformat_ignore_scan.ml
+  ocamlformat_ignore_scan.expected
+  shell_scripts_parse.ml
+  shell_scripts_parse.expected
   test_config_consistency.ml
   verdict_ratchet.ml
   verdict_scan_cases.expected)
@@ -1796,6 +1802,8 @@
    %{test}
    atomic_file_rename_scan.ml
    atomic_file_rename_scan.expected
+   agent_notes_structure.ml
+   agent_notes_structure.expected
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected
    codegen_text_inventory.ml
@@ -1808,6 +1816,10 @@
    config_scan_lexing.expected
    env_var_deps.ml
    env_var_deps_control.expected
+   ocamlformat_ignore_scan.ml
+   ocamlformat_ignore_scan.expected
+   shell_scripts_parse.ml
+   shell_scripts_parse.expected
    test_config_consistency.ml
    config_scan_lexing.expected
    verdict_ratchet.ml

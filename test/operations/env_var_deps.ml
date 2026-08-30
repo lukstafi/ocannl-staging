@@ -1114,8 +1114,10 @@ let main () =
                        dune_file
                        (if String.is_empty subdir then "" else " in `(subdir " ^ subdir ^ " ...)`"));
                 List.iter executables ~f:(fun executable ->
-                    let basename = Stdlib.Filename.basename executable in
-                    match String.chop_suffix basename ~suffix:".exe" with
+                    let executable_path =
+                      Scan.in_subdir (Scan.in_subdir dir subdir) executable |> normalize_path
+                    in
+                    match String.chop_suffix executable_path ~suffix:".exe" with
                     | None ->
                         fail
                           (Printf.sprintf
@@ -1126,10 +1128,7 @@ let main () =
                               else " in `(subdir " ^ subdir ^ " ...)`")
                              executable)
                     | Some stem ->
-                        let source =
-                          Scan.in_subdir (Scan.in_subdir dir subdir) (stem ^ ".ml")
-                          |> String.lowercase
-                        in
+                        let source = String.lowercase (stem ^ ".ml") in
                         if List.Assoc.mem sources source ~equal:String.equal then
                           scanner_sources := Set.add !scanner_sources source
                         else
@@ -2059,10 +2058,11 @@ let main () =
       per_directory file_stanzas ~checks:(List.rev !directory_checks);
       check_family_members ();
       artifact_by_file := (dune_file, !artifact_subjects) :: !artifact_by_file);
-  (* Every static format a repository scanner hands to [Verdict.fail], related to all permanent
-     control goldens. The filename conventions are the repository's existing control vocabulary; a
-     scan whose live golden embeds its controls announces the same thing with the heading [Synthetic
-     controls:]. Production goldens without either signal cannot accidentally answer. *)
+  (* Every static format a repository scanner hands to a Verdict refusal or claim, related to all
+     permanent control goldens. The filename conventions are the repository's existing control
+     vocabulary; a scan whose live golden embeds its controls announces the same thing with the
+     heading [Synthetic controls:]. Production goldens without either signal cannot accidentally
+     answer. *)
   let refusal_diagnostics =
     Set.to_list !scanner_sources
     |> List.concat_map ~f:(fun source ->

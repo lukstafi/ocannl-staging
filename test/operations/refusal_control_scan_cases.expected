@@ -1,4 +1,4 @@
-direct, formatted, and `@@` refusal formats are extracted: true
+direct, formatted, `@@`, and quantified refusal formats are extracted: true
 comments, quoted code, and a dynamic value contribute no diagnostic string constant: true
 Printf substitutions are holes and a stable literal fragment becomes the fragment: true
 an absent fragment is an orphan: true
@@ -8,6 +8,18 @@ control matching normalizes line wrapping and repeated whitespace: true
 Scanner refusal formats and the permanent control suite assigned to their source:
 atomic_file_rename_scan.ml: `arguments the rule's` is catalogued beside atomic_file_rename_scan.expected: true
 atomic_file_rename_scan.ml: `scan cannot vouch` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `unrelated rename spelling` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `contributes its derived` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `generated-source negative control` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `Atomic_file` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `raw rename exemption` is catalogued beside atomic_file_rename_scan.expected: true
+atomic_file_rename_scan.ml: `exemption matches exactly` is catalogued beside atomic_file_rename_scan.expected: true
+agent_notes_structure.ml: `handed the notes` is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: `the notes' bullets` is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: `names is reported` is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: `every finding carries` is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: `each flagged bullet` is catalogued beside agent_notes_structure.expected: true
+agent_notes_structure.ml: `every exemption still` is catalogued beside agent_notes_structure.expected: true
 cache_dir_ignores.ml: `the repository-root gitignore` is catalogued beside cache_dir_scan_cases.expected: true
 cache_dir_ignores.ml: `arguments the rule's` is catalogued beside cache_dir_scan_cases.expected: true
 cache_dir_ignores.ml: `gitignore no longer` is catalogued beside cache_dir_scan_cases.expected: true
@@ -20,6 +32,13 @@ cache_dir_ignores.ml: `the cache directory` is catalogued beside cache_dir_scan_
 codegen_text_inventory.ml: `the exclusion for` is catalogued beside codegen_text_scan_cases.expected: true
 codegen_text_inventory.ml: `cannot say whether` is catalogued beside codegen_text_scan_cases.expected: true
 codegen_text_inventory.ml: `declares module` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `every scanned root` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `meets its source-site` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `every source handed` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `every exclusion still` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `scanned library interfaces` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `scanned library declares` is catalogued beside codegen_text_scan_cases.expected: true
+codegen_text_inventory.ml: `generated text behind` is catalogued beside codegen_text_scan_cases.expected: true
 config_dep_completeness.ml: `arguments the rule's` is catalogued beside dune_scan_cases.expected: true
 config_dep_completeness.ml: `Dune_stanza_scan.action_heads` is catalogued beside dune_scan_cases.expected: true
 config_dep_completeness.ml: `Dune_stanza_scan` is catalogued beside dune_scan_cases.expected: true
@@ -33,9 +52,14 @@ config_dep_completeness.ml: `raw text shows` is catalogued beside dune_scan_case
 config_dep_completeness.ml: `raw text runs` is catalogued beside dune_scan_cases.expected: true
 config_dep_completeness.ml: `raw text runs` is catalogued beside dune_scan_cases.expected: true
 config_dep_completeness.ml: `exempted sites that` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `stanza inline-test library` is catalogued beside dune_scan_cases.expected: true
+config_dep_completeness.ml: `that floor applies` is catalogued beside dune_scan_cases.expected: true
 dead_export_scan.ml: `mli-less implementation modules` is catalogued beside dead_export_scan.expected: true
 dead_export_scan.ml: `scan cannot vouch` is catalogued beside dead_export_scan.expected: true
 dead_export_scan.ml: `OCaml source does` is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: `zero-reference implicit export` is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: `named dead-export exemptions` is catalogued beside dead_export_scan.expected: true
+dead_export_scan.ml: `dead-export exemption remains` is catalogued beside dead_export_scan.expected: true
 digest_completeness.ml: `which the codegen-stage` is catalogued beside config_scan_lexing.expected: true
 digest_completeness.ml: `keys classified more` is catalogued beside config_scan_lexing.expected: true
 digest_completeness.ml: `no cache-identity classification` is catalogued beside config_scan_lexing.expected: true
@@ -43,6 +67,10 @@ digest_completeness.ml: `Utils.known_config_keys` is catalogued beside config_sc
 digest_completeness.ml: `classifications claim cache-key` is catalogued beside config_scan_lexing.expected: true
 digest_completeness.ml: `cache-key components no` is catalogued beside config_scan_lexing.expected: true
 digest_completeness.ml: `but classified code-borne` is catalogued beside config_scan_lexing.expected: true
+digest_completeness.ml: `meets its source-count` is catalogued beside config_scan_lexing.expected: true
+env_var_deps.ml: `plugged-in check receives` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `diagnostic absent from` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `same diagnostic fragment` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `arguments the rule's` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `the resource-lifecycle instrumentation` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `Test_utils.Generated` is catalogued beside env_var_deps_control.expected: true
@@ -85,9 +113,105 @@ env_var_deps.ml: `scanner refusal` is catalogued beside env_var_deps_control.exp
 env_var_deps.ml: `scanner-refusal exemptions no` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `exempted declarations no` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `directories exempted from` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `executable either declares` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `running an executable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `running an executable` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `the repository's` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository-wide derivation finds` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `Test_utils.Generated.init` is catalogued beside env_var_deps_control.expected: true
 env_var_deps.ml: `repository's census finds` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Test_utils.Generated.init` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Test_utils.Generated.init` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `repository-wide scan rules` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `permanent control-golden corpus` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `statically recoverable scanner` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `omits the declaration` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `declaration added passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `external command handed` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `same stanza declaring` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `command handed nothing` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `metal-codegen alias does` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `family stanza passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the resource-lifecycle instrumentation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `member listed passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `executable whose RUNNER` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `alias listed passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `generated aliases listed` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `same plural stanza` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the instrumentation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `inline-test library carrying` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `generated alias passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `recursive build from` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `another directory's executable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `this directory's executable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `public_name` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `top-level family stanza` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the directory-wide runtest` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `second unit's public` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `names the instrumentation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `family alias defined` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `group whose actions` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `through another qualifier` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Alloc_census.snapshot` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `I.Alloc_census.snapshot` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Ir.Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `executable's public name` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Vendor.Ir` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Vendor.Ir.Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Foo.Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Vendor.I.Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `functor parameter named` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `I.Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `structure defines something` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `somebody else re-exports` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `functor's parameter named` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `includes the qualifier` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Ir.Alloc_census.t` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `definition supersedes it` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `Alloc_census` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `qualifier's name shadows` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `later reference alive` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `alias declared before` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `includes the qualifier` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `I.Alloc_census.t` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `runtest-<name> dune generates` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reads the instrumentation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `local executable's name` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `ANOTHER directory's binary` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `alias dune generates` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `stanza neither derivation` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `guard neither declares` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `declaration added passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `pinning the variable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `SIBLING branch of` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `pinned guard does` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `dune's default module` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `program declared inside` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `module the stanza` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `utils.ml` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reported as undeclarable` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `and pinning it` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `itself pins through` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `refused not approximated` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `same directive inside` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `reported there being` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `library with inline` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `inline_tests` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `same executable answers` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `both declaring passes` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `dynamic reach whose` is catalogued beside env_var_deps_control.expected: true
+env_var_deps.ml: `the same variable` is catalogued beside env_var_deps_control.expected: true
+ocamlformat_ignore_scan.ml: `ocamlformat-ignore ends in` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `ocamlformat-ignore line contains` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `every ocamlformat-ignore entry` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `every ppx-expectation golden` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `complete fixture with` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `concatenated append is` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `its append-corruption diagnostic` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `line containing no` is catalogued beside ocamlformat_ignore_scan.expected: true
+ocamlformat_ignore_scan.ml: `undeclared file present` is catalogued beside ocamlformat_ignore_scan.expected: true
+shell_scripts_parse.ml: `reached the session` is catalogued beside shell_scripts_parse.expected: true
 test_config_consistency.ml: `call-site keys missing` is catalogued beside config_scan_lexing.expected: true
 test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
 test_config_consistency.ml: `known_config_keys` is catalogued beside config_scan_lexing.expected: true
@@ -100,9 +224,16 @@ test_config_consistency.ml: `Utils.settings` is catalogued beside config_scan_le
 test_config_consistency.ml: `the empty string` is catalogued beside config_scan_lexing.expected: true
 test_config_consistency.ml: `string literal in` is catalogued beside config_scan_lexing.expected: true
 test_config_consistency.ml: `exempted functions that` is catalogued beside config_scan_lexing.expected: true
+test_config_consistency.ml: `meets its source-count` is catalogued beside config_scan_lexing.expected: true
 verdict_ratchet.ml: `arguments the rule's` is catalogued beside verdict_scan_cases.expected: true
 verdict_ratchet.ml: `check cannot vouch` is catalogued beside verdict_scan_cases.expected: true
 verdict_ratchet.ml: `prints the claim` is catalogued beside verdict_scan_cases.expected: true
 verdict_ratchet.ml: `exempted literals that` is catalogued beside verdict_scan_cases.expected: true
 verdict_ratchet.ml: `claim-shaped literal any` is catalogued beside verdict_scan_cases.expected: true
 verdict_ratchet.ml: `planted canaries the` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `claims through Verdict` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `every literal planted` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `every exemption on` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `read string literals` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `them as arguments` is catalogued beside verdict_scan_cases.expected: true
+verdict_ratchet.ml: `one test directory` is catalogued beside verdict_scan_cases.expected: true

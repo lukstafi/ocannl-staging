@@ -22,16 +22,19 @@ let formatted name =
 let applied name =
   fail @@ Printf.sprintf "%s is stale -- drop it from the exemption list" name
 
+let quantified xs =
+  Verdict.p_all "every refusal control remains related to its diagnostic" xs ~f:Fn.id
+
 let prose = "Verdict.fail \"quoted code is not an application\""
 let dynamic reason = Verdict.fail reason
 |ocaml}
   in
   let diagnostics = Scan.diagnostics source in
   let fragments = List.map diagnostics ~f:(fun diagnostic -> diagnostic.Scan.fragment) in
-  Verdict.p_all ~min:3 "direct, formatted, and `@@` refusal formats are extracted" diagnostics
-    ~f:(fun diagnostic -> not (String.is_empty diagnostic.Scan.fragment));
+  Verdict.p_all ~min:4 "direct, formatted, `@@`, and quantified refusal formats are extracted"
+    diagnostics ~f:(fun diagnostic -> not (String.is_empty diagnostic.Scan.fragment));
   Verdict.p "comments, quoted code, and a dynamic value contribute no diagnostic string constant"
-    (List.length diagnostics = 3);
+    (List.length diagnostics = 4);
   Verdict.p "Printf substitutions are holes and a stable literal fragment becomes the fragment"
     (List.mem fragments "formatted_relationship" ~equal:String.equal);
   let one = List.hd_exn diagnostics in

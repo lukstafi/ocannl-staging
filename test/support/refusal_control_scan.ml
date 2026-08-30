@@ -1,10 +1,11 @@
 (** Relating repository-scanner refusal diagnostics to permanent control goldens.
 
     A scanner refusal is mechanically visible when its source hands a string literal, directly or as
-    a [Printf.sprintf] format, to [Verdict.fail] or to the local [fail] alias every repository
-    scanner uses. The dynamic values a helper returns are deliberately outside this reader: there is
-    no diagnostic string constant in that scanner source to relate. The live check names those
-    limits in its report rather than pretending to infer a value through arbitrary OCaml.
+    a [Printf.sprintf] format, to [Verdict.fail], to the local [fail] alias scanners use, or to one
+    of Verdict's claim forms: a false claim emits its label as the refusal. The dynamic values a
+    helper returns are deliberately outside this reader: there is no diagnostic string constant in
+    that scanner source to relate. The live check names those limits in its report rather than
+    pretending to infer a value through arbitrary OCaml.
 
     Formats are reduced to a stable literal fragment. Code-shaped tokens (underscores or qualified
     names) win; otherwise the longest three-word run does. Values substituted by the failing run
@@ -111,8 +112,12 @@ let fragment_of_format format =
 
 let last_name expression = Option.bind (Read.longident_of expression) ~f:List.last
 
-let is_fail expression =
-  Option.value_map (last_name expression) ~default:false ~f:(String.equal "fail")
+let refusal_callees =
+  [ "fail"; "p"; "p_all"; "p_none"; "p_exists"; "p_empty"; "claim"; "claimf"; "pass_fail" ]
+
+let is_refusal expression =
+  Option.value_map (last_name expression) ~default:false ~f:(fun name ->
+      List.mem refusal_callees name ~equal:String.equal)
 
 let rec format_of expression =
   match Read.string_literal expression with
@@ -134,12 +139,12 @@ let rec format_of expression =
 
 let diagnostic_argument expression =
   match expression.pexp_desc with
-  | Pexp_apply (callee, arguments) when is_fail callee ->
+  | Pexp_apply (callee, arguments) when is_refusal callee ->
       List.find_map arguments ~f:(fun (label, argument) ->
           match label with Nolabel -> Some argument | Labelled _ | Optional _ -> None)
   | Pexp_apply (operator, [ (Nolabel, callee); (Nolabel, argument) ])
     when Option.value_map (last_name operator) ~default:false ~f:(String.equal "@@")
-         && is_fail callee ->
+         && is_refusal callee ->
       Some argument
   | _ -> None
 
