@@ -653,8 +653,13 @@ type report = {
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. Includes completed timing
-          windows refused for host contention; [timings_contended] identifies those unusable
-          verdicts. *)
+          windows refused for host contention; [split_reduce_contended] identifies those unusable
+          family verdicts. *)
+  split_reduce_contended : int;
+      (** Of [split_reduce_timed], timing windows refused because host contention dominated their
+          samples. Unlike [timings_contended], this excludes the baseline and other candidate
+          families, so consumers can decide whether a missing split-reduce composite follows from
+          an unusable per-site measurement. Zero on cache replay and search-disabled calls. *)
   mma_candidates : int;
       (** Candidates whose label promises a tensorized ([Schedule.Tensorize]) pipeline that the
           search put through candidate compile: whole-routine and per-fission-segment sketch seeds,
