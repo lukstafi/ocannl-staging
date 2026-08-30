@@ -44,14 +44,27 @@ let () =
   case ~argument:"scale" "a later optional default uses an earlier option"
     {ocaml|let f ?(scale = 2) ?(fallback = scale) () = fallback|ocaml} ~implemented:true
     ~honest:true;
+  case ~argument:"scale" "a nested optional default sees the outer option before shadowing"
+    {ocaml|let f ?(scale = 2) () = fun ?(scale = scale) () -> scale|ocaml} ~implemented:true
+    ~honest:true;
+  case "an expression-level op extension enables generated uses"
+    {ocaml|let f ?(stride = 1) x = [%op x ++ "stride*o+k => o"]|ocaml} ~implemented:true
+    ~honest:true;
   case "ordinary label discarded through let-wildcard is rejected"
     {ocaml|let f ?(feature = true) () = let _ = feature in ()|ocaml} ~implemented:false
     ~honest:false;
   case "ordinary label discarded through ignore is rejected"
     {ocaml|let f ?(feature = true) () = ignore feature|ocaml} ~implemented:false ~honest:false;
+  case "ordinary label discarded through the pipe operator is rejected"
+    {ocaml|let f ?(feature = true) () = feature |> ignore|ocaml} ~implemented:false ~honest:false;
+  case "ordinary label discarded through the apply operator is rejected"
+    {ocaml|let f ?(feature = true) () = ignore @@ feature|ocaml} ~implemented:false ~honest:false;
   case "ordinary label discarded through named throwaway is rejected"
     {ocaml|let f ?(feature = true) () = let _unused = feature in ()|ocaml} ~implemented:false
     ~honest:false;
+  case "an underscore-prefixed local forwarded later is a real use"
+    {ocaml|let f ?(feature = 1) () = let _value = feature in helper _value|ocaml} ~implemented:true
+    ~honest:true;
   case "underscore label makes an unimplemented option caller-visible"
     {ocaml|let f ?(_feature = true) () = ()|ocaml} ~implemented:false ~honest:true;
   case "implemented underscore label is stale" {ocaml|let f ?(_feature = 2) x = x * _feature|ocaml}
@@ -61,4 +74,7 @@ let () =
     ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
+    ~honest:false;
+  case "an optional argument on a directly returned closure is inventoried"
+    {ocaml|let make () = fun ?(feature = true) () -> ignore feature|ocaml} ~implemented:false
     ~honest:false

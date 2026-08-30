@@ -68,12 +68,37 @@ let pattern_binds pattern name =
   iterator#pattern pattern;
   !found
 
-let rec throwaway_pattern pattern =
+let pattern_names pattern =
+  let found = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! pattern pattern =
+        (match pattern.ppat_desc with Ppat_var { txt; _ } -> found := txt :: !found | _ -> ());
+        super#pattern pattern
+    end
+  in
+  iterator#pattern pattern;
+  List.dedup_and_sort !found ~compare:String.compare
+
+type throwaway = Not_throwaway | Wildcard | Named_throwaway of string list
+
+let rec wildcard_pattern pattern =
   match pattern.ppat_desc with
   | Ppat_any -> true
-  | Ppat_var { txt; _ } -> String.is_prefix txt ~prefix:"_"
-  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> throwaway_pattern inner
+  | Ppat_constraint (inner, _) -> wildcard_pattern inner
   | _ -> false
+
+let throwaway_pattern pattern =
+  if wildcard_pattern pattern then Wildcard
+  else
+    let names = pattern_names pattern in
+    if
+      (not (List.is_empty names))
+      && List.for_all names ~f:(fun name -> String.is_prefix name ~prefix:"_")
+    then Named_throwaway names
+    else Not_throwaway
 
 let flatten_ident expression =
   match expression.pexp_desc with
@@ -84,6 +109,24 @@ let rec direct_name expression =
   match expression.pexp_desc with
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> direct_name inner
   | _ -> ( match flatten_ident expression with Some [ name ] -> Some name | _ -> None)
+
+let path_ends_in expression wanted =
+  match flatten_ident expression with
+  | Some path -> Option.value_map (List.last path) ~default:false ~f:(String.equal wanted)
+  | None -> false
+
+let direct_discard name expression =
+  match expression.pexp_desc with
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) ->
+      path_ends_in callee "ignore"
+      && Option.value_map (direct_name argument) ~default:false ~f:(String.equal name)
+  | Pexp_apply (operator, [ (_, left); (_, right) ]) when path_ends_in operator "|>" ->
+      Option.value_map (direct_name left) ~default:false ~f:(String.equal name)
+      && path_ends_in right "ignore"
+  | Pexp_apply (operator, [ (_, left); (_, right) ]) when path_ends_in operator "@@" ->
+      path_ends_in left "ignore"
+      && Option.value_map (direct_name right) ~default:false ~f:(String.equal name)
+  | _ -> false
 
 type function_tail = Expression of expression | Cases of case list
 
@@ -162,14 +205,21 @@ let einsum_spec expression =
             | _ -> None))
   | _ -> None
 
-let meaningfully_used ~dsl name tail =
+let rec meaningfully_used ~dsl name tail =
   let meaningful = ref false in
   let shadowed = ref false in
+  let dsl_mode = ref dsl in
   let within_shadow shadows f =
     let saved = !shadowed in
     shadowed := saved || shadows;
     f ();
     shadowed := saved
+  in
+  let within_dsl enabled f =
+    let saved = !dsl_mode in
+    dsl_mode := saved || enabled;
+    f ();
+    dsl_mode := saved
   in
   let iterator =
     object (self)
@@ -182,48 +232,65 @@ let meaningfully_used ~dsl name tail =
 
       method! expression expression =
         if not !shadowed then (
-          if dsl then
+          if !dsl_mode then
             Option.iter (einsum_spec expression) ~f:(fun spec ->
                 if
                   mentions_word spec name
                   || (String.equal name "use_padding" && has_unmarked_convolution spec)
                 then meaningful := true);
           match expression.pexp_desc with
+          | Pexp_extension ({ txt = "op" | "cd"; _ }, _) ->
+              within_dsl true (fun () -> super#expression expression)
           | Pexp_ident _ -> (
               match direct_name expression with
               | Some found when String.equal found name -> meaningful := true
               | _ -> ())
-          | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) -> (
-              match (flatten_ident callee, direct_name argument) with
-              | Some path, Some found
-                when String.equal found name
-                     && Option.value_map (List.last path) ~default:false ~f:(String.equal "ignore")
-                ->
-                  ()
-              | _ -> super#expression expression)
+          | Pexp_apply _ when direct_discard name expression -> ()
           | Pexp_let (recursive, bindings, body) ->
               let binds =
                 List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat name)
               in
               List.iter bindings ~f:(fun binding ->
                   let discarded =
-                    throwaway_pattern binding.pvb_pat
-                    && Option.value_map (direct_name binding.pvb_expr) ~default:false
-                         ~f:(String.equal name)
+                    if
+                      not
+                        (Option.value_map (direct_name binding.pvb_expr) ~default:false
+                           ~f:(String.equal name))
+                    then false
+                    else
+                      match throwaway_pattern binding.pvb_pat with
+                      | Not_throwaway -> false
+                      | Wildcard -> true
+                      | Named_throwaway bound_names ->
+                          let used_in_body =
+                            List.exists bound_names ~f:(fun bound ->
+                                meaningfully_used ~dsl:!dsl_mode bound (Expression body))
+                          in
+                          let used_in_recursive_group =
+                            match recursive with
+                            | Nonrecursive -> false
+                            | Recursive ->
+                                List.exists bindings ~f:(fun other ->
+                                    List.exists bound_names ~f:(fun bound ->
+                                        meaningfully_used ~dsl:!dsl_mode bound
+                                          (Expression other.pvb_expr)))
+                          in
+                          not (used_in_body || used_in_recursive_group)
                   in
                   if not discarded then
                     within_shadow
                       (match recursive with Recursive -> binds | Nonrecursive -> false)
                       (fun () -> self#expression binding.pvb_expr));
               within_shadow binds (fun () -> self#expression body)
-          | Pexp_function (params, _, _) ->
-              let binds =
-                List.exists params ~f:(fun param ->
-                    match param.pparam_desc with
-                    | Pparam_val (_, _, pattern) -> pattern_binds pattern name
-                    | Pparam_newtype _ -> false)
-              in
-              within_shadow binds (fun () -> super#expression expression)
+          | Pexp_function (params, _, body) ->
+              let visible = ref true in
+              List.iter params ~f:(fun param ->
+                  match param.pparam_desc with
+                  | Pparam_newtype _ -> ()
+                  | Pparam_val (_, default, pattern) ->
+                      if !visible then Option.iter default ~f:self#expression;
+                      if !visible && pattern_binds pattern name then visible := false);
+              if !visible then self#function_body body
           | Pexp_for (pattern, from_, to_, _, body) ->
               self#expression from_;
               self#expression to_;
@@ -237,24 +304,25 @@ let meaningfully_used ~dsl name tail =
   !meaningful
 
 let implementation_of ~dsl ~params ~position ~tail pattern =
-  match pattern_name pattern with
-  | None -> Unimplemented
-  | Some name ->
-      (* An earlier parameter is in scope in every later default until a later parameter shadows it;
-         that shadowing parameter's own default is still evaluated before its pattern binds. *)
-      let rec used_after = function
-        | [] -> meaningfully_used ~dsl name tail
-        | param :: later -> (
-            match param.pparam_desc with
-            | Pparam_newtype _ -> used_after later
-            | Pparam_val (_, default, pattern) ->
-                let used_in_default =
-                  Option.value_map default ~default:false ~f:(fun expression ->
-                      meaningfully_used ~dsl name (Expression expression))
-                in
-                used_in_default || if pattern_binds pattern name then false else used_after later)
-      in
-      if used_after (List.drop params (position + 1)) then Implemented else Unimplemented
+  let names = pattern_names pattern in
+  let name_used name =
+    (* An earlier parameter is in scope in every later default until a later parameter shadows it;
+       that shadowing parameter's own default is still evaluated before its pattern binds. *)
+    let rec used_after = function
+      | [] -> meaningfully_used ~dsl name tail
+      | param :: later -> (
+          match param.pparam_desc with
+          | Pparam_newtype _ -> used_after later
+          | Pparam_val (_, default, pattern) ->
+              let used_in_default =
+                Option.value_map default ~default:false ~f:(fun expression ->
+                    meaningfully_used ~dsl name (Expression expression))
+              in
+              used_in_default || if pattern_binds pattern name then false else used_after later)
+    in
+    used_after (List.drop params (position + 1))
+  in
+  if List.exists names ~f:name_used then Implemented else Unimplemented
 
 let args_in_source ~source content =
   let found = ref [] in

@@ -49,9 +49,11 @@ that they earn a lookup rather than always-loaded space.
 - Public optional arguments in `lib/` follow the caller-visible underscore policy enforced by
   `optional_arg_inventory`: a discard-only value is exposed as `?_feature`, while an implemented
   value uses `?feature`; both mismatches fail. `Optional_arg_scan` parses the source and distinguishes
-  real uses from `let _ = feature` / `let _unused = feature` / `ignore feature`, including later
-  optional defaults and the identifiers that actual `%op` einsum operands turn into generated
-  coefficient / legacy-`use_padding` reads under the same lexical scope; and
+  real uses from `let _ = feature` / an unused `let _unused = feature` / direct `ignore` spellings,
+  including later and nested optional defaults, destructured option patterns, directly returned
+  optional closures, and the identifiers that actual structure- or expression-level `%op`/`%cd`
+  einsum operands turn into generated coefficient / legacy-`use_padding` reads under the same
+  lexical scope; and
   `optional_arg_scan_cases` supplies the violating discard forms plus their nearest honest
    counterparts (gh-ocannl-811). Optimizer
    forwarders still need executed oracles — syntactic use proves only that the value was forwarded.
