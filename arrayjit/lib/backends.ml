@@ -770,14 +770,12 @@ struct
           fun () ->
             (* The merge buffer is the device's reserved single-tenant pool; grow it in place when a
                larger node arrives ([alloc_pool] overwrites the reserved pool-id entry). *)
-            if s.merge_buffer_capacity < size_in_bytes then (
+            if s.merge_buffer_capacity < size_in_bytes then
               alloc_pool
                 ?mode:(Option.map tn.Tnode.memory_mode_intent ~f:fst)
                 s ~pool_id:merge_buffer_pool_id ~size_in_bytes
                 ~alignment:(Ops.prec_in_bytes (Lazy.force tn.Tnode.storage_prec));
-              s.merge_buffer_capacity <- size_in_bytes);
             let loc = { pool_id = merge_buffer_pool_id; offset = 0 } in
-            s.merge_buffer := Some loc;
             buffer_to_buffer ~dst:(resolve_pool s loc) ~src:src_ptr ~size_in_bytes
     in
     let description =
