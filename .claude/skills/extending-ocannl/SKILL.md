@@ -25,10 +25,18 @@ When outputs differ between backends:
 
 ## Backend Extensions
 
-1. Implement device-specific module following `Backend_impl` signatures
+1. Implement device-specific module following `Backend_impl` signatures; backends implement stream-based execution with FIFO queuing, plus events and synchronization between streams/devices
 2. Add compilation logic in `arrayjit/lib/backends.ml`
 3. Handle memory management and synchronization
 4. Add configuration options in `ocannl_config.reference`
+
+### Code generation architecture
+
+- `c_syntax.ml` provides a functor with default C code generation patterns from `Low_level.t`
+- `cc_backend.ml` uses the defaults with minimal overrides; `cuda_backend.ml` overrides more functions for CUDA-specific syntax (e.g. `__float2half`); `metal_backend.ml` overrides using MSL-specific syntax; `hip_backend.ml` mirrors the CUDA backend
+- Backends must provide `convert_precision` for type conversions
+- Builtin functions (e.g. type conversions) must be implemented in the per-backend builtin modules prepended to generated code: `builtins_cc.ml` for the C backends, `builtins_cuda.ml` (CUDA), `builtins_hip.ml` (HIP), `builtins_metal.ml` (Metal). `builtins.c` provides the host-side FFI stubs compiled into the library
+- When adding new precision types, ensure conversion functions exist in all backend builtins
 
 ## Shape Inference Extensions
 

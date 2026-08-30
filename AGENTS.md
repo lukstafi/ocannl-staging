@@ -76,13 +76,10 @@ design history) that is not derivable from the code alone.
    - `%op` ("operation"): For tensor expressions (`Tensor.t`)
    - Inline declarations lift to unit parameter `()` scope, enabling parameter reuse
 
-2. **Shape Inference**: 
-   - Three axis kinds: batch | input -> output (matrix convention: input rightmost)
-   - Row variables (`..d..`) enable flexible axis handling and broadcasting
-   - Einsum notation supports convolutions, reductions, and arbitrary permutations
+2. **Shape Inference** (`docs/shape_inference.md` is the authoritative reference):
+   - Three axis kinds — batch | input -> output (matrix convention: input rightmost) — with row variables (`..d..`) for broadcasting and generalized einsum notation for convolutions, reductions, and arbitrary permutations
    - "Principle of least commitment": use row variables where axis count doesn't matter
    - Shape inference completion is forced by lowering: via `Context.compile`, or wrappers such as `Train.to_routine`, `Train.run_once` or `Train.forward_once`; `finish_inference` closes still-unsolved dims (GLB where known, otherwise 1/broadcast)
-   - Projection inference is re-derived per operation (`derive_projections`, fresh projection ids) to avoid cross-op contamination
    - Operations in `Operation`, `TDSL`, `NTDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
    -  Operations in `TDSL.O` (opened for `%op`), `NTDSL.O` (opened for `%cd`) hide this so that shapes have to be inferred
    
@@ -209,44 +206,18 @@ Backends are process-wide singletons: use `Backends.get_backend ()` or the Conte
 
 ### Backend Development
 
-- Backends must implement stream-based execution with FIFO queuing
-- Support for events and synchronization between streams/devices  
-- Code generation through `Low_level.t` to backend-specific representations
-
-**Backend Code Generation Architecture**:
-- `c_syntax.ml` provides a functor with default C code generation patterns
-- `cc_backend.ml` uses defaults from `c_syntax.ml` with minimal overrides
-- `cuda_backend.ml` overrides more functions for CUDA-specific syntax (e.g., `__float2half`)
-- `metal_backend.ml` overrides using MSL-specific syntax
-- Backends must provide `convert_precision` for type conversions
-- Builtin functions (e.g., type conversions) must be implemented in the per-backend builtin modules prepended to generated code: `builtins_cc.ml` for the C backends, `builtins_cuda.ml` (CUDA), `builtins_hip.ml` (HIP), `builtins_metal.ml` (Metal). `builtins.c` provides the host-side FFI stubs compiled into the library
-- When adding new precision types, ensure conversion functions exist in all backend builtins
+- Backends implement stream-based execution with FIFO queuing, events, and synchronization between streams/devices, generating code from `Low_level.t`
+- Code generation: `c_syntax.ml` is a functor with default C patterns that each backend overrides for its own syntax; the touch-lists — including the per-backend builtins modules and the `convert_precision` obligation — are in the `extending-ocannl` skill (`.claude/skills/extending-ocannl/SKILL.md`)
 
 ### Syntax Extensions
 
-- `%cd` requires `NTDSL` module in scope (from `Operation.NTDSL`)
-- `%op` requires `TDSL` module in scope (from `Operation.TDSL`)
-- Record syntax for inline tensor declarations: `{ tensor_name }` or `{ tensor_name = init_expr }`
-- Generalized einsum notation for complex tensor operations
+`docs/syntax_extensions.md` is the authoritative reference for `%op`/`%cd` — the record syntax and its shorthand fields, inline-declaration scoping, einsum specs and dimension capture, projection slots. Orientation and traps:
 
-**Key differences between %op and %cd**:
-- `%op` allows initialization expressions (`{ x = uniform () }`), used for model parameters
-- `%cd` is self-referential only (`{ x }`), used in computation graphs where tensors are defined by operations
-- Inline parameter init in `%op` is forward-only and uses NTDSL internally; `TDSL.param` adds the final parameter gradient
-- See `docs/syntax_extensions.md` for comprehensive documentation
+- `%cd` requires `NTDSL` in scope, `%op` requires `TDSL` (both provided by the `DSL_modules` opens above)
+- Record syntax for inline tensor declarations: `{ tensor_name }`, or `{ tensor_name = init_expr }` — initialization expressions are `%op`-only, for model parameters; they run forward-only, then `TDSL.param` adds the final parameter gradient
 
-**Record syntax features**:
-- OCaml punning: `{ x }` expands to default initialization (centered scaled packed `uniform()` over `[-0.25, 0.25)` for parameters in %op, but configurable via `TDSL.default_param_init`)
-- Shorthand field names: `o` → `output_dims`, `i` → `input_dims`, `b` → `batch_dims`
-- Additional fields map to labeled arguments of tensor creation functions `Tensor.op_fun`
-- Dimension specification for tensor literals: lists `[...]` for output, tuples `(...)` for input, arrays `[|...|]` for batch
-
-**Einsum notation**:
-- Binary form: `tensor1 +* "spec1; spec2 => result_spec" tensor2`
-- Unary form: `tensor ++ "spec => result_spec"`
-- Capture dimensions: `+* "spec" ["var1"; "var2"]` binds dimension variables
-- Use `Shape.set_dim var value` to constrain captured dimensions
-- Special operators -- binary: `+*` (`einsum`, add-reduce with multiply), `@^+` (`tropical`, max-reduce with add), `+++` (`outer_sum`, add-reduce with add); unary: `++` (`einsum1`, add-reduce), `@^^` (`einmax1`, max-reduce)
+**Einsum notation** — binary `t1 +* "spec1; spec2 => result_spec" t2`, unary `t ++ "spec => result_spec"`; a trailing string list captures dimension/row variables (constrain them with `Shape.set_dim`):
+- Operators -- binary: `+*` (`einsum`, add-reduce with multiply), `@^+` (`tropical`, max-reduce with add), `+++` (`outer_sum`, add-reduce with add); unary: `++` (`einsum1`, add-reduce), `@^^` (`einmax1`, max-reduce)
 - Concatenation: `a^b` in specs creates concatenated axis (for slicing, block tensors)
 
 **Common gotchas and idioms**:
@@ -254,9 +225,10 @@ Backends are process-wide singletons: use `Backends.get_backend ()` or the Conte
 - `**.` is pointwise power with a numeric exponent (specialized gradients)
 - Use `_rhs1`/`_rhs2`/`_lhs` suffixes in `%cd` for intermediate tensors when projection slots matter
 - `stretch 1.0` creates a shape-inferred constant 1 whose shape resolves at the use site; `1.0` alone is a fixed scalar. Operation results otherwise close down to their arguments' shapes — a use site broadcasts them in but cannot widen them (gh-544; the old `0.5 + 0.5` idiom relied on the pre-544 widening default)
-- Einsum spec must be a literal string when capturing dimensions: `x ++ "a,b" ["a"]` works, `let s = "a,b" in x ++ s ["a"]` fails
+- Einsum spec must be a literal string when capturing dimensions: `x ++ "ab => a" ["b"]` works, `let s = "ab => a" in x ++ s ["b"]` fails
 - Single-char vs multi-char mode: `"abc"` = 3 axes; `"abc,"` = 1 axis named `abc` (comma triggers multi-char)
 - `{ param }` in `%op` creates learnable parameters; same syntax in `%cd` creates non-differentiable tensors
+- Default param init is a centered scaled `uniform ()` over `[-0.25, 0.25)`, configurable via the reference `TDSL.default_param_init`
 - Sub-modules with `()` must be bound before input: `let layer = make_layer () in fun x -> layer x`
 - No reshape/flatten—use multi-axis operations or row variables instead
 
