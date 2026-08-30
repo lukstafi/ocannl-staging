@@ -335,6 +335,15 @@ that they earn a lookup rather than always-loaded space.
   they express the WHOLE shape, since they ignore locations and attributes while keeping arity and
   labels exact. What they cannot reach — a variable-length argument list, a string constant's value,
   a module binding — stays written against the constructors.
+- `dead_export_scan` (gh-ocannl-806) is a source-level ratchet over direct `.ml` modules without a
+  sibling `.mli` in `arrayjit/lib/` and `tensor/`: it enumerates source-declared top-level `let` and
+  `external` values, then counts qualified references from other sources. Module aliases are
+  followed conservatively; an unqualified identifier in the lexical scope of `open M` counts even
+  when shadowing could make it local, and `include M` counts every value because it re-exports the
+  interface. Those choices admit false positives rather than refusing valid code. Values created
+  only by PPX expansion or brought into the defining module by `include` are outside this first
+  cut. Every current zero-reference export is an exact stale-checked exemption: adding an `.mli`,
+  removing the value, or giving it a detected caller requires deleting its exemption.
 - A documentation comment survives into the parse tree as an `[@@@ocaml.doc "…"]` attribute holding
   a STRING, so an iterator hands it to an expression hook exactly like code would (verified by
   removing the guard — the prose cases flip to findings). Any scan over string literals must

@@ -78,7 +78,7 @@
   (alias slow-hip_scratch_budget)
   (alias slow-hip_scratch_tune_survives)))
 
-; The repo-wide scans, as one family (gh-ocannl-703). These seven parse the repository's own
+; The repo-wide scans, as one family (gh-ocannl-703). These parse the repository's own
 ; sources, dune files and documentation rather than compiling anything, so they are cheap -- and
 ; they are the ones a small targeted change trips: add a config key, add a dune stanza, print a
 ; claim. Before this alias the only way to run them was the whole directory, which is the expensive
@@ -101,6 +101,7 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-dead_export_scan)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
@@ -182,6 +183,7 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-atomic_file_rename_scan)
+  (alias runtest-dead_export_scan)
   (alias runtest-backend_golden_family_scan)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
@@ -1920,6 +1922,48 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff atomic_file_rename_scan.expected atomic_file_rename_scan.actual)))
+
+; gh-ocannl-806: modules without interfaces implicitly export every top-level binding. The live
+; scan ratchets every source-declared value in direct modules under arrayjit/lib and tensor against
+; external qualified, aliased, opened, or included references. The matching policy is pure in
+; test/support/dead_export_scan.ml, so these cases exercise it against synthetic violations and
+; near misses rather than trusting today's usually-clean repository as its own control.
+
+(test
+ ; ocannl-backend: none -- reads synthetic OCaml sources through ppxlib and links no backend.
+ (name dead_export_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules dead_export_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(executable
+ (name dead_export_scan)
+ (modules dead_export_scan)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- parses repository OCaml sources and opens no backend.
+ (target dead_export_scan.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../tensor/lexer.ml
+  ../../tensor/parser.ml
+  (glob_files_rec ../../*.ml)
+  (glob_files_rec ../../*.mli))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:dead_export_scan.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-dead_export_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff dead_export_scan.expected dead_export_scan.actual)))
 
 ; gh-ocannl-802: a per-backend golden family covers the backend vocabulary derived from
 ; `Backends.all_of_backend`, and goldens copied from another backend carry a visible provenance

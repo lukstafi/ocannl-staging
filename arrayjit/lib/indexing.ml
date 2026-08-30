@@ -27,8 +27,6 @@ let symbol_ident (Symbol s) = "i" ^ Int.to_string s
 
 type 'a environment = 'a Map.M(Symbol).t [@@deriving sexp]
 
-let empty_env : 'a environment = Map.empty (module Symbol)
-
 type static_symbol = {
   static_symbol : symbol;
   mutable static_range : int option; [@compare.ignore] [@equal.ignore] [@hash.ignore]
@@ -186,9 +184,6 @@ let axis_index_mentions_any (syms : symbol list) (idx : axis_index) : bool =
   List.exists syms ~f:(fun s -> axis_index_mentions_symbol s idx)
 
 type str_osym_map = (string, symbol option, Base.String.comparator_witness) Base.Map.t
-
-let sexp_of_str_osym_map (map : str_osym_map) =
-  Sexp.List (Map.to_alist map |> List.map ~f:[%sexp_of: string * symbol option])
 
 type projections_debug = { spec : string; derived_for : Sexp.t; trace : (string * int) list }
 [@@deriving sexp]

@@ -29,6 +29,10 @@ module Agent_notes_scan = Agent_notes_scan
 (** Reading [docs/agent-notes.md] and [docs/agent-notes/] as structure: bullet integrity, index-hook
     agreement, table shape, reachability from the index, and repetition across files. *)
 
+module Dead_export_scan = Dead_export_scan
+(** Enumerating source-declared values in modules without interfaces and conservatively counting
+    external qualified, aliased, opened, and included references to them. *)
+
 module Codegen_text_scan = Codegen_text_scan
 (** Deciding what pins the TEXT of generated code: goldens holding emitted kernel or IR source, and
     test sources asserting on it from a string literal. *)
