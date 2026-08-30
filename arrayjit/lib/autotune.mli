@@ -558,6 +558,25 @@ type timing_mode =
           step presents — it queues every kernel of a layer and synchronizes at the end, so no
           kernel in it pays a round trip of its own. *)
 
+type timing_sample = {
+  per_launch_ms : float;  (** The quantity the sampling budget accumulates and the minimum ranks. *)
+  contention_ms : float;
+      (** Raw wall time used only for contention detection. Under {!Queued} this is the whole batch
+          before division by its depth, so a fixed host stall is not divided out of the signal. *)
+}
+
+type timing_result = {
+  ms : float;
+      (** The minimum per-launch sample. Callers must use it only when [contended = false]. *)
+  contended : bool;
+      (** At least half the sample window was more than 2x slower than its minimum. This is a
+          refusal signal: the window mostly measured host stalls, so the autotuner does not rank or
+          cache the number (gh-ocannl-855). *)
+  samples : int;
+      (** The number of samples behind [ms] and [contended], for diagnostics and exact dispatch
+          accounting. *)
+}
+
 (** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
     [autotune_timing].
 
@@ -581,6 +600,11 @@ type report = {
           this count is not comparable across a CPU and a GPU backend: every serial-form candidate
           the CPU backends legitimately time is refused on GPU, and the refusals are counted in
           [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
+  timings_contended : int;
+      (** Baseline and candidate timing windows refused because host contention dominated their
+          samples (gh-ocannl-855). Zero on cache replay and search-disabled calls, which time
+          nothing in this process. Lets a completed search distinguish transient measurement refusal
+          from structural candidate declines and retry when appropriate. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
           serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
@@ -616,6 +640,8 @@ type report = {
   fiss_sketch_timed : int;
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
+          Includes completed timing windows refused for host contention; [timings_contended]
+          identifies those unusable verdicts.
       *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
@@ -626,7 +652,9 @@ type report = {
           [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
-          composite), those that compiled and were actually timed. *)
+          composite), those that compiled and were actually timed. Includes completed timing
+          windows refused for host contention; [timings_contended] identifies those unusable
+          verdicts. *)
   mma_candidates : int;
       (** Candidates whose label promises a tensorized ([Schedule.Tensorize]) pipeline that the
           search put through candidate compile: whole-routine and per-fission-segment sketch seeds,
@@ -634,10 +662,12 @@ type report = {
           same point as [mma_timed], so the two always describe the same population. *)
   mma_timed : int;
       (** Of [mma_candidates], those that compiled and were actually timed (dedup'd duplicates
-          excluded — an identical candidate was already timed). [mma_candidates > 0] with
-          [mma_timed = 0] means the search never measured a tensorized pipeline at all, the state
-          gh-ocannl-521 recorded for every GPU backend: candidates are cheap to enumerate and were
-          being rejected in bulk at candidate compile. *)
+          excluded — an identical candidate was already timed). Includes completed timing windows
+          refused for host contention; [timings_contended] identifies those unusable verdicts.
+          [mma_candidates > 0] with [mma_timed = 0] means the search never reached a timing window
+          for a tensorized pipeline at all, the state gh-ocannl-521 recorded for every GPU backend:
+          candidates are cheap to enumerate and were being rejected in bulk at candidate compile.
+      *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
@@ -892,6 +922,8 @@ val family_profit_of_report : ?margin:float -> report -> family_profit
 val family_profit_of_reports : ?margin:float -> report list -> family_profit
 (** What completed searches measured about the tensorized family's profitability on this device
     (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config [tune_flip_profit_margin].
+    A report with any [timings_contended] contributes [Unmeasured]: its finite minima cover an
+    incomplete candidate set and cannot safely price the family.
     Over several reports the most favourable evidence wins — the expressibility prior is deleted
     only by evidence that contradicts it, never by the absence of a confirmation. A failing arm's
     report counts: its timings are measurements of the family even though its [best_ms] is not
@@ -1047,7 +1079,7 @@ val set_test_bindings : Context.routine -> unit
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
-val queued_batch_depth : est_ms:float -> int
+val queued_batch_depth : timing_result -> int option
 (** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
     synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
     at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
@@ -1056,7 +1088,20 @@ val queued_batch_depth : est_ms:float -> int
     and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
     the target). Total, over every float: a subnormal estimate saturates rather than raising.
     Exposed because those two boundaries are what a regression would cross silently: a depth stuck
-    at 1 turns a queued search back into an isolated one. *)
+    at 1 turns a queued search back into an isolated one. Returns [None] for a contended estimate,
+    refusing to turn a stall-inflated calibration into depth 1. *)
+
+val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
+(** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
+    16 samples, then tops up until their accumulated [per_launch_ms] reaches ~25 ms or 64 samples
+    have been taken. Reports [contended] when at least half the raw [contention_ms] samples exceed
+    their minimum by 2x. Exposed so tests can inject a deterministic clock. *)
+
+val search_measurements_cacheable : nothing_timed:bool -> timings_contended:int -> bool
+(** Pure cache-policy seam (gh-ocannl-855). A search result is cacheable only when at least one
+    candidate was timed and no timing window was refused for host contention. The current call may
+    still ship its best usable candidate, but an incomplete measurement set must be retried by a
+    later cache-cold search. *)
 
 val timing_string : timing_mode -> string
 (** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component
@@ -1067,19 +1112,23 @@ val timing_of_setting : string -> timing_mode
     raises [Invalid_argument] on anything else. *)
 
 val time_routine :
-  ?tag_failures:bool -> timing:timing_mode -> repeats:int -> Context.t -> Context.routine -> float
+  ?tag_failures:bool ->
+  timing:timing_mode ->
+  repeats:int ->
+  Context.t ->
+  Context.routine ->
+  timing_result
 (** The tuner's own instrument, exposed so a harness can rank candidates by exactly what a search
     ranks them by (gh-ocannl-755) rather than by a re-derivation of it. Binds test values
     ({!set_test_bindings}) and restores the routine's bindings afterwards, runs one warmup, then
-    minimizes the per-launch time over at least [repeats] timed runs, topping up until ~25 ms of
-    wall time has accumulated (at most 64 runs) so that a sub-millisecond candidate is not crowned
-    by one lucky sample. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth
-    is calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
-    than that target is measured identically in both modes. Both modes sit under the same ~25 ms
-    ceiling, but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
-    finishes isolated timing in a few milliseconds and queued timing at the budget, so queued timing
-    spends a few milliseconds more per candidate — immaterial beside the compile each candidate
-    already costs.
+    minimizes the per-launch time over at least 16 and [repeats] timed runs, topping up until ~25 ms
+    of per-launch samples has accumulated (at most 64 runs) so that a host stall cannot collapse the
+    min-of-N. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth is
+    calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
+    than that target is measured identically in both modes. The result reports when most samples
+    were stalled; the tuner refuses such a calibration or candidate measurement rather than ranking
+    and caching it. Since the budget is per-launch rather than batch wall, queued timing can spend
+    up to 64 batches on a fast candidate; [max_timing_runs] is its wall-cost bound.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
@@ -1087,18 +1136,20 @@ val time_routine :
     propagate raw. Timing dispatches the routine repeatedly against live buffers, so an accumulating
     routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
     afterwards. [Queued] raises how many such dispatches happen — at most 65 under [Isolated],
-    against at most 12805 for a microsecond kernel batched at the cap — so a routine whose values
-    grow per run reaches larger ones. That is a fact about the scratch buffers, not about the
-    measurement: the number of dispatches is bounded by the same ~25 ms of wall time either way, and
-    a candidate's time is not what it accumulated. *)
+    against at most 12865 for a microsecond kernel (warmup, 64 calibration launches, then 64 batches
+    at the cap) — so a routine whose values grow per run reaches larger ones. That is a fact about
+    the scratch buffers, not about the measurement: the cap bounds dispatches while the ~25 ms
+    budget accumulates per-launch samples, and a candidate's time is not what it accumulated. *)
 
-val on_batch_depth : (int -> unit) ref
+val on_batch_depth : (int option -> calibration_samples:int -> unit) ref
 (** Observation seam for the timing tests (gh-ocannl-851), called by each {!time_routine} call with
     the batch depth it settled on — after calibration, before the timed loop; {!Isolated} always
     reports 1. The negative control for a twice-divided queued reading needs the depth the call
     ACTUALLY used: the call recalibrates independently, so re-applying {!queued_batch_depth} to an
     estimate taken outside it guesses wrong exactly on the busy runners the control must survive.
-    The default is a no-op and no configuration selects it. *)
+    [None] means calibration was contended and refused; [calibration_samples] is zero for
+    {!Isolated} and the actual number of single-launch samples for {!Queued}. The default is a no-op
+    and no configuration selects it. *)
 
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's

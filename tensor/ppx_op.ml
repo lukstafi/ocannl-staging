@@ -234,10 +234,11 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
           [%e Hashtbl.find_exn einsum_unary_ops op_ident loc]
             ?label:[%e opt_expr ~loc label] [%e spec] [%e e1]] )
   | [%expr
-      [%e? { pexp_desc = Pexp_ident { txt = Lident "++^"; _ }; _ }]
+      [%e? { pexp_desc = Pexp_ident { txt = Lident op_ident; _ }; _ }]
         [%e? expr1]
         [%e? { pexp_desc = Pexp_constant (Pconst_string (spec_str, _, _)); _ }]]
-    when String.contains spec_str '>' ->
+    when String.contains spec_str '>'
+         && String.equal op_ident Einsum_parser.concat_operator_with_generated_specs ->
       let vbs1, rhses_expr =
         match expr1.pexp_desc with
         | Pexp_tuple elems ->
@@ -250,11 +251,12 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
       let spec = substitute_identifiers_in_einsum_spec ~loc spec_str in
       (vbs1, [%expr concat ?label:[%e opt_expr ~loc label] [%e spec] [%e rhses_expr]])
   | [%expr
-      [%e? { pexp_desc = Pexp_ident { txt = Lident "++^"; _ }; _ }]
+      [%e? { pexp_desc = Pexp_ident { txt = Lident op_ident; _ }; _ }]
         [%e? expr1]
         ([%e? { pexp_desc = Pexp_constant (Pconst_string (spec_str, _, _)); _ }]
            ([%e? { pexp_desc = Pexp_constant (Pconst_string _); _ } as head] :: [%e? rest]))]
-    when String.contains spec_str '>' ->
+    when String.contains spec_str '>'
+         && String.equal op_ident Einsum_parser.concat_operator_with_generated_specs ->
       let capture_vbs, capture_dims_expr = collect_capture_labels ~loc head rest in
       let vbs1, rhses_expr =
         match expr1.pexp_desc with

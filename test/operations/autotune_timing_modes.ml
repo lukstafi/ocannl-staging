@@ -24,6 +24,63 @@ module SC = Ir.Schedule_cache
 let p = Verdict.p
 let backend () = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
+(* {1 Sampling policy, with an injected clock} *)
+
+let sample_from_samples values fallback =
+  let rest = ref values and calls = ref 0 in
+  let sample () =
+    Int.incr calls;
+    match !rest with
+    | x :: xs ->
+        rest := xs;
+        x
+    | [] -> fallback
+  in
+  (sample, calls)
+
+let same_sample ms : Autotune.timing_sample = { per_launch_ms = ms; contention_ms = ms }
+
+let sample_from values fallback =
+  sample_from_samples (List.map values ~f:same_sample) (same_sample fallback)
+
+let () =
+  Stdio.printf "== contention-robust sample budgeting ==\n";
+  let sample, calls = sample_from [] 0.08 in
+  let fast = Autotune.sample_min ~repeats:3 ~sample in
+  p "a fast routine reaches the 64-sample cap"
+    (!calls = 64 && fast.samples = 64 && Float.equal fast.ms 0.08 && not fast.contended);
+  (* The first 15 samples model the 16-28 ms host stalls from gh-ocannl-855 and the sixteenth the
+     routine's ~0.08 ms idle cost. A wall budget would stop after two samples; the minimum-sample
+     floor must reach the clean one, and the population must say that the minimum came from a
+     contended window rather than silently presenting it as ordinary calibration. *)
+  let sample, calls = sample_from (List.init 15 ~f:(fun _ -> 20.)) 0.08 in
+  let burst = Autotune.sample_min ~repeats:3 ~sample in
+  p "a stall burst cannot spend the budget before the 16-sample floor"
+    (!calls = 16 && burst.samples = 16 && Float.equal burst.ms 0.08);
+  p "a mostly stalled sample window reports contention" burst.contended;
+  p "queued calibration refuses a contended estimate"
+    (Option.is_none (Autotune.queued_batch_depth burst));
+  let stalled : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 30. } in
+  let clean : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 10. } in
+  let sample, _ = sample_from_samples (List.init 63 ~f:(fun _ -> stalled)) clean in
+  let queued_burst = Autotune.sample_min ~repeats:3 ~sample in
+  p "queued contention is detected on raw batch wall before per-launch division"
+    queued_burst.contended;
+  let sample, _ = sample_from [] 20. in
+  let slow = Autotune.sample_min ~repeats:3 ~sample in
+  p "a consistently slow routine is not mistaken for host contention"
+    ((not slow.contended) && Option.equal Int.equal (Autotune.queued_batch_depth slow) (Some 1));
+  let sample, calls = sample_from [] 0.5 in
+  let budgeted = Autotune.sample_min ~repeats:3 ~sample in
+  p "the top-up budget accumulates per-sample time"
+    (!calls = 50 && budgeted.samples = 50 && Float.equal budgeted.ms 0.5 && not budgeted.contended);
+  p "a complete measurement set with a winner is cacheable"
+    (Autotune.search_measurements_cacheable ~nothing_timed:false ~timings_contended:0);
+  p "a contention-refused window prevents caching an incomplete winner"
+    (not (Autotune.search_measurements_cacheable ~nothing_timed:false ~timings_contended:1));
+  p "a search with no measured winner remains uncacheable"
+    (not (Autotune.search_measurements_cacheable ~nothing_timed:true ~timings_contended:0))
+
 (* {1 The calibration policy, without a device} *)
 
 (* [queued_batch_depth] is what decides whether queued timing queues anything at all, and its two
@@ -51,16 +108,22 @@ let () =
   Stdio.printf "== queued batch depth ==\n";
   Verdict.p_all "every calibration estimate gets the depth the policy owes it" depth_cases
     ~f:(fun (what, est_ms, want) ->
-      let got = Autotune.queued_batch_depth ~est_ms in
-      if got <> want then
-        Stdio.eprintf "  %s: est %g ms -> depth %d, expected %d\n%!" what est_ms got want;
-      got = want);
+      let got = Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } in
+      if not (Option.equal Int.equal got (Some want)) then
+        Stdio.eprintf "  %s: est %g ms -> depth %s, expected %d\n%!" what est_ms
+          (Option.value_map got ~default:"refused" ~f:Int.to_string)
+          want;
+      Option.equal Int.equal got (Some want));
   (* The floor and the cap are the two claims a scaling-only implementation would still pass, so
      they are also asserted as the properties they are, over the same population. *)
   Verdict.p_all "no calibration estimate ever yields a depth below 1" depth_cases
-    ~f:(fun (_, est_ms, _) -> Autotune.queued_batch_depth ~est_ms >= 1);
+    ~f:(fun (_, est_ms, _) ->
+      Option.value_exn (Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 })
+      >= 1);
   Verdict.p_all "no calibration estimate ever yields a depth above the cap" depth_cases
-    ~f:(fun (_, est_ms, _) -> Autotune.queued_batch_depth ~est_ms <= 200)
+    ~f:(fun (_, est_ms, _) ->
+      Option.value_exn (Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 })
+      <= 200)
 
 (* {1 The setting's spelling} *)
 
@@ -100,7 +163,15 @@ let counter_routine () =
   let ctx, routine = Ll_test.link ~name:"gh755_counter" o in
   (o, ctx, routine)
 
-type reading = { ms : float; wall_ms : float; dispatches : int; depth : int }
+type reading = {
+  ms : float;
+  contended : bool;
+  samples : int;
+  wall_ms : float;
+  dispatches : int;
+  depth : int option;
+  calibration_samples : int;
+}
 
 (* Held so the cache-key section below asks about the SAME lowering the instrument measured, rather
    than minting a second one whose canonical form it would have to argue is equivalent. *)
@@ -115,14 +186,25 @@ let () =
   (* The depth each call settles on, off the instrument's own observation seam: the queued call
      calibrates independently, so nothing derived from a reading taken outside it (gh-ocannl-851,
      Codex round 2 on PR #521) stands in for what it actually used. *)
-  let depth_seen = ref 0 in
-  (Autotune.on_batch_depth := fun d -> depth_seen := d);
+  let depth_seen = ref None and calibration_samples_seen = ref 0 in
+  (Autotune.on_batch_depth :=
+     fun d ~calibration_samples ->
+       depth_seen := d;
+       calibration_samples_seen := calibration_samples);
   let measure timing =
     let before = count () in
     let c0 = Mtime_clock.counter () in
-    let ms = Autotune.time_routine ~repeats:3 ~timing ctx routine in
+    let result = Autotune.time_routine ~repeats:3 ~timing ctx routine in
     let wall_ms = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
-    { ms; wall_ms; dispatches = count () - before; depth = !depth_seen }
+    {
+      ms = result.ms;
+      contended = result.contended;
+      samples = result.samples;
+      wall_ms;
+      dispatches = count () - before;
+      depth = !depth_seen;
+      calibration_samples = !calibration_samples_seen;
+    }
   in
   (* The anchor the low side of the per-launch envelope below is written against: one launch plus
      one host synchronization, hand-rolled off the same two primitives the instrument uses and
@@ -157,30 +239,36 @@ let () =
      ms over %d dispatches (batch depth %d) in %.1f ms wall; second round isolated %.6f ms, queued \
      %.6f ms (batch depth %d); round trip %.6f ms (%.6f/%.6f/%.6f)\n\
      %!"
-    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches que.depth que.wall_ms iso2.ms que2.ms
-    que2.depth floor_ms before between after;
+    iso.ms iso.dispatches iso.wall_ms que.ms que.dispatches
+    (Option.value que.depth ~default:0)
+    que.wall_ms iso2.ms que2.ms
+    (Option.value que2.depth ~default:0)
+    floor_ms before between after;
   let finite r = Float.is_finite r.ms && Float.is_positive r.ms in
-  p "both modes returned a positive finite per-launch time" (finite iso && finite que);
+  p "both modes returned a positive finite per-launch time or reported contention"
+    ((finite iso || iso.contended) && (finite que || que.contended));
   (* One launch per timed run, at least [repeats] runs and at most the 64-run top-up cap, plus the
      warmup. Two-sided: the upper bound would also admit a loop that stopped at the warmup. *)
-  p "isolated timing dispatched one launch per timed run, warmup included"
-    (iso.dispatches >= 4 && iso.dispatches <= 65);
-  p "isolated timing reports batch depth 1" (iso.depth = 1);
-  (* The seam's report is not taken on faith: past the warmup (1) and the calibration runs (3), the
-     dispatch counter must decompose into whole batches of the reported depth, between the 3
-     guaranteed timed runs and the 64-run top-up cap. A loop batching at some depth other than the
-     one it reported fails this on any count the reported depth does not divide. *)
-  p "queued timing's dispatches decompose into whole batches of the reported depth"
-    (que.depth >= 1
-    && (que.dispatches - 4) % que.depth = 0
-    && (que.dispatches - 4) / que.depth >= 3
-    && (que.dispatches - 4) / que.depth <= 64);
+  p "isolated timing either reports contention or dispatches one launch per timed run"
+    (iso.contended || (iso.samples >= 16 && iso.samples <= 64 && iso.dispatches = 1 + iso.samples));
+  p "isolated timing reports batch depth 1" (Option.equal Int.equal iso.depth (Some 1));
+  (* The seam's report is not taken on faith: past the warmup (1) and the 16 calibration samples,
+     the dispatch counter must decompose into whole batches of the reported depth, between the 16
+     guaranteed timed samples and the 64-run top-up cap. A loop batching at some depth other than
+     the one it reported fails this on any count the reported depth does not divide. *)
+  p "queued timing either refuses contention or dispatches whole batches at the reported depth"
+    (que.contended
+    || Option.exists que.depth ~f:(fun depth ->
+        depth >= 1 && que.calibration_samples >= 16 && que.calibration_samples <= 64
+        && que.samples >= 16 && que.samples <= 64
+        && que.dispatches = 1 + que.calibration_samples + (que.samples * depth)));
   (* Depth > 1 is what queued mode IS. Gated on the depth the queued call itself reported: on a
      machine where one dispatch already costs a whole batch target the claim is vacuously true, and
      a vacuous [true] must not read like a verified one. *)
-  let batches_here = que.depth > 1 in
-  let claim = "queued timing dispatched more launches than isolated timing did" in
-  if batches_here then p claim (que.dispatches > iso.dispatches)
+  let batches_here = Option.exists que.depth ~f:(fun depth -> depth > 1) in
+  let claim = "queued timing either reports contention or dispatches more launches than isolated" in
+  if que.contended || iso.contended || batches_here then
+    p claim (que.contended || iso.contended || que.dispatches > iso.dispatches)
   else Verdict.skipped ~backend:(backend ()) claim;
   (* Per launch, not per batch. The two sides refuse mirror errors, and they are anchored on
      different quantities because of it.
@@ -211,13 +299,16 @@ let () =
      instrument's reach, as it already was under the pre-widening factor of 3. *)
   let mean r = r.wall_ms /. Float.of_int (max 1 r.dispatches) in
   let per_launch ~low_div r = Float.(r.ms <= 3. * mean r && r.ms >= floor_ms / low_div) in
-  Verdict.pass_fail "isolated reading is a per-launch time" (per_launch ~low_div:3. iso)
+  Verdict.pass_fail "isolated reading is a per-launch time or reports contention"
+    (iso.contended || per_launch ~low_div:3. iso)
     ~detail:(fun () ->
       Printf.sprintf "%.6f ms vs mean %.6f ms, round trip %.6f ms" iso.ms (mean iso) floor_ms);
-  Verdict.pass_fail "queued reading is a per-launch time" (per_launch ~low_div:16. que)
+  Verdict.pass_fail "queued reading is a per-launch time or reports contention"
+    (que.contended || per_launch ~low_div:16. que)
     ~detail:(fun () ->
       Printf.sprintf "%.6f ms vs mean %.6f ms, round trip %.6f ms (depth %d)" que.ms (mean que)
-        floor_ms que.depth);
+        floor_ms
+        (Option.value que.depth ~default:0));
   (* Amortizing a round trip can only remove time, so a queued reading above the isolated one is the
      instrument reporting the wrong quantity, not a slow machine. The factor absorbs the noise a
      min-of-N leaves; the point of the claim is the direction.
@@ -234,19 +325,18 @@ let () =
      direction to inherit. The other claims stay on the first round: they are about one call's own
      decomposition, not about a quantity two calls can be minimized over. *)
   let iso_min = Float.min iso.ms iso2.ms and que_min = Float.min que.ms que2.ms in
-  Verdict.pass_fail "queued timing does not read above isolated timing"
-    Float.(que_min <= iso_min * 2.)
+  Verdict.pass_fail "queued timing does not read above isolated timing or reports contention"
+    (iso.contended || iso2.contended || que.contended || que2.contended
+    || Float.(que_min <= iso_min * 2.))
     ~detail:(fun () ->
       Printf.sprintf "queued %.6f ms (%.6f, %.6f) vs isolated %.6f ms (%.6f, %.6f)" que_min que.ms
         que2.ms iso_min iso.ms iso2.ms);
-  (* Queued timing costs MORE than isolated timing on a fast routine -- isolated stops at the 64-run
-     cap, queued runs to the wall budget -- but it is bounded by that budget rather than scaling
-     with the batch depth. A loop that counted launches instead of wall time would spend up to
-     [max_queue_depth] times longer, which is what this refuses. *)
-  Verdict.pass_fail "queued timing's wall cost is bounded by the budget, not by the batch depth"
-    Float.(que.wall_ms <= (iso.wall_ms * 3.) + 100.)
-    ~detail:(fun () ->
-      Printf.sprintf "queued %.1f ms vs isolated %.1f ms wall" que.wall_ms iso.wall_ms)
+  (* The old wall-budget claim is intentionally gone: accumulating per-launch samples means a fast
+     queued routine can run all 64 batches. The pure injected-clock claims above pin the budget;
+     this executed leg pins only the absolute dispatch cap. *)
+  p "queued timing either reports contention or stays within the 64-batch dispatch cap"
+    (que.contended
+    || Option.exists que.depth ~f:(fun depth -> que.dispatches <= 1 + 64 + (64 * depth)))
 
 (* {1 The objective is part of the cache identity} *)
 

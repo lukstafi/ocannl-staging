@@ -1,3 +1,14 @@
+== contention-robust sample budgeting ==
+a fast routine reaches the 64-sample cap: true
+a stall burst cannot spend the budget before the 16-sample floor: true
+a mostly stalled sample window reports contention: true
+queued calibration refuses a contended estimate: true
+queued contention is detected on raw batch wall before per-launch division: true
+a consistently slow routine is not mistaken for host contention: true
+the top-up budget accumulates per-sample time: true
+a complete measurement set with a winner is cacheable: true
+a contention-refused window prevents caching an incomplete winner: true
+a search with no measured winner remains uncacheable: true
 == queued batch depth ==
 every calibration estimate gets the depth the policy owes it: true
 no calibration estimate ever yields a depth below 1: true
@@ -10,15 +21,15 @@ the spelling is case- and space-insensitive: true
 a misspelling is refused rather than defaulted: true
 
 == the instrument's two modes ==
-both modes returned a positive finite per-launch time: true
-isolated timing dispatched one launch per timed run, warmup included: true
+both modes returned a positive finite per-launch time or reported contention: true
+isolated timing either reports contention or dispatches one launch per timed run: true
 isolated timing reports batch depth 1: true
-queued timing's dispatches decompose into whole batches of the reported depth: true
-queued timing dispatched more launches than isolated timing did: true
-isolated reading is a per-launch time: PASS
-queued reading is a per-launch time: PASS
-queued timing does not read above isolated timing: PASS
-queued timing's wall cost is bounded by the budget, not by the batch depth: PASS
+queued timing either refuses contention or dispatches whole batches at the reported depth: true
+queued timing either reports contention or dispatches more launches than isolated: true
+isolated reading is a per-launch time or reports contention: PASS
+queued reading is a per-launch time or reports contention: PASS
+queued timing does not read above isolated timing or reports contention: PASS
+queued timing either reports contention or stays within the 64-batch dispatch cap: true
 
 == the objective in the cache key ==
 the cache key is stable within one objective: true

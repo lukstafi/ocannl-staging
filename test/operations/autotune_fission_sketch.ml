@@ -9,8 +9,9 @@
    replays through [Autotune.tune]'s cache-hit path: the report says [fissioned], and the values are
    correct — exercising [F_saved] rebinding of per-segment saved schedules. - [Autotune.tune] on a
    fissionable computation searches whole-routine and fissioned candidates and returns correct
-   values; the second call hits the cache; its search reaches several candidates, measuring the ones
-   the backend can dispatch and accounting for the rest in the decline census (gh-ocannl-543 — on
+   values; the second call hits the cache when the first search had no contention refusals, and
+   otherwise retries; its search reaches several candidates, measuring the ones the backend can
+   dispatch and accounting for the rest in the decline census (gh-ocannl-543 — on
    GPU backends only the fissioned preset is measured). - The matmul sketch generator detects a
    32x32 matmul and seeds tile-size instantiations of the register-blocktiling (GPU) /
    operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
@@ -214,7 +215,12 @@ let () =
     match !reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two reports"
   in
   p_all2 "tuned fissionable chain values correct" got_t1 expected_e ~f:approx;
-  p "chain tune searches then hits the cache" (completed r1 && replayed r2);
+  let chain_first_cacheable = r1.Autotune.timings_contended = 0 in
+  p "chain tune replays exactly after a contention-free search"
+    (completed r1 && Bool.equal (replayed r2) chain_first_cacheable);
+  let chain_cache_committed =
+    chain_first_cacheable || (completed r2 && r2.Autotune.timings_contended = 0)
+  in
   (* gh-ocannl-552: the untuned-default reference is measured by the search — the config-thresholds
      fissioned seed is the first candidate that binds a hardware dimension on GPU, and on CPU it is
      timed or dedups against a timed twin — and persists through the cache entry, so a cache-hit
@@ -241,13 +247,13 @@ let () =
           c3 chain_comp Ir.Indexing.Empty
       in
       let (_ : Context.t) = Context.run c3 rt3 in
-      p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
+      p "a stored stale default fingerprint drops the reference but not the hit (gh-ocannl-552)"
         (match !r3 with
         | Some r -> replayed r && Option.is_none r.Autotune.default_ms
         | None -> false)
   | None ->
-      p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
-        false);
+      p "a stored stale default fingerprint drops the reference but not the hit (gh-ocannl-552)"
+        (not chain_cache_committed));
   (* gh-ocannl-543: [candidates_timed >= 2] is a cc-shaped assertion. This chain's candidate space
      is the same on every backend, but most of it is serial forms — the whole-routine presets dedup
      to the unscheduled base, and the beam's Split/Swap/Vectorize moves off that base cannot bind a
@@ -323,7 +329,8 @@ let () =
     (mr1.Autotune.sketch_candidates
     >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
   p_all2 "tuned matmul matches the serial twin" got_mm1 got_serial ~f:approx;
-  p "matmul tune searches then hits the cache" (completed mr1 && replayed mr2);
+  p "matmul tune replays exactly after a contention-free search"
+    (completed mr1 && Bool.equal (replayed mr2) (mr1.Autotune.timings_contended = 0));
   p_all2 "matmul cache-hit values match the serial twin" got_mm2 got_serial ~f:approx;
 
   (* === Per-fission-segment sketches (F_sketch): qd = qa + qb (forced materialized), then the

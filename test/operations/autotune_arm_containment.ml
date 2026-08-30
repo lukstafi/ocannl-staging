@@ -158,7 +158,9 @@ let () =
   let got = Context.get_values ctx_t t2.Tensor.value in
   p_all2 "the surviving arm's routine ships and computes the right values" got expected ~f:approx;
 
-  (* --- Run 2, no injection: arm A's winner survived to the disk cache --- *)
+  (* --- Run 2, no injection: arm A's winner replays exactly when run 1's candidate set was
+     complete. A contention-refused window keeps the search cache-cold (gh-ocannl-855), so this run
+     retries instead. --- *)
   let reports = ref [] in
   let ctx_2, routine_2 =
     Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir
@@ -166,9 +168,13 @@ let () =
       (Context.auto ()) t2 comp Ir.Indexing.Empty
   in
   let arm_a2 = List.nth_exn (List.rev !reports) 0 in
-  p "arm A's winner was cached by the run its sibling arm failed in" (replayed arm_a2);
-  p "the replay is the very schedule run 1 crowned"
-    (SC.equal_saved_schedule arm_a.Autotune.best_schedule arm_a2.Autotune.best_schedule);
+  let arm_a1_cacheable = arm_a.Autotune.timings_contended = 0 in
+  p "arm A replays exactly when its first search had no contention refusals"
+    (Bool.equal (replayed arm_a2) arm_a1_cacheable);
+  p "a replay is the very schedule run 1 crowned"
+    ((not (replayed arm_a2))
+    || SC.equal_saved_schedule arm_a.Autotune.best_schedule arm_a2.Autotune.best_schedule);
+  let arm_a_cached = arm_a1_cacheable || arm_a2.Autotune.timings_contended = 0 in
   let ctx_2 = Context.run ctx_2 routine_2 in
   let got_2 = Context.get_values ctx_2 t2.Tensor.value in
   p_all2 "the cached winner replays to the right values" got_2 expected ~f:approx;
@@ -193,7 +199,7 @@ let () =
   p "an arm failing before its search starts still occupies its slot" (List.length reports3 = 2);
   let arm_a3 = List.nth_exn reports3 0 and arm_b3 = List.nth_exn reports3 1 in
   p "the slot report is arm B's, not arm A's misattributed one"
-    (replayed arm_a3 && died_before_search arm_b3);
+    (Bool.equal (replayed arm_a3) arm_a_cached && died_before_search arm_b3);
   p "the pre-search report names the injected failure at a structured phase"
     (Option.value_map (Autotune.terminal_failure arm_b3) ~default:false ~f:(fun tf ->
          String.is_substring tf.Autotune.detail ~substring:message

@@ -32,8 +32,14 @@ files.
   in the previous invocation, not this one. `sgd_one` materializes its `sgd_momentum` buffer for
   exactly this reason (gh-ocannl-772); a new optimizer with its own buffers owes the same. The
   option matrix has executed coverage in `test/operations/sgd_variants.ml`, which compares a
-  multi-step trajectory against a host simulation — reach for that shape rather than a structural
-  check, since `~momentum` had been dead on arrival with a green suite behind it.
+  multi-step trajectory against a host simulation and sends non-default momentum through all four
+  construction paths (`sgd_one`, `sgd_update`, `Mixed_prec.scaled_sgd_update`,
+  `Mixed_prec.gated_scaled_update`) on `cc`; each wrapper's non-default result must also differ from
+  its own zero-momentum run. The higher-level `Parallel.data_parallel` forwarder is exercised in
+  `test/training/data_parallel.ml`: two-step `cc` trajectories separately send non-default momentum
+  and weight decay through the wrapper, match an independent closed-form host recurrence, and
+  differ from the same default trajectory. Reach for that shape rather than a structural check,
+  since `~momentum` had been dead on arrival with a green suite behind it.
 - `Train.to_routine` returns `Context.t * Context.routine` (gh-ocannl-772), like `Context.compile`
   and `Train.run_once`. `routine.Context.context` is the same value, so both spellings work; prefer
   chaining the returned context.

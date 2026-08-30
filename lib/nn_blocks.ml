@@ -665,9 +665,9 @@ let%op avg_pool2d ?(stride = 2) ?(window_size = 2) () x =
 let%op global_avg_pool2d x = x ++ "... | h, w, ..c.. => ... | 0, 0, ..c.."
 
 (** Batch normalization for CNN layers - normalizes across the batch dimension for each channel.
-    Typically applied after convolutions and before activations. *)
-let%op batch_norm2d ~label ?(epsilon = 1e-5) ?(momentum = 0.9) () ~train_step x =
-  let _ = momentum in
+    Typically applied after convolutions and before activations. [_momentum] is caller-visible as
+    unimplemented: running statistics do not exist yet, so changing it has no effect. *)
+let%op batch_norm2d ~label ?(epsilon = 1e-5) ?(_momentum = 0.9) () ~train_step x =
   (* FIXME: implement running statistics, currently using learned params *)
   (* Compute batch statistics across batch and spatial dimensions for each channel *)
   let total_size = dim o *. dim h *. dim w in
@@ -689,12 +689,11 @@ let%op batch_norm2d ~label ?(epsilon = 1e-5) ?(momentum = 0.9) () ~train_step x 
     {!batch_norm2d} there are no spatial axes to reduce over; channel axes are carried through
     unchanged via the [..c..] row variable.
 
-    See the FIXME on {!batch_norm2d}: running statistics are not implemented, so [momentum] is
-    ignored and inference falls back to the learned [gamma]/[beta] parameters rather than population
-    statistics. Acceptable for tutorial examples; do not rely on inference correctness for
-    distribution-shifted inputs. *)
-let%op batch_norm1d ~label ?(epsilon = 1e-5) ?(momentum = 0.9) () ~train_step x =
-  let _ = momentum in
+    See the FIXME on {!batch_norm2d}: running statistics are not implemented, so [_momentum] is a
+    caller-visible unimplemented option and inference falls back to the learned [gamma]/[beta]
+    parameters rather than population statistics. Acceptable for tutorial examples; do not rely on
+    inference correctness for distribution-shifted inputs. *)
+let%op batch_norm1d ~label ?(epsilon = 1e-5) ?(_momentum = 0.9) () ~train_step x =
   (* Compute batch statistics across the batch axis only, for each channel *)
   let mean = (x ++ "..o.. | ..c.. => 0 | ..c.." [ "o" ]) /. dim o in
   let centered = x - mean in
@@ -782,9 +781,9 @@ let%op sokoban_cnn ~label ?(num_actions = 4) () =
     (action_logits, value)
 
 (** Modern CNN with depthwise separable convolutions for efficiency. Suitable for mobile/edge
-    deployment. *)
-let%op mobile_cnn ~label ?(num_classes = 1000) ?(width_mult = 1.0) () =
-  let _ = width_mult in
+    deployment. [_width_mult] is caller-visible as unimplemented: changing it currently has no
+    effect on channel counts. *)
+let%op mobile_cnn ~label ?(num_classes = 1000) ?(_width_mult = 1.0) () =
   (* TODO: implement channel width multiplier *)
   (* Initial standard conv *)
   let conv_init = conv_bn_relu ~label:("conv_init" :: label) ~kernel_size:3 ~stride:2 () in

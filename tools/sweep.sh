@@ -386,6 +386,7 @@ rtc_context_cmd() {
   case $backend in
     cuda) alias_name=@arrayjit/test/runtest-test_cuda_compile_options ;;
     hip) alias_name=@arrayjit/test/runtest-test_hip_compile_options ;;
+    metal) alias_name=@arrayjit/test/runtest-test_metal_compile_options ;;
   esac
   printf 'echo "=== rtc-context (%s) ==="; ' "$backend"
   case $backend in
@@ -407,12 +408,6 @@ rtc_context_cmd() {
     metal)
       printf 'command -v sw_vers >/dev/null 2>&1 && sw_vers 2>&1; '
       printf 'command -v xcrun >/dev/null 2>&1 && xcrun -sdk macosx metal --version 2>&1 | head -3; '
-      # Named, not silently absent: Metal's MSL options are still assembled inside
-      # metal_backend.ml rather than in `Compiler_options`, so there is no builder
-      # for a GPU-free test to print. Until that lands, MSL fast math is the one
-      # unguarded reassociation surface left (gh-ocannl-784).
-      printf 'echo "rtc options: not available -- MSL options are still assembled in '
-      printf 'metal_backend.ml, not in Compiler_options (gh-ocannl-784)"; '
       ;;
   esac
   if [ -n "$alias_name" ]; then
@@ -421,17 +416,24 @@ rtc_context_cmd() {
     # the compile that just failed. Four lines, not a paragraph: `fingerprint`
     # carries this block under a line bound, and prose that crowded the vectors out
     # of it would cost more than it explains.
-    printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
-    printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
-    printf 'echo "discovery input above and the failing kernel arch markers."; '
-    # Line four says which of the two the reader is holding. A CUDA compile that
-    # failed logs its own vector; a HIP one does not, because nothing appends it.
+    # CUDA/HIP builders contain discovered include/architecture slots filled with sentinels by
+    # their tests; Metal's property sequence has no discovered slot and is the effective policy.
     case $backend in
       cuda)
+        printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
+        printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
+        printf 'echo "discovery input above and the failing kernel arch markers."; '
         printf 'echo "A failed nvrtc compile also logged its OWN vector, on an \x27nvrtc options:\x27 line."; '
         ;;
       hip)
+        printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
+        printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
+        printf 'echo "discovery input above and the failing kernel arch markers."; '
         printf 'echo "A failed hiprtc compile logs no vector of its own: nothing appends one yet."; '
+        ;;
+      metal)
+        printf 'echo "rtc option policy from %s; exact MTLCompileOptions property sequence."; ' "${alias_name#@}"
+        printf 'echo "A failed Metal compile also logged its OWN state, on a \x27metal options:\x27 line."; '
         ;;
     esac
     printf 'opam exec -- dune build %s --force 2>&1 | sed "s/^/rtc /"; ' "$alias_name"
@@ -620,7 +622,7 @@ fingerprint() {
     # never reached the file callers actually diff (Codex P2 on PR #510). Matched
     # by the prefix the backend writes, not by the rendered vector, so a changed
     # option set shows up as a fingerprint diff rather than as a missing line.
-    grep -hoE '^nvrtc options: .*' "$1"
+    grep -hoE '^(nvrtc|metal) options: .*' "$1"
   } 2>/dev/null | sort -u | head -60
   # The rtc-context block a failing GPU unit appended (see rtc_context_cmd),
   # verbatim and unsorted: it is a small fixed-size report whose ORDER is what

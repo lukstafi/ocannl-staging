@@ -26,6 +26,10 @@ module Refusal_control_manifest = Refusal_control_manifest
 (** Extracting static refusal-diagnostic fragments from repository scanners and relating them to
     permanent control goldens. *)
 
+module Optional_arg_scan = Optional_arg_scan
+(** Classifying whether [lib/] optional arguments affect their function bodies or are deliberately
+    unimplemented, in which case the caller-visible label must begin with an underscore. *)
+
 module Verdict_scan = Verdict_scan
 (** Scanning test sources for claims a test decides itself and prints outside [Verdict], where a
     failing one is [dune promote]-able into the golden. *)

@@ -12,3 +12,11 @@ gate open throughout: matches the host oracle: PASS
 gate open throughout: the step moved the parameter: true
 gate closed mid-run, with momentum: matches the host oracle: PASS
 gate closed mid-run, with momentum: the step moved the parameter: true
+Train.sgd_one forwards momentum: matches the host oracle: PASS
+Train.sgd_one forwards momentum: non-default changes the device result: PASS
+Train.sgd_update forwards momentum: matches the host oracle: PASS
+Train.sgd_update forwards momentum: non-default changes the device result: PASS
+Mixed_prec.scaled_sgd_update forwards momentum: matches the host oracle: PASS
+Mixed_prec.scaled_sgd_update forwards momentum: non-default changes the device result: PASS
+Mixed_prec.gated_scaled_update forwards momentum: matches the host oracle: PASS
+Mixed_prec.gated_scaled_update forwards momentum: non-default changes the device result: PASS

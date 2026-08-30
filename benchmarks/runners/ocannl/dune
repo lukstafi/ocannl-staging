@@ -52,14 +52,13 @@
   (pps ppx_here ppx_ocannl))
  (modes exe))
 
-; The two standalone (OCANNL-free) Metal compiler-bug probes: the original device-memory
-; read-modify-write manifestation, and the localized-accumulator one plus the measurement of what
-; the volatile workaround costs (gh-ocannl-782).
+; The standalone (OCANNL-free) Metal compiler probes: the two accumulation-miscompile
+; reproducers, and the math-mode reassociation/infinity measurement (gh-ocannl-848).
 
 (executables
- (names bench_metal_bug bench_metal_bug_local)
- (modules bench_metal_bug bench_metal_bug_local)
- (libraries metal ctypes)
+ (names bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
+ (modules bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
+ (libraries metal metal.runtime ctypes)
  (enabled_if
   (= %{system} macosx))
  (modes exe))

@@ -56,7 +56,8 @@ let tune =
           ~cache_hit:false
             (* An arm that timed nothing still names an objective: [tune] resolves it before it can
                construct any report, so every arm on the line carries one. *)
-          ~timing:"queued" ~best_ms:Float.infinity ~best_label:"tile 32x32" ~tensorized:false
+          ~timing:"queued" ~timings_contended:0 ~best_ms:Float.infinity
+          ~best_label:"tile 32x32" ~tensorized:false
           ~tensorization:None ~mma_statements:0 ~mma_scalar_fallbacks:0 ~mma_seeded:4 ~mma_timed:0
           ~mma_best_ms:Float.infinity
           ~terminal_failure:
@@ -64,23 +65,27 @@ let tune =
                (Printf.sprintf "compile failed: \"kernel\" \\ path%c%c ESC" (Char.of_int_exn 0)
                   (Char.of_int_exn 27)));
         Bench_json.tune_arm ~name:"B" ~state:"cache-replay" ~searched:false ~cache_hit:true
-          ~timing:"queued" ~best_ms:0.75 ~best_label:"grid 128" ~tensorized:true
+          ~timing:"queued" ~timings_contended:0 ~best_ms:0.75 ~best_label:"grid 128"
+          ~tensorized:true
           ~tensorization:(Some "scalar-fallback") ~mma_statements:2 ~mma_scalar_fallbacks:2
           ~mma_seeded:6 ~mma_timed:3 ~mma_best_ms:0.8 ~terminal_failure:None;
         (* Neither searched nor replayed: every counter zero, no winner to name. *)
         Bench_json.tune_arm ~name:"C" ~state:"search-disabled" ~searched:false ~cache_hit:false
-          ~timing:"queued" ~best_ms:Float.infinity ~best_label:"" ~tensorized:false
+          ~timing:"queued" ~timings_contended:0 ~best_ms:Float.infinity ~best_label:""
+          ~tensorized:false
           ~tensorization:None ~mma_statements:0 ~mma_scalar_fallbacks:0 ~mma_seeded:0 ~mma_timed:0
           ~mma_best_ms:Float.infinity ~terminal_failure:None;
         (* An honestly tensorized winner, and an ordinary one that never asked. *)
         Bench_json.tune_arm ~name:"D" ~state:"searched" ~searched:true ~cache_hit:false
-          ~timing:"queued" ~best_ms:0.5 ~best_label:"mma-gpu 16x16x16" ~tensorized:true
+          ~timing:"queued" ~timings_contended:2 ~best_ms:0.5 ~best_label:"mma-gpu 16x16x16"
+          ~tensorized:true
           ~tensorization:(Some "tensorized") ~mma_statements:4 ~mma_scalar_fallbacks:0 ~mma_seeded:6
           ~mma_timed:5 ~mma_best_ms:0.5 ~terminal_failure:None;
         Bench_json.tune_arm ~name:"E" ~state:"searched" ~searched:true
           ~cache_hit:false
             (* The other objective, so the golden shows both spellings on one line. *)
-          ~timing:"isolated" ~best_ms:1.25 ~best_label:"grid 64" ~tensorized:false
+          ~timing:"isolated" ~timings_contended:0 ~best_ms:1.25 ~best_label:"grid 64"
+          ~tensorized:false
           ~tensorization:(Some "not-requested") ~mma_statements:0 ~mma_scalar_fallbacks:0
           ~mma_seeded:0 ~mma_timed:0 ~mma_best_ms:Float.infinity ~terminal_failure:None;
       ]
@@ -146,6 +151,8 @@ let () =
       match member "timing" a with
       | `String spelling -> List.mem [ "queued"; "isolated" ] spelling ~equal:String.equal
       | _ -> false);
+  V.p "a contention-affected arm preserves its refusal count"
+    (Yojson.Safe.equal (member "timings_contended" (arm "D")) (`Int 2));
   V.p "an arm with no crowned candidate reports a null tensorization, not a label"
     (List.for_all [ "A"; "C" ] ~f:(fun n ->
          Yojson.Safe.equal (member "tensorization" (arm n)) `Null));

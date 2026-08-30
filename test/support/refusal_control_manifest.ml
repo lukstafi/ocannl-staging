@@ -287,6 +287,13 @@ let raw_entries =
         "[scanner-refusal:d3e7969b1266fa6b311234da304986db] line containing no";
         "[scanner-refusal:4186a2cb3aaa270f0e693d87e91d2e2d] undeclared file present";
       ] );
+    ( "optional_arg_inventory.ml",
+      [
+        "[scanner-refusal:924efa1e307f7c5a40712dd66311abe1] the inventory nothing";
+        "[scanner-refusal:52e64fbae740ca90c4066b7840e926ae] source hand-over reaches";
+        "[scanner-refusal:8827ebeb8572d08d2dd427695c19c0f4] lib/ optional arguments";
+        "[scanner-refusal:69241f287bacdd3e1e418debbdc13d3d] every unimplemented option";
+      ] );
     ( "shell_scripts_parse.ml",
       [
         "[scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang";

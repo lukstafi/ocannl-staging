@@ -1,4 +1,5 @@
-(* Executed oracle for {!Train.sgd_one}'s option matrix (gh-ocannl-772).
+(* Executed oracle for SGD's option matrix and every core optimizer construction entry point
+   (gh-ocannl-772, gh-ocannl-811).
 
    Every other training test runs sgd on its defaults, so [momentum], [nesterov], [grad_scale] and a
    gate that actually CLOSES are reachable only from here. This test drives each of them for several
@@ -10,6 +11,17 @@
    not multiplication, since the gate exists to skip inf/nan gradients and [0 * inf] is [nan]. The
    "gate closed mid-run" case is where those two meet: step 4 must resume from step 1's buffer.
 
+   The entry-point cases send the same non-default [momentum] through [Train.sgd_one],
+   [Train.sgd_update], [Mixed_prec.scaled_sgd_update] and [Mixed_prec.gated_scaled_update]. Each
+   runs both zero- and nonzero-momentum trajectories on the cc backend, checks the latter against
+   the host rule, AND requires the two device results to differ. The last condition is the
+   forwarding oracle: a wrapper that accepts but drops the option still takes ordinary SGD steps,
+   but it cannot pass by matching its own default.
+
+   [Parallel.data_parallel], whose execution harness lives in [test/training/data_parallel.ml],
+   separately runs its public momentum and weight-decay forwarders against the same kind of host
+   recurrence and nondefault-vs-default discriminator.
+
    The oracle discriminates: perturbing the momentum the device is given (0.9 -> 0.45) fails all
    four momentum-bearing cases with errors of 0.09 to 1.3, against a 1e-4 tolerance. *)
 
@@ -17,6 +29,7 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module IDX = Train.IDX
+module MP = Mixed_prec
 
 let dims = 3
 
@@ -26,6 +39,14 @@ let coeffs = [| 0.5; -1.5; 2.0 |]
 let p_init = [| 1.0; -2.0; 0.25 |]
 let lr = 0.1
 let steps = 4
+
+type entry_point = Sgd_one | Sgd_update | Scaled_sgd_update | Gated_scaled_update
+
+let entry_point_name = function
+  | Sgd_one -> "Train.sgd_one"
+  | Sgd_update -> "Train.sgd_update"
+  | Scaled_sgd_update -> "Mixed_prec.scaled_sgd_update"
+  | Gated_scaled_update -> "Mixed_prec.gated_scaled_update"
 
 (** Host simulation of {!Train.sgd_one}. [gate_of_step] is [None] for the ungated arm. *)
 let oracle ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
@@ -46,13 +67,9 @@ let oracle ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
   done;
   p
 
-let device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
+let device ~entry_point ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
   Tensor.unsafe_reinitialize ();
-  let p =
-    Operation.init ~l:"p" ~prec:Ir.Ops.single ~o:[ dims ]
-      ~f:(function [| i |] -> p_init.(i) | _ -> assert false)
-      ~grad_spec:Tensor.Require_grad ()
-  in
+  let p = TDSL.param ~values:p_init "p" ~output_dims:[ dims ] () in
   let c =
     NTDSL.init ~l:"c" ~prec:Ir.Ops.single ~o:[ dims ]
       ~f:(function [| i |] -> coeffs.(i) | _ -> assert false)
@@ -64,14 +81,35 @@ let device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
   Train.set_materialized learning_rate.Tensor.value;
   let gate = Option.map gate_of_step ~f:(fun _ -> Train.host_scalar ~l:"gate" 1.0) in
   let scale = Option.map grad_scale ~f:(Train.host_scalar ~l:"grad_scale") in
-  let update = Train.grad_update loss in
-  let sgd =
-    Train.sgd_one ~learning_rate ~momentum ~weight_decay ~nesterov ?grad_scale:scale
-      ?update_gate:gate p
+  let comp =
+    match entry_point with
+    | Sgd_one ->
+        let update = Train.grad_update loss in
+        let sgd =
+          Train.sgd_one ~learning_rate ~momentum ~weight_decay ~nesterov ?grad_scale:scale
+            ?update_gate:gate p
+        in
+        Ir.Assignments.sequence [ update; sgd ]
+    | Sgd_update ->
+        let update = Train.grad_update loss in
+        let sgd =
+          Train.sgd_update ~learning_rate ~momentum ~weight_decay ~nesterov ?grad_scale:scale
+            ?update_gate:gate loss
+        in
+        Ir.Assignments.sequence [ update; sgd ]
+    | Scaled_sgd_update ->
+        let scaler = MP.Loss_scaler.create ~init_scale:8. ~growth_interval:100 () in
+        let _checksum, update = MP.scaled_grad_update scaler loss in
+        let sgd =
+          MP.scaled_sgd_update scaler ~learning_rate ~momentum ~weight_decay ~nesterov loss
+        in
+        Ir.Assignments.sequence [ update; sgd ]
+    | Gated_scaled_update ->
+        let scaler = MP.Loss_scaler.create ~init_scale:8. ~growth_interval:100 () in
+        snd (MP.gated_scaled_update scaler ~learning_rate ~momentum ~weight_decay ~nesterov loss)
   in
-  let ctx, routine =
-    Train.to_routine (Context.auto ()) IDX.empty (Ir.Assignments.sequence [ update; sgd ])
-  in
+  let ctx = Train.init_params (Context.cpu ()) IDX.empty loss in
+  let ctx, routine = Train.to_routine ctx IDX.empty comp in
   let ctx = ref ctx in
   for step = 1 to steps do
     (match (gate, gate_of_step) with
@@ -84,12 +122,15 @@ let device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step =
   let open Operation.At in
   Array.init dims ~f:(fun i -> (!ctx, p).@[i])
 
+let max_abs_diff a b =
+  Array.foldi a ~init:0.0 ~f:(fun i acc v -> Float.max acc (Float.abs (v -. b.(i))))
+
 let case label ~momentum ?(nesterov = false) ?(weight_decay = 0.0) ?grad_scale ?gate_of_step () =
   let expected = oracle ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step in
-  let actual = device ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step in
-  let err =
-    Array.foldi actual ~init:0.0 ~f:(fun i acc v -> Float.max acc (Float.abs (v -. expected.(i))))
+  let actual =
+    device ~entry_point:Sgd_one ~momentum ~nesterov ~weight_decay ~grad_scale ~gate_of_step
   in
+  let err = max_abs_diff actual expected in
   (* Device-produced floats: the digits stay off stdout, the claim about them goes on it. *)
   Stdio.eprintf "%s (not part of the golden): expected %s; got %s; max abs err %.3e\n%!" label
     (String.concat ~sep:", " (Array.to_list (Array.map expected ~f:(Printf.sprintf "%.6f"))))
@@ -104,6 +145,32 @@ let case label ~momentum ?(nesterov = false) ?(weight_decay = 0.0) ?grad_scale ?
     ~detail:(fun () -> Printf.sprintf "max abs err %.3e" err);
   Verdict.p (label ^ ": the step moved the parameter") moved
 
+let entry_point_case entry_point =
+  let label = entry_point_name entry_point ^ " forwards momentum" in
+  let actual =
+    device ~entry_point ~momentum:0.9 ~nesterov:false ~weight_decay:0.0 ~grad_scale:None
+      ~gate_of_step:None
+  in
+  let baseline =
+    device ~entry_point ~momentum:0.0 ~nesterov:false ~weight_decay:0.0 ~grad_scale:None
+      ~gate_of_step:None
+  in
+  let expected =
+    oracle ~momentum:0.9 ~nesterov:false ~weight_decay:0.0 ~grad_scale:None ~gate_of_step:None
+  in
+  let oracle_err = max_abs_diff actual expected in
+  let effect_size = max_abs_diff actual baseline in
+  Stdio.eprintf "%s (not part of the golden): oracle err %.3e; option effect %.3e\n%!" label
+    oracle_err effect_size;
+  Verdict.pass_fail
+    (label ^ ": matches the host oracle")
+    Float.(oracle_err < 1e-4)
+    ~detail:(fun () -> Printf.sprintf "max abs err %.3e" oracle_err);
+  Verdict.pass_fail
+    (label ^ ": non-default changes the device result")
+    Float.(effect_size > 1e-3)
+    ~detail:(fun () -> Printf.sprintf "max abs difference %.3e" effect_size)
+
 let () =
   case "plain" ~momentum:0.0 ();
   case "weight decay" ~momentum:0.0 ~weight_decay:0.05 ();
@@ -115,4 +182,5 @@ let () =
      step 4 resumes from step 1's buffer rather than from an advanced one. *)
   case "gate closed mid-run, with momentum" ~momentum:0.9
     ~gate_of_step:(fun step -> step = 1 || step = 4)
-    ()
+    ();
+  List.iter [ Sgd_one; Sgd_update; Scaled_sgd_update; Gated_scaled_update ] ~f:entry_point_case

@@ -38,6 +38,7 @@
   cache_dir_scan
   refusal_control_scan
   refusal_control_manifest
+  optional_arg_scan
   scan_floors
   dune_stanza_scan
   verdict_scan
@@ -50,6 +51,7 @@
   arrayjit.utils
   arrayjit.ir
   arrayjit.verdict
+  einsum_parser
   ppxlib
   sexplib)
  ; A fixed expression shape is written as that expression: `[%expr [%e? f] ()]` says "applied to

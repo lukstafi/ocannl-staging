@@ -2,6 +2,10 @@ n_shards=1: loss=67.5000
 n_shards=2: loss=11.2500
 1-shard step lands w on the closed-form 5 (within 1e-4): true
 data-parallel parity with single-shard baseline: true
+data_parallel forwards momentum: matches the host oracle: PASS
+data_parallel forwards momentum: non-default changes the result: PASS
+data_parallel forwards weight decay: matches the host oracle: PASS
+data_parallel forwards weight decay: non-default changes the result: PASS
 driver routes per-shard seed into RNG: true
 shards seeded distinctly (base_seed + i): true
 global random-seed singleton preserved across data_parallel: true

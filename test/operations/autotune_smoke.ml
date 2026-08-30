@@ -258,9 +258,12 @@ let () =
   p "decline census sums to candidates_failed"
     (r1.Autotune.candidates_failed
     = List.sum (module Int) r1.Autotune.declines ~f:(fun d -> d.Autotune.count));
-  p "second tune call hits the schedule cache" (replayed r2);
-  p "cache-hit report has no declines"
-    (List.is_empty r2.Autotune.declines && r2.Autotune.candidates_failed = 0);
+  let first_cacheable = r1.Autotune.timings_contended = 0 in
+  p "second tune call replays exactly when the first search had no contention refusals"
+    (Bool.equal (replayed r2) first_cacheable);
+  p "a replayed second report has no declines"
+    ((not (replayed r2))
+    || (List.is_empty r2.Autotune.declines && r2.Autotune.candidates_failed = 0));
   (* The crowned candidate's identity in the report (gh-ocannl-546): backend-independent contract,
      since which candidate wins is not. A per-arm win that never reaches a shipping artifact is
      invisible in every end-to-end number unless the report says which candidate won and whether it
@@ -350,8 +353,8 @@ let () =
            (ms r.Autotune.mma_best_ms) (ms r.Autotune.best_ms))
   in
   winner_contract ~which:"searched report" r1;
-  winner_contract ~which:"cache-hit report" r2;
-  p "cache-hit report names the replayed winner" (not (String.is_empty r2.Autotune.best_label));
+  winner_contract ~which:"second report" r2;
+  p "second report names its winner" (not (String.is_empty r2.Autotune.best_label));
   p "cached schedule replays to correct values"
     (Array.for_all2_exn got2 expected_c ~f:approx
     && Array.for_all2_exn got_mm2 mm_expected ~f:approx);
@@ -382,9 +385,10 @@ let () =
   p "search off without a cache returns the correct untuned routine"
     (Array.for_all2_exn got3 expected_c ~f:approx
     && Array.for_all2_exn got_mm3 mm_expected ~f:approx);
+  let cache_committed = first_cacheable || (completed r2 && r2.Autotune.timings_contended = 0) in
   let r4, got4, got_mm4 = tune_no_search ~cache_dir () in
-  p "search off still replays a committed cache entry"
-    (replayed r4 && r4.Autotune.candidates_timed = 0);
+  p "search off replays exactly when a complete search committed a cache entry"
+    (Bool.equal (replayed r4) cache_committed && r4.Autotune.candidates_timed = 0);
   p "cache replay under search off gives correct values"
     (Array.for_all2_exn got4 expected_c ~f:approx
     && Array.for_all2_exn got_mm4 mm_expected ~f:approx);
@@ -405,11 +409,17 @@ let () =
     ]
   in
   List.iter named_states ~f:(fun (what, r) ->
-      Stdio.printf "state: %-22s -> %s\n" what (Autotune.outcome_name r.Autotune.outcome));
-  p "the four calls report, by name, exactly the three states they reach"
+      Stdio.eprintf "state (not part of the golden): %-22s -> %s\n" what
+        (Autotune.outcome_name r.Autotune.outcome));
+  p "the four calls report outcomes consistent with contention-aware cacheability"
     (List.equal String.equal
        (List.map named_states ~f:(fun (_, r) -> Autotune.outcome_name r.Autotune.outcome))
-       [ "searched"; "cache-replay"; "search-disabled"; "cache-replay" ]);
+       [
+         "searched";
+         (if first_cacheable then "cache-replay" else "searched");
+         "search-disabled";
+         (if cache_committed then "cache-replay" else "search-disabled");
+       ]);
   p_all "a report that neither searched nor replayed timed nothing" named_states ~f:(fun (_, r) ->
       match r.Autotune.outcome with
       | Autotune.Searched | Autotune.Search_died _ | Autotune.Cache_replay -> true
@@ -420,12 +430,17 @@ let () =
      up -- otherwise two reproducible runs would differ on whether an earlier local search happened
      to leave one there -- while naming the same directory explicitly replays it. *)
   let default_cache_dir = "autotune_cache" in
+  let default_search_report = ref None in
   let ctx = Context.auto () in
   let _ctx, _routine =
-    Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ctx tune_comp Ir.Indexing.Empty
+    Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1
+      ~report:(fun r -> default_search_report := Some r)
+      ctx tune_comp Ir.Indexing.Empty
   in
+  let default_search_report = Option.value_exn ~here:[%here] !default_search_report in
   let r5, _, _ = tune_no_search ~cache_dir:default_cache_dir () in
-  p "search off replays the default cache directory when asked for it" (replayed r5);
+  p "search off replays the chosen default cache exactly after a complete search"
+    (Bool.equal (replayed r5) (default_search_report.Autotune.timings_contended = 0));
   let r6 = ref None in
   let ctx = Context.auto () in
   let ctx, routine =

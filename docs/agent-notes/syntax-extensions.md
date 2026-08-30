@@ -8,6 +8,10 @@ files.
 - Block-tensor delimiters map array `[|…|]` → batch, list `[…]` → output, tuple `(…)` → input
   axis; canonical nesting is array ⊃ list ⊃ tuple. Function-argument and einsum-operand tuples
   keep their OCaml meaning (distinct ppx arms), so `(a,b) ++^ …` is an operand pair, not a stack.
+- `Einsum_parser.{binary,unary}_operators_with_generated_specs` and
+  `concat_operator_with_generated_specs` own the unqualified operator spellings whose literal specs
+  undergo runtime coefficient substitution. The PPX dispatch tables and source-policy inventory
+  consume those same values; extend the shared set rather than copying a spelling into one side.
 - `%op` inline-record init expressions (`{ w = kaiming normal1 () }`) are bound under the
   generated `open TDSL.O`, including when there is no unit parameter (gh-511). The no-unit-param
   form is not generative: `let%op f x = ...` closes over ONE shared param created at definition
