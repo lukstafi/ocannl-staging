@@ -129,22 +129,22 @@ holder_pid=
 # kernels were compiled under and which toolkit did it, beside the failure rather
 # than nowhere. `metal` is the case this can pin without hardware and without a
 # reachable remote -- it is a LOCAL unit, and its context block is built only from
-# `command -v` guards and one echo, so on a machine with no macOS tooling it
-# reduces to exactly the residual line and still proves the block was emitted,
-# reached the log, and was carried into the fingerprint. The cuda and hip arms
-# differ from it only in which commands they guard.
+# `command -v` guards plus the pure option-builder alias, so on a machine with no
+# macOS tooling it still prints the production property sequence and proves the
+# block was emitted, reached the log, and was carried into the fingerprint. The
+# cuda and hip arms differ from it only in which discovery commands they guard.
 #
 # A red unit, not a green one: this is diagnosis, and emitting it on a pass would
 # run dune a second time on every sweep.
-# The failure text the fake dune writes. Its second line is the shape
+# The failure text the fake dune writes. Its second and third lines are the shapes
 # `cuda_to_ptx` appends to nvrtc's message when a compile fails -- the one
-# PRODUCTION option vector a sweep can ever hold, as opposed to the sentinel
-# policy vectors the context block prints. `fingerprint` is backend-blind, so the
-# local metal unit is enough to pin that the line survives extraction; what would
-# need a GPU is producing it, and that half was checked against a real rejected
-# nvrtc compile on rog-nv (Codex P2 on PR #510).
+# CUDA vector and `compile_metal_source` appends to a Metal failure -- as opposed
+# to the pure policy vectors the context block prints. `fingerprint` is
+# backend-blind, so the local metal unit pins both lines' extraction; producing
+# them is separately covered on their hardware boxes.
 nvrtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
-nvrtc options: -I/usr/local/cuda/include --use_fast_math'
+nvrtc options: -I/usr/local/cuda/include --use_fast_math
+metal options: language-version=3.1 math-mode=safe math-functions=fast enable-logging=false'
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$nvrtc_failure \
   run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"
@@ -158,7 +158,7 @@ metal_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail
 [ -n "$metal_log" ] && [ -f "$metal_log" ]
 grep -q '^=== rtc-context (metal) ===$' "$metal_log"
 grep -q '^=== end rtc-context ===$' "$metal_log"
-grep -q 'MSL options are still assembled in metal_backend.ml' "$metal_log"
+grep -q 'rtc option policy from arrayjit/test/runtest-test_metal_compile_options' "$metal_log"
 # The fingerprint is what a caller diffs against yesterday's, so the block has to
 # reach it and not merely the log.
 grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
@@ -167,6 +167,8 @@ grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
 # nor at `Error`/`Fatal error`/`Exception`, so before its own selector existed it
 # stopped at the log and never reached the file callers diff.
 grep -q '^nvrtc options: -I/usr/local/cuda/include --use_fast_math$' \
+  "${metal_log%.log}.fingerprint"
+grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast enable-logging=false$' \
   "${metal_log%.log}.fingerprint"
 
 # And a GREEN unit must NOT pay for it -- the same backend, so the only thing
