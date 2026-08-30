@@ -43,6 +43,7 @@ tools/dune-quiet.sh parses: true
 tools/format-sweep.sh parses: true
 tools/opam-env.sh parses: true
 tools/promote.sh parses: true
+tools/remote-verify.sh parses: true
 tools/sweep.sh parses: true
 tools/test-pin-revisions.sh parses: true
 tools/test-promote.sh parses: true

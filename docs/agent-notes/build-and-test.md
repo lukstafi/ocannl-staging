@@ -1028,6 +1028,39 @@ that they earn a lookup rather than always-loaded space.
   (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
   gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
+- `tools/remote-verify.sh` is the one-off counterpart to the scheduled sweep for a pushed branch:
+  it derives the remote pointing to the staging repository by URL, fetches the named branch,
+  without rewriting the checkout's `FETCH_HEAD`, resolves one commit, creates a fresh detached
+  worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
+  that switch, and removes just that worktree before its exit sentinel (never repository-wide
+  `worktree prune`, which could unregister an unrelated temporarily unavailable worktree). The individual
+  commands (including worktree add/remove) and the whole SSH trip have separate process-group caps; the latter also bounds setup
+  and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
+  Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
+  selected switch are printed and stripped inside `opam exec`, so only the requested backend can
+  override the pushed tree's configuration. A regular, non-symlink root `ocannl_config` from the pushed commit
+  is the configuration boundary; when the commit has none, the script creates an empty ignored one
+  in the disposable worktree so a personal file above it cannot reach root-launched probes. A
+  worktree root nested under any outer Dune root is refused: without that
+  boundary Dune can build the parent checkout while this script reports the detached commit.
+  `--expect-lib cudajit|hipjit` asserts all three
+  pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
+  backend's absent `.cmi`). A test, probe or `--record-golden` trip also requires a backend and
+  asserts `_build/default/test/config/ocannl_backend.txt`; an unrestricted test alias is reported
+  only as passing under that configuration, since the alias may be backend-independent, while a
+  runnable probe must print its own backend/device evidence. An `@check`-only trip says explicitly
+  that it compiled code and executed no backend. Golden mode prints the corrected `.actual`
+  contents and an apply-ready patch, then re-runs the alias before accepting it so a second failing
+  dependency cannot hide behind a promotable diff. Before reset, source status (with untracked-file
+  reporting forced independently of Git configuration) must name exactly the listed golden
+  destinations, both after promotion and after the re-run. After reporting it, the script resets tracked
+  files, removes untracked files, and proves the worktree clean at the resolved commit before
+  running another operation. Every path also reasserts exact HEAD, clean tracked/untracked source,
+  and the unchanged configuration boundary after each operation and before the final certificate;
+  a nominally successful probe that edits its checkout therefore fails loudly. Do not replace its
+  unpiped ssh output with a convenience pipe: the verifier source travels on a separate remote file
+  descriptor while child stdin is `/dev/null`, and the far-side sentinel is the build verdict plus
+  cleanup, and the local sentinel is ssh's transport verdict.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the
