@@ -123,6 +123,10 @@ files.
   `benchmarks/example-report.md` are stale by that factor, and any tuned-vs-default gap measured on
   Metal before this was partly the search buying its way out of the tax (`Privatize` "sidesteps the
   volatile-RMW workaround tax", `autotune.ml`), so those gaps should be expected to shrink.
+  gh-ocannl-820 later changed the remaining workaround's form from a volatile accumulator to
+  expression-level volatile device reads inside the accumulating loop: on the standalone
+  scalar-loss shape the ratio fell from 4.08x to 1.03x while its reproducer matrix stayed green
+  row-for-row.
 - That digest covers the compiled result, NOT the diagnostics. When re-measuring a search's
   decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
   first — otherwise the second run reports `state=cache-replay`, `timed=0`, `declines=[]` and every

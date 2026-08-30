@@ -301,37 +301,37 @@ let with_peel_census f =
   restore ();
   (result, summarize_peel_census sites)
 
-(* {2 The volatility census (gh-ocannl-782)}
+(* {2 The volatility census (gh-ocannl-782, gh-ocannl-820)}
 
    Which serial accumulations in a routine carry the {!C_syntax_config.volatile_serial_accumulation}
-   workaround, in which of its two forms, and which were left alone. The emitted text answers "is
-   this local volatile"; it does not answer "how many accumulators did this routine have, and did
-   any of them escape the qualifier" — and that second question is the one a residency or
-   performance investigation asks, because the qualifier is what stops an accumulator being
-   register-resident.
+   workaround, in which of its two forms, and which were left alone. The emitted text answers "does
+   this expression contain a volatile read"; it does not answer "how many accumulations did this
+   routine have, and did any of them escape the workaround" — and that second question is the one a
+   residency or performance investigation asks.
 
    Collected where each decision is made ([scope_decl_type] for the localized form, [pp_ll]'s [Set]
-   case for the read-modify-write pointer shadow) and bracketed by {!with_volatility_census}, which
+   case for the read-modify-write form) and bracketed by {!with_volatility_census}, which
    {!Context.compile} calls around every routine's codegen, so the summary is a field of the
    compiled routine.
 
    The two arms are censused asymmetrically, and deliberately. A reduction-shaped scope local is
    recorded on EVERY backend — the classification it needs is computed anyway, so a routine compiled
-   for a C backend still reports "three accumulators, none qualified" — while the pointer shadow is
-   recorded only where the backend requests the workaround, because elsewhere its structural
+   for a C backend still reports "three accumulations, none protected" — while the device-memory RMW
+   is recorded only where the backend requests the workaround, because elsewhere its structural
    predicate is never evaluated (the capability short-circuits it) and there is no decision to
    record. {!field-volatility_summary.requested} is what tells the two situations apart. *)
 
 type volatility_site =
-  | Volatile_accumulator of string
-      (** A reduction-shaped scope local declared [volatile], by its emitted identifier: the
-          localized accumulation form (gh-ocannl-731). *)
+  | Volatile_accumulation_reads of string
+      (** A reduction-shaped scope local for which the backend selected expression-level [volatile]
+          pointer casts on any device reads in its accumulating loop, by the local's emitted
+          identifier: the localized accumulation form (gh-ocannl-731, gh-ocannl-820). *)
   | Plain_accumulator of string
-      (** A reduction-shaped scope local left unqualified — this backend does not request the
-          workaround, so the accumulator stays register-resident. *)
-  | Volatile_rmw_shadow of string
+      (** A reduction-shaped scope local whose reads stay plain — this backend does not request the
+          workaround. The accumulator itself stays register-resident in both cases. *)
+  | Volatile_rmw_reads of string
       (** A device-memory read-modify-write at an address invariant across an enclosing serial loop,
-          rendered through a [volatile]-qualified shadow of the named node's pointer. *)
+          whose device reads use expression-level [volatile] pointer casts. *)
 [@@deriving sexp, equal, compare]
 
 type volatility_summary = {
@@ -340,11 +340,11 @@ type volatility_summary = {
           segments of one routine contribute their kernels to the same summary. *)
   requested : bool;
       (** Whether the backend this compile ran on asks for the workaround
-          ({!C_syntax_config.volatile_serial_accumulation}). [false] makes every accumulator site a
-          {!Plain_accumulator} and suppresses the shadow arm entirely. *)
-  volatile_accumulators : int;
-  plain_accumulators : int;
-  rmw_shadows : int;
+          ({!C_syntax_config.volatile_serial_accumulation}). [false] makes every localized site a
+          {!Plain_accumulator} and suppresses the device-memory RMW arm entirely. *)
+  volatile_accumulations : int;
+  plain_accumulations : int;
+  volatile_rmw_reads : int;
 }
 [@@deriving sexp_of]
 (** What a compile's volatility census says about the routine it produced (gh-ocannl-782). *)
@@ -367,23 +367,23 @@ let summarize_volatility_census ~requested entries =
   {
     entries;
     requested;
-    volatile_accumulators = count (function Volatile_accumulator _ -> true | _ -> false);
-    plain_accumulators = count (function Plain_accumulator _ -> true | _ -> false);
-    rmw_shadows = count (function Volatile_rmw_shadow _ -> true | _ -> false);
+    volatile_accumulations = count (function Volatile_accumulation_reads _ -> true | _ -> false);
+    plain_accumulations = count (function Plain_accumulator _ -> true | _ -> false);
+    volatile_rmw_reads = count (function Volatile_rmw_reads _ -> true | _ -> false);
   }
 
 let empty_volatility_summary = summarize_volatility_census ~requested:false []
 
-(** The one-line volatility census a report prints beside a routine (gh-ocannl-782): how many serial
-    accumulations this routine carries and how many of them the compiler-bug workaround pinned to
-    memory. *)
+(** The one-line volatility census a report prints beside a routine (gh-ocannl-782/820): how many
+    serial accumulations this routine carries and how many selected the volatile-read workaround. *)
 let volatility_summary_string summary =
-  let accumulators = summary.volatile_accumulators + summary.plain_accumulators in
+  let accumulations = summary.volatile_accumulations + summary.plain_accumulations in
   if not summary.requested then
-    Printf.sprintf "%d accumulator(s), workaround not requested by this backend" accumulators
+    Printf.sprintf "%d accumulation(s), workaround not requested by this backend" accumulations
   else
-    Printf.sprintf "%d of %d accumulator(s) volatile, %d rmw pointer shadow(s)"
-      summary.volatile_accumulators accumulators summary.rmw_shadows
+    Printf.sprintf
+      "%d of %d accumulation(s) use the volatile-read workaround, %d volatile rmw read(s)"
+      summary.volatile_accumulations accumulations summary.volatile_rmw_reads
 
 (** Run [f] with the volatility census collecting, and return its result alongside the summary of
     what the accumulation workaround decided during it (gh-ocannl-782). Nests additively and
@@ -631,17 +631,18 @@ module type C_syntax_config = sig
       identically, and so does moving the preceding store to an unrelated cell. What does remove it,
       besides the qualifier, is having the accumulating loop read no device pointer at all.
 
-      When [true]: [Set] statements that read the written node at an index invariant across at least
-      one enclosing serial [for] loop render both accesses through a [volatile]-qualified shadow
-      pointer, pinning the per-iteration read-modify-write; and reduction-shaped scope locals are
-      declared [volatile]. Pointwise updates and non-accumulator locals stay unqualified. Both
-      decisions are reported per routine by the volatility census ({!volatility_summary}).
+      When [true]: device reads in reduction-shaped scope-local updates, and in [Set] statements
+      that read the written node at an index invariant across at least one enclosing serial [for]
+      loop, use expression-level [volatile] pointer casts. The cast exists only while rendering the
+      accumulating update: accumulator declarations, opening reads, vectorized/packed paths and MMA
+      reads stay plain. Pointwise updates and non-accumulator locals stay untouched. Both decisions
+      are reported per routine by the volatility census ({!volatility_summary}).
 
-      The qualifier is not free — it is exactly the loss of register residency. Measured on an M4
-      Max (the [bench_metal_bug_local] tax table): 1.06x on a memory-bound per-thread reduction,
-      2.15x on an accumulator-bound dependency chain, 4.1x on a long single-threaded reduction,
-      which is the scalar-loss shape. Correctness wins that trade until the defect is fixed
-      upstream. *)
+      The form matters: qualifying the accumulator itself cost 1.06x on a memory-bound per-thread
+      reduction, 2.15x on an accumulator-bound dependency chain and 4.1x on a long single-threaded
+      scalar-loss reduction on an M4 Max. The confined volatile-read form measured 1.03x on that
+      loss shape while keeping the standalone reproducer matrix correct row-for-row
+      ([bench_metal_bug_local], gh-ocannl-820). *)
 
   val restrict_keyword : string option
   (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
@@ -2081,21 +2082,22 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* The Metal compiler bug also reaches the localized spelling of a scalar accumulation
      (gh-ocannl-731): instead of a device-memory RMW, the loop updates a scope local and stores it
-     once. Shader validation hides both manifestations. Keep every reduction-shaped scope local
-     volatile on the backend that requests the workaround; ordinary locals and every other backend
-     stay byte-identical. The decision is censused on EVERY backend (gh-ocannl-782) — an accumulator
-     left plain because the backend asks for nothing is exactly what a residency investigation wants
-     to see, and the classification it needs was computed for the precision decision anyway. *)
+     once. Shader validation hides both manifestations. The accumulator stays register-resident;
+     [Set_local] below confines the workaround to expression-level casts on the accumulating loop's
+     device reads (gh-ocannl-820). The decision is censused on EVERY backend (gh-ocannl-782) — an
+     accumulation left plain because the backend asks for nothing is exactly what a residency
+     investigation wants to see, and the classification it needs was computed for the precision
+     decision anyway. *)
   let scope_decl_type (id : Low_level.scope_id) =
     let is_accum = Hash_set.mem accum_scope_ids id.scope_id in
-    let qualified = B.volatile_serial_accumulation && is_accum in
+    let protected = B.volatile_serial_accumulation && is_accum in
     if is_accum && !volatility_census_enabled then
       volatility_census :=
         ( !current_kernel_name,
-          if qualified then Volatile_accumulator (scope_local_ident id)
+          if protected then Volatile_accumulation_reads (scope_local_ident id)
           else Plain_accumulator (scope_local_ident id) )
         :: !volatility_census;
-    (if qualified then "volatile " else "") ^ B.typ_of_prec (scope_prec_of id)
+    B.typ_of_prec (scope_prec_of id)
 
   let wrap_conversion (pre, post) doc =
     let open PPrint in
@@ -2110,6 +2112,26 @@ module C_syntax (B : C_syntax_config) = struct
   let placements () =
     Option.value_exn ~message:"C_syntax: placements consulted outside compile_proc"
       !current_placements
+
+  (* Whether scalar device loads at the current expression-rendering point must use the Metal
+     accumulation workaround. Bracketed narrowly by the two recognized accumulating-statement arms
+     below; in particular the opening read of a localized accumulator is outside it. *)
+  let volatile_accumulation_reads = ref false
+
+  let with_volatile_accumulation_reads enabled f =
+    let saved = !volatile_accumulation_reads in
+    volatile_accumulation_reads := saved || enabled;
+    Exn.protect ~f ~finally:(fun () -> volatile_accumulation_reads := saved)
+
+  let pp_device_read_ptr tn ident_doc =
+    let open PPrint in
+    if !volatile_accumulation_reads && Tn.Placements.is_materialized_force (placements ()) tn 820
+    then
+      let typ =
+        "(" ^ B.buffer_prefix ^ "volatile " ^ B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ "*)"
+      in
+      parens (string typ ^^ ident_doc)
+    else ident_doc
 
   let in_ctx tn = Tn.Placements.is_in_context_force (placements ()) tn 46
 
@@ -4656,12 +4678,12 @@ module C_syntax (B : C_syntax_config) = struct
            change the draw, not just move it.
 
            Interaction with [volatile_serial_accumulation] (Metal) has two forms. Localization lifts
-           the node [Set] out of exactly the invariant-address loops, so the volatile POINTER
-           shadow's predicate is false at a fully localized site. But gh-ocannl-731 showed the same
-           shader compiler pass corrupting the replacement scope-local accumulation when its
-           contribution reads through a pooled pointer; [scope_decl_type] therefore makes that
-           accumulator local volatile. Where the peel is blocked at an outer level, the
-           device-memory RMW remains and the original pointer shadow still fires. *)
+           the node [Set] out of exactly the invariant-address loops, so the device-memory RMW
+           predicate is false at a fully localized site. But gh-ocannl-731 showed the same shader
+           compiler pass corrupting the replacement scope-local accumulation when its contribution
+           reads through a pooled pointer; [Set_local] therefore renders those device reads through
+           confined volatile pointer casts. Where the peel is blocked at an outer level, the
+           device-memory RMW remains and its reads receive the same expression-level cast. *)
         let try_localize_serial_reduce () : PPrint.document option =
           (* The peel census (gh-ocannl-733) records what this site DECIDED, not merely what it
              rendered. Only accumulating levels are censused: elsewhere localization was never a
@@ -4876,6 +4898,43 @@ module C_syntax (B : C_syntax_config) = struct
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let store_prec = Lazy.force tn.storage_prec in
+        (* See {!C_syntax_config.volatile_serial_accumulation}: identify a per-iteration
+           read-modify-write whose target address is invariant across an enclosing serial loop. The
+           old workaround shadowed the target pointer for the whole statement; gh-ocannl-820 instead
+           brackets [pp_scalar] so only device reads in the accumulating expression acquire an
+           expression-level volatile pointer cast. *)
+        let rmw_volatile_reads =
+          B.volatile_serial_accumulation
+          && List.exists !serial_loop_stack ~f:(fun s ->
+              not (Array.exists idcs ~f:(Indexing.axis_index_mentions_symbol s)))
+          (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as a
+             plain local array (not address-castable, and compiler-visible anyway). *)
+          && Tn.Placements.is_materialized_force (placements ()) tn 433
+          &&
+          let rec reads_tn (llsc : Low_level.scalar_t) =
+            match llsc with
+            | Low_level.Get (tn2, _) -> Tn.equal tn tn2
+            | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || reads_tn v
+            | Local_scope { body; _ } -> body_reads_tn body
+            | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+                false
+            | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn a || reads_tn b || reads_tn c
+            | Binop (_, (a, _), (b, _)) -> reads_tn a || reads_tn b
+            | Unop (_, (a, _)) -> reads_tn a
+          and body_reads_tn (body : Low_level.t) =
+            match body with
+            | Low_level.Seq (a, b) -> body_reads_tn a || body_reads_tn b
+            | For_loop { body; _ } -> body_reads_tn body
+            | If { cond = c, _; body } -> reads_tn c || body_reads_tn body
+            | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn llsc
+            | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn v || reads_tn llsc
+            | Set_from_vec { arg = a, _; _ } -> reads_tn a
+            | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+            | Workgroup_barrier | Tile_mma _ ->
+                false
+          in
+          reads_tn llsc
+        in
         (* gh-487 phase 2: a staging copy into an async-eligible pipelined tile renders as the
            backend's asynchronous copy — the same address arithmetic on both sides (the write-side
            buffer rotation included), byte-for-byte, so the bitwise-identity invariant is untouched;
@@ -4905,81 +4964,21 @@ module C_syntax (B : C_syntax_config) = struct
         | Some doc -> doc
         | None ->
             let prec, narrowing = store_precs ~store_prec llsc in
-            let local_defs, val_doc = pp_scalar prec llsc in
+            let local_defs, val_doc =
+              with_volatile_accumulation_reads rmw_volatile_reads (fun () -> pp_scalar prec llsc)
+            in
             let val_doc = wrap_conversion narrowing val_doc in
             let local_defs = pp_local_defs local_defs in
             let offset_doc =
               pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims)
             in
-            (* See {!C_syntax_config.volatile_serial_accumulation}: pin the per-iteration
-               read-modify-write of loop-invariant-address accumulators by shadowing the node's
-               pointer with a volatile-qualified alias for the whole statement (the shadow also
-               covers reads inside [local_defs]). The rule keys on the miscompiling pass's
-               precondition — a read-modify-write whose address is invariant across at least one
-               enclosing serial [for] loop (a scalar loss reduction's constant index, a gradient
-               accumulated over an outer batch loop, a matmul/conv accumulator indexed only by loops
-               outside its reduction) — because no finer syntactic discriminator survived the
-               observed cases: plain-FMA and Local-scope-bearing statements both miscompiled in some
-               kernels while byte-alike statements in others compiled fine. *)
-            let rmw_volatile =
-              B.volatile_serial_accumulation
-              && List.exists !serial_loop_stack ~f:(fun s ->
-                  not (Array.exists idcs ~f:(Indexing.axis_index_mentions_symbol s)))
-              (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
-                 a plain local array (not address-castable, and compiler-visible anyway). *)
-              && Tn.Placements.is_materialized_force (placements ()) tn 433
-              &&
-              let rec reads_tn (llsc : Low_level.scalar_t) =
-                match llsc with
-                | Low_level.Get (tn2, _) -> Tn.equal tn tn2
-                | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || reads_tn v
-                | Local_scope { body; _ } -> body_reads_tn body
-                | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
-                    false
-                | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn a || reads_tn b || reads_tn c
-                | Binop (_, (a, _), (b, _)) -> reads_tn a || reads_tn b
-                | Unop (_, (a, _)) -> reads_tn a
-              and body_reads_tn (body : Low_level.t) =
-                match body with
-                | Low_level.Seq (a, b) -> body_reads_tn a || body_reads_tn b
-                | For_loop { body; _ } -> body_reads_tn body
-                | If { cond = c, _; body } -> reads_tn c || body_reads_tn body
-                | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn llsc
-                | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn v || reads_tn llsc
-                | Set_from_vec { arg = a, _; _ } -> reads_tn a
-                | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-                | Workgroup_barrier | Tile_mma _ ->
-                    false
-              in
-              reads_tn llsc
-            in
             (* The volatility census (gh-ocannl-782) records this arm only where it fires. Unlike
                the accumulator arm, its predicate is not evaluated at all on a backend that requests
                nothing — the capability short-circuits it — so there is no decision there to report,
                and [volatility_summary.requested] is what says so. *)
-            if rmw_volatile && !volatility_census_enabled then
+            if rmw_volatile_reads && !volatility_census_enabled then
               volatility_census :=
-                (!current_kernel_name, Volatile_rmw_shadow (get_ident tn)) :: !volatility_census;
-            let wrap_rmw_volatile stmt_doc =
-              if not rmw_volatile then stmt_doc
-              else
-                let vol_ptr =
-                  string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec store_prec ^ "*")
-                in
-                (* The ident is for readability of the generated source; the uid suffix guarantees
-                   uniqueness — label-derived identifiers (get_ident) could legally collide with a
-                   prefixed name, and the inner scope must shadow nothing except the target node. *)
-                let tmp = string ("__rmw_" ^ get_ident tn ^ "_" ^ Int.to_string tn.Tn.uid) in
-                lbrace
-                ^^ nest 2
-                     (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
-                    ^^ hardline ^^ lbrace
-                     ^^ nest 2
-                          (hardline ^^ vol_ptr ^^ space ^^ ident_doc ^^ string " = " ^^ tmp ^^ semi
-                         ^^ hardline ^^ stmt_doc)
-                     ^^ hardline ^^ rbrace)
-                ^^ hardline ^^ rbrace
-            in
+                (!current_kernel_name, Volatile_rmw_reads (get_ident tn)) :: !volatility_census;
             let assignment =
               group
                 (ident_doc ^^ brackets offset_doc ^^ string " ="
@@ -5035,12 +5034,11 @@ module C_syntax (B : C_syntax_config) = struct
                 else
                   local_defs ^^ hardline ^^ decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
               in
-              wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
-            else if PPrint.is_empty local_defs then wrap_rmw_volatile assignment
+              lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
+            else if PPrint.is_empty local_defs then assignment
             else
               let block_content = local_defs ^^ hardline ^^ assignment in
-              wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
-        )
+              lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec; llsc; debug } ->
         (* gh-466: the scatter counterpart of the [Get_dynamic] gather — the write offset splices
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
@@ -5252,7 +5250,15 @@ module C_syntax (B : C_syntax_config) = struct
           else if Hash_set.mem rng_scope_ids id.Low_level.scope_id then prec
           else comp_prec (Lazy.force id.Low_level.tn.Tn.storage_prec)
         in
-        let local_defs, value_doc = pp_scalar value_prec value in
+        let volatile_reads =
+          B.volatile_serial_accumulation
+          && Hash_set.mem accum_scope_ids id.Low_level.scope_id
+          && (not (List.is_empty !serial_loop_stack))
+          && Option.is_some (Low_level.accum_local_update_op ~id value)
+        in
+        let local_defs, value_doc =
+          with_volatile_accumulation_reads volatile_reads (fun () -> pp_scalar value_prec value)
+        in
         let value_doc =
           wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc
         in
@@ -5873,9 +5879,14 @@ module C_syntax (B : C_syntax_config) = struct
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
-        let expr =
-          string prefix ^^ string "merge_buffer" ^^ brackets offset_doc ^^ string postfix
+        let ptr_doc =
+          if !volatile_accumulation_reads then
+            parens
+              (string
+                 ("(" ^ B.buffer_prefix ^ "volatile " ^ B.typ_of_prec from_prec ^ "*)merge_buffer"))
+          else string "merge_buffer"
         in
+        let expr = string prefix ^^ ptr_doc ^^ brackets offset_doc ^^ string postfix in
         ([], expr)
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
@@ -5883,7 +5894,9 @@ module C_syntax (B : C_syntax_config) = struct
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims) in
-        let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
+        let expr =
+          string prefix ^^ pp_device_read_ptr tn ident_doc ^^ brackets offset_doc ^^ string postfix
+        in
         ([], expr)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec } ->
         (* gh-343: a guarded dynamic gather. The dynamic index is spliced into the row-major offset
@@ -5904,7 +5917,9 @@ module C_syntax (B : C_syntax_config) = struct
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
         let dyn_idx_doc = string ("((" ^ idx_typ ^ ")(") ^^ dyn_expr ^^ string "))" in
         let offset_doc = pp_array_offset_dyn (idcs, dims) ~dyn_axis ~dyn_idx_doc in
-        let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
+        let expr =
+          string prefix ^^ pp_device_read_ptr tn ident_doc ^^ brackets offset_doc ^^ string postfix
+        in
         (dyn_defs, expr)
     | Constant c ->
         let from_prec = Ops.double in

@@ -13,18 +13,18 @@
 
    - the emitted f32 kernel opens the accumulator into a local, updates the local inside the
    reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop; - the
-   accumulator's volatility agrees with what the compile REPORTED (gh-ocannl-782): the routine's
-   volatility census names the local, says whether the workaround qualified it, and says whether
-   this backend asked for the workaround at all — so the expectation is read off the compile instead
-   of off the backend's name, and the emitted text is checked against it. On a backend that requests
-   the workaround the accumulator is [volatile] (gh-ocannl-731), because the same shader-compiler
-   pass can corrupt the localized form too; on one that does not, it stays register-resident. Either
-   way the kernel carries no volatile POINTER shadow: localization lifted the device-memory RMW that
-   shadow pins, and the census's shadow count says so independently of the text; - the values match
-   a host reference computed in the same summation order. The producers discriminate: every element
-   is [1 + 10*i + j], so it varies with BOTH loop symbols and is clear of the zero the accumulator
-   is initialized to — a constant producer would survive a dropped or replayed iteration, and a
-   value omitting a symbol would survive a wrong substitution.
+   workaround decision agrees with what the compile REPORTED (gh-ocannl-782): the routine's
+   volatility census names the local, says whether its accumulating device reads use the workaround,
+   and says whether this backend asked for the workaround at all — so the expectation is read off
+   the compile instead of off the backend's name, and the emitted text is checked against it. On a
+   backend that requests the workaround the accumulator stays plain and register-resident while the
+   accumulating loop's device reads use expression-level [volatile] pointer casts (gh-ocannl-820);
+   on one that does not, both stay plain. Either way the kernel carries no RMW shadow declaration:
+   localization lifted that device-memory RMW, and the census's RMW-read count says so independently
+   of the text; - the values match a host reference computed in the same summation order. The
+   producers discriminate: every element is [1 + 10*i + j], so it varies with BOTH loop symbols and
+   is clear of the zero the accumulator is initialized to — a constant producer would survive a
+   dropped or replayed iteration, and a value omitting a symbol would survive a wrong substitution.
 
    Two nest shapes, because they exercise different placements of the localized store: a scalar
    reduction over both axes (the loss shape — the store lands above every loop, at function scope)
@@ -130,7 +130,8 @@ let () =
               && String.for_all (String.sub lhs ~pos:1 ~len:(us - 1)) ~f:Char.is_digit
               && not (String.is_empty ident)
             in
-            if is_scope_local && String.is_prefix rhs ~prefix:(ident ^ "[") then Some (lhs, ident)
+            if is_scope_local && String.is_prefix rhs ~prefix:(ident ^ "[") then
+              Some (lhs, ident, st)
             else None)
   in
   (* The census names the local by the identifier the declaration carries ([scope_local_ident] is
@@ -155,26 +156,30 @@ let () =
           "no statement both reads and writes the node";
           "the node is stored exactly once, from the local";
           "the census names the accumulator the kernel declares";
-          "the declaration's volatility is the one the census reports";
-          "the accumulator is volatile exactly when the backend requests it";
-          "no volatile pointer shadow, by the census and by the text";
+          "the accumulator declaration stays plain";
+          "the accumulating loop's volatile-read form is the one the census reports";
+          "the opening read stays plain";
+          "no rmw shadow declaration, by the census and by the text";
         ] ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
     in
     match List.find_map statements ~f:scope_init with
     | None -> fail_all ()
-    | Some (local, ident) ->
+    | Some (local, ident, opening) ->
         let count st pattern =
           List.length (String.substr_index_all st ~may_overlap:false ~pattern)
         in
         let node_accesses st = count st (ident ^ "[") in
+        let accumulation_updates =
+          List.filter statements ~f:(fun st ->
+              node_accesses st = 0
+              && count st local >= 2
+              && String.is_substring st ~substring:(local ^ " = "))
+        in
         Verdict.p (label ^ ": accumulator opens into a scope local") true;
         (* The accumulation: assigns the local from itself, and never touches the node. *)
         Verdict.p
           (label ^ ": the reduction updates the local, not the node")
-          (List.exists statements ~f:(fun st ->
-               node_accesses st = 0
-               && count st local >= 2
-               && String.is_substring st ~substring:(local ^ " = ")));
+          (not (List.is_empty accumulation_updates));
         (* The read-modify-write shape is one statement reading and writing the node. Its absence is
            what localization buys; the [Zero_out] statement reaches the node once and is not it. *)
         Verdict.p_all (label ^ ": no statement both reads and writes the node") statements
@@ -190,30 +195,38 @@ let () =
            These claims are therefore backend-uniform: they say the same thing on Metal, where the
            workaround is requested, and on the C backends, where it is not. *)
         let v = compiled.Context.volatility in
-        let accumulators =
+        let accumulations =
           List.filter_map v.Ir.C_syntax.entries ~f:(fun (_, site) ->
               match site with
-              | Ir.C_syntax.Volatile_accumulator name -> Some (name, true)
+              | Ir.C_syntax.Volatile_accumulation_reads name -> Some (name, true)
               | Ir.C_syntax.Plain_accumulator name -> Some (name, false)
-              | Ir.C_syntax.Volatile_rmw_shadow _ -> None)
+              | Ir.C_syntax.Volatile_rmw_reads _ -> None)
         in
         Verdict.p
           (label ^ ": the census names the accumulator the kernel declares")
-          (List.mem (List.map accumulators ~f:fst) local ~equal:String.equal);
-        Verdict.p_all (label ^ ": the declaration's volatility is the one the census reports")
-          accumulators ~f:(fun (name, volatile) ->
-            match declared_volatile source name with
-            | Some declared -> Bool.equal declared volatile
-            | None -> false);
-        Verdict.p_all (label ^ ": the accumulator is volatile exactly when the backend requests it")
-          accumulators ~f:(fun (_, volatile) -> Bool.equal volatile v.Ir.C_syntax.requested);
+          (List.mem (List.map accumulations ~f:fst) local ~equal:String.equal);
+        Verdict.p_all (label ^ ": the accumulator declaration stays plain") accumulations
+          ~f:(fun (name, _) ->
+            match declared_volatile source name with Some declared -> not declared | None -> false);
+        Verdict.p_all
+          (label ^ ": the accumulating loop's volatile-read form is the one the census reports")
+          accumulations ~f:(fun (_, volatile_reads) ->
+            Bool.equal volatile_reads v.Ir.C_syntax.requested
+            && (not (List.is_empty accumulation_updates))
+            && List.for_all accumulation_updates ~f:(fun st ->
+                Bool.equal
+                  (String.is_substring st ~substring:"device volatile float*")
+                  volatile_reads));
+        Verdict.p
+          (label ^ ": the opening read stays plain")
+          (not (String.is_substring opening ~substring:"volatile"));
         (* Localization lifted the device-memory read-modify-write the pointer shadow pins, so this
            routine has none — asserted twice over, from the census and from the emitted text, which
            is what makes either one a check rather than a restatement. *)
         Verdict.p
-          (label ^ ": no volatile pointer shadow, by the census and by the text")
-          (v.Ir.C_syntax.rmw_shadows = 0
-          && not (String.is_substring source ~substring:"volatile float*"))
+          (label ^ ": no rmw shadow declaration, by the census and by the text")
+          (v.Ir.C_syntax.volatile_rmw_reads = 0
+          && not (String.is_substring source ~substring:"__rmw_"))
   in
   check_localized r_total "res_total" "scalar reduction";
   check_localized r_per_col "res_per_col" "row reduction"
@@ -230,7 +243,8 @@ let () =
   let entries_equal =
     List.equal (fun (n1, s1) (n2, s2) -> String.equal n1 n2 && Cs.equal_volatility_site s1 s2)
   in
-  let outer = Cs.Volatile_accumulator "v1_outer" and inner = Cs.Plain_accumulator "v2_inner" in
+  let outer = Cs.Volatile_accumulation_reads "v1_outer"
+  and inner = Cs.Plain_accumulator "v2_inner" in
   let inner_summary, outer_summary =
     Cs.with_volatility_census (fun () ->
         Cs.volatility_census := ("outer_kernel", outer) :: !Cs.volatility_census;
@@ -252,9 +266,9 @@ let () =
   Verdict.p "the enclosing bracket keeps its own capability across the nested one"
     outer_summary.Cs.requested;
   Verdict.p "the counts classify what was collected"
-    (outer_summary.Cs.volatile_accumulators = 1
-    && outer_summary.Cs.plain_accumulators = 1
-    && outer_summary.Cs.rmw_shadows = 0);
+    (outer_summary.Cs.volatile_accumulations = 1
+    && outer_summary.Cs.plain_accumulations = 1
+    && outer_summary.Cs.volatile_rmw_reads = 0);
   Verdict.p "a completed bracket leaves the census global as it found it"
     (List.is_empty !Cs.volatility_census);
   Verdict.p "collection is off outside every bracket" (not !Cs.volatility_census_enabled)

@@ -1,13 +1,13 @@
 (* Standalone Metal check for the LOCALIZED spelling of the pooled-accumulation miscompile
-   (gh-ocannl-731, follow-ups gh-ocannl-782), and the measurement of what the workaround costs.
+   (gh-ocannl-731, follow-ups gh-ocannl-782/820), and the measurement of what the workaround costs.
 
    [bench_metal_bug.ml] beside this file reproduces the original manifestation: a device-memory
    read-modify-write [acc[0] = acc[0] + f(i)] over slot-table-derived pool pointers keeping only the
    last iteration. After the serial-reduction localizer (gh-ocannl-693) that statement shape is gone
    from most kernels — the accumulator lives in a scope local and the node is stored once — and the
-   same compiler pass can corrupt THAT form instead. OCANNL works around it by declaring every
-   reduction-shaped scope local [volatile] on Metal ([volatile_serial_accumulation] in
-   arrayjit/lib/c_syntax.ml).
+   same compiler pass can corrupt THAT form instead. OCANNL works around it with expression-level
+   volatile pointer casts on device reads inside accumulating updates on Metal
+   ([volatile_serial_accumulation] in arrayjit/lib/c_syntax.ml).
 
    This program has two halves, and no OCANNL dependency at all:
 
@@ -86,8 +86,8 @@ let slot_values = [| 3; 5; 7; 11 |]
    is what an upstream report needs and what decides whether a narrower or cheaper workaround than
    [volatile] exists:
 
-   - [qualifier]: the shipped workaround, on the accumulator's declaration. - [restrict]: whether
-   the pooled pointers carry [__restrict] (the Metal backend emits it). - [pointers]: how a per-node
+   - [qualifier]: the prior workaround, on the accumulator's declaration. - [restrict]: whether the
+   pooled pointers carry [__restrict] (the Metal backend emits it). - [pointers]: how a per-node
    pointer is formed. [`Slots] is what the backend emits — a slab base chosen by a value LOADED from
    the slot table, offset by another. [`Slots_in_locals] performs the same two loads into named
    locals first. [`Pools_literal] indexes the pool array with a literal and offsets by a literal, so
@@ -193,7 +193,7 @@ let variants =
       vname = "emitted-volatile";
       vbody = repro_body ~qualifier:"volatile " ();
       vexpected = oracle `Pooled_read;
-      vnote = "the shipped workaround: volatile accumulator";
+      vnote = "the prior workaround: volatile accumulator";
     };
     {
       vname = "no-restrict";

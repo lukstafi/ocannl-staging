@@ -6,17 +6,19 @@ scalar reduction: the reduction updates the local, not the node: true
 scalar reduction: no statement both reads and writes the node: true
 scalar reduction: the node is stored exactly once, from the local: true
 scalar reduction: the census names the accumulator the kernel declares: true
-scalar reduction: the declaration's volatility is the one the census reports: true
-scalar reduction: the accumulator is volatile exactly when the backend requests it: true
-scalar reduction: no volatile pointer shadow, by the census and by the text: true
+scalar reduction: the accumulator declaration stays plain: true
+scalar reduction: the accumulating loop's volatile-read form is the one the census reports: true
+scalar reduction: the opening read stays plain: true
+scalar reduction: no rmw shadow declaration, by the census and by the text: true
 row reduction: accumulator opens into a scope local: true
 row reduction: the reduction updates the local, not the node: true
 row reduction: no statement both reads and writes the node: true
 row reduction: the node is stored exactly once, from the local: true
 row reduction: the census names the accumulator the kernel declares: true
-row reduction: the declaration's volatility is the one the census reports: true
-row reduction: the accumulator is volatile exactly when the backend requests it: true
-row reduction: no volatile pointer shadow, by the census and by the text: true
+row reduction: the accumulator declaration stays plain: true
+row reduction: the accumulating loop's volatile-read form is the one the census reports: true
+row reduction: the opening read stays plain: true
+row reduction: no rmw shadow declaration, by the census and by the text: true
 an inner bracket summarizes only its own sites: true
 the enclosing bracket sees both, in emission order: true
 an inner bracket reports the capability of the compile it bracketed: true

@@ -83,15 +83,15 @@ type routine = private {
           either; this field is what lets it say which code path actually ran. *)
   volatility : Ir.C_syntax.volatility_summary;
       (** Which of this routine's serial accumulations carry the Metal compiler-bug workaround
-          (gh-ocannl-782), in which of its two forms, and how many were left register-resident.
+          (gh-ocannl-782/820), in which of its two forms, and how many stayed plain because the
+          backend did not request it.
 
-          A field of the routine, beside {!mma} and {!peel}, because the qualifier is precisely the
-          loss of register residency: a performance question about a Metal reduction starts by
-          asking how many of its accumulators are pinned to memory, and a residency test needs to
-          know what the compile DECIDED rather than re-deriving it from the backend's name. On a
-          backend that requests no workaround the accumulator sites are still reported, as
-          {!Ir.C_syntax.Plain_accumulator}, with {!Ir.C_syntax.volatility_summary.requested}
-          [= false]. *)
+          A field of the routine, beside {!mma} and {!peel}, because a performance question about a
+          Metal reduction starts by asking how many of its accumulation reads carry the workaround,
+          and a residency test needs to know what the compile DECIDED rather than re-deriving it
+          from the backend's name. On a backend that requests no workaround the accumulator sites
+          are still reported, as {!Ir.C_syntax.Plain_accumulator}, with
+          {!Ir.C_syntax.volatility_summary.requested} [= false]. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every

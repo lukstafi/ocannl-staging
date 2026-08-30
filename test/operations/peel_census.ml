@@ -288,14 +288,14 @@ let () =
       (* The two censuses are collected by different code for different questions, and over these
          nests they must agree on one number: localizing a site is what mints the accumulator the
          volatility census then classifies (gh-ocannl-782). The claim is backend-uniform — on a
-         backend that requests the accumulation workaround those accumulators are volatile, on one
-         that does not they are plain, and either way there is one per localized site. Where the
+         backend that requests the accumulation workaround those sites use volatile reads, on one
+         that does not they stay plain, and either way there is one per localized site. Where the
          peel declined, no accumulator exists to classify; on Metal the device-memory
-         read-modify-write it left behind is what the pointer shadow pins instead, which is the
-         other half of the same picture (the summaries above show it). *)
+         read-modify-write it left behind receives the expression-level read cast instead, which is
+         the other half of the same picture (the summaries above show it). *)
       p
         (Printf.sprintf "%s: one censused accumulator per localized peel site" (shape_name shape))
-        (run.volatility.Cs.volatile_accumulators + run.volatility.Cs.plain_accumulators
+        (run.volatility.Cs.volatile_accumulations + run.volatility.Cs.plain_accumulations
         = run.summary.Cs.localized))
 
 (* The two localizing shapes. Each pins the FULL verdict — how many levels were peeled and which
