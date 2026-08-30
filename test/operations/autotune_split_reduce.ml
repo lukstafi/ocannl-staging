@@ -329,13 +329,19 @@ let () =
   (match !report with
   | Some r ->
       (* CPU sweep {8, 32, 128}: site 1 (red 128) admits {8, 32}, site 2 (red 256) admits {8, 32,
-         128} — five singles; the composite recombines the two sites' best-timed singles. On cc
-         every candidate compiles and times, so the composite is exactly one extra timing. *)
+         128} — five singles; the composite recombines the two sites' best-timed singles. Every
+         single must reach a timing window. With no contention the composite is exactly one extra
+         timing; a contention-refused single cannot staff it (gh-ocannl-855). *)
       p "multi-site split-reduce singles seeded"
         (if is_cpu then r.Autotune.split_reduce_candidates = 5
          else r.Autotune.split_reduce_candidates >= 2);
       p "best-timed singles recombined into a composite"
-        (if is_cpu then r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1
+        (if is_cpu then
+           r.Autotune.split_reduce_timed
+             - (if r.Autotune.split_reduce_composite_timed then 1 else 0)
+           = r.Autotune.split_reduce_candidates
+           && Bool.equal r.Autotune.split_reduce_composite_timed
+                r.Autotune.split_reduce_composite_eligible
          else r.Autotune.split_reduce_timed > 0)
   | None ->
       p "multi-site split-reduce singles seeded" false;
@@ -440,9 +446,11 @@ let () =
          when EACH site contributed a usable best-timed single. Under contention a refused single
          cannot staff that composite, but still counts as reaching the timing window. *)
       p "the interchanged bias-gradient candidate reaches timing"
-        (r.Autotune.split_reduce_timed >= r.Autotune.split_reduce_candidates
-        && (r.Autotune.timings_contended > 0
-           || r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1))
+        (r.Autotune.split_reduce_timed
+           - (if r.Autotune.split_reduce_composite_timed then 1 else 0)
+         = r.Autotune.split_reduce_candidates
+        && Bool.equal r.Autotune.split_reduce_composite_timed
+             r.Autotune.split_reduce_composite_eligible)
   | None ->
       p "conv-gradient split-reduce candidates seeded" false;
       p "the interchanged bias-gradient candidate reaches timing" false);

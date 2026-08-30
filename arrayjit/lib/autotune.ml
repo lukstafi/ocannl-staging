@@ -80,6 +80,8 @@ type report = {
   fiss_sketch_timed : int;
   split_reduce_candidates : int;
   split_reduce_timed : int;
+  split_reduce_composite_eligible : bool;
+  split_reduce_composite_timed : bool;
   mma_candidates : int;
       (** Candidates whose label promises a tensorized pipeline ([spec_expects_mma]) that the search
           put through candidate compile: whole-routine and per-fission-segment seeds, the
@@ -141,6 +143,8 @@ let no_search_report ~timing =
     fiss_sketch_timed = 0;
     split_reduce_candidates = 0;
     split_reduce_timed = 0;
+    split_reduce_composite_eligible = false;
+    split_reduce_composite_timed = false;
     mma_candidates = 0;
     mma_timed = 0;
     model_scored = 0;
@@ -2955,6 +2959,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     fiss_sketch_timed = 0;
                     split_reduce_candidates = 0;
                     split_reduce_timed = 0;
+                    split_reduce_composite_eligible = false;
+                    split_reduce_composite_timed = false;
                     mma_candidates = 0;
                     mma_timed = 0;
                     model_scored = 0;
@@ -3186,7 +3192,10 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                  (CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
                     ~bytes:f.CM.fr_bytes ()) ~f:(fun sec -> sec *. 1e3))
         in
-        let n_fiss_sketch_timed = ref 0 and n_sr_timed = ref 0 in
+        let n_fiss_sketch_timed = ref 0
+        and n_sr_timed = ref 0
+        and sr_composite_eligible = ref false
+        and sr_composite_timed = ref false in
         let rounds_run = ref 0 in
         let n_sketch_candidates = ref 0
         and n_epilogue_sketch_candidates = ref 0
@@ -3318,6 +3327,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               fiss_sketch_timed = !n_fiss_sketch_timed;
               split_reduce_candidates = !n_split_reduce_candidates;
               split_reduce_timed = !n_sr_timed;
+              split_reduce_composite_eligible = !sr_composite_eligible;
+              split_reduce_composite_timed = !sr_composite_timed;
               mma_candidates = !n_mma_proposed;
               mma_timed = !n_mma_timed;
               model_scored = !n_model_scored;
@@ -3477,7 +3488,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                            admitted. *)
                         (match spec with
                         | Fiss (F_sketch _) -> Int.incr n_fiss_sketch_timed
-                        | Fiss (F_split _) -> Int.incr n_sr_timed
+                        | Fiss (F_split { sites }) ->
+                            Int.incr n_sr_timed;
+                            if List.length sites >= 2 then sr_composite_timed := true
                         | _ -> ());
                         if spec_expects_mma spec then Int.incr n_mma_timed;
                         Int.incr n_timings_contended;
@@ -3786,6 +3799,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           in
           let fiss_single_results = ref [] in
           let sr_single_results = ref [] in
+          let update_sr_composite_eligible () =
+            sr_composite_eligible :=
+              List.count sr_sites ~f:(fun s ->
+                  List.exists !sr_single_results ~f:(fun (s2, _, _) ->
+                      Idx.equal_symbol s2.sr_axis s.sr_axis))
+              >= 2
+          in
           List.iter seed_specs ~f:(fun spec ->
               let result = try_spec spec in
               (match (spec, result) with
@@ -3795,7 +3815,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
               | Fiss (F_split { sites = [ (s, b) ] }), Some (_, ms) ->
                   Int.incr n_sr_timed;
-                  sr_single_results := (s, b, ms) :: !sr_single_results
+                  sr_single_results := (s, b, ms) :: !sr_single_results;
+                  (* Keep the live report honest if a later seed dies before the post-seed
+                     recombination step. Eligibility is about usable singles already collected,
+                     not about whether control reached composite proposal. *)
+                  update_sr_composite_eligible ()
               | Fiss (F_split _), Some _ -> Int.incr n_sr_timed
               | _ -> ());
               Option.iter result ~f:admit);
@@ -3855,11 +3879,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                 |> List.min_elt ~compare:(fun (_, _, a) (_, _, b) -> Float.compare a b)
                 |> Option.map ~f:(fun (s2, b, _) -> (s2, b)))
           in
-          if List.length recombined >= 2 then
+          sr_composite_eligible := List.length recombined >= 2;
+          if !sr_composite_eligible then
             Option.iter
               (try_spec (Fiss (F_split { sites = recombined })))
               ~f:(fun timed ->
                 Int.incr n_sr_timed;
+                sr_composite_timed := true;
                 admit timed);
           (* [None] iff the beam is empty: no candidate timed and the baseline was not eligible (an
              undispatched GPU baseline never enters the beam with a finite rank; a declined one does
@@ -4030,6 +4056,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               fiss_sketch_timed = !n_fiss_sketch_timed;
               split_reduce_candidates = List.length sr_specs;
               split_reduce_timed = !n_sr_timed;
+              split_reduce_composite_eligible = !sr_composite_eligible;
+              split_reduce_composite_timed = !sr_composite_timed;
               mma_candidates = !n_mma_proposed;
               mma_timed = !n_mma_timed;
               model_scored = !n_model_scored;
