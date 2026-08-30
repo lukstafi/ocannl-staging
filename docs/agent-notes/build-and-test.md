@@ -73,8 +73,8 @@ that they earn a lookup rather than always-loaded space.
   not permission to leave that case undefined.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
-  `benchmarks/`; user-facing `*.ml` help text under `tools/` and `benchmarks/` joins it. Its prose
-  corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
+  `benchmarks/`; user-facing `*.ml` help text under `tools/`, `benchmarks/`, and `bin/` joins it. Its
+  prose corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
   and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
   `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in
   `ocannl_config.reference`. A script or Dune-action
@@ -90,8 +90,10 @@ that they earn a lookup rather than always-loaded space.
   (whitespace around `=` and an empty example value do not hide the key). Config files contribute
   each nonempty uncommented assignment after applying `Utils.parse_config_lines`' key normalization:
   case folding, leading-dash stripping, and the optional `ocannl_` prefix. The explicitly included
-  `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Because
-  spaced assignments are pervasive in code prose, each
+  `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Comment
+  markers are recognized against the raw line, matching the runtime parser, so leading whitespace
+  does not turn an active invalid key into a silently ignored comment. Because spaced assignments are
+  pervasive in code prose, each
   current spaced config mention is itself file/key/count-pinned; newly registered mentions must join
   that list, and a later rename leaves the old pinned mention failing. That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked

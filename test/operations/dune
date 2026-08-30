@@ -4099,8 +4099,8 @@
 ; rename otherwise leaves them behind until a reviewer remembers the site.
 ;
 ; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/, plus
-; user-facing `*.ml` help text under tools/ and benchmarks/: the three checked-in script roots and
-; both OCaml roots have non-vacuity claims. Qualified command-line spellings and value separators
+; user-facing `*.ml` help text under tools/, benchmarks/, and bin/: the three checked-in script roots
+; and all three OCaml roots have non-vacuity claims. Qualified command-line spellings and value separators
 ; accepted by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are
 ; consumers.
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
@@ -4145,7 +4145,8 @@
   (glob_files_rec ../../scripts/*.py)
   (glob_files_rec ../../benchmarks/*.sh)
   (glob_files_rec ../../benchmarks/*.py)
-  (glob_files_rec ../../benchmarks/*.ml))
+  (glob_files_rec ../../benchmarks/*.ml)
+  (glob_files_rec ../../bin/*.ml))
  (action
   (with-stdout-to
    %{target}

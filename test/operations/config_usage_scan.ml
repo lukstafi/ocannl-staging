@@ -108,6 +108,7 @@ let prefix_free_config_mentions =
   [
     ("docs/agent-notes/conventions.md", "backend", 1);
     ("docs/proposals/gh-ocannl-409.md", "backend", 3);
+    ("tools/calibrate_bandwidth.ml", "backend", 1);
   ]
 
 let prefix_free_names key =
@@ -430,17 +431,19 @@ let normalize_config_file_key raw_key =
 let config_file_occurrences ?(include_commented = false) ~path content =
   String.split_lines content
   |> List.filter_mapi ~f:(fun index line ->
-      let rendered = String.strip line in
-      let commented = String.is_prefix rendered ~prefix:"#" in
+      (* [Utils.parse_config_lines] tests comment markers against the RAW line. Leading whitespace
+         therefore makes [#key=value] an active (invalid) key rather than a comment, and this scan
+         must not silently forgive it by stripping first. *)
+      let commented = String.is_prefix line ~prefix:"#" in
       let candidate =
         if include_commented then
-          Option.value (String.chop_prefix rendered ~prefix:"#") ~default:rendered |> String.strip
-        else rendered
+          Option.value (String.chop_prefix line ~prefix:"#") ~default:line |> String.strip
+        else line
       in
       if
-        String.is_empty candidate
-        || ((not include_commented) && String.is_prefix rendered ~prefix:"#")
-        || String.is_prefix candidate ~prefix:"~~"
+        String.is_empty (String.strip candidate)
+        || ((not include_commented) && commented)
+        || String.is_prefix line ~prefix:"~~"
       then None
       else
         Option.bind (String.lsplit2 candidate ~on:'=') ~f:(fun (raw_key, value) ->
@@ -748,11 +751,13 @@ let live workspace_root paths =
           || String.equal (Stdlib.Filename.basename relative) "ocannl_config"
           || (String.is_prefix relative ~prefix:"tools/"
              || String.is_prefix relative ~prefix:"scripts/"
-             || String.is_prefix relative ~prefix:"benchmarks/")
+             || String.is_prefix relative ~prefix:"benchmarks/"
+             || String.is_prefix relative ~prefix:"bin/")
              && (String.is_suffix relative ~suffix:".sh"
                 || String.is_suffix relative ~suffix:".py"
                 || (String.is_prefix relative ~prefix:"tools/"
-                   || String.is_prefix relative ~prefix:"benchmarks/")
+                   || String.is_prefix relative ~prefix:"benchmarks/"
+                   || String.is_prefix relative ~prefix:"bin/")
                    && String.is_suffix relative ~suffix:".ml")
         then Some (relative, path)
         else None)
@@ -769,11 +774,11 @@ let live workspace_root paths =
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
     ~f:(fun root -> not (List.is_empty (scripts_under root)));
-  Verdict.p "the scan reaches OCaml help text under tools and benchmarks"
-    (List.exists files ~f:(fun (path, _) ->
-         String.is_prefix path ~prefix:"tools/" && String.is_suffix path ~suffix:".ml")
-    && List.exists files ~f:(fun (path, _) ->
-        String.is_prefix path ~prefix:"benchmarks/" && String.is_suffix path ~suffix:".ml"));
+  let ocaml_help_roots = [ "tools/"; "benchmarks/"; "bin/" ] in
+  Verdict.p_all "the scan reaches OCaml help text under tools, benchmarks, and bin" ocaml_help_roots
+    ~f:(fun root ->
+      List.exists files ~f:(fun (path, _) ->
+          String.is_prefix path ~prefix:root && String.is_suffix path ~suffix:".ml"));
   Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")

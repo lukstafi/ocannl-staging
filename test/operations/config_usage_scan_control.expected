@@ -31,4 +31,5 @@ FAIL: config_usage_scan_bogus_config.fixture:1: configuration-file assignment `O
 FAIL: config_usage_scan_bogus_config.fixture:2: configuration-file assignment `Definitely_Not_A_Config_Key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus_config.fixture:3: configuration-file assignment `--definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus_config.fixture:4: configuration-file assignment `OCANNL_DEFINITELY_NOT_A_COMMENTED_CONFIG_KEY=` names `definitely_not_a_commented_config_key`, absent from Utils.known_config_keys
-FAILED: 33 checks did not hold.
+FAIL: config_usage_scan_bogus_config.fixture:5: configuration-file assignment `# OCANNL_DEFINITELY_NOT_A_LEADING_SPACE_COMMENT_KEY=` names `# ocannl_definitely_not_a_leading_space_comment_key`, absent from Utils.known_config_keys
+FAILED: 34 checks did not hold.
