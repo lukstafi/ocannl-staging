@@ -24,6 +24,7 @@ module Longident = Ppxlib.Longident
 module Parse = Ppxlib.Parse
 
 type implementation = Implemented | Unimplemented
+type dsl_context = Outside_dsl | Op_dsl | Cd_dsl
 
 type optional_arg = {
   source : string;
@@ -206,30 +207,36 @@ let string_constant expression =
 (* The spec is the right operand's callee in [x ++ "spec" dims] / [x +* "spec" y], and its first
    direct argument in the inline-tensor form [x +* kernel "spec" dims]. Restricting generated reads
    to this exact operator position keeps a diagnostic string from lending an option a use. *)
-let einsum_spec expression =
+let einsum_spec ~dsl expression =
   match expression.pexp_desc with
-  | Pexp_apply (operator, [ (_, _left); (_, right) ]) -> (
+  | Pexp_apply (operator, [ (_, _left); (_, right) ]) ->
       let operator_kind =
         match operator.pexp_desc with
         | Pexp_ident { txt = Lident name; _ }
           when List.mem Einsum_parser.binary_operators_with_generated_specs name ~equal:String.equal
-          ->
+               && not (Poly.equal dsl Outside_dsl) ->
             `Binary
         | Pexp_ident { txt = Lident name; _ }
           when List.mem Einsum_parser.unary_operators_with_generated_specs name ~equal:String.equal
-               || String.equal name Einsum_parser.concat_operator_with_generated_specs ->
+               && not (Poly.equal dsl Outside_dsl)
+               || Poly.equal dsl Op_dsl
+                  && String.equal name Einsum_parser.concat_operator_with_generated_specs ->
             `Unary
         | _ -> `Other
       in
-      match (operator_kind, string_constant right, right.pexp_desc) with
-      | `Unary, (Some _ as spec), _ -> spec
-      | `Unary, None, Pexp_apply (callee, _) -> string_constant callee
-      | `Unary, None, _ -> None
-      | `Binary, None, Pexp_apply (callee, arguments) -> (
-          match string_constant callee with
-          | Some _ as spec -> spec
-          | None -> ( match arguments with (_, first) :: _ -> string_constant first | [] -> None))
-      | (`Binary | `Other), _, _ -> None)
+      let spec =
+        match (operator_kind, string_constant right, right.pexp_desc) with
+        | `Unary, (Some _ as spec), _ -> spec
+        | `Unary, None, Pexp_apply (callee, _) -> string_constant callee
+        | `Unary, None, _ -> None
+        | `Binary, None, Pexp_apply (callee, arguments) -> (
+            match string_constant callee with
+            | Some _ as spec -> spec
+            | None -> (
+                match arguments with (_, first) :: _ -> string_constant first | [] -> None))
+        | (`Binary | `Other), _, _ -> None
+      in
+      Option.filter spec ~f:(fun spec -> String.contains spec '>')
   | _ -> None
 
 let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
@@ -243,15 +250,15 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
     f ();
     shadowed := saved
   in
-  let within_dsl enabled f =
+  let within_dsl context f =
     let saved = !dsl_mode in
-    dsl_mode := saved || enabled;
+    dsl_mode := context;
     f ();
     dsl_mode := saved
   in
   let without_dsl f =
     let saved = !dsl_mode in
-    dsl_mode := false;
+    dsl_mode := Outside_dsl;
     f ();
     dsl_mode := saved
   in
@@ -298,16 +305,18 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
 
       method! expression expression =
         if not !shadowed then (
-          if !dsl_mode then
-            Option.iter (einsum_spec expression) ~f:(fun spec ->
+          if not (Poly.equal !dsl_mode Outside_dsl) then
+            Option.iter (einsum_spec ~dsl:!dsl_mode expression) ~f:(fun spec ->
                 if List.mem (generated_reads_in_einsum spec) name ~equal:String.equal then
                   meaningful := true);
           match expression.pexp_desc with
           | Pexp_extension ({ txt = "oc"; _ }, _) ->
               (* [%oc] is an anti-quotation boundary: the OCANNL PPXs preserve its payload. *)
               without_dsl (fun () -> super#expression expression)
-          | Pexp_extension ({ txt = "op" | "cd"; _ }, _) ->
-              within_dsl true (fun () -> super#expression expression)
+          | Pexp_extension ({ txt = "op"; _ }, _) ->
+              within_dsl Op_dsl (fun () -> super#expression expression)
+          | Pexp_extension ({ txt = "cd"; _ }, _) ->
+              within_dsl Cd_dsl (fun () -> super#expression expression)
           | Pexp_ident _ -> (
               match direct_name expression with
               | Some found when String.equal found name -> meaningful := true
@@ -405,7 +414,7 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
   | Cases cases -> iterator#cases cases);
   !meaningful
 
-let implementation_of ~dsl ~params ~position ~tail pattern =
+let implementation_of ~dsl ~ignore_is_shadowed ~params ~position ~tail pattern =
   let names = pattern_names pattern in
   let name_used name =
     (* An earlier parameter is in scope in every later default until a later parameter shadows it;
@@ -426,11 +435,12 @@ let implementation_of ~dsl ~params ~position ~tail pattern =
               else used_after (ignore_is_shadowed || pattern_binds pattern "ignore") later)
     in
     let ignore_is_shadowed =
-      List.take params (position + 1)
-      |> List.exists ~f:(fun param ->
-          match param.pparam_desc with
-          | Pparam_val (_, _, pattern) -> pattern_binds pattern "ignore"
-          | Pparam_newtype _ -> false)
+      ignore_is_shadowed
+      || List.take params (position + 1)
+         |> List.exists ~f:(fun param ->
+             match param.pparam_desc with
+             | Pparam_val (_, _, pattern) -> pattern_binds pattern "ignore"
+             | Pparam_newtype _ -> false)
     in
     used_after ignore_is_shadowed (List.drop params (position + 1))
   in
@@ -456,12 +466,15 @@ let args_in_source ~source content =
   let found = ref [] in
   let local_expression_depth = ref 0 in
   let module_path = ref [] in
-  let dsl_extension_depth = ref 0 in
+  let dsl_context = ref Outside_dsl in
+  let top_ignore_shadowed = ref false in
   let within_module name f =
     let saved = !module_path in
+    let saved_ignore = !top_ignore_shadowed in
     module_path := name :: saved;
     f ();
-    module_path := saved
+    module_path := saved;
+    top_ignore_shadowed := saved_ignore
   in
   let qualify name = String.concat ~sep:"." (List.rev (name :: !module_path)) in
   let add_optional arg =
@@ -487,18 +500,36 @@ let args_in_source ~source content =
                 && String.equal candidate.label arg.label))
   in
   let iterator =
-    object
+    object (self)
       inherit Ast_traverse.iter as super
+
+      method! structure items =
+        if !local_expression_depth > 0 then super#structure items
+        else
+          List.iter items ~f:(fun item ->
+              self#structure_item item;
+              match item.pstr_desc with
+              | Pstr_value (_, bindings) ->
+                  if List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat "ignore")
+                  then top_ignore_shadowed := true
+              | Pstr_open { popen_expr = { pmod_desc = Pmod_ident { txt = Lident name; _ }; _ }; _ }
+                when String.equal name "Base" || String.equal name "Stdlib" ->
+                  ()
+              | Pstr_open _ | Pstr_include _ -> top_ignore_shadowed := true
+              | Pstr_primitive { pval_name = { txt = "ignore"; _ }; _ } ->
+                  top_ignore_shadowed := true
+              | _ -> ())
 
       method! structure_item item =
         match item.pstr_desc with
         | Pstr_module { pmb_name = { txt = Some name; _ }; _ } ->
             within_module name (fun () -> super#structure_item item)
-        | Pstr_extension (({ txt = "op" | "cd"; _ }, _), _) ->
-            Int.incr dsl_extension_depth;
+        | Pstr_extension (({ txt = ("op" | "cd") as extension; _ }, _), _) ->
+            let saved = !dsl_context in
+            dsl_context := if String.equal extension "op" then Op_dsl else Cd_dsl;
             Exn.protect
               ~f:(fun () -> super#structure_item item)
-              ~finally:(fun () -> Int.decr dsl_extension_depth)
+              ~finally:(fun () -> dsl_context := saved)
         | _ -> super#structure_item item
 
       method! expression expression =
@@ -516,8 +547,9 @@ let args_in_source ~source content =
                       match param.pparam_desc with
                       | Pparam_val (Asttypes.Optional label, _, pattern) ->
                           let implementation =
-                            implementation_of ~dsl:(!dsl_extension_depth > 0) ~params ~position
-                              ~tail pattern
+                            implementation_of ~dsl:!dsl_context
+                              ~ignore_is_shadowed:!top_ignore_shadowed ~params ~position ~tail
+                              pattern
                           in
                           add_optional
                             { source; definition = qualify definition; label; implementation }

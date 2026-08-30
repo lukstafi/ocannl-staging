@@ -46,6 +46,12 @@ let () =
   case "an einsum-shaped argument outside a unary PPX spec position is not a generated use"
     {ocaml|let%op f ?(stride = 1) x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
+  case "an axis-only literal without the PPX dispatch guard generates no read"
+    {ocaml|let%op f ?(stride = 1) x = let _ = stride in let ( ++ ) x _ = x in x ++ "stride*o+k"|ocaml}
+    ~implemented:false ~honest:false;
+  case "concat generated reads are op-only"
+    {ocaml|let%cd f ?(stride = 1) x = let _ = stride in let ( ++^ ) x _ = x in x ++^ "stride*o+k; i => o"|ocaml}
+    ~implemented:false ~honest:false;
   case "legacy convolution padding is a ppx-generated use"
     {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
@@ -93,6 +99,10 @@ let () =
   case "an earlier ignore parameter makes its call a real use"
     {ocaml|let f ignore ?(_feature = true) () = ignore _feature|ocaml} ~implemented:true
     ~honest:false;
+  case "a preceding top-level ignore binding makes its call a real use"
+    {ocaml|let ignore x = if x then enable ()
+let f ?(_feature = true) () = ignore _feature|ocaml}
+    ~implemented:true ~honest:false;
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;

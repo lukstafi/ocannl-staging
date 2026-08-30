@@ -14,6 +14,10 @@ a qualified custom operator does not generate a use: implementation classified: 
 a qualified custom operator does not generate a use: honesty classified: true
 an einsum-shaped argument outside a unary PPX spec position is not a generated use: implementation classified: true
 an einsum-shaped argument outside a unary PPX spec position is not a generated use: honesty classified: true
+an axis-only literal without the PPX dispatch guard generates no read: implementation classified: true
+an axis-only literal without the PPX dispatch guard generates no read: honesty classified: true
+concat generated reads are op-only: implementation classified: true
+concat generated reads are op-only: honesty classified: true
 legacy convolution padding is a ppx-generated use: implementation classified: true
 legacy convolution padding is a ppx-generated use: honesty classified: true
 a shadowed op spec coefficient does not use the outer option: implementation classified: true
@@ -48,6 +52,8 @@ a later ignore parameter makes its call a real use: implementation classified: t
 a later ignore parameter makes its call a real use: honesty classified: true
 an earlier ignore parameter makes its call a real use: implementation classified: true
 an earlier ignore parameter makes its call a real use: honesty classified: true
+a preceding top-level ignore binding makes its call a real use: implementation classified: true
+a preceding top-level ignore binding makes its call a real use: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
 underscore label makes an unimplemented option caller-visible: implementation classified: true

@@ -52,9 +52,10 @@ that they earn a lookup rather than always-loaded space.
   real uses from `let _ = feature` / an unused `let _unused = feature` / calls to the unshadowed
   standard `ignore`, including later and nested optional defaults, destructured option patterns,
   functions exported through tuple destructuring, optional closures returned directly or through
-  result-position control flow, sequential bindings inside local modules, and the identifiers that
-  exact unqualified structure- or expression-level `%op`/`%cd` einsum and concat operands turn into
-  generated coefficient / legacy-`use_padding` reads under the same lexical scope.
+  result-position control flow, sequential top-level and local-module bindings, and the identifiers
+  that exact unqualified structure- or expression-level `%op`/`%cd` einsum operands (plus `%op`'s
+  concat) with the PPX's `=>` dispatch guard turn into generated coefficient /
+  legacy-`use_padding` reads under the same lexical scope.
   `optional_arg_scan_cases.expected` ratchets the violating discard forms plus their nearest honest
   counterparts so losing a control is itself a golden change (gh-ocannl-811). Optimizer
   forwarders still need executed oracles — syntactic use proves only that the value was forwarded.
