@@ -22,6 +22,8 @@
 #                            $HOME/ocannl-staging-worktrees on the remote).
 #   --cap SECONDS            Per-build/test/probe wall-clock cap; 0 disables
 #                            it (default: 5400).
+#   --ssh-cap SECONDS        Whole SSH-trip cap, including setup and cleanup;
+#                            0 disables it (default: 21600).
 #   -j, --jobs N             Dune concurrency, 1..4 (default: 4).
 #
 # Examples:
@@ -66,6 +68,7 @@ remote_repo=
 staging_remote=
 worktree_root=
 cap=5400
+ssh_cap=21600
 jobs=4
 operations=()
 operation_count=0
@@ -108,6 +111,11 @@ while [ $# -gt 0 ]; do
       cap=$2
       shift 2
       ;;
+    --ssh-cap)
+      [ $# -ge 2 ] || die "--ssh-cap needs a value"
+      ssh_cap=$2
+      shift 2
+      ;;
     -j | --jobs)
       [ $# -ge 2 ] || die "$1 needs a value"
       jobs=$2
@@ -123,6 +131,7 @@ git check-ref-format --branch "$branch" >/dev/null 2>&1 || die "invalid branch n
 
 case $jobs in 1 | 2 | 3 | 4) ;; *) die "jobs must be between 1 and 4" ;; esac
 case $cap in '' | *[!0-9]*) die "cap must be a non-negative integer" ;; esac
+case $ssh_cap in '' | *[!0-9]*) die "ssh cap must be a non-negative integer" ;; esac
 case $staging_remote in -*) die "--remote must not begin with '-'" ;; esac
 case $backend in
   '' | cc | multidev_cc | cuda | hip | metal) ;;
@@ -158,85 +167,10 @@ done
 case $remote_repo in '' | /*) ;; *) die "--repo must be an absolute path on the remote" ;; esac
 case $worktree_root in '' | /*) ;; *) die "--worktree-root must be an absolute path on the remote" ;; esac
 
-# ssh concatenates its remote argv into shell text. Quote every value once here,
-# then let /bin/sh recover the exact positional arguments before reading the
-# static program from stdin. In particular, --run commands are never interpolated
-# into this command string.
-remote_command="/bin/sh -s --"
-for arg in "$box" "$branch" "$backend" "$expect_lib" "$remote_repo" "$staging_remote" \
-  "$worktree_root" "$cap" "$jobs"; do
-  remote_command="$remote_command $(sq "$arg")"
-done
-if [ "$operation_count" -gt 0 ]; then
-  for arg in "${operations[@]}"; do
-    remote_command="$remote_command $(sq "$arg")"
-  done
-fi
-
-ssh -o BatchMode=yes -o ConnectTimeout=8 \
-  -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-  "$box" "$remote_command" <<'REMOTE_VERIFY'
-set -u
-
-requested_box=$1
-branch=$2
-backend=$3
-expect_lib=$4
-repo_arg=$5
-staging_remote_arg=$6
-worktree_root_arg=$7
-cap=$8
-jobs=$9
-shift 9
-
-repo=${repo_arg:-$HOME/ocannl-staging}
-worktree_root=${worktree_root_arg:-$HOME/ocannl-staging-worktrees}
-wt=
-wt_registered=0
-finished=0
-
-fail() {
-  echo "remote-verify: $*" >&2
-  exit 2
-}
-
-finish() {
-  main_rc=$1
-  [ "$finished" -eq 0 ] || exit "$main_rc"
-  finished=1
-  trap - EXIT HUP INT TERM
-  cleanup_rc=0
-
-  if [ -n "$wt" ]; then
-    if [ "$wt_registered" -eq 1 ]; then
-      git -C "$repo" worktree remove --force "$wt" || cleanup_rc=1
-    elif [ -d "$wt" ]; then
-      rmdir "$wt" 2>/dev/null || cleanup_rc=1
-    fi
-    git -C "$repo" worktree prune || cleanup_rc=1
-    [ ! -e "$wt" ] || cleanup_rc=1
-  fi
-
-  if [ "$cleanup_rc" -eq 0 ]; then
-    echo "remote-verify: cleanup: PASS${wt:+ ($wt removed and pruned)}"
-  else
-    echo "remote-verify: cleanup: FAIL ($wt may need manual removal)" >&2
-    [ "$main_rc" -ne 0 ] || main_rc=125
-  fi
-  echo "remote-verify: exit: $main_rc"
-  exit "$main_rc"
-}
-
-trap 'finish $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
-
-# Cap each potentially long command on the far side and kill its whole process
-# group on expiry. macOS has no timeout(1), and uutils timeout on the GPU boxes
-# can leave descendants alive after its KILL phase; this is the supervisor
-# already proven by tools/test-run.sh and tools/sweep.sh. Exit 142 means the cap
-# expired. Signal handlers reap before returning, so cleanup never races a dune
-# process that still owns the worktree.
+# One process-group supervisor is used on both sides of SSH. The local instance
+# bounds setup plus cleanup; the same source is passed as a positional argument
+# to the remote shell and bounds each build/test/probe there. Exit 142 means the
+# wall-clock cap expired.
 capped_perl='
   use POSIX ();
   my $cap = shift;
@@ -294,6 +228,94 @@ capped_perl='
   alarm 0;
   exit $done;
 '
+local_capped() {
+  local budget=$1
+  shift
+  perl -e "$capped_perl" -- "$budget" "$@"
+}
+
+# ssh concatenates its remote argv into shell text. Quote every value once here,
+# then let /bin/sh recover the exact positional arguments before reading the
+# static program from stdin. In particular, --run commands are never interpolated
+# into this command string.
+remote_command="/bin/sh -s --"
+for arg in "$box" "$branch" "$backend" "$expect_lib" "$remote_repo" "$staging_remote" \
+  "$worktree_root" "$cap" "$ssh_cap" "$jobs" "$capped_perl"; do
+  remote_command="$remote_command $(sq "$arg")"
+done
+if [ "$operation_count" -gt 0 ]; then
+  for arg in "${operations[@]}"; do
+    remote_command="$remote_command $(sq "$arg")"
+  done
+fi
+
+local_capped "$ssh_cap" ssh -o BatchMode=yes -o ConnectTimeout=8 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+  "$box" "$remote_command" <<'REMOTE_VERIFY'
+set -u
+
+requested_box=$1
+branch=$2
+backend=$3
+expect_lib=$4
+repo_arg=$5
+staging_remote_arg=$6
+worktree_root_arg=$7
+cap=$8
+ssh_cap=$9
+jobs=${10}
+capped_perl=${11}
+shift 11
+
+# Non-login SSH shells on rog need both locations; harmless when the
+# directories do not exist (tools/sweep.sh uses the same prefix).
+PATH=/usr/local/cuda/bin:/usr/lib/wsl/lib:$PATH
+export PATH
+
+repo=${repo_arg:-$HOME/ocannl-staging}
+worktree_root=${worktree_root_arg:-$HOME/ocannl-staging-worktrees}
+wt=
+wt_registered=0
+finished=0
+
+fail() {
+  echo "remote-verify: $*" >&2
+  exit 2
+}
+
+finish() {
+  main_rc=$1
+  [ "$finished" -eq 0 ] || exit "$main_rc"
+  finished=1
+  trap - EXIT HUP INT TERM
+  cleanup_rc=0
+
+  if [ -n "$wt" ]; then
+    if [ "$wt_registered" -eq 1 ]; then
+      git -C "$repo" worktree remove --force "$wt" || cleanup_rc=1
+    elif [ -d "$wt" ]; then
+      rmdir "$wt" 2>/dev/null || cleanup_rc=1
+    fi
+    git -C "$repo" worktree prune || cleanup_rc=1
+    [ ! -e "$wt" ] || cleanup_rc=1
+  fi
+
+  if [ "$cleanup_rc" -eq 0 ]; then
+    echo "remote-verify: cleanup: PASS${wt:+ ($wt removed and pruned)}"
+  else
+    echo "remote-verify: cleanup: FAIL ($wt may need manual removal)" >&2
+    [ "$main_rc" -ne 0 ] || main_rc=125
+  fi
+  echo "remote-verify: exit: $main_rc"
+  exit "$main_rc"
+}
+
+trap 'finish $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+# This is the exact supervisor source the local side passed in; keeping one
+# copy prevents the outer SSH and inner command caps from drifting apart.
 capped() { perl -e "$capped_perl" -- "$cap" "$@"; }
 
 staging_url_matches() {
@@ -352,21 +374,28 @@ else
     fail "no remote in $repo points to lukstafi/ocannl-staging (use --remote after adding one)"
 fi
 
+opam_switch=$(cd "$repo" && capped opam switch show --safe) ||
+  fail "cannot resolve the opam switch selected by $repo"
+[ -n "$opam_switch" ] || fail "the remote checkout has no selected opam switch"
+
 actual_box=$(hostname 2>/dev/null || uname -n)
 echo "=== remote-verify provenance ==="
 echo "requested box: $requested_box"
 echo "actual box:    $actual_box"
 echo "repository:    $repo"
 echo "staging remote: $staging_remote ($staging_url)"
+echo "opam switch:    $opam_switch (resolved from the checkout)"
 echo "pushed branch: $branch"
 echo "requested backend: ${backend:-none (@check compiles only)}"
 echo "expected optional library: ${expect_lib:-none}"
 echo "dune jobs:     $jobs"
 echo "per-command cap: ${cap}s"
+echo "whole SSH cap: ${ssh_cap}s"
+echo "remote PATH prefix: /usr/local/cuda/bin:/usr/lib/wsl/lib"
 
 # Fetch the named pushed branch explicitly. Resolving an already-present remote
 # tracking ref after a failed fetch would certify stale source.
-capped git -C "$repo" fetch -q "$staging_remote" \
+capped git -C "$repo" fetch -q --no-write-fetch-head "$staging_remote" \
   "+refs/heads/$branch:refs/remotes/$staging_remote/$branch" ||
   fail "cannot fetch pushed branch $staging_remote/$branch"
 full_sha=$(git -C "$repo" rev-parse --verify "refs/remotes/$staging_remote/$branch^{commit}") ||
@@ -383,7 +412,8 @@ wt_registered=1
 actual_sha=$(git -C "$wt" rev-parse HEAD) || fail "cannot read worktree HEAD"
 [ "$actual_sha" = "$full_sha" ] ||
   fail "worktree commit $actual_sha differs from resolved commit $full_sha"
-[ -z "$(git -C "$wt" status --porcelain)" ] || fail "fresh worktree is not clean"
+worktree_status=$(git -C "$wt" status --porcelain) || fail "cannot read fresh worktree status"
+[ -z "$worktree_status" ] || fail "fresh worktree is not clean"
 echo "worktree:      $wt"
 echo "worktree HEAD: $actual_sha"
 echo "source state:  clean, detached, exact commit"
@@ -391,11 +421,13 @@ echo "=== end provenance ==="
 
 cd "$wt" || fail "cannot enter $wt"
 
+opam_exec() { capped opam exec --switch="$opam_switch" -- "$@"; }
+
 dune_build() {
   if [ -n "$backend" ]; then
-    OCANNL_BACKEND=$backend capped opam exec -- dune build -j "$jobs" "$@"
+    OCANNL_BACKEND=$backend opam_exec dune build -j "$jobs" "$@"
   else
-    capped opam exec -- dune build -j "$jobs" "$@"
+    opam_exec dune build -j "$jobs" "$@"
   fi
 }
 
@@ -441,7 +473,7 @@ assert_optional_library() {
   echo "remote-verify: opposite-backend negative control: PASS $other_cmi absent"
 }
 
-echo "remote-verify: build: opam exec -- dune build -j $jobs @check"
+echo "remote-verify: build: opam exec --switch=$opam_switch -- dune build -j $jobs @check"
 dune_build @check || exit $?
 echo "remote-verify: @check: PASS (compilation only; no backend execution claimed)"
 assert_backend
@@ -462,20 +494,23 @@ while [ $# -gt 0 ]; do
       ;;
     run)
       echo "remote-verify: probe ($backend): $value"
-      OCANNL_BACKEND=$backend capped opam exec -- sh -c "$value" || exit $?
+      OCANNL_BACKEND=$backend opam_exec sh -c "$value" || exit $?
       assert_backend
       echo "remote-verify: probe: PASS with resolved backend configuration $backend"
       echo "remote-verify: probe backend execution: see the probe's own output above"
       ;;
     record-golden)
       echo "remote-verify: record golden ($backend): $value"
+      # Establish the configuration BEFORE the alias. Any later Dune invocation
+      # clears the pending-promotion registry that this mode must consume.
+      assert_backend
       dune_build "$value"
       build_rc=$?
-      assert_backend
-      promotions=$(capped opam exec -- dune promotion list --root .) ||
+      promotions=$(opam_exec dune promotion list --root .) ||
         fail "cannot list golden corrections after $value"
       if [ -z "$promotions" ]; then
         [ "$build_rc" -eq 0 ] || exit "$build_rc"
+        assert_backend
         echo "remote-verify: golden: PASS, already current ($value; backend=$backend)"
       else
         echo "=== remote-verify corrected golden contents (backend=$backend) ==="
@@ -489,12 +524,12 @@ while [ $# -gt 0 ]; do
             *) fail "--record-golden produced a non-golden correction: $promoted" ;;
           esac
           echo "--- $promoted (.actual) ---"
-          capped opam exec -- dune promotion show --root . "$promoted" ||
+          opam_exec dune promotion show --root . "$promoted" ||
             fail "cannot show corrected contents for $promoted"
         done
         IFS=$old_ifs
         echo "=== end corrected golden contents ==="
-        capped opam exec -- dune promotion apply --root . ||
+        opam_exec dune promotion apply --root . ||
           fail "cannot apply remote golden corrections"
         git diff --quiet
         diff_rc=$?
@@ -509,11 +544,19 @@ while [ $# -gt 0 ]; do
         echo "=== end apply-ready golden patch ==="
         echo "remote-verify: golden: correction recorded; re-running $value to retain all failures"
         dune_build "$value" || exit $?
-        remaining=$(capped opam exec -- dune promotion list --root .) ||
+        remaining=$(opam_exec dune promotion list --root .) ||
           fail "cannot check for corrections after re-running $value"
         [ -z "$remaining" ] || fail "$value still has promotable corrections after its re-run"
         assert_backend
         echo "remote-verify: golden: RECORDED and re-run PASS ($value; original dune exit=$build_rc)"
+        git reset -q --hard "$full_sha" || fail "cannot restore source after recording $value"
+        git clean -q -fd || fail "cannot remove untracked source after recording $value"
+        restored_sha=$(git rev-parse HEAD) || fail "cannot read restored worktree HEAD"
+        [ "$restored_sha" = "$full_sha" ] ||
+          fail "golden cleanup restored $restored_sha instead of $full_sha"
+        restored_status=$(git status --porcelain) || fail "cannot read restored worktree status"
+        [ -z "$restored_status" ] || fail "golden cleanup left tracked or untracked source changes"
+        echo "remote-verify: golden source restore: PASS (exact commit $full_sha, clean)"
       fi
       ;;
     *) fail "internal unknown operation: $kind" ;;
