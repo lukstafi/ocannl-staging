@@ -7,6 +7,18 @@
 
 set -euo pipefail
 
+# Most assertions below are deliberately quiet shell predicates. If one fails
+# under errexit, name the exact site before cleanup removes its evidence; the
+# expected-error controls temporarily disable errexit and therefore stay quiet.
+on_error() {
+  local rc=$1 line=$2 command=$3
+  case $- in
+    *e*) printf 'sweep_harness: line %s failed (exit %s): %s\n' "$line" "$rc" "$command" >&2 ;;
+  esac
+  return "$rc"
+}
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 sweep=$1
 aggregate=$2
 verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
