@@ -2,34 +2,39 @@ scalar reduction matches host reference: true
 row reduction matches host reference: true
 index-only reduction matches host reference: true
 reference discriminates a last-iteration-only result: true
-scalar reduction: accumulator opens into a scope local: true
+scalar reduction: accumulator opens from zero in a scope local: true
 scalar reduction: the reduction updates the local, not the node: true
 scalar reduction: no statement both reads and writes the node: true
+scalar reduction: the dead zeroing store and opening read are absent: true
 scalar reduction: the node is stored exactly once, from the local: true
 scalar reduction: the census names the accumulator the kernel declares: true
 scalar reduction: the accumulator declaration stays plain: true
 scalar reduction: the accumulating loop's volatile-read form is the one the census reports: true
-scalar reduction: the opening read stays plain: true
+scalar reduction: the forwarded zero seed performs no device read: true
 scalar reduction: no rmw shadow declaration, by the census and by the text: true
-row reduction: accumulator opens into a scope local: true
+row reduction: accumulator opens from zero in a scope local: true
 row reduction: the reduction updates the local, not the node: true
 row reduction: no statement both reads and writes the node: true
+row reduction: the dead zeroing store and opening read are absent: true
 row reduction: the node is stored exactly once, from the local: true
 row reduction: the census names the accumulator the kernel declares: true
 row reduction: the accumulator declaration stays plain: true
 row reduction: the accumulating loop's volatile-read form is the one the census reports: true
-row reduction: the opening read stays plain: true
+row reduction: the forwarded zero seed performs no device read: true
 row reduction: no rmw shadow declaration, by the census and by the text: true
-index-only reduction: accumulator opens into a scope local: true
+index-only reduction: accumulator opens from zero in a scope local: true
 index-only reduction: the reduction updates the local, not the node: true
 index-only reduction: no statement both reads and writes the node: true
+index-only reduction: the dead zeroing store and opening read are absent: true
 index-only reduction: the node is stored exactly once, from the local: true
 index-only reduction: the census names the accumulator the kernel declares: true
 index-only reduction: the accumulator declaration stays plain: true
 index-only reduction: the accumulating loop's volatile-read form is the one the census reports: true
-index-only reduction: the opening read stays plain: true
+index-only reduction: the forwarded zero seed performs no device read: true
 index-only reduction: no rmw shadow declaration, by the census and by the text: true
 index-only accumulation is censused plain because it emits no device read: true
+partial-cell localized reduction preserves the live whole-node zero: true
+partial-cell reduction retains zero store, opening read, and closing store: true
 cross-statement CSE produces one lifted accumulator declaration: true
 lifted accumulator executes once for both users: true
 lifted accumulator contributes exactly one census site: true

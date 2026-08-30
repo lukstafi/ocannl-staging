@@ -187,6 +187,7 @@ test/operations/reduction_accumulator_residency.ml [also pins text this scan can
     "] = " ^ ...
     "__rmw_"
     "device volatile float*"
+    "res_partial_out["
     "volatile float*)res_guard_mask"
     "volatile"
     ... ^ " = "
