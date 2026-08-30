@@ -379,6 +379,11 @@ that they earn a lookup rather than always-loaded space.
   the dumbest possible substring scan, must have been read as a marker attributed to a stanza that
   runs something. That is what catches the marker written into a quoted argument, into a field, or
   into a stanza that runs nothing — cases where the author believed they had declared something.
+  `Dune_stanza_scan.contained_marker_contract` owns that reusable outer contract (gh-ocannl-863):
+  one sentinel per comment, the earliest admitted reason separator, a multi-word reason, raw-text
+  sentinel accounting, parenthesis containment, and a convention-supplied wrong-stanza predicate.
+  A new Dune comment convention supplies only its declaration parser and subject rule; it does not
+  reimplement those refusal classes.
   (iv) READ THE DECLARATION FROM THE FIELD THE ACTION RUNS UNDER, never from the stanza at large. A
   stanza can carry several dependency fields and dune reruns an action under exactly one of them —
   an inline-test library declares under `(inline_tests (deps …))`, and `(preprocessor_deps (env_var
