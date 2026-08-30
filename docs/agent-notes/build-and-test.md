@@ -71,10 +71,12 @@ that they earn a lookup rather than always-loaded space.
   contain is the one most in need of a fixture, since nothing in the tree will contradict the
   implementation's guess about it; a survey reporting zero of something is a hole in the fixtures,
   not permission to leave that case undefined.
-- Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
+- Configuration consumers outside typed config call sites are covered by `config_usage_scan`
+  (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
-  `benchmarks/`; user-facing `*.ml` help text under `tools/`, `benchmarks/`, and `bin/` joins it. Its
-  prose corpus is `AGENTS.md`, the root README, and every `*.md` under `docs/`
+  `benchmarks/`; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
+  `test/` joins it (generated `*.pp.ml` renderings are excluded). Its prose corpus is `AGENTS.md`,
+  the root README, and every `*.md` under `docs/`
   and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
   `ocannl_config` files join too, as do `ocannl_config.for_debug` and prefixed-token examples in
   `ocannl_config.reference`. A script or Dune-action
@@ -85,9 +87,11 @@ that they earn a lookup rather than always-loaded space.
   Supported prefix-free
   config flags occupy the host application's namespace, so their current documentation sites are
   separately file/key/count-pinned. Prose contributes a key
-  when an inline code span or fenced line contains either unambiguous prefixed form; a bare
+  when an inline code span (including each physical segment of a multiline span) or fenced line
+  contains either unambiguous prefixed form; a bare
   assignment contributes only when it occupies the whole inline span outside benchmark reports
-  (whitespace around `=` and an empty example value do not hide the key). Config files contribute
+  (whitespace around `=`, within the value, or an empty example value does not hide the key). Config
+  files contribute
   each nonempty uncommented assignment after applying `Utils.parse_config_lines`' key normalization:
   case folding, leading-dash stripping, and the optional `ocannl_` prefix. The explicitly included
   `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Comment

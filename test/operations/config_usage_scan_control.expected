@@ -24,6 +24,7 @@ FAIL: config_usage_scan_bogus.fixture:11: documentation assignment `--ocannl_def
 FAIL: config_usage_scan_bogus.fixture:12: documentation assignment `definitely_not_a_config_key = true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:14: documentation assignment `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=` names `definitely_not_a_second_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:15: documentation assignment `--ocannl-definitely-not-a-third-config-key=true` names `definitely_not_a_third_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:23: documentation assignment `definitely_not_a_multiword_config_key = one | two` names `definitely_not_a_multiword_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:18: documentation assignment `OCANNL_DEFINITELY_NOT_A_FOURTH_CONFIG_KEY=` names `definitely_not_a_fourth_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:19: documentation assignment `--ocannl-definitely-not-a-fifth-config-key=true` names `definitely_not_a_fifth_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:21: prefix-free command-line flag `--definitely_not_a_prefix_free_config_key=true` names `definitely_not_a_prefix_free_config_key`, absent from Utils.known_config_keys
@@ -32,4 +33,5 @@ FAIL: config_usage_scan_bogus_config.fixture:2: configuration-file assignment `D
 FAIL: config_usage_scan_bogus_config.fixture:3: configuration-file assignment `--definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus_config.fixture:4: configuration-file assignment `OCANNL_DEFINITELY_NOT_A_COMMENTED_CONFIG_KEY=` names `definitely_not_a_commented_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus_config.fixture:5: configuration-file assignment `# OCANNL_DEFINITELY_NOT_A_LEADING_SPACE_COMMENT_KEY=` names `# ocannl_definitely_not_a_leading_space_comment_key`, absent from Utils.known_config_keys
-FAILED: 34 checks did not hold.
+FAIL: config_usage_scan_multiline_bogus.fixture:2: documentation assignment `--ocannl_definitely_not_a_multiline_config_key=true` names `definitely_not_a_multiline_config_key`, absent from Utils.known_config_keys
+FAILED: 36 checks did not hold.

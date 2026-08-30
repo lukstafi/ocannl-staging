@@ -284,11 +284,10 @@ let same_range (a, b) (x, y) = Int.equal a x && Int.equal b y
 
 let assignment_key ~key_char ~normalize rendered =
   match String.lsplit2 rendered ~on:'=' with
-  | Some (raw_key, value)
+  | Some (raw_key, _value)
     when (not (String.is_empty raw_key))
          && key_char raw_key.[0]
-         && String.for_all raw_key ~f:key_char
-         && not (String.exists value ~f:Char.is_whitespace) ->
+         && String.for_all raw_key ~f:key_char ->
       normalize raw_key
   | _ -> None
 
@@ -323,6 +322,7 @@ let spaced_config_mentions =
       1 );
     ("docs/proposals/gh-ocannl-344.md", "large_models", 2);
     ("docs/proposals/gh-ocannl-351.md", "inline_complex_computations", 2);
+    ("docs/proposals/gh-ocannl-530-pool-uniformity.md", "cc_pool_core_class", 1);
     ("docs/proposals/task-73617488.md", "virtualize_max_visits", 3);
   ]
 
@@ -338,7 +338,8 @@ let one_assignment ~path rendered =
       let name = String.strip raw_name in
       let value = String.strip raw_value in
       let spaced = not (String.equal raw_name name && String.equal raw_value value) in
-      if String.is_empty name || String.exists value ~f:Char.is_whitespace then None
+      let value_has_whitespace = String.exists value ~f:Char.is_whitespace in
+      if String.is_empty name then None
       else
         match cli_key_of_token (name ^ "=" ^ value) with
         | Some key -> Some (key, false)
@@ -356,6 +357,13 @@ let one_assignment ~path rendered =
                      (name ^ "=" ^ value))
                   ~f:(fun key ->
                     if
+                      value_has_whitespace
+                      && not
+                           (Set.mem Utils.known_config_keys key
+                           || tracked_spaced_config path key || control_fixture path
+                           || tracked_historical_config path key)
+                    then None
+                    else if
                       (not spaced)
                       || Set.mem Utils.known_config_keys key
                       || tracked_spaced_config path key || control_fixture path
@@ -385,18 +393,24 @@ let markdown_occurrences ~allow_bare ~path content =
             (not (List.mem (comments lineno) range ~equal:same_range))
             && not (List.mem (fences lineno) range ~equal:same_range))
         |> List.concat_map ~f:(fun (start, stop) ->
-            (* A multiline span arrives as one range per physical line. A complete [key=value]
-               mention is one inline span, so both delimiters must be on this line. *)
-            if stop <= start || not (Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
-            then []
+            if stop <= start then []
             else
               let spelling = String.sub line ~pos:start ~len:(stop - start) in
-              let rendered = Markdown.code_span_content spelling in
+              let complete = Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`' in
+              (* A multiline code span arrives as one range per physical line. Bare assignments
+                 still require a complete span, but prefixed tokens are unambiguous on any segment.
+                 Remove whichever delimiter this segment owns before applying the token reader. *)
+              let rendered =
+                if complete then Markdown.code_span_content spelling
+                else
+                  (spelling |> fun s -> Option.value (String.chop_prefix s ~prefix:"`") ~default:s)
+                  |> fun s -> Option.value (String.chop_suffix s ~suffix:"`") ~default:s
+              in
               let prefixed =
                 script_occurrences ~path rendered |> List.map ~f:(as_markdown lineno)
               in
               if not (List.is_empty prefixed) then prefixed
-              else if allow_bare then
+              else if complete && allow_bare then
                 Option.to_list
                 @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
                     {
@@ -482,6 +496,31 @@ let non_config_environment_mentions =
     ("ocannl_config.reference", "print", 2);
     ("test/operations/dune", "dashed_only_key", 4);
     ("test/operations/dune", "demo_key", 6);
+    ("test/operations/cc_march_census.ml", "vec_widen_half", 2);
+    ("test/operations/cc_march_census.ml", "vec_widen_bfloat16", 1);
+    ("test/operations/cc_march_census.ml", "vec_", 1);
+    ("test/operations/cc_march_census.ml", "vec_widen_", 1);
+    ("test/operations/cc_march_census.ml", "vec_narrow_", 1);
+    ("test/operations/codegen_text_scan_cases.ml", "vec_widen_bfloat16", 2);
+    ("test/operations/codegen_text_scan_cases.ml", "half_fma", 2);
+    ("test/operations/config_var_spellings.ml", "demo_key", 1);
+    ("test/operations/config_var_spellings.ml", "print", 1);
+    ("test/operations/config_var_spellings.ml", "backedn", 1);
+    ("test/operations/env_var_deps.ml", "backedn", 1);
+    ("test/operations/env_var_deps.ml", "demo_key", 1);
+    ("test/operations/env_var_deps.ml", "dashed_only_key", 1);
+    ("test/operations/env_var_deps.ml", "x", 1);
+    ("test/operations/env_var_deps.ml", "not_a_config_key", 1);
+    ("test/operations/narrow_storage_compute.ml", "half_fma", 2);
+    ("test/operations/narrow_storage_compute.ml", "vec_widen_bfloat16", 1);
+    ("test/operations/narrow_storage_compute.ml", "vec_narrow_bfloat16", 1);
+    ("test/operations/narrow_storage_compute.ml", "vec_widen_half", 2);
+    ("test/operations/scope_over_materialized.ml", "virtualize_", 1);
+    ("test/operations/tile_mma_narrow.ml", "vec_widen_bfloat16", 1);
+    ("test/operations/tile_mma_narrow.ml", "vec_narrow_bfloat16", 1);
+    ("test/operations/tile_mma_narrow.ml", "vec_widen_half", 1);
+    ("test/operations/tile_mma_narrow.ml", "vec_narrow_half", 1);
+    ("test/operations/tile_mma_narrow.ml", "half_fma", 1);
   ]
 
 (* These are assignments in other languages or report formats, not configuration. This is a judgment
@@ -719,7 +758,7 @@ let occurrences_of_file ~reported_path path =
       ~keys:(tracked_prefix_free_keys reported_path)
       content
 
-let fixture path config_path =
+let fixture path config_path multiline_path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
   check ~repository_census:false
@@ -730,7 +769,10 @@ let fixture path config_path =
         content
     @ config_file_occurrences ~include_commented:true
         ~path:(Stdlib.Filename.basename config_path)
-        (In_channel.read_all config_path))
+        (In_channel.read_all config_path)
+    @ markdown_occurrences ~allow_bare:true
+        ~path:(Stdlib.Filename.basename multiline_path)
+        (In_channel.read_all multiline_path))
 
 let live workspace_root paths =
   let base = Test_utils.Dune_stanza_scan.base_dir workspace_root in
@@ -739,26 +781,30 @@ let live workspace_root paths =
     |> List.filter_map ~f:(fun path ->
         let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
         if
-          String.equal relative "AGENTS.md" || String.equal relative "README.md"
-          || String.equal relative "ocannl_config.reference"
-          || String.equal relative "ocannl_config.for_debug"
-          || String.is_prefix relative ~prefix:".claude/skills/"
-             && String.is_suffix relative ~suffix:".md"
-          || (String.is_prefix relative ~prefix:"docs/" && String.is_suffix relative ~suffix:".md")
-          || String.is_prefix relative ~prefix:"benchmarks/"
-             && String.is_suffix relative ~suffix:".md"
-          || String.equal (Stdlib.Filename.basename relative) "dune"
-          || String.equal (Stdlib.Filename.basename relative) "ocannl_config"
-          || (String.is_prefix relative ~prefix:"tools/"
-             || String.is_prefix relative ~prefix:"scripts/"
+          (not (String.is_suffix relative ~suffix:".pp.ml"))
+          && (String.equal relative "AGENTS.md" || String.equal relative "README.md"
+             || String.equal relative "ocannl_config.reference"
+             || String.equal relative "ocannl_config.for_debug"
+             || String.is_prefix relative ~prefix:".claude/skills/"
+                && String.is_suffix relative ~suffix:".md"
+             || String.is_prefix relative ~prefix:"docs/"
+                && String.is_suffix relative ~suffix:".md"
              || String.is_prefix relative ~prefix:"benchmarks/"
-             || String.is_prefix relative ~prefix:"bin/")
-             && (String.is_suffix relative ~suffix:".sh"
-                || String.is_suffix relative ~suffix:".py"
-                || (String.is_prefix relative ~prefix:"tools/"
-                   || String.is_prefix relative ~prefix:"benchmarks/"
-                   || String.is_prefix relative ~prefix:"bin/")
-                   && String.is_suffix relative ~suffix:".ml")
+                && String.is_suffix relative ~suffix:".md"
+             || String.equal (Stdlib.Filename.basename relative) "dune"
+             || String.equal (Stdlib.Filename.basename relative) "ocannl_config"
+             || (String.is_prefix relative ~prefix:"tools/"
+                || String.is_prefix relative ~prefix:"scripts/"
+                || String.is_prefix relative ~prefix:"benchmarks/"
+                || String.is_prefix relative ~prefix:"bin/"
+                || String.is_prefix relative ~prefix:"test/")
+                && (String.is_suffix relative ~suffix:".sh"
+                   || String.is_suffix relative ~suffix:".py"
+                   || (String.is_prefix relative ~prefix:"tools/"
+                      || String.is_prefix relative ~prefix:"benchmarks/"
+                      || String.is_prefix relative ~prefix:"bin/"
+                      || String.is_prefix relative ~prefix:"test/")
+                      && String.is_suffix relative ~suffix:".ml"))
         then Some (relative, path)
         else None)
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
@@ -779,6 +825,11 @@ let live workspace_root paths =
     ~f:(fun root ->
       List.exists files ~f:(fun (path, _) ->
           String.is_prefix path ~prefix:root && String.is_suffix path ~suffix:".ml"));
+  Verdict.p "the scan reaches OCaml tutorial and test help text"
+    (List.exists files ~f:(fun (path, _) ->
+         String.is_prefix path ~prefix:"test/training/" && String.is_suffix path ~suffix:".ml")
+    && List.exists files ~f:(fun (path, _) ->
+        String.is_prefix path ~prefix:"test/operations/" && String.is_suffix path ~suffix:".ml"));
   Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
     && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")
@@ -840,9 +891,12 @@ let live workspace_root paths =
 
 let () =
   match Array.to_list Stdlib.Sys.argv with
-  | _ :: [ "--fixture"; path; config_path ] -> fixture path config_path
+  | _ :: [ "--fixture"; path; config_path; multiline_path ] ->
+      fixture path config_path multiline_path
   | _ :: workspace_root :: paths when not (List.is_empty paths) -> live workspace_root paths
   | argv ->
-      eprintf "Usage: %s <workspace_root> <files...> | %s --fixture <file> <config-file>\n"
+      eprintf
+        "Usage: %s <workspace_root> <files...> | %s --fixture <file> <config-file> \
+         <multiline-markdown-file>\n"
         (List.hd_exn argv) (List.hd_exn argv);
       Stdlib.exit 1

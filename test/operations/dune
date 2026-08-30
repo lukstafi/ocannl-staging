@@ -4099,17 +4099,18 @@
 ; rename otherwise leaves them behind until a reviewer remembers the site.
 ;
 ; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/, plus
-; user-facing `*.ml` help text under tools/, benchmarks/, and bin/: the three checked-in script roots
-; and all three OCaml roots have non-vacuity claims. Qualified command-line spellings and value separators
-; accepted by Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are
-; consumers.
+; user-facing `*.ml` help text under tools/, benchmarks/, bin/, and test/ (excluding generated
+; `*.pp.ml` renderings): the three checked-in script roots and the OCaml roots have non-vacuity
+; claims. Qualified command-line spellings and value separators accepted by
+; Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are consumers.
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
 ; application and cannot safely be claimed globally.
 ; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
 ; under docs/ and benchmarks/.
 ; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
-; tokens, and elsewhere a bare assignment may occupy the whole inline span (with optional whitespace
-; around `=`). Every checked-in dune file contributes action arguments, and every checked-in
+; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
+; occupy the whole inline span (with optional whitespace around `=` or in its value). Every
+; checked-in dune file contributes action arguments, and every checked-in
 ; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
 ; assignment keys (including commented ready-to-enable assignments in the latter); the five
 ; checked-in config roots are named in the non-vacuity floor so Dune's generated local copy cannot
@@ -4146,7 +4147,8 @@
   (glob_files_rec ../../benchmarks/*.sh)
   (glob_files_rec ../../benchmarks/*.py)
   (glob_files_rec ../../benchmarks/*.ml)
-  (glob_files_rec ../../bin/*.ml))
+  (glob_files_rec ../../bin/*.ml)
+  (glob_files_rec ../../test/*.ml))
  (action
   (with-stdout-to
    %{target}
@@ -4160,7 +4162,8 @@
  (deps
   ocannl_config
   config_usage_scan_bogus.fixture
-  config_usage_scan_bogus_config.fixture)
+  config_usage_scan_bogus_config.fixture
+  config_usage_scan_multiline_bogus.fixture)
  (action
   (with-stderr-to
    %{target}
@@ -4171,7 +4174,8 @@
       %{dep:config_usage_scan.exe}
       --fixture
       %{dep:config_usage_scan_bogus.fixture}
-      %{dep:config_usage_scan_bogus_config.fixture}))))))
+      %{dep:config_usage_scan_bogus_config.fixture}
+      %{dep:config_usage_scan_multiline_bogus.fixture}))))))
 
 (rule
  (alias runtest-config_usage_scan)

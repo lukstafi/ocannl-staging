@@ -1,5 +1,6 @@
 the scan reaches script files under tools, scripts, and benchmarks: true
 the scan reaches OCaml help text under tools, benchmarks, and bin: true
+the scan reaches OCaml tutorial and test help text: true
 the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown: true
 the scan reaches Dune actions: true
 the scan reaches every checked-in ocannl_config root: true
