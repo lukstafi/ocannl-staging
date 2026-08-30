@@ -194,14 +194,22 @@ let test_poisoned_lineage () =
 let test_merge_buffer_read_dependency () =
   printf "\n=== Test 8: merge-buffer read dependency ===\n";
   Tensor.unsafe_reinitialize ();
-  let%op merge_value = [ 1.; 2. ] + [ 10.; 20. ] in
+  let%op merge_value = [ 0.; 0. ] + [ 0.; 0. ] in
+  let%op source_values = [ 1.; 2. ] + [ 10.; 20. ] in
   let%op merge_output = [ 0.; 0. ] + [ 0.; 0. ] in
   let%op destination_tick = [ 40.; 2. ] + [ 1.; 0. ] in
   Train.set_materialized merge_value.Tensor.value;
   Train.set_materialized merge_output.Tensor.value;
   Train.set_materialized destination_tick.Tensor.value;
-  let source_ctx, _source_writer =
-    Train.to_routine (Context.auto ()) IDX.empty (Train.forward merge_value)
+  let source_write = [%cd merge_value =: source_values] in
+  let named_source_write name =
+    { source_write with asgns = Ir.Assignments.Block_comment (name, source_write.asgns) }
+  in
+  let source_ctx, source_writer =
+    Context.compile (Context.auto ()) (named_source_write "merge_source_writer_1") IDX.empty
+  in
+  let source_ctx, _future_source_writer =
+    Context.compile source_ctx (named_source_write "merge_source_writer_2") IDX.empty
   in
   let destination_ctx, destination_tick_writer =
     Train.to_routine (Context.auto ()) IDX.empty (Train.forward destination_tick)
@@ -215,10 +223,9 @@ let test_merge_buffer_read_dependency () =
    with Failure msg ->
      Verdict.p "merge transfer refuses an unexecuted source writer"
        (String.is_substring msg ~substring:"before source writer"));
-  (* A synchronous explicit write supersedes that compiled writer in the returned context. The
-     transfer must now accept this source, and the final values distinguish the upload from the
-     never-run writer's [11; 22]. *)
-  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
+  (* The compile frontier names the later, unexecuted writer, but re-running the earlier writer is
+     what actually refreshes the source buffer. Merge readiness follows that execution state. *)
+  ignore (Context.run source_ctx source_writer : Context.t);
   let merge_ctx =
     Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:destination_ctx
       merge_value.Tensor.value
@@ -235,10 +242,34 @@ let test_merge_buffer_read_dependency () =
     (Set.length consumer.Context.execution_deps = 1
     && not (Set.mem consumer.Context.execution_deps destination_tick_writer.Context.routine_id));
   Verdict.p "merge consumer can run after the transfer" (Context.can_run consumer_ctx consumer);
+  (* An explicit write supersedes both compiled source writers. It can feed the next transfer, but
+     not until the current transfer generation's consumer executes. *)
+  let source_ctx = Context.set_values source_ctx merge_value.Tensor.value [| 5.; 6. |] in
+  (try
+     ignore
+       (Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:consumer_ctx
+          merge_value.Tensor.value);
+     Verdict.fail "merge transfer overwrote a generation with a pending consumer"
+   with Failure msg ->
+     Verdict.p "merge overwrite refuses a pending consumer"
+       (String.is_substring msg ~substring:"pending consumers"));
   let consumer_ctx = Context.run consumer_ctx consumer in
-  Verdict.p "merge consumer reads the transferred values"
+  Verdict.p "first merge consumer reads the executed writer's values"
     (Array.equal Float.equal
        (Context.get_values consumer_ctx merge_output.Tensor.value)
+       [| 11.; 22. |]);
+  let replacement_merge_ctx =
+    Context.copy ~into_merge_buffer:Copy ~src:source_ctx ~dst:consumer_ctx merge_value.Tensor.value
+  in
+  Verdict.p "overwriting invalidates the old merge consumer"
+    (not (Context.can_run consumer_ctx consumer));
+  let replacement_ctx, replacement =
+    Context.compile replacement_merge_ctx consumer_comp IDX.empty
+  in
+  let replacement_ctx = Context.run replacement_ctx replacement in
+  Verdict.p "replacement merge consumer reads the explicit upload"
+    (Array.equal Float.equal
+       (Context.get_values replacement_ctx merge_output.Tensor.value)
        [| 5.; 6. |])
 
 let () =

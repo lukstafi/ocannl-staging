@@ -315,11 +315,14 @@ val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t
     [dst]'s stream's merge buffer for [~into_merge_buffer:Copy], returning the updated destination
     context. When both contexts come from the same backend the copy stays on-device via the
     backend's [device_to_device] transfer machinery (for [Copy], the source node's latest compiled
-    writer must have executed, and the returned context carries both the merge-buffer node and the
-    completed transfer's execution-ledger entry against which the next [compile] of merge-consuming
-    code is verified); a cross-backend copy falls back to a host round-trip ([Copy] raises). Nodes
-    absent from [src]'s device buffers fall back to the host round-trip as well, serving host-init
-    literals and for-print proxies. *)
+    writer must have an effective executed or externally written value, and the returned context
+    carries both the merge-buffer node and the completed transfer's execution-ledger entry against
+    which the next [compile] of merge-consuming code is verified). A later [Copy] refuses while a
+    consumer of the current transfer is pending; after those consumers execute, replacing the slab
+    invalidates their old transfer dependency so they cannot silently re-run against new bytes. A
+    cross-backend copy falls back to a host round-trip ([Copy] raises). Nodes absent from [src]'s
+    device buffers fall back to the host round-trip as well, serving host-init literals and
+    for-print proxies. *)
 
 (** {2 On-demand host access}
 

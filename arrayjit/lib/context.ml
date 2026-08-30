@@ -33,6 +33,15 @@ type execution_ledger = {
   mutable next_id : int;
   routine_names : string Hashtbl.M(Int).t;
   mutable executed : Set.M(Int).t;
+  mutable current_writers : int Map.M(Tn).t;
+      (** The routine whose execution most recently wrote each ordinary node. Unlike the immutable
+          compile frontier, this follows re-execution order. External writes remove their node. *)
+  merge_buffer_readers : Set.M(Int).t Hashtbl.M(Int).t;
+      (** Consumer routine ids by synthetic merge-transfer id. Readers are registered at compile
+          time so an eager overwrite can refuse while any consumer is still pending. *)
+  mutable current_merge_buffer_writer : int option;
+      (** The synthetic transfer id whose generation currently occupies this lineage's merge slab.
+          Replacing it removes the old id from [executed], invalidating its compiled consumers. *)
   mutable poisoned : (string * exn) option;
       (** Set when a launch or synchronization failed in a way that may have left device buffers of
           this lineage partially written (gh-ocannl-536). [Context.run] marks a routine executed
@@ -57,6 +66,9 @@ let create_ledger () =
     next_id = 0;
     routine_names = Hashtbl.create (module Int);
     executed = Set.empty (module Int);
+    current_writers = Map.empty (module Tn);
+    merge_buffer_readers = Hashtbl.create (module Int);
+    current_merge_buffer_writer = None;
     poisoned = None;
   }
 
@@ -280,6 +292,10 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
 
       (* Register in shared ledger *)
       Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
+      Option.iter merge_buffer_input ~f:(fun _ ->
+          let _, transfer_id = Option.value_exn ~here:[%here] frontier.merge_buffer_writer in
+          Hashtbl.update ctx.ledger.merge_buffer_readers transfer_id ~f:(fun readers ->
+              Set.add (Option.value readers ~default:empty_int_set) id));
 
       (* Required inputs for the initialization check below: the backend routine's materialized
          read-only / read-before-write nodes, resolved against this compile's placements (the
@@ -427,6 +443,9 @@ let run ctx routine =
 
   (* Mark executed in shared ledger *)
   ctx.ledger.executed <- Set.add ctx.ledger.executed routine.routine_id;
+  ctx.ledger.current_writers <-
+    Set.fold routine.outputs ~init:ctx.ledger.current_writers ~f:(fun writers tn ->
+        Map.set writers ~key:tn ~data:routine.routine_id);
 
   (* Mark outputs as initialized and return updated context *)
   let initialized_nodes = Set.union ctx.initialized_nodes routine.outputs in
@@ -459,6 +478,8 @@ let mark_initialized ctx nodes =
    unexecuted reader cannot impose a WAR edge on a write that already happened. The merge-buffer
    frontier is separate storage and is deliberately unaffected. *)
 let record_external_writes ctx nodes =
+  ctx.ledger.current_writers <-
+    Set.fold nodes ~init:ctx.ledger.current_writers ~f:(fun writers tn -> Map.remove writers tn);
   let frontier =
     Set.fold nodes ~init:ctx.frontier ~f:(fun frontier tn ->
         {
@@ -686,8 +707,18 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
      edge, so it cannot live in the destination routine's integer dependency set; enforce it before
      scheduling the transfer. *)
   let check_merge_source_ready () =
-    match Map.find src.frontier.last_writer tn with
-    | Some writer_id when not (Set.mem src.ledger.executed writer_id) ->
+    let pending_writer =
+      match Map.find src.ledger.current_writers tn with
+      | Some writer_id when Set.mem src.ledger.executed writer_id -> None
+      | Some writer_id -> Some writer_id
+      | None when Set.mem src.initialized_nodes tn -> None
+      | None -> (
+          match Map.find src.frontier.last_writer tn with
+          | Some writer_id when not (Set.mem src.ledger.executed writer_id) -> Some writer_id
+          | _ -> None)
+    in
+    match pending_writer with
+    | Some writer_id ->
         let writer_name =
           Option.value (Hashtbl.find src.ledger.routine_names writer_id) ~default:"<unknown>"
         in
@@ -698,14 +729,46 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
              (Tn.debug_name tn) writer_name writer_id)
     | _ -> ()
   in
+  (* The merge buffer is single-tenant. Compiling a consumer registers it against the current
+     transfer generation; overwriting before every such reader has executed would leave that
+     consumer runnable while changing the bytes it will read. *)
+  let check_merge_destination_ready () =
+    Option.iter dst.ledger.current_merge_buffer_writer ~f:(fun transfer_id ->
+        let readers =
+          Option.value
+            (Hashtbl.find dst.ledger.merge_buffer_readers transfer_id)
+            ~default:(Set.empty (module Int))
+        in
+        let pending = Set.diff readers dst.ledger.executed in
+        if not (Set.is_empty pending) then
+          let pending_names =
+            Set.to_list pending
+            |> List.map ~f:(fun reader_id ->
+                Printf.sprintf "%s (id=%d)"
+                  (Option.value
+                     (Hashtbl.find dst.ledger.routine_names reader_id)
+                     ~default:"<unknown>")
+                  reader_id)
+            |> String.concat ~sep:", "
+          in
+          failwith
+            (Printf.sprintf
+               "Context.copy: cannot overwrite the merge buffer before pending consumers execute: \
+                %s"
+               pending_names))
+  in
   (* [Context.copy] schedules transfers eagerly, so by the time it returns this synthetic routine is
      executed. Keeping its id in the immutable destination frontier still gives a later merge-buffer
      consumer the real read edge; it also preserves sibling-compilation semantics. *)
   let record_merge_transfer dst ~name =
+    Option.iter dst.ledger.current_merge_buffer_writer ~f:(fun old_transfer_id ->
+        dst.ledger.executed <- Set.remove dst.ledger.executed old_transfer_id;
+        Hashtbl.remove dst.ledger.merge_buffer_readers old_transfer_id);
     let transfer_id = dst.ledger.next_id in
     dst.ledger.next_id <- transfer_id + 1;
     Hashtbl.set dst.ledger.routine_names ~key:transfer_id ~data:name;
     dst.ledger.executed <- Set.add dst.ledger.executed transfer_id;
+    dst.ledger.current_merge_buffer_writer <- Some transfer_id;
     { dst with frontier = { dst.frontier with merge_buffer_writer = Some (tn, transfer_id) } }
   in
   let same (type d r e) (impl : (d, r, e) Backends.backend_impl) (sctx : (d, r, e) BI.context)
@@ -719,7 +782,9 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
            tn] into the next [compile]'s static merge-node check (gh-ocannl-288). *)
         (match into_merge_buffer with
         | BI.No -> ()
-        | BI.Copy -> check_merge_source_ready ());
+        | BI.Copy ->
+            check_merge_source_ready ();
+            check_merge_destination_ready ());
         Ir.Task.run r.BI.schedule;
         let dst = { dst with wrapped = rewrap r.BI.context } in
         match into_merge_buffer with

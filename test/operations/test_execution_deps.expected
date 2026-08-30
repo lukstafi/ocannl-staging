@@ -37,4 +37,7 @@ copy in refused, names the routine: true, names the cause: true
 merge transfer refuses an unexecuted source writer: true
 merge consumer has exactly the transfer dependency: true
 merge consumer can run after the transfer: true
-merge consumer reads the transferred values: true
+merge overwrite refuses a pending consumer: true
+first merge consumer reads the executed writer's values: true
+overwriting invalidates the old merge consumer: true
+replacement merge consumer reads the explicit upload: true
