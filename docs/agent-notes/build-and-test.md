@@ -93,9 +93,9 @@ that they earn a lookup rather than always-loaded space.
   contains either unambiguous prefixed form; a bare
   assignment contributes only when it occupies the whole inline span outside benchmark reports
   (whitespace around `=`, within the value, or an empty example value does not hide the key). Config
-  files contribute
-  each nonempty uncommented assignment after applying `Utils.parse_config_lines`' key normalization:
-  case folding, leading-dash stripping, and the optional `ocannl_` prefix. The explicitly included
+  files contribute each uncommented assignment with a nonempty value after applying
+  `Utils.parse_config_lines`' key normalization: case folding, leading-dash stripping, and the
+  optional `ocannl_` prefix. An empty normalized key is retained so registry lookup rejects it. The explicitly included
   `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Comment
   markers are recognized against the raw line, matching the runtime parser, so leading whitespace
   does not turn an active invalid key into a silently ignored comment. Because spaced assignments are

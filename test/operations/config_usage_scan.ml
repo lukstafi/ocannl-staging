@@ -111,6 +111,7 @@ let prefix_free_config_mentions =
     ("tools/calibrate_bandwidth.ml", "backend", 1);
     ("tools/fit_envelope.ml", "backend", 6);
     ("bin/bench_args.ml", "backend", 1);
+    ("arrayjit/lib/utils.ml", "virtualize_max_visits", 1);
   ]
 
 let prefix_free_names key =
@@ -465,7 +466,7 @@ let config_file_occurrences ?(include_commented = false) ~path content =
         Option.bind (String.lsplit2 candidate ~on:'=') ~f:(fun (raw_key, value) ->
             let key = normalize_config_file_key raw_key in
             Option.some_if
-              ((not (String.is_empty key || String.is_empty value))
+              ((not (String.is_empty value))
               && ((not commented) || String.for_all key ~f:lowercase_key_char))
               {
                 path;
