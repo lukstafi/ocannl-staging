@@ -56,6 +56,8 @@ a preceding top-level ignore binding makes its call a real use: implementation c
 a preceding top-level ignore binding makes its call a real use: honesty classified: true
 a preceding Stdlib.ignore alias remains a discard: implementation classified: true
 a preceding Stdlib.ignore alias remains a discard: honesty classified: true
+a local Stdlib.ignore alias remains a discard: implementation classified: true
+a local Stdlib.ignore alias remains a discard: honesty classified: true
 a locally opened ignore can be effectful: implementation classified: true
 a locally opened ignore can be effectful: honesty classified: true
 a local Base open preserves standard ignore: implementation classified: true
@@ -90,6 +92,10 @@ an optional argument on a directly returned closure is inventoried: implementati
 an optional argument on a directly returned closure is inventoried: honesty classified: true
 an optional argument on a returned local function is inventoried: implementation classified: true
 an optional argument on a returned local function is inventoried: honesty classified: true
+an optional argument on a destructured returned local function is inventoried: implementation classified: true
+an optional argument on a destructured returned local function is inventoried: honesty classified: true
+an optional class constructor argument is inventoried: implementation classified: true
+an optional class constructor argument is inventoried: honesty classified: true
 a constrained optional function is inventoried: implementation classified: true
 a constrained optional function is inventoried: honesty classified: true
 optional closures returned through control flow are inventoried: implementation classified: true
