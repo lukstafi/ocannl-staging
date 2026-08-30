@@ -592,6 +592,12 @@ that they earn a lookup rather than always-loaded space.
   emptiness — "no candidate declines", "no key is undocumented", a scan over a tree that is usually
   clean — and those want a companion claim that the population was there at all, which is what the
   `p_empty ~over` form is.
+  `verdict_ratchet` also follows file-local boolean helpers into `Verdict.p`/`claim`/`pass_fail`
+  (and their format-taking forms): a helper returning `for_all`, `for_all2_exn`, `is_empty`, or a
+  negated `exists` must make non-emptiness part of its passing result. Its exact, stale-checked
+  exemption list is only for helpers whose intended passing meaning allows an empty population;
+  synthetic controls include a child process the shipping ratchet demonstrably refuses
+  (gh-ocannl-801).
 - Guarantees that fire only on an empty collection are never exercised by a green suite, so
   `verdict_quantified` stages them: the satisfied forms run directly, and each refusal runs as a
   CHILD process whose streams the parent captures. Capturing is not tidiness — a refusal prints

@@ -34,13 +34,382 @@
    conversion no longer works, because a computed label carries one by construction; what remains is
    a named exemption below with the reason the line is not an assertion. The list is short, and the
    reason it stays short is structural: a print whose boolean is not a verdict is a census row or a
-   table, and those rarely END on the boolean. *)
+   table, and those rarely END on the boolean.
+
+   gh-ocannl-801 closes the same escape hatch one level deeper. A parity or collection quantifier
+   can sit in a file-local helper, with only [p "claim" (close got want)] left at the claim site.
+   The gh-ocannl-729/746 sweeps could not find that shape by looking for the quantifier beside [p],
+   and ten helpers carried the empty-population hole until a manual read found them. The second
+   reader below follows local bindings from a Verdict boolean back to [for_all], [for_all2_exn],
+   [is_empty], or a negated [exists], and requires the helper to make non-emptiness part of its
+   passing result. *)
 
 open Base
 open Stdio
 module Scan = Test_utils.Verdict_scan
 module Dune = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
+module Ast_traverse = Ppxlib.Ast_traverse
+module Asttypes = Ppxlib.Asttypes
+open Ppxlib.Parsetree
+
+type quantifier_kind = For_all | For_all2 | Is_empty | Not_exists
+
+let quantifier_name = function
+  | For_all -> "for_all"
+  | For_all2 -> "for_all2_exn"
+  | Is_empty -> "is_empty"
+  | Not_exists -> "not exists"
+
+type quantifier = { kind : quantifier_kind; populations : Set.M(String).t }
+
+type helper_binding = {
+  name : string;
+  line : int;
+  expression : expression;
+  dependencies : Set.M(String).t;
+  unguarded : quantifier list;
+}
+
+type quantified_claim = {
+  helper : string;
+  helper_line : int;
+  claim_line : int;
+  quantifiers : quantifier_kind list;
+}
+
+let path_ends path ~container ~member =
+  match List.rev path with
+  | found_member :: found_container :: _ ->
+      String.equal found_member member && String.equal found_container container
+  | _ -> false
+
+let is_collection_call expr ~member =
+  match Sources.longident_of expr with
+  | Some path ->
+      path_ends path ~container:"Array" ~member || path_ends path ~container:"List" ~member
+  | None -> false
+
+let is_name expr name =
+  match Sources.longident_of expr with
+  | Some path -> Option.value_map (List.last path) ~default:false ~f:(String.equal name)
+  | None -> false
+
+let rec helper_name pattern =
+  match pattern.ppat_desc with
+  | Ppat_var { txt; _ } -> Some txt
+  | Ppat_alias (_, { txt; _ }) -> Some txt
+  | Ppat_constraint (inner, _) -> helper_name inner
+  | _ -> None
+
+let rec function_body expr =
+  match expr.pexp_desc with
+  | Pexp_function (_, _, Pfunction_body body) -> function_body body
+  | _ -> expr
+
+let is_function expr = match expr.pexp_desc with Pexp_function _ -> true | _ -> false
+
+let unlabelled arguments =
+  List.filter_map arguments ~f:(function Asttypes.Nolabel, argument -> Some argument | _ -> None)
+
+let rec population_name expr =
+  match Sources.longident_of expr with
+  | Some [ name ] -> Some name
+  | _ -> (
+      match expr.pexp_desc with
+      | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> population_name inner
+      | Pexp_apply (callee, arguments)
+        when is_collection_call callee ~member:"filter"
+             || is_collection_call callee ~member:"filter_map" ->
+          List.hd (unlabelled arguments) |> Option.bind ~f:population_name
+      | _ -> None)
+
+let populations arguments count =
+  unlabelled arguments |> Fn.flip List.take count
+  |> List.filter_map ~f:population_name
+  |> Set.of_list (module String)
+
+let quantifiers_in expr =
+  let found = ref [] in
+  let positive = ref true in
+  let iterator =
+    object (self)
+      inherit Ast_traverse.iter as super
+      method! attribute _ = ()
+
+      method! expression expr =
+        match expr.pexp_desc with
+        | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+            let previous = !positive in
+            positive := not previous;
+            self#expression argument;
+            positive := previous
+        | Pexp_apply (callee, arguments) ->
+            let add kind count =
+              found := { kind; populations = populations arguments count } :: !found
+            in
+            if !positive && is_collection_call callee ~member:"for_all" then add For_all 1
+            else if !positive && is_collection_call callee ~member:"for_all2_exn" then
+              add For_all2 2
+            else if !positive && is_collection_call callee ~member:"is_empty" then add Is_empty 1
+            else if (not !positive) && is_collection_call callee ~member:"exists" then
+              add Not_exists 1;
+            super#expression expr
+        | _ -> super#expression expr
+    end
+  in
+  iterator#expression (function_body expr);
+  List.rev !found
+
+(* Quantifiers that contribute to the value a helper RETURNS, rather than to setup or validation it
+   performs on the way. [nonzero] helpers are the important near miss: they use [not (exists ...)]
+   only to decide whether to raise, then return the input array. Treating every expression in their
+   body as the helper's boolean made every later parity claim look helper-wrapped. *)
+let rec returned_quantifiers expr =
+  match expr.pexp_desc with
+  | Pexp_function (_, _, Pfunction_body body) -> returned_quantifiers body
+  | Pexp_let (_, _, body) -> returned_quantifiers body
+  | Pexp_sequence (_, result) -> returned_quantifiers result
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers inner
+  | Pexp_ifthenelse (_, yes, no) ->
+      returned_quantifiers yes @ Option.value_map no ~default:[] ~f:returned_quantifiers
+  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+      List.concat_map cases ~f:(fun case -> returned_quantifiers case.pc_rhs)
+  | Pexp_apply (callee, _)
+    when is_collection_call callee ~member:"for_all"
+         || is_collection_call callee ~member:"for_all2_exn"
+         || is_collection_call callee ~member:"is_empty"
+         || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
+         || is_name callee "<>" ->
+      quantifiers_in expr
+  | _ -> []
+
+let is_partial_quantifier expr =
+  match expr.pexp_desc with
+  | Pexp_apply (callee, arguments) when is_collection_call callee ~member:"for_all" ->
+      List.length (unlabelled arguments) < 1
+  | Pexp_apply (callee, arguments) when is_collection_call callee ~member:"for_all2_exn" ->
+      List.length (unlabelled arguments) < 2
+  | Pexp_apply (callee, arguments) when is_collection_call callee ~member:"is_empty" ->
+      List.length (unlabelled arguments) < 1
+  | _ -> false
+
+let int_literal expr =
+  match expr.pexp_desc with
+  | Pexp_constant (Pconst_integer (value, _)) -> Option.try_with (fun () -> Int.of_string value)
+  | _ -> None
+
+let length_population expr =
+  match expr.pexp_desc with
+  | Pexp_apply (callee, arguments) when is_collection_call callee ~member:"length" ->
+      List.hd (unlabelled arguments) |> Option.bind ~f:population_name
+  | _ -> None
+
+let bool_literal expr value =
+  match expr.pexp_desc with
+  | Pexp_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
+      String.equal found (Bool.to_string value)
+  | _ -> false
+
+(* Populations that HAVE to be non-empty for this expression to be true. This is intentionally a
+   small boolean grammar: conjunction composes requirements, [not (X.is_empty xs)] is the spelling
+   the gh-ocannl-746 helper sweep installed, and a positive literal length pins the same fact. A
+   construct the reader cannot prove contributes no guard, so it produces a loud finding rather than
+   silently licensing a vacuous helper. *)
+let rec required_nonempty expr =
+  let none () = Set.empty (module String) in
+  match expr.pexp_desc with
+  | Pexp_function (_, _, Pfunction_body body) -> required_nonempty body
+  | Pexp_let (_, _, body) -> required_nonempty body
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> required_nonempty inner
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" -> (
+      match argument.pexp_desc with
+      | Pexp_apply (empty, arguments) when is_collection_call empty ~member:"is_empty" ->
+          populations arguments 1
+      | _ -> none ())
+  | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ]) when is_name op "&&" ->
+      Set.union (required_nonempty left) (required_nonempty right)
+  | Pexp_apply (op, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    when is_name op "=" || is_name op ">" || is_name op ">=" -> (
+      match
+        (length_population left, int_literal right, int_literal left, length_population right)
+      with
+      | Some population, Some n, _, _ when n > 0 -> Set.singleton (module String) population
+      | _, _, Some n, Some population when n > 0 -> Set.singleton (module String) population
+      | _ -> none ())
+  | Pexp_ifthenelse (condition, yes, Some no) when bool_literal no false ->
+      Set.union (required_nonempty condition) (required_nonempty yes)
+  | _ -> none ()
+
+let names_in ?(positive_only = false) expr =
+  let names = ref (Set.empty (module String)) in
+  let positive = ref true in
+  let iterator =
+    object (self)
+      inherit Ast_traverse.iter as super
+      method! attribute _ = ()
+      method! value_binding _ = ()
+
+      method! expression expr =
+        match expr.pexp_desc with
+        | Pexp_function _ -> ()
+        | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+            let previous = !positive in
+            positive := not previous;
+            self#expression argument;
+            positive := previous
+        | _ ->
+            (match Sources.longident_of expr with
+            | Some [ name ] when (not positive_only) || !positive -> names := Set.add !names name
+            | _ -> ());
+            super#expression expr
+    end
+  in
+  iterator#expression expr;
+  !names
+
+let bindings_of structure =
+  let found = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+      method! attribute _ = ()
+
+      method! value_binding value =
+        (match helper_name value.pvb_pat with
+        | None -> ()
+        | Some name ->
+            let guards = required_nonempty value.pvb_expr in
+            let unguarded =
+              if is_function value.pvb_expr || is_partial_quantifier value.pvb_expr then
+                List.filter (returned_quantifiers value.pvb_expr) ~f:(fun quantifier ->
+                    Set.is_empty quantifier.populations
+                    || Set.is_empty (Set.inter guards quantifier.populations))
+              else []
+            in
+            found :=
+              {
+                name;
+                line = value.pvb_loc.loc_start.pos_lnum;
+                expression = value.pvb_expr;
+                dependencies = names_in (function_body value.pvb_expr);
+                unguarded;
+              }
+              :: !found);
+        super#value_binding value
+    end
+  in
+  iterator#structure structure;
+  List.rev !found
+
+type claim_kind = P | Pf | Pass_fail | Claim | Claimf
+
+let claim_kind_of_path path =
+  match path with
+  | ("Verdict" | "Ll_test") :: _ -> (
+      match List.last path with
+      | Some "p" -> Some P
+      | Some "pf" -> Some Pf
+      | Some "pass_fail" -> Some Pass_fail
+      | Some "claim" -> Some Claim
+      | Some "claimf" -> Some Claimf
+      | _ -> None)
+  | _ -> None
+
+let claim_aliases bindings =
+  let aliases = Hashtbl.create (module String) in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter bindings ~f:(fun binding ->
+        if not (Hashtbl.mem aliases binding.name) then
+          let kind =
+            match Sources.longident_of binding.expression with
+            | Some [ alias ] -> Hashtbl.find aliases alias
+            | Some path -> claim_kind_of_path path
+            | None -> None
+          in
+          Option.iter kind ~f:(fun kind ->
+              changed := true;
+              Hashtbl.set aliases ~key:binding.name ~data:kind))
+  done;
+  aliases
+
+let quantified_claims structure =
+  let bindings = bindings_of structure in
+  let by_name = Hashtbl.create (module String) in
+  List.iter bindings ~f:(fun binding -> Hashtbl.add_multi by_name ~key:binding.name ~data:binding);
+  let aliases = claim_aliases bindings in
+  let origins ~before names =
+    let rec visit seen ~before name =
+      if Set.mem seen name then []
+      else
+        let seen = Set.add seen name in
+        let visible =
+          Hashtbl.find_multi by_name name |> List.filter ~f:(fun binding -> binding.line <= before)
+        in
+        let visible =
+          match List.max_elt visible ~compare:(fun a b -> Int.compare a.line b.line) with
+          | None -> []
+          | Some latest -> List.filter visible ~f:(fun binding -> binding.line = latest.line)
+        in
+        visible
+        |> List.concat_map ~f:(fun binding ->
+            let direct = if List.is_empty binding.unguarded then [] else [ binding ] in
+            direct
+            @ (Set.to_list binding.dependencies
+              |> List.concat_map ~f:(visit seen ~before:binding.line)))
+    in
+    Set.to_list names
+    |> List.concat_map ~f:(visit (Set.empty (module String)) ~before)
+    |> List.dedup_and_sort ~compare:(fun a b -> Int.compare a.line b.line)
+  in
+  let found = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+      method! attribute _ = ()
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (callee, arguments) ->
+            let kind =
+              match Sources.longident_of callee with
+              | Some [ alias ] -> Hashtbl.find aliases alias
+              | Some path -> claim_kind_of_path path
+              | None -> None
+            in
+            Option.iter kind ~f:(fun _ ->
+                match List.last (unlabelled arguments) with
+                | None -> ()
+                | Some boolean ->
+                    List.iter
+                      (origins ~before:expr.pexp_loc.loc_start.pos_lnum
+                         (names_in ~positive_only:true boolean))
+                      ~f:(fun binding ->
+                        found :=
+                          {
+                            helper = binding.name;
+                            helper_line = binding.line;
+                            claim_line = expr.pexp_loc.loc_start.pos_lnum;
+                            quantifiers =
+                              List.map binding.unguarded ~f:(fun quantifier -> quantifier.kind)
+                              |> List.dedup_and_sort ~compare:Poly.compare;
+                          }
+                          :: !found))
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  iterator#structure structure;
+  List.rev !found
+  |> List.dedup_and_sort ~compare:(fun a b ->
+      match Int.compare a.claim_line b.claim_line with
+      | 0 -> (
+          match Int.compare a.helper_line b.helper_line with
+          | 0 -> String.compare a.helper b.helper
+          | order -> order)
+      | order -> order)
 
 (* Sources whose claim-shaped literals are this check's own input rather than anything printed: the
    table that pins the shape reader on hostile formats, which has to spell the shapes out to pin
@@ -134,10 +503,128 @@ let canary_sites =
        finds" );
   ]
 
+(* Helper-wrapped quantified claims whose passing meaning genuinely ALLOWS an empty population.
+   Keyed by [<repository-relative path>:<helper name>], and stale-checked below. The exemption is on
+   the helper rather than every claim that calls it: the helper is the unit whose boolean semantics
+   decide what empty means, and every call reaches the same decision. *)
+let exempt_quantified_helpers : (string * string) list = []
+
+(* Synthetic inputs state the helper rule independently of whatever helpers happen to be in the
+   repository today. The first four are negative controls: the rule must return an offender for
+   each, which is the same list the corpus loop below turns into a [Verdict.fail]. The rest are the
+   nearest accepted forms, so widening the ratchet until ordinary boolean helpers need exemptions
+   also fails here rather than growing a noisy central list. *)
+let quantified_helper_controls =
+  [
+    ( "refuses an unguarded for_all2_exn helper behind a local Verdict alias",
+      {ocaml|let p = Verdict.p
+let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = p "the values agree" (close got want)|ocaml},
+      [ "close" ] );
+    ( "refuses a sibling for_all helper through an intermediate result binding",
+      {ocaml|let agrees xs = List.for_all xs ~f:Fn.id
+let ok = agrees samples
+let () = Verdict.claim "every sample agrees" ok|ocaml},
+      [ "agrees" ] );
+    ( "refuses an is_empty helper whose claim can pass on an empty source",
+      {ocaml|let no_bad xs = List.is_empty (List.filter xs ~f:bad)
+let () = Verdict.p "no sample is bad" (no_bad samples)|ocaml},
+      [ "no_bad" ] );
+    ( "refuses a negated exists helper with the same empty-population hole",
+      {ocaml|let none_bad xs = not (Array.exists xs ~f:bad)
+let () = Verdict.pass_fail "no sample is bad" (none_bad samples)|ocaml},
+      [ "none_bad" ] );
+    ( "accepts the explicit non-empty guard installed by the parity sweep",
+      {ocaml|let close got want =
+  (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the values agree" (close got want)|ocaml},
+      [] );
+    ( "does not let a guard on somebody else's population answer for the helper",
+      {ocaml|let close got want other =
+  (not (Array.is_empty other)) && Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the values agree" (close got want other)|ocaml},
+      [ "close" ] );
+    ( "accepts a positive literal length as the non-empty witness",
+      {ocaml|let close got want =
+  Array.length got = 4 && Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the values agree" (close got want)|ocaml},
+      [] );
+    ( "accepts a negated for_all2_exn discrimination helper",
+      {ocaml|let differs got want = not (Array.for_all2_exn got want ~f:Float.equal)
+let () = Verdict.p "some value differs" (differs got want)|ocaml},
+      [] );
+    ( "accepts a positive exists helper, which is false on an empty population",
+      {ocaml|let some_bad xs = List.exists xs ~f:bad
+let () = Verdict.p "some sample is bad" (some_bad samples)|ocaml},
+      [] );
+    ( "ignores a quantified helper that reaches no Verdict claim",
+      {ocaml|let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = if close got want then Stdio.printf "same\n"|ocaml},
+      [] );
+  ]
+
+let run_quantified_helper_controls () =
+  List.map quantified_helper_controls ~f:(fun (label, source, expected) ->
+      let found =
+        quantified_claims (Sources.structure_of source)
+        |> List.map ~f:(fun claim -> claim.helper)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
+      let ok = List.equal String.equal found expected in
+      if not ok then
+        eprintf "quantified-helper control %S expected [%s], found [%s]\n" label
+          (String.concat ~sep:", " expected)
+          (String.concat ~sep:", " found);
+      (label, ok))
+
+let quantified_failure source claim =
+  let key = source ^ ":" ^ claim.helper in
+  Printf.sprintf
+    "%s:%d sends `%s` from line %d into a Verdict claim, but that helper's `%s` can pass on an \
+     empty population -- use the matching `Verdict.p_*` combinator, or make non-emptiness part of \
+     the helper's passing result. If emptiness is the intended passing case, exempt `%s` by name \
+     in verdict_ratchet.ml and say why"
+    source claim.claim_line claim.helper claim.helper_line
+    (List.map claim.quantifiers ~f:quantifier_name |> String.concat ~sep:", ")
+    key
+
+let refusal_mode = "--quantified-helper-refusal-control"
+
+let run_refusal_control () =
+  let exe = Stdlib.Sys.executable_name in
+  let capture suffix = Stdlib.Filename.temp_file "verdict_ratchet_control" suffix in
+  let out_path = capture ".out" and err_path = capture ".err" in
+  let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let out = open_capture out_path and err = open_capture err_path in
+  let pid = Unix.create_process exe [| exe; refusal_mode |] Unix.stdin out err in
+  let _, status = Unix.waitpid [] pid in
+  Unix.close out;
+  Unix.close err;
+  let output = In_channel.read_all out_path ^ In_channel.read_all err_path in
+  let unlink path = try Unix.unlink path with Unix.Unix_error _ -> () in
+  unlink out_path;
+  unlink err_path;
+  let ok =
+    (match status with Unix.WEXITED 1 -> true | _ -> false)
+    && String.is_substring output ~substring:"control_fixture.ml:3 sends `close`"
+    && String.is_substring output ~substring:"can pass on an empty population"
+  in
+  if not ok then
+    eprintf "the helper-refusal child did not reject its planted fixture as designed:\n%s\n" output;
+  ("the shipping ratchet process refuses the planted helper fixture", ok)
+
 let base_dir = Dune.base_dir
 let repo_relative = Dune.repo_relative
 
 let () =
+  if Array.length Stdlib.Sys.argv >= 2 && String.equal Stdlib.Sys.argv.(1) refusal_mode then (
+    let _, source, _ = List.hd_exn quantified_helper_controls in
+    let claims = quantified_claims (Sources.structure_of source) in
+    if List.is_empty claims then (
+      eprintf "the planted helper fixture produced no finding\n";
+      Stdlib.exit 2);
+    List.iter claims ~f:(fun claim -> Verdict.fail (quantified_failure "control_fixture.ml" claim));
+    Stdlib.exit 1);
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <source...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
@@ -162,13 +649,17 @@ let () =
   let fail message = Verdict.fail message in
   let exemptions = Map.of_alist_exn (module String) exempt_sites in
   let computed_exemptions = Map.of_alist_exn (module String) exempt_computed_sites in
+  let quantified_exemptions = Map.of_alist_exn (module String) exempt_quantified_helpers in
   let computed_used = ref (Set.empty (module String)) in
+  let quantified_used = ref (Set.empty (module String)) in
   let canaries = Map.of_alist_exn (module String) canary_sites in
   let data = Map.of_alist_exn (module String) data_sources in
   let exemptions_used = ref (Set.empty (module String)) in
   let canaries_found = ref (Set.empty (module String)) in
   let data_used = ref (Set.empty (module String)) in
   let literals = ref 0 and applied = ref 0 and offenders = ref 0 in
+  let quantified_offenders = ref 0 in
+  let control_results = run_quantified_helper_controls () @ [ run_refusal_control () ] in
   let per_directory = Hashtbl.create (module String) in
   printf
     "Test sources that print a claim they decided themselves, outside `Verdict`: a format whose\n\
@@ -178,18 +669,19 @@ let () =
      is how a failure gets recorded as the expected output.\n\n";
   List.iter sources ~f:(fun source ->
       let path = Map.find_exn on_disk source in
+      let content = In_channel.read_all path in
       (* A source this reader cannot read is reported by NAME and the scan carries on, rather than
          taking the run down with a syntax error naming no file: the corpus is globbed, so what
          arrives is whatever the test directories hold -- including whatever a `(select …)` or a ppx
          put there -- and the one thing worse than a parse failure here is one that leaves nobody
          knowing which of three hundred files it was about. *)
-      let scanned =
-        try Scan.scan (In_channel.read_all path)
+      let scanned, helper_claims =
+        try (Scan.scan content, quantified_claims (Sources.structure_of content))
         with exception_ ->
           fail
             (Printf.sprintf "%s does not parse as OCaml, so this check cannot vouch for it: %s"
                source (Exn.to_string exception_));
-          { Scan.sites = []; literals = 0; applied_literals = 0 }
+          ({ Scan.sites = []; literals = 0; applied_literals = 0 }, [])
       in
       literals := !literals + scanned.Scan.literals;
       applied := !applied + scanned.Scan.applied_literals;
@@ -238,7 +730,13 @@ let () =
                   describes rather than asserts, exempt it by name in verdict_ratchet.ml with the \
                   reason it is not an assertion"
                  where site.Scan.label how remedy
-                 (Stdlib.Filename.remove_extension (Stdlib.Filename.basename source) ^ ".expected")))));
+                 (Stdlib.Filename.remove_extension (Stdlib.Filename.basename source) ^ ".expected"))));
+      List.iter helper_claims ~f:(fun claim ->
+          let key = source ^ ":" ^ claim.helper in
+          if Map.mem quantified_exemptions key then quantified_used := Set.add !quantified_used key
+          else (
+            Int.incr quantified_offenders;
+            fail (quantified_failure source claim))));
   (* Which directories the corpus came from, by name and not by count: a file added anywhere under
      `test/` moved a tally here, so every contributor would promote this file over a change that
      never touched it -- a promote indistinguishable from blessing a real regression (the lesson of
@@ -260,6 +758,12 @@ let () =
      Computed-label claims exempted -- rows and tables that describe rather than decide,\n\
      each carrying its assertion separately through `Verdict.claim`/`claimf`:\n";
   List.iter exempt_computed_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
+  printf "\nHelper-wrapped quantified claims exempted because emptiness is their passing meaning:\n";
+  if List.is_empty exempt_quantified_helpers then
+    printf "  (none: every helper-wrapped quantifier in a claim must witness a population)\n"
+  else List.iter exempt_quantified_helpers ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
+  printf "\nSynthetic helper-rule controls:\n";
+  List.iter control_results ~f:(fun (label, ok) -> Verdict.pf "%s" label ok);
   let stale =
     Set.union
       (Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used)
@@ -267,12 +771,23 @@ let () =
          (Set.of_list (module String) (List.map exempt_computed_sites ~f:fst))
          !computed_used)
   in
+  let stale_quantified =
+    Set.diff
+      (Set.of_list (module String) (List.map exempt_quantified_helpers ~f:fst))
+      !quantified_used
+  in
   if not (Set.is_empty stale) then
     fail
       (Printf.sprintf
          "exempted literals that no source carries any more -- drop them from the exemption list: \
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
+  if not (Set.is_empty stale_quantified) then
+    fail
+      (Printf.sprintf
+         "exempted quantified helpers that no Verdict claim reaches any more -- drop them from the \
+          exemption list: %s"
+         (String.concat ~sep:", " (Set.to_list stale_quantified)));
   (* An exempted source that carries no claim-shaped literal is either a file that stopped being a
      fixture, or one this scan stopped reading -- and the second is what a blanket exemption is
      capable of hiding, so it is checked rather than trusted. *)
@@ -304,13 +819,18 @@ let () =
   printf "\n";
   (* Stated so that `true` is the passing reading, as every line of a golden should be. *)
   Verdict.p "every test source decides its claims through Verdict" (!offenders = 0);
+  Verdict.p "every helper-wrapped quantified claim witnesses a non-empty population"
+    (!quantified_offenders = 0);
   Verdict.p "the scan found every literal planted for it" (Set.is_empty missing);
   Verdict.p "every exemption on this check's lists is still earned"
-    (Set.is_empty unread && Set.is_empty stale);
+    (Set.is_empty unread && Set.is_empty stale && Set.is_empty stale_quantified);
   (* What a blind walk cannot produce. Without these, "no offenders" and "read nothing" are the same
      result -- and the second is the one that arrives silently. *)
   Verdict.p "the walk read string literals out of these sources" (!literals > 0);
   Verdict.p "and placed some of them as arguments of a named function" (!applied > 0);
   Verdict.p "over more than one test directory" (List.length directories > 1);
   if not (Verdict.any_failed ()) then
-    printf "\nOK: no test source prints a claim it decided itself outside `Verdict`.\n"
+    printf
+      "\n\
+       OK: test claims route through `Verdict`, and helper-wrapped quantifiers cannot pass on \
+       nothing.\n"
