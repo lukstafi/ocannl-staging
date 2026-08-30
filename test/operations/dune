@@ -4106,13 +4106,15 @@
 ; command-line spellings and value separators accepted by
 ; Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are consumers.
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
-; application and cannot safely be claimed globally.
+; application and cannot safely be claimed globally; the runtime's per-key qualified-only policy
+; decides whether those spellings exist.
 ; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
 ; under docs/ and benchmarks/. Workflow `*.yml`/`*.yaml` under .github/workflows/ contributes
 ; unambiguous prefixed tokens too.
 ; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
 ; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
-; occupy the whole inline span (with optional whitespace around `=` or in its value). Every
+; occupy the whole inline span (case-insensitively, with optional whitespace around `=` or in its
+; value). Embedded prefixed tokens and the outer bare assignment are both checked. Every
 ; checked-in dune file contributes action arguments, and every checked-in
 ; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
 ; assignment keys, retaining empty keys for registry rejection (and including commented

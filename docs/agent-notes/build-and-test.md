@@ -88,12 +88,15 @@ that they earn a lookup rather than always-loaded space.
   explicit open namespaces `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config.
   Supported prefix-free
   config flags occupy the host application's namespace, so their current documentation sites are
-  separately file/key/count-pinned. Prose contributes a key
+  separately file/key/count-pinned and disappear when the runtime's per-key qualified-only policy
+  says so. Prose contributes a key
   when an inline code span (including each physical segment of a multiline span) or fenced line
   contains either unambiguous prefixed form; a bare
   assignment contributes only when it occupies the whole inline span outside benchmark reports
-  (whitespace around `=`, within the value, or an empty example value does not hide the key). Config
-  files contribute each uncommented assignment with a nonempty value after applying
+  (case is normalized like a config file, and whitespace around `=`, within the value, or an empty
+  example value does not hide the key). An outer bare assignment and prefixed tokens embedded in its
+  value are both consumers. Config files contribute each uncommented assignment with a nonempty
+  value after applying
   `Utils.parse_config_lines`' key normalization: case folding, leading-dash stripping, and the
   optional `ocannl_` prefix. An empty normalized key is retained so registry lookup rejects it. The explicitly included
   `ocannl_config.for_debug` template also contributes commented ready-to-enable assignments. Comment

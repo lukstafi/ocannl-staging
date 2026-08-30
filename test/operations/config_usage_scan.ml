@@ -93,11 +93,12 @@ let cli_key_of_token token =
       Option.bind (String.chop_prefix token ~prefix:name_prefix) ~f:(fun rest ->
           if String.is_empty rest || not (String.for_all rest ~f:cli_token_char) then None
           else
-            match String.lsplit2 token ~on:'=' with
-            | Some (name, _) -> syntactic_cli_key_of_name name
-            | None ->
-                Some
-                  (Option.value (known_cli_key token) ~default:(unknown_cli_key ~name_prefix token))))
+            match known_cli_key token with
+            | Some key -> Some key
+            | None -> (
+                match String.lsplit2 token ~on:'=' with
+                | Some (name, _) -> syntactic_cli_key_of_name name
+                | None -> Some (unknown_cli_key ~name_prefix token))))
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -115,9 +116,11 @@ let prefix_free_config_mentions =
   ]
 
 let prefix_free_names key =
-  let qualified = Utils.cmdline_var_names ~qualified_only:true key in
-  Utils.cmdline_var_names key
-  |> List.filter ~f:(fun name -> not (List.mem qualified name ~equal:String.equal))
+  if Set.mem Utils.qualified_only_config_keys key then []
+  else
+    let qualified = Utils.cmdline_var_names ~qualified_only:true key in
+    Utils.cmdline_var_names key
+    |> List.filter ~f:(fun name -> not (List.mem qualified name ~equal:String.equal))
 
 let prefix_free_occurrences_for ~path ~keys content =
   String.split_lines content
@@ -191,6 +194,26 @@ let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~
       from 0 [])
   |> List.concat
 
+(* These sites deliberately retain or exercise spellings known to be invalid. Counts stop a second
+   obsolete instruction or test input in the same file from borrowing the intended exception. This
+   list lives beside the spelling classifiers so a repetition changes its count rather than
+   disappearing as ordinary non-config prose. *)
+let historical_invalid_config_mentions =
+  [
+    ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap", 1);
+    ("docs/agent-notes/conventions.md", "private_bytes_cap", 1);
+    ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
+    ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
+    ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
+    ("test/operations/dune", "backedn", 3);
+    ("test/operations/dune", "not_a_real_key", 1);
+    ("test/operations/startup_streams/ocannl_config", "definitely_not_a_config_key", 1);
+  ]
+
+let tracked_historical_config path key =
+  List.exists historical_invalid_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
+      String.equal path tracked_path && String.equal key tracked_key)
+
 let script_occurrences ~path content =
   let cli_occurrences =
     String.split_lines content
@@ -214,7 +237,12 @@ let script_occurrences ~path content =
                   if !stop = start + String.length name_prefix then from next found
                   else
                     let spelling = String.sub line ~pos:start ~len:(!stop - start) in
-                    match cli_key_of_token spelling with
+                    let historical_key =
+                      Option.bind (String.lsplit2 spelling ~on:'=') ~f:(fun (name, _) ->
+                          Option.bind (syntactic_cli_key_of_name name) ~f:(fun key ->
+                              Option.some_if (tracked_historical_config path key) key))
+                    in
+                    match Option.first_some historical_key (cli_key_of_token spelling) with
                     | None -> from next found
                     | Some key ->
                         from next
@@ -284,6 +312,7 @@ let script_occurrences ~path content =
   cli_occurrences @ environment_assignments @ standalone_environment_mentions
 
 let same_range (a, b) (x, y) = Int.equal a x && Int.equal b y
+let documentation_key_char c = Char.is_alpha c || Char.is_digit c || Char.equal c '_'
 
 let assignment_key ~key_char ~normalize rendered =
   match String.lsplit2 rendered ~on:'=' with
@@ -293,26 +322,6 @@ let assignment_key ~key_char ~normalize rendered =
          && String.for_all raw_key ~f:key_char ->
       normalize raw_key
   | _ -> None
-
-(* These sites deliberately retain or exercise spellings known to be invalid. Counts stop a second
-   obsolete instruction or test input in the same file from borrowing the intended exception. This
-   list lives beside the spaced-form classifier so a spaced repetition is admitted to the scan and
-   then changes its count, rather than disappearing as ordinary non-config prose. *)
-let historical_invalid_config_mentions =
-  [
-    ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap", 1);
-    ("docs/agent-notes/conventions.md", "private_bytes_cap", 1);
-    ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
-    ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
-    ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
-    ("test/operations/dune", "backedn", 3);
-    ("test/operations/dune", "not_a_real_key", 1);
-    ("test/operations/startup_streams/ocannl_config", "definitely_not_a_config_key", 1);
-  ]
-
-let tracked_historical_config path key =
-  List.exists historical_invalid_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
-      String.equal path tracked_path && String.equal key tracked_key)
 
 (* Whitespace makes bare assignments common in non-config prose. Pin every CURRENT config use of
    that form by file/key/count: a later key removal still scans the old site, while a newly added
@@ -337,48 +346,41 @@ let control_fixture path = String.equal path "config_usage_scan_bogus.fixture"
 
 let one_assignment ~path rendered =
   match String.lsplit2 rendered ~on:'=' with
-  | Some (raw_name, raw_value) -> (
+  | Some (raw_name, raw_value) ->
       let name = String.strip raw_name in
       let value = String.strip raw_value in
       let spaced = not (String.equal raw_name name && String.equal raw_value value) in
       let value_has_whitespace = String.exists value ~f:Char.is_whitespace in
-      if String.is_empty name then None
+      if
+        String.is_empty name
+        || String.is_prefix name ~prefix:"OCANNL_"
+        || Option.is_some (cli_key_of_token (name ^ "=" ^ value))
+      then None
       else
-        match cli_key_of_token (name ^ "=" ^ value) with
-        | Some key -> Some (key, false)
-        | None -> (
-            match String.chop_prefix name ~prefix:"OCANNL_" with
-            | Some key
-              when (not (String.is_empty key))
-                   && String.for_all key ~f:uppercase_key_char
-                   && not (non_config_env_key key) ->
-                Some (String.lowercase key, false)
-            | _ ->
-                Option.bind
-                  (assignment_key ~key_char:lowercase_key_char
-                     ~normalize:(fun key -> Some (normalize_key key))
-                     (name ^ "=" ^ value))
-                  ~f:(fun key ->
-                    if
-                      value_has_whitespace
-                      && not
-                           (Set.mem Utils.known_config_keys key
-                           || tracked_spaced_config path key || control_fixture path
-                           || tracked_historical_config path key)
-                    then None
-                    else if
-                      (not spaced)
-                      || Set.mem Utils.known_config_keys key
-                      || tracked_spaced_config path key || control_fixture path
-                      || tracked_historical_config path key
-                    then
-                      Some
-                        ( key,
-                          spaced
-                          && (not (control_fixture path))
-                          && not (tracked_historical_config path key) )
-                    else None)))
-  | None -> ( match cli_key_of_token rendered with Some key -> Some (key, false) | None -> None)
+        Option.bind
+          (assignment_key ~key_char:documentation_key_char
+             ~normalize:(fun key -> Some (normalize_key (String.lowercase key)))
+             (name ^ "=" ^ value))
+          ~f:(fun key ->
+            if
+              value_has_whitespace
+              && not
+                   (Set.mem Utils.known_config_keys key
+                   || tracked_spaced_config path key || control_fixture path
+                   || tracked_historical_config path key)
+            then None
+            else if
+              (not spaced)
+              || Set.mem Utils.known_config_keys key
+              || tracked_spaced_config path key || control_fixture path
+              || tracked_historical_config path key
+            then
+              Some
+                ( key,
+                  spaced && (not (control_fixture path)) && not (tracked_historical_config path key)
+                )
+            else None)
+  | None -> None
 
 let markdown_occurrences ~allow_bare ~path content =
   let scan = Markdown.inert_by_line content in
@@ -412,19 +414,21 @@ let markdown_occurrences ~allow_bare ~path content =
               let prefixed =
                 script_occurrences ~path rendered |> List.map ~f:(as_markdown lineno)
               in
-              if not (List.is_empty prefixed) then prefixed
-              else if complete && allow_bare then
-                Option.to_list
-                @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
-                    {
-                      path;
-                      line = lineno;
-                      key;
-                      spelling = rendered;
-                      kind = Markdown_assignment;
-                      spaced_bare;
-                    })
-              else []))
+              let bare =
+                if complete && allow_bare then
+                  Option.to_list
+                  @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
+                      {
+                        path;
+                        line = lineno;
+                        key;
+                        spelling = rendered;
+                        kind = Markdown_assignment;
+                        spaced_bare;
+                      })
+                else []
+              in
+              prefixed @ bare))
   in
   let fenced =
     lines
@@ -556,12 +560,41 @@ let non_config_assignment_mentions =
     (".claude/skills/slipshow/SKILL.md", "title", 1);
     ("README.md", "i", 1);
     ("benchmarks/README.md", "lr", 1);
+    ("benchmarks/README.md", "bench_tune", 3);
+    ("benchmarks/README.md", "bench_materialize", 2);
+    ("benchmarks/README.md", "bench_precision", 2);
+    ("benchmarks/README.md", "bench_static_scale", 2);
+    ("benchmarks/README.md", "bench_gate_interval", 2);
+    ("benchmarks/README.md", "bench_loss_scale", 1);
+    ("benchmarks/README.md", "bench_debug", 2);
+    ("benchmarks/README.md", "bench_no_sgd", 2);
+    ("benchmarks/README.md", "bench_no_slice", 2);
+    ("benchmarks/README.md", "bench_twin_placement", 1);
+    ("benchmarks/README.md", "bench_preseed_twins", 1);
+    ("benchmarks/README.md", "bench_tune_report", 1);
+    ("benchmarks/README.md", "bench_flip_dump", 1);
+    ("benchmarks/README.md", "cachedb", 1);
+    ("benchmarks/README.md", "bench_cell_log_dir", 1);
+    ("benchmarks/README.md", "bench_steps", 1);
+    ("benchmarks/README.md", "bench_probe", 1);
+    ("benchmarks/README.md", "bench_dump", 1);
+    ("benchmarks/README.md", "bench_fwd", 1);
+    ("benchmarks/README.md", "bench_promote", 1);
+    ("benchmarks/README.md", "bench_seg_times", 2);
+    ("benchmarks/README.md", "bench_sr_sites", 1);
+    ("benchmarks/README.md", "beam", 1);
+    ("docs/agent-notes/backend-dialects-and-idents.md", "mtl_shader_validation", 1);
     ("docs/agent-notes/build-and-test.md", "execution", 3);
+    ("docs/agent-notes/build-and-test.md", "ostype", 1);
+    ("docs/agent-notes/scheduling-and-autotune.md", "n", 1);
     ("docs/agent-notes/scheduling-and-autotune.md", "max_chain", 1);
+    ("docs/agent-notes/shape-inference.md", "concat", 1);
+    ("docs/agent-notes/training-and-performance.md", "bench_tune_report", 1);
     ("docs/agent-notes/training-and-performance.md", "declines", 1);
     ("docs/agent-notes/training-and-performance.md", "state", 1);
     ("docs/agent-notes/training-and-performance.md", "timed", 1);
     ("docs/precision_inference.md", "top_down_prec", 6);
+    ("docs/blog/a-range-is-not-its-shape.md", "viz", 1);
     ("docs/proposals/axis-labels.md", "hidden", 1);
     ("docs/proposals/axis-labels.md", "name", 4);
     ("docs/proposals/axis-labels.md", "rgb", 1);
@@ -571,13 +604,20 @@ let non_config_assignment_mentions =
     ("docs/proposals/concat-forward-component-data-propagation.md", "b_mc", 1);
     ("docs/proposals/concat-forward-component-data-propagation.md", "c", 2);
     ("docs/proposals/concat-forward-component-data-propagation.md", "c_mc", 1);
+    ("docs/proposals/cuda-einsum-conv-codegen-investigation.md", "path", 1);
     ("docs/proposals/fix-centered-init-test-fallout.md", "epsilon", 1);
     ("docs/proposals/gh-ocannl-255.md", "d", 2);
+    ("docs/proposals/gh-ocannl-166.md", "default", 2);
+    ("docs/proposals/gh-ocannl-166.md", "prohibited", 2);
+    ("docs/proposals/gh-ocannl-166.md", "exclusive_process", 2);
     ("docs/proposals/gh-ocannl-263.md", "seq_q", 1);
     ("docs/proposals/gh-ocannl-308-comment.md", "n", 1);
+    ("docs/proposals/gh-ocannl-313.md", "has_native_float16", 1);
+    ("docs/proposals/gh-ocannl-411.md", "hip_platform", 1);
     ("docs/proposals/gh-ocannl-420.md", "i", 1);
     ("docs/proposals/gh-ocannl-536.md", "private_seg_size", 1);
     ("docs/proposals/total-basis-bcast-if-1.md", "d", 1);
+    ("docs/proposals/tensorize-mma.md", "bench_tune_report", 1);
     ("docs/proposals/watch-ocannl-README-md-369aadb4.md", "batch", 2);
     ("docs/research/llmc-lessons.md", "accumulate", 1);
     ("docs/research/llmc-lessons.md", "beta", 1);
@@ -784,6 +824,8 @@ let occurrences_of_file ~reported_path path =
 let fixture path config_path multiline_path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
+  Verdict.p "a runtime value separator is resolved before equals inside its value"
+    (Option.equal String.equal (cli_key_of_token "--ocannl_backend_cuda=true") (Some "backend"));
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
     @ markdown_occurrences ~allow_bare:true ~path:reported_path content

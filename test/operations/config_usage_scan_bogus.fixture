@@ -21,3 +21,5 @@ dune build --ocannl-definitely-not-a-fifth-config-key=true
 The prefix-free removal control must be refused: --definitely_not_a_prefix_free_config_key=true
 The standalone environment removal control must be refused: OCANNL_DEFINITELY_NOT_A_STANDALONE_CONFIG_KEY
 The multi-word value must not hide its key: `definitely_not_a_multiword_config_key = one | two`
+The mixed-case config spelling must be refused: `Definitely_Not_A_Mixed_Case_Key=cc`
+The prefixed value must not hide the outer key: `definitely_not_an_outer_config_key=$OCANNL_BACKEND`
