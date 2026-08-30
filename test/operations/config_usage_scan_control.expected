@@ -7,6 +7,7 @@ FAIL: config_usage_scan_bogus.fixture:10: command-line flag `--ocannl-definitely
 FAIL: config_usage_scan_bogus.fixture:11: command-line flag `--ocannl_definitelynotaconfigkeyvalue` names `definitelynotaconfigkeyvalue`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:15: command-line flag `--ocannl-definitely-not-a-third-config-key=true` names `definitely_not_a_third_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:19: command-line flag `--ocannl-definitely-not-a-fifth-config-key=true` names `definitely_not_a_fifth_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:26: command-line flag `--ocannl_backend_variant=true` names `backend_variant`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:2: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:5: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:14: environment assignment `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=` names `definitely_not_a_second_config_key`, absent from Utils.known_config_keys
@@ -37,4 +38,4 @@ FAIL: config_usage_scan_bogus_config.fixture:4: configuration-file assignment `O
 FAIL: config_usage_scan_bogus_config.fixture:5: configuration-file assignment `# OCANNL_DEFINITELY_NOT_A_LEADING_SPACE_COMMENT_KEY=` names `# ocannl_definitely_not_a_leading_space_comment_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus_config.fixture:6: configuration-file assignment `=` names ``, absent from Utils.known_config_keys
 FAIL: config_usage_scan_multiline_bogus.fixture:2: documentation assignment `--ocannl_definitely_not_a_multiline_config_key=true` names `definitely_not_a_multiline_config_key`, absent from Utils.known_config_keys
-FAILED: 39 checks did not hold.
+FAILED: 40 checks did not hold.

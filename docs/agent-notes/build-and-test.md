@@ -91,6 +91,10 @@ that they earn a lookup rather than always-loaded space.
   value separator accepted by `Utils.cmdline_var_prefixes`, or the environment form
   `OCANNL_<KEY>` beginning and ending at identifier boundaries (with or without an assignment); the
   explicit open namespaces `OCANNL_TOOL_*` and `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config.
+  The explicit name before `=` normally wins over a shorter registered-key prefix. The inherently
+  ambiguous alternate-value spelling `--ocannl_backend_cuda=true` is a file/token/key/count-pinned
+  judgment meaning key `backend` with value cuda=true; any other such ambiguity fails as the
+  longer explicit name.
   Supported prefix-free
   config flags occupy the host application's namespace, so their current documentation sites are
   separately file/key/count-pinned and disappear when the runtime's per-key qualified-only policy

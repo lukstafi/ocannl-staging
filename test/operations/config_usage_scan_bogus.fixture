@@ -23,3 +23,4 @@ The standalone environment removal control must be refused: OCANNL_DEFINITELY_NO
 The multi-word value must not hide its key: `definitely_not_a_multiword_config_key = one | two`
 The mixed-case config spelling must be refused: `Definitely_Not_A_Mixed_Case_Key=cc`
 The prefixed value must not hide the outer key: `definitely_not_an_outer_config_key=$OCANNL_BACKEND`
+The surviving backend prefix must not hide a removed longer key: --ocannl_backend_variant=true

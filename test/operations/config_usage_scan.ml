@@ -88,17 +88,34 @@ let unknown_cli_key ~name_prefix token =
   done;
   String.prefix rest !stop |> String.lowercase |> String.tr ~target:'-' ~replacement:'_'
 
-let cli_key_of_token token =
+(* A qualified spelling can be ambiguous when a runtime value separator is also a legal key
+   character: [backend_cuda=true] can mean key [backend] with value [cuda=true], or a key named
+   [backend_cuda]. Prefer the explicit syntactic name so a removed longer key cannot be absorbed by
+   a surviving prefix. The exceptional runtime-value reading is a counted site judgment. Store the
+   suffix separately so this declaration does not scan itself as another command-line occurrence. *)
+let ambiguous_cli_value_mentions =
+  [ ("docs/agent-notes/build-and-test.md", "backend_cuda=true", "backend", 1) ]
+
+let declared_ambiguous_cli_value_key ~path token =
+  List.find_map ambiguous_cli_value_mentions ~f:(fun (tracked_path, suffix, key, _) ->
+      Option.some_if
+        (String.equal path tracked_path && String.equal token ("--ocannl_" ^ suffix))
+        key)
+
+let cli_key_of_token ~path token =
   List.find_map cli_name_prefixes ~f:(fun name_prefix ->
       Option.bind (String.chop_prefix token ~prefix:name_prefix) ~f:(fun rest ->
           if String.is_empty rest || not (String.for_all rest ~f:cli_token_char) then None
           else
-            match known_cli_key token with
-            | Some key -> Some key
-            | None -> (
-                match String.lsplit2 token ~on:'=' with
-                | Some (name, _) -> syntactic_cli_key_of_name name
-                | None -> Some (unknown_cli_key ~name_prefix token))))
+            match String.lsplit2 token ~on:'=' with
+            | Some (name, _) -> (
+                match syntactic_cli_key_of_name name with
+                | Some key when Set.mem Utils.known_config_keys key -> Some key
+                | Some key ->
+                    Option.first_some (declared_ambiguous_cli_value_key ~path token) (Some key)
+                | None -> known_cli_key token)
+            | None ->
+                Option.first_some (known_cli_key token) (Some (unknown_cli_key ~name_prefix token))))
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -242,7 +259,7 @@ let script_occurrences ~path content =
                           Option.bind (syntactic_cli_key_of_name name) ~f:(fun key ->
                               Option.some_if (tracked_historical_config path key) key))
                     in
-                    match Option.first_some historical_key (cli_key_of_token spelling) with
+                    match Option.first_some historical_key (cli_key_of_token ~path spelling) with
                     | None -> from next found
                     | Some key ->
                         from next
@@ -354,7 +371,7 @@ let one_assignment ~path rendered =
       if
         String.is_empty name
         || String.is_prefix name ~prefix:"OCANNL_"
-        || Option.is_some (cli_key_of_token (name ^ "=" ^ value))
+        || Option.is_some (cli_key_of_token ~path (name ^ "=" ^ value))
       then None
       else
         Option.bind
@@ -649,6 +666,13 @@ let prefix_free_config_sites =
   Set.of_list (module String)
   @@ List.map prefix_free_config_mentions ~f:(fun (path, key, _) -> mention_site path key)
 
+let ambiguous_cli_value_site path spelling key = path ^ "\000" ^ spelling ^ "\000" ^ key
+
+let ambiguous_cli_value_sites =
+  Set.of_list (module String)
+  @@ List.map ambiguous_cli_value_mentions ~f:(fun (path, suffix, key, _) ->
+      ambiguous_cli_value_site path ("--ocannl_" ^ suffix) key)
+
 let kind_name = function
   | Cli_flag -> "command-line flag"
   | Prefix_free_cli_flag -> "prefix-free command-line flag"
@@ -663,7 +687,13 @@ let check ~repository_census occurrences =
   let seen_historical = Hashtbl.create (module String) in
   let seen_spaced_config = Hashtbl.create (module String) in
   let seen_prefix_free = Hashtbl.create (module String) in
+  let seen_ambiguous_cli_value = Hashtbl.create (module String) in
   List.iter occurrences ~f:(fun occurrence ->
+      let ambiguous_site =
+        ambiguous_cli_value_site occurrence.path occurrence.spelling occurrence.key
+      in
+      if Set.mem ambiguous_cli_value_sites ambiguous_site then
+        Hashtbl.incr seen_ambiguous_cli_value ambiguous_site;
       (if occurrence.spaced_bare then
          let site = mention_site occurrence.path occurrence.key in
          if Set.mem spaced_config_sites site then Hashtbl.incr seen_spaced_config site
@@ -789,6 +819,22 @@ let check ~repository_census occurrences =
            (drifted_prefix_free
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
+           |> String.concat ~sep:", "));
+    let drifted_ambiguous_cli_value =
+      List.filter_map ambiguous_cli_value_mentions ~f:(fun (path, suffix, key, expected) ->
+          let spelling = "--ocannl_" ^ suffix in
+          let actual =
+            Hashtbl.find seen_ambiguous_cli_value (ambiguous_cli_value_site path spelling key)
+            |> Option.value ~default:0
+          in
+          Option.some_if (not (Int.equal actual expected)) (path, spelling, key, expected, actual))
+    in
+    if not (List.is_empty drifted_ambiguous_cli_value) then
+      Verdict.fail
+        (Printf.sprintf "ambiguous command-line value occurrence counts drifted: %s"
+           (drifted_ambiguous_cli_value
+           |> List.map ~f:(fun (path, spelling, key, expected, actual) ->
+               Printf.sprintf "%s:%s (%s) expected %d, saw %d" path spelling key expected actual)
            |> String.concat ~sep:", ")))
 
 let file_kind path =
@@ -825,7 +871,10 @@ let fixture path config_path multiline_path =
   let reported_path = Stdlib.Filename.basename path in
   let content = In_channel.read_all path in
   Verdict.p "a runtime value separator is resolved before equals inside its value"
-    (Option.equal String.equal (cli_key_of_token "--ocannl_backend_cuda=true") (Some "backend"));
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"docs/agent-notes/build-and-test.md"
+          ("--ocannl_" ^ "backend_cuda=true"))
+       (Some "backend"));
   check ~repository_census:false
     (script_occurrences ~path:reported_path content
     @ markdown_occurrences ~allow_bare:true ~path:reported_path content

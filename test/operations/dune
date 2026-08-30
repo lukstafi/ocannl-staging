@@ -4287,7 +4287,8 @@
 ; ready-to-enable assignments in the latter); the five
 ; checked-in config roots are named in the non-vacuity floor so Dune's generated local copy cannot
 ; satisfy it. Prefixed token examples in ocannl_config.reference join too. Non-config judgments,
-; spaced bare config mentions, and intentional-invalid exemptions pin file/key occurrence counts.
+; spaced bare config mentions, ambiguous alternate-value spellings, and intentional-invalid
+; exemptions pin file/key occurrence counts.
 ; The checked-in fixture carries one unknown key in every accepted syntax, and the control requires
 ; refusal with exit 1.
 
