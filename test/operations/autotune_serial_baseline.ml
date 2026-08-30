@@ -12,12 +12,14 @@
    backend — the premise of the rule. - The default compile of that same code does bind one wherever
    automatic scheduling is active, so on GPU the baseline is strictly the serial twin of code the
    backend parallelizes for free. - [Autotune.tune] times the baseline exactly where it is not a
-   single work-item: [baseline_ms] is finite on CPU backends (the serial form runs at full
-   single-core speed and stays a legitimate competitor) and [infinity] on GPU ones. Where it is
-   refused, the refusal is recorded in the report's decline census under [Not_dispatched_key
-   "baseline"] (gh-ocannl-543). - Either way the search returns a working routine whose winner
-   carries a measurement. - The rule holds on the cache-replay path too: a planted entry naming the
-   serial form as the winner is rejected and re-searched on GPU, and honoured on CPU. *)
+   single work-item: [baseline_ms] is finite on CPU backends when its timing window is usable (the
+   serial form runs at full single-core speed and stays a legitimate competitor), while a
+   contention-dominated CPU window is explicitly counted and refused; it is [infinity] on GPU ones.
+   Where dispatch itself is refused, the refusal is recorded in the report's decline census under
+   [Not_dispatched_key "baseline"] (gh-ocannl-543). - Either way the search returns a working routine
+   whose winner carries a measurement. - The rule holds on the cache-replay path too: a planted
+   entry naming the serial form as the winner is rejected and re-searched on GPU, and honoured on
+   CPU. *)
 
 open Base
 open Ocannl
@@ -116,8 +118,12 @@ let () =
   let got = Context.get_values ctx mc.Tensor.value in
   let r = Option.value_exn ~here:[%here] !report in
   let is_gpu = Sched.backend_is_gpu backend in
-  p "the serial baseline is timed on CPU backends and not dispatched on GPU ones"
-    (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
+  let baseline_measured = Float.is_finite r.Autotune.baseline_ms in
+  let baseline_contention_refused =
+    (not is_gpu) && (not baseline_measured) && r.Autotune.timings_contended > 0
+  in
+  p "the serial baseline is measured or contention-refused on CPU, and not dispatched on GPU"
+    (if is_gpu then not baseline_measured else baseline_measured || baseline_contention_refused);
   (* gh-ocannl-543: the refusal is a decline like any other. Without a census entry a GPU search
      that refused most of its candidate space reports exactly what an empty candidate space reports,
      and the difference was only visible in the [autotune_log] stderr stream. *)
