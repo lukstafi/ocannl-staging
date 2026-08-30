@@ -601,36 +601,116 @@ let cache_key ?objective ~(limits : Backend_intf.hardware_limits) canonical ~bac
 let ensure_dir = Utils.Atomic_file.ensure_dir
 let cache_file ~dir ~key = Stdlib.Filename.concat dir (sanitize key ^ ".sexp")
 
-let store ~dir ~key entry =
-  ensure_dir dir;
-  (* A writer killed between staging and commit leaves its staging file behind; nothing else in the
-     process would ever remove it, and a cache directory is long-lived. Sweep once per process, from
-     the writers rather than on a timer. *)
-  Utils.Atomic_file.cleanup_stale_once dir;
-  let file = cache_file ~dir ~key in
-  (* Uniqueness, failure cleanup and the Windows-safe commit all live in [Atomic_file]: the
-     committed entry is either the old complete file or the new complete file, never an intention.
-     The injection point sits in the staged-but-uncommitted window, which is what makes that
-     guarantee testable. *)
-  try
-    Utils.Atomic_file.write_all ~path:file
-      ~data:(Sexp.to_string_hum (sexp_of_entry entry))
-      ~before_commit:(fun () -> Resource_fault_injection.hit Schedule_cache_before_commit)
-      ()
-  with Stdlib.Sys_error _ ->
-    (* The cache is an optimization, so a filesystem refusal — a directory that turned unwritable, a
-       Windows peer still holding this entry open past the bounded commit retry — means the tuning
-       result is not saved, not that the run fails. [publish] has already removed the staging file;
-       an earlier complete entry is still in place. *)
+(* The key REGIME is deliberately independent of [entry_version]. The latter says whether the
+   payload at a key can be decoded; this stamp says whether the directory's filenames were minted by
+   the same [key_components] schema. Bump this once when that schema changes. Cache-open then
+   discards the superseded generation wholesale, with no migration arm for each historical schema
+   (gh-ocannl-835). *)
+let cache_regime_version = 1
+let regime_stamp_filename = ".ocannl-schedule-cache-regime"
+let regime_lock_filename = ".ocannl-schedule-cache.lock"
+let regime_stamp_file dir = Stdlib.Filename.concat dir regime_stamp_filename
+let regime_lock_file dir = Stdlib.Filename.concat dir regime_lock_filename
+
+(* POSIX record locks are process-scoped, so two Domains of one process do not serialize each other
+   through [lockf]. This mutex supplies that half; the permanent lock file supplies the
+   cross-process half and is never unlinked, avoiding the unlink/recreate inode race. *)
+let cache_open_mutex = Stdlib.Mutex.create ()
+
+let remove_entry path =
+  match Unix.unlink path with
+  | () -> true
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> true
+  | exception Unix.Unix_error _ -> false
+
+let sweep_superseded_entries dir =
+  match Stdlib.Sys.readdir dir with
+  | exception Stdlib.Sys_error _ -> false
+  | names ->
+      Array.fold names ~init:true ~f:(fun removed name ->
+          if String.is_suffix name ~suffix:".sexp" then
+            remove_entry (Stdlib.Filename.concat dir name) && removed
+          else removed)
+
+type regime_stamp = Missing | Version of int | Refuse
+
+let read_regime_stamp dir =
+  let path = regime_stamp_file dir in
+  if not (Stdlib.Sys.file_exists path) then Missing
+  else
+    match Int.of_string (String.strip (Stdio.In_channel.read_all path)) with
+    | version -> Version version
+    | exception _ -> Refuse
+
+let write_regime_stamp dir =
+  Utils.Atomic_file.write_all ~path:(regime_stamp_file dir)
+    ~data:(Int.to_string cache_regime_version ^ "\n")
     ()
 
+let open_current_regime dir =
+  match read_regime_stamp dir with
+  | Version version when version = cache_regime_version -> true
+  | Version version when version > cache_regime_version -> false
+  | Refuse -> false
+  | Missing | Version _ ->
+      (* Deletions precede the atomic stamp publication. A crash or refusal before publication
+         leaves the old stamp in place, so the next opener retries; a current-regime operation is
+         admitted only after every old entry is gone and the new stamp is visible. *)
+      if sweep_superseded_entries dir then (
+        write_regime_stamp dir;
+        true)
+      else false
+
+let with_cache_open ~dir f =
+  if not (Stdlib.Sys.file_exists dir) then None
+  else (
+    Stdlib.Mutex.lock cache_open_mutex;
+    Stdlib.Fun.protect
+      ~finally:(fun () -> Stdlib.Mutex.unlock cache_open_mutex)
+      (fun () ->
+        try
+          let fd = Unix.openfile (regime_lock_file dir) [ Unix.O_CREAT; Unix.O_RDWR ] 0o666 in
+          Stdlib.Fun.protect
+            ~finally:(fun () -> Unix.close fd)
+            (fun () ->
+              Unix.lockf fd Unix.F_LOCK 0;
+              if open_current_regime dir then Some (f ()) else None)
+        with Unix.Unix_error _ | Stdlib.Sys_error _ -> None))
+
+let store ~dir ~key entry =
+  ensure_dir dir;
+  ignore
+    (with_cache_open ~dir (fun () ->
+         (* A writer killed between staging and commit leaves its staging file behind; nothing else
+            in the process would ever remove it, and a cache directory is long-lived. Sweep once per
+            process, from the writers rather than on a timer. *)
+         Utils.Atomic_file.cleanup_stale_once dir;
+         let file = cache_file ~dir ~key in
+         (* Uniqueness, failure cleanup and the Windows-safe commit all live in [Atomic_file]: the
+            committed entry is either the old complete file or the new complete file, never an
+            intention. The injection point sits in the staged-but-uncommitted window, which is what
+            makes that guarantee testable. *)
+         try
+           Utils.Atomic_file.write_all ~path:file
+             ~data:(Sexp.to_string_hum (sexp_of_entry entry))
+             ~before_commit:(fun () -> Resource_fault_injection.hit Schedule_cache_before_commit)
+             ()
+         with Stdlib.Sys_error _ ->
+           (* The cache is an optimization, so a filesystem refusal — a directory that turned
+              unwritable, a Windows peer still holding this entry open past the bounded commit retry
+              — means the tuning result is not saved, not that the run fails. [publish] has already
+              removed the staging file; an earlier complete entry is still in place. *)
+           ()))
+
 let lookup ~dir ~key =
-  Utils.Atomic_file.cleanup_stale_once dir;
-  let file = cache_file ~dir ~key in
-  if not (Stdlib.Sys.file_exists file) then None
-  else
-    try
-      Resource_fault_injection.hit Schedule_cache_before_replay;
-      let entry = entry_of_sexp (Sexplib.Sexp.load_sexp file) in
-      if entry.version = entry_version then Some entry else None
-    with _ -> None
+  Option.join
+    (with_cache_open ~dir (fun () ->
+         Utils.Atomic_file.cleanup_stale_once dir;
+         let file = cache_file ~dir ~key in
+         if not (Stdlib.Sys.file_exists file) then None
+         else
+           try
+             Resource_fault_injection.hit Schedule_cache_before_replay;
+             let entry = entry_of_sexp (Sexplib.Sexp.load_sexp file) in
+             if entry.version = entry_version then Some entry else None
+           with _ -> None))

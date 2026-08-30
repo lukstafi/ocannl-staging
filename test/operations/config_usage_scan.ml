@@ -617,7 +617,6 @@ let non_config_assignment_mentions =
     ("benchmarks/README.md", "bench_sr_sites", 1);
     ("benchmarks/README.md", "beam", 1);
     ("docs/agent-notes/backend-dialects-and-idents.md", "mtl_shader_validation", 1);
-    ("docs/agent-notes/backend-precision-and-simd.md", "fastmathenabled", 2);
     ("docs/agent-notes/build-and-test.md", "execution", 3);
     ("docs/agent-notes/build-and-test.md", "ostype", 1);
     ("docs/agent-notes/scheduling-and-autotune.md", "n", 1);

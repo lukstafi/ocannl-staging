@@ -1,0 +1,8 @@
+an old stamped generation opens as a cache miss: true
+every old-regime entry is swept: true
+the completed sweep atomically advances the regime stamp: true
+a current entry remains readable across later cache opens: true
+an unstamped legacy generation is swept and stamped current: true
+a future regime refuses an otherwise readable entry: true
+a refused future-regime open changes no entries: true
+a refused future-regime open does not rewrite its stamp: true

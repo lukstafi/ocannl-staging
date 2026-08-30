@@ -1120,10 +1120,10 @@ files.
     The exact production setter sequence (Safe followed by Fast functions) measured 0.991x default
     for 262144 threads x 128 fixed-count terms and 1.006x for one thread x 1048576 runtime-bound
     terms (GPU-clock medians, 21 rotated interleaved repeats). The legacy
-    `fastMathEnabled=false` also selects Precise functions, so the production state instead pins
+    `fastMathEnabled` property (set to false) also selects Precise functions, so the production state instead pins
     the two modern properties separately on macOS 15+. macOS 14 lacks those selectors; the backend
-    detects the Objective-C methods before constructing the pure state and uses
-    `fastMathEnabled=false` there as the safe, compatible fallback. `Compiler_options.metal` owns
+    detects the Objective-C methods before constructing the pure state and there falls back to
+    setting `fastMathEnabled` to false as the safe, compatible choice. `Compiler_options.metal` owns
     both ordered property sequences; `test_metal_compile_options` pins both API/debug variants
     GPU-free and
     `benchmarks/runners/ocannl/metal_reassoc_probe.ml` is the rerunnable measurement.
