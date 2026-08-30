@@ -108,6 +108,7 @@
   (alias runtest-backend_golden_family_scan)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-codegen_text_inventory_control)
   (alias runtest-agent_notes_structure)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
@@ -205,6 +206,7 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-codegen_text_inventory_control)
   (alias runtest-ocamlformat_ignore_scan)
   (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
@@ -1811,6 +1813,7 @@
   cache_dir_ignores_control.expected
   codegen_text_inventory.ml
   codegen_text_scan_cases.expected
+  codegen_text_inventory_control.expected
   codegen_text_inventory.expected
   config_dep_completeness.ml
   dune_scan_cases.expected
@@ -1845,7 +1848,7 @@
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
    codegen_text_inventory.ml
-   codegen_text_scan_cases.expected,codegen_text_inventory.expected
+   codegen_text_scan_cases.expected,codegen_text_inventory_control.expected,codegen_text_inventory.expected
    config_dep_completeness.ml
    dune_scan_cases.expected,config_dep_completeness.expected
    dead_export_scan.ml
@@ -2346,6 +2349,26 @@
   (alias runtest-env_spelling_gate))
  (action
   (diff codegen_text_inventory.expected codegen_text_inventory.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scanner's synthetic stale-exclusion refusal branch.
+ (target codegen_text_inventory_control.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  codegen_text_inventory.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:codegen_text_inventory.exe} --refusal-control))))
+
+(rule
+ (alias runtest-codegen_text_inventory_control)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff codegen_text_inventory_control.expected codegen_text_inventory_control.actual)))
 
 ; Interfaces built to break the emitter derivation: a library whose .mli declares every shape
 ; `Emitter_frontier` has to answer for, beside the near misses that decide the rule. Its second

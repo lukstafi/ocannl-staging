@@ -57,6 +57,7 @@ let raw_entries =
     ( "codegen_text_inventory.ml",
       [
         "[scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for";
+        "[scanner-refusal:b1a8055bff15f499f2f143975afca3d7] reaches the stale-exclusion";
         "[scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether";
         "[scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module";
         "[scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root";
@@ -311,8 +312,6 @@ let sources = List.map entries ~f:fst
 
 let raw_direct_evidence =
   [
-    ( "codegen_text_inventory.ml:83dfdd0395c402128515f27b2f3b1b1c",
-      "ok: source -- a predicate over the backend's NAME pins nothing, however it is spelled" );
     ( "codegen_text_inventory.ml:123bedafe19167d3536ddb2ca1115d21",
       "ok: source -- text the scan cannot name marks the itemisation partial, without losing the \
        file" );

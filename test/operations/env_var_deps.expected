@@ -128,6 +128,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-cache_dir_ignores
   test/operations/dune                     @runtest-cache_dir_ignores_control
   test/operations/dune                     @runtest-codegen_text_inventory
+  test/operations/dune                     @runtest-codegen_text_inventory_control
   test/operations/dune                     @runtest-config_dep_completeness
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
@@ -256,7 +257,7 @@ every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_
 Scanner refusal controls (gh-ocannl-800). Sources come from repository-wide scan rules;
 controls are *_cases.expected, *_control.expected, or a live scan golden with an explicit
 `Synthetic controls:` section. Printf substitutions do not decide coverage.
-  statically extracted diagnostics: 250 (details on stderr)
+  statically extracted diagnostics: 251 (details on stderr)
   named exemptions with reasons:
     (none)
 repository-wide scan rules resolve to scanner sources: true

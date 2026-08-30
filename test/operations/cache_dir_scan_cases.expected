@@ -31,13 +31,3 @@ ok: built-in default -- an empty default names no directory
 ok: built-in default -- another key's default is not this one's
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore
-  [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's
-  [scanner-refusal:88e191145bdba435fd0fb303d486d684] gitignore no longer
-  [scanner-refusal:3076fb53f1ae34b427f82aaa89404cb3] root gitignore pattern
-  [scanner-refusal:e2fdd92481a66b85f6f54b5c68513edd] sources this check
-  [scanner-refusal:cd6f72db4a56b656b92efd2c4a07945f] the cache directory
-  [scanner-refusal:a8ea78ba60f371d22646868a36871617] argument
-  [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads
-  [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default
-  [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory

@@ -90,7 +90,37 @@ let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
 
 module Dune = Test_utils.Dune_stanza_scan
 
+let stale_exclusions ~excluded ~handed_over =
+  List.filter excluded ~f:(fun (path, _) -> not (List.mem handed_over path ~equal:String.equal))
+
+let refuse_stale_exclusions ~fail stale =
+  List.iter stale ~f:(fun (path, reason) ->
+      fail
+        (Printf.sprintf
+           "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or \
+            fix the path it was meant to name"
+           path reason))
+
+let refusal_control () =
+  let source = "test/operations/codegen_text_inventory.ml" in
+  let refused = ref false in
+  let fail _message =
+    refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source
+      ~format:
+        "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or fix \
+         the path it was meant to name"
+  in
+  let stale = stale_exclusions ~excluded:[ ("gone.expected", "fixture") ] ~handed_over:[] in
+  refuse_stale_exclusions ~fail stale;
+  Verdict.p "an exclusion absent from the hand-over reaches the stale-exclusion refusal"
+    (!refused && List.length stale = 1);
+  Test_utils.Refusal_control_manifest.print source
+
 let () =
+  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+    refusal_control ();
+    Stdlib.exit 0);
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <file...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
@@ -146,15 +176,8 @@ let () =
             | None -> true))
   in
   let handed_over = List.map (golden_files @ source_files) ~f:fst in
-  let stale =
-    List.filter excluded ~f:(fun (path, _) -> not (List.mem handed_over path ~equal:String.equal))
-  in
-  List.iter stale ~f:(fun (path, reason) ->
-      Verdict.fail
-        (Printf.sprintf
-           "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or \
-            fix the path it was meant to name"
-           path reason));
+  let stale = stale_exclusions ~excluded ~handed_over in
+  refuse_stale_exclusions ~fail:Verdict.fail stale;
   let by_itself =
     List.filter_map golden_files ~f:(fun (name, on_disk) ->
         if is_excluded name then None else Scan.classify_golden ~path:name ~contents:(read on_disk))
