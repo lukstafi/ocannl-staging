@@ -30,6 +30,7 @@ shebang "#!/usr/bin/env python3" is outside this check's scope: true
 shebang "#!/usr/bin/perl" is outside this check's scope: true
 shebang "" is outside this check's scope: true
 shebang " #!/bin/bash" is outside this check's scope: true
+.github/actions/pin-revisions/resolve.sh parses: true
 benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
 benchmarks/gh612v_session.sh parses: true
@@ -43,6 +44,7 @@ tools/format-sweep.sh parses: true
 tools/opam-env.sh parses: true
 tools/promote.sh parses: true
 tools/sweep.sh parses: true
+tools/test-pin-revisions.sh parses: true
 tools/test-promote.sh parses: true
 tools/test-run.sh parses: true
 tools/test-test-run.sh parses: true

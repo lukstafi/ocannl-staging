@@ -166,6 +166,13 @@ jobs:
       if: runner.os == 'Linux'
       run: sudo apt-get update
     - uses: actions/checkout@v7
+    # Hermetic composite-action coverage belongs on the POSIX runner where the
+    # action's bash/sed/awk contract executes natively. It uses fake opam and
+    # git binaries, so it needs neither setup-ocaml nor network and adds no
+    # matrix-wide dependency-install cost.
+    - name: Test pin-revisions action
+      if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main'
+      run: tools/test-pin-revisions.sh
     - uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ matrix.ocaml-compiler }}
