@@ -21,7 +21,6 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 let is_gpu = Sched.backend_is_gpu backend_name
 
 let clean_cache dir =
@@ -82,7 +81,13 @@ let () =
      an empty seed list used to print the same `true` a hundred verified seeds print, so on cc this
      claim announced coverage it never had. The golden stays backend-independent either way. *)
   let claim = "mc: every unfused GPU tensorized seed compiles and computes correctly" in
-  if n_seeds = 0 then skipped claim
+  if n_seeds = 0 then
+    let aggregation =
+      match backend_name with
+      | ("cuda" | "hip") when not (Ir.Numerics.get ()).tf32_matmuls -> `Environment
+      | _ -> `Backend
+    in
+    Verdict.skipped ~aggregation ~backend:backend_name claim
   else
     p_all claim (List.init n_seeds ~f:Fn.id) ~f:(fun k ->
         let transform opt =
