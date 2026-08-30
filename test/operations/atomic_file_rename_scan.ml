@@ -199,4 +199,5 @@ let () =
     ~f:(fun { reason; _ } -> not (String.is_empty (String.strip reason)));
   Verdict.p_all "every named raw rename exemption matches exactly one live reference"
     exempt_references ~f:(fun exemption ->
-      Map.Poly.find !remaining (exemption_key exemption) |> Option.value ~default:0 |> Int.equal 0)
+      Map.Poly.find !remaining (exemption_key exemption) |> Option.value ~default:0 |> Int.equal 0);
+  Test_utils.Refusal_control_manifest.print "atomic_file_rename_scan.ml"

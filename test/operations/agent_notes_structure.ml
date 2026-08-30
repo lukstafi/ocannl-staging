@@ -157,4 +157,5 @@ let () =
   in
   List.iter stale ~f:(fun (key, reason) ->
       eprintf "  stale exemption for %s (%s): no bullet is flagged for it any more\n" key reason);
-  Verdict.p "every exemption still names a bullet that needs one" (List.is_empty stale)
+  Verdict.p "every exemption still names a bullet that needs one" (List.is_empty stale);
+  Test_utils.Refusal_control_manifest.print "agent_notes_structure.ml"

@@ -11,14 +11,16 @@
     names) win; otherwise the longest three-word run does. Values substituted by the failing run
     decide nothing. Thus an [(include_subdirs %s)] refusal contributes [include_subdirs], while a
     malformed marker refusal contributes a phrase naming that condition rather than a generic word.
-    A control golden is normalized the same way before matching. *)
+    Coverage uses a marker whose digest is over the complete normalized format, so two diagnostics
+    that happen to display the same fragment still need two control entries. *)
 
 open Base
 open Ppxlib.Parsetree
 module Ast_traverse = Ppxlib.Ast_traverse
+module Digest = Stdlib.Digest
 module Read = Config_key_scan
 
-type diagnostic = { line : int; fragment : string; format : string }
+type diagnostic = { line : int; fragment : string; format : string; identity : string }
 
 let normalize text =
   String.split_on_chars text ~on:[ ' '; '\t'; '\r'; '\n' ]
@@ -113,7 +115,7 @@ let fragment_of_format format =
 let last_name expression = Option.bind (Read.longident_of expression) ~f:List.last
 
 let refusal_callees =
-  [ "fail"; "p"; "p_all"; "p_none"; "p_exists"; "p_empty"; "claim"; "claimf"; "pass_fail" ]
+  [ "fail"; "p"; "pf"; "p_all"; "p_none"; "p_exists"; "p_empty"; "claim"; "claimf"; "pass_fail" ]
 
 let is_refusal expression =
   Option.value_map (last_name expression) ~default:false ~f:(fun name ->
@@ -163,8 +165,10 @@ let diagnostics content =
         | Some format -> (
             match fragment_of_format format with
             | Some fragment ->
+                let identity = Digest.string (normalize format) |> Digest.to_hex in
                 found :=
-                  { line = expression.pexp_loc.loc_start.pos_lnum; fragment; format } :: !found
+                  { line = expression.pexp_loc.loc_start.pos_lnum; fragment; format; identity }
+                  :: !found
             | None -> ())
         | None -> ());
         super#expression expression
@@ -173,8 +177,11 @@ let diagnostics content =
   iterator#structure (Read.structure_of content);
   List.rev !found
 
+let marker diagnostic =
+  Printf.sprintf "[scanner-refusal:%s] %s" diagnostic.identity diagnostic.fragment
+
 let covered ~control_text diagnostic =
-  String.is_substring (normalize control_text) ~substring:diagnostic.fragment
+  String.is_substring control_text ~substring:(marker diagnostic)
 
 let orphans ~control_text diagnostics =
   List.filter diagnostics ~f:(fun diagnostic -> not (covered ~control_text diagnostic))

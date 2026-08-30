@@ -1560,4 +1560,5 @@ let () =
       | exception _ -> printf "ok: refused -- %s\n" name
       | sites ->
           fail "refused -- %s: read the file as %d sites instead of refusing it" name
-            (List.length sites))
+            (List.length sites));
+  Test_utils.Refusal_control_manifest.print "config_dep_completeness.ml"

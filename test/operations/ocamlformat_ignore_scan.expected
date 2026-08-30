@@ -10,3 +10,14 @@ a concatenated append is refused in both directions, naming the nonexistent entr
 a missing trailing newline is refused with its append-corruption diagnostic: true
 a blank line is refused as a line containing no path: true
 an undeclared file present in the build root is refused as a stale artifact: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:e1f2fc5fc55abe7d73725c939c81a516] ocamlformat-ignore ends in
+  [scanner-refusal:d936cdade68aaf6cb4f1a8a0bfc17655] ocamlformat-ignore line contains
+  [scanner-refusal:cf335754f478997f3146ae0063d7d03e] every ocamlformat-ignore entry
+  [scanner-refusal:2e170f2ab6d02300e60fc334c88d3481] every ppx-expectation golden
+  [scanner-refusal:bd075431f78cab212b8ec01cde19088f] complete fixture with
+  [scanner-refusal:050d763773d2e7b11b18179905cf9981] concatenated append is
+  [scanner-refusal:f111a87fee55ca52831220a49495432a] its append-corruption diagnostic
+  [scanner-refusal:d3e7969b1266fa6b311234da304986db] line containing no
+  [scanner-refusal:4186a2cb3aaa270f0e693d87e91d2e2d] undeclared file present

@@ -764,4 +764,6 @@ let () =
   List.iter could_read_cases ~f:(fun (name, source, expected) ->
       let found = Scan.could_read_env_var source in
       if Bool.equal found expected then printf "ok: could read the environment -- %s\n" name
-      else fail "could read the environment -- %s: expected %b, found %b" name expected found)
+      else fail "could read the environment -- %s: expected %b, found %b" name expected found);
+  List.iter [ "digest_completeness.ml"; "test_config_consistency.ml" ] ~f:(fun source ->
+      Test_utils.Refusal_control_manifest.print source)

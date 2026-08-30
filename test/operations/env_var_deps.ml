@@ -87,6 +87,7 @@ open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
 module Refusals = Test_utils.Refusal_control_scan
+module Refusal_manifest = Test_utils.Refusal_control_manifest
 
 (* Declarations of a name OCANNL does not read as a configuration key. Keyed by "<dune
    file>:<name>", and each entry earns its place on every run (see the staleness check below): a
@@ -713,10 +714,7 @@ let refuse name =
     Refusals.orphans ~control_text:"a legitimate control about something else" diagnostics
   in
   let covered =
-    Refusals.orphans
-      ~control_text:
-        "the scanner refusal appears in no permanent control golden -- add a negative control"
-      diagnostics
+    Refusals.orphans ~control_text:(Refusals.marker (List.hd_exn diagnostics)) diagnostics
   in
   printf
     "The refusal relationship is put to a synthesized `Verdict.fail` format. Its stable fragment\n\
@@ -753,9 +751,10 @@ let main () =
   in
   let control_goldens =
     List.filter expected_files ~f:(fun (path, on_disk) ->
-        String.is_suffix path ~suffix:"_cases.expected"
-        || String.is_suffix path ~suffix:"_control.expected"
-        || String.is_substring (In_channel.read_all on_disk) ~substring:"Synthetic controls:")
+        (not (String.is_suffix path ~suffix:"refusal_control_scan_cases.expected"))
+        && (String.is_suffix path ~suffix:"_cases.expected"
+           || String.is_suffix path ~suffix:"_control.expected"
+           || String.is_substring (In_channel.read_all on_disk) ~substring:"Synthetic controls:"))
   in
   let control_text =
     String.concat ~sep:"\n"
@@ -2075,7 +2074,7 @@ let main () =
   let refusal_exemptions : (string * string) list = [] in
   let exemption_map = Map.of_alist_exn (module String) refusal_exemptions in
   let refusal_exemptions_used = ref (Set.empty (module String)) in
-  let refusal_key source diagnostic = source ^ ":" ^ diagnostic.Refusals.fragment in
+  let refusal_key source diagnostic = source ^ ":" ^ diagnostic.Refusals.identity in
   let orphan_refusals =
     List.filter refusal_diagnostics ~f:(fun (source, diagnostic) ->
         if Refusals.covered ~control_text diagnostic then false
@@ -4098,5 +4097,6 @@ let () =
       control ();
       floor_control ();
       guard_control ();
-      family_control ()
+      family_control ();
+      Refusal_manifest.print "env_var_deps.ml"
   | _ -> main ()

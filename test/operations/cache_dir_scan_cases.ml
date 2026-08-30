@@ -180,4 +180,5 @@ let () =
       if List.equal String.equal found expected then printf "ok: built-in default -- %s\n" name
       else
         fail "built-in default -- %s: expected [%s], found [%s]" name (render expected)
-          (render found))
+          (render found));
+  Test_utils.Refusal_control_manifest.print "cache_dir_ignores.ml"

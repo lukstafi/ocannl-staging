@@ -209,4 +209,5 @@ let () =
   let counted = Scan.scan {ocaml|let unapplied = "c"
 let () = printf "a" "b"|ocaml} in
   Verdict.p "the walk counts every string literal it passes" (counted.Scan.literals = 3);
-  Verdict.p "and places the ones a named function receives" (counted.Scan.applied_literals = 2)
+  Verdict.p "and places the ones a named function receives" (counted.Scan.applied_literals = 2);
+  Test_utils.Refusal_control_manifest.print "verdict_ratchet.ml"

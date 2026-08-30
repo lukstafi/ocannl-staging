@@ -652,4 +652,5 @@ let () =
           -1
       in
       if expected = found then printf "ok: rejection -- %s\n" name
-      else fail "rejection -- %s: expected %d refusals, found %d" name expected found)
+      else fail "rejection -- %s: expected %d refusals, found %d" name expected found);
+  Test_utils.Refusal_control_manifest.print "codegen_text_inventory.ml"

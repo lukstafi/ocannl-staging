@@ -648,4 +648,5 @@ let () =
   let scanned = Set.of_list (module String) (List.map scripts ~f:fst) in
   let missing = List.filter must_be_scanned ~f:(Fn.non (Set.mem scanned)) in
   List.iter missing ~f:(fun rel -> eprintf "not reached by the scan: %s\n" rel);
-  Verdict.p "the scan reached the session hook and the suite runner" (List.is_empty missing)
+  Verdict.p "the scan reached the session hook and the suite runner" (List.is_empty missing);
+  Test_utils.Refusal_control_manifest.print "shell_scripts_parse.ml"

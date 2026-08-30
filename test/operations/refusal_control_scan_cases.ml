@@ -4,6 +4,7 @@
 open Base
 open Stdio
 module Scan = Test_utils.Refusal_control_scan
+module Manifest = Test_utils.Refusal_control_manifest
 
 let () =
   let source =
@@ -25,27 +26,30 @@ let applied name =
 let quantified xs =
   Verdict.p_all "every refusal control remains related to its diagnostic" xs ~f:Fn.id
 
+let formatted_claim name ok = Verdict.pf "%s refusal stays live" name ok
+
 let prose = "Verdict.fail \"quoted code is not an application\""
 let dynamic reason = Verdict.fail reason
 |ocaml}
   in
   let diagnostics = Scan.diagnostics source in
   let fragments = List.map diagnostics ~f:(fun diagnostic -> diagnostic.Scan.fragment) in
-  Verdict.p_all ~min:4 "direct, formatted, `@@`, and quantified refusal formats are extracted"
+  Verdict.p_all ~min:5 "direct, formatted, `@@`, quantified, and `pf` refusal formats are extracted"
     diagnostics ~f:(fun diagnostic -> not (String.is_empty diagnostic.Scan.fragment));
   Verdict.p "comments, quoted code, and a dynamic value contribute no diagnostic string constant"
-    (List.length diagnostics = 4);
+    (List.length diagnostics = 5);
   Verdict.p "Printf substitutions are holes and a stable literal fragment becomes the fragment"
     (List.mem fragments "formatted_relationship" ~equal:String.equal);
   let one = List.hd_exn diagnostics in
   Verdict.p "an absent fragment is an orphan"
     (List.length (Scan.orphans ~control_text:"" [ one ]) = 1);
-  Verdict.p "the same fragment in a control golden covers it"
-    (List.is_empty (Scan.orphans ~control_text:one.fragment [ one ]));
-  Verdict.p "control matching normalizes line wrapping and repeated whitespace"
-    (List.is_empty
-       (Scan.orphans ~control_text:"a direct scanner refusal\n    has a permanent diagnostic"
-          [ one ]));
+  Verdict.p "the diagnostic's unique marker in a control golden covers it"
+    (List.is_empty (Scan.orphans ~control_text:(Scan.marker one) [ one ]));
+  let colliding_fragment =
+    { one with Scan.format = one.format ^ " elsewhere"; identity = "other" }
+  in
+  Verdict.p "two diagnostics sharing a display fragment still require distinct controls"
+    (List.length (Scan.orphans ~control_text:(Scan.marker one) [ one; colliding_fragment ]) = 1);
   let arguments = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1) in
   let rec pairs = function
     | source :: control :: rest -> (source, control) :: pairs rest
@@ -58,14 +62,13 @@ let dynamic reason = Verdict.fail reason
   pairs arguments
   |> List.iter ~f:(fun (source, control) ->
       let control_text = In_channel.read_all control in
-      let has_gated_result =
-        String.split_lines control_text
-        |> List.exists ~f:(fun line ->
-            String.is_prefix line ~prefix:"ok:" || String.is_suffix line ~suffix:": true")
-      in
-      Scan.diagnostics (In_channel.read_all source)
+      let diagnostics = Scan.diagnostics (In_channel.read_all source) in
+      let extracted = List.map diagnostics ~f:Scan.marker in
+      Verdict.p
+        (Printf.sprintf "%s has exactly the explicitly assigned refusal controls" source)
+        (List.equal String.equal extracted (Manifest.markers source));
+      diagnostics
       |> List.iter ~f:(fun diagnostic ->
           Verdict.p
-            (Printf.sprintf "%s: `%s` is catalogued beside %s" source diagnostic.Scan.fragment
-               control)
-            has_gated_result))
+            (Printf.sprintf "%s: %s is catalogued beside %s" source (Scan.marker diagnostic) control)
+            (Scan.covered ~control_text diagnostic)))

@@ -253,6 +253,7 @@ let control () =
     (refused "stale artifact"
        ~messages:[ "listed path `build/stale_expected.ml` is not a declared source file" ]
        stale_artifact);
+  Test_utils.Refusal_control_manifest.print "ocamlformat_ignore_scan.ml";
   remove_tree fixture
 
 let usage () =

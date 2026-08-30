@@ -1749,7 +1749,10 @@
  ; ocannl-backend: none -- links no backend: it reads embedded OCaml snippets through Config_key_scan as text.
  (name config_scan_lexing)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  digest_completeness.ml
+  test_config_consistency.ml)
  (modules config_scan_lexing)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -1760,7 +1763,9 @@
  ; ocannl-backend: none -- links no backend: it reads embedded dune-file text through Dune_stanza_scan as text.
  (name dune_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  config_dep_completeness.ml)
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -1778,6 +1783,8 @@
   atomic_file_rename_scan.expected
   agent_notes_structure.ml
   agent_notes_structure.expected
+  backend_golden_family_scan.ml
+  backend_golden_family_scan.expected
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
   codegen_text_inventory.ml
@@ -1804,6 +1811,8 @@
    atomic_file_rename_scan.expected
    agent_notes_structure.ml
    agent_notes_structure.expected
+   backend_golden_family_scan.ml
+   backend_golden_family_scan.expected
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected
    codegen_text_inventory.ml
@@ -2278,7 +2287,9 @@
  ; ocannl-backend: none -- links no backend: the fixtures are embedded strings it classifies as text.
  (name codegen_text_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  codegen_text_inventory.ml)
  (modules codegen_text_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2307,7 +2318,9 @@
  ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
  (name cache_dir_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  cache_dir_ignores.ml)
  (modules cache_dir_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2315,7 +2328,9 @@
  ; ocannl-backend: none -- links no backend: it reads embedded format strings through Verdict_scan as text.
  (name verdict_scan_cases)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  verdict_ratchet.ml)
  (modules verdict_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -4105,7 +4120,7 @@
 (executable
  (name ocamlformat_ignore_scan)
  (modules ocamlformat_ignore_scan)
- (libraries base stdio unix arrayjit.verdict))
+ (libraries base stdio unix test_utils arrayjit.verdict))
 
 (rule
  ; ocannl-backend: none -- reads path lists and file existence only, and links no backend.

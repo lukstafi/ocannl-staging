@@ -177,12 +177,14 @@ that they earn a lookup rather than always-loaded space.
   gh-ocannl-800 adds the corresponding refusal ratchet. `env_var_deps` derives scanner sources from
   the repository-wide rules through the shared `per_directory` traversal, extracts literal formats
   handed to `Verdict.fail` or a Verdict claim form (including `Printf` formats, with substitutions
-  removed), and requires a stable fragment of each in a permanent control golden.
-  `refusal_control_scan_cases.expected` is
-  the reviewable source-to-control-suite catalogue; changing or adding a refusal therefore fails
-  until that golden records it, while the test's absent-fragment arm proves an omitted entry is an
-  orphan. Dynamic strings returned by helpers have no scanner-owned literal to extract and stay
-  outside this syntactic contract; exact exemptions, when one is deliberate, are stale-checked.
+  removed), and requires a unique full-format marker plus its readable fragment in the scanner's
+  assigned permanent control golden. `Refusal_control_manifest` is the explicit bridge: a new
+  diagnostic is absent from it by default, and `refusal_control_scan_cases.expected` holds the
+  manifest equal to the mechanical extraction and every entry present in the assigned golden. That
+  audit catalogue is excluded from the evidence corpus, so it cannot answer for itself. The
+  absent-marker and colliding-fragment arms prove both failure directions. Dynamic strings returned
+  by helpers have no scanner-owned literal to extract and stay outside this syntactic contract;
+  exact exemptions, when one is deliberate, are stale-checked.
   Four shapes such a scan gets wrong quietly, all found in review, and each is a member of a genre
   rather than a one-off. **Identifiers**: a scan that matches a function through the module it
   belongs to must collect the module's local names from BOTH grammars — OCaml spells binding,

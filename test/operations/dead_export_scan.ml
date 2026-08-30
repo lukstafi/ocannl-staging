@@ -413,4 +413,5 @@ let () =
   Verdict.p "named dead-export exemptions are unique"
     (Set.length exemptions = List.length exempt_zero_reference_exports);
   Verdict.p_empty "every named dead-export exemption remains necessary"
-    ~over:exempt_zero_reference_exports stale
+    ~over:exempt_zero_reference_exports stale;
+  Test_utils.Refusal_control_manifest.print "dead_export_scan.ml"
