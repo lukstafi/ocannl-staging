@@ -19,6 +19,10 @@ type compile_frontier = {
       (** For each tnode, the routine_id of the most recent routine that writes it. *)
   last_readers : Set.M(Int).t Map.M(Tn).t;
       (** For each tnode, the set of routine_ids that read it since the last write. *)
+  merge_buffer_writer : (Tn.t * int) option;
+      (** The node and synthetic routine id of the most recent merge-buffer transfer in this
+          compilation lineage. Unlike [last_writer], this names the transient merge slab write, not
+          a write to the node's ordinary context buffer. *)
 }
 (** Immutable compile-time frontier for execution dependency tracking. Each context carries its own
     frontier; only the context returned by [compile] receives the updated frontier. The original
@@ -41,7 +45,12 @@ type execution_ledger = {
 (** Shared mutable state for execution tracking, allocated once per root context. Shared by
     reference across all contexts derived from the same root. *)
 
-let empty_frontier = { last_writer = Map.empty (module Tn); last_readers = Map.empty (module Tn) }
+let empty_frontier =
+  {
+    last_writer = Map.empty (module Tn);
+    last_readers = Map.empty (module Tn);
+    merge_buffer_writer = None;
+  }
 
 let create_ledger () =
   {
@@ -207,19 +216,35 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
       ctx.ledger.next_id <- id + 1;
 
       (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
-         materialized read-only and read-before-write nodes. A merge-buffer input is a real read
-         edge too, even though its transient slab is not an ordinary context input requiring
-         initialization. [backend_outputs] = all materialized written-to nodes. *)
+         materialized read-only and read-before-write nodes. A merge-buffer input is a separate read
+         of the transfer slab: it depends on the synthetic transfer routine recorded by [copy], not
+         on a writer of the node's ordinary context buffer. [backend_outputs] = all materialized
+         written-to nodes. *)
       let frontier = ctx.frontier in
       let empty_int_set = Set.empty (module Int) in
-      let dependency_inputs = Option.fold merge_buffer_input ~init:backend_inputs ~f:Set.add in
 
-      (* RAW: for each ordinary or merge-buffer input, depend on its last writer *)
+      (* RAW: for each ordinary input, depend on its last writer. *)
       let deps =
-        Set.fold dependency_inputs ~init:empty_int_set ~f:(fun deps tn ->
+        Set.fold backend_inputs ~init:empty_int_set ~f:(fun deps tn ->
             match Map.find frontier.last_writer tn with
             | Some writer_id -> Set.add deps writer_id
             | None -> deps)
+      in
+
+      (* The backend's static merge-node check has already established the same node identity on its
+         wrapped context. Mirror that invariant in the execution frontier and attach the consumer to
+         the transfer routine that actually filled the slab. *)
+      let deps =
+        match (merge_buffer_input, frontier.merge_buffer_writer) with
+        | None, _ -> deps
+        | Some input, Some (transferred, transfer_id) when Tn.equal input transferred ->
+            Set.add deps transfer_id
+        | Some input, _ ->
+            failwith
+              (Printf.sprintf
+                 "Context.compile: backend accepted merge-buffer input %s without a matching \
+                  execution-frontier transfer"
+                 (Tn.debug_name input))
       in
 
       (* WAW + WAR: for each backend output, depend on last writer and all last readers *)
@@ -243,13 +268,15 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
       let new_last_readers =
         Set.fold backend_outputs ~init:frontier.last_readers ~f:(fun lr tn -> Map.remove lr tn)
       in
-      let pure_inputs = Set.diff dependency_inputs backend_outputs in
+      let pure_inputs = Set.diff backend_inputs backend_outputs in
       let new_last_readers =
         Set.fold pure_inputs ~init:new_last_readers ~f:(fun lr tn ->
             let existing = Option.value (Map.find lr tn) ~default:empty_int_set in
             Map.set lr ~key:tn ~data:(Set.add existing id))
       in
-      let new_frontier = { last_writer = new_last_writer; last_readers = new_last_readers } in
+      let new_frontier =
+        { frontier with last_writer = new_last_writer; last_readers = new_last_readers }
+      in
 
       (* Register in shared ledger *)
       Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
@@ -637,6 +664,34 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
              (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
                 (Tn.debug_name tn) what)
   in
+  (* A same-backend merge transfer reads the source node immediately. If that source context was
+     obtained by compiling a writer but the writer has not run, device synchronization has no event
+     to wait for and the transfer would silently copy the old/zero buffer. This is a cross-lineage
+     edge, so it cannot live in the destination routine's integer dependency set; enforce it before
+     scheduling the transfer. *)
+  let check_merge_source_ready () =
+    match Map.find src.frontier.last_writer tn with
+    | Some writer_id when not (Set.mem src.ledger.executed writer_id) ->
+        let writer_name =
+          Option.value (Hashtbl.find src.ledger.routine_names writer_id) ~default:"<unknown>"
+        in
+        failwith
+          (Printf.sprintf
+             "Context.copy: cannot fill the merge buffer from node %s before source writer %s \
+              (id=%d) executes"
+             (Tn.debug_name tn) writer_name writer_id)
+    | _ -> ()
+  in
+  (* [Context.copy] schedules transfers eagerly, so by the time it returns this synthetic routine is
+     executed. Keeping its id in the immutable destination frontier still gives a later merge-buffer
+     consumer the real read edge; it also preserves sibling-compilation semantics. *)
+  let record_merge_transfer dst ~name =
+    let transfer_id = dst.ledger.next_id in
+    dst.ledger.next_id <- transfer_id + 1;
+    Hashtbl.set dst.ledger.routine_names ~key:transfer_id ~data:name;
+    dst.ledger.executed <- Set.add dst.ledger.executed transfer_id;
+    { dst with frontier = { dst.frontier with merge_buffer_writer = Some (tn, transfer_id) } }
+  in
   let same (type d r e) (impl : (d, r, e) Backends.backend_impl) (sctx : (d, r, e) BI.context)
       (dctx : (d, r, e) BI.context) =
     let (module Backend) = impl.Backends.bi_module in
@@ -646,11 +701,14 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
         (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the device
            as usual. For [Copy], the rewrapped [r.context] is what carries [merge_buffer_node = Some
            tn] into the next [compile]'s static merge-node check (gh-ocannl-288). *)
+        (match into_merge_buffer with
+        | BI.No -> ()
+        | BI.Copy -> check_merge_source_ready ());
         Ir.Task.run r.BI.schedule;
         let dst = { dst with wrapped = rewrap r.BI.context } in
         match into_merge_buffer with
         | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
-        | BI.Copy -> dst)
+        | BI.Copy -> record_merge_transfer dst ~name:r.BI.name)
     | None ->
         if not (Map.mem sctx.BI.ctx_buffers tn) then
           host_roundtrip "the node is absent from the source context"

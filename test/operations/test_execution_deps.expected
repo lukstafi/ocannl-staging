@@ -34,8 +34,7 @@ copy out refused, names the routine: true, names the cause: true
 copy in refused, names the routine: true, names the cause: true
 
 === Test 8: merge-buffer read dependency ===
-merge consumer depends on prior writer: true
-cannot run merge consumer before writer: true
-out-of-order merge consumer is refused by Context.run: true
-can run merge consumer after writer: true
+merge transfer refuses an unexecuted source writer: true
+merge consumer has exactly the transfer dependency: true
+merge consumer can run after the transfer: true
 merge consumer reads the transferred values: true
