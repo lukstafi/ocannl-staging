@@ -60,6 +60,14 @@ let () =
   p "a mostly stalled sample window reports contention" burst.contended;
   p "queued calibration refuses a contended estimate"
     (Option.is_none (Autotune.queued_batch_depth burst));
+  p "a refused positive timing cannot enter ranking or calibration"
+    (Option.is_none (Autotune.admitted_timing_ms { ms = 0.0002; contended = true; samples = 16 }));
+  let sample, _ = sample_from [] 0. in
+  let unresolved = Autotune.sample_min ~repeats:3 ~sample in
+  p "an unresolved zero clock window is refused as degenerate"
+    (unresolved.contended
+    && Option.is_none (Autotune.admitted_timing_ms unresolved)
+    && Option.is_none (Autotune.queued_batch_depth unresolved));
   let stalled : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 30. } in
   let clean : Autotune.timing_sample = { per_launch_ms = 0.05; contention_ms = 10. } in
   let sample, _ = sample_from_samples (List.init 63 ~f:(fun _ -> stalled)) clean in
@@ -96,12 +104,16 @@ let depth_cases =
     ("a 0.1 ms routine", 0.1, 100);
     ("a 0.05 ms routine, exactly at the cap", 0.05, 200);
     ("a 1 us routine, past the cap", 0.001, 200);
-    ("an infinitely slow routine", Float.infinity, 1);
-    ("a clock that resolved nothing (zero)", 0., 200);
-    ("a clock that resolved nothing (nan)", Float.nan, 200);
     (* Saturates rather than raising: the ratio here is past the integer range, so a cap applied
        after the float-to-int conversion would raise instead of capping. *)
     ("a subnormal estimate", Float.min_positive_subnormal_value, 200);
+  ]
+
+let refused_depth_cases =
+  [
+    ("an infinitely slow routine", Float.infinity);
+    ("a clock that resolved nothing (zero)", 0.);
+    ("a clock that resolved nothing (nan)", Float.nan);
   ]
 
 let () =
@@ -114,6 +126,14 @@ let () =
           (Option.value_map got ~default:"refused" ~f:Int.to_string)
           want;
       Option.equal Int.equal got (Some want));
+  Verdict.p_all "every degenerate calibration estimate is refused" refused_depth_cases
+    ~f:(fun (what, est_ms) ->
+      let result : Autotune.timing_result = { ms = est_ms; contended = false; samples = 16 } in
+      let admitted = Autotune.admitted_timing_ms result in
+      let depth = Autotune.queued_batch_depth result in
+      if Option.is_some admitted || Option.is_some depth then
+        Stdio.eprintf "  %s: est %g ms was admitted\n%!" what est_ms;
+      Option.is_none admitted && Option.is_none depth);
   (* The floor and the cap are the two claims a scaling-only implementation would still pass, so
      they are also asserted as the properties they are, over the same population. *)
   Verdict.p_all "no calibration estimate ever yields a depth below 1" depth_cases

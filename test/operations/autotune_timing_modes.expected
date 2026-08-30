@@ -3,6 +3,8 @@ a fast routine reaches the 64-sample cap: true
 a stall burst cannot spend the budget before the 16-sample floor: true
 a mostly stalled sample window reports contention: true
 queued calibration refuses a contended estimate: true
+a refused positive timing cannot enter ranking or calibration: true
+an unresolved zero clock window is refused as degenerate: true
 queued contention is detected on raw batch wall before per-launch division: true
 a consistently slow routine is not mistaken for host contention: true
 the top-up budget accumulates per-sample time: true
@@ -11,6 +13,7 @@ a contention-refused window prevents caching an incomplete winner: true
 a search with no measured winner remains uncacheable: true
 == queued batch depth ==
 every calibration estimate gets the depth the policy owes it: true
+every degenerate calibration estimate is refused: true
 no calibration estimate ever yields a depth below 1: true
 no calibration estimate ever yields a depth above the cap: true
 

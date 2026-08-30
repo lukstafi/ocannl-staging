@@ -57,6 +57,12 @@ type timing_sample = { per_launch_ms : float; contention_ms : float }
    cannot silently consume it as an ordinary measurement (gh-ocannl-855). *)
 type timing_result = { ms : float; contended : bool; samples : int }
 
+(* The one admission gate for a timing verdict. Keeping this next to the result type prevents a
+   caller from proving only one half of usability (usually [not contended]) and accidentally feeding
+   an unresolved zero/NaN clock reading to ranking or the roofline consistency check. *)
+let admitted_timing_ms { ms; contended; samples = _ } =
+  if contended || (not (Float.is_finite ms)) || not (Float.is_positive ms) then None else Some ms
+
 let timing_string = function Isolated -> "isolated" | Queued -> "queued"
 
 let timing_of_setting s =
@@ -303,7 +309,8 @@ let sample_min ~repeats ~sample =
   let stalled =
     List.count !samples ~f:(fun s -> Float.(s.contention_ms > contention_floor * contention_ratio))
   in
-  { ms; contended = stalled * 2 >= !count; samples = !count }
+  let degenerate = (not (Float.is_finite ms)) || not (Float.is_positive ms) in
+  { ms; contended = degenerate || stalled * 2 >= !count; samples = !count }
 
 (* A usable winner drawn from an incomplete measurement set may ship for this call, but must not
    become the answer to every later call through the schedule cache. A later idle process needs to
@@ -335,21 +342,17 @@ let queue_calibration_runs = 3
    device: what [Queued] measures depends on it, and its two boundaries are the ones a regression
    would silently cross -- a depth stuck at 1 turns a queued search back into an isolated one, and
    an uncapped depth turns a microsecond kernel's batch into an unbounded dispatch. A non-positive
-   or NaN estimate is a clock that resolved nothing, not a zero-cost kernel: batch as deeply as the
-   cap allows rather than degenerating on the very routines queueing exists for. An infinite one is
-   not that case and is left to the arithmetic, which floors it at depth 1 — an unboundedly slow
-   routine is the far end of the scale the policy is FOR, not a reading it failed to take. The cap
-   is applied to the FLOAT, before the conversion: [Float.iround_up_exn] raises on a value outside
-   the integer range, and an estimate of a few times [Float.min_positive_subnormal_value] produces
-   exactly such a value — the clamp has to happen while the quantity can still hold it. *)
+   or non-finite estimate is a clock that resolved nothing, not a zero-cost or infinitely slow
+   kernel: refuse it through the same admission gate as the search. The cap is applied to the FLOAT,
+   before the conversion: [Float.iround_up_exn] raises on a value outside the integer range, and an
+   estimate of a few times [Float.min_positive_subnormal_value] produces exactly such a value — the
+   clamp has to happen while the quantity can still hold it. *)
 let queued_batch_depth estimate =
-  if estimate.contended then None
-  else
-    let est_ms = estimate.ms in
-    Some
-      (if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
-       else
-         let want = queued_batch_ms /. est_ms in
+  match admitted_timing_ms estimate with
+  | None -> None
+  | Some est_ms ->
+      Some
+        (let want = queued_batch_ms /. est_ms in
          if Float.(want >= of_int max_queue_depth) then max_queue_depth
          else Int.max 1 (Float.iround_up_exn want))
 
@@ -1032,7 +1035,7 @@ let bound_prunable = function
   | Whole (W_sketch _) | Fiss (F_sketch _) | Fiss (F_split _) -> true
   | _ -> false
 
-let emit_calibration ~backend ~device ~limits ~routine ~label ~digest ~measured_ms
+let emit_calibration_unchecked ~backend ~device ~limits ~routine ~label ~digest ~measured_ms
     (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
   (* Everything this emits names the computation as well as the candidate (gh-ocannl-635): a process
@@ -1135,6 +1138,10 @@ let emit_calibration ~backend ~device ~limits ~routine ~label ~digest ~measured_
         Stdio.Out_channel.with_file file ~append:true ~f:(fun oc ->
             Stdio.Out_channel.output_string oc line)
       with _ -> logf "calibration: cannot append to %s" file)
+
+let emit_calibration ~backend ~device ~limits ~routine ~label ~digest ~timing_result opts =
+  Option.iter (admitted_timing_ms timing_result) ~f:(fun measured_ms ->
+      emit_calibration_unchecked ~backend ~device ~limits ~routine ~label ~digest ~measured_ms opts)
 
 (* Whether the spec's label promises a tensorized pipeline — used to flag "no Tile_mma emitted"
    census anomalies (gh-ocannl-479). *)
@@ -3067,6 +3074,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
            fallback at the end), and a declined baseline ranks the same way. *)
         let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
         let baseline_contended = ref false in
+        let baseline_timing_result = ref None in
         let baseline_ms =
           match baseline with
           | Some b when baseline_dispatched -> (
@@ -3109,11 +3117,17 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     Context.check_lineage_runnable b.cctx b.routine);
                 time_routine ~tag_failures:true ~timing ~repeats b.cctx b.routine
               with
-              | { ms; contended = false; _ } -> ms
-              | { contended = true; _ } ->
-                  baseline_contended := true;
-                  logf "baseline timing refused: host contention dominated the sample window";
-                  Float.infinity
+              | timing_result -> (
+                  match admitted_timing_ms timing_result with
+                  | Some ms ->
+                      baseline_timing_result := Some timing_result;
+                      ms
+                  | None ->
+                      baseline_contended := true;
+                      logf
+                        "baseline timing refused: contention or a degenerate clock reading made \
+                         the sample window unusable";
+                      Float.infinity)
               | exception Outcome.Raised_at (phase, exn, backtrace) ->
                   condemn phase exn;
                   emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
@@ -3145,7 +3159,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
             if baseline_timed then (
               logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
               emit_calibration ~backend ~device ~limits ~routine:(Lazy.force routine_name)
-                ~label:"baseline" ~digest:base_digest ~measured_ms:baseline_ms [ base_opt ])
+                ~label:"baseline" ~digest:base_digest
+                ~timing_result:(Option.value_exn !baseline_timing_result)
+                [ base_opt ])
             else if baseline_dispatched then release_baseline ()
             else (
               (* No calibration row: the model column is only meaningful next to a measurement. *)
@@ -3480,12 +3496,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                         ~candidate:(spec_label spec) (fun () ->
                           time_routine ~tag_failures:true ~timing ~repeats c.cctx c.routine)
                     with
-                    | Ok { contended = true; _ } ->
+                    | Ok timing_result when Option.is_none (admitted_timing_ms timing_result) ->
                         (* The family counters answer whether a candidate compiled and reached a
                            timing window, independently of whether that window yielded a usable
-                           verdict. Keep that accounting stable under contention; the aggregate
-                           [timings_contended] counter says why this particular timing cannot be
-                           admitted. *)
+                           verdict. Keep that accounting stable under refusal; the historical
+                           [timings_contended] counter covers every unusable timing result. *)
                         (match spec with
                         | Fiss (F_sketch _) -> Int.incr n_fiss_sketch_timed
                         | Fiss (F_split { sites }) ->
@@ -3498,11 +3513,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                            schedule. An equivalent later seed is a useful retry, not a dedup. *)
                         Hash_set.remove seen c.digest_after;
                         logf
-                          "%s: NOT TIMED, host contention dominated the sample window (digest %s)"
+                          "%s: NOT TIMED, contention or a degenerate clock reading made the sample \
+                           window unusable (digest %s)"
                           (spec_label spec) (dshort c.digest_after);
                         release_candidate c;
                         None
-                    | Ok { ms; contended = false; _ } ->
+                    | Ok timing_result ->
+                        let ms = Option.value_exn (admitted_timing_ms timing_result) in
                         Int.incr n_timed;
                         Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
                         Hashtbl.set label_by_digest ~key:c.digest_after ~data:(spec_label spec);
@@ -3518,7 +3535,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                         then mma_best_ms := ms;
                         logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                         emit_calibration ~backend ~device ~limits ~routine:(Lazy.force routine_name)
-                          ~label:(spec_label spec) ~digest:c.digest_after ~measured_ms:ms c.all_opts;
+                          ~label:(spec_label spec) ~digest:c.digest_after ~timing_result c.all_opts;
                         (* The rendering census next to the timing (gh-ocannl-479): a candidate
                            labeled tensorized whose [Tile_mma] statements all declined at emission
                            timed the scalar fallback — report it, or every number off this tuning
@@ -3817,8 +3834,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                   Int.incr n_sr_timed;
                   sr_single_results := (s, b, ms) :: !sr_single_results;
                   (* Keep the live report honest if a later seed dies before the post-seed
-                     recombination step. Eligibility is about usable singles already collected,
-                     not about whether control reached composite proposal. *)
+                     recombination step. Eligibility is about usable singles already collected, not
+                     about whether control reached composite proposal. *)
                   update_sr_composite_eligible ()
               | Fiss (F_split _), Some _ -> Int.incr n_sr_timed
               | _ -> ());
@@ -3974,15 +3991,15 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
              schedule. *)
           let nothing_timed = Float.is_inf best_ms in
           (if use_cache then
-             if not
-                  (search_measurements_cacheable ~nothing_timed
-                     ~timings_contended:!n_timings_contended)
+             if
+               not
+                 (search_measurements_cacheable ~nothing_timed
+                    ~timings_contended:!n_timings_contended)
              then
                if nothing_timed then
                  logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
                else
-                 logf
-                   "%d timing window(s) were refused for host contention: storing no cache entry"
+                 logf "%d timing window(s) were refused as unusable: storing no cache entry"
                    !n_timings_contended
              else
                let saved, segments, finer_fission =
@@ -4024,10 +4041,13 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
              match Context.compile ?name search_ctx comp bindings with
              | cctx, croutine ->
                  (match time_routine ~timing ~repeats cctx croutine with
-                 | { ms; contended = false; _ } ->
-                     logf "untuned-default in-process control: %.4f ms" ms
-                 | { contended = true; _ } ->
-                     logf "untuned-default in-process control: refused (host contention)"
+                 | timing_result -> (
+                     match admitted_timing_ms timing_result with
+                     | Some ms -> logf "untuned-default in-process control: %.4f ms" ms
+                     | None ->
+                         logf
+                           "untuned-default in-process control: refused (contention or degenerate \
+                            clock reading)")
                  | exception exn ->
                      logf "untuned-default control run failed: %s" (Exn.to_string exn));
                  (* A diagnostic's artifacts are dead the moment it has printed its number

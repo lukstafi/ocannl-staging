@@ -566,16 +566,21 @@ type timing_sample = {
 }
 
 type timing_result = {
-  ms : float;
-      (** The minimum per-launch sample. Callers must use it only when [contended = false]. *)
+  ms : float;  (** The minimum per-launch sample. Callers admit it through {!admitted_timing_ms}. *)
   contended : bool;
       (** At least half the sample window was more than 2x slower than its minimum. This is a
           refusal signal: the window mostly measured host stalls, so the autotuner does not rank or
-          cache the number (gh-ocannl-855). *)
+          cache the number (gh-ocannl-855). Also true when the minimum is non-positive or
+          non-finite, because the clock resolved no usable verdict. *)
   samples : int;
       (** The number of samples behind [ms] and [contended], for diagnostics and exact dispatch
           accounting. *)
 }
+
+val admitted_timing_ms : timing_result -> float option
+(** The shared admission gate for batching, ranking, and calibration/model checks. Returns a
+    positive finite [ms] only for an uncontended result; a refused or degenerate result is [None].
+*)
 
 (** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
     [autotune_timing].
@@ -602,9 +607,10 @@ type report = {
           [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
   timings_contended : int;
       (** Baseline and candidate timing windows refused because host contention dominated their
-          samples (gh-ocannl-855). Zero on cache replay and search-disabled calls, which time
-          nothing in this process. Lets a completed search distinguish transient measurement refusal
-          from structural candidate declines and retry when appropriate. *)
+          samples or the clock result was non-positive/non-finite (gh-ocannl-855). Zero on cache
+          replay and search-disabled calls, which time nothing in this process. Lets a completed
+          search distinguish transient measurement refusal from structural candidate declines and
+          retry when appropriate. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
           serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
@@ -640,9 +646,8 @@ type report = {
   fiss_sketch_timed : int;
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
-          Includes completed timing windows refused for host contention; [timings_contended]
-          identifies those unusable verdicts.
-      *)
+          Includes completed timing windows refused as unusable; [timings_contended] identifies
+          those verdicts. *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
           within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
@@ -652,15 +657,15 @@ type report = {
           [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
-          composite), those that compiled and were actually timed. Includes completed timing
-          windows refused for host contention. *)
+          composite), those that compiled and were actually timed. Includes completed timing windows
+          refused as unusable. *)
   split_reduce_composite_eligible : bool;
       (** Whether at least two split-reduce sites supplied usable best-timed singles, making the
           multi-site composite eligible for proposal. False on cache replay and search-disabled
           calls. *)
   split_reduce_composite_timed : bool;
       (** Whether the eligible multi-site split-reduce composite compiled and reached a timing
-          window. A completed window refused for contention still counts: the field pins candidate
+          window. A completed window refused as unusable still counts: the field pins candidate
           reachability, independently of whether its timing verdict was usable. False when the
           composite was ineligible, on cache replay, and on search-disabled calls. *)
   mma_candidates : int;
@@ -671,11 +676,10 @@ type report = {
   mma_timed : int;
       (** Of [mma_candidates], those that compiled and were actually timed (dedup'd duplicates
           excluded — an identical candidate was already timed). Includes completed timing windows
-          refused for host contention; [timings_contended] identifies those unusable verdicts.
+          refused as unusable; [timings_contended] identifies those verdicts.
           [mma_candidates > 0] with [mma_timed = 0] means the search never reached a timing window
           for a tensorized pipeline at all, the state gh-ocannl-521 recorded for every GPU backend:
-          candidates are cheap to enumerate and were being rejected in bulk at candidate compile.
-      *)
+          candidates are cheap to enumerate and were being rejected in bulk at candidate compile. *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
@@ -930,13 +934,12 @@ val family_profit_of_report : ?margin:float -> report -> family_profit
 val family_profit_of_reports : ?margin:float -> report list -> family_profit
 (** What completed searches measured about the tensorized family's profitability on this device
     (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config [tune_flip_profit_margin].
-    A report with any [timings_contended] contributes [Unmeasured]: its finite minima cover an
-    incomplete candidate set and cannot safely price the family.
-    Over several reports the most favourable evidence wins — the expressibility prior is deleted
-    only by evidence that contradicts it, never by the absence of a confirmation. A failing arm's
-    report counts: its timings are measurements of the family even though its [best_ms] is not
-    shippable. Exposed for tests and for [Train.tune_placements], which derives it from the
-    placement A/B's two arm reports. *)
+    A report with any [timings_contended] contributes [Unmeasured]: its admitted minima cover an
+    incomplete candidate set and cannot safely price the family. Over several reports the most
+    favourable evidence wins — the expressibility prior is deleted only by evidence that contradicts
+    it, never by the absence of a confirmation. A failing arm's report counts: its timings are
+    measurements of the family even though its [best_ms] is not shippable. Exposed for tests and for
+    [Train.tune_placements], which derives it from the placement A/B's two arm reports. *)
 
 val family_profit_summary : family_profit -> string
 (** A log-line phrase naming the evidence and its ratio. *)
@@ -1092,22 +1095,22 @@ val queued_batch_depth : timing_result -> int option
     synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
     at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
     {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
-    non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel,
-    and batches at the cap (an infinite one is not that case: it floors at 1, like any routine past
-    the target). Total, over every float: a subnormal estimate saturates rather than raising.
-    Exposed because those two boundaries are what a regression would cross silently: a depth stuck
-    at 1 turns a queued search back into an isolated one. Returns [None] for a contended estimate,
-    refusing to turn a stall-inflated calibration into depth 1. *)
+    non-positive, NaN, or infinite estimate is a clock that resolved nothing and is refused. Total,
+    over every float: a positive subnormal estimate saturates rather than raising. Exposed because
+    those two boundaries are what a regression would cross silently: a depth stuck at 1 turns a
+    queued search back into an isolated one. Returns [None] for any result that
+    {!admitted_timing_ms} refuses, rather than turning a bad calibration into a depth. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
     16 samples, then tops up until their accumulated [per_launch_ms] reaches ~25 ms or 64 samples
     have been taken. Reports [contended] when at least half the raw [contention_ms] samples exceed
-    their minimum by 2x. Exposed so tests can inject a deterministic clock. *)
+    their minimum by 2x, or when the minimum is non-positive/non-finite. Exposed so tests can inject
+    a deterministic clock. *)
 
 val search_measurements_cacheable : nothing_timed:bool -> timings_contended:int -> bool
 (** Pure cache-policy seam (gh-ocannl-855). A search result is cacheable only when at least one
-    candidate was timed and no timing window was refused for host contention. The current call may
+    candidate was timed and no timing window was refused as unusable. The current call may
     still ship its best usable candidate, but an incomplete measurement set must be retried by a
     later cache-cold search. *)
 
