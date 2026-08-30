@@ -100,9 +100,8 @@ let test_separate_copies () =
   let ctx = Context.run ctx routine in
   let pooled_v2 = Context.get_values ctx pooled.value in
   let conv_v2 = Context.get_values ctx conv_out.value in
-  Verdict.p "second pass identical"
-    (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal
-    && Array.for_all2_exn conv_v conv_v2 ~f:Float.equal)
+  Verdict.p_all2 "second-pass pooled values identical" pooled_v pooled_v2 ~f:Float.equal;
+  Verdict.p_all2 "second-pass convolution values identical" conv_v conv_v2 ~f:Float.equal
 
 (** Input used with a single padded max-pool: the operand stays unpadded (no margins to initialize),
     results stable across repeated runs. *)

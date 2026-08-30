@@ -120,8 +120,8 @@ let () =
   let got_b = Context.get_values ctx_b folded_emb.Tensor.value in
   (* Binding constraint 10: the bounds-folded kernel EXECUTES and its values match the unfolded
      baseline. *)
-  p "bounds-folded kernel executes with values equal to the guarded baseline"
-    (Array.for_all2_exn got_b got_a ~f:approx && Array.for_all2_exn got_b expected ~f:approx);
+  p_all2 "bounds-folded kernel values equal the guarded baseline" got_b got_a ~f:approx;
+  p_all2 "bounds-folded kernel values equal the host reference" got_b expected ~f:approx;
   let dyn_b, wheres_b, truncs_b = inspect folded_emb in
   p "folded IR keeps the Get_dynamic gather" (dyn_b >= 1);
   p "folded IR has no Where guard and no Trunc" (wheres_b = 0 && truncs_b = 0);

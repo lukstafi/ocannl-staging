@@ -134,9 +134,8 @@ let () =
   p "pruned search timed fewer candidates than the full search"
     (r_cut.Autotune.candidates_timed <= r_all.Autotune.candidates_timed);
   p "baseline still timed under aggressive pruning" (r_cut.Autotune.candidates_timed >= 1);
-  p "tuned values correct with and without the pre-filter"
-    (Array.for_all2_exn got_all mm_expected ~f:approx
-    && Array.for_all2_exn got_cut mm_expected ~f:approx)
+  p_all2 "tuned values correct without the pre-filter" got_all mm_expected ~f:approx;
+  p_all2 "tuned values correct with the pre-filter" got_cut mm_expected ~f:approx
 
 let () =
   (* --- The model-picked untuned default --- *)

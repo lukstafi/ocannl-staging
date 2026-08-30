@@ -7,7 +7,8 @@ privatized replay structurally equals the direct application: true
 replayed schedule values correct: true
 replayed schedule structurally equals the direct application: true
 saved schedule roundtrips through sexp: true
-tuned routine values correct: true
+tuned elementwise values correct: true
+tuned matmul values correct: true
 first tune call searches (cache miss): true
 first tune call timed at least the baseline: true
 a completed search carries no terminal failure: true
@@ -25,11 +26,14 @@ second report's scalar fallbacks do not exceed its Tile_mma statements: PASS
 second report's best tensorized time undercuts the winner only inside the beam's progress band: PASS
 second report's tensorizing winner was itself timed in the tensorized family: PASS
 second report names its winner: true
-cached schedule replays to correct values: true
+cached schedule replays to correct elementwise values: true
+cached schedule replays to correct matmul values: true
 search off without a cache times nothing: true
-search off without a cache returns the correct untuned routine: true
+search off without a cache returns correct untuned elementwise values: true
+search off without a cache returns correct untuned matmul values: true
 search off replays exactly when a complete search committed a cache entry: true
-cache replay under search off gives correct values: true
+cache replay under search off gives correct elementwise values: true
+cache replay under search off gives correct matmul values: true
 the four calls report outcomes consistent with contention-aware cacheability: true
 a report that neither searched nor replayed timed nothing: true
 search off replays the chosen default cache exactly after a complete search: true

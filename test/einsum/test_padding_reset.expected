@@ -14,7 +14,8 @@ pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
 conv[0,0]=-54 conv[1,1]=-99
 pooled values correct (windows clamped): true
 conv values correct (margins 0): true
-second pass identical: true
+second-pass pooled values identical: true
+second-pass convolution values identical: true
 
 Copy-pattern test completed!
 

@@ -85,10 +85,9 @@ let () =
   in
   let ctx = Context.run ctx routine in
   let values = Context.get_values ctx mc.Tensor.value in
-  Verdict.pass_fail "scheduled matmul over small constant operands compiles and matches reference"
-    (Array.length values = Array.length reference
-    && Array.for_all2_exn values reference ~f:(fun a b -> Float.equal a b))
-    ~detail:(fun () ->
+  Verdict.pass_fail_all2
+    "scheduled matmul over small constant operands compiles and matches reference" values reference
+    ~f:Float.equal ~detail:(fun () ->
       Printf.sprintf "got [%s]"
         (String.concat ~sep:"; " (Array.to_list (Array.map values ~f:Float.to_string))));
   (* Part 2: ma's fetch is now consumed (embedded in mc's forward above), so a computation reading
@@ -102,10 +101,9 @@ let () =
   let ctx2 = Context.run ctx2 routine2 in
   let values2 = Context.get_values ctx2 md.Tensor.value in
   let reference2 = Array.map mav ~f:(fun v -> v *. v) in
-  Verdict.pass_fail "fresh context reads the consumed constant via its link-time host-init upload"
-    (Array.length values2 = Array.length reference2
-    && Array.for_all2_exn values2 reference2 ~f:(fun a b -> Float.equal a b))
-    ~detail:(fun () ->
+  Verdict.pass_fail_all2
+    "fresh context reads the consumed constant via its link-time host-init upload" values2
+    reference2 ~f:Float.equal ~detail:(fun () ->
       Printf.sprintf "got [%s]"
         (String.concat ~sep:"; " (Array.to_list (Array.map values2 ~f:Float.to_string))));
   (* Part 3 (gh-633 review round 1, both P2s): a 1-element zero literal broadcast to a matmul
@@ -138,10 +136,8 @@ let () =
   in
   let ctx3 = Context.run ctx3 routine3 in
   let values3 = Context.get_values ctx3 mc3.Tensor.value in
-  Verdict.pass_fail
-    "scheduled matmul adding a materialized broadcast-zero constant matches reference"
-    (Array.length values3 = Array.length reference
-    && Array.for_all2_exn values3 reference ~f:(fun a b -> Float.equal a b))
-    ~detail:(fun () ->
+  Verdict.pass_fail_all2
+    "scheduled matmul adding a materialized broadcast-zero constant matches reference" values3
+    reference ~f:Float.equal ~detail:(fun () ->
       Printf.sprintf "got [%s]"
         (String.concat ~sep:"; " (Array.to_list (Array.map values3 ~f:Float.to_string))))

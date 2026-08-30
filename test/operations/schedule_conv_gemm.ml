@@ -915,27 +915,27 @@ let () =
   in
   (* Constant label across backends (the [.expected] is backend-neutral): the CPU leg uses
      non-shared packing panels, the metal leg cooperative shared tiles at the backend lane width. *)
-  let blocked_ok =
-    if on_cpu then
-      let x, kern, y = make_conv16 "cvb_c" in
-      let got =
-        run_fiss_sched "cvb_cpu" y ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
-      in
-      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
-    else if on_metal then
-      let w =
-        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-        | Some m -> m.Ir.Backend_intf.mma_simd_width
-        | None -> 32
-      in
-      let x, kern, y = make_conv16 "cvb_g" in
-      let got =
-        run_fiss_sched "cvb_gpu" y ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern))
-      in
-      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
-    else true
+  let blocked_claim =
+    "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance"
   in
-  p "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance" blocked_ok;
+  if on_cpu then
+    let x, kern, y = make_conv16 "cvb_c" in
+    let got =
+      run_fiss_sched "cvb_cpu" y ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
+    in
+    p_all2 blocked_claim got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+  else if on_metal then
+    let w =
+      match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+      | Some m -> m.Ir.Backend_intf.mma_simd_width
+      | None -> 32
+    in
+    let x, kern, y = make_conv16 "cvb_g" in
+    let got =
+      run_fiss_sched "cvb_gpu" y ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern))
+    in
+    p_all2 blocked_claim got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+  else skipped blocked_claim;
 
   (* --- Seeding: the fission segment now proposes the row-block flavors alongside the whole-extent
      ones — an extra CPU cache-panel seed (bm=8, two panels) and an extra GPU threadgroup-block seed

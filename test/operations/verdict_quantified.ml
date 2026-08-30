@@ -103,12 +103,17 @@ let () =
         ~f:Float.is_finite;
       Verdict.p_all2 "the readback matches the reference cell for cell" got want ~f:Float.equal;
       Verdict.p_all2 ~min:3 "all three cells match the reference" got want ~f:Float.equal;
+      pf_all2 "computed %s matches the reference cell for cell" "readback" got want ~f:Float.equal;
+      pass_fail_all2 "the PASS/FAIL readback matches the reference" got want ~f:Float.equal;
       p_pairwise_distinct "the three source values are pairwise distinct" distinct ~equal:Int.equal
         ~to_string:Int.to_string
   (* === Shape: what a non-empty collection prints, compared against [p]'s own line. === *)
   | "shape_p" -> Verdict.p "the claim" true
   | "shape_p_all" -> Verdict.p_all "the claim" seeds ~f:even
   | "shape_p_all2" -> Verdict.p_all2 "the claim" got want ~f:Float.equal
+  | "shape_pf_all2" -> Verdict.pf_all2 "%s" "the claim" got want ~f:Float.equal
+  | "shape_pass_fail" -> Verdict.pass_fail "the claim" true
+  | "shape_pass_fail_all2" -> Verdict.pass_fail_all2 "the claim" got want ~f:Float.equal
   | "shape_p_pairwise_distinct" ->
       p_pairwise_distinct "the claim" distinct ~equal:Int.equal ~to_string:Int.to_string
   | "shape_p_false" -> Verdict.p "the claim" false
@@ -135,6 +140,13 @@ let () =
       Verdict.p_all2 "the readback matches the reference cell for cell" [||] want ~f:Float.equal
   | "all2_short" ->
       Verdict.p_all2 ~min:3 "all three cells match the reference" [| 1.0 |] [| 1.0 |] ~f:Float.equal
+  | "pf_all2_empty" ->
+      Verdict.pf_all2 "computed %s matches the reference" "readback" [||] [||] ~f:Float.equal
+  | "pass_fail_all2_empty_detail" ->
+      Verdict.pass_fail_all2 "the readback matches the reference" [||] [||] ~f:Float.equal
+        ~detail:(fun () -> "got []")
+  | "pass_fail_all2_length" ->
+      Verdict.pass_fail_all2 "the readback matches the reference" got [| 1.0; 2.0 |] ~f:Float.equal
   | "pairwise_empty" ->
       p_pairwise_distinct "the source values are pairwise distinct" [] ~equal:Int.equal
         ~to_string:Int.to_string
@@ -174,6 +186,14 @@ let () =
         (run_child "all2_length_left_empty");
       refused "a pair below its stated floor fails, naming the shortfall"
         ~line:"all three cells match the reference (only 1 of 3): false" (run_child "all2_short");
+      refused "a computed-label executed-parity claim refuses two empty readbacks"
+        ~line:"computed readback matches the reference (empty): false" (run_child "pf_all2_empty");
+      refused "a PASS/FAIL parity claim keeps its empty reason and caller detail"
+        ~line:"the readback matches the reference: FAIL (empty; got [])"
+        (run_child "pass_fail_all2_empty_detail");
+      refused "a PASS/FAIL parity claim reports a length mismatch without raising"
+        ~line:"the readback matches the reference: FAIL (length 3 vs 2)"
+        (run_child "pass_fail_all2_length");
       refused "pairwise distinctness refuses an empty source population"
         ~line:"the source values are pairwise distinct (empty): false" (run_child "pairwise_empty");
       refused "pairwise distinctness requires at least two source values"
@@ -190,6 +210,13 @@ let () =
       let _, all2_true, _ = run_child "shape_p_all2" in
       Verdict.p "a satisfied executed-parity claim prints what `Verdict.p` prints"
         (String.equal plain_true all2_true);
+      let _, pf_all2_true, _ = run_child "shape_pf_all2" in
+      Verdict.p "a satisfied computed-label parity claim prints what `Verdict.p` prints"
+        (String.equal plain_true pf_all2_true);
+      let _, pass_fail_true, _ = run_child "shape_pass_fail" in
+      let _, pass_fail_all2_true, _ = run_child "shape_pass_fail_all2" in
+      Verdict.p "a satisfied PASS/FAIL parity claim prints what `Verdict.pass_fail` prints"
+        (String.equal pass_fail_true pass_fail_all2_true);
       let _, pairwise_true, _ = run_child "shape_p_pairwise_distinct" in
       Verdict.p "a satisfied pairwise-distinct claim prints what `Verdict.p` prints"
         (String.equal plain_true pairwise_true);

@@ -1,6 +1,7 @@
 guarded baseline executes the direct table gather: true
 guarded baseline C contains the guard ternary: true
-bounds-folded kernel executes with values equal to the guarded baseline: true
+bounds-folded kernel values equal the guarded baseline: true
+bounds-folded kernel values equal the host reference: true
 folded IR keeps the Get_dynamic gather: true
 folded IR has no Where guard and no Trunc: true
 folded C has no guard ternary: true

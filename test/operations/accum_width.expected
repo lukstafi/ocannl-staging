@@ -3,7 +3,9 @@ the f16 scalar rival-rendering values are pairwise distinct: true
 the default-policy f16 reduction takes the backend's declared residency (2048 + 1x8: wide 2056 on CPU, per-step 2048 on GPU): true
 Fp16_wide widens the f16 reduction on this backend too (2048 + 1x8 gives 2056): true
 Fp16_wide holds the f32 residency even under narrow_compute_f32=false (2048 + 1x8 gives 2056): true
-a Vectorized f16 reduction under Fp16_wide + narrow_compute_f32=false declines the SIMD chains and keeps the f32 residency (equals the once-narrowed wide reference): true
+a Vectorized f16 reduction under Fp16_wide + narrow_compute_f32=false declines the SIMD chains: true
+the declined Vectorized f16 reduction keeps f32 residency (equals the once-narrowed wide reference): true
+the serial f16 reduction under Fp16_wide + narrow_compute_f32=false equals the once-narrowed wide reference: true
 under Fp16_wide the f16 naive matmul equals the once-narrowed wide-accumulation reference: true
 the default-policy f16 matmul matches the wide reference exactly where the backend widens (CPU) and diverges where it keeps storage residency (GPU): true
 bf16 naive matmul equals the once-narrowed wide-accumulation reference: true
@@ -20,6 +22,7 @@ Unroll-annotated both reduction axes equals the serial result: true
 BOTH reduction axes materialized sequentially keep the whole-nest accumulator (equals the serial result): true
 Pad-guarded materialized unroll equals the serial result (the guard peels into the scope): true
 inner loops stay reachable after an outer materializing unroll (annotating them equals the serial result): true
+the nested vectorized reduction rendering fires: true
 a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the serial result): true
 a serialized nested Workgroup_reduce keeps the whole-nest accumulator (equals the serial result): true
 adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 at bf16): true
@@ -29,6 +32,7 @@ a non-reduction recurrence through a pre-existing scope keeps its per-iteration 
 a mixed-operator scope is not a reduction and keeps its per-iteration narrowing (256 +1 *1 stays 256 at bf16): true
 a widened scope's opening init keeps its own assignment's rounding (128 + 0.5 rounds before the x3 reduction): true
 a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial result): true
+the non-divisible SIMD reduction rendering fires: true
 the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result): true
 fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16): true
 narrow_compute_f32=false recovers per-operator rounding: the result differs from the widened default: true

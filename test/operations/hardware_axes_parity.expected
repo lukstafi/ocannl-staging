@@ -1,5 +1,7 @@
-serial combo values correct: true
-annotated combo values match the serial twin: true
+serial add-nest values correct: true
+serial multiply-nest values correct: true
+annotated add-nest values match the serial twin: true
+annotated multiply-nest values match the serial twin: true
 annotated kernel structure as expected: true
 unrolled variant values correct: true
 unrolled kernel repeats the body with constant bindings: true

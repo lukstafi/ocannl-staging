@@ -61,7 +61,8 @@ let widens_bf16 = on_cpu || String.equal backend_name "cuda"
 
 (* Runs the leg only on cc; elsewhere prints the golden line as skipped (the leg exercises a
    CPU-only rendering or greps cc's generated C). *)
-let cc_only claim leg = if on_cpu then leg () else skipped claim
+let cc_only_claims claims leg = if on_cpu then leg () else List.iter claims ~f:skipped
+let cc_only claim leg = cc_only_claims [ claim ] leg
 
 module Generated = Test_utils.Generated
 
@@ -166,6 +167,8 @@ let claim_mat_then_inner =
   "inner loops stay reachable after an outer materializing unroll (annotating them equals the \
    serial result)"
 
+let claim_vec_nested_structure = "the nested vectorized reduction rendering fires"
+
 let claim_vec_nested =
   "a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the serial \
    result)"
@@ -176,6 +179,8 @@ let claim_wgr_nested =
 let claim_mixed_scope =
   "a mixed-operator scope is not a reduction and keeps its per-iteration narrowing (256 +1 *1 \
    stays 256 at bf16)"
+
+let claim_simd_tail_structure = "the non-divisible SIMD reduction rendering fires"
 
 let claim_simd_tail =
   "the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result)"
@@ -318,9 +323,16 @@ let claim_f16_wide =
 let claim_f16_wide_ncf32_off =
   "Fp16_wide holds the f32 residency even under narrow_compute_f32=false (2048 + 1x8 gives 2056)"
 
+let claim_f16_vec_decline =
+  "a Vectorized f16 reduction under Fp16_wide + narrow_compute_f32=false declines the SIMD chains"
+
 let claim_f16_vec_wide =
-  "a Vectorized f16 reduction under Fp16_wide + narrow_compute_f32=false declines the SIMD chains \
-   and keeps the f32 residency (equals the once-narrowed wide reference)"
+  "the declined Vectorized f16 reduction keeps f32 residency (equals the once-narrowed wide \
+   reference)"
+
+let claim_f16_serial_wide =
+  "the serial f16 reduction under Fp16_wide + narrow_compute_f32=false equals the once-narrowed \
+   wide reference"
 
 let claim_f16_wide_matmul =
   "under Fp16_wide the f16 naive matmul equals the once-narrowed wide-accumulation reference"
@@ -386,7 +398,7 @@ let () =
      exact in f32, so the comparison is bitwise. On a promoted-fp16 target the vector-capability
      gate declines the same candidates and the leg still holds. cc-only: the SIMD reduction
      rendering is a CPU form. *)
-  cc_only claim_f16_vec_wide (fun () ->
+  cc_only_claims [ claim_f16_vec_decline; claim_f16_vec_wide; claim_f16_serial_wide ] (fun () ->
       let rows, cols = (4, 67) in
       let fv = Ll_test.drift ~dims:[| rows; cols |] in
       let run_f16_sum ~name ?schedule () =
@@ -432,10 +444,9 @@ let () =
           (Generated.read ~ext:".c" "aw_f16v_vec")
           ~substring:"Vectorized reduction rendering"
       in
-      p claim_f16_vec_wide
-        ((not vec_fired)
-        && Array.for_all2_exn got_v want_v ~f:Float.equal
-        && Array.for_all2_exn got_s want_v ~f:Float.equal));
+      p claim_f16_vec_decline (not vec_fired);
+      p_all2 claim_f16_vec_wide got_v want_v ~f:Float.equal;
+      p_all2 claim_f16_serial_wide got_s want_v ~f:Float.equal);
   Numerics.set_policy saved_policy;
   let wide_sums16 =
     Array.init (n16 * n16) ~f:(fun t ->
@@ -474,6 +485,7 @@ let all_claims =
     claim_2ax_both_mat;
     claim_2ax_pad_mat;
     claim_mat_then_inner;
+    claim_vec_nested_structure;
     claim_vec_nested;
     claim_wgr_nested;
     claim_adjacent;
@@ -483,6 +495,7 @@ let all_claims =
     claim_mixed_scope;
     claim_init_round;
     claim_wgreduce;
+    claim_simd_tail_structure;
     claim_simd_tail;
     claim_fp8;
     claim_off_value;
@@ -650,7 +663,7 @@ let () =
        accumulator. Inner extent 32 clears the SIMD profitability gate; the reduction is exact in
        f32, so the vector reassociation is harmless and the comparison is bitwise. The structural
        conjunct asserts the vectorized rendering actually fired inside the scope. *)
-    cc_only claim_vec_nested (fun () ->
+    cc_only_claims [ claim_vec_nested_structure; claim_vec_nested ] (fun () ->
         let nvr, nvs = (4, 32) in
         let fxv = Ll_test.drift ~dims:[| ni; nvr; nvs |] in
         let run2v ~name ?schedule () =
@@ -673,7 +686,8 @@ let () =
             (Generated.read ~ext:".c" "aw_vecnest_vec")
             ~substring:"Vectorized reduction rendering"
         in
-        p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal));
+        p claim_vec_nested_structure vecn_fired;
+        p_all2 claim_vec_nested got_vnv got_vn ~f:Float.equal);
     (* A hardware-annotated inner reduction axis the backend serializes (cc binds no workgroup
        dimension) is a serial level to the peel, so the whole nest keeps one accumulator instead of
        narrowing once per outer iteration. The [=+]-into-pre-zeroed form again: the einsum
@@ -1044,7 +1058,7 @@ let () =
        the partial to bf16 mid-way (at running sums ~25, where 1/64 increments are lost) and then
        narrowed per tail step. The structural conjunct keeps the leg honest: if the vectorized
        rendering declines, serial-equals-serial would be a false green. *)
-    cc_only claim_simd_tail (fun () ->
+    cc_only_claims [ claim_simd_tail_structure; claim_simd_tail ] (fun () ->
         let got_v = run_sum ~cols:67 ~name:"aw_vec_serial" () in
         let got_vt =
           run_sum ~cols:67 ~name:"aw_vec_tail" ~schedule:(retype_reduction LL.Vectorized) ()
@@ -1054,7 +1068,8 @@ let () =
             (Generated.read ~ext:".c" "aw_vec_tail")
             ~substring:"Vectorized reduction rendering"
         in
-        p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal));
+        p claim_simd_tail_structure vec_fired;
+        p_all2 claim_simd_tail got_vt got_v ~f:Float.equal);
     fp8_leg ();
     (* Negative controls: turning the policy off recovers per-step narrowing wherever that is
        schedule-uniform — which on these inputs must visibly differ from the widened default,
