@@ -103,6 +103,10 @@ let () =
     {ocaml|let ignore x = if x then enable ()
 let f ?(_feature = true) () = ignore _feature|ocaml}
     ~implemented:true ~honest:false;
+  case "a preceding Stdlib.ignore alias remains a discard"
+    {ocaml|let ignore = Stdlib.ignore
+let f ?(feature = true) () = ignore feature|ocaml}
+    ~implemented:false ~honest:false;
   case "a locally opened ignore can be effectful"
     {ocaml|let f ?(_feature = true) () = let open Effects in ignore _feature|ocaml}
     ~implemented:true ~honest:false;
@@ -119,6 +123,12 @@ let f ?(_feature = true) () = ignore _feature|ocaml}
   case "local module value bindings shadow sequentially"
     {ocaml|let f ?(feature = true) () = let _ = feature in let module M = struct let feature = false let enabled = feature end in M.enabled|ocaml}
     ~implemented:false ~honest:false;
+  case "local module opens affect following structure items"
+    {ocaml|let f ?(_feature = true) () = let module M = struct open Effects let () = ignore _feature end in ()|ocaml}
+    ~implemented:true ~honest:false;
+  case "an object self pattern shadows the outer option"
+    {ocaml|let f ?(feature = true) () = let _ = feature in object (feature) method enabled = feature end|ocaml}
+    ~implemented:false ~honest:false;
   case "comments and strings do not pretend the option is used"
     {ocaml|let f ?(feature = 2) () = (* feature *) ignore "feature"|ocaml} ~implemented:false
     ~honest:false;
@@ -130,6 +140,9 @@ let f ?(_feature = true) () = ignore _feature|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "optional closures returned through control flow are inventoried"
     {ocaml|let make flag = if flag then (fun ?(feature = true) () -> ignore feature) else (fun ?(feature = true) () -> ignore feature)|ocaml}
+    ~implemented:false ~honest:false;
+  case "an optional closure returned normally from try is inventoried"
+    {ocaml|let make () = try (fun ?(feature = true) () -> ignore feature) with _ -> raise Exit|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "an optional function exported through a tuple is inventoried"
     {ocaml|let f, sentinel = ((fun ?(feature = true) () -> ignore feature), 0)|ocaml}

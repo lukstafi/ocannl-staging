@@ -111,6 +111,25 @@ let is_ignore ~unqualified_visible expression =
   | Some [ "Stdlib"; "ignore" ] -> true
   | _ -> false
 
+let binding_defines_standard_ignore binding =
+  pattern_binds binding.pvb_pat "ignore"
+  && List.equal String.equal (pattern_names binding.pvb_pat) [ "ignore" ]
+  && match flatten_ident binding.pvb_expr with Some [ "Stdlib"; "ignore" ] -> true | _ -> false
+
+let ignore_binding_state bindings =
+  let bindings = List.filter bindings ~f:(fun binding -> pattern_binds binding.pvb_pat "ignore") in
+  match bindings with
+  | [] -> None
+  | _ -> Some (not (List.for_all bindings ~f:binding_defines_standard_ignore))
+
+let structure_item_may_shadow_ignore item =
+  match item.pstr_desc with
+  | Pstr_open { popen_expr = { pmod_desc = Pmod_ident { txt = Lident name; _ }; _ }; _ } ->
+      not (String.equal name "Base" || String.equal name "Stdlib")
+  | Pstr_open _ | Pstr_include _ -> true
+  | Pstr_primitive { pval_name = { txt = "ignore"; _ }; _ } -> true
+  | _ -> false
+
 let direct_discard ~unqualified_ignore_visible name expression =
   match expression.pexp_desc with
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) ->
@@ -149,8 +168,9 @@ let rec function_paths expression =
     | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_paths inner
     | Pexp_ifthenelse (_, then_, else_) ->
         returned_paths then_ @ Option.value_map else_ ~default:[] ~f:returned_paths
-    | Pexp_match (_, cases) | Pexp_try (_, cases) ->
-        List.concat_map cases ~f:(fun case -> returned_paths case.pc_rhs)
+    | Pexp_match (_, cases) -> List.concat_map cases ~f:(fun case -> returned_paths case.pc_rhs)
+    | Pexp_try (body, cases) ->
+        returned_paths body @ List.concat_map cases ~f:(fun case -> returned_paths case.pc_rhs)
     | Pexp_let (_, _, body)
     | Pexp_letmodule (_, _, body)
     | Pexp_letexception (_, body)
@@ -268,6 +288,12 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
     f ();
     ignore_shadowed := saved
   in
+  let within_ignore_state state f =
+    let saved = !ignore_shadowed in
+    ignore_shadowed := state;
+    f ();
+    ignore_shadowed := saved
+  in
   let iterator =
     object (self)
       inherit Ast_traverse.iter as super
@@ -279,21 +305,21 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
               let binds_name =
                 List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat name)
               in
-              let binds_ignore =
-                List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat "ignore")
-              in
-              within_ignore_shadow
-                (match recursive with Recursive -> binds_ignore | Nonrecursive -> false)
+              let next_ignore = ignore_binding_state bindings in
+              within_ignore_state
+                (match (recursive, next_ignore) with
+                | Recursive, Some state -> state
+                | _ -> !ignore_shadowed)
                 (fun () ->
                   within_shadow
                     (match recursive with Recursive -> binds_name | Nonrecursive -> false)
                     (fun () ->
                       List.iter bindings ~f:(fun binding -> self#expression binding.pvb_expr)));
-              within_ignore_shadow binds_ignore (fun () ->
+              within_ignore_state (Option.value next_ignore ~default:!ignore_shadowed) (fun () ->
                   within_shadow binds_name (fun () -> walk rest))
           | item :: rest ->
               self#structure_item item;
-              walk rest
+              within_ignore_shadow (structure_item_may_shadow_ignore item) (fun () -> walk rest)
         in
         walk items
 
@@ -401,6 +427,10 @@ let rec meaningfully_used ?(ignore_is_shadowed = false) ~dsl name tail =
           | Pexp_open (_, body) ->
               (* A local open can replace the unqualified [ignore] with an arbitrary function. *)
               within_ignore_shadow true (fun () -> self#expression body)
+          | Pexp_object class_structure ->
+              within_ignore_shadow (pattern_binds class_structure.pcstr_self "ignore") (fun () ->
+                  within_shadow (pattern_binds class_structure.pcstr_self name) (fun () ->
+                      List.iter class_structure.pcstr_fields ~f:self#class_field))
           | Pexp_for (pattern, from_, to_, _, body) ->
               self#expression from_;
               self#expression to_;
@@ -510,15 +540,9 @@ let args_in_source ~source content =
               self#structure_item item;
               match item.pstr_desc with
               | Pstr_value (_, bindings) ->
-                  if List.exists bindings ~f:(fun binding -> pattern_binds binding.pvb_pat "ignore")
-                  then top_ignore_shadowed := true
-              | Pstr_open { popen_expr = { pmod_desc = Pmod_ident { txt = Lident name; _ }; _ }; _ }
-                when String.equal name "Base" || String.equal name "Stdlib" ->
-                  ()
-              | Pstr_open _ | Pstr_include _ -> top_ignore_shadowed := true
-              | Pstr_primitive { pval_name = { txt = "ignore"; _ }; _ } ->
-                  top_ignore_shadowed := true
-              | _ -> ())
+                  Option.iter (ignore_binding_state bindings) ~f:(fun state ->
+                      top_ignore_shadowed := state)
+              | _ -> if structure_item_may_shadow_ignore item then top_ignore_shadowed := true)
 
       method! structure_item item =
         match item.pstr_desc with
