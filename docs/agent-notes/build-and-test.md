@@ -1012,8 +1012,10 @@ that they earn a lookup rather than always-loaded space.
   and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
   Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
   selected switch are printed and stripped inside `opam exec`, so only the requested backend can
-  override the pushed tree's configuration. A worktree root nested under any outer Dune root is
-  refused: without that
+  override the pushed tree's configuration. A regular root `ocannl_config` from the pushed commit
+  is the configuration boundary; when the commit has none, the script creates an empty ignored one
+  in the disposable worktree so a personal file above it cannot reach root-launched probes. A
+  worktree root nested under any outer Dune root is refused: without that
   boundary Dune can build the parent checkout while this script reports the detached commit.
   `--expect-lib cudajit|hipjit` asserts all three
   pieces of optional-backend provenance above (positive `.cmi`, vendor `select` arm, and the other
