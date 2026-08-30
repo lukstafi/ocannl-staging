@@ -1,8 +1,13 @@
+FAIL: config_usage_scan_bogus.fixture:6: command-line flag `--OCANNL-DEFINITELY-NOT-A-CONFIG-KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:1: command-line flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:4: command-line flag `--ocannl_definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:7: command-line flag `-ocannl-definitely-not-a-config-key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:2: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:5: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:3: documentation assignment `definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:4: documentation assignment `--ocannl_definitely_not_a_config_key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:5: documentation assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
-FAILED: 7 checks did not hold.
+FAIL: config_usage_scan_bogus.fixture:6: documentation assignment `--OCANNL-DEFINITELY-NOT-A-CONFIG-KEY=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:7: documentation assignment `-ocannl-definitely-not-a-config-key=true` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:8: documentation assignment `definitely_not_a_config_key=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
+FAILED: 12 checks did not hold.

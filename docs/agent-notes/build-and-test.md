@@ -73,11 +73,13 @@ that they earn a lookup rather than always-loaded space.
   not permission to leave that case undefined.
 - Configuration consumers outside OCaml are covered by `config_usage_scan` (gh-ocannl-790). Its
   script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
-  `benchmarks/`; its prose corpus is `AGENTS.md` and every `*.md` recursively under `docs/`. A script
-  token contributes a key when it has the command-line form `--ocannl_<key>=` or environment form
+  `benchmarks/`; its prose corpus is `AGENTS.md`, the root and benchmark READMEs, and every `*.md`
+  under `docs/`. A script token contributes a key when it has a qualified command-line spelling
+  accepted by `Utils.cmdline_var_names` followed by `=`, or the environment form
   `OCANNL_<KEY>=`; the explicit open namespaces `OCANNL_TOOL_*` and
   `OCANNL_LOG_LEVEL_<MODULE>` are not runtime config. Prose contributes a key only when an inline
-  code span consists entirely of one bare or prefixed assignment. That boundary leaves fenced
+  code span consists entirely of one bare or prefixed assignment (an empty example value is still
+  a key mention). That boundary leaves fenced
   programs and longer expressions to their own languages. Every config-shaped token is checked
   against `Utils.known_config_keys`; an explicit, usage-checked file/key judgment list identifies
   bare assignments that are tensor fields, dimensions, or report notation, and equally narrow

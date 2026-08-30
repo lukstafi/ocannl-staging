@@ -4100,11 +4100,13 @@
 ;
 ; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, and benchmarks/:
 ; those are the three checked-in script roots, and naming them separately makes a vanished root
-; fail the scan's non-vacuity claim. Both `--ocannl_<key>=` flags and `OCANNL_<KEY>=` assignments
-; are consumers. Documentation scope is AGENTS.md plus every `*.md` recursively under docs/.
-; Markdown contributes only an inline code span that is exactly one bare or prefixed assignment;
-; fenced examples and longer snippets describe unrelated languages. The checked-in fixture carries
-; one unknown key in every accepted syntax, and the control requires refusal with exit 1.
+; fail the scan's non-vacuity claim. Qualified command-line spellings accepted by
+; Utils.cmdline_var_names when followed by `=`, and `OCANNL_<KEY>=` assignments, are consumers.
+; Documentation scope is AGENTS.md, the root and benchmark READMEs, and every `*.md`
+; under docs/. Markdown contributes only an inline code span that is exactly one bare or prefixed
+; assignment; fenced examples and longer snippets describe unrelated languages. The checked-in
+; fixture carries one unknown key in every accepted syntax, and the control requires refusal with
+; exit 1.
 
 (executable
  (name config_usage_scan)
@@ -4118,6 +4120,8 @@
  (deps
   ocannl_config
   ../../AGENTS.md
+  ../../README.md
+  ../../benchmarks/README.md
   (glob_files_rec ../../docs/*.md)
   (glob_files_rec ../../tools/*.sh)
   (glob_files_rec ../../tools/*.py)

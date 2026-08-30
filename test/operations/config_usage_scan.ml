@@ -1,11 +1,12 @@
 (* Configuration names used outside OCaml stay tied to [Utils.known_config_keys].
 
    The source forms are deliberately narrow and syntactic. Shell and Python scripts contribute every
-   [--ocannl_<key>=] and [OCANNL_<KEY>=] token, including tokens in comments and quoted command
-   strings -- those are still instructions or commands a reader can reuse. Markdown contributes an
-   inline code span whose whole rendered content is one assignment in a bare or prefixed form.
-   Fenced code and longer snippets describe arbitrary APIs and expression languages, so treating
-   every equals sign in them as configuration would make the scan unusable.
+   qualified command-line spelling accepted by [Utils.cmdline_var_names] when followed by [=], and
+   every [OCANNL_<KEY>=] token, including tokens in comments and quoted command strings -- those are
+   still instructions or commands a reader can reuse. Markdown contributes an inline code span whose
+   whole rendered content is one assignment in a bare or prefixed form. Fenced code and longer
+   snippets describe arbitrary APIs and expression languages, so treating every equals sign in them
+   as configuration would make the scan unusable.
 
    gh-ocannl-790. *)
 
@@ -26,12 +27,40 @@ let normalize_key key = Option.value (String.chop_prefix key ~prefix:"ocannl_") 
 let non_config_env_key key =
   String.is_prefix key ~prefix:"TOOL_" || String.is_prefix key ~prefix:"LOG_LEVEL_"
 
-let prefixed_occurrences ~path ~prefix ~key_char ~normalize ~kind content =
+(* The command-line spelling grammar belongs to the runtime reader. Derive its qualified prefixes
+   with a sentinel key, then ask the same function whether each observed name is one it accepts.
+   This still finds a REMOVED key: only the grammar comes from the registry owner, never the key
+   population. *)
+let cli_prefixes =
+  let sentinel = "configusagescankey" in
+  Utils.cmdline_var_names ~qualified_only:true sentinel
+  |> List.filter_map ~f:(fun name ->
+      let suffix =
+        if String.equal name (String.uppercase name) then String.uppercase sentinel else sentinel
+      in
+      String.chop_suffix name ~suffix)
+  |> List.dedup_and_sort ~compare:String.compare
+
+let cli_key_char c = Char.is_alpha c || Char.is_digit c || Char.equal c '_' || Char.equal c '-'
+
+let cli_key_of_name name =
+  List.find_map cli_prefixes ~f:(fun prefix ->
+      Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
+          if String.is_empty raw_key || not (String.for_all raw_key ~f:cli_key_char) then None
+          else
+            let key = String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_' in
+            if List.mem (Utils.cmdline_var_names ~qualified_only:true key) name ~equal:String.equal
+            then Some key
+            else None))
+
+let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~normalize ~kind
+    content =
   String.split_lines content
   |> List.mapi ~f:(fun index line ->
       let rec from pos found =
         match String.substr_index line ~pos ~pattern:prefix with
         | None -> List.rev found
+        | Some start when not (start_ok line start) -> from (start + 1) found
         | Some start ->
             let key_start = start + String.length prefix in
             let key_stop = ref key_start in
@@ -55,9 +84,12 @@ let prefixed_occurrences ~path ~prefix ~key_char ~normalize ~kind content =
   |> List.concat
 
 let script_occurrences ~path content =
-  prefixed_occurrences ~path ~prefix:"--ocannl_" ~key_char:lowercase_key_char
-    ~normalize:(fun key -> Some key)
-    ~kind:Cli_flag content
+  List.concat_map cli_prefixes ~f:(fun prefix ->
+      prefixed_occurrences
+        ~start_ok:(fun line start -> start = 0 || not (Char.equal line.[start - 1] '-'))
+        ~path ~prefix ~key_char:cli_key_char
+        ~normalize:(fun raw_key -> cli_key_of_name (prefix ^ raw_key))
+        ~kind:Cli_flag content)
   @ prefixed_occurrences ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
       ~normalize:(fun key -> if non_config_env_key key then None else Some (String.lowercase key))
       ~kind:Environment_assignment content
@@ -68,7 +100,6 @@ let assignment_key ~key_char ~normalize rendered =
   match String.lsplit2 rendered ~on:'=' with
   | Some (raw_key, value)
     when (not (String.is_empty raw_key))
-         && (not (String.is_empty value))
          && key_char raw_key.[0]
          && String.for_all raw_key ~f:key_char
          && not (String.exists value ~f:Char.is_whitespace) ->
@@ -76,19 +107,21 @@ let assignment_key ~key_char ~normalize rendered =
   | _ -> None
 
 let one_assignment rendered =
-  match String.chop_prefix rendered ~prefix:"--ocannl_" with
-  | Some rest -> assignment_key ~key_char:lowercase_key_char ~normalize:(fun key -> Some key) rest
-  | None -> (
-      match String.chop_prefix rendered ~prefix:"OCANNL_" with
-      | Some rest ->
-          assignment_key ~key_char:uppercase_key_char
-            ~normalize:(fun key ->
-              if non_config_env_key key then None else Some (String.lowercase key))
-            rest
-      | None ->
-          assignment_key ~key_char:lowercase_key_char
-            ~normalize:(fun key -> Some (normalize_key key))
-            rendered)
+  match String.lsplit2 rendered ~on:'=' with
+  | Some (name, value)
+    when (not (String.is_empty name)) && not (String.exists value ~f:Char.is_whitespace) -> (
+      match cli_key_of_name name with
+      | Some key -> Some key
+      | None -> (
+          match String.chop_prefix name ~prefix:"OCANNL_" with
+          | Some key when String.for_all key ~f:uppercase_key_char && not (non_config_env_key key)
+            ->
+              Some (String.lowercase key)
+          | _ ->
+              assignment_key ~key_char:lowercase_key_char
+                ~normalize:(fun key -> Some (normalize_key key))
+                rendered))
+  | _ -> None
 
 let markdown_occurrences ~path content =
   let scan = Markdown.inert_by_line content in
@@ -118,6 +151,8 @@ let markdown_occurrences ~path content =
    every entry must still explain at least one scanned occurrence. *)
 let non_config_assignment_mentions =
   [
+    ("README.md", "i");
+    ("benchmarks/README.md", "lr");
     ("docs/agent-notes/build-and-test.md", "execution");
     ("docs/agent-notes/scheduling-and-autotune.md", "max_chain");
     ("docs/agent-notes/training-and-performance.md", "declines");
@@ -245,7 +280,8 @@ let live workspace_root paths =
     |> List.filter_map ~f:(fun path ->
         let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
         if
-          String.equal relative "AGENTS.md"
+          String.equal relative "AGENTS.md" || String.equal relative "README.md"
+          || String.equal relative "benchmarks/README.md"
           || (String.is_prefix relative ~prefix:"docs/" && String.is_suffix relative ~suffix:".md")
           || (String.is_prefix relative ~prefix:"tools/"
              || String.is_prefix relative ~prefix:"scripts/"
@@ -256,16 +292,15 @@ let live workspace_root paths =
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
   let under root = List.filter files ~f:(fun (path, _) -> String.is_prefix path ~prefix:root) in
-  let markdown =
-    List.filter files ~f:(fun (path, _) ->
-        String.equal path "AGENTS.md" || String.is_prefix path ~prefix:"docs/")
-  in
+  let markdown = List.filter files ~f:(fun (path, _) -> String.is_suffix path ~suffix:".md") in
   let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
   Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
     ~f:(fun root -> not (List.is_empty (under root)));
-  Verdict.p "the scan reaches AGENTS.md and documentation"
+  Verdict.p "the scan reaches AGENTS.md, root README, docs, and benchmark README"
     (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
-    && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:"docs/"));
+    && List.exists markdown ~f:(fun (path, _) -> String.equal path "README.md")
+    && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:"docs/")
+    && List.exists markdown ~f:(fun (path, _) -> String.equal path "benchmarks/README.md"));
   let occurrences =
     List.concat_map files ~f:(fun (reported_path, path) -> occurrences_of_file ~reported_path path)
   in
@@ -279,10 +314,10 @@ let live workspace_root paths =
     (List.length files) cli_count env_count markdown_count;
   if not (Verdict.any_failed ()) then (
     printf
-      "OK: --ocannl_<key>= flags and OCANNL_<KEY>= assignments in scripts under tools/, scripts/, \
-       and benchmarks/ name registered keys.\n";
+      "OK: qualified OCANNL command-line flags and OCANNL_<KEY>= assignments in scripts under \
+       tools/, scripts/, and benchmarks/ name registered keys.\n";
     printf
-      "OK: inline key=value assignments in AGENTS.md and docs/ name registered keys or explicit \
+      "OK: inline key=value assignments in scanned Markdown name registered keys or explicit \
        non-config notation.\n")
 
 let () =
