@@ -3119,6 +3119,10 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           | _ -> Float.infinity
         in
         let baseline_timed = baseline_dispatched && Float.is_finite baseline_ms in
+        (* A contended timing established nothing about this digest. Let an identical seed retry it
+           later in the search; successful timing and every definitive structural refusal keep the
+           ordinary dedup ownership. *)
+        if !baseline_contended then Hash_set.remove seen base_digest;
         (match baseline_decline with
         | Some classified ->
             logf "baseline: DECLINED at %s %s" (phase_label classified.phase)
@@ -3459,6 +3463,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     with
                     | Ok { contended = true; _ } ->
                         Int.incr n_timings_contended;
+                        (* Unlike a launch/compile decline, contention is not a property of this
+                           schedule. An equivalent later seed is a useful retry, not a dedup. *)
+                        Hash_set.remove seen c.digest_after;
                         logf
                           "%s: NOT TIMED, host contention dominated the sample window (digest %s)"
                           (spec_label spec) (dshort c.digest_after);
