@@ -1009,7 +1009,7 @@ that they earn a lookup rather than always-loaded space.
   worktree, resolves the checkout's selected opam switch before leaving it, runs explicitly under
   that switch, and removes just that worktree before its exit sentinel (never repository-wide
   `worktree prune`, which could unregister an unrelated temporarily unavailable worktree). The individual
-  commands and the whole SSH trip have separate process-group caps; the latter also bounds setup
+  commands (including worktree add/remove) and the whole SSH trip have separate process-group caps; the latter also bounds setup
   and cleanup. Non-login shells receive the CUDA/WSL PATH prefix that `tools/sweep.sh` uses.
   Ambient `OCANNL_*` variable names are printed and cleared before opam runs; names injected by the
   selected switch are printed and stripped inside `opam exec`, so only the requested backend can
@@ -1026,12 +1026,15 @@ that they earn a lookup rather than always-loaded space.
   runnable probe must print its own backend/device evidence. An `@check`-only trip says explicitly
   that it compiled code and executed no backend. Golden mode prints the corrected `.actual`
   contents and an apply-ready patch, then re-runs the alias before accepting it so a second failing
-  dependency cannot hide behind a promotable diff; after reporting it, the script resets tracked
+  dependency cannot hide behind a promotable diff. Before reset, source status (with untracked-file
+  reporting forced independently of Git configuration) must name exactly the listed golden
+  destinations, both after promotion and after the re-run. After reporting it, the script resets tracked
   files, removes untracked files, and proves the worktree clean at the resolved commit before
   running another operation. Every path also reasserts exact HEAD, clean tracked/untracked source,
   and the unchanged configuration boundary after each operation and before the final certificate;
   a nominally successful probe that edits its checkout therefore fails loudly. Do not replace its
-  unpiped ssh output with a convenience pipe: the far-side sentinel is the build verdict plus
+  unpiped ssh output with a convenience pipe: the verifier source travels on a separate remote file
+  descriptor while child stdin is `/dev/null`, and the far-side sentinel is the build verdict plus
   cleanup, and the local sentinel is ssh's transport verdict.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third

@@ -235,10 +235,11 @@ local_capped() {
 }
 
 # ssh concatenates its remote argv into shell text. Quote every value once here,
-# then let /bin/sh recover the exact positional arguments before reading the
-# static program from stdin. In particular, --run commands are never interpolated
-# into this command string.
-remote_command="/bin/sh -s --"
+# then let /bin/sh recover the exact positional arguments. The outer shell moves
+# the verifier program to fd 3 and replaces stdin with /dev/null before the inner
+# shell reads that program; no child can consume the caller's remaining control
+# flow. In particular, --run commands are never interpolated into this string.
+remote_command="/bin/sh -c 'exec 3<&0; exec </dev/null; exec /bin/sh /dev/fd/3 \"\$@\"' remote-verify"
 for arg in "$box" "$branch" "$backend" "$expect_lib" "$remote_repo" "$staging_remote" \
   "$worktree_root" "$cap" "$ssh_cap" "$jobs" "$capped_perl"; do
   remote_command="$remote_command $(sq "$arg")"
@@ -292,7 +293,7 @@ finish() {
 
   if [ -n "$wt" ]; then
     if [ "$wt_registered" -eq 1 ]; then
-      git -C "$repo" worktree remove --force "$wt" || cleanup_rc=1
+      capped git -C "$repo" worktree remove --force "$wt" || cleanup_rc=1
     elif [ -d "$wt" ]; then
       rmdir "$wt" 2>/dev/null || cleanup_rc=1
     fi
@@ -459,14 +460,15 @@ echo "resolved commit: $full_sha"
 wt=$(mktemp -d "$worktree_root/remote-verify.XXXXXX") ||
   fail "cannot allocate a temporary worktree path"
 rmdir "$wt" || fail "cannot prepare temporary worktree path $wt"
-git -C "$repo" worktree add -q --detach "$wt" "$full_sha" ||
+capped git -C "$repo" worktree add -q --detach "$wt" "$full_sha" ||
   fail "cannot create detached worktree at $wt"
 wt_registered=1
 
 actual_sha=$(git -C "$wt" rev-parse HEAD) || fail "cannot read worktree HEAD"
 [ "$actual_sha" = "$full_sha" ] ||
   fail "worktree commit $actual_sha differs from resolved commit $full_sha"
-worktree_status=$(git -C "$wt" status --porcelain) || fail "cannot read fresh worktree status"
+worktree_status=$(git -C "$wt" status --porcelain --untracked-files=all) ||
+  fail "cannot read fresh worktree status"
 [ -z "$worktree_status" ] || fail "fresh worktree is not clean"
 if [ -L "$wt/ocannl_config" ]; then
   fail "pushed root ocannl_config must not be a symlink"
@@ -492,7 +494,8 @@ assert_source_state() {
   observed_sha=$(git rev-parse HEAD) || fail "cannot read HEAD $state_context"
   [ "$observed_sha" = "$full_sha" ] ||
     fail "HEAD changed to $observed_sha $state_context (expected $full_sha)"
-  observed_status=$(git status --porcelain) || fail "cannot read worktree status $state_context"
+  observed_status=$(git status --porcelain --untracked-files=all) ||
+    fail "cannot read worktree status $state_context"
   [ -z "$observed_status" ] || fail "source changed $state_context: $observed_status"
   [ -f ocannl_config ] && [ ! -L ocannl_config ] ||
     fail "root ocannl_config boundary changed type $state_context"
@@ -500,6 +503,54 @@ assert_source_state() {
     [ ! -s ocannl_config ] || fail "empty root ocannl_config boundary was rewritten $state_context"
   fi
   echo "remote-verify: source assertion: PASS ($state_context; commit=$full_sha; clean; boundary=$config_boundary_kind)"
+}
+
+assert_only_promoted_goldens() {
+  golden_context=$1
+  status_file=_build/.remote-verify-status.$$
+  git status --porcelain=v1 -z --untracked-files=all >"$status_file" ||
+    fail "cannot inspect source changes $golden_context"
+  set --
+  old_ifs=$IFS
+  IFS='
+'
+  for promoted in $promotions; do
+    [ -n "$promoted" ] && set -- "$@" "$promoted"
+  done
+  IFS=$old_ifs
+  perl -0 -e '
+    my %allowed = map { $_ => 1 } @ARGV;
+    my (%seen, $ok);
+    $ok = 1;
+    while (defined(my $entry = <STDIN>)) {
+      chomp $entry;
+      next if $entry eq "";
+      if (length($entry) < 4) {
+        print STDERR "remote-verify: malformed git status entry during golden recording\n";
+        $ok = 0;
+        next;
+      }
+      my $code = substr($entry, 0, 2);
+      my $path = substr($entry, 3);
+      if ($code =~ /[RC]/ || !$allowed{$path}) {
+        print STDERR "remote-verify: non-golden source change during golden recording: $code $path\n";
+        $ok = 0;
+      } else {
+        $seen{$path} = 1;
+      }
+    }
+    for my $path (keys %allowed) {
+      if (!$seen{$path}) {
+        print STDERR "remote-verify: listed golden has no source change after apply: $path\n";
+        $ok = 0;
+      }
+    }
+    exit($ok ? 0 : 1);
+  ' -- "$@" <"$status_file"
+  status_rc=$?
+  rm -f "$status_file" || fail "cannot remove temporary golden status"
+  [ "$status_rc" -eq 0 ] || fail "source changes are not limited to listed goldens $golden_context"
+  echo "remote-verify: golden source scope: PASS ($golden_context)"
 }
 
 dune_build() {
@@ -574,7 +625,7 @@ while [ $# -gt 0 ]; do
       ;;
     run)
       echo "remote-verify: probe ($backend): $value"
-      opam_exec env "OCANNL_BACKEND=$backend" sh -c "$value" || exit $?
+      opam_exec env "OCANNL_BACKEND=$backend" sh -c "$value" </dev/null || exit $?
       assert_backend
       echo "remote-verify: probe: PASS with resolved backend configuration $backend"
       echo "remote-verify: probe backend execution: see the probe's own output above"
@@ -611,6 +662,7 @@ while [ $# -gt 0 ]; do
         echo "=== end corrected golden contents ==="
         opam_exec dune promotion apply --root . ||
           fail "cannot apply remote golden corrections"
+        assert_only_promoted_goldens "after applying corrections for $value"
         git diff --quiet
         diff_rc=$?
         case $diff_rc in
@@ -628,6 +680,7 @@ while [ $# -gt 0 ]; do
           fail "cannot check for corrections after re-running $value"
         [ -z "$remaining" ] || fail "$value still has promotable corrections after its re-run"
         assert_backend
+        assert_only_promoted_goldens "after re-running $value"
         echo "remote-verify: golden: RECORDED and re-run PASS ($value; original dune exit=$build_rc)"
         git reset -q --hard "$full_sha" || fail "cannot restore source after recording $value"
         git clean -q -fd || fail "cannot remove untracked source after recording $value"
