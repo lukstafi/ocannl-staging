@@ -653,7 +653,14 @@ let canary_sites =
 (* Helper-wrapped quantified claims whose passing meaning genuinely ALLOWS an empty population.
    Keyed by [<repository-relative path>:<helper name>], and stale-checked below. The exemption is on
    the helper rather than every claim that calls it: the helper is the unit whose boolean semantics
-   decide what empty means, and every call reaches the same decision. *)
+   decide what empty means, and every call reaches the same decision.
+
+   That last sentence is a precondition, not a fact about names, so it is checked below rather than
+   assumed. A name is the unit only while it denotes ONE definition: a file that shadows `refused`
+   with a second `refused`, or defines one per local scope, hands both to the same key, and the
+   exemption -- granted after reading one body -- would license the other silently, which is exactly
+   the shape the reader was widened to catch. Two definitions under one exempted key therefore
+   REFUSE the run; the fix is to give them separate names, or to hoist them into one. *)
 let exempt_quantified_helpers =
   [
     ( "test/operations/ocamlformat_ignore_scan.ml:refused",
@@ -752,6 +759,34 @@ let () = if close got want then Stdio.printf "same\n"|ocaml},
       [] );
   ]
 
+(* The shadowing fixture, which the list above cannot state: those controls compare the helper NAMES
+   a source yields, and a name shadowed by a second definition of itself appears once in that
+   comparison however many bodies carry it. What has to be pinned here is the opposite -- that one
+   name comes back as two definitions -- so this fixture is read for its definition LINES, and then
+   handed to the refusal it must produce. Both claims of the same name are unguarded, so the reader
+   would find each of them on its own; the point is that a single exemption key would cover both. *)
+let shadowed_helper_fixture =
+  {ocaml|let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the first pair agrees" (close got want)
+let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the second pair agrees" (close got want)|ocaml}
+
+(* Definition lines each exemption key resolves to, so that "one key, one helper" is something this
+   check reads off the corpus rather than a property of names it hopes holds. *)
+let definition_lines ~source claims =
+  List.fold claims
+    ~init:(Map.empty (module String))
+    ~f:(fun found claim ->
+      Map.update found
+        (source ^ ":" ^ claim.helper)
+        ~f:(fun previous ->
+          Set.add (Option.value previous ~default:(Set.empty (module Int))) claim.helper_line))
+
+let colliding_exemptions definitions =
+  Map.to_alist definitions
+  |> List.filter_map ~f:(fun (key, lines) ->
+      if Set.length lines > 1 then Some (key, Set.to_list lines) else None)
+
 let run_quantified_helper_controls () =
   List.map quantified_helper_controls ~f:(fun (label, source, expected) ->
       let found =
@@ -810,6 +845,49 @@ let refuse_stale_quantified ~fail stale_quantified =
           exemption list: %s"
          (String.concat ~sep:", " (Set.to_list stale_quantified)))
 
+let refuse_colliding_quantified ~fail colliding =
+  if not (List.is_empty colliding) then
+    fail
+      (Printf.sprintf
+         "exempted quantified helpers whose key names more than one definition, so one granted \
+          exemption is silently covering helpers nobody read -- give the shadowing definitions \
+          separate names, or hoist them into one: %s"
+         (String.concat ~sep:", "
+            (List.map colliding ~f:(fun (key, lines) ->
+                 Printf.sprintf "%s (lines %s)" key
+                   (String.concat ~sep:", " (List.map lines ~f:Int.to_string))))))
+
+let run_shadowed_quantified_controls () =
+  let colliding =
+    quantified_claims (Sources.structure_of shadowed_helper_fixture)
+    |> definition_lines ~source:"fixture"
+    |> colliding_exemptions
+  in
+  let two_definitions =
+    match colliding with [ ("fixture:close", [ _; _ ]) ] -> true | _ -> false
+  in
+  if not two_definitions then
+    eprintf "the shadowing fixture resolved to %s, not to one name with two definitions\n"
+      (String.concat ~sep:", "
+         (List.map colliding ~f:(fun (key, lines) ->
+              Printf.sprintf "%s (%d)" key (List.length lines))));
+  let source = "test/operations/verdict_ratchet.ml" in
+  let format =
+    "exempted quantified helpers whose key names more than one definition, so one granted \
+     exemption is silently covering helpers nobody read -- give the shadowing definitions separate \
+     names, or hoist them into one: %s"
+  in
+  let refused = ref false in
+  let fail _message =
+    refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source ~format
+  in
+  refuse_colliding_quantified ~fail colliding;
+  [
+    ("a shadowed helper name resolves to two definitions, not one", two_definitions);
+    ("refuses an exemption key that names both of them", !refused);
+  ]
+
 let run_stale_quantified_control () =
   let source = "test/operations/verdict_ratchet.ml" in
   let format =
@@ -863,6 +941,7 @@ let () =
   let quantified_exemptions = Map.of_alist_exn (module String) exempt_quantified_helpers in
   let computed_used = ref (Set.empty (module String)) in
   let quantified_used = ref (Set.empty (module String)) in
+  let quantified_definitions = ref (Map.empty (module String)) in
   let canaries = Map.of_alist_exn (module String) canary_sites in
   let data = Map.of_alist_exn (module String) data_sources in
   let exemptions_used = ref (Set.empty (module String)) in
@@ -871,7 +950,9 @@ let () =
   let literals = ref 0 and applied = ref 0 and offenders = ref 0 in
   let quantified_offenders = ref 0 in
   let control_results =
-    run_quantified_helper_controls () @ [ run_refusal_control (); run_stale_quantified_control () ]
+    run_quantified_helper_controls ()
+    @ [ run_refusal_control (); run_stale_quantified_control () ]
+    @ run_shadowed_quantified_controls ()
   in
   let per_directory = Hashtbl.create (module String) in
   printf
@@ -946,7 +1027,13 @@ let () =
                  (Stdlib.Filename.remove_extension (Stdlib.Filename.basename source) ^ ".expected"))));
       List.iter helper_claims ~f:(fun claim ->
           let key = source ^ ":" ^ claim.helper in
-          if Map.mem quantified_exemptions key then quantified_used := Set.add !quantified_used key
+          if Map.mem quantified_exemptions key then (
+            quantified_used := Set.add !quantified_used key;
+            quantified_definitions :=
+              Map.update !quantified_definitions key ~f:(fun previous ->
+                  Set.add
+                    (Option.value previous ~default:(Set.empty (module Int)))
+                    claim.helper_line))
           else (
             Int.incr quantified_offenders;
             fail (quantified_failure source claim))));
@@ -989,6 +1076,7 @@ let () =
       (Set.of_list (module String) (List.map exempt_quantified_helpers ~f:fst))
       !quantified_used
   in
+  let colliding_quantified = colliding_exemptions !quantified_definitions in
   if not (Set.is_empty stale) then
     fail
       (Printf.sprintf
@@ -996,6 +1084,7 @@ let () =
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
   refuse_stale_quantified ~fail stale_quantified;
+  refuse_colliding_quantified ~fail colliding_quantified;
   (* An exempted source that carries no claim-shaped literal is either a file that stopped being a
      fixture, or one this scan stopped reading -- and the second is what a blanket exemption is
      capable of hiding, so it is checked rather than trusted. *)
@@ -1032,6 +1121,8 @@ let () =
   Verdict.p "the scan found every literal planted for it" (Set.is_empty missing);
   Verdict.p "every exemption on this check's lists is still earned"
     (Set.is_empty unread && Set.is_empty stale && Set.is_empty stale_quantified);
+  Verdict.p "every exempted quantified helper is one definition, not a shared name"
+    (List.is_empty colliding_quantified);
   (* What a blind walk cannot produce. Without these, "no offenders" and "read nothing" are the same
      result -- and the second is the one that arrives silently. *)
   Verdict.p "the walk read string literals out of these sources" (!literals > 0);
