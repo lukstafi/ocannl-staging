@@ -682,7 +682,9 @@ that they earn a lookup rather than always-loaded space.
   negated `exists` must make non-emptiness part of its passing result. Its exact, stale-checked
   exemption list is only for helpers whose intended passing meaning allows an empty population;
   synthetic controls include a child process the shipping ratchet demonstrably refuses
-  (gh-ocannl-801).
+  (gh-ocannl-801). An entry there names ONE helper, and that is checked rather than assumed: a
+  helper name shadowed by a second definition would hand both bodies to one key, so an exempted key
+  resolving to two definition lines refuses the run instead of covering the body nobody read.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
   `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or

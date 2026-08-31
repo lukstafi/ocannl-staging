@@ -67,9 +67,16 @@ let quantifier_name = function
 type quantifier = { kind : quantifier_kind; populations : Set.M(String).t }
 type claim_kind = P | Pf | Pass_fail | Claim | Claimf
 
+(* A definition's [position] is its absolute character offset, which no two bindings share; [line]
+   and [column] are for saying where it is. Identity has to be the offset: `let refused = … in`
+   twice in one expression, or two local scopes written on one line, are two bodies a line number
+   cannot tell apart -- and telling two bodies apart is the whole of what the exemption key rests
+   on. *)
+type definition_site = { line : int; column : int; position : int }
+
 type helper_binding = {
   name : string;
-  line : int;
+  site : definition_site;
   dependencies : helper_binding list;
   unguarded : quantifier list;
   claim_kind : claim_kind option;
@@ -77,10 +84,12 @@ type helper_binding = {
 
 type quantified_claim = {
   helper : string;
-  helper_line : int;
+  helper_site : definition_site;
   claim_line : int;
   quantifiers : quantifier_kind list;
 }
+
+let describe_site site = Printf.sprintf "%d:%d" site.line site.column
 
 let path_ends path ~container ~member =
   match List.rev path with
@@ -359,14 +368,22 @@ let opens_verdict_claims module_expr =
    helper-following does not lose sight of an unqualified [p]/[claim]/[pass_fail] call when the file
    deletes its local aliases. Ordinary value bindings are prepended later and therefore shadow these
    exactly as they do in OCaml. *)
-let opened_claim_bindings line =
+let opened_claim_bindings site =
   [ ("p", P); ("pf", Pf); ("pass_fail", Pass_fail); ("claim", Claim); ("claimf", Claimf) ]
   |> List.map ~f:(fun (name, claim_kind) ->
-      { name; line; dependencies = []; unguarded = []; claim_kind = Some claim_kind })
+      { name; site; dependencies = []; unguarded = []; claim_kind = Some claim_kind })
 
 let open_claims environment declaration =
   if opens_verdict_claims declaration.popen_expr then
-    List.rev_append (opened_claim_bindings declaration.popen_loc.loc_start.pos_lnum) environment
+    let start = declaration.popen_loc.loc_start in
+    List.rev_append
+      (opened_claim_bindings
+         {
+           line = start.Stdlib.Lexing.pos_lnum;
+           column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
+           position = start.Stdlib.Lexing.pos_cnum;
+         })
+      environment
   else environment
 
 let lookup environment name =
@@ -442,12 +459,20 @@ let make_binding environment value =
         | Some path -> claim_kind_of_path path
         | None -> None
       in
-      { name; line = value.pvb_loc.loc_start.pos_lnum; dependencies; unguarded; claim_kind })
+      let start = value.pvb_loc.loc_start in
+      let site =
+        {
+          line = start.Stdlib.Lexing.pos_lnum;
+          column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
+          position = start.Stdlib.Lexing.pos_cnum;
+        }
+      in
+      { name; site; dependencies; unguarded; claim_kind })
 
 let quantified_claims structure =
   let origins bindings =
     let rec visit seen binding =
-      let key = binding.name ^ ":" ^ Int.to_string binding.line in
+      let key = binding.name ^ ":" ^ Int.to_string binding.site.position in
       if Set.mem seen key then []
       else
         let seen = Set.add seen key in
@@ -455,7 +480,7 @@ let quantified_claims structure =
         direct @ List.concat_map binding.dependencies ~f:(visit seen)
     in
     List.concat_map bindings ~f:(visit (Set.empty (module String)))
-    |> List.dedup_and_sort ~compare:(fun a b -> Int.compare a.line b.line)
+    |> List.dedup_and_sort ~compare:(fun a b -> Int.compare a.site.position b.site.position)
   in
   let found = ref [] in
   let record_claim environment expr =
@@ -472,7 +497,7 @@ let quantified_claims structure =
                     found :=
                       {
                         helper = binding.name;
-                        helper_line = binding.line;
+                        helper_site = binding.site;
                         claim_line = expr.pexp_loc.loc_start.pos_lnum;
                         quantifiers =
                           List.map binding.unguarded ~f:(fun quantifier -> quantifier.kind)
@@ -553,7 +578,7 @@ let quantified_claims structure =
   |> List.dedup_and_sort ~compare:(fun a b ->
       match Int.compare a.claim_line b.claim_line with
       | 0 -> (
-          match Int.compare a.helper_line b.helper_line with
+          match Int.compare a.helper_site.position b.helper_site.position with
           | 0 -> String.compare a.helper b.helper
           | order -> order)
       | order -> order)
@@ -653,7 +678,14 @@ let canary_sites =
 (* Helper-wrapped quantified claims whose passing meaning genuinely ALLOWS an empty population.
    Keyed by [<repository-relative path>:<helper name>], and stale-checked below. The exemption is on
    the helper rather than every claim that calls it: the helper is the unit whose boolean semantics
-   decide what empty means, and every call reaches the same decision. *)
+   decide what empty means, and every call reaches the same decision.
+
+   That last sentence is a precondition, not a fact about names, so it is checked below rather than
+   assumed. A name is the unit only while it denotes ONE definition: a file that shadows `refused`
+   with a second `refused`, or defines one per local scope, hands both to the same key, and the
+   exemption -- granted after reading one body -- would license the other silently, which is exactly
+   the shape the reader was widened to catch. Two definitions under one exempted key therefore
+   REFUSE the run; the fix is to give them separate names, or to hoist them into one. *)
 let exempt_quantified_helpers =
   [
     ( "test/operations/ocamlformat_ignore_scan.ml:refused",
@@ -752,6 +784,52 @@ let () = if close got want then Stdio.printf "same\n"|ocaml},
       [] );
   ]
 
+(* The shadowing fixtures, which the control list above cannot state: those cases compare the helper
+   NAMES a source yields, and a name shadowed by a second definition of itself appears once in that
+   comparison however many bodies carry it. What has to be pinned here is the opposite -- that one
+   name comes back as two definitions -- so these are read for their definition SITES, and each
+   collision is then handed to the refusal it must produce. Both claims of the same name are
+   unguarded in each, so the reader would find every body on its own; the point is that a single
+   exemption key would cover them all.
+
+   The second fixture is the one a line number cannot serve. Its two `close` bindings are local to
+   separate expressions written on ONE line -- the shape of a scanner test that spells a small
+   helper inline in each of its cases -- so a definition identified by its line is one definition,
+   and the exemption covers a body nobody read while this check reports green. *)
+let shadowed_helper_fixture =
+  {ocaml|let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the first pair agrees" (close got want)
+let close got want = Array.for_all2_exn got want ~f:Float.equal
+let () = Verdict.p "the second pair agrees" (close got want)|ocaml}
+
+let same_line_shadowed_helper_fixture =
+  {ocaml|let () = (let close got want = Array.for_all2_exn got want ~f:Float.equal in Verdict.p "the first pair agrees" (close got want)); (let close got want = Array.for_all2_exn got want ~f:Float.equal in Verdict.p "the second pair agrees" (close got want))|ocaml}
+
+(* The definitions each exemption key resolves to, so that "one key, one helper" is something this
+   check reads off the corpus rather than a property of names it hopes holds. Keyed by offset and
+   carrying the printable site, so the report says where each body is and the identity does not
+   depend on the report's precision.
+
+   [record_definition] is one function rather than two spellings of an update because the corpus and
+   the control below must agree on both halves of it -- the key, and what counts as a definition. A
+   control that reproduced the aggregation instead of calling it would pass while the corpus stopped
+   recording, and with one exempted helper in the tree nothing else would notice. *)
+let exemption_key ~source claim = source ^ ":" ^ claim.helper
+
+let record_definition ~source definitions claim =
+  Map.update definitions (exemption_key ~source claim) ~f:(fun previous ->
+      Map.set
+        (Option.value previous ~default:(Map.empty (module Int)))
+        ~key:claim.helper_site.position ~data:(describe_site claim.helper_site))
+
+let definition_sites ~source claims =
+  List.fold claims ~init:(Map.empty (module String)) ~f:(record_definition ~source)
+
+let colliding_exemptions definitions =
+  Map.to_alist definitions
+  |> List.filter_map ~f:(fun (key, sites) ->
+      if Map.length sites > 1 then Some (key, Map.data sites) else None)
+
 let run_quantified_helper_controls () =
   List.map quantified_helper_controls ~f:(fun (label, source, expected) ->
       let found =
@@ -767,13 +845,13 @@ let run_quantified_helper_controls () =
       (label, ok))
 
 let quantified_failure source claim =
-  let key = source ^ ":" ^ claim.helper in
+  let key = exemption_key ~source claim in
   Printf.sprintf
     "%s:%d sends `%s` from line %d into a Verdict claim, but that helper's `%s` can pass on an \
      empty population -- use the matching `Verdict.p_*` combinator, or make non-emptiness part of \
      the helper's passing result. If emptiness is the intended passing case, exempt `%s` by name \
      in verdict_ratchet.ml and say why"
-    source claim.claim_line claim.helper claim.helper_line
+    source claim.claim_line claim.helper claim.helper_site.line
     (List.map claim.quantifiers ~f:quantifier_name |> String.concat ~sep:", ")
     key
 
@@ -809,6 +887,54 @@ let refuse_stale_quantified ~fail stale_quantified =
          "exempted quantified helpers that no Verdict claim reaches any more -- drop them from the \
           exemption list: %s"
          (String.concat ~sep:", " (Set.to_list stale_quantified)))
+
+let refuse_colliding_quantified ~fail colliding =
+  if not (List.is_empty colliding) then
+    fail
+      (Printf.sprintf
+         "exempted quantified helpers whose key names more than one definition, so one granted \
+          exemption is silently covering helpers nobody read -- give the shadowing definitions \
+          separate names, or hoist them into one: %s"
+         (String.concat ~sep:", "
+            (List.map colliding ~f:(fun (key, sites) ->
+                 Printf.sprintf "%s (definitions at %s)" key (String.concat ~sep:", " sites)))))
+
+let run_shadowed_quantified_control label fixture =
+  let colliding =
+    quantified_claims (Sources.structure_of fixture)
+    |> definition_sites ~source:"fixture"
+    |> colliding_exemptions
+  in
+  let two_definitions =
+    match colliding with
+    | [ ("fixture:close", [ first; second ]) ] -> not (String.equal first second)
+    | _ -> false
+  in
+  if not two_definitions then
+    eprintf "the %s fixture resolved to %s, not to one name with two definitions\n" label
+      (String.concat ~sep:", "
+         (List.map colliding ~f:(fun (key, sites) ->
+              Printf.sprintf "%s (%s)" key (String.concat ~sep:", " sites))));
+  let source = "test/operations/verdict_ratchet.ml" in
+  let format =
+    "exempted quantified helpers whose key names more than one definition, so one granted \
+     exemption is silently covering helpers nobody read -- give the shadowing definitions separate \
+     names, or hoist them into one: %s"
+  in
+  let refused = ref false in
+  let fail _message =
+    refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source ~format
+  in
+  refuse_colliding_quantified ~fail colliding;
+  [
+    (Printf.sprintf "a %s helper name resolves to two definitions, not one" label, two_definitions);
+    (Printf.sprintf "refuses an exemption key that names both %s definitions" label, !refused);
+  ]
+
+let run_shadowed_quantified_controls () =
+  run_shadowed_quantified_control "shadowed" shadowed_helper_fixture
+  @ run_shadowed_quantified_control "same-line shadowed" same_line_shadowed_helper_fixture
 
 let run_stale_quantified_control () =
   let source = "test/operations/verdict_ratchet.ml" in
@@ -863,6 +989,7 @@ let () =
   let quantified_exemptions = Map.of_alist_exn (module String) exempt_quantified_helpers in
   let computed_used = ref (Set.empty (module String)) in
   let quantified_used = ref (Set.empty (module String)) in
+  let quantified_definitions = ref (Map.empty (module String)) in
   let canaries = Map.of_alist_exn (module String) canary_sites in
   let data = Map.of_alist_exn (module String) data_sources in
   let exemptions_used = ref (Set.empty (module String)) in
@@ -871,7 +998,9 @@ let () =
   let literals = ref 0 and applied = ref 0 and offenders = ref 0 in
   let quantified_offenders = ref 0 in
   let control_results =
-    run_quantified_helper_controls () @ [ run_refusal_control (); run_stale_quantified_control () ]
+    run_quantified_helper_controls ()
+    @ [ run_refusal_control (); run_stale_quantified_control () ]
+    @ run_shadowed_quantified_controls ()
   in
   let per_directory = Hashtbl.create (module String) in
   printf
@@ -945,8 +1074,10 @@ let () =
                  where site.Scan.label how remedy
                  (Stdlib.Filename.remove_extension (Stdlib.Filename.basename source) ^ ".expected"))));
       List.iter helper_claims ~f:(fun claim ->
-          let key = source ^ ":" ^ claim.helper in
-          if Map.mem quantified_exemptions key then quantified_used := Set.add !quantified_used key
+          let key = exemption_key ~source claim in
+          if Map.mem quantified_exemptions key then (
+            quantified_used := Set.add !quantified_used key;
+            quantified_definitions := record_definition ~source !quantified_definitions claim)
           else (
             Int.incr quantified_offenders;
             fail (quantified_failure source claim))));
@@ -989,6 +1120,7 @@ let () =
       (Set.of_list (module String) (List.map exempt_quantified_helpers ~f:fst))
       !quantified_used
   in
+  let colliding_quantified = colliding_exemptions !quantified_definitions in
   if not (Set.is_empty stale) then
     fail
       (Printf.sprintf
@@ -996,6 +1128,7 @@ let () =
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
   refuse_stale_quantified ~fail stale_quantified;
+  refuse_colliding_quantified ~fail colliding_quantified;
   (* An exempted source that carries no claim-shaped literal is either a file that stopped being a
      fixture, or one this scan stopped reading -- and the second is what a blanket exemption is
      capable of hiding, so it is checked rather than trusted. *)
@@ -1032,6 +1165,8 @@ let () =
   Verdict.p "the scan found every literal planted for it" (Set.is_empty missing);
   Verdict.p "every exemption on this check's lists is still earned"
     (Set.is_empty unread && Set.is_empty stale && Set.is_empty stale_quantified);
+  Verdict.p "every exempted quantified helper is one definition, not a shared name"
+    (List.is_empty colliding_quantified);
   (* What a blind walk cannot produce. Without these, "no offenders" and "read nothing" are the same
      result -- and the second is the one that arrives silently. *)
   Verdict.p "the walk read string literals out of these sources" (!literals > 0);

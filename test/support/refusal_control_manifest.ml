@@ -323,6 +323,7 @@ let raw_entries =
     ( "verdict_ratchet.ml",
       [
         "[scanner-refusal:21c46bd80cd0c37bcebde7eb2d04dcd8] exempted quantified helpers";
+        "[scanner-refusal:a762c69e145dd278ddd9810ecfe2f65e] shadowing definitions separate";
         "[scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's";
         "[scanner-refusal:f3e306858423827e6575d13a17d57af6] check cannot vouch";
         "[scanner-refusal:53b71ea33a69d24c941985f4eb35406b] prints the claim";
@@ -333,6 +334,7 @@ let raw_entries =
         "[scanner-refusal:a340b965171aa5b79a43e8b92ef3307e] every helper-wrapped quantified";
         "[scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted";
         "[scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on";
+        "[scanner-refusal:021b016668a04863104372940f003669] exempted quantified helper";
         "[scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals";
         "[scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments";
         "[scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory";
