@@ -1330,7 +1330,12 @@ that they earn a lookup rather than always-loaded space.
   A skip caused by a host or configuration capability rather than the selected backend (a compiler
   target, preprocessing flag or filesystem feature) uses
   ``Verdict.skipped ~aggregation:`Environment``: its human stderr line stays visible, while the
-  record's scope keeps it out of the backend intersection.
+  record's scope keeps it out of the backend intersection. The sweep's stdout summary quotes the
+  report's `result:` verdict and each `FAIL:`/`POTENTIAL:` finding line (indented, under the
+  `skip coverage:` line that carries the report path), so consumers of sweep output — the daily
+  scheduled routine's report and notification foremost — see zero-coverage findings without
+  opening the report file; the routine diffs the latest report's finding set against the previous
+  `*-skip-coverage.txt` and treats `FAIL`, or a changed finding set, as notify-worthy.
 - An unreachable machine records `skip (unreachable)`, and a sweep of skips is not a failure. It is
   not the expected steady state either: both GPU boxes are cabled and Wake-on-LAN armed, and wake
   over Ethernet from sleep and from full shutdown alike, so a run that is meant to cover CUDA or HIP
