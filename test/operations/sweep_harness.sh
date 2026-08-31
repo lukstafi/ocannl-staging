@@ -157,6 +157,24 @@ grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common une
 ! grep -q 'multidev-only unevaluated claim' "$coverage_report"
 ! grep -q 'environment-gated claim' "$coverage_report"
 
+# The verdict and each finding must reach the sweep's OWN summary, not only the
+# report file: the scheduled routine's notification path quotes sweep output,
+# and a zero-coverage claim that lives only behind the report path is one no
+# human reads (gh-ocannl-792). Indented, so the `skip coverage:` pointer line
+# stays the one line the path is extracted from -- which the extraction above
+# already proved. Per-backend-only and environment-gated claims must not reach
+# the summary either, for the same reason they stay out of the report.
+grep -q '^  result: POTENTIAL -- 1 claim(s) skipped on every completed backend; absent backends remain unknown$' \
+  <<<"$coverage"
+grep -q '^  POTENTIAL: skipped on every completed backend: fixture.exe: common unevaluated claim$' \
+  <<<"$coverage"
+! grep -q 'cc-only unevaluated claim' <<<"$coverage"
+! grep -q 'multidev-only unevaluated claim' <<<"$coverage"
+! grep -q 'environment-gated claim' <<<"$coverage"
+# A single-backend forced run cannot aggregate, and its summary says so through
+# the same channel rather than staying silent about the report it wrote.
+grep -q '^  result: NOT AGGREGATED$' <<<"$forced"
+
 # The pure aggregator's complete-backend control is the escalation seam the
 # real sweep reaches only when both remote GPU boxes and all local units pass.
 # All five logs sharing a claim is exit 1 and a FAIL line; removing it from one

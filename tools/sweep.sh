@@ -838,6 +838,15 @@ if [ "$FORCE" = 1 ] && [ -z "$TARGET" ]; then
     aggregate_status=$(grep '^status:' "$report" | head -1)
     echo "skip coverage: ${aggregate_status:-report written} -- $report"
   fi
+  # The verdict and the findings themselves, not only the report path: the
+  # scheduled routine's report and notification quote sweep output, and a
+  # zero-coverage claim that lives only behind a file path is one no human
+  # reads (gh-ocannl-792). Indented, so the `skip coverage:` line above stays
+  # the one line consumers extract the path from. Unbounded on purpose: the
+  # findings are the intersection across backends, already small by
+  # construction, and a cap here would silently hide the very claims this
+  # exists to surface.
+  grep -E '^(result|FAIL|POTENTIAL): ' "$report" | sed 's/^/  /'
 else
   echo "skip coverage: not aggregated (requires --force with no --target)"
 fi
