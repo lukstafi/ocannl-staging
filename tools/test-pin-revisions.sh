@@ -10,8 +10,35 @@
 # Each shipping assertion has a fault-injected twin below. A mutation must make
 # the same oracle reject the subject, proving the test would go red if that
 # defect were reintroduced instead of merely restating today's implementation.
+#
+#   tools/test-pin-revisions.sh          # run every leg
+#   tools/test-pin-revisions.sh --keep   # keep the scratch directory
+#
+# A failing leg reports the run directory holding the subject's stdout, stderr,
+# `$GITHUB_OUTPUT` and recorded fake-tool calls -- which is the only way to see
+# what the subject actually did, and which cleanup deletes on the way out, so
+# the printed path is dead by the time it is read. `--keep` is what makes that
+# report actionable; it is the same flag, spelled the same way, as the sibling
+# harnesses tools/test-promote.sh and tools/test-test-run.sh.
 
 set -u
+
+KEEP=0
+for arg in "$@"; do
+  case "$arg" in
+    --keep) KEEP=1 ;;
+    # The whole leading comment block, however long it grows: a pinned line
+    # range silently truncates --help the first time a leg is added.
+    -h | --help)
+      sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "test-pin-revisions.sh: unknown argument '$arg'" >&2
+      exit 2
+      ;;
+  esac
+done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -36,7 +63,12 @@ if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   exit 2
 fi
 cleanup() {
+  if [ "$KEEP" = 1 ]; then
+    printf 'kept %s\n' "$TMP"
+    return 0
+  fi
   [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != / ] && rm -rf "$TMP"
+  return 0
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -315,5 +347,8 @@ fi
 
 if [ "$failures" -ne 0 ]; then
   printf '%s pin-revisions test failure(s)\n' "$failures" >&2
+  # The run directories named above are inside $TMP, so without --keep the EXIT
+  # trap removes them before anyone can look.
+  [ "$KEEP" = 1 ] || printf 're-run with --keep to retain the run directories named above\n' >&2
   exit 1
 fi
