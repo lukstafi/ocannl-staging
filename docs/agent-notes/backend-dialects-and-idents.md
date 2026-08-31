@@ -37,12 +37,21 @@ files.
   and neither is `__restrict`, nor a device memory barrier, nor where the preceding device store
   lands (moving it to an unrelated cell keeps the defect; removing it altogether is what stops it,
   which no kernel can rely on). The two things that do stop it are the `volatile` accumulator and a
-  `volatile` READ pointer; an accumulating loop that dereferences no node pointer at all never
-  miscompiled. So the only reproducer-backed narrowing axis excludes accumulations that read no
-  device memory, which are rare and usually constant-folded — measured, the tax is 1.06x on a
-  memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x on a single-threaded
-  scalar-loss reduction. The `volatile`-source form costs 1.03x on that last shape; gh-ocannl-820
-  adopted its expression-level equivalent after the matrix stayed green row-for-row.
+  `volatile` READ pointer — in either spelling, the pointer's declaration or the per-read cast the
+  backend actually emits (`volatile-source`, `volatile-source-expr`); an accumulating loop that
+  dereferences no node pointer at all never miscompiled. A read reached only through the update's
+  controlling guard sits on that same safe side: `guard-read-only` — the update reading nothing
+  while its `if` reads the node — computes correctly unqualified. So the reproducer-backed
+  narrowing axis excludes accumulations whose accumulating expression reads no device memory, which
+  are rare and usually constant-folded. The shipped rule is deliberately wider than that axis and
+  qualifies a recognized accumulation's controlling guards too (gh-ocannl-820, Codex P1 round 3 on
+  PR 553): one 4x16 shape on one toolchain not reproducing is not a shape proven safe, and
+  confining the context to the update alone would leave a guard-only accumulation with no
+  workaround at all.
+  Measured, the tax is 1.06x on a memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x
+  on a single-threaded scalar-loss reduction. The `volatile`-source form costs 1.03x on that last
+  shape; gh-ocannl-820 adopted its expression-level equivalent after the matrix stayed green
+  row-for-row.
 - Metal `Where` must stay a short-circuiting ternary: MSL `select` is a function call that
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:

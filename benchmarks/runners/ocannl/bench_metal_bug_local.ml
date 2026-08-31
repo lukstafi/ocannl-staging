@@ -79,6 +79,29 @@ let width = 16
    none zero. *)
 let slot_values = [| 3; 5; 7; 11 |]
 
+(* The threshold of the [`Guarded_read] guard, in the middle of the input's range rather than at
+   either end: a guard that always passes, or never does, would be one the compiler is free to fold
+   away, and this reproducer is about a guard that is actually evaluated per iteration. Every input
+   value is a dyadic rational and none of them is the threshold, so no iteration's fate depends on a
+   float comparison landing on a tie. *)
+let guard_threshold = 4.0
+
+(* [Utils.decimal_float_literal]'s rule, transcribed rather than called: this file links no OCANNL,
+   and what it is a reproduction OF is the text the backend emits — a literal spelled some other way
+   is a kernel the compiler may optimize differently, which for a source-sensitive defect is the one
+   liberty this program cannot take. Sixteen significant digits, seventeen where those do not
+   round-trip, and a radix point appended when [%g] produced none, so the token is a floating
+   literal rather than an integer one the cast happens to convert. Two departures, both because this
+   executable is macOS-only and its constants are ordinary finite dyadics: the non-finite spellings
+   and the Windows three-digit-exponent normalization are left out. The round-trip is what keeps the
+   kernel's constant and the oracle's the same number for any threshold someone later picks. *)
+let c_float_literal c =
+  let s =
+    let s16 = Printf.sprintf "%.16g" c in
+    if float_of_string s16 = c then s16 else Printf.sprintf "%.17g" c
+  in
+  if String.exists (function '.' | 'e' | 'E' -> true | _ -> false) s then s else s ^ ".0"
+
 (* The emitted body of [total_fwd__seg1] (scalar_rmw_accumulation's localized leg, Metal, f32): the
    accumulator opens into a scope local, the nest updates the local, the node is stored once.
 
@@ -95,14 +118,20 @@ let slot_values = [| 3; 5; 7; 11 |]
    directly. - [prezero]: where the device store that precedes the nest lands — the accumulated cell
    (what codegen emits, a [Zero_out]), a neighbouring cell, a cell of the READ node, or nowhere. -
    [opening]: whether the accumulator opens by reading its cell (what the localizer emits) or from a
-   literal. - [fence]: a device memory barrier between that store and the nest. - [src_volatile]:
-   the qualifier on the READ pointer rather than on the accumulator — a candidate workaround that
-   would leave the accumulator register-resident. - [contribution]: what the loop body reads.
+   literal. - [fence]: a device memory barrier between that store and the nest. - [read_volatile]:
+   volatility on the READ pointer rather than on the accumulator — a candidate workaround that would
+   leave the accumulator register-resident. [`Decl] qualifies the pointer's declaration, [`Expr]
+   casts at each read, which is the form OCANNL ships. - [contribution]: what the loop body reads.
    [`Pooled_read] reads the pooled input node; [`Slots_read] reads only the (device, dynamically
    indexed) slot table, so the accumulation depends on device memory without dereferencing any
-   slot-DERIVED pointer. *)
+   slot-DERIVED pointer; [`Index_only] reads nothing at all; [`Guarded_read] reads nothing in the
+   accumulating expression itself and puts the node read in the [if] that CONTROLS the update, so
+   the guard is the accumulation's only device read. That last shape is why the workaround's
+   confinement rule covers a recognized accumulation's controlling guards and not just its update
+   (gh-ocannl-820, Codex P1 round 3 on #553): a context stopping at the update would leave this
+   shape with no workaround at all. *)
 let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots)
-    ?(src_volatile = false) ?(contribution = `Pooled_read) ?(opening = `Read_cell)
+    ?(read_volatile = `None) ?(contribution = `Pooled_read) ?(opening = `Read_cell)
     ?(prezero = `Accumulated_cell) ?(fence = false) () =
   let ptr ~qual ~name ~slot_base ~slot_off ~byte_off =
     let typ = qual ^ "float" in
@@ -126,15 +155,45 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
   in
   let decls =
     ptr
-      ~qual:(if src_volatile then "volatile " else "")
+      ~qual:(match read_volatile with `Decl -> "volatile " | `Expr | `None -> "")
       ~name:"produced" ~slot_base:0 ~slot_off:1 ~byte_off:produced_off
     ^ ptr ~qual:"" ~name:"total" ~slot_base:2 ~slot_off:3 ~byte_off:total_off
   in
+  (* A read of the pooled input node. [`Expr] is the pointer cast the Metal backend emits: the read
+     is qualified where it happens, so an unqualified read of the same node elsewhere in the kernel
+     stays unqualified. *)
+  let node_read idx =
+    match read_volatile with
+    | `Expr -> Printf.sprintf "((device volatile float*)produced)[%s]" idx
+    | `Decl | `None -> Printf.sprintf "produced[%s]" idx
+  in
+  let cell = "((0) * 4 + i88) * 16 + i89" in
   let term =
     match contribution with
-    | `Pooled_read -> "((float)((16*i88+i89)) + produced[((0) * 4 + i88) * 16 + i89])"
+    | `Pooled_read -> Printf.sprintf "((float)((16*i88+i89)) + %s)" (node_read cell)
     | `Slots_read -> "((float)((16*i88+i89)) + (float)(__pool_slots[4 + ((16*i88+i89) & 3)]))"
-    | `Index_only -> "((float)((16*i88+i89)))"
+    | `Index_only | `Guarded_read -> "((float)((16*i88+i89)))"
+  in
+  (* The update, and for [`Guarded_read] the [if] that controls it: the node read moves out of the
+     accumulating expression into the guard, which is then the update's only device read. The
+     threshold admits 43 of the 64 iterations, so a guard that is dropped, inverted or hoisted out
+     of the nest lands on a different total than an honoured one.
+
+     The guard is the only kernel text in this file not lifted verbatim from an emitted kernel, so
+     every token of it is one the backend can produce, and that is a constraint on anyone editing
+     it: the comparison is [Cmplt], which {!Ops.binop_c_syntax} spells [(a < b)] and Metal renders
+     through the shared default — there is no [>] in emitted code, because [Operation.( > )] is an
+     operand swap of [lt] (NaN-correct, unlike negation), so "greater than" reaches codegen already
+     swapped. Hence the constant on the left. The literal goes through [c_float_literal] above, the
+     [(float)] cast is what a double-typed constant's [convert_precision] emits at f32, and the
+     subscript is the same index expression the surrounding rows use. *)
+  let update = Printf.sprintf "v33_total = (v33_total + %s);" term in
+  let statement =
+    match contribution with
+    | `Guarded_read ->
+        Printf.sprintf "if (((float)(%s) < %s)) {\n          %s\n        }"
+          (c_float_literal guard_threshold) (node_read cell) update
+    | `Pooled_read | `Slots_read | `Index_only -> update
   in
   Printf.sprintf
     "%s  /* Local declarations and initialization. */\n\n\
@@ -144,7 +203,7 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
     \    v33_total = %s;\n\
     \    for (int32_t i88 = 0; i88 <= %d; ++i88) {\n\
     \      for (int32_t i89 = 0; i89 <= %d; ++i89) {\n\
-    \        v33_total = (v33_total + %s);\n\
+    \        %s\n\
     \      }\n\
     \    }\n\
     \    total[0] = v33_total;\n\
@@ -159,7 +218,7 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
     ^ if fence then "  threadgroup_barrier(mem_flags::mem_device);\n" else "")
     qualifier
     (match opening with `Read_cell -> "total[0]" | `Literal_zero -> "(float)(0.0)")
-    (seq_len - 1) (width - 1) term
+    (seq_len - 1) (width - 1) statement
 
 (* The reproducer's input: [produced = source * 1.25 - 0.5] over [source i = 1 + 0.125 i], the
    values scalar_rmw_accumulation feeds its localized leg. Every cell distinct, none zero, so a
@@ -169,13 +228,19 @@ let produced i = ((1.0 +. (float_of_int i *. 0.125)) *. 1.25) -. 0.5
 let oracle ?(scale = 1.0) contribution =
   let acc = ref 0.0 in
   for n = 0 to (seq_len * width) - 1 do
-    let term =
-      match contribution with
-      | `Pooled_read -> scale *. produced n
-      | `Slots_read -> float_of_int slot_values.(n land 3)
-      | `Index_only -> 0.0
-    in
-    acc := !acc +. float_of_int n +. term
+    match contribution with
+    | `Guarded_read ->
+        (* The guard reads the node; the update it controls reads nothing. Spelled in the kernel's
+           own order, which is the backend's: the constant is the comparison's left operand. *)
+        if guard_threshold < scale *. produced n then acc := !acc +. float_of_int n
+    | (`Pooled_read | `Slots_read | `Index_only) as contribution ->
+        let term =
+          match contribution with
+          | `Pooled_read -> scale *. produced n
+          | `Slots_read -> float_of_int slot_values.(n land 3)
+          | `Index_only -> 0.0
+        in
+        acc := !acc +. float_of_int n +. term
   done;
   !acc
 
@@ -221,9 +286,15 @@ let variants =
     };
     {
       vname = "volatile-source";
-      vbody = repro_body ~src_volatile:true ();
+      vbody = repro_body ~read_volatile:`Decl ();
       vexpected = oracle `Pooled_read;
       vnote = "plain accumulator, volatile READ pointer";
+    };
+    {
+      vname = "volatile-source-expr";
+      vbody = repro_body ~read_volatile:`Expr ();
+      vexpected = oracle `Pooled_read;
+      vnote = "the same as a per-read cast, the shipped spelling";
     };
     {
       vname = "slots-read-only";
@@ -272,6 +343,18 @@ let variants =
       vbody = repro_body ~contribution:`Index_only ();
       vexpected = oracle `Index_only;
       vnote = "plain, contribution reads nothing at all";
+    };
+    {
+      vname = "guard-read-only";
+      vbody = repro_body ~contribution:`Guarded_read ();
+      vexpected = oracle `Guarded_read;
+      vnote = "plain, the update's only read is in its guard";
+    };
+    {
+      vname = "guard-read-volatile";
+      vbody = repro_body ~contribution:`Guarded_read ~read_volatile:`Expr ();
+      vexpected = oracle `Guarded_read;
+      vnote = "the same, guard read cast volatile (what ships)";
     };
   ]
 
