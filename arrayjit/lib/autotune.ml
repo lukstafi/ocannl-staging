@@ -57,9 +57,13 @@ type timing_sample = { per_launch_ms : float; contention_ms : float }
    cannot silently consume it as an ordinary measurement (gh-ocannl-855). *)
 type timing_result = { ms : float; contended : bool; samples : int }
 
-(* The one admission gate for a timing verdict. Keeping this next to the result type prevents a
-   caller from proving only one half of usability (usually [not contended]) and accidentally feeding
-   an unresolved zero/NaN clock reading to ranking or the roofline consistency check. *)
+(* The one admission gate for a timing verdict, for the consumers that RANK: candidate selection,
+   the calibration rows, the roofline consistency check, cache attribution. Keeping it next to the
+   result type prevents such a caller from proving only one half of usability (usually
+   [not contended]) and accidentally feeding an unresolved zero/NaN clock reading to ranking.
+
+   Deliberately not the gate for [queued_batch_depth] (gh-ocannl-888): a batch depth is a scale
+   estimate, not a measurement, and both of its error directions are bounded. *)
 let admitted_timing_ms { ms; contended; samples = _ } =
   if contended || (not (Float.is_finite ms)) || not (Float.is_positive ms) then None else Some ms
 
@@ -309,8 +313,11 @@ let sample_min ~repeats ~sample =
   let stalled =
     List.count !samples ~f:(fun s -> Float.(s.contention_ms > contention_floor * contention_ratio))
   in
-  let degenerate = (not (Float.is_finite ms)) || not (Float.is_positive ms) in
-  { ms; contended = degenerate || stalled * 2 >= !count; samples = !count }
+  (* Dispersion only. A window whose minimum is zero, NaN or infinite is a clock that resolved
+     nothing -- a different fact, and one [admitted_timing_ms] already refuses on the number itself.
+     Folding the two lost the distinction exactly where it is load-bearing (gh-ocannl-888): the
+     depth policy consults one and must ignore the other. *)
+  { ms; contended = stalled * 2 >= !count; samples = !count }
 
 (* A usable winner drawn from an incomplete measurement set may ship for this call, but must not
    become the answer to every later call through the schedule cache. A later idle process needs to
@@ -342,19 +349,29 @@ let queue_calibration_runs = 3
    device: what [Queued] measures depends on it, and its two boundaries are the ones a regression
    would silently cross -- a depth stuck at 1 turns a queued search back into an isolated one, and
    an uncapped depth turns a microsecond kernel's batch into an unbounded dispatch. A non-positive
-   or non-finite estimate is a clock that resolved nothing, not a zero-cost or infinitely slow
-   kernel: refuse it through the same admission gate as the search. The cap is applied to the FLOAT,
-   before the conversion: [Float.iround_up_exn] raises on a value outside the integer range, and an
-   estimate of a few times [Float.min_positive_subnormal_value] produces exactly such a value — the
-   clamp has to happen while the quantity can still hold it. *)
-let queued_batch_depth estimate =
-  match admitted_timing_ms estimate with
-  | None -> None
-  | Some est_ms ->
-      Some
-        (let want = queued_batch_ms /. est_ms in
-         if Float.(want >= of_int max_queue_depth) then max_queue_depth
-         else Int.max 1 (Float.iround_up_exn want))
+   or NaN estimate is a clock that resolved nothing, not a zero-cost kernel: batch as deeply as the
+   cap allows rather than degenerating on the very routines queueing exists for. An infinite one is
+   not that case and is left to the arithmetic, which floors it at depth 1 — an unboundedly slow
+   routine is the far end of the scale the policy is FOR, not a reading it failed to take. The cap
+   is applied to the FLOAT, before the conversion: [Float.iround_up_exn] raises on a value outside
+   the integer range, and an estimate of a few times [Float.min_positive_subnormal_value] produces
+   exactly such a value — the clamp has to happen while the quantity can still hold it.
+
+   Total, and [contended] is deliberately unread (gh-ocannl-888). The 2x-majority contention rule is
+   a statement about a ~10 ms batch; the estimate it judges here is ONE dispatch plus one host
+   synchronization, whose dispersion on a GPU is the round trip's own tail rather than a host stall.
+   Refusing on it starved every search on both GPU backends: the calibration was refused, the
+   refusal was returned as the candidate's timing, and so nothing was ever timed on the machines
+   queued batching exists for. A depth is not a measurement -- an overestimated one only shortens
+   the batch and an underestimated one is capped -- and a deeper batch is precisely the remedy for
+   the dispersion that made the estimate look contended. The refusal belongs downstream, in the
+   timed loop, where the window being judged IS a batch. *)
+let queued_batch_depth { ms = est_ms; contended = _; samples = _ } =
+  if Float.is_nan est_ms || Float.(est_ms <= 0.) then max_queue_depth
+  else
+    let want = queued_batch_ms /. est_ms in
+    if Float.(want >= of_int max_queue_depth) then max_queue_depth
+    else Int.max 1 (Float.iround_up_exn want)
 
 (* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
    rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
@@ -364,13 +381,13 @@ let queued_batch_depth estimate =
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
 (* Observation seam for the timing tests (gh-ocannl-851), reporting the batch depth each
-   [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] reports 1
-   and a contended calibration reports [None]. The negative control for a twice-divided queued
-   reading needs the depth the call ACTUALLY used: the call recalibrates independently, so
-   re-applying the policy to an estimate taken outside it guesses wrong exactly on the busy runners
-   the control must survive. The calibration sample count accompanies it because that loop now has
-   the same variable top-up as timing. Default no-op, no config key selects it. *)
-let on_batch_depth : (int option -> calibration_samples:int -> unit) ref =
+   [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] reports 1.
+   The negative control for a twice-divided queued reading needs the depth the call ACTUALLY used:
+   the call recalibrates independently, so re-applying the policy to an estimate taken outside it
+   guesses wrong exactly on the busy runners the control must survive. The calibration sample count
+   accompanies it because that loop now has the same variable top-up as timing. Default no-op, no
+   config key selects it. *)
+let on_batch_depth : (int -> calibration_samples:int -> unit) ref =
   ref (fun _depth ~calibration_samples:_ -> ())
 
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
@@ -414,25 +431,23 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
         sync !ctx;
         Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6
       in
-      let calibration, depth =
+      let calibration_samples, depth =
         match timing with
-        | Isolated -> (None, Some 1)
+        | Isolated -> (0, 1)
         | Queued ->
             let estimate =
               sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
                   let wall = batch 1 in
                   { per_launch_ms = wall; contention_ms = wall })
             in
-            (Some estimate, queued_batch_depth estimate)
+            (estimate.samples, queued_batch_depth estimate)
       in
-      !on_batch_depth depth
-        ~calibration_samples:(Option.value_map calibration ~default:0 ~f:(fun r -> r.samples));
-      match depth with
-      | None -> Option.value_exn calibration
-      | Some depth ->
-          sample_min ~repeats ~sample:(fun () ->
-              let wall = batch depth in
-              { per_launch_ms = wall /. Float.of_int depth; contention_ms = wall }))
+      !on_batch_depth depth ~calibration_samples;
+      (* The calibration's own contention verdict is not consulted (gh-ocannl-888): it judged single
+         dispatches, and the window that gets judged for refusal is the batch below. *)
+      sample_min ~repeats ~sample:(fun () ->
+          let wall = batch depth in
+          { per_launch_ms = wall /. Float.of_int depth; contention_ms = wall }))
 
 (* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
    a single work-item — every nest a serial scalar loop, at one lane's throughput. Such a candidate

@@ -581,11 +581,29 @@ files.
   the whole budget and collapse a min-of-N to three samples. `Autotune.timing_result` also marks a
   window contended when at least half its raw wall samples exceed their minimum by 2x. Queued mode
   tests that dispersion on BATCH wall before dividing the ranked and budgeted samples by depth, so
-  the division cannot hide a fixed host stall. A queued calibration carrying that mark yields no
-  depth, and the search neither ranks a contended timing nor caches any winner from a search with
-  one or more contention refusals; `report.timings_contended` records every refusal so the
-  incomplete candidate set is diagnosable and a later cache-cold call retries it. Falling back to
-  depth 1 would silently change the queued objective back into the isolated one. Downstream,
+  the division cannot hide a fixed host stall. The search neither ranks a contended timing nor
+  caches any winner from a search with one or more contention refusals; `report.timings_contended`
+  records every refusal so the incomplete candidate set is diagnosable and a later cache-cold call
+  retries it. Falling back to depth 1 would silently change the queued objective back into the
+  isolated one.
+  **That 2x-majority rule is a statement about a ~10 ms batch, and applying it anywhere else is a
+  scale error** (gh-ocannl-888). The queued calibration samples ONE dispatch plus one host sync;
+  on a GPU the dispersion of that quantity is the round trip's own heavy tail, and a majority above
+  2x the minimum is ordinary rather than evidence of a host stall — a 08-31 CUDA probe read
+  0.143874 / 0.052629 / 0.016898 ms. When `queued_batch_depth` refused on that verdict, the refusal
+  was returned as the candidate's timing, so every search over microsecond kernels timed NOTHING on
+  both GPU backends while `cc` (no round trip to disperse, and the only backend per-PR CI runs)
+  stayed green. So `Autotune.queued_batch_depth` is **total** and never reads `contended`: a depth
+  is a scale estimate whose error is bounded both ways (floor 1, cap 200), and a deeper batch is
+  the REMEDY for dispatch dispersion. Refusal happens once, downstream, on the timed loop's own
+  window, which is a batch. Correspondingly `sample_min`'s `contended` is dispersion only: a
+  non-positive or non-finite minimum is a clock that resolved nothing, refused by
+  `Autotune.admitted_timing_ms` on the number itself, and such an estimate batches at the cap
+  because sub-resolution readings are exactly what queueing exists to resolve.
+  Symptom to recognize: the `on_batch_depth` seam (printed by `autotune_timing_modes` to stderr)
+  reporting depth 1 where a batch was expected, alongside `NOT TIMED` for every candidate. Note
+  that `autotune_timing_modes`' own device-facing claims are all written `... || contended`, so a
+  total refusal reads there as a pass — the tuner tests are what catch it. Downstream,
   `family_profit_of_report` treats such a partial report as `Unmeasured`, and benchmark JSON carries
   the refusal count on each tune arm so an artifact never presents it as a complete measurement.
   **The objective is a cache-key component** (`Schedule_cache.key_components`' `timing`, classified
