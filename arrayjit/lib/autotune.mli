@@ -570,9 +570,14 @@ type timing_result = {
   contended : bool;
       (** At least half the sample window was more than 2x slower than its minimum. This is a
           refusal signal: the window mostly measured host stalls, so the autotuner does not rank or
-          cache the number (gh-ocannl-855). Dispersion only — a window whose minimum is
-          non-positive or non-finite is a clock that resolved nothing, a separate fact that
-          {!admitted_timing_ms} refuses on the number itself (gh-ocannl-888). *)
+          cache the number (gh-ocannl-855). Dispersion only — a window whose minimum is non-positive
+          or non-finite is a clock that resolved nothing, a separate fact that {!admitted_timing_ms}
+          refuses on the number itself (gh-ocannl-888).
+
+          Because they are separate, [not contended] is HALF a proof of usability: a consumer
+          deciding whether to keep a number asks {!admitted_timing_ms}, never this field. Reading it
+          directly is for saying something about contention itself — a diagnostic, a test that
+          excuses a claim under host load. *)
   samples : int;
       (** The number of samples behind [ms] and [contended], for diagnostics and exact dispatch
           accounting. *)
@@ -1148,8 +1153,9 @@ val time_routine :
     calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
     than that target is measured identically in both modes. The calibration always yields a depth;
     the result of the timed loop reports when most of ITS samples were stalled, and the tuner
-    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can spend
-    up to 64 batches on a fast candidate; [max_timing_runs] is its wall-cost bound.
+    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since
+    the budget is per-launch rather than batch wall, queued timing can spend up to 64 batches on a
+    fast candidate; [max_timing_runs] is its wall-cost bound.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's

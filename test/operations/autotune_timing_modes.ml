@@ -115,9 +115,9 @@ let depth_cases =
     ("a subnormal estimate", Float.min_positive_subnormal_value, 200);
   ]
 
-(* The estimates ranking refuses. The depth policy still owes each of them one -- batching is what
-   a sub-resolution reading CALLS for (gh-ocannl-888), and an unboundedly slow routine is the far
-   end of the scale the policy is for, not a reading it failed to take. *)
+(* The estimates ranking refuses. The depth policy still owes each of them one -- batching is what a
+   sub-resolution reading CALLS for (gh-ocannl-888), and an unboundedly slow routine is the far end
+   of the scale the policy is for, not a reading it failed to take. *)
 let degenerate_depth_cases =
   [
     ("an infinitely slow routine", Float.infinity, 1);
@@ -134,8 +134,7 @@ let () =
         Stdio.eprintf "  %s: est %g ms -> depth %d, expected %d\n%!" what est_ms got want;
       got = want);
   Verdict.p_all "every degenerate calibration estimate is refused by ranking but still batched"
-    degenerate_depth_cases
-    ~f:(fun (what, est_ms, want) ->
+    degenerate_depth_cases ~f:(fun (what, est_ms, want) ->
       let result : Autotune.timing_result = { ms = est_ms; contended = false; samples = 16 } in
       let admitted = Autotune.admitted_timing_ms result in
       let depth = Autotune.queued_batch_depth result in
@@ -283,9 +282,7 @@ let () =
      the one it reported fails this on any count the reported depth does not divide. *)
   p "queued timing either refuses contention or dispatches whole batches at the reported depth"
     (que.contended
-    || que.depth >= 1
-       && que.calibration_samples >= 16
-       && que.calibration_samples <= 64
+    || que.depth >= 1 && que.calibration_samples >= 16 && que.calibration_samples <= 64
        && que.samples >= 16 && que.samples <= 64
        && que.dispatches = 1 + que.calibration_samples + (que.samples * que.depth));
   (* Depth > 1 is what queued mode IS. Gated on the depth the queued call itself reported: on a

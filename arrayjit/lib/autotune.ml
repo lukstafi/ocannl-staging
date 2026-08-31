@@ -59,8 +59,8 @@ type timing_result = { ms : float; contended : bool; samples : int }
 
 (* The one admission gate for a timing verdict, for the consumers that RANK: candidate selection,
    the calibration rows, the roofline consistency check, cache attribution. Keeping it next to the
-   result type prevents such a caller from proving only one half of usability (usually
-   [not contended]) and accidentally feeding an unresolved zero/NaN clock reading to ranking.
+   result type prevents such a caller from proving only one half of usability (usually [not
+   contended]) and accidentally feeding an unresolved zero/NaN clock reading to ranking.
 
    Deliberately not the gate for [queued_batch_depth] (gh-ocannl-888): a batch depth is a scale
    estimate, not a measurement, and both of its error directions are bounded. *)
