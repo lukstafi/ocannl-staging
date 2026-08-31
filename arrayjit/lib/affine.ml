@@ -48,11 +48,6 @@ type verdict =
           witness/explanation (the axis or symbol pair that failed). *)
 [@@deriving sexp_of]
 
-let equal_verdict a b =
-  match (a, b) with
-  | Disjoint, Disjoint | Same_thread, Same_thread | Cross_thread _, Cross_thread _ -> true
-  | _ -> false
-
 let rec gcd a b = if b = 0 then abs a else gcd b (Int.rem a b)
 
 (* Linear terms of one axis component on one side. [None] = uninterpretable component (no

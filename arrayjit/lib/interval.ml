@@ -84,13 +84,6 @@ let is_within ~outer inner =
   && Float.(inner.hi <= outer.hi)
   && ((not outer.integral) || inner.integral)
 
-(** Whether the single (machine) value [v] is admitted. *)
-let value_fits iv v =
-  (not (Float.is_nan v))
-  && Float.(v >= iv.lo)
-  && Float.(v <= iv.hi)
-  && ((not iv.integral) || Float.is_integer v)
-
 let is_singleton iv = iv.exact && Float.(iv.lo = iv.hi)
 
 (** {2 Truthiness}
