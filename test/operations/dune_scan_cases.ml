@@ -1058,20 +1058,36 @@ let backend_rule_cases =
       [ "rule REPORTED: declares neither +floor" ] );
   ]
 
-(* The dumb reading against the placed one. A marker written where the comment lexer does not look
-   -- into a quoted argument, into a field -- is the difference between the two counts, which is the
-   shape of "the author declared something the check did not read". *)
+(* The dumb reading against the placed one, in the contract's own three counts: the whole text, the
+   comments the lexer finds, and the comments a stanza's parentheses contain. A marker written where
+   the comment lexer does not look -- into a quoted argument, into a field -- shows up as the first
+   gap, and one written in a comment no stanza encloses as the second. Both are the same shape,
+   "the author declared something no stanza carries", which is why the contract answers the placed
+   count itself instead of leaving each consumer to subtract its way to it (gh-ocannl-863). *)
 let sentinel_counting_cases =
   [
     ( "in a comment",
       {dune|(test (name t)
  ; ocannl-backend: none -- links no backend
  (deps ocannl_config))|dune},
-      (1, 1) );
+      (1, 1, 1) );
     ( "inside a quoted argument, where it declares nothing",
       {dune|(rule (deps ocannl_config) (action (echo "ocannl-backend: none -- links no backend")))|dune},
-      (1, 0) );
-    ("none at all", {dune|(test (name t) (deps ocannl_config))|dune}, (0, 0));
+      (1, 0, 0) );
+    (* The count that separates the placed answer from the comment answer: a lexed comment that no
+       stanza's parentheses contain. Subtracting one from the other would give 1 here. *)
+    ( "in a comment above every stanza, which encloses it in none",
+      {dune|; ocannl-backend: none -- sits between stanzas and declares nothing
+(test (name t) (deps ocannl_config))|dune},
+      (1, 1, 0) );
+    (* A malformed marker was still PLACED: what is wrong with it is its own issue, not its
+       position, so the placed count keeps it. *)
+    ( "a malformed marker inside a stanza is still placed",
+      {dune|(test (name t)
+ ; ocannl-backend: none
+ (deps ocannl_config))|dune},
+      (1, 1, 1) );
+    ("none at all", {dune|(test (name t) (deps ocannl_config))|dune}, (0, 0, 0));
   ]
 
 (* gh-ocannl-863: every Dune comment convention inherits this outer grammar and placement contract.
@@ -1649,16 +1665,18 @@ let () =
           []
       in
       check ("backend rule -- " ^ name) expected found);
-  List.iter sentinel_counting_cases ~f:(fun (name, source, (in_text, in_comments)) ->
+  List.iter sentinel_counting_cases ~f:(fun (name, source, (in_text, in_comments, in_stanzas)) ->
       let contract = Scan.backend_marker_contract source in
-      let found =
-        Printf.sprintf "%d in the text, %d in comments" contract.Scan.contract_text_occurrences
-          contract.Scan.contract_comment_occurrences
+      let render text comments stanzas =
+        Printf.sprintf "%d in the text, %d in comments, %d in stanzas" text comments stanzas
       in
       check
         ("backend marker sentinel -- " ^ name)
-        [ Printf.sprintf "%d in the text, %d in comments" in_text in_comments ]
-        [ found ]);
+        [ render in_text in_comments in_stanzas ]
+        [
+          render contract.Scan.contract_text_occurrences
+            contract.Scan.contract_comment_occurrences contract.Scan.contract_stanza_occurrences;
+        ]);
   List.iter contained_marker_cases ~f:(fun (name, source, expected) ->
       let found =
         try render_contained_marker_contract source

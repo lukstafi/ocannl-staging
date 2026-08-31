@@ -234,20 +234,11 @@ let scan ~backends ~expected_paths ~dune_files =
             let contract_errors =
               List.concat_map contract.contract_issues ~f:(marker_issue_errors ~dune_path)
             in
-            let outside_stanza_occurrences =
-              List.sum
-                (module Int)
-                contract.contract_issues
-                ~f:(function
-                  | Dune_scan.Marker_outside_stanza { issue_text; _ } ->
-                      Dune_scan.sentinel_occurrences ~sentinel:marker issue_text
-                  | Dune_scan.Malformed_marker _ | Dune_scan.Marker_in_wrong_stanza _
-                  | Dune_scan.Marker_outside_comment _ ->
-                      0)
-            in
-            let inside_stanzas =
-              contract.contract_comment_occurrences - outside_stanza_occurrences
-            in
+            (* The contract counts the placed occurrences itself: this check only compares the
+               dumb text count against it, so a marker written outside a comment and one written
+               between stanzas are the same report -- the author declared something no stanza
+               carries. *)
+            let inside_stanzas = contract.contract_stanza_occurrences in
             let errors =
               if Int.equal contract.contract_text_occurrences inside_stanzas then
                 List.rev_append contract_errors errors
