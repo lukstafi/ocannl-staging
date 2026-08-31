@@ -1,92 +1,47 @@
+# Changelog
+
+These notes record each release's outward-facing key achievements — features, architectural
+choices, important bug fixes — not ongoing progress. Finer-grained history lives in merge
+commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue threads
+(`ahrefs/ocannl`, cited as gh-ocannl-NNN).
+
 ## [Unreleased]
-
-### Fixed
-
-- **`Train.sgd_update ~momentum` works** (gh-ocannl-772). The momentum buffer is optimizer state --
-  read before it is written, carrying its value into the next invocation of the routine -- but it
-  was left undetermined and so became a virtualization candidate, and lowering a node whose defining
-  computation is in a previous invocation fails outright: any `~momentum:x` with `x > 0` died with
-  `Stale optimize_ctx: No computations found for #N: sgd_momentum_...`, on every backend. `sgd_one`
-  now materializes the buffer. Nothing had noticed because nothing in the suite ran sgd off its
-  defaults; `test/operations/sgd_variants` now drives momentum, nesterov, weight decay, `grad_scale`
-  and a gate that actually closes against a host simulation of the update rule.
 
 ### Changed
 
-- **The test-suite configuration reader lives in `test/config`, and resolves the backend once for
-  the whole suite.** `ocannl_read_config` — the executable a dune rule runs to learn which backend a
-  test run will pick — sat in `test/operations/config`, and gh-ocannl-787's per-backend
-  `transformer_names` goldens needed a near-copy of its rule in `test/training/dune`. Both the
-  executable and the rules now sit in `test/config`, beside the `ocannl_config` and
-  `env_spelling_gate.ml` that every test directory already shares, producing `ocannl_backend.txt`
-  and `ocannl_backend_extension.txt` once. A directory adopting a per-backend golden writes
-  `%{read:../config/ocannl_backend.txt}` and copies nothing. One resolution serves every directory
-  because they all copy the same `ocannl_config` and share the environment and command line.
+- Metal's serial-accumulation workaround — the backend capability `volatile_scalar_rmw` — is
+  renamed `volatile_serial_accumulation`, reproduced
+  standalone without OCANNL (`benchmarks/runners/ocannl/bench_metal_bug_local.ml`), and measured:
+  1.06x cost memory-bound up to 4.1x on a single-threaded scalar-loss reduction; each compiled
+  routine now carries a volatility census (`Context.routine.volatility`) (gh-ocannl-782).
+- `Train.to_routine` returns the post-compile context (`Context.t * Context.routine`), matching
+  `Context.compile` and `Train.run_once` — out-of-tree callers get a type error whose fix is
+  `let _, routine = ...` or, better, chaining the returned context; `Train`'s duplicated
+  dump/budget blocks are shared helpers (gh-ocannl-772).
+- `?lowered_transform` / `?lowered_transforms` on `Context.compile` / `Context.compile_outcome`
+  and backend `compile` are
+  unified into one list-returning `?lowered_transform : Low_level.optimized ->
+  Low_level.optimized list`, making their runtime mutual exclusion impossible to express
+  (gh-ocannl-768).
+- `Context.t`'s device field and the `?device_id` parameters are renamed `ordinal` (no deprecated
+  alias) — the value is the backend's device ordinal, not the process-global `device_id` — and the
+  gh-ocannl-498 memory-budget planner moves out of `Context` into its own `arrayjit.memory_budget`
+  library: `Context.plan_memory_budget` is `Memory_budget.fit`, `Context.memory_budget` is
+  `Memory_budget.t`, `Context.budget_plan` is `Memory_budget.plan`, and `footprint` /
+  `compare_relief_ratio` move across unchanged (gh-ocannl-776).
+- The fp8 soak's vendor arms hold only their jit calls; all vendor-independent logic lives in
+  `tools/fp8_soak.ml`, which every box compiles, so an edit can no longer ship having only ever
+  been parsed (gh-ocannl-758).
+- The test-suite configuration reader lives in `test/config` and resolves the backend once for the
+  whole suite; a directory adopting a per-backend golden reads
+  `%{read:../config/ocannl_backend.txt}` and copies nothing (gh-ocannl-787).
 
-- **Metal's accumulation workaround is renamed, censused and measured** (gh-ocannl-782). The
-  backend capability `volatile_scalar_rmw` is now `volatile_serial_accumulation`: since
-  gh-ocannl-731 it covers both spellings of a serial reduction (the device-memory read-modify-write
-  pointer shadow and the localized scope-local accumulator), and it turns out to key on neither
-  "scalar" nor the pooled binding. A new standalone probe,
-  `benchmarks/runners/ocannl/bench_metal_bug_local.ml`, reproduces the localized manifestation
-  without OCANNL and varies the emitted kernel one factor at a time: the defect survives dropping
-  the pooled slot table entirely (literal offsets off a kernel parameter), dropping `__restrict`,
-  inserting a device memory barrier, and moving the preceding device store to an unrelated cell. It
-  is stopped by the `volatile` accumulator, by a `volatile` read pointer, or by an accumulating loop
-  that dereferences no node pointer — which leaves no narrowing worth taking, so the predicate stays
-  wide. The same program measures what that costs (M4 Max, GPU clock, best of 30 rotated
-  interleaved repeats): 1.06x on a memory-bound per-thread reduction, 2.15x accumulator-bound,
-  4.1x on a single-threaded
-  scalar-loss reduction. Each compiled routine now carries a volatility census
-  (`Context.routine.volatility`) reporting which accumulators were pinned to memory, which stayed
-  register-resident, and whether the backend requested the workaround at all;
-  `test/operations/reduction_accumulator_residency` states its expectation from that census instead
-  of matching the backend's name against `"metal"`.
+### Fixed
 
-- **`Train.to_routine` returns the post-compile context** (`Context.t * Context.routine`) instead of
-  discarding it (gh-ocannl-772), matching `Context.compile` and `Train.run_once`. The context was
-  never actually lost -- `routine.Context.context` carries the same value, which is why the 2026-06
-  review deferred this -- but the asymmetry made `train.ml` read as if `to_routine` and `run_once`
-  disagreed about who owns the post-compile context. All in-tree callers were adapted; out-of-tree
-  callers get a type error whose fix is `let _, routine = ...` or, better, chaining the returned
-  context into the next compile.
-
-- **`Train`'s duplicated blocks are shared** (gh-ocannl-772). `to_routine` and `run_once` carried
-  the same `output_cd_file` dump and the same memory-budget plan/compile/report triple verbatim;
-  these are now `dump_cd_file` and `compile_within_budget`, with the explanatory comments living
-  once at the helper. `sgd_one` no longer duplicates its whole `%cd` payload across the
-  `update_gate` arms -- the ppx hoists inline declarations above the enclosing `match`/`if`, so the
-  arms differ only where gating changes the emitted assignment.
-
-- `?lowered_transform` and `?lowered_transforms` on `Context.compile` / `Context.compile_outcome` /
-  backend `compile` are unified into one list-returning `?lowered_transform :
-  Low_level.optimized -> Low_level.optimized list` (gh-ocannl-768). Their mutual exclusion was a
-  runtime `Invalid_argument` threaded through three layers; it is now impossible to express. A
-  whole-routine transform returns a singleton (`fun o -> [ f o ]`), a fissioning one returns one
-  element per kernel segment.
-- `Context.t`'s device field and the `?device_id` parameters of `Context.cuda`/`hip`/`metal` and
-  `Backends.make_context` are renamed to `ordinal` (gh-ocannl-776): the value IS the backend's
-  device ordinal, while `Backend_intf.device.device_id` is a process-global counter across all
-  backends, so the old name answered a different question than it asked on multi-backend runs. The
-  accessor is now `Context.ordinal`. No deprecated alias.
-- The gh-ocannl-498 memory-budget planner moves out of `Context` into its own
-  `arrayjit.memory_budget` library (gh-ocannl-776): `Context.plan_memory_budget` is
-  `Memory_budget.fit`, `Context.memory_budget` is `Memory_budget.t`, `Context.budget_plan` is
-  `Memory_budget.plan`, and `Context.footprint` / `Context.compare_relief_ratio` move across
-  unchanged. It is a deterministic planning pass over `Context`'s analyze-only surface, so it sat in
-  `context.mli` only by history. `test/operations/memory_budget` is renamed
-  `memory_budget_planner`, so that the test executable's module does not shadow the library's.
-- **The fp8 soak's vendor arms hold only their jit calls** (gh-ocannl-758). A file behind a dune
-  `select` is compiled on its own box and nowhere else, so an edit to `fp8_soak_cuda.cudajit.ml` or
-  `fp8_soak_hip.hipjit.ml` made elsewhere is blind — twice in two days one shipped through a green
-  CI having only ever been parsed. Everything that is not a call into a vendor's jit library now
-  lives in `tools/fp8_soak.ml`, which every box compiles: per-vendor `vendor` records carry each
-  platform's name, C type, narrowing spellings and labels, the probe and header wording, and the
-  thresholds that say what a reported kernel macro means, while an arm is left with its kernel
-  source, its compile/load/launch/copy calls, and data extractors. The `.missing` stubs mirror no
-  vendor knowledge at all. Each arm also records where it last really compiled — box, date, and the
-  PR whose evidence says so — which the run header prints beside the arm's source path, so the next
-  editor knows whether they are editing blind.
+- `Train.sgd_update ~momentum` works (gh-ocannl-772): the momentum buffer — optimizer state, read
+  before written — was left a virtualization candidate, so any `~momentum:x > 0` failed at
+  lowering on every backend; `sgd_one` now materializes it, and `test/operations/sgd_variants`
+  drives momentum, nesterov, weight decay and `grad_scale` against a host simulation.
 
 ## [1.0.1] -- 2026-08-26
 
@@ -112,767 +67,168 @@
 > a Zen 5 (gh-ocannl-621, gh-ocannl-648).
 >
 > Honest nulls, recorded as such: the two-pass benchmark protocol stays OCANNL-only — no other
-> framework's searching cell clears ~10% on both GPU boxes (the torch.compile residue even changes
-> sign between them), and the old 2.5–3.5x rationale is superseded by a measured ≤10.3%
-> (gh-ocannl-675); the menu's descent into virtualization-inlined
-> scopes measured zero loops reached across the whole suite, so the provenance restriction is
-> insurance rather than a measured save (gh-ocannl-687); and the gh-573/gh-574 HIP ratios were
-> re-verified end to end after the first session's arm A routines turned out profiled-but-never-
-> executed in three of four cells (gh-ocannl-612).
+> framework's searching cell clears ~10% on both GPU boxes, and the old 2.5–3.5x rationale is
+> superseded by a measured ≤10.3% (gh-ocannl-675); the menu's descent into virtualization-inlined
+> scopes measured zero loops reached across the whole suite (gh-ocannl-687); and the gh-573/gh-574
+> HIP ratios were re-verified end to end after the first session's arm A routines turned out
+> profiled-but-never-executed in three of four cells (gh-ocannl-612).
+
+### Added
+
+- **Training-loop mechanics** (gh-ocannl-465): host-side LR schedules (`Train.Lr_schedule`:
+  cosine / linear / constant / WSD with warmup, via `Train.host_scalar`); global-norm gradient
+  clipping (`Train.grad_l2_norm`, `Train.clip_by_global_norm`, folded into the update by
+  `sgd_update ~grad_scale` — gradient buffers stay untouched, llm.c-style); gradient accumulation
+  (`Train.grad_update ~accum_steps`, `Train.zero_params_grads`); and the `Train.Outlier_detector`
+  sliding-window z-score monitor. Executed-parity coverage against host oracles.
+- **Mapped checkpoint and safetensors loading** (gh-ocannl-467, gh-ocannl-587, gh-ocannl-588):
+  payloads load as private, copy-on-write `Unix.map_file` regions instead of element-by-element
+  decodes, so pages are read lazily by the OS; the checkpoint format gained an `alignment` field
+  (old readers and old files keep working); unaligned payloads are decoded rather than mapped (an
+  unaligned mapping is undefined behaviour); and the Windows carve-out was measured, found
+  unnecessary, and retired — mapping defaults on for every platform (opt out with
+  `checkpoint_load_mmap=false` or `?mmap:false`, for a filesystem that does refuse replacement
+  under a live mapping), pinned by a cross-platform
+  regression test. **Behavior change**: `Safetensors.to_ndarray` returns each payload's own
+  precision instead of forcing F32 — pass `?prec` for a fixed target — and I8/I16/F8_E4M3 payloads
+  are refused rather than reinterpreted (`to_float32` keeps its F32-only contract).
+- **Frozen parameters are not trained** (gh-ocannl-670, gh-ocannl-673): `Train.trainable_params`
+  derives the trained subset from the backprop code (`?params` to override) while `loss.params`
+  keeps its union semantics as the state set; params-driven helpers over a loss that trains
+  nothing raise at construction instead of compiling empty routines.
+- **The pre-driver launch gate covers every hardware launch dimension** (gh-ocannl-679,
+  gh-ocannl-643, gh-ocannl-684): per-dimension workgroup caps (`max_workgroup_dims`) and the `.y`
+  grid extent join the checks, enumerated from one table rather than hand-copied per bound
+  (`Backend_intf.max_grid_z` became `max_grid_yz`); new
+  `bin/device_props` prints the queried device properties and derived limits the gates compare
+  against.
+- **Tuning ergonomics and verification**: `Autotune.tune` takes `?name` like `Context.compile`, so
+  a nameable computation is a tunable one (gh-ocannl-669); `tune_ship_arm` lets a measurement ship
+  a chosen placement arm so the profiled artifact is the one whose losses are reported
+  (gh-ocannl-638); and the gh-573/gh-574 HIP measurement was re-verified end to end with every
+  quoted routine executed — gh-573 is worth 1.28x end to end (gh-ocannl-612,
+  `benchmarks/report-gh612-hip-verified.md`).
+- **Cache identity is complete by construction** (gh-ocannl-572): every configuration key is
+  classified against the schedule cache's identity (code-borne / keyed component / search-shaping
+  / neutral), enforced by `test/operations/digest_completeness`; the cache key gains a codegen
+  component covering the emission gates, each backend's codegen knobs, the whole `hardware_limits`
+  record, and a cc toolchain fingerprint.
+- **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658): one minimal,
+  executed IR shape per outcome, stating which phase decides it and under which provenance; and
+  hand-built lowered code can be executed, not only analyzed, via `Context.compile ?prelowered`
+  (gh-ocannl-562). **Behavior changes**: `Context.routine` became a `private` record — fields
+  stay readable, but out-of-tree code can no longer construct or functionally update one — and
+  `Context.get_values` / `set_values` on a node the
+  optimizer placed `Local` now raise instead of serving an unrelated uploaded copy — host access
+  requires materializing the node (gh-ocannl-599).
+- **A fault-injection inventory for resource-owning seams** (gh-ocannl-571), with a GPU-free
+  harness over finalize/release, pool, merge-pool, transfer and cache seams — it found a real
+  `from_host` leak before the harness was done; and the cost model's **memory leg is fittable**
+  from STREAM-style bandwidth calibration (gh-ocannl-578).
 
 ### Changed
 
-- **A green GPU sweep row now says whether tests actually had to run** (gh-ocannl-737). The reused
-  `_build` makes the daily sweep affordable, but it also lets Dune serve unchanged backend tests
-  from cache. Normal successes therefore record `incremental-pass` and `execution=incremental`,
-  while `tools/sweep.sh --force` cleans the locked worktree before forcing the selected aliases,
-  including inline expectations; only its complete success records `pass` and `execution=forced`.
-  Existing history is migrated conservatively (`legacy-pass`, `execution=unknown`) under the same
-  run lock that protects new rows, and a cold unit that exceeds its backend's cap remains an honest
-  `timeout`.
-
-- **Each `@slow` test has its own `slow-<name>` alias**, so one slow test reruns alone after a
-  change -- `OCANNL_BACKEND=cc dune build @test/training/slow-mlp_names` -- instead of the whole
-  suite (~30 min on CUDA, longer on cc) or a hand-run of the exe with a manual diff, which fixing
-  `cifar_conv`/`mnist_conv` (lukstafi/ocannl-staging#429) had to do four times. `@slow` is now a per-directory
-  `(alias (name slow) (deps ...))` stanza aggregating the per-test aliases and the directory's
-  ambient `env_spelling_gate`, which each slow rule also depends on directly, so the gate runs
-  BEFORE the test rather than beside it. `test/operations/env_var_deps` follows gates through alias
-  dependencies now, asks the gating question of every alias a build can start from, and fails on a
-  `slow-<name>` rule the `slow` stanza does not list -- the one way the aggregation could quietly
-  lose a test.
-
-- **The flip chain's enablement promotion is weighed against measured profitability**
-  (gh-ocannl-579, the last open follow-up of the gh-ocannl-514 branch-and-bound arc). The
-  enablement prior ranks a placement flip by which sketch families it makes EXPRESSIBLE — the
-  gh-ocannl-558 lesson, which the recompute-cost bound has no term for — and prices nothing about
-  whether those families pay. On gh-ocannl-514's metal/f16 `mlp_wide` cell that cost the run: the
-  two promoted cast twins took budget slots 1-2 of a budget-5 chain, the family they unlocked timed
-  79-92 ms against the arm's 7.5 ms, and the cheap `inline` flip that actually won (cost-rank 5)
-  fell out of the budget — enablement-ordered chains shipped 7.03-7.14 ms where cost-ordered ones
-  shipped 6.55/6.64. The evidence that settles it is already paid for at the decision point:
-  `Train.tune_placements` searches arm B, the all-materialized specialization the prior derives its
-  enablement set FROM, before the chain walks, so its report's best tensorized time against its best
-  time prices the promotion for free, on this device and this computation. New
-  `Autotune.family_profit_of_reports` reads both arms' reports and the new default
-  `tune_flip_ordering=profitable` resolves to `enablement` when the family is competitive or was
-  never timed, and to `cost` when it lost by more than the new `tune_flip_profit_margin` (default
-  1.25). Absence of a confirmation is not evidence against — an arm that seeded tensorized
-  candidates and timed none measured nothing about the family, so gh-ocannl-558's budget-5
-  reachability closure is untouched — and when the prior is voided both its classes go at once,
-  since promoting family-unlocking flips and demoting family-breaking ones are the same bet on the
-  same family. The verdict does not depend on cache state: the schedule-cache entry now carries the
-  storing search's `mma_best_ms` (an optional field, so existing entries stay readable and claim
-  nothing), replayed like `best_ms` and `baseline_ms` already were — the counters describe the call,
-  the times describe the program. `tune_flip_ordering=cost` and `=enablement` remain as the two
-  unconditional evaluation baselines the gh-514 report's cells were measured under, and under them
-  the evidence is never derived, so `tune_flip_profit_margin` is never read; `Autotune.model_default`'s
-  placement walk measures nothing, so it gets the prior unchanged.
-- **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626). The
-  `Tile_mma` rendering census was a pair of global refs each consumer bracketed by hand (six copies
-  of the same five-line `Exn.protect`), so the default for any new timing harness was to report a
-  variant name unrelated to what rendered: a `Tile_mma` whose emission preconditions fail renders
-  the lane-0 scalar fallback, which compiles, runs and times fine under an `mma-*` label. It is now
-  derived once, inside `Context.compile`, and carried on the routine as
-  `Context.routine.mma : Ir.C_syntax.mma_summary`. The label is a three-way
-  `Ir.C_syntax.tensorization` — `Tensorized` (at least one tensor-core / SIMD-register-tile
-  emission), `Scalar_fallback` (statements emitted, every one declined), `Not_requested` (no
-  `Tile_mma` emitted) — with the statement and fallback counts beside it, and
-  `C_syntax.with_census` is the (additively nesting) bracket that replaces the six copies.
-
-  `Autotune.report` gains `best_tensorization : tensorization option`, `None` exactly when there is
-  no crowned candidate to consult, so a report that consulted no census cannot read as tensorized;
-  read against the existing `best_tensorized` it separates what the schedule ASKED for from what
-  the emission DELIVERED. The label is printed where timings are reported: the `autotune_log` notes,
-  `Train.tune_placements`' arm lines, every timing line of `bin/schedule_bench` and
-  `bin/narrow_gebp_bench` (through the now-shared `C_syntax.mma_summary_string`, which also ends
-  the two benches' disagreement about the "did this tensorize" predicate), the benchmark harness's
-  per-kernel segment table, and the result line's `tune` arms as `tensorization` +
-  `mma_statements`, plus `shipped_mma`: the census of the routine whose steps were timed, which is
-  what `orchestrate.py` reads into the report's `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED`
-  shouted, plus a `TENSORIZATION NOTICE`). Not the arm named as shipped — a crowned arm candidate
-  is not always the shipped artifact, since a flip refinement ships under `shipped: "flip"` and is
-  not an arm at all, and the `timing_ctx` path can fall back to the untuned default after crowning
-  a winner.
-
-- **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
-  from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`
-  used to consult FIRST, is gone — no caller in the repository spelled a variable that way and no
-  documentation recommended it, while every dune rule declaring the ambient variables it is
-  invalidated by paid two lines per key (228 of them; gh-ocannl-628 had just swept them in).
-  Dropping a spelling someone may have exported would be a silent demotion, so it is not merely
-  ignored: an environment variable naming a KNOWN key in a spelling nothing reads is now a FATAL
-  startup error that names the spelling that works, rather than a warning. Names that address
-  OCANNL without naming a key, and lowercase names in the reserved `OCANNL_TOOL_` /
-  `OCANNL_LOG_LEVEL_` namespaces, keep their warnings; an empty value counts as unset everywhere
-  and is never reported. A key written with dashed separators (`OCANNL_PRINT-DECIMALS-PRECISION`,
-  the shape the commandline reads) is recognized as the key it names, so it aborts rather than
-  warning as an unknown key. Commandline spellings are untouched — `--ocannl_backend=cuda` and
-  `--backend=cuda` still work, dashes and all. `Utils.env_var_names` became `Utils.env_var_name`.
-
-  Because no dune rule declares the rejected spellings any more, each test directory carries an
-  `env_spelling_gate` whose `(universe)` dependency makes dune rerun it on every invocation:
-  `ocannl_backend=cuda dune build @test/einsum/runtest` fails there naming the variable, instead of
-  serving that directory's cached passes. One per directory and per alias, since dune aliases are per
-  directory and a `(test)` stanza is a `runtest` action alone — `@slow` carries its own gate rule
-  in the three directories that have slow rules. `test/operations/env_var_deps` fails if a
-  directory has actions on an alias with no gate attached to that alias.
-
-  Also fixes two latent bugs in the same predicate. The case-insensitivity allowance answered
-  "read" for every candidate rather than for case-only variants, so a DASHED spelling classified as
-  a config key on Windows; punctuation is not case, and `Utils.same_env_name` no longer folds it.
-  And it applied on Cygwin, whose POSIX environment is case-SENSITIVE — folding there would have
-  called a lowercase spelling read while `read_env_var` found nothing, which is the demotion the
-  check exists to prevent. The check now runs before every configuration-driven startup effect, so
-  a rejected `ocannl_clean_up_build_files_on_startup=false` no longer loses the artifacts it asked
-  to keep on the way to the abort.
-
-### Added
-
-- **The pre-driver launch gate covers every hardware dimension, workgroup included**
-  (gh-ocannl-679). `max_threads_per_workgroup` caps the thread *product* of a workgroup and nothing
-  capped its dimensions individually — but CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a
-  `2 x 2 x 128` threadgroup has a perfectly legal 512-thread product, passes every check, compiles,
-  and then dies at the driver with an opaque invalid-configuration error. `Workgroup` slots cap at
-  3 and the innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly;
-  no fold and no exotic schedule is needed to reach it. `Backend_intf.hardware_limits` therefore
-  gains `max_workgroup_dims : (int * int * int) option`, the per-dimension caps on the block's
-  `.x`/`.y`/`.z` — all three rather than one shared bound (as `max_grid_yz` is) because here the
-  dimensions genuinely differ, and an immutable tuple because the GPU backends memoize this record
-  and `Context.hardware_limits` hands it out directly, so a single mutable cell in it would let a
-  caller write through into the process-wide device limits. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
-  all three components of `maxThreadsPerThreadgroup` (it read `width` alone before); the C backends
-  stay `None`. Three typed causes join the two grid ones —
-  `Schedule_outcome.Workgroup_{x,y,z}_extent` — because the rejection key is what an autotune search
-  groups declines under and each dimension shrinks by its own knob. `Schedule.default_gpu` and
-  `Schedule.zero_expansion` clamp their block size against the `.x` entry as well as the product,
-  so the gate is a backstop rather than the first line of defence.
-
-  `Schedule.check_hardware_limits{,_classified}` now enumerates the launch geometry from **one
-  table, one row per hardware dimension**, instead of a hand-written `Option.iter` per bound: each
-  bound used to be a copy of its neighbour, which is how `gridDim.y` came to be ungated for a
-  release (gh-ocannl-643) and how the workgroup's dimensions came to be ungated entirely. Five
-  rows, not six — `grid.(0)` is 2^31-scale wherever hardware axes bind, so its absence is stated
-  rather than implied.
-
-- **`bin/device_props`, a supported readback for what the gates compare against** (gh-ocannl-684).
-  `Backend_intf.static_properties` (the per-device props dump) and `hardware_limits` (the derived
-  caps the schedule layer gates against) had no caller anywhere in the repository, so reading a
-  device's queried limits back meant adding a throwaway executable to the tree and deleting it
-  again — paid twice already, and about to be paid a third time verifying gh-ocannl-679's caps on
-  hardware. The new executable prints both for the selected backend, flattened to one
-  `path = value` line per fact so the output greps and diffs, and it compiles no routine (both
-  functions are deliberately `unit ->` so they can run before any driver work). The two surfaces
-  are printed together because they are not redundant: on HIP `max_grid_yz` is a device query, on
-  CUDA a hardcoded architectural constant, on Metal `None` — a dump of the raw props does not tell
-  you what the gate uses, and a dump of `hardware_limits` does not tell you whether the underlying
-  query answered. `Context.static_properties` exposes the first of them the way
-  `Context.hardware_limits` already exposed the second.
-
-- **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
-  takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:
-  each candidate, the baseline, the cache replay, the winner, both untuned fallbacks and the
-  `autotune_log` control — so all of them, and the search's calibration rows, name the computation
-  alike. Without it, a comp carrying no `Assignments.Block_comment` but that `Context.compile ?name`
-  can name — as `Parallel`'s broadcast and all-reduce routines are named — could be compiled but not
-  tuned: the search died at its first lowering with `get_name_exn`'s `Invalid_argument`, deep inside
-  the search and saying nothing about names. `Autotune.model_default`, `Autotune.compile_advisory`
-  and `Autotune.placement_surface` — the other drop-ins for `Context.compile` and its analyze-only
-  sibling — take it too, and `Train.tune_placements` forwards it to both arms and to the flip
-  refinement's decision surface. The schedule cache deliberately does not see the name: a cache key
-  covers the canonical lowering, the backend, the numerics and codegen tags and the worker pool,
-  while the name reaches only codegen's artifact and kernel naming, so two identical computations
-  under different names share one tuned entry.
-
-  The calibration schema's `routine` column (gh-ocannl-635) now READS that name rather than deriving
-  it a second time from the block comment. The comment on the old derivation stated the assumption
-  it rested on — that no compile of a search passes `~name` — and this change is exactly what would
-  have broken it: every row would have gone on naming the block comment while the kernels it
-  measured, and their generated sources, carried the other name, with nothing failing.
-  `Calibrate.stream` now passes the kernel name it already has, so its rows are that string by
-  construction rather than by `get_name_exn`'s punctuation mangling happening to leave it alone.
-
-- **The pre-driver launch gate covers the `.y` grid dimension** (gh-ocannl-643 follow-up). CUDA and
-  HIP cap `gridDim.y` and `gridDim.z` at the same 65535 (`gridDim.x` is 2^31-scale), but only the
-  folded `.z` extent was checked, so a blocktiled matmul over a large enough m-extent — past ~1M
-  rows at `bm = 16`, with no batch axis in sight — still failed at the driver rather than as a
-  named, typed error. `Backend_intf.max_grid_z` is therefore now `max_grid_yz`, one field for the
-  one hardware fact (CUDA fills the architectural constant; HIP queries the smaller of the device's
-  `max_grid_size` y and z components; Metal and the C backends stay `None`), and
-  `Schedule.check_hardware_limits{,_classified}` checks both extents against it. The typed causes
-  stay distinct — `Schedule_outcome.Grid_y_extent` beside `Grid_z_extent` — because an autotune
-  search groups declines by resource and the two are shrunk by different knobs: coarser row
-  blocking for `.y`, serial batch loops for `.z`.
-
-- **Training-loop utilities** (gh-ocannl-465), ports of llm.c's loop scaffolding sized for the
-  GPT-2 training example: `Train.Lr_schedule` (cosine / linear / constant / WSD host-side
-  learning-rate schedules with linear warmup, fed to the device through the new
-  `Train.host_scalar` — moved from `Mixed_prec.Loss_scaler` — via
-  `Train.scheduled_learning_rate`); global-norm gradient clipping (`Train.grad_l2_norm`, a
-  deterministic per-parameter sum-of-squares einsum reduction, and `Train.clip_by_global_norm`
-  computing `scale = min(1, max_norm/norm)` on device, consumed by the new
-  `Train.sgd_update ~grad_scale`, which folds the scale into the update as the gradient is read —
-  gradient buffers stay untouched, llm.c-style); a gradient-accumulation recipe
-  (`Train.grad_update ~accum_steps` seeds backprop with `1/accum_steps` and keeps zeroing
-  intermediate gradients while parameter gradients accumulate across micro-steps, paired with the
-  standalone `Train.zero_params_grads` run at each cycle start); and `Train.Outlier_detector`, the
-  sliding-window z-score monitor for loss/grad-norm with skip-update loops. Executed-parity
-  coverage in `test/training/loop_utils.ml`: clipped SGD against a host oracle, and two
-  accumulation micro-steps reproducing a single big-batch step's gradients and parameters.
-- **Safetensors payloads are mapped, not decoded** (gh-ocannl-587): `Safetensors.to_ndarray` wraps
-  each payload as a private, copy-on-write `Unix.map_file` region through `Ndarray.map_file_array`,
-  the way checkpoint loading has since gh-ocannl-467 — the format fixes little-endian order and
-  contiguous, unpadded payloads, and `read` had already checked that the ranges tile the byte
-  buffer, so the staging `Bytes` buffer and the element-by-element decode loop had nothing left to
-  do. Three things came with it. The reader now *owns* the descriptor it parsed the header
-  through and maps from that, never from a fresh open of the path, so a concurrent replacement of
-  the file cannot pair one file's metadata with another's bytes (the gh-ocannl-467 review's trap);
-  `Safetensors.close` releases it, the GC does so otherwise, and payloads already handed out —
-  mappings included — stay valid. `to_ndarray` returns the payload's own precision instead of
-  forcing F32, for every dtype that *names* an OCANNL precision (F64/F32/F16/BF16/F8_E5M2,
-  I64/I32, U64/U32/U16/U8, BOOL), with `?prec` for callers that want one precision regardless;
-  I8/I16/F8_E4M3 are refused rather than reinterpreted, and `to_float32` keeps its F32-only
-  contract. And one thing the format does not guarantee is checked per payload: a payload whose
-  file offset is not a multiple of its element size — which happens to a wide dtype sitting behind
-  narrow ones even in a header padded to 8 bytes — is decoded instead of mapped, an unaligned
-  mapping being undefined behaviour. `Safetensors.ingestion_counts` reports the split.
-
-- **Mapped checkpoint loading is no longer conditional on the platform** (gh-ocannl-588):
-  `checkpoint_load_mmap` defaults to true on Windows too. The exception it had there was asserted
-  from documented Win32 semantics and never run: a mapped view keeps the file object referenced, so
-  `save`'s replacing rename over a path this process has loaded from was expected to fail with a
-  sharing violation, breaking a load-then-save workflow. Measured on a Windows 11 box, it does not
-  — the rename succeeds, and, which a succeeding rename alone would not have settled, the live
-  mapping goes on reading the bytes it was taken from rather than the replacing file's. Test 15 of
-  `test/operations/test_tensor_persistence.ml` is that measurement, holding the mapped ndarray in a
-  local across a save that writes different values, and it makes the same claims on every platform.
-  Windows users get the same lazy, copy-free loads as everyone else; the setting stays for a
-  filesystem that does refuse, and a rename that fails now cleans up its temp file.
-
-- **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
-  `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
-  arm A routines that were profiled but, in three of four cells, never executed — the limitation it
-  stated in its own verdict. Re-run on the same box, same commits and same fixture with
-  `tune_ship_arm=a` forcing arm A in all 18 cells, every quoted artifact now shipped and executed:
-  the loss gate covers 36 records at 3 sequences within **2 f32 ulp** (and within 14 ulp of the
-  earlier session's independently executed arm B), and every load-bearing number reproduces — the
-  8.034 ms tied lm_head, the 8.516 → 1.711 ms triangle, the 14-vs-32 and 16-vs-17 signature counts,
-  the same four newly materialized nodes. Holding the arm fixed also yields two claims the first
-  session could not make: gh-573 is worth **1.28x end to end** with non-overlapping ranges (it was
-  1.12x inside the noise floor, because without the guard the search shipped materialize-all — the
-  crude form of the same transform), and cap 4 beats the default cap 8 by **7.1%** end to end and
-  9.4% per-kernel. The default is still not proposed for change: one fixture, one depth, one device.
-
-- **A measurement can ship a chosen placement arm** (gh-ocannl-638): `Train.tune_placements`
-  searches both arms and ships the faster one, so a report that profiles the default-placement arm
-  can rest on routines that were compiled, dispatched and timed but never executed against a
-  reference — `benchmarks/report-gh612-hip.md` had to state exactly that for three of its four
-  cells. Config `tune_ship_arm` (`auto` | `a` | `b`, argument `?ship_arm`) now selects the arm that
-  ships, whatever the timings said, so the profiled artifact is the one whose losses the run
-  reports. Deliberately measurement-only: it announces itself on stderr regardless of
-  `autotune_log`, once when it resolves and once at the decision it changes; it does not skip the
-  other arm's search (the A-vs-B comparison a report quotes is unaffected, and both arms still
-  report in position); it suppresses the `tune_inline_flips` refinement, whose result is neither
-  arm; and a forced arm whose search failed propagates that failure instead of falling back. The
-  shipped artifact is now also reported directly, through the new `?on_ship` callback — the
-  benchmark runners record it in `results.jsonl` instead of re-deriving it from the arms' times,
-  which was only ever valid while nothing could override the comparison, and never described a
-  flip-refined result.
-
-- **The CPU register tiling reaches 16-bit GEMMs** (gh-ocannl-575, the gh-ocannl-516/517
-  remainder): `try_register_tile` joined the storage/compute-precision seam — its gates, lane
-  geometry and accumulator registers follow the compute precision, narrow-storage operands widen
-  and narrow at the memory boundary through the existing vector bridges, and the C-tile narrows
-  once per cell after the whole k extent (the gh-ocannl-545 accumulator rule; bitwise vs the
-  scalar fallback whenever storage = compute, pure-fp16 on native-arithmetic targets included).
-  Packing `Stage`s can mint their tiles at the compute precision (`tile_prec`, exact widenings
-  only), folding the widening conversion into the packing copy — host-side for hoisted
-  constant-pool packs — so packed panels become f32 scratch and the micro-kernel streams them
-  unconverted. Autotune's sketch pre-filters resolve the same `Numerics.cpu_compute_prec` the
-  emission asks (single source of truth), so narrow-storage matmul/conv sites now seed the
-  tensorized families (packed seeds carry `sk_pack_prec`), and pure-fp16 seeds fire exactly where
-  the probe reports native arithmetic. Measured on x86 (gcc 15, n=512): f32-GEBP-over-narrow
-  storage reaches 51.3 GFLOP/s at bf16 and 37.1 at fp16 against a 0.4-0.7 GFLOP/s scalar narrow
-  rendering; computing fp16 in fp16 where the compiler merely promotes loses ~18x, confirming the
-  gating. The pure-f16-vs-f32-GEBP decision on genuinely native hardware (NEON) is still pending;
-  see docs/proposals/gh-ocannl-575-narrow-register-tiling.md.
-- **Accumulation chains materialize a running sum instead of re-summing at every consumer**
-  (gh-ocannl-573): a transformer's residual stream used to stay `Virtual` end to end — each
-  running-sum node's per-cell read multiplicity passes the visit cap (its consumers' copy-position
-  reads are read-modify-write-exempt) and it has no reduction loops, so no per-node guard fired —
-  and every LayerNorm site re-derived the residual by re-summing the entire prefix, quadratic in
-  depth (9.3% of the gpt2_mini step on an APU). `decide_placements` now walks the per-setter
-  read-dependency graph bottom-up accumulating each virtualization candidate's transitive inline
-  fan-in — the distinct materialized nodes its fully-inlined computation would load — and
-  materializes a node whose fan-in exceeds `virtualize_max_inline_fanin` (default 8; negative
-  disables), which resets the fan-in downstream. The fan-in of a node an earlier routine in the
-  lineage committed `Virtual` is derived from its stored computation (reads inside `Local_scope`
-  bodies included), so a chain cannot escape the cap by being compiled in pieces. The decision is
-  a heuristic policy prior like the other caps (`Never_virtual` provenance 41):
-  `Context.decide_inline` exempts a node from it, and it is reported as an `` `Inline `` flip
-  candidate whose recompute cost carries the fan-in — without that factor the memory-budget
-  planner would rank the guard's own decisions among the cheapest to undo.
-
-- **Checkpoints load by mapping the file, not by copying it** (gh-ocannl-467): `Persistence.load`
-  and `Persistence.restore` wrap each payload as a private, copy-on-write `Unix.map_file` region
-  instead of decoding it element by element into a fresh host buffer — so a checkpoint's pages are
-  read lazily, by the OS, and only the ones actually touched. Padded tensor nodes keep the decoding
-  path: their payload holds only the logical region, which has to be scattered into the padded
-  buffer. The checkpoint format gained an `alignment` field (default 32, GGUF's `general.alignment`
-  default) and rounds payload offsets up to it; the header is space-padded to the same boundary, so
-  the offsets are absolute file alignments and the change breaks neither old readers nor old files.
-  Mapping is on by default (`checkpoint_load_mmap`, or the `?mmap` argument) — originally
-  everywhere but Windows, where a mapped view holding the file open was expected to make a later
-  save over the same path fail; gh-ocannl-588 (entry above) measured that claim, found the rename
-  succeeds, and retired the exception, so the released default is on for every platform.
-
-- **Cache identity is complete by construction, not by vigilance** (gh-ocannl-572): every
-  configuration key is classified in `Utils.config_key_classification` — code-borne (it reaches the
-  canonical digest through the lowered code), keyed to a named cache-key component, search-shaping,
-  or execution-neutral — with the reason recorded, and `test/operations/digest_completeness` fails
-  on a key that is not classified, on a claimed component that does not exist, and on a key read at
-  codegen yet classified code-borne. Generalizes gh-ocannl-568, where the numerics policy's absence
-  from the schedule-cache key let a default-flags run replay a tf32-tuned winner at 5.9x slower than
-  not tuning at all.
-
-- **The startup streams are pinned, on both halves** (gh-ocannl-593):
-  `test/operations/startup_streams` runs an executable that writes nothing of its own, once with the
-  chatter turned all the way up (stdout must stay empty — the convention that lets a tool make
-  stdout a data channel) and once with a default configuration whose `ocannl_config` carries an
-  unknown key (stderr must be the three lines a user can read). Until now every test config set
-  `suppress_welcome_message=true` and `log_config_sourcing=false`, so flipping the `Stdio.eprintf`
-  calls in `arrayjit/lib/utils.ml` back to `Stdio.printf` left `dune runtest` fully green.
-
-- **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
-  and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
-  lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the
-  supplied record IS `code.lowered` — it drives I/O classification, liveness planning and the
-  context-buffer delta as well — so a test can seed a hand-built routine's inputs with `set_values`,
-  run it, and compare `get_values` against a reference. This is what lets the executed-parity
-  doctrine reach regressions whose subject is the analysis layer on IR shapes the `Assignments`
-  pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
-  read-before-write case that motivated it.
-
-### Added
-
-- **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658).
-  `test/operations/virtual_rejection_boundary.ml` states, for one minimal IR shape per outcome,
-  which of four phases decides it and under which provenance: the heuristic caps in
-  `decide_placements` (ahead of every legality question), the store-time rejections in
-  `check_and_store_virtual`, the consumption-time ones in `inline_computation`, and acceptance. Each
-  row also executes the shape against a reference and against the same program re-specialized with
-  the candidate materialized, so a row that later becomes inlineable needs only its verdict changed
-  and then goes on to pin that inlining preserved the values. Which codes have no minimal shape, and
-  why each was ruled out rather than skipped, is recorded in the file's header.
-
-### Fixed
-
-- **A candidate's computation is no longer inlined without an enclosing repetition loop**
-  (gh-ocannl-674), the `For_loop` half of the defect below. `virtual_llc` captures a candidate's
-  computation at the outermost loop whose index appears in the candidate's assignment indices, so a
-  reduction loop BELOW that point rides along inside the stored subtree — the ordinary
-  `x[t] += a[s]` shape, whose replay cost `virtualize_max_inline_reduction` prices — while a
-  repetition loop ABOVE it does not, and a symbol-free (fixed-index) map makes no loop a capture
-  site at all. `inline_computation` then spliced the setter once and the fold lost every iteration
-  but one: `for k in 0..1: for t: x[t] += 1.` read back 1 per cell instead of 2. The walk now
-  carries the enclosing loops and rejects such a candidate as `Non_virtual 147`. Loops of width 1
-  stay exempt (replaying one iteration once is exact), and the array spelling of the same reduction
-  was already rejected for an unrelated reason — the sibling read `a[s]` escapes the captured
-  statement — so what reached the miscompile was a reduction whose right-hand side does not mention
-  the reduction symbol, with the accumulator read few enough times to stay under
-  `virtualize_max_visits`.
-
-- **A guarded setter's computation is no longer inlined without its guard** (gh-ocannl-651). The
-  `Low_level.t` doc's v1 contract — a conditional write is not a definite write, so virtualization
-  treats guarded computations as non-inlineable — was enforced for a guard INTERIOR to the captured
-  subtree only. `virtual_llc`'s `If` arm recursed plainly and the setter/loop arms handed
-  `check_and_store_virtual` the subtree rooted BELOW the guard, so a candidate whose whole nest sat
-  inside an `If` stored its computation guardless and every read site replayed it unconditionally:
-  the guard was silently dropped rather than the candidate rejected. The walk now carries an
-  enclosing-guard flag and rejects such a candidate as `Non_virtual 142` at store time, the same
-  verdict the interior case already gave. Guards do reach virtualization from the front end, not
-  only from the backend-compile-time launch-extent pass the old comment assumed: `Assignments`
-  lowering emits interval guards for clamped-window pooling (gh-ocannl-504) and extent guards for
-  symbolic extents (gh-ocannl-490). Lifting the restriction — prepending the guard to the stored
-  computation — is adjacent to the Block virtualizer's range-guard machinery and remains future work.
-
-- **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
-  *signed* int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
-  the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
-  host's signed conversion, so a u32 `0xffffffff` read back as `-1.` and writing `4294967295.`
-  raised outright. Found by review on the new `Safetensors.to_ndarray ?prec` path, but the defect
-  was in the conversions, so the fix is there: four reinterpreting helpers all four sites now use,
-  with out-of-range floats wrapping as C's unsigned conversion does. A u64 too large to be a double
-  now rounds once, to the nearest: halving it to dodge the sign bit and doubling back rounds twice,
-  which cost an ulp on values just past a midpoint.
-
-- **Unaligned checkpoint payloads are decoded rather than mapped.** `Persistence`'s mappability test
-  never checked that a payload's file offset is a multiple of its element size — which a checkpoint
-  written with a small `?alignment`, or a packed pre-alignment-field one, does not give: a byte
-  payload ahead of a float one leaves the float at an odd offset, and mapping it handed out a
-  misaligned typed pointer. Undefined behaviour on any platform, not only the Windows one this
-  release turns mapping on for. The rule now lives as `Ndarray.mappable_file_region` next to
-  `map_file_array`, so the checkpoint and safetensors readers share one predicate rather than each
-  carrying its own.
-
-### Changed
-
-- **An OCANNL setting has two spellings in the environment, not four** (gh-ocannl-605):
-  `ocannl_<key>` and `OCANNL_<KEY>`, which is what `ocannl_config.reference` already described.
-  (An interim state within this release: gh-ocannl-652 — entry above — later dropped the
-  lowercase spelling too, so the released environment reads `OCANNL_<KEY>` alone and a lowercase
-  spelling of a known key is a fatal startup error; the commandline story below is the released
-  one.) The
-  dash-prefixed `ocannl-<key>` / `OCANNL-<KEY>` are gone: documented nowhere, used by no caller,
-  unsettable from bash or zsh without `env "ocannl-log_level=1" cmd` — and the tax was paid by
-  every dune rule that has to declare the ambient variables it must be invalidated by, which had to
-  enumerate four spellings per key while the natural-looking all-dashed `ocannl-log-level` was not
-  one of them, so a dep on it tracked nothing (gh-ocannl-593). On the commandline dashes stay, and
-  now go all the way: the prefix separator dashes on its own and the key's own separators dash as a
-  group, so `--ocannl-log-level=1` is read (a key dashed halfway is not a spelling and says so).
-  A bare `ocannl_log_level=1`, with no leading dash, is no longer read at all: a positional
-  argument belongs to the host application, and an OCANNL-linked tool taking a path named
-  `ocannl_config` was one key name away from having it eaten. The unknown-argument warning stopped parsing arguments a second
-  way (split on `=`, dash to underscore, look up the result) and now asks the reader's own table
-  whether any known key would read the argument — closing both silent contradictions the two
-  parsers produced: the all-dashed spelling used to pass validation and then be ignored, and
-  `--ocannl_log_level_0` used to be applied and warned about as unknown, its separator not being an
-  `=`. `Utils.env_var_names` returns two names; the commandline spellings moved to
-  `Utils.cmdline_var_names` / `Utils.cmdline_var_prefixes` beside it, and
-  `test/operations/config_var_spellings` pins both lists against live lookups, with
-  `config_var_warnings` pinning what the library warns about.
-
-- **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
-  gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left
-  stderr carrying 83 lines of routine trace on a default run — burying the unknown-config-key
-  warning, the one startup message that means the user made a mistake, and training red-blindness
-  wherever stderr is coloured as the error stream. `log_config_sourcing` now defaults to false and
-  `log_level` to 0 (the value every `ocannl_config` in this repository had already chosen), taking a
-  default run's stderr to three lines: the welcome banner and whatever warnings there are. Enabling
-  `log_config_sourcing` now traces every key rather than deferring to `log_level`, which is the
-  reading of "tell me where the configuration came from" — including the bootstrap keys resolved
-  before the config file can turn the trace on (`no_config_file`, `suppress_welcome_message` and the
-  setting's own lookup), which get a report of their own, defaulted cases included, since they
-  cannot report themselves as they go. Groundwork, separately defensible: the
-  CUDA and HIP backends' `with_debug` — the RTC flag that keeps a compilation log on a SUCCESSFUL
-  compile — no longer keys on `log_level`, only on `output_debug_files_in_build_directory`, whose
-  build file is the log's only reader.
-
-- The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
-  backend-independent emission gates (`large_models`, `buffer_aliasing`, the effective
-  routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns keys
-  — and the logging-only settings once it holds, `prefer_backend_uniformity` and the stream-log
-  routing) and the compiling backend's own codegen knobs, which it reports as
-  `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags, the OpenMP team,
-  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` / `cc_parallel_chunks`,
-  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime and debug compilation. The component also
-  hashes the whole `hardware_limits` record (the cache key otherwise named only the backend, so two
-  GPUs of one backend shared every key) and, on `cc`, a fingerprint of the toolchain's predefined
-  macros under the configured flags (`-mcpu=native` is a spelling, not a target). These are read after the lowered code the
-  digest names, so a winner crowned under one of them used to replay under another — the shape of
-  gh-ocannl-568. Existing cache entries miss once and are re-tuned. `Schedule_cache.cache_key` now
-  takes the whole `hardware_limits` record instead of one optional tag per component.
-- The cc backend quotes the paths it interpolates into compiler command lines — a build or temp
-  directory containing whitespace previously failed every kernel compile with a "this is a bug in
-  OCANNL" report against a command the shell never saw whole, and silently failed the toolchain
-  probes.
-- The cc backend's on-disk probe cache keys on `cc_backend_simd_flags` and on the identity (path,
-  size, mtime) of the compiler executable the probes will run: the fp16 probe compiles under those
-  flags, and an in-place toolchain upgrade leaves command, flags and `PATH` unchanged — so either
-  could be served another configuration's, or an older compiler's, answer.
-
-### Added
-
-- **Reduction accumulators are localized without a widening request** (gh-ocannl-693):
-  `try_widen_serial_reduce`'s identity-precision gate is gone — renamed `try_localize_serial_reduce`,
-  residency now the primary property and gh-ocannl-639's widening the special case — so an f32
-  reduction no schedule op reaches accumulates in a local scope instead of one global-memory
-  read-modify-write per step. Measured on Metal (`gpt2_mini` forward, M4 Max, default schedule):
-  step p50 367.1 → 93.9 ms (−74.4%), lm_head −80.3%, the fused kernel's 124 `device volatile`
-  RMW shadows → 0, with 7 of 8 batch losses bitwise identical and the eighth one ULP of FMA
-  reassociation away. The decline for lane-private accumulators under a mixed guard is conditional
-  on the accumulated cell rather than blanket (gh-ocannl-721), with peel-guard legality owned by
-  two `Ir.Affine` queries — `separates` and `peel_guard` — instead of a bespoke predicate that five
-  review rounds had re-derived (gh-ocannl-722).
-- **Accumulator width is policy, not schedule** (gh-ocannl-639, gh-ocannl-663): on the CPU backends
-  every serial-rendered form of a reduction holds its accumulator at `Numerics.cpu_compute_prec`
-  and narrows once; on GPU, `C_syntax_config.accum_prec` names the residency per backend, mirroring
-  its tensor units (CUDA widens bf16→f32 structurally, HIP widens only fp8, Metal and cc restate
-  `compute_prec`), and the resolution reaches every rendering, schedule-minted scopes included. The
-  warp-shuffle `Workgroup_reduce` rendering stages at the same residency instead of hard-erroring
-  on narrow storage (gh-ocannl-682). The serial-rendered forms of one reduction are no longer an
-  implicitly-defined set: `test/operations/reduction_forms` executes a 27-member table of schedule
-  compositions over one row sum — 25 of them at all three storage precisions, `split`+`swap` and
-  `split_reduce` at f32 — each member naming the form it claims (gh-ocannl-664). On HIP the compile flags append `-fno-associative-math` and
-  `-fhonor-infinities`, so bf16/f16 serial reductions match the declared residency and the
-  `(-INFINITY)` mask sentinel survives fast math by construction (gh-ocannl-735).
-- **The q/k/v projections spread batch and head across the grid** (gh-ocannl-643): `sk_batch_grid`
-  twins bind the batch/head product to `blockIdx.z`, taking the rank-4 sites from 4 resident
-  blocks at 10% of `sgemm` peak (36.7% of the `gpt2_mini` step on HIP) to 256–1024 blocks at
-  44.4% — **1.72x on the whole step**, with attn·V, the FFN down-projection and QKᵀ batched too.
-  The attention out projection — the next dominant line item, a site whose contraction spans
-  multiple loops — is matched by the matmul family, with the k-block witness naming the innermost
-  contraction extent (gh-ocannl-683); and the GPU blocktile family pads awkward contraction extents
-  through the shared `pad_composition_ok` gate instead of refuting wholesale (gh-ocannl-730).
-- **Finer fission** (gh-ocannl-574): `Schedule.fission_scheduled ?arity_cuts` additionally requires
-  merged materialized-writing nests to share one extent list, so the lm_head GEMM ships apart from
-  its `max_logits` row-max and its output axis can spread. A candidate-generation mode: the untuned
-  pipeline is byte-for-byte unchanged and fine candidates are timed against coarse ones. Measured
-  on CUDA: tuned `gpt2_mini` step 51.40 → 36.00 ms scalar (**1.43x**), 43.37 → 27.87 ms at tf32
-  (**1.56x**) — larger than predicted, because the finer cuts also freed the four attention QKᵀ
-  sites. The HIP leg was folded into the gh-ocannl-612 verification session (entry above).
-- **The sketch families are a module, and their trees judge what seeding owns** (gh-ocannl-580,
-  gh-ocannl-577, gh-ocannl-613, gh-ocannl-591): the family construction moved out of the
-  5,700-line `autotune.ml` into `arrayjit/lib/sketch_families.ml`; the statically-decidable
-  components of builder-settled rules — companion coverage, the zero-expansion row-axis rule — are
-  lifted into tree verdicts, so a refuted family fathoms at the root instead of dying
-  candidate-by-candidate (the gh-ocannl-514 evaluation's 241-of-255 lattice completions dying at
-  candidate build now read 2 expanded / 0 scored / 3 refuted); epilogue fusion is a root-level
-  `Choice` of the tree, the fused flavor refuted by the recognizer's own witness, dissolving the
-  double tree build and the flag-flipped twins; and decision labels are typed data
-  (`Autotune.Family_decision.t`) rather than a stringly protocol a reword could silently zero.
-- **The autotuner's enumeration and menu keep up with what the schedule ops mint** (gh-ocannl-666,
-  gh-ocannl-687, gh-ocannl-685, gh-ocannl-709): `collect_loops` descends into the `Local_scope`s
-  that accumulation mints create, so the loops they move stay schedulable — with
-  `Low_level.scope_mint` provenance distinguishing schedule mints from virtualization inlines,
-  whose loops draw only the `Vectorized` retype (measured latent: zero such loops reached across
-  the suite); the per-unit action cap is spent round-robin across categories behind the beam's own
-  dispatchability filter, so a tensorize-rich unit no longer starves every other action; and
-  seeding pre-filters all five launch dimensions through `Schedule.launch_geometry_excess`, the
-  same predicate the pre-driver gate checks, so a search learns a hardware cap from a refutation
-  witness instead of one compile at a time.
-- **`Autotune.report` states its outcome as a variant** (gh-ocannl-677): `Searched` /
-  `Search_died` / `Cache_replay` / `Search_disabled` / `Pre_search_failure`, replacing four
-  independent booleans every consumer re-derived (two got it wrong in one PR); the Python layer
-  reads `arms[].state` rather than recovering the state from zero counters. `autotune_smoke`'s
-  winner contract is five separately named claims, the timing-dependent conjuncts stating the
-  progress-band precondition they were missing — the macOS flake was the beam's 1% `min_progress`
-  band, empty on sub-microsecond cc timings and wide open on a loaded runner (gh-ocannl-716).
-- **CPU SIMD: whole-vector FMA, and the widths to use it at** (gh-ocannl-614, gh-ocannl-621,
-  gh-ocannl-648, gh-ocannl-649, gh-ocannl-615, gh-ocannl-650): gcc has no generic vector fma
-  builtin, and the per-lane loop that forced was register-allocated catastrophically at `-O3`
-  (the register C-tile spilled per unrolled step). `C_syntax.vec_fma_builtin` renders whole-vector
-  target FMA — packed f32 GEBP **12.6 → 127.2 GFLOP/s** at the default flags — with AVX-512 arms
-  and `cc_vector_bytes` auto-resolving to 64 where the target asserts AVX-512 F/BW/VL (Zen 5: f32
-  225.7 vs 130.5 GFLOP/s), the width ranked per extent since an accumulating loop pays a
-  horizontal fold as long as its lane count. `Max`/`Min` reductions leave the per-lane loop too —
-  the scalar spelling was a libm call per lane, not the register-pressure trade the comment
-  claimed — rendered as `fmax`'s own compare-and-select definition, verified bitwise against glibc
-  (one hot loop: 259 instructions / 64 libm calls / 126 stack references → 9 / 0 / 0). The
-  register-tile A-splat is an arithmetic-free initializer, so `-0.0` and signaling-NaN bit
-  patterns survive into the FMA unconditionally (gh-ocannl-615). And
-  `test/operations/cc_march_census` attempts 7 `-march` targets × 3 vector widths × 2 optimization
-  levels on every run — columns the host toolchain cannot compile report as skipped, and the
-  AArch64 columns need an optional cross gcc — so a guarded arm is known to compile wherever a
-  toolchain for it exists; it caught gcc/aarch64 typing its fp16 vector builtin `__fp16` on its
-  first cross-compiled run (gh-ocannl-650).
+- **Soundness fixes that were performance fixes**: reduction accumulators are localized without a
+  widening request — an f32 reduction accumulates in a local scope instead of one global-memory
+  read-modify-write per step — taking the Metal `gpt2_mini` forward step p50 from 367.1 to
+  93.9 ms (gh-ocannl-693); `sk_batch_grid` twins bind the batch/head product to `blockIdx.z`,
+  1.72x on the whole HIP step (gh-ocannl-643); finer fission ships the lm_head GEMM apart from its
+  row-max so its output axis can spread, 1.43x on the tuned CUDA step (gh-ocannl-574); and
+  accumulation chains materialize a running sum instead of re-summing at every consumer
+  (`virtualize_max_inline_fanin`, default 8), removing the transformer residual stream's
+  quadratic re-derivation (gh-ocannl-573).
+- **Accumulator width is policy, not schedule** (gh-ocannl-639, gh-ocannl-663): every
+  serial-rendered form of a reduction holds its accumulator at the backend's declared residency
+  and narrows once, pinned by a 27-member executed table of schedule compositions
+  (gh-ocannl-664); HIP compiles with `-fno-associative-math -fhonor-infinities` so narrow
+  reductions and the `(-INFINITY)` mask sentinel survive fast math (gh-ocannl-735).
+- **CPU SIMD: whole-vector FMA and the widths to use it at** (gh-ocannl-614, gh-ocannl-621,
+  gh-ocannl-648): packed f32 GEBP 12.6 → 127.2 GFLOP/s at the default flags; `cc_vector_bytes`
+  auto-resolves to 64 where the target asserts AVX-512; `Max`/`Min` reductions render
+  compare-and-select instead of a libm call per lane; and a cross-target `-march` census keeps
+  guarded arms compiling wherever a toolchain for them exists (gh-ocannl-650).
+- **CPU register tiling reaches 16-bit GEMMs** (gh-ocannl-575): `try_register_tile` joined the
+  storage/compute-precision seam, packing stages can mint tiles at the compute precision, and
+  pure-fp16 seeds fire exactly where the probe reports native arithmetic — f32-GEBP-over-narrow
+  storage reaches 51.3 GFLOP/s at bf16 against a 0.4–0.7 GFLOP/s scalar rendering.
 - **fp8 everywhere it was almost** (gh-ocannl-632, gh-ocannl-647, gh-ocannl-657): Metal stores
-  e5m2 as a byte and computes f32 through a `Builtins_metal` codec bit-identical to `builtins.c`
-  over all 2^32 floats — the "fp8 mma crash" was Metal having no fp8 at all — re-enabling
-  `test_fp8_roundtrip` and `test_uniform_vec_prec` there. HIP's guarded pre-round is the backend's
-  only float→fp8 narrowing: the vendor's `(__hip_fp8_e5m2)` returns spurious nonzero for
-  magnitudes ~20 orders below the smallest subnormal (67,108,862 disagreements over the f32 space
-  on gfx1151; the guard measures 0). The codecs' exhaustive verification lives in-tree rather than
-  in a scratch directory: `@test/operations/slow-fp8_codec_exhaustive` sweeps all 2^32 f32
-  patterns and 17.2e9 doubles against a rounding oracle in ~8 s on 8 domains, with
-  `tools/fp8_soak.exe` as the per-vendor GPU arm (CUDA and HIP; the Metal codec's bit-identity
-  was established off-tree).
+  e5m2 as a byte with a codec bit-identical to `builtins.c` over all 2^32 floats; HIP guards the
+  vendor's defective float→fp8 narrowing; the codecs' exhaustive verification lives in-tree
+  (`@slow-fp8_codec_exhaustive`, plus `tools/fp8_soak.exe` as the CUDA/HIP GPU arm).
+- **The flip chain's enablement promotion is weighed against measured profitability**
+  (gh-ocannl-579, closing the gh-ocannl-514 arc): the new default `tune_flip_ordering=profitable`
+  demotes the enablement prior when the family it promotes lost by more than
+  `tune_flip_profit_margin` (default 1.25), using evidence the placement A/B already pays for;
+  `=cost` and `=enablement` remain as the two unconditional baselines.
+- **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626): the
+  `Tile_mma` rendering census is derived once inside `Context.compile` and carried on the routine
+  (`Tensorized` / `Scalar_fallback` / `Not_requested`), printed wherever timings are reported and
+  read into the benchmark reports.
+- **The sketch families are a module, and their trees judge what seeding owns** (gh-ocannl-577,
+  gh-ocannl-580, gh-ocannl-613, gh-ocannl-591): family construction moved out of `autotune.ml`;
+  statically-decidable builder preconditions are tree verdicts, so a refuted family fathoms at
+  the root instead of dying candidate-by-candidate; epilogue fusion is a root-level `Choice`; and
+  decision labels are typed data. The enumeration and menu keep up with what the schedule ops
+  mint (gh-ocannl-666, gh-ocannl-687, gh-ocannl-685, gh-ocannl-709), and `Autotune.report` states
+  its outcome as a five-state variant (gh-ocannl-677).
 - **Cross-routine splices are reconciled, and deferred computations have stated semantics**
-  (gh-ocannl-610, gh-ocannl-611, gh-ocannl-617, gh-ocannl-618): the traced store is the routine's
-  single node registry and `specialize_proc` reconciles it with the final optimized code — fresh
-  entries for spliced-in leaf reads (which used to generate kernels with undeclared identifiers),
-  `read_before_write` flips judged by per-cell definite-write coverage, phantom-input pruning and
-  merge-node reconciliation — while a routine that optimizes to nothing is a legal empty result
-  rather than an anonymous `Option.value_exn`. Recompute-at-read is the documented semantics of
-  virtual nodes (a virtual node is a named computation, not a snapshot;
-  `docs/lowering_and_inlining.md`), and the read-modify-write exemption is split by consumer:
-  placement heuristics keep the tracer-mirroring lenient reading, while the routine-interface
-  classification judges the raw verdict as a closing pass over settled placements, promoting
-  entry-consuming nodes `On_device`.
+  (gh-ocannl-610, gh-ocannl-611, gh-ocannl-617, gh-ocannl-618): spliced-in leaf reads get
+  declared entries, read-before-write flips are judged by per-cell definite-write coverage, a
+  routine that optimizes to nothing is a legal empty result, and recompute-at-read is the
+  documented semantics of virtual nodes (`docs/lowering_and_inlining.md`).
 - **`Local_scope` has a contract, enforced at both ends of the pipeline** (gh-ocannl-584,
-  gh-ocannl-681, gh-ocannl-704): a scope body's only effect is on the locals it owns — validated
-  by `Low_level.validate_scope_bodies` at `optimize_proc` and again at `C_syntax.compile_proc`,
-  with no catch-all arm, which is what makes `Affine.path_before`'s refusal to order sibling
-  operands sound rather than merely cautious. Two live miscompiles fell out (`hoist_shared_locals`
-  tracked only tensor nodes; the same pass could launder an impure body out of its scope). A
-  `Local_scope` over a materialized node is rejected by name instead of silently collapsing to a
-  `Get` — a collapse that had made two `accum_width` legs and an `affine_extraction` probe
-  green-by-collapse — with the optimizer's own mint-and-retract path kept as the one exemption and
-  pinned reachable by witness tests.
-- **Hand-built IR is executed, not only analyzed — the seam arc** (gh-ocannl-589, gh-ocannl-599,
-  gh-ocannl-600, gh-ocannl-608, gh-ocannl-631, gh-ocannl-590): the three virtualization tests
-  execute the very `optimized` record they assert on, every candidate checked cell-for-cell
-  against a materialized re-specialization, with producers writing values that name their
-  iteration (`1 + 10*outer + inner`) so a wrong substitution or a dropped iteration cannot pass;
-  `Context.get_values` on a `Local`-placed node is honest rather than returning the uploaded copy;
-  the copy-pasted harness became `test/support/ll_test` — node/index/statement builders, one
-  hooks-based exhaustive traversal replacing seven private walkers, and the `?prelowered`
-  optimize/run/execute harness — with post-finalization lineage seams (`optimize_in`,
-  `link_finalized`, `known_local`); and `Context.routine` is a private record whose
-  `inputs`/`outputs` a test asserts on directly, pinning the classification the link actually
-  used.
-- **Operand-evaluation conditionality is encoded once** (gh-ocannl-582):
-  `Ops.binop_conditionality` / `ternop_conditionality` decide which operands evaluate, next to the
-  op definitions, consumed by `affine_accesses` and the cost model's walks; the renderers are
-  checked against the classifier at functor application (`operand_conditionality_violations`
-  renders every pair over distinguishable placeholders), which is what forbids spelling `Where` as
-  MSL `select` or `Max` as `?:`. A fourth instance of the drift it ends was found and fixed on the
-  way — the cost model charging a projection's discarded operand.
-- **Frozen parameters are not trained, and an empty optimizer is an error** (gh-ocannl-673,
-  gh-ocannl-670): `loss.params` keeps its union semantics as the state set (initialization,
-  checkpointing), while `Train.trainable_params` derives the trained subset from the backprop code
-  and the optimizer-side helpers operate on it (`?params` to override) — a frozen parameter's
-  non-movement under `~weight_decay` is pinned bitwise. Params-driven helpers over a loss that
-  trains no registered parameters raise `Session_error` at construction instead of compiling empty
-  routines whose executed parity passes vacuously; the guard's first suite run caught exactly that
-  latent in-tree.
-- **A fault-injection inventory for resource-owning seams** (gh-ocannl-571):
-  `docs/resource-fault-injection-inventory.md` enumerates seam × failure mode, with a GPU-free
-  harness holding exact allocation/free/live-count contracts over finalize/release, pool-entry
-  removal, merge-pool lifecycle, host transfers, compile-failure cleanup and schedule-cache
-  store/replay. The inventory paid for itself before the harness was done — a real `from_host`
-  constant-location leak, and merge-pool growth hardened to free-first with ownership invalidated
-  before any fallible action. The hardware-gated legs are follow-up work.
-- **The envelope's memory leg is fittable** (gh-ocannl-578): `Calibrate.stream` /
-  `tools/calibrate_bandwidth.exe` run STREAM's copy/scale/add/triad past LLC through the ordinary
-  tune path, so bytes-exact calibration rows exist and `model_peak_memory_bandwidth` fits from the
-  first run (351 GB/s cc / 429 GB/s metal demonstrated floors on an M4 Max);
-  `Ir.Cost_model.analyze` counts pairwise provably-disjoint accesses exactly, with
-  conditionally-evaluated reads denying exactness on both legs, and the bandwidth class advisories
-  are ceilings rather than understatements.
-- **`Ndarray.ingest_payload` owns the mappable-or-decode act** (gh-ocannl-667): the decision, both
-  acts (mapping from the reader's own descriptor; decode-and-scatter) and one `mapped`/`decoded`
-  counter pair, shared by `Persistence` and `Safetensors` instead of written twice with private
-  counters that had already drifted once.
-- **`static_properties` has a contract** (gh-ocannl-710):
-  `(<backend>_devices (device (key value) ...) ...)`, one uniformly-keyed entry per device, parsed
-  only through `Backend_intf.parse_static_properties`; Multidev enumerates its worker-domain
-  devices (its dump had no device entries at all), and `bin/device_props` reads the shared parser
-  so the tool and the contract test cannot drift apart.
-- **The benchmark harness cannot mistake one failure mode for another** (gh-ocannl-676,
-  gh-ocannl-675, gh-ocannl-751, gh-ocannl-702, gh-ocannl-711, gh-ocannl-640): a diverged cell
-  emits `null` for non-finite numbers and `orchestrate.py` reports DIVERGED naming the step,
-  rather than losing the cell as a runner failure; whether the tinygrad-BEAM and torch.compile
-  cells need OCANNL's two-pass protocol was measured on both GPU boxes — no cell clears ~10% on
-  both boxes and the torch.compile residue changes sign between them, so they stay single-pass,
-  and the README's 2.5–3.5x rationale is superseded by a measured ≤10.3%;
-  the tinygrad beam-provenance probe binds tinygrad 0.13's module path, and promptly flagged a
-  contaminated replay; `bench_mlp --self-test` runs the full protocol on a fabricated in-memory
-  MLP, so the measurement path has an executable smoke test in a fresh checkout with no Python
-  venv; the bench checksums are keyed on the (row, column) pair in a shared `bench_checksum`
-  library with its own discrimination test, replacing flat-offset weights that degenerated
-  whenever the modulus divided the extent; and test/bench operands minted from flattened or
-  hand-multiplied indices go through `Ll_test.cycle`/`cycle_flat`, whose blind-axis guard raises
-  when a modulus divides an axis stride (78 sites across 19 files, every rewrite verified
-  bitwise).
-- **The Verdict convention defends itself** (gh-ocannl-601, gh-ocannl-668, gh-ocannl-624,
-  gh-ocannl-729, gh-ocannl-692): `Verdict` (`test/support/verdict.ml`) exits the process 1 from a
-  shared teardown on any failed check, so a regression cannot be `dune promote`d into the golden —
-  the sweep converted every self-decided verdict in the tree and found one blessed-looking stale
-  golden in the wild; `verdict_ratchet` fails on the bare literal-label `printf "<claim>: %b"`
-  shape, so the convention cannot regrow holes (it caught four fresh sites in one post-sweep
-  test); `Verdict.pf`/`claimf` give computed-label claims the same gate, with eleven claims
-  renamed so `true` is the passing reading; quantified claims go through
-  `Verdict.p_all`/`p_none`/`p_exists`/`p_empty`, byte-identical to `p` on a non-empty collection
-  and a distinct `<claim> (empty): false` on an empty one — "every X …" was vacuously true on an
-  empty X (88 sites converted); and a green suite log carries zero `FAIL` lines: expected-to-fail
-  children are captured and required by their message, not by exit status alone.
-- **Generated-kernel assertions establish provenance** (gh-ocannl-655, gh-ocannl-723):
-  `Test_utils.Generated.init` empties this executable's own `build_files/<exe>/` before the first
-  compile, so existence *is* freshness; `read` fails through `Verdict` on a missing artifact
-  instead of answering `None`, `Generated.arm` scopes per-candidate attribution, and the migration
-  of all 29 private copies surfaced five latent bugs in failure arms. The relation "calls
-  `Generated.init` ⇒ declares `(env_var OCANNL_BUILD_FILES_PREFIX)` where dune runs it" is checked
-  by `env_var_deps` in both directions, after review caught the omission twice in one day.
-- **The repository scans check the tree, and the tree can check one scan** (gh-ocannl-586,
-  gh-ocannl-597, gh-ocannl-592, gh-ocannl-598, gh-ocannl-602, gh-ocannl-665, gh-ocannl-701,
-  gh-ocannl-726, gh-ocannl-703, gh-ocannl-712): every `(test)` stanza and exe-running rule
-  declares `ocannl_config`, checked over every dune file by `config_dep_completeness` — which
-  found the eighth omission the day it landed; the config-key scans glob their roots rather than
-  trusting a 19-file hand-maintained list (23 → 69 files scanned, the old list provably complete
-  on its last day); `.gitignore` anchors `/ocannl_config`, so tracked configs stop depending on a
-  negation allowlist; scan goldens pin per-root floors and root names with exact counts on stderr,
-  so adding a test or a source file owes no promote round and two same-directory PRs cannot merge
-  cleanly to a wrong total; every `(executable)`-plus-diff-rule test carries its own
-  `runtest-<name>` alias and the repo-wide scans share `dune build @test/operations/scans`;
-  and `runtest-codegen_text_inventory` enumerates every file that pins emitted-kernel text — 31
-  goldens across two trees and 46 source sites, each tagged with the backend family that must
-  re-record it — so a codegen change finds its blast radius mechanically. The general habit — pin
-  the relationship, not the restatement, deriving sets from their owners and comparing sorted
-  identity lists — is recorded in the agent notes and swept across the test tree, as is validating
-  repo-wide scans against the PR's *merge commit* rather than the branch (gh-ocannl-706,
-  gh-ocannl-718).
-- **The environment cannot be misspelled silently, and the scans can vouch for it**
-  (gh-ocannl-628, gh-ocannl-629, gh-ocannl-661, gh-ocannl-662, gh-ocannl-659, gh-ocannl-622,
-  gh-ocannl-689, gh-ocannl-690, gh-ocannl-708): a mistyped `OCANNL_...` variable warns by name,
-  with reserved `OCANNL_TOOL_` / `OCANNL_LOG_LEVEL_<MODULE>` namespaces instead of an exemption
-  list; `Utils.classify_env_var` is shared between the startup warning and `env_var_deps`, so what
-  a rule tracks and what a run warns about cannot be classified two ways — including on Windows,
-  whose environment is case-insensitive but not dash-insensitive. The same sweep found nineteen
-  ppx_minidebug gates declared nowhere (`OCANNL_LOG_LEVEL_ROW=9` used to require touching
-  sources). The documented single-test recipe is `dune build @<dir>/runtest-<name>` — env pinning
-  reaches a run only for variables the stanza declares, and a backend-uniform golden cannot say
-  which backend ran; a stanza that picks no backend carries a checked
-  `; ocannl-backend: <word> -- <reason>` marker whose vocabulary is derived from
-  `Backends.backend` rather than restated; and the scan's independent raw-text floor covers
-  `bash`/`system` actions, `%{}`-chdir wrapping and path-pform arguments, held equal to the walk
-  as sorted stanza identities. CI's Windows smoke is pinned to the Git Bash it was verified on
-  (`uname -o = Msys` asserted), and `test-run.sh` names a missing perl instead of misreading its
-  127 as a lock conflict (gh-ocannl-662).
-- **One argv convention across `bin/`** (gh-ocannl-634): `Bench_args` replaces five hand-rolled
-  spellings of "positionals beside `--ocannl_*` flags", two of them defective (dropping negative
-  integers; shifting later positionals into the wrong slots). Repeated options resolve to the
-  first spelling, matching the library's own reader, and a post-`--` positional that spells a
-  known configuration key is reported as `shadowing_config` rather than silently applied.
-- **The agent notes' structure is checked** (gh-ocannl-691, gh-ocannl-714):
-  `agent_notes_structure` parses the index table and every note — orphan-freeness, split bullets,
-  global near-duplicate detection — and reports constructs outside the deliberately small dialect
-  rather than misreading them (unspaced block-quote markers, setext underlines), with 177
-  synthetic fixture cases pinning each rule against both a violation and its nearest legitimate
-  text.
-- **Sweep and CI hygiene** (gh-ocannl-700, gh-ocannl-756, gh-ocannl-727, gh-ocannl-698,
-  gh-ocannl-694): the stale `multidev_cc` micrograd golden — wrong on master for six weeks,
-  because nothing anywhere set that backend — was re-recorded with its provenance established
-  commit by commit, and the daily sweep runs a full `multidev_cc` unit (the recorded decision:
-  the sweep gates it, not a per-PR CI leg, since it needs no hardware but would roughly double the
-  ubuntu job); the sweep's remote cap runs under the same perl supervisor as the local one, so a
-  hung far-side test dies group-wide on uutils-coreutils hosts too; `gh-pages-api` carries the
-  `apt-get update` its `Deps` step had been dying without on every master push; and the maintainer
-  merge tooling reads the head commit's check runs before merging, after a master that did not
-  compile survived seven merges.
-- **Floats from device reductions stay out of stdout goldens** (gh-ocannl-725): a value a device
-  reduction produced does not belong in a golden at fixed precision — `cifar_conv`'s epoch mean
-  landed on a rounding tie that no promotion could serve on both backends. The genre is swept out
-  of `test/training` and `test/gpt2`: exact digits go to stderr tagged `(not part of the golden)`,
-  with a discriminating two-sided `Verdict` claim in their place; the classification rule is
-  recorded in the agent notes.
+  gh-ocannl-681, gh-ocannl-704): a scope body's only effect is on the locals it owns — two live
+  miscompiles fell out — and a scope over a materialized node is rejected by name instead of
+  silently collapsing to a `Get`.
+- **One environment spelling, and no silent demotion** (gh-ocannl-605, gh-ocannl-628,
+  gh-ocannl-652): a configuration key is read from `OCANNL_<KEY>` and nothing else; a known key in
+  a spelling nothing reads is a fatal startup error naming the spelling that works (on
+  case-sensitive platforms — native Windows's case-insensitive environment reads the lowercase
+  spelling as the same variable); a mistyped
+  variable warns by name (gh-ocannl-629); and per-directory `env_spelling_gate` rules plus
+  `env_var_deps` make dune reruns track exactly the declared variables. On the commandline,
+  dashes now go all the way (`--ocannl-log-level=1` is read alongside `--ocannl_log_level=1`),
+  while a bare `ocannl_log_level=1` with no leading dash is no longer read at all — a positional
+  argument belongs to the host application (gh-ocannl-605). `Utils.env_var_names` became
+  `Utils.env_var_name`.
+- **Test seams that cannot report a false pass**: a test that decides its own verdict reports it
+  through `Verdict`, which exits the process nonzero so a regression cannot be `dune promote`d
+  into a golden — with a ratchet against unguarded claim prints and empty-collection-safe
+  quantifiers (gh-ocannl-601, gh-ocannl-668, gh-ocannl-729); generated-kernel assertions
+  establish artifact provenance through `Test_utils.Generated` (gh-ocannl-655, gh-ocannl-723);
+  every test stanza declares `ocannl_config` and the repository scans glob rather than trust hand
+  lists, with `codegen_text_inventory` enumerating every file that pins emitted-kernel text
+  (gh-ocannl-586, gh-ocannl-592, gh-ocannl-703, gh-ocannl-712); floats from device reductions
+  stay out of stdout goldens (gh-ocannl-725); and each `@slow` test gets its own `slow-<name>`
+  alias.
+- **Benchmark trust** (gh-ocannl-675, gh-ocannl-676, gh-ocannl-634, gh-ocannl-737): a diverged
+  cell reports DIVERGED naming the step instead of a runner failure; the tinygrad-BEAM and
+  torch.compile cells were measured to not need OCANNL's two-pass protocol (≤10.3%, superseding
+  the README's 2.5–3.5x rationale); checksums key on the (row, column) pair; `bench_mlp
+  --self-test` smoke-tests the measurement path with no fixtures or Python venv; one `Bench_args`
+  argv convention across `bin/`; and a green GPU sweep row records whether tests actually ran
+  (`incremental-pass` vs `forced`).
+- **Startup chatter is opt-in, so a warning on stderr is legible** (gh-ocannl-593, gh-ocannl-595):
+  `log_config_sourcing` now defaults to false and `log_level` to 0 (raise `log_level` to restore
+  the previous diagnostics), taking a default run's stderr to three lines; the startup
+  streams (empty stdout, readable stderr) are pinned by test.
 
 ### Fixed
 
-- **Intermittent SIGBUS at startup of every arrayjit executable** (gh-ocannl-688): `Ir.Ops`'s
-  link-forcing block called the uint4x32 stubs with one-element arrays and the stubs read four
-  lanes blind, faulting whenever the block landed at the top of a fresh minor heap. The call sites
-  pass full arrays, `ocaml_array_to_uint4x32` checks `Wosize_val` and raises, and the regression
-  test makes the old over-read deterministic (`Gc.minor` + top-of-heap allocation) while asserting
-  the refusal, not the fault.
+- **A guarded setter's computation is no longer inlined without its guard** (gh-ocannl-651), and a
+  candidate's computation is no longer inlined without its enclosing repetition loop
+  (gh-ocannl-674) — both stored the computation with the guard or loop silently dropped,
+  replaying wrong values at every read site; both now reject at store time.
 - **RoPE attention gradient-flow loss diverged 68% on Metal** (gh-ocannl-731): localized reduction
-  accumulators are `volatile` on Metal — the same pooled-slot compiler-bug family as the
-  pointer-shadow manifestation, confirmed by the shader-validation fingerprint and pinned by a
-  device-producer regression that fails unpatched. The three green sweep days that masked it are
-  what the `incremental-pass` schema (gh-ocannl-737, entry above) makes impossible to misread.
-- **Emitted float constants are floating literals that round-trip** (gh-ocannl-623,
-  gh-ocannl-713): `%.16g` spelled whole numbers without a radix point — a C integer literal the
-  cast converts, inert for every value except `-0.0` — and does not round-trip every double
-  (`0.1 +. 0.2` printed a *different* double, reachable through hosted constant inits).
-  `C_syntax.c_float_literal` forces the radix and retries at `%.17g` only when 16 digits fail to
-  parse back, so the churn was three debug-log goldens; the portable half is
-  `Utils.decimal_float_literal`, shared with both IR debug printers, so a `.ll` dump can show
-  `-0.0` and a 17th digit, with `ll_printer_constants` as the dump-side twin of the emission test.
-- **Routine names cannot crash codegen** (gh-ocannl-686): `C_syntax.kernel_ident` mangles
-  reserved-word and builtin collisions once per compile entry, so the emitted header, the symbol
-  lookup and the artifact agree (`Block_comment "asm"` used to emit `void asm(`); the keyword
-  tables gained C11 and, for the C++-parsed backends, C++ keywords — `not` as a tensor label used
-  to emit an unparseable bare declaration on MSL.
+  accumulators join the `volatile` workaround for Metal's pooled-slot compiler-bug family.
+- **Intermittent SIGBUS at startup of every arrayjit executable** (gh-ocannl-688): the `Ir.Ops`
+  link-forcing block called the uint4x32 stubs with one-element arrays whose four lanes the stubs
+  read blind.
+- `uint32`/`uint64` ndarrays convert to and from floats as unsigned — a u32 `0xffffffff` used to
+  read back as `-1.` through the signed host conversion.
+- Emitted float constants are floating literals that round-trip (forced radix point, `%.17g`
+  retry; gh-ocannl-623, gh-ocannl-713), and routine names cannot crash codegen — reserved-word
+  and builtin collisions are mangled once per compile entry (gh-ocannl-686).
 
 ## [1.0] -- 2026-08-13
 
@@ -907,466 +263,115 @@
 
 ### Added
 
-- **Schedule inference as branch-and-bound: search in constraint space, legality as fathoming**
-  (gh-ocannl-514). The enumerate-then-filter pipeline is replaced by a refinement tree over
-  *partial* schedules, so a subtree can be refuted or priced before any of its members is built.
-  `Ir.Schedule_space` represents a partial schedule as placement levels plus a lazily expanded
-  family tree, with the matmul sketch family factored into it so that its leaves stay
-  byte-identical to the previous flat enumeration. Legality answers four verdicts over a partial
-  shape, each carrying its witness, and `Excluded` carries the lifted judgment that killed the
-  subtree; hardware floors and emission gates therefore fathom pre-compile. Bound evaluation
-  mirrors the cost model downward — `Cost_model.completion_floor` is an admissible lower bound
-  over everything a partial schedule could still become, every upward bias in the model matched by
-  a downward one, and commitment is monotone re-evaluation. `Schedule_space.search` drives it,
-  distinguishing verdict-fathoming from cost-fathoming; `model_default` walks the family through
-  it (config `autotune_bound_pruning` extends the same pruning against the *measured* incumbent
-  inside `tune`), `model_default_placements` takes the joint placement×family argmin over an
-  enablement-ranked chain, and `model_default_geometry_lattice` lifts the staged tile geometry into
-  interval boxes judged at their corners, so a family's bound is non-uniform per subtree.
-  Phase 0's calibration schema, envelope fitter (`tools/fit_envelope.exe`) and continuous
-  bound-vs-measured agreement check ship with it: the check is what caught the one over-pruning
-  episode, with 33 warnings rather than a silent wrong answer.
-
-  The evaluation is a research output in its own right ([benchmarks/report-gh514-eval.md](benchmarks/report-gh514-eval.md)):
-  three machines, per-box fitted envelopes, a fathomed-vs-priced ledger, and the nulls stated as
-  nulls. Fathoming by infeasibility is real and cheap — 25 of 30 `gpt2` segment families are
-  dispatched by a single bound evaluation, and box corners refute before expansion — and the
-  enablement ordering closes gh-ocannl-558's budget failure on both GPU boxes. Where strict
-  dominance was not reached the evaluation says why, and the three causes are filed with their
-  evidence: statically-decidable builder preconditions not yet lifted into tree verdicts
-  (gh-ocannl-577), a memory leg unfittable from matmul-family calibration, which is what keeps the
-  placement floors toothless (gh-ocannl-578), and enablement promotion needing a profitability term
-  (gh-ocannl-579).
-
-- **Inlining as a first-class, searchable schedule decision** (gh-ocannl-555). Virtualization was a
-  fixed policy applied during optimization; it is now a decision surface the search can move.
-  `Low_level.optimize` splits into analyze and specialize, so one analysis can be replayed per
-  candidate; `Context.decide_inline` and `optimize_ctx.inline_preferences` carry per-node
-  preferences (the `virtualize_max_*` caps demote to priors of the default policy — legality and
-  observability are untouched, so a preference can never make an unobservable node observable);
-  and `optimized.flip_candidates` exposes the cost-ranked decisions as data. `Train.tune_placements`
-  gains a greedy per-node refinement level behind `tune_inline_flips` (default 0, which reproduces
-  the previous A/B exactly) with `tune_flip_ordering` selecting how flips are ranked.
-
-- **CUDA and HIP graph capture of the fissioned step** (gh-ocannl-488), generalizing Metal's fused
-  segment encoding: a routine's kernel sequence is captured once and replayed as a driver graph,
-  behind config `gpu_graph_capture`. Requires cudajit 0.8.0 / hipjit 0.2.0 for their `Graph`
-  modules; capture runs in RELAXED mode because GC finalizers can fire mid-capture, documented at
-  the implementation. Launch-bound steps gain what the launch overhead cost them and nothing else,
-  which is the prediction and the measurement both: `mlp_small` 0.105 → 0.055 ms p50 on CUDA and
-  ~2x on HIP, `mlp_wide` ~10% on HIP and ~1% on CUDA, `lenet` 114.7 → 114.6 ms unchanged. Loss
-  trajectories are bitwise identical with capture on and off.
-
-- **Software-pipelined double-buffered staging** (gh-ocannl-487). `Schedule.Stage ~pipeline_depth`
-  double-buffers a cooperative stage against its consumer with rotor anchoring, the doubled
-  footprint accounted through `check_hardware_limits`, and cache identity preserved by omitting the
-  field at depth 1 (so existing entries stay valid and `debug_log_from_routines` keeps the
-  unpipelined form). Metal and HIP run the portable double-buffered rendering; CUDA emits
-  `cp.async` through the new `C_syntax_config.async_copy` hook, advertised on sm_80+ so the tuner
-  measures the depth twin wherever staged seeds fire. Executed bitwise depth-2/depth-1 parity is
-  pinned on both GPU substrates. The verdict is per-substrate and is stated that way: CUDA
-  `cp.async` ~8% where the k-loop dominates (deep-K 0.92 ratio, 9/9 replicates favorable), HIP
-  null, Metal ~1.4–1.5x *cost*. The refinements — Metal `simdgroup_async_copy`, the HIP
-  direct-to-LDS arm, depths > 2 — are gh-ocannl-576.
-
-- **Budget-driven rematerialization** (gh-ocannl-498). On top of the gh-ocannl-489 liveness arena
-  planner, a peak-footprint score is computed for the arena layout and a deterministic selector
-  trades storage for recompute over `Inline`-direction flips on gh-ocannl-555's decision surface,
-  until the layout fits config `memory_budget` (`log_memory_budget` reports what it chose and why).
-  `memory_budget` deliberately overrides `model_default_schedule` on the specific-beats-general
-  principle, documented in the reference and logged when it fires. The selector is a bounded
-  planner: it accepts groups jointly and never checks whether a subset of an accepted group would
-  have achieved the same relief, so recompute paid can exceed what the footprint required.
-
-- **Batched and rank-3 matmul sites are seeded** (gh-ocannl-528), so a transformer can reach tensor
-  cores at all. The cause was a mis-detected variance site rather than the two limits the issue
-  quoted: a shared batched-site classifier, batch-aware sketch pipelines, and interior-batch
-  `Tensorize`/`Tile_mma` via recorded leading-dimension strides now cover the all-batched GEMM
-  population. On `gpt2_mini`, 16 tensorized candidates are timed where there were 0, and the
-  crowned cross-segment recombination runs at 106.2 ms against 187.5 ms untuned (1.77x), winner
-  replay verified.
-
-- **The CUDA tensor-core profile's remaining shapes** (gh-ocannl-481): fp8 `mma.sync` gathers
-  addressing transposed operands, a typed swizzle mark carried from `Low_level` through `Schedule`,
-  `ldmatrix` feeding the inline-PTX `mma.sync` arms over a swizzled staged tile (as autotuner twins
-  gated on an advertised layout), per-family arch markers, and `Stage ~pad_stride` padding a tile's
-  minor dimension. Emission is verified by grepping the generated `.cu` rather than by trusting a
-  candidate's label. The measurement is a null and stays on the record: pooled over 45 paired
-  twin-vs-plain timings on `gpt2_mini`/bf16, `ldmatrix` over a b128-swizzled tile is +0.096%
-  against per-lane gathers over a plain one — reproducing the +0.20% first measured on `mlp_wide`,
-  on a workload ~100x larger.
-
-- **Site-targeted materialization** (gh-ocannl-558), and the measurement that says it ships
-  nowhere. `Context.decide_materialized` pre-seeds individual nodes as materialized, and the cast
-  twins turn out to be ordinary policy-decided nodes on gh-ocannl-555's surface, so no seeding hook
-  was missing: one materialized twin suffices to seed and time mma from the default-placement arm's
-  context (`mlp_wide`/HIP/bf16: −37.0% on that arm, rocWMMA verified). It still loses 0/3 measured
-  cells — materialize-all reaches two tensorized sites where site-targeted reaches one, so that arm
-  stays 5.2% ahead at ~1/11th the search cost, inverting the Metal picture where the same arm was
-  the expensive one. Neither placement arm dominates globally, which is the A/B doing its job.
-
-- **Config profiles: `reproducible` and `performance`, with picker-inherited precedence**
-  (gh-ocannl-559). A new `profile` setting picks a goal-oriented preset bundle through the ordinary
-  sources (`--ocannl_profile=…`, `OCANNL_PROFILE=…`, `profile=…` in `ocannl_config`).
-  `reproducible` is deterministic and, wherever reasonable, identical across machines — the
-  autotuner's *search* off (replaying a committed cache stays allowed: a pinned schedule is
-  deterministic), the gh-555 inlining refinement off (a flip is accepted on a measured
-  improvement, and inlining is not numerics-neutral where storage is narrower than compute), no
-  `-mcpu=native`, no probed SIMD flags, FP contraction pinned off, explicit SIMD rendering off (it
-  reassociates strict-FP reductions), and the numerics gates at their exact defaults.
-  `performance` is the fastest configuration *at unchanged semantics*: search on with a wider beam,
-  the cost model picking untuned compiles, host-targeted arch flags, `fp16_arithmetic`.
-  Result-changing gates like `tf32_matmuls` stay on the orthogonal numerics axis, so an A/B across
-  profiles keeps measuring scheduling rather than different math.
-
-  Each source level splits into two sublevels — its explicit keys, then the payload of a profile
-  *picked at that level* — so a specific setting can never be defeated by an aggregate one of equal
-  immediacy (`--ocannl_profile=reproducible --ocannl_autotune_rounds=3` gets both), while a profile
-  named on the commandline does override an exhaustive config file. The payloads are partial
-  `ocannl_config` files embedded as string constants (no share-directory machinery, nothing for the
-  walk-up config search to shadow), quoted verbatim in `ocannl_config.reference`, and each
-  payload-derived value is reported with its provenance by `log_config_sourcing`. Companion
-  convention: the reference file now ships with every setting commented out, so copying it wholesale
-  no longer manufactures a hundred explicit settings the user never chose. New keys:
-  `profile`, `autotune_search`, `cc_backend_fp_contract`, and the `none` spelling of
-  `cc_backend_arch_flags`.
-
-- **A search report that says which candidate won, and the placement A/B saying when a tensorized
-  winner is discarded** (gh-ocannl-546). `Autotune.report` gains `best_label`, `best_tensorized`
-  (read off the winner's schedule, not off its label's promise), the winner's `Tile_mma` statement
-  and scalar-fallback counts, and `mma_best_ms` — the best *timed* tensorized candidate, whose
-  margin against `best_ms` separates "tensorization is uncompetitive here" from "it lost inside the
-  noise". `Train.tune_placements` states the cross-arm conclusion, and a tuned benchmark cell emits
-  both arms in its result line, so a per-arm win that reaches no artifact survives in
-  `results.jsonl` instead of only in a discarded stderr stream. The measurement leg behind it
-  ([benchmarks/report-gh546-metal.md](benchmarks/report-gh546-metal.md)) found the Metal placement
-  A/B sound — the arms are 57–95% apart, 4–13x the per-arm spread — and relocated the actual gap:
-  under the mixed-precision recipe the default-placement arm seeds *zero* tensorized candidates,
-  because the virtual cast twins leave the matmul site reading f32 masters into an f16 destination,
-  a triple no uniform-format backend advertises. Materializing just the twins
-  (`Mixed_prec.Twin_materialized`, exposed as `BENCH_TWIN_PLACEMENT`) restores the whole tensorized
-  candidate family at that arm's cost.
-
-- **`gpt2_mini_train`: a transformer training-step cell, and gate-cost legs that cannot go
-  missing** (gh-ocannl-551). `bench_gpt` now dispatches its step shape on the fixture's `mode`
-  like the Python runners do, and the new `gpt2_mini_train` workload trains the same
-  architecture with plain SGD in all three frameworks (every weight a parameter, `wte` tied to
-  the lm_head, the positional table added by an einsum since an OCANNL parameter has no batch
-  axes). That closes the gh-492 task-5 gap: the four precision variants `f32 / bf16 /
-  f16-static / f16-gatedN` were unsatisfiable for the matmul-dominated workload, because
-  `BENCH_STATIC_SCALE` / `BENCH_GATE_INTERVAL` existed in `bench_mlp` alone *and* a forward-only
-  workload has no loss scale to gate. The flag parsing and the training-step shapes moved into
-  `Bench_harness` (shared by every training runner, so the next flag added cannot apply to a
-  subset), the legs became orchestrated cells (`--precision f16-static f16-gated16`), and a
-  requested cell a workload cannot express is now reported as `NOT APPLICABLE` with its reason —
-  in the run log and in a report section — instead of being silently absent, which is
-  indistinguishable from an unrun cell. The workload's f16 cells rest on gh-ocannl-548 and
-  gh-ocannl-547 below, which landed alongside it: before the `-inf` mask fill and the guard's
-  narrowed scope, no gpt cell could compile at f16.
-- **The tuner's honest reference point** (gh-ocannl-552, the shared cause behind gh-ocannl-532
-  and gh-ocannl-533): `Autotune.tune` reports the untuned default pipeline's measured time as
-  `report.default_ms`, next to `baseline_ms` (which is `infinity` on GPU backends, where the
-  serial baseline is never dispatched) — the in-search answer to "did tuning beat the schedule
-  the user gets without tuning?", the question gh-ocannl-491 could previously only ask in the
-  benchmark harness. The measurement is the existing config-thresholds fissioned seed's,
-  attributed by digest so a seed that dedups against a timed twin still reports; it persists on
-  schedule-cache entries as an optional field, so pre-existing entries stay readable. The
-  attribution honors the scheduling gates (with automatic scheduling inactive the untuned default
-  is the serial form, reported via the baseline; with `schedule_fission=false` no candidate
-  reproduces the default and the field is absent), and cached values are validated against a
-  config fingerprint of the gates and preset thresholds, so a config change that redefines the
-  default drops the stale diagnostic instead of reporting it. The issue's
-  other half is settled in place: the base compile stays the unscheduled serial form (the default
-  pipeline is several kernels in general, every candidate family assumes the serial zero point,
-  and annotation would bake per-device decisions into the cache digest), documented at the
-  capture site.
+- **Schedule inference as branch-and-bound** (gh-ocannl-514): `Ir.Schedule_space` replaces
+  enumerate-then-filter with a refinement tree over *partial* schedules — legality answers typed
+  verdicts with witnesses so subtrees fathom pre-compile, `Cost_model.completion_floor` is an
+  admissible lower bound, and the placement walk and staged tile lattice ride the same tree. The
+  three-machine evaluation is a research output in its own right
+  ([benchmarks/report-gh514-eval.md](benchmarks/report-gh514-eval.md)), its nulls stated as nulls
+  and its causes filed (gh-ocannl-577/578/579).
+- **Inlining as a first-class, searchable schedule decision** (gh-ocannl-555): `Low_level.optimize`
+  splits into analyze and specialize so one analysis replays per candidate;
+  `Context.decide_inline` carries per-node preferences (legality and observability untouched);
+  `optimized.flip_candidates` exposes the cost-ranked decisions; `Train.tune_placements` gains a
+  greedy flip refinement (`tune_inline_flips`).
+- **CUDA and HIP graph capture of the fissioned step** (gh-ocannl-488), behind
+  `gpu_graph_capture`: launch-bound steps gain what launch overhead cost them and nothing else —
+  `mlp_small` 0.105 → 0.055 ms p50 on CUDA, ~2x on HIP, `lenet` unchanged; loss trajectories
+  bitwise identical.
+- **Software-pipelined double-buffered staging** (gh-ocannl-487): `Schedule.Stage
+  ~pipeline_depth`, with CUDA emitting `cp.async` on sm_80+. Verdict per substrate: CUDA ~8%
+  where the k-loop dominates, HIP null, Metal a 1.4–1.5x cost; refinements are gh-ocannl-576.
+- **Budget-driven rematerialization** (gh-ocannl-498): a deterministic selector trades storage for
+  recompute over `Inline` flips until the liveness-arena layout fits config `memory_budget`.
+- **Batched and rank-3 matmul sites are seeded** (gh-ocannl-528), so transformers reach tensor
+  cores at all: on `gpt2_mini`, 16 tensorized candidates timed where there were 0, crowned
+  recombination 1.77x against untuned.
+- **The CUDA tensor-core profile's remaining shapes** (gh-ocannl-481): fp8 `mma.sync`, typed
+  swizzle marks, `ldmatrix` over swizzled staged tiles, per-family arch markers. The measurement
+  is a null on the record: +0.096% pooled over 45 paired timings.
+- **Site-targeted materialization** (gh-ocannl-558): `Context.decide_materialized` pre-seeds
+  individual nodes; it works and loses 0/3 measured cells to the existing A/B arms — neither
+  placement arm dominates globally.
+- **Config profiles `reproducible` and `performance`** (gh-ocannl-559), picked through the
+  ordinary sources with picker-inherited precedence (explicit keys beat a profile of equal
+  immediacy). `reproducible` is deterministic and, wherever reasonable, identical across machines
+  (cross-backend reproducibility is out of its scope); `performance` is the fastest
+  configuration at unchanged semantics, with one named exception — it enables
+  `fp16_arithmetic`, the mantissa-for-throughput trade — while result-changing gates like
+  `tf32_matmuls` stay on the orthogonal numerics axis. The reference config now ships with every
+  setting commented out.
+- **Honest search reporting**: `Autotune.report` gains `best_label`, `best_tensorized` (read off
+  the winner's schedule, not its label) and `mma_best_ms`, and the placement A/B states when a
+  tensorized winner is discarded (gh-ocannl-546, [report](benchmarks/report-gh546-metal.md));
+  the tuner reports the untuned default's measured time as `default_ms`, the honest reference
+  point (gh-ocannl-552); and `gpt2_mini_train` joins the benchmark suite with gate-cost precision
+  legs that report `NOT APPLICABLE` rather than going silently missing (gh-ocannl-551).
 
 ### Changed
 
-- **The concrete-index tracer is retired** (gh-ocannl-554). Virtualization metrics came from a
-  tracer that enumerated concrete indices, bounded by `virtualize_max_tracing_dim` — an enumeration
-  whose cost grew with the shapes and whose answers were approximations of what the affine access
-  relations (gh-ocannl-494) already state exactly. The tracer is deleted; `trace_node_facts`
-  (structural, non-enumerating), `read_multiplicity_query` / `reads_covered_query` over the access
-  relations, and `decide_placements` replace it, and `virtualize_max_tracing_dim` is gone. The
-  regular and `@slow` suites pass unchanged apart from the config-key golden and the probes that
-  referenced the tracer directly. Note for anyone reading multiplicities: a read-modify-write at the
-  same position is exempted, so a copy-read's multiplicity is zero there.
-
-- **`cc` restricts its worker pool to one core class on hybrid CPUs** (gh-ocannl-530), new config
-  key `cc_pool_core_class = auto | all | performance | efficiency`. Conv-sketch tuning wins did not
-  port across CPUs — 3.2x/2.5x on Apple silicon against 1.5x/1.1x on a 24-thread x86 — and the
-  campaign traced it to pool *heterogeneity* rather than to the seeds: the crown family a mixed pool
-  loses (`F_split_saved`) comes back for free on every uniform subset, worth 25–34% of tuned time,
-  with untuned baselines unmoved. The mechanism is process affinity applied lazily before the first
-  `-fopenmp` kernel is dlopened, because libgomp sizes its default team from the affinity mask in
-  its constructor. A new `Cpu_topology` module reads the class map (Windows
-  `GetLogicalProcessorInformationEx`, Linux `cpu_core`/`cpu_atom` sysfs with an ARM `cpu_capacity`
-  fallback, Darwin perflevels) behind a guest-vs-host hypervisor probe, and the policy is a
-  conservative no-op everywhere it cannot be sure: libdispatch pools, fabricated guest topologies,
-  uniform machines, class maps spanning more than one 64-CPU processor group, and externally pinned
-  processes (`auto` respects an external mask as the user's own pool decision). Two consequences:
-  auto `cc_parallel_chunks` is now 4x the *effective* pool width, since
-  `Domain.recommended_domain_count` is affinity-blind on Windows, and the pool signature enters the
-  autotune disk-cache key as `hardware_limits.worker_pool_tag`, because crowns do not transfer
-  across pools. Whether a core-type-*aware* schedule would beat restriction remains untested; no
-  such candidate has ever been constructed.
-
-- **One `Low_level` analysis is shared across sibling candidate compiles** (gh-ocannl-560). With
-  gh-ocannl-555 replaying one analysis per candidate, re-deriving it per sibling was pure waste: the
-  analysis is cached under a canonical digest of the raw lowered code plus static indices (tnodes
-  and statics by identity, binders and scope ids alpha-renamed), and the analyze-only
-  `Context.decision_surface` replaces the flip driver's capture compile.
-
-- **Affine access paths encode intra-statement order** (gh-ocannl-561). A path could not distinguish
-  an `If` condition from its body, which `read_covered_before` had been papering over with a prefix
-  hack. Path components are now typed — `Stmt`/`Cond`/`Body`/`Rhs`/`Write`, plus `Arg` evaluation
-  positions for sibling `Local_scope` operands, deliberately incomparable across operands — and the
-  rmw license, the serial-kernel recognizer and statement grouping move to `Affine.same_statement` /
-  `Affine.stmt_head` where they belong.
-
-- **A single canonical-llc emission core** (gh-ocannl-563). `Low_level.analysis_digest` and
-  `Schedule_cache.canonicalize` each maintained a hand-written construct-by-construct walk of the
-  same IR, which is two things to update per IR change and one silent cache-correctness hazard when
-  only one is updated. Both now call `Low_level.Canonical_render`, parameterized by the identity
-  policy that deliberately differs between them. Digests are byte-identical for both consumers, so
-  no cache invalidates.
-
-- **Four explicit barriers per k-block become one** (gh-ocannl-567). `apply_stage` recognizes a load
-  phase already in place at the same anchor and groups into it, and barrier elision is gated on
-  `workgroup_shared` rather than on `pipelined` (`elide_pipelined_barriers` →
-  `elide_staged_barriers`). One correction to the design, which sets the depth-1 floor at one rather
-  than zero: only some `Tile_mma` rendering forms open a barrier per iteration — the fragment-scope
-  form the crowns actually emit opens it once, on the scope wrapping the anchor loop — so a barrier
-  is never elidable against a *following* `Tile_mma`. Depth 2 is byte-identical. This is free rather
-  than faster: paired before/after on Metal, 8 replicates alternating arms, measured +0.2% against a
-  ±3–7% noise floor established by byte-identical-codegen controls in the same runs. A Metal
-  threadgroup barrier on a one-simdgroup composition is close to free; a multi-warp
-  `__syncthreads()` is a different regime, untested. What it does buy is removing the larger of two
-  confounds in gh-ocannl-487's depth-2-vs-depth-1 measurements.
-
-- **`cudajit` and `hipjit` are pinned to their releases** rather than to `main`, and the CUDA/HIP
-  graph capture above requires cudajit 0.8.0 / hipjit 0.2.0.
-
-- **Config startup chatter goes to stderr** (gh-ocannl-581). The "Welcome to OCANNL!" banner, the
-  `log_config_sourcing` trace, and the profile-picked banner are diagnostics, and they were landing
-  on stdout of every OCANNL-linked executable — so any tool whose stdout is a data channel (the
-  benchmark one-JSON-line runners, `tools/fit_envelope.exe`'s config-pasteable `model_peak_*` fits)
-  had to fight them off with `--ocannl_suppress_welcome_message=true
-  --ocannl_log_config_sourcing=false`. They now join the unknown-config-key warning on stderr, and
-  that incantation is gone. `.expected` goldens are unaffected (dune captures stdout), and the two
-  config tests drop their stdout-protecting guards on the chatter keys.
-
-- **CI runs on OCaml 5.5, Windows on a schedule rather than per-PR, and the GPU backends on a
-  daily cross-machine sweep.** Windows took 62-74min against 20 on macOS and 29 on ubuntu, setting
-  the latency of every PR check; it now runs twice weekly plus on demand via `workflow_dispatch`.
-  Bumping the compiler surfaced that the `slipshow` `with-doc` dependency was vestigial — the slide
-  decks are compiled by the prebuilt binary `gh-pages-docs.yml` downloads, never by an
-  opam-installed one — while dragging `js_of_ocaml-compiler`, and hence an `ocaml < 5.5` bound,
-  into every `--with-doc` solve; it is dropped. Because CI pins `backend=cc` and its runners have
-  no GPU, Metal, CUDA and HIP were never covered there at all: `tools/sweep.sh` now runs the suite
-  per (machine, backend) pair across whichever machines are reachable, pinned to a single resolved
-  commit, reporting changes in the failure set rather than the presence of failures. The schedule
-  also carries an ubuntu job on the declared OCaml floor, so `"ocaml" {>= "5.3.0"}` is a tested
-  claim rather than an assumption; action references are pinned to release tags (two workflows
-  tracked `@main`) and moved off the deprecated Node 20 runtime.
-
-  Two Windows-visible costs were paid down alongside it: the dune cache is enabled and the opam
-  cache restore shrunk, and the `cc` backend stopped re-probing its toolchain once per process. The
-  probe results — the compiler command from `ocamlc -config`, `cc_backend_simd_flags=auto`,
-  `cc_parallel_grid=auto` — are memoized under the temp directory and shared machine-wide, keyed by
-  compiler command, arch flags and `PATH` so an opam switch re-probes; new config key
-  `cc_backend_probe_cache` (default true) restores in-process probing. About five subprocesses per
-  process is nothing in a training run and most of the wall clock when a test suite runs hundreds of
-  short executables in sequence.
-
-- **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516): fp16 is the one 16-bit format a
-  CPU can execute natively, and where it does, computing in it doubles the lane count against f32.
-  `cc` probes the configured compiler once per process for `_Float16` and for whether its arithmetic
-  is genuinely 16-bit (ARMv8.2-FP16, AVX512-FP16) rather than promoted to float, and reports the
-  latter as `hardware_limits.native_fp16_arithmetic`. `Ir.Numerics.fp16_arithmetic` (config
-  `fp16_arithmetic`, default **false** — unlike gh-ocannl-517's widening, this trades mantissa for
-  throughput) then makes fp16 compute in fp16: `Vectorized` loops mint a `HALF_T` vector and run at
-  twice f32's lanes with no conversions at all. The fused multiply-add of both the scalar and the
-  vector rendering goes through one shared builtin macro, because `fmaf` on `_Float16` rounds twice
-  where the elementwise builtin rounds once — the two paths must not disagree. `Tile_mma` register
-  tiling still declines fp16; its tile geometry and packed-`Stage` seeds assume f32 lane counts.
-
-  Measured on an M-series at n = 2^22: the compute-bound control goes from 0.76x to **1.99x** of
-  f32, and the streaming kernels from ~1.5x to ~2x.
-
-- **`cc_backend_arch_flags` defaults to `auto`** (found while implementing gh-ocannl-516): the
-  previous default `-march=native` is accepted by Apple clang on arm64 and *downgrades* the target
-  — 22 `__ARM_FEATURE_*` macros against 26 with no flag and 33 with `-mcpu=native`, losing
-  `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` among them, so a machine with native 16-bit arithmetic
-  looked like one without. `auto` asks the target which architecture family it is in and probes that
-  family's spelling (`-mcpu=native` on ARM, `-march=native` on x86, where `-mcpu=` is only an alias
-  for `-mtune=` and would not select the ISA). Explicit values are passed through verbatim.
-
-- **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517): a tensor node's precision is
-  now its *storage* precision only; the precision its arithmetic runs at is a separate decision at
-  the codegen seam (`C_syntax_config.compute_prec`). The GPU backends are unchanged — they have
-  native 16-bit types and arithmetic — but `cc`, which had no 16-bit arithmetic and wrapped every
-  narrow-float operator in a widen/op/narrow round-trip, now computes narrow floats in f32: a load
-  widens once, a store narrows once, and an assignment's intermediates keep f32 mantissa instead of
-  being rounded per operator. This is both strictly more accurate and the precondition for the
-  `Vectorized` renderings, previously gated to f32/f64, to accept 16-bit nodes at all: narrow loads
-  widen into f32 vector registers and stores narrow on the way out, whole vectors at a time
-  (shift-based for bf16, `__builtin_convertvector` for fp16 on `_Float16` targets, a per-lane
-  fallback otherwise — every arm bitwise-identical to the scalar path, so a vectorized loop still
-  matches its serial remainder exactly). Governed by `Ir.Numerics.narrow_compute_f32` (config
-  `narrow_compute_f32`, default true); setting it false restores per-operator rounding. Two things
-  deliberately stay at storage precision: the RNG lane conversions, whose generator is selected by
-  the precision they render at, and operator-free assignments, so a copy loop stays a copy. New
-  `bin/narrow_storage_bench.exe` and `test/operations/narrow_storage_compute.ml`.
-
-  The measured verdict is the reverse of the issue's expectation: on an M-series, a bandwidth-bound
-  elementwise add reaches 1.97x at fp16 storage but 0.91x at bf16, whose round-to-nearest-even
-  narrowing costs more than the halved traffic saves.
-
+- **The concrete-index tracer is retired** (gh-ocannl-554): the affine access relations
+  (gh-ocannl-494) answer exactly what the enumerating tracer approximated;
+  `virtualize_max_tracing_dim` is gone. One `Low_level` analysis is shared across sibling
+  candidate compiles under a canonical digest (gh-ocannl-560); affine access paths encode
+  intra-statement order with typed components (gh-ocannl-561); and digesting and cache
+  canonicalization share a single canonical-llc emission core (gh-ocannl-563).
+- **`cc` restricts its worker pool to one core class on hybrid CPUs** (gh-ocannl-530,
+  `cc_pool_core_class`): conv-sketch tuning wins that did not port across CPUs traced to pool
+  *heterogeneity* — uniform subsets recover 25–34% of tuned time — and the pool signature enters
+  the autotune cache key, because crowns do not transfer across pools.
+- **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516, config `fp16_arithmetic`,
+  default **false** — opt-in, since it trades mantissa for throughput): where the hardware has
+  genuine 16-bit arithmetic, fp16 computes in fp16 at twice f32's lanes —
+  1.99x on an M-series compute-bound control. `cc_backend_arch_flags` defaults to `auto`
+  (`-march=native` silently *downgrades* Apple clang arm64 targets; `auto` probes the family's
+  right spelling).
+- **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517, `narrow_compute_f32`,
+  default **true**; setting it false restores the previous per-operator rounding): a
+  node's precision is storage-only; `cc` computes narrow floats in f32 — strictly more accurate,
+  and the precondition for vectorizing 16-bit nodes at all. Measured verdict recorded: fp16
+  storage 1.97x on a bandwidth-bound add, bf16 0.91x (its narrowing costs more than the halved
+  traffic saves).
 - **Operation results close down; `stretch` requests use-site resolution** (gh-ocannl-544): an
-  open row of an operation's result no longer widens to what a use site demands — it closes to
-  the arguments' shapes and the use site broadcasts it in. Use-site resolution (closing to the
-  GLB of the use sites) remains the rule for leaf tensors, parameters, and — via the new
-  resolve-at-use row marking — parameter-initialization expressions, whose intermediates must
-  fill the parameter's shape rather than broadcast (repeating random values). The new identity
-  operation `stretch` requests use-site resolution by name; the `0.5 + 0.5` shape-inferred
-  constant idiom is replaced by `stretch 1.0`, and pooling kernels use `stretch 0.0`. The
-  gh-ocannl-540 cast-twin pin in `Mixed_prec.cast_param` is reverted: the default now guarantees
-  a twin keeps its master's shape (guarded by `test/operations/mixed_prec_twin_shape`). The same
-  policy applies to dimension variables: an unmarked, unconstrained operation-result axis is
-  guessed minimal instead of widening to its use sites (a learning-rate expression meeting a
-  single parameter shape stays scalar); `At_least_dim` axes keep meeting their use sites, since
-  direct indexing is a dim-carrying use.
+  operation result's open row closes to its arguments' shapes and the use site broadcasts it in;
+  use-site resolution remains the rule for leaves, parameters and init expressions, and the new
+  identity `stretch` requests it by name (`stretch 1.0` replaces the `0.5 + 0.5` idiom).
+- **Four explicit barriers per k-block become one** (gh-ocannl-567): load phases group at the same
+  anchor and elision keys on `workgroup_shared` (config `elide_pipelined_barriers` renamed
+  `elide_staged_barriers`). Free rather than faster on Metal (+0.2% against a ±3–7% noise floor),
+  measured and recorded.
+- **Config startup chatter goes to stderr** (gh-ocannl-581), so tools whose stdout is a data
+  channel need no suppression incantation.
+- **CI on OCaml 5.5; Windows off the per-PR path onto a schedule; GPU backends on a daily
+  cross-machine sweep** (`tools/sweep.sh`) — CI's runners have no GPU, so Metal/CUDA/HIP were
+  never covered there. The `cc` backend's toolchain probes are memoized machine-wide.
+- `cudajit` and `hipjit` are pinned to their releases (0.8.0 / 0.2.0, required by graph capture).
 
 ### Fixed
 
 - **Companion coverage is judged at the site's arity** (gh-ocannl-569) — the single largest
-  end-to-end win in this release. The gh-ocannl-521 rule that refuses a sketch whose companion nests
-  cannot be covered capped the chain it inspected at two loops, so five FFN-class kernels of
-  `gpt2_mini` — 70.2% of the CUDA step, 47.2% of the HIP one — were declined into a naive scalar
-  form running at 1.3% (CUDA) / 5.6% (HIP) of measured local peak. `aligned_chains` takes a
-  `?max_chain`, which lifts the cap to the site's own arity, and the batched GPU sketch seeds
-  become reachable on exactly those kernels. Tuned `gpt2_mini` step: 107.4 → 52.4 ms at f32 and
-  106.2 → 47.9 ms at tf32 on CUDA, 45.6 → 25.4 ms on HIP, against a predicted floor of ~48.6 ms;
-  the untuned default is unchanged by design. Values are bitwise verified against the declined
-  form. The residual — the `lm_head` segment needs fissioning apart from its `max_logits` reduction
-  before that GEMM's output axis can spread — is gh-ocannl-574.
-
-- **A backend's tensor-core capability is keyed on the accumulator format, not the multiplicand
-  pair** (gh-ocannl-545). `nvcuda::wmma` declares `__nv_bfloat16` operands against an f32
-  accumulator only, so the uniform bf16 x bf16 -> bf16 triple that a uniformly-bf16 network produces
-  has no wmma arm at all — yet `mma_format_tiles` advertised the bf16 *pair*, so CUDA seeded 36
-  candidates per arm, timed 20, and ranked and crowned among them with every one of the 20
-  rendering the lane-0 scalar fallback. Reported as "20 timed" that cell read as bf16 tensor-core
-  adoption; it measured scalar code. The table is now keyed on the format triple, with
-  `mma_tile_for_precisions` taking `~d_prec` through `mma_acc_format_of_prec` — the accumulator
-  admits no policy choice the way the multiplicands do, since it is read back from and written to
-  the node, so f32 storage accumulates as `Mma_f32` even under the tf32 policy. Each CUDA entry
-  additionally carries its own arch floor, so an sm_70 device stops advertising the sm_80 (bf16,
-  tf32) and sm_89 (fp8) shapes it would decline at emission. After the fix the same cell is 37
-  seeded / 21 timed with zero scalar-fallback notes, crowning a genuine mma candidate at 1.1075 ms
-  against 1.7581 ms for the best non-tensorized candidate of its arm. The trap generalizes and is
-  recorded in the agent notes: "timed" is not "tensorized", because a declined `Tile_mma` is still
-  timed, ranked and crownable under an `mma-*` label.
-
-- **The autotuner no longer accumulates device memory across candidates** (gh-ocannl-550,
-  accumulation half). Attribution refuted the mechanism the issue proposed: code modules loaded and
-  unloaded normally (127/124, live 2–5) while working pools and contexts grew one per *linked*
-  candidate — 127 over 261 attempts, none freed, 28.8 GB requested. A pool simply could not be
-  finalized: each backend's `Slab.pools` table is a module-level strong root, and `Backends.finalize`,
-  the only function that drops an entry, had no caller anywhere in the repo, behind a doc comment
-  asserting the opposite. Peak scaled with candidates reaching link, not with candidates kept or
-  ranked, since the pool is allocated before the search judges anything. `Context.release` gives
-  `finalize` a caller and `Autotune.tune` uses it where the lifetime is exactly known, with a hook
-  ensuring every pre-search exit releases the baseline. Three cold tf32 `gpt2_mini` replicates on
-  CUDA: exit 0, zero OOMs, 261 candidates each, 4–7 live working pools throughout, peak 1,924–1,935
-  MiB against 11,879 unfixed, and the shipped step time unchanged. One class stays out of reach
-  rather than deferred — hoisted packed constants, which need a per-pool purity rule in the shared
-  constant cache (gh-ocannl-565).
-
-- **A lineage-wide validation failure is not a candidate's decline.** `Context.check_runnable`
-  bundled two unlike things, and the `Preflight` containment below put both inside the region that
-  turns failures into per-candidate declines: lineage-wide conditions (a poisoned lineage, an
-  uninitialized input, an unexecuted dependency) fail every candidate of every arm identically,
-  while bind-time static-binding validation genuinely differs per candidate. Contained, the first
-  class was silent on every GPU backend — the serial baseline is refused there (gh-ocannl-532), so
-  nothing validates the lineage before the search, every candidate declines at `Preflight`, nothing
-  is timed, and `Train.tune_placements` *returns normally*, shipping the untuned default out of a
-  lineage in which that routine cannot run. On the C backends the dispatched baseline hits the error
-  first, which is why every golden encodes the CPU shape and CI never saw the divergence. Split into
-  `check_lineage_runnable` and `check_launch_bindings`, with only the per-candidate half contained;
-  `check_runnable`, and hence `Context.run`, is unchanged.
-
-- **A roofline bound violation is reported once per process** rather than once per compile: the
-  cost model's bound-vs-measured agreement check is a continuous invariant (gh-ocannl-514 phase 0),
-  and a violated bound in a tuning loop otherwise repeats the same warning hundreds of times. The
-  dedupe is keyed by candidate digest, backend and device — all three named in the warning — with
-  the test-and-set under a mutex so concurrent compiles cannot both print.
-
-- **`simplify_llc` narrows its interval environment from enclosing `If` conditions**
-  (gh-ocannl-566): every condition that is a conjunction of integer-affine index comparisons — the
-  shapes `partition_breakpoints` reads — now narrows the environment for its body, gated on faithful
-  machine evaluation at the condition's precision. The depth-2 pipelined prefetch's zero-fringe
-  guard folds as a result, pinned structurally and by executed bitwise parity on Metal; a per-rule
-  discriminating suite with executed references landed as `test/operations/simplify_if_narrowing`.
-  Results are guard-relative by construction, so a simplified body is only valid under its guard.
-
-- **The schedule cache key covers the numerics policy** (gh-ocannl-568). `Ir.Numerics.t`
-  (`tf32_matmuls`, `narrow_compute_f32`, `fp16_arithmetic`) is chosen by the user and consulted at
-  codegen, not baked into the lowered code, so two runs differing only in it produced an equal
-  canonical digest — and the disk cache keyed on that digest plus the backend name alone. A
-  default-flags run sharing a cache directory with a tf32-tuned search therefore reported an
-  ordinary cache hit and replayed the tf32-tuned tensorized winner, whose mma rendering degrades to
-  the scalar fallback under the stricter numerics: measured at 1111.93 ms/step, 5.9x slower than not
-  tuning at all, silently. It also broke `Ir.Numerics`'s invariant that the policy is identical
-  across sibling candidates, a replayed winner being a candidate from another policy regime. The
-  key now ends in a digest of the policy record — derived from its sexp, so a knob added to that
-  deliberately open-ended record is covered by construction — and the entry records the same tag,
-  checked alongside the source digest on replay. Regimes coexist in one directory instead of
-  cross-replaying, so the cache-wipe discipline of the tf32-vs-default sweep protocols is no longer
-  the only thing standing between an A/B and a fictitious 6x regression. Entries written before
-  this change are invalidated (`entry_version` 4): one cold search per program.
-
-- **A fixable mistake before a timing run no longer condemns the autotuner's lineage**
-  (gh-ocannl-564). `Context.run` validates — poisoned lineage, uninitialized inputs, unsatisfied
-  execution dependencies, out-of-range static bindings — *before* it dispatches, but the candidate
-  timing wrapped all of it in a `Launch`-tagged failure boundary. With no backend verdict (
-  `classify_failure` answers `None` on every C backend) such a failure classified as `Fatal`, so the
-  handler poisoned the lineage and the search died — for a mistake nothing had yet acted on, and
-  with no restore API (gh-ocannl-536) to undo it. The most reachable trigger is the one
-  `Autotune.tune`'s own `timing_ctx` documentation warns about: a scratch context missing one of the
-  caller's initializations. `Ir.Schedule_outcome` gains a `Preflight` phase for that region, and
-  classifies its failures as contained `No_device_writes` declines without consulting the backend —
-  the validation is host-side, so the backend has no evidence, and a classifier guessing
-  `Writes_may_have_occurred` would escalate a failure that provably wrote nothing. A candidate whose
-  timing run fails validation is now an ordinary census-visible decline (`Unclassified_key
-  (Preflight, _)`) and the search runs on; the baseline's own such failure still propagates, as
-  every baseline timing failure does, but leaves the lineage usable and the retry possible. The one
-  pre-dispatch condition that is *not* fixable — an already-poisoned lineage, which has no restore —
-  is deliberately raised outside that region and stays terminal: contained, it would decline every
-  candidate for the same reason and then ship an untuned fallback out of a dead lineage.
-  Coverage extends the GPU-free fault-injection suite (`test/operations/autotune_arm_containment`),
-  with `Autotune.on_candidate_preflight` as the per-candidate seam — the real causes are properties
-  of the lineage and the bindings, so a genuine one fails every candidate at once, which the suite
-  also pins end-to-end.
-
-- **A failed placement arm no longer destroys the other arm's finished winner** (gh-ocannl-550,
-  robustness half). `Train.tune_placements` now treats an arm whose search terminates on a fatal
-  failure as a *losing* arm: it ranks at `infinity`, the surviving arm's winner ships and stays
-  cached, and the failed arm's partial report — carrying its `terminal_failure` — still arrives in
-  position, so the failure is recorded rather than downgraded to "that arm merely lost". Only when
-  every arm fails does the tune propagate, with the first failure's original backtrace. The same
-  containment covers the gh-555 flip-refinement searches. Per-candidate containment inside a search
-  was already in place (gh-ocannl-533/536) and held on the reproduction; what escaped was the
-  aftermath — with the device exhausted by candidate 47, the arm's own winner replay could not
-  compile and neither could its untuned-default fallback, so `Autotune.tune` raised and took arm
-  A's already-crowned, already-cached winner out of the process with it (five of five tf32
-  `gpt2_mini` runs, benchmarks/report-gh528-gpt2-cuda.md §3). Regression coverage is backend-neutral
-  and GPU-free: `Autotune.on_candidate_attempt` injects a candidate failure at a chosen position
-  within arm B (`test/operations/autotune_arm_containment`). The benchmark harness's arm
-  attribution follows the same rule — an arm with a `terminal_failure` is never reported as
-  shipped, and its failure is emitted in the result line.
+  end-to-end win in this release: the gh-ocannl-521 rule capped its inspected chain at two loops,
+  declining five FFN-class kernels (70.2% of the CUDA `gpt2_mini` step) into naive scalar forms.
+  `aligned_chains ?max_chain` lifts the cap; tuned step 107.4 → 52.4 ms CUDA, 45.6 → 25.4 ms HIP,
+  values bitwise-verified.
+- **A backend's tensor-core capability is keyed on the accumulator format** (gh-ocannl-545): CUDA
+  advertised the bf16 multiplicand *pair* that wmma only supports against an f32 accumulator, so a
+  uniformly-bf16 network's "20 timed mma candidates" were all scalar fallback under mma labels.
+  The general trap — "timed" is not "tensorized" — is recorded.
+- **The autotuner no longer accumulates device memory across candidates** (gh-ocannl-550):
+  `Backends.finalize` had no caller anywhere; `Context.release` gives it one and `Autotune.tune`
+  uses it — peak 1.9 GB against 11.9 GB unfixed on cold tf32 `gpt2_mini` runs. Also: a failed
+  placement arm ranks at infinity instead of destroying the other arm's finished winner; a
+  fixable pre-timing mistake is a contained `Preflight` decline rather than a poisoned lineage
+  (gh-ocannl-564); and a lineage-wide validation failure propagates instead of reading as
+  per-candidate declines.
+- **The schedule cache key covers the numerics policy** (gh-ocannl-568): a default-flags run
+  sharing a cache directory with a tf32-tuned search used to replay the tf32 winner at 5.9x
+  slower than not tuning at all, silently. Pre-existing cache entries are invalidated: one cold
+  search per program.
+- `simplify_llc` narrows its interval environment from enclosing `If` conditions, so schedule
+  guards fold where the guard decides them (gh-ocannl-566); a roofline bound violation is
+  reported once per process, not once per compile.
 
 ## [0.9] -- 2026-08-03
 
@@ -1393,662 +398,209 @@
 
 ### Added
 
-- **Typed candidate-failure containment** (gh-ocannl-536): a failing autotune candidate now
-  carries a classified cause instead of three call sites guessing. `Schedule_outcome` causes are
-  raised at the seams that actually refuse work — Metal's post-link pipeline check
-  (`Resource_exceeded Workgroup_threads`, plus the compiled kernel's own static threadgroup
-  allocation), CUDA's driver and nvrtc statuses (split on the damage axis: launch/link/PTX
-  rejections that leave the context usable are contained declines; the asynchronous memory-fault
-  family is counted and then escalated, since the context is left sticky), and sketch
-  applicability (no matmul/conv site detected, an uncoverable companion nest) which is a decline
-  like a `Schedule.apply` precondition, not a fatal. `Autotune` consults the backend's
-  classifier at launch and sync too (via `Context.failure_classifier`), and the reported cause
-  names the phase it was raised at. Damage is contained rather than assumed away: a rejection
-  the backend proved wrote nothing rolls back the routine's executed marking, while one that may
-  have written buffers — or any unattributed fatal — poisons the execution lineage, which then
-  refuses further use naming the routine and the original failure. Toolchain and environment
-  faults stay deliberately unclassified (`NVRTC_ERROR_BUILTIN_OPERATION_FAILURE` and friends fail
-  every candidate identically, and absorbing them would turn a broken installation into a silent
-  "nothing worked" report). Backend selection was narrowed to match: device discovery signals
-  `Backend_intf.Backend_unavailable` only when the library is not linked in or the driver reports
-  no devices, and `Context.auto` advances on that alone — a driver that is present but fails to
-  initialize propagates instead of being relabelled "unknown backend".
-- **HIP scratch-budget pre-validation** (gh-ocannl-533): a kernel whose private (scratch) segment
-  exceeds what the device can back does not fail cleanly on ROCm — it aborts the HSA queue, and
-  what reaches OCaml is an undifferentiated `hipErrorInvalidValue` on a stream that is already
-  dead. So containment comes from prediction: the linked kernel's private segment size is checked
-  at `Backend_link` against an occupancy-derived budget (calibrated on gfx1151/ROCm 7.14; the
-  4 GiB total-scratch cap it encodes is not exposed by any HIP or HSA query) and an over-budget
-  kernel is declined as `Resource_exceeded Thread_scratch` before it is ever launched. To a tuner
-  candidate that is an ordinary censused decline; to a hand-written schedule it is the usual
-  `User_error`. New config key `hip_scratch_validation` (default true) disables it on a device
-  where the model is wrong, and a device reporting no usable occupancy figures is never rejected.
-  Device properties are memoized per ordinal rather than re-queried per link.
-- **A decline census that accounts for every refusal**: two new typed causes give the search a
-  vocabulary for candidates that were never measured. `Not_dispatched` (gh-ocannl-532,
-  gh-ocannl-543) records a candidate refused because it binds no hardware dimension, with an
-  `origin` distinguishing the serial baseline, a candidate that degenerated to one, and a beam
-  move pruned before compile. `Seed_evicted` (gh-ocannl-541) records a detected seed site that
-  lost only to a candidate-volume cap — previously such a site was not proposed, not declined,
-  and absent from the report entirely. `BENCH_TUNE_REPORT=1` renders both, and the census is now
-  created before the schedule-cache lookup so a cache hit reports the declines it saw.
-- **Split-reduce site ranking and capping** (gh-ocannl-541): `Autotune.split_reduce_sites` returns
-  every detected site ranked by `sr_cost` — the accumulation statement's trip count, i.e. the
-  estimated cost of the segment the split would parallelize — and `tune` applies the
-  candidate-volume cap (new config key `autotune_split_reduce_max_sites`, default raised 4 → 8),
-  recording each evicted site in the census. The previous `sr_red / sr_out` integer-division
-  ratio sent every wide-output site to 0, which after gh-ocannl-537 grew lenet's site count past
-  the cap meant excluding exactly the conv weight gradients with the most serial work to recover.
-- **Reserved identifiers derived from each backend's own syntax** (gh-ocannl-553): tensor-node
-  debug names become identifiers verbatim in the emitted kernel, so `op_syntax_idents` now renders
-  every (precision, operator) pair through the backend's *own* syntax functions and harvests the
-  names, instead of deriving the blacklist from how C spells each operator. MSL spells
-  `Tanh_approx` as `tanh` — which `Tensor.unop`'s `~op_label` makes the label of every node
-  `Operation.tanh` mints, so a GPT-2 gelu produces one — and the Metal kernel declared
-  `device float *__restrict tanh` next to a call that then resolved to the pointer. Each backend's
-  builtins-table keys are reserved as well (a node taking a builtin's name both shadows the
-  definition and drags it into kernels that never call it, since builtins are selected by
-  searching the rendered kernel for their key). Plain-C names stay a floor, so the change is
-  purely additive and no existing node name moves.
-- **`?mask_fill` on the attention and transformer entry points**: every `~mask`-taking entry point
-  in `Nn_blocks` can now select a finite fill value, for padding masks that can cover a whole
-  query row (where the `-inf` default would make the softmax's max-subtraction produce NaN).
-- **Benchmark matrix: tuning and precision are independent cell axes** (gh-ocannl-539). An OCANNL
-  cell was identified by one `variant` string conflating the scheduling choice
-  (default/materialized/tuned) with the storage precision, so a tuned reduced-precision cell could
-  not be expressed at all — the one cell where tensor cores can show on a backend whose only mma
-  route is a reduced input format (RDNA3/3.5 WMMA has no f32-input shape). Cells are now the
-  product of the two, `SKIP_CELLS` keys gained a precision component with `None` as a wildcard,
-  results are stamped with the identity that was dispatched rather than the runner's self-report,
-  and the report renders precision as its own column, ordered precision-major. `bench_mlp`
-  composes `BENCH_TUNE` with `BENCH_PRECISION` (gh-ocannl-529) and reports mma seeded/timed counts
-  under `BENCH_TUNE_REPORT`; `BENCH_CELL_LOG_DIR` opts into keeping each cell's raw output, where
-  the per-candidate search lines live.
-- **Cross-machine sweep reports** (gh-ocannl-476, gh-ocannl-538): full re-measurements at one
-  commit with a wiped autotune cache on Metal, CUDA and HIP, plus paired same-session A/B legs for
-  gh-ocannl-537 on CUDA and Metal, all under a reporting contract that qualifies every segment
-  share by placement, never presents per-segment sums as step times, and reports tensor-core
-  reachability as seeded/timed counts rather than a yes/no. Headlines: a rocWMMA candidate is
-  seeded, timed and crowned for the first time (HIP `mlp_wide` bf16, −12.8% against the best
-  scalar candidate in the same search); CUDA reaches `mma.sync…m16n16k8.f32.tf32.tf32.f32` under
-  `tf32_matmuls=true`, so the policy is no longer a no-op; split reduction is worth 46–82% on the
-  default-placement arm and −17.7% on CUDA lenet's shipping artifact.
-- **`Swap` ∘ `Split_reduce` seeding: conv-gradient accumulations become reachable**
-  (gh-ocannl-537). The gh-484 split-reduce family timed cleanly but was inert on the reduction it
-  was filed for: OCANNL lowers parameter gradients with the accumulated channel loop *innermost*
-  and the reduction loops outside it, so `Split_reduce`'s pinning discipline (every
-  accumulation-cell symbol bound by a loop *enclosing* the reduction loop) rejected every axis of
-  every parameter gradient — while that one fission segment was 89% of HIP lenet's step after
-  gh-527, and 69–95% across three backends. `Schedule.split_reduce_hoist` now reports the
-  offending symbols structurally from the recognizer's own hermetic probe, and
-  `Autotune.split_reduce_sites` hoists them outside the reduction loop with a chain of adjacent
-  `Swap`s (relative order preserved, each `Swap` confirmed `Op_legal` against the code it acts on)
-  before re-probing the split; the chain rides on the site (`sr_swaps`) and is replayed by the
-  `F_split` candidate's prelude. `BENCH_SR_SITES=1` names the interchange a site was reached
-  through, and tags a rejection `[hoistable: …]` when the interchange would remove it.
-- **Forward-only reduced precision by load-time conversion** (gh-ocannl-492, the `gpt2_mini`
-  leg): data-backed tensors are precision-`Specified` at creation and inference has no
-  optimizer, so there is no master copy for a cast twin to preserve — re-precision happens at
-  ingestion instead (torch's `model.half()`): `Ir.Ndarray.convert` plus `TDSL.wrap ~prec`
-  convert fixture data to the target precision, `bench_gpt` gains `BENCH_PRECISION=bf16|f16`
-  (attention params via the storage policy, injected values converted by `set_values`; layer
-  norms and the softmax-CE head pinned f32), and `orchestrate.py --precision` covers the gpt
-  workloads. Cast twins remain the training-side construct.
-- **Fused on-device loss-scaling gate** (gh-ocannl-492 task 5): the f16 recipe's per-step
-  host-read inf/nan gate (a full device await plus a routine split, on top of the checksum
-  reduction) is now optional. `Train.sgd_update ?update_gate` gates every optimizer-state
-  mutation by `Where` selection (skipped steps leave parameters and momentum buffers untouched
-  exactly — selection, not multiplication, since `0 * inf = nan`);
-  `Mixed_prec.gated_scaled_update` builds the whole dynamically-scaled step as one routine with
-  the gate computed on device (a fast-math-robust range test of the checksum), and
-  `Mixed_prec.gated_step` samples a sticky window checksum every `check_interval` steps to
-  drive backoff/growth — overflowing steps inside a window skip themselves on device, so
-  delayed sampling delays only scale adjustment, never poisons state. Bench legs
-  `BENCH_STATIC_SCALE=1` (fixed scale, no gate — the discriminating experiment for the gate's
-  share of f16's step cost, gh-ocannl-535) and `BENCH_GATE_INTERVAL=N` in `bench_mlp`. The
-  checksum reduction itself is the shape the gh-484 split-reduce seeding parallelizes under
-  tuning.
-- **Virtual packed uniform via lane extraction** (gh-ocannl-509 task 4): packed `uniform`
-  results can now be virtual (inlined). A read cell inlines as
-  `vec_convert(counter[flat / lanes]).v[flat mod lanes]` through the new IR-internal
-  `Uint4x32_to_prec_uniform_lane` binop, whose per-backend builtins index the same converted
-  block as the vectorized stores — virtual and materialized runs agree bitwise on every backend
-  (pinned by `test_uniform_virtual_lane` across odd/divisible sizes, multi-axis shapes, and
-  single/half/double/fp8). Trade-off: the counter tensor of a virtualized uniform is read at a
-  runtime block index, so it stays materialized (typically as routine-local scratch, 16 bytes
-  per 128-bit block) — dropout-mask-style virtual uses keep working after `uniform1` retires,
-  with the conversion recomputed per cell but the threefry chain evaluated once per block.
-- **Numerics policy with tf32 matmuls** (gh-ocannl-478): `Ir.Numerics` is a record of
-  compute-precision decisions — user-chosen, never optimizer-chosen, identical across sibling
-  autotune candidates. Its first field, the opt-in `tf32_matmuls` config key (default false,
-  PyTorch-style), routes CUDA uniform-f32 GEMMs through wmma `precision::tf32` (m16n16k8,
-  sm_80+) instead of the scalar fallback; off keeps full f32 numerics. Compute precisions like
-  tf32 have no byte layout and never appear as a tensor node's storage precision.
-- **Precision-assignment policy over a model** (gh-ocannl-492 task 1):
-  `Ocannl.Precision_policy.apply` assigns storage precisions across a tensor graph by structural
-  class (params / activations / gradients) instead of hand-annotating every tensor.
-  User-specified precisions win; integer and uint4x32 (RNG) chains are protected; the `except`
-  predicate pins matched nodes at the session default (a skip would be undone by top-down
-  precision inference). Verified by an executed f32-vs-bf16 parity test, not only settled-
-  precision pins.
-- **Mixed-precision training recipe** (gh-ocannl-492 tasks 2-4): `Ocannl.Mixed_prec` — the
-  torch-AMP recipe over OCANNL structures. Master weights: `with_master_weights` installs a
-  `Tensor.param_postprocess` hook giving every parameter a reduced-precision cast twin (the new
-  identity `Operation.cast`, whose gradient accumulates back through the widening assignment);
-  the f32 master stays the optimizer/persistence target, pinned `Specified` because the cast
-  registers a top-down `Inferred` of the twin's precision into the param. Dynamic loss scaling
-  (f16): `Train.grad_update ~loss_scale` seeds backprop with the scale, `Train.sgd_update
-  ~grad_unscale` unscales gradients in place before the optimizer math, and
-  `Train.grad_checksum` reduces every parameter gradient to one host-readable scalar (non-finite
-  iff any gradient cell is) — `Mixed_prec.scaled_step` gates the optimizer routine on it and
-  `Loss_scaler` runs the backoff/growth schedule by overwriting tiny device-resident scale
-  tensors (no recompilation). Executed-parity coverage in `test/training/mixed_prec_parity.ml`
-  (bf16 and f16 trajectories vs the f32 oracle, plus a deterministically engineered f16 overflow
-  pinning the backoff/growth cycle); benchmark legs via `BENCH_PRECISION=bf16|f16` in the mlp
-  runner and `orchestrate.py --precision`.
-- **Tensor-core input-format vocabulary** (gh-ocannl-481 groundwork):
-  `Backend_intf.mma_input_format` (f32, tf32, f16, bf16, fp8-e5m2) with per-(a, b)-operand-pair
-  intrinsic tile shapes in `mma_capability.mma_format_tiles`; a future e4m3 (and mixed
-  e5m2×e4m3) needs only a constructor and descriptor entries.
-- **Pad-to-tile scheduling, PADTO** (gh-ocannl-485): `Schedule.Pad { axis; to_multiple_of }`
-  extends a Serial loop to the next tile multiple with `If (axis < N)` guards on the effectful
-  leaf statements (so barriers stay uniform and downstream `Split`s divide cleanly). `Stage`'s
-  cooperative/packing edge guards became identity-filling (`Where`-form, storing 0 — the
-  add-reduce identity — to out-of-range tile slots; tiles are tracked in
-  `Low_level.optimized.zero_fringe`), and `Tensorize` recognizes pad/remainder guards around the
-  micro-kernel: row/column masks move to the accumulator contraction's transfers (0-filled
-  init-load, `If`-guarded store-back; on GPU pipelines the masked fragment is placed in
-  workgroup-shared memory so the intrinsics still fire), and reduction-axis masks are discharged
-  against zero-fringe staged operands. Tensorized paths thus cover arbitrary extents — a
-  33x65x70 matmul register-tiles on cc bitwise-exactly and runs Metal simdgroup intrinsics
-  within f32 tolerance. Autotune drops the extent-divisibility pre-filters for fully staged
-  pipelines (GPU MMA staged seeds, CPU packed compositions, conv whole/blocked GPU flavors and
-  CPU row panels), seeding `(pad, tensorize)` compositions the tuner measures against scalar
-  alternatives; in-place pipelines keep their gates.
-- **Partition / index-set-splitting transform** (gh-ocannl-508): `Schedule.Partition` splits a
-  Serial loop's range at static affine breakpoints into separate, individually specialized (and
-  individually schedulable) segment nests; per-segment interval folding then erases the guards
-  each segment decides. Replaces in-loop guards for `Split` remainders (partition-then-split =
-  guard-free main nest + epilogue) and for inlined concatenations' per-component `Where` range
-  guards, with `Schedule.partition_breakpoints` deriving the breakpoints from the guards
-  themselves.
-- **Hardware matrix units and packed microkernels** (gh-ocannl-412): CUDA now renders
-  `Tile_mma` through WMMA for f16/bf16 and inline PTX for fp8/e5m2; HIP renders it through
-  rocWMMA on RDNA wave32 devices. CPU schedules compose register-tiled `Tile_mma` with
-  cache-blocked operand packing and pool-parallel `Grid` panels. Autotune seeds these forms both
-  for whole routines and individual fission segments.
-- **Persistent staged tensor-core accumulators** (gh-ocannl-480): Metal, CUDA, and HIP keep MMA
-  accumulator fragments resident across the serial outer reduction, loading once before `k_o`
-  and storing once afterward. Structural regressions pin the fragment scope, not only numeric
-  parity.
-- **Convolution schedule families** (gh-ocannl-493, gh-ocannl-500): `detect_conv` recognizes
-  lowered affine convolution sites and seeds implicit-GEMM schedules using `Stage` as virtual
-  im2col, `Tile_mma`, aligned-segment `Grid` geometry, and cache-blocked row panels. A
-  cross-framework `cifar_conv` workload exercises realistic channel counts and loss parity.
-- **Epilogue fusion**: `Schedule.Fuse_epilogue` folds eligible elementwise consumers into a
-  register/tensor-core tile's store-back, with exactly-once and dependency validation.
-- **Conv epilogue twins** (gh-ocannl-501): the tensorized accumulator contraction spans the
-  whole kernel-window chain (one fragment init/store per output tile instead of per outer-window
-  iteration), so the fused-epilogue twins of the conv sketches apply to 2-D convs; on
-  aligned-merged segments the twin omits the preset `Grid` retype on the tail nest it consumes
-  (fuse-before-annotate), extending the twins to conv+multi-companion segments.
-- **Launch-time symbolic extents** (gh-ocannl-490): bounded symbolic shape axes lower to runtime
-  extent parameters, so one compiled routine and schedule-cache entry can serve multiple batch
-  or sequence lengths. Allocation and analysis use the declared maximum; autotuning measures at
-  that upper bound; serial extent guards fuse into loop headers.
-- **Liveness-based buffer aliasing** (gh-ocannl-489): the pool planner derives access spans and
-  reuses non-overlapping working-buffer slots. `Zero_out` sinking exposes further training-step
-  reuse while preserving observable, merge-buffer, and cross-stream exclusions.
 - **Native affine program analysis** (gh-ocannl-494): `Ir.Affine` and
-  `Low_level.affine_accesses` expose loop boxes and tensor access relations. Conflict, coverage,
-  fiber-cardinality, and read-before-write queries now drive shared-memory safety, fission,
-  scratch validation, and a `Schedule.op_legality` oracle that prunes proven-illegal autotune
-  proposals, including invalid `Stage` and `Tensorize` roles.
-- **Analytic cost-model foundation** (gh-ocannl-491): reusable footprint/FLOP extraction,
-  arithmetic-intensity and roofline lower bounds, plus advisory per-backend compute/bandwidth
-  envelopes.
-- **Cost-model-guided selection** (gh-ocannl-491): `Autotune.model_default` picks the untuned
-  default schedule by scoring the default pipeline and the sketch families with the roofline
-  model — zero timing runs — behind config `model_default_schedule` (routed through
-  `Train.to_routine`/`run_once` and the benchmark runners); `Autotune.tune` gains a model
-  pre-filter over sketch seeds with configurable keep-fraction (`autotune_keep_fraction`).
-  Candidates without model coverage are always kept — never dropped, only measured — so the
-  model never overrides or precludes a measured result. Calibration logging pairs model scores
-  with measured times (`autotune_calibration_file`, plus `autotune_log` lines), and
-  `model_peak_flops`/`model_peak_memory_bandwidth` accept per-machine calibrated envelope
-  constants that also enable scoring on backends without advisory values.
-- **Swizzled shared staging**: `Stage ~swizzle:true` marks XOR-swizzled shared-memory tiles, with
-  validation and explicit intrinsic-decline behavior until swizzle-aware fragment loads land.
+  `Low_level.affine_accesses` expose loop boxes and access relations; conflict, coverage,
+  fiber-cardinality and read-before-write queries drive shared-memory safety, fission, scratch
+  validation, and a `Schedule.op_legality` oracle pruning proven-illegal proposals.
+- **Analytic cost model** (gh-ocannl-491): footprint/FLOP extraction, roofline lower bounds,
+  per-backend envelopes; `Autotune.model_default` picks untuned defaults with zero timing runs
+  (`model_default_schedule`) and `tune` gains a keep-fraction pre-filter — advisory throughout:
+  candidates without model coverage are never dropped, and calibration logging pairs scores with
+  measured times.
+- **Hardware matrix units and packed microkernels** (gh-ocannl-412): CUDA renders `Tile_mma`
+  through WMMA (f16/bf16) and inline PTX (fp8); HIP through rocWMMA; CPU schedules compose
+  register tiling with cache-blocked packing and pool-parallel panels. Accumulator fragments stay
+  resident across the serial reduction (gh-ocannl-480); `Stage ~swizzle` marks XOR-swizzled tiles.
+- **Convolution schedule families** (gh-ocannl-493, gh-ocannl-500, gh-ocannl-501): implicit-GEMM
+  sketches using `Stage` as virtual im2col, blocked tile flavors, epilogue twins spanning the
+  whole kernel-window chain, and `Schedule.Fuse_epilogue` folding elementwise consumers into a
+  tile's store-back.
+- **Pad-to-tile scheduling** (gh-ocannl-485) and **partition / index-set splitting**
+  (gh-ocannl-508): tensorized paths cover arbitrary extents (a 33x65x70 matmul register-tiles
+  bitwise-exactly), and partition-then-specialize erases remainder and concatenation guards.
+- **Launch-time symbolic extents** (gh-ocannl-490): bounded symbolic axes lower to runtime extent
+  parameters, so one compiled routine serves multiple batch or sequence lengths.
+- **Liveness-based buffer aliasing** (gh-ocannl-489): the pool planner reuses non-overlapping
+  working-buffer slots, with `Zero_out` sinking exposing further training-step reuse.
+- **Deterministic split reductions made reachable** (gh-ocannl-537, gh-ocannl-541):
+  `Swap`-hoisting composes interchange chains so conv-gradient accumulations — up to 89% of HIP
+  lenet's step — reach the gh-ocannl-484 split-reduce family; detected sites are ranked by serial
+  work and capped with every eviction censused (`autotune_split_reduce_max_sites`, default raised
+  4 → 8).
+- **Mixed-precision training recipe** (gh-ocannl-492): `Precision_policy.apply` assigns storage
+  precisions by structural class; `Mixed_prec` implements torch-AMP-style master weights via cast
+  twins, dynamic loss scaling with `Train.grad_checksum`, and a fused on-device loss-scaling gate
+  (`Where`-selection, so skipped steps leave state untouched exactly); forward-only reduced
+  precision converts at ingestion. Executed-parity coverage against f32 oracles.
+- **Numerics policy with tf32 matmuls** (gh-ocannl-478): `Ir.Numerics` — user-chosen, never
+  optimizer-chosen, identical across sibling candidates; opt-in `tf32_matmuls` routes CUDA
+  uniform-f32 GEMMs through wmma `precision::tf32`.
+- **Packed `uniform` total over shapes** (gh-ocannl-509): no more block-width divisibility
+  requirement; it becomes the default parameter init, and packed uniform results can be virtual
+  via lane extraction, bitwise-equal to materialized runs on every backend. **Reproducibility
+  break**: this changes every default-initialized random stream even at an unchanged seed —
+  `uniform1` and `default_uniform1_param_init` are deprecated but kept exactly for reproducing
+  pre-0.9 streams.
+- **Search survivability**: typed candidate-failure containment with per-backend classifiers and
+  damage tracking — a rejection that provably wrote nothing rolls back, one that may have written
+  poisons the lineage by name (gh-ocannl-536); HIP scratch-budget pre-validation, since ROCm
+  aborts the queue instead of failing cleanly (gh-ocannl-533; set `hip_scratch_validation=false`,
+  default true, on a device where the occupancy model is wrong); and a decline census accounting
+  for every refusal, including undispatched and cap-evicted candidates (gh-ocannl-532,
+  gh-ocannl-541, gh-ocannl-543).
+- **Benchmark matrix and sweep**: tuning and precision are independent cell axes (gh-ocannl-539);
+  the cross-machine sweep reports are checked in (gh-ocannl-476, gh-ocannl-538) — first
+  seeded-timed-and-crowned rocWMMA candidate (HIP `mlp_wide` bf16), CUDA tf32 mma reached, split
+  reduction worth 46–82% on the default-placement arm.
 
 ### Changed
 
-- **An unparallelized candidate is refused, not dispatched, on GPU backends** (gh-ocannl-532). A
-  kernel binding no hardware dimension runs the whole routine in one work-item: on Metal LeNet's
-  serial baseline measures 6.9 s per run against a 35.7 ms winner, and on gfx1151 the same
-  dispatches ran for hours, uninterruptible, on the device driving the display. This is not
-  specific to the baseline — supplying any `?lowered_transform` bypasses the default annotator, so
-  the tuner's base compile is the unscheduled serial form on every backend — so `dispatchable`
-  gates the baseline and every candidate alike, and `baseline_ms` is infinity where the baseline
-  is not run. Three consequences: a search that timed nothing stores no cache entry and returns
-  the untuned default compile (rather than caching a never-measured schedule); a cached entry that
-  replays to an unparallelized GPU routine is rejected like a stale one, so the fresh search
-  overwrites it; and beam moves off an undispatched incumbent are pruned before compile, since
-  none of them can introduce a hardware dimension. CPU backends are unaffected by construction —
-  the serial form runs at full single-core speed and stays a legitimate competitor.
-- **Attention masks fill with `-infinity`** (gh-ocannl-548). The causal mask filled masked-out
-  scores with `-1e9`, four orders of magnitude past fp16's largest finite value.
-  `Nn_blocks.default_mask_fill` is precision-independent and needs no re-deciding per storage
-  format; this is numerics-preserving for models that already worked (`exp` underflows to exactly
-  zero for both values at f32, and no existing golden moved).
-- **The fp16 magnitude guard is a headroom policy, so infinities are out of its scope**
-  (gh-ocannl-547). `Ops.exceeds_fp16_cutoff` tested `abs c >= cutoff`, trivially true for any
-  infinity — so it refused `-inf`, which is exactly representable in binary16 and which
-  `c_syntax.ml` already emits deliberately as `(-INFINITY)`. No arithmetic can push an infinity
-  past a finite bound, so there is no headroom to preserve; finiteness is tested first, covering
-  `Min`'s `+inf` identity as well as `Max`'s `-inf`. Refusing them made every fp16 max-reduction,
-  hence every fp16 softmax, hence every attention model at f16 fail during lowering on every
-  backend.
-- The HIP backend reports OCANNL's own slab allocation from `get_used_memory` (gh-ocannl-542),
-  matching what gh-ocannl-289 did for CUDA, instead of the driver's device-global `total - free` —
-  a granule-quantized number that counts every other process's VRAM and is not even monotonic in
-  what OCANNL allocated.
-- `Schedule`'s `Tensorize` declines name what broke the discipline: the offending body statements
-  for a non-perfect nest, and the operands' *index expressions* against the micro-kernel symbols
-  for the unit-coefficient role check. Both were previously unactionable.
-- The benchmark runners report the scheduling variant alone rather than folding the storage
-  precision into it, now that `orchestrate.py` composes the two axes itself.
-- **`Tnode.t` field renames**: `memory_mode` is now `memory_mode_intent` (it has been intent-only
-  since the context-scoped `Placements` migration) and `prec` is now `storage_prec` (the settled
-  bytes-in-buffers precision, as opposed to the compute precisions the numerics policy governs).
-- **Packed `uniform` is total over shapes** (gh-ocannl-509, tasks 1-3): the result's element
-  count no longer needs to be a multiple of the 128-bit block width (`16 / bytes-per-element`).
-  Shape inference gives the counter `ceil(total / lanes)` blocks via a round-up mode of the
-  `Strided_var` total-elements constraint (with a `Range_elems` slack window once the counter is
-  solved), and lowering peels the final counter iteration into a shorter `Set_from_vec` store.
-  The value stream depends only on the element index, so growing a tensor preserves its prefix
-  bitwise, and divisible shapes keep their previous streams unchanged. `Set_from_vec` into a
-  padded (halo) target is now rejected explicitly at lowering with a materialize-through-copy
-  remedy (it previously assumed dense flat offsets without checking).
-- **Default parameter initialization uses the packed `uniform`** (gh-ocannl-509 task 5):
-  `default_param_init` now defaults to `default_uniform_param_init` (a centered, scaled packed
-  `uniform` over `[-0.25, 0.25)`). Since the packed conversion became total over shapes, the
-  pointwise `uniform1` fallback is no longer needed: `uniform1`,
-  `centered_uniform1_param_init` and `default_uniform1_param_init` are deprecated (kept for
-  reproducing pre-0.9 random streams; `uniform_at`/`uniform_at1` — pointwise mapping of a user
-  counter — remain first-class). This changes every default-initialized random stream:
-  expectation files were re-promoted suite-wide. Composite initializers over inferred-shape
-  parameters exposed premature round-up eliminations in the row solver: the counter was guessed
-  at one block while the result rows' broadcast bounds were still arriving. Round-up
-  `Total_elems` eliminations are now bounds-aware — a row variable with registered-but-pending
-  bounds defers through the stored-constraint path, sibling rows are only closed empty before
-  the final stage when they carry no bounds at all, and the resolved-bound consumption arm also
-  fires when closed axes folded into the constraint's denominator (previously such a constraint
-  sat stored forever, leaving the counter variable unsolved).
-- Padding layout and neutral values are committed as tensor-node identity. Padded convolutions
-  consequently lower offset-free and can be staged safely; incompatible later padding demands
-  fail during shape inference instead of silently reinterpreting an existing buffer.
-- Per-fission `F_sketch` candidates are enumerated one segment at a time instead of pairing each
-  segment's nth seed, so an invalid seed on one segment no longer masks viable schedules on
-  another.
-- CUDA and HIP slab allocators report exact allocated bytes rather than inferred pool capacity.
-- Development pins now follow their upstream branch heads; release packaging still requires
-  released dependency versions because opam-repository packages do not preserve `pin-depends`.
+- **An unparallelized candidate is refused, not dispatched, on GPU backends** (gh-ocannl-532):
+  one-work-item kernels measured 6.9 s against a 35.7 ms winner on Metal and ran for hours on
+  gfx1151; CPU backends keep the serial form as a legitimate competitor.
+- **Attention masks fill with `-infinity`** instead of `-1e9` (gh-ocannl-548), and the fp16
+  magnitude guard exempts infinities (gh-ocannl-547) — together unblocking every attention model
+  at f16. For padding masks that can cover a whole query row (where `-inf` makes the softmax's
+  max-subtraction produce NaN), every mask-taking `Nn_blocks` entry point takes `?mask_fill` to
+  select a finite fill.
+- `Tnode.t` renames: `memory_mode` → `memory_mode_intent` (intent-only since the context-scoped
+  `Placements` migration in 0.8) and `prec` → `storage_prec` (the settled bytes-in-buffers
+  precision, as opposed to the compute precisions the numerics policy governs).
+- Padding layout and neutral values are committed as tensor-node identity, so padded convolutions
+  lower offset-free; incompatible later padding demands fail in shape inference.
+- Reserved identifiers are derived from each backend's own syntax rather than C's spellings
+  (gh-ocannl-553): MSL spells `Tanh_approx` as `tanh`, and a gelu-derived node named `tanh` used
+  to shadow the function.
 
 ### Fixed
 
-- **bfloat16 math builtins on every GPU backend** (gh-ocannl-549). MSL, CUDA and HIP have no
-  bfloat overload of the math library, so a builtin called on bfloat16 operands promotes them and
-  returns `float` — the op tables' own `expf`/`logf`/`sqrtf` arms return one, nothing downstream
-  introduces it. One root site, three symptoms, because the dialects disagree about where the
-  float is illegal: MSL rejects the narrowing assignment, so *every* placement fails (~50
-  instances in `gpt2_mini` at bf16, from `sqrt` in `Nn_blocks.layer_norm` and `fmax` in the
-  softmax max-reduction), while CUDA and HIP accept it and fail only where inlining makes the
-  float an *operand* of a bf16 binop (nvrtc on a mixed-operand `__hadd`, hiprtc on an ambiguous
-  `operator '+'`) — which makes a placement-dependent bf16 compile error a clue about inlining,
-  not about a fission-introduced mixed type. All three now bridge the result back to bfloat16 on
-  the family rather than operator by operator. Verified against the compilers rather than the
-  specs: f16 has no such gap, and bfloat arithmetic, comparisons, the ternary and the `0.0bf`
-  literal suffix are all native.
-- **A tensor node named after a builtin broke codegen** (gh-ocannl-553) — see the reserved-
-  identifier entry above.
-- **A cast twin inherited its use site's batch axes** (gh-ocannl-540). `Operation.cast` is a
-  shape-inferred pointwise op, so a master-weights twin's batch row starts as an open row
-  variable; read as the weight operand of a batched matmul, that row is resolved by the use site
-  and the twin materializes as `[batch, out, in]` — for `mlp_small`, a 64x64x64 per-batch-row copy
-  of a 64x64 weight. Every slice holds the same value, so the loss-trajectory oracle could not see
-  it (its input carries no batch axis); the costs are 64x the twin's memory and cast work per step,
-  and the row symbol appearing in the matmul's weight operand, which is what made every tensorized
-  candidate decline on HIP. A parameter has no batch axes, so neither may its twin. Measured on
-  gfx1151, `mlp_small` bf16 tuned: 0 → 17 timed mma candidates, all genuine tile-MMA.
-- **A declined baseline no longer ends the search** (gh-ocannl-533). The tuner's base compile — the
-  identity-transform capture at the top of `tune` — was the one compile there going through
-  raising `Context.compile` rather than `compile_outcome`, so a rejection bypassed `try_spec`, the
-  census and the partial report, and took the whole search with it before a single candidate had
-  been tried. It is now protected like any other candidate; the capture happens inside the
-  transform, so the base lowering survives a rejection and every candidate still derives from it.
-  The baseline record became optional, which lets the candidate pool be empty — the state every
-  consumer already reads as "nothing was timed". The benchmark diag runners got the same treatment
-  and now report a declined segment rather than ending the run.
-- **gh-ocannl-521's companion-coverage rejections are typed declines**, not `invalid_arg`. Under
-  the now-default `strict_failure_classification` an unattributed compile-side failure is fatal,
-  so at stock config an expected decline aborted the entire search on every GPU backend (this is
-  shared middle-end code). Two further containment holes found in review: Metal device discovery
-  asserted at least one device inside a lazy, so a Metal-linked machine with no Metal device died
-  where fall-through to `cc` was intended; and `Context.copy` bypassed the lineage-poisoning guard
-  on the same-backend path.
-- `autotune_fission_sketch`'s "timed multiple candidates" assertion was cc-shaped and read false on
-  HIP (gh-ocannl-543) — not a regression, but 16 candidates refused under gh-ocannl-532 and only
-  ever visible in the stderr log. `candidates_timed` is not comparable across a CPU and a GPU
-  backend; the assertions are now over the population the census covers, and both goldens are
-  byte-identical on `cc` and `hip`.
-- Reduced-precision test goldens cannot pin transcendental results: backend math libraries disagree
-  in the last mantissa bit (HIP's `exp` differs from `cc`/`metal`/`cuda` by one ulp at 2^-13), and
-  no choice of inputs makes an `exp`/`log`/`tanh` output exactly representable. `half_softmax`
-  prints coarsely enough to sit above that divergence and moves its numeric content to a tolerance
-  comparison against the same softmax evaluated in double.
-- **GPU mma sketch candidates unreachable by the tuner** (gh-ocannl-521, route 1):
-  `Schedule.Fuse_epilogue` fuses at two previously rejected sites — the whole-K `Tile_mma`
-  writing the accumulator directly (the unstaged tensorized pipelines; the tail becomes a
-  sibling lane-0 nest over the completed m x n tile), and the pad-masked fragment store-back
-  (gh-485 range guards on non-dividing sites; the guards are collected and re-imposed on the
-  relocated tail, with guard-aware coverage). The GPU mma seeds' fused twins — their only
-  survival path past `validate_parallel`, since companion nests are otherwise uncovered — now
-  compile and reach timing instead of failing 100% of the time on Metal/CUDA/HIP;
-  `test/operations/epilogue_fusion_mma_seeds.ml` pins seeded → applies/validates → runs with
-  correct values against the real seed enumeration. Covering companions without fusion is the
-  complementary route 2, tracked on the issue.
-- **Non-overlapping pooling gradient cost** (gh-ocannl-527): the gh-512 product-space gradient
-  gate made overlapping max windows exact but cost 1.8-2.6x on the conv benchmarks, whose
-  pooling is non-overlapping and cannot exercise the exactness. `Operation.einmax1`/`tropical`
-  take `?nonoverlapping` restoring the input-space gate on the domain where the two
-  formulations agree exactly (ties included) — each RHS1 position feeding at most one result
-  position — and `max_pool2d`/`max_pool2d_copy` dispatch on `stride >= window_size`. Bitwise
-  gradient parity between the gates on that domain is pinned by
-  `test/operations/nonoverlap_pool_grads.ml`; overlapping pooling keeps the exact
-  product-space gate.
-- Scalar-embedded multi-term affine indices are parenthesized in generated C-family code (an
-  unparenthesized `5*i+j / 4` divided only `j`), and integer-precision `Mod` renders the `%`
-  operator on Metal/CUDA/HIP instead of the float-only (and on Metal ambiguous) `fmod`.
-- `Total_elems` application against a closed row includes the row's `beg_dims` in the known
-  product (block/stack rows carry leading dims there); previously a total constraint meeting a
-  block row divided by the trailing dims only.
-- CUDA random generation no longer bit-casts random bits directly to `double`, and vector helper
-  names no longer exceed CUDA identifier limits. fp8 conversion, arithmetic, and uniform
-  generation were corrected across C, CUDA, HIP, and Metal paths.
-- The process-global slab-pool table is synchronized across `multidev` worker domains, fixing a
-  race between pool growth and lookup.
-- Shape inference no longer hangs on valid-convolution specs with output-only axes; `Embed_dim`
-  lowering forces the solved dimension before reading it.
-- Padded max-pooling commits `-infinity` margins on its private copy, and mixed-anchoring row
-  unification no longer loses compatible bounds.
-- The affine read-before-write proof cancels false `Recurrent` classifications caused by bounded
-  tracing on padded convolution/pooling chains, avoiding unnecessary materialization.
-- CIFAR dataset downloads are atomic, fail on HTTP errors, tolerate Windows Schannel behavior,
-  and self-heal incomplete archives; Windows documentation now calls out PowerShell's unquoted
-  Dune-alias splatting trap.
-- The model-picked untuned default (`model_default_schedule`) now honors its advisory contract
-  against validation failures (gh-ocannl-519): its guard only covered *producing* the picked
-  segments, while `Low_level.validate_parallel` — the check that rejects most bad picks — runs
-  inside backend codegen, past the transform seam, so a rejected pick escaped the guard and
-  killed the process (reproducibly, on Metal `mlp` workloads). Picks are now validated at the
-  seam (`Autotune.validate_segments`), and the compile itself is wrapped
-  (`Autotune.compile_advisory`) so that a downstream failure of a picked schedule recompiles
-  with the ordinary default pipeline, the reported choice degrading to `"default"`. Once the
-  compile is on that pipeline there is nothing left to fall back to, so its failures propagate
-  without a duplicate attempt.
-- The cost model's untuned-default selection no longer ranks candidates it cannot build
-  (gh-ocannl-522): the roofline has no notion of compilability and rates the tensorized families
-  best, so on backends where those are unbuildable (gh-ocannl-521) it crowned one and — with the
-  fallback above — degraded straight back to the default, making the gate a no-op exactly where
-  it looked most promising. Each candidate's scheduled form is now checked with
-  `Low_level.validate_parallel` during scoring, on the hermetic copy it is already scored on, and
-  the dead ones drop out of the argmin; the count is reported as `model_choice.mc_rejected` and
-  logged under `autotune_log`. On a 128x128 matmul+relu on `cc` this changes the outcome from
-  "default" (22 of 64 candidates unbuildable) to a packed mma sketch that compiles and runs.
+- **bfloat16 math builtins on every GPU backend** (gh-ocannl-549): no GPU dialect has bfloat math
+  overloads, so builtins returned promoted `float` — rejected outright by MSL, and a
+  placement-dependent compile error on CUDA/HIP; all three now bridge the result back to bf16.
+- **A cast twin inherited its use site's batch axes** (gh-ocannl-540): a master-weights twin read
+  as a batched matmul operand materialized per-batch-row copies of the weight — invisible to the
+  loss oracle, 64x the memory, and the reason every tensorized candidate declined on HIP
+  (0 → 17 timed mma candidates after the fix).
+- **A declined baseline no longer ends the search** (gh-ocannl-533), and companion-coverage
+  rejections are typed declines rather than `invalid_arg` fatals (gh-ocannl-521) — whose fused
+  epilogue twins now compile and reach timing on Metal/CUDA/HIP (route 1 of making GPU mma seeds
+  reachable).
+- **Non-overlapping pooling keeps the fast gradient gate** (gh-ocannl-527): the exact
+  product-space gate for overlapping windows (gh-ocannl-512) cost 1.8–2.6x where windows cannot
+  overlap; `?nonoverlapping` restores the input-space gate on the domain where the two agree
+  bitwise.
+- Model-picked untuned defaults validate their picks at the seam and skip candidates they cannot
+  build (gh-ocannl-519, gh-ocannl-522).
+- Assorted codegen and lowering: multi-term affine indices parenthesized, integer `Mod` rendered
+  as `%` on GPU dialects, fp8 conversion/arithmetic/uniform fixes across all backends,
+  `Total_elems` counting `beg_dims`, the slab-pool table synchronized across `multidev` worker
+  domains, and atomic self-healing CIFAR downloads.
 
 ## [0.8] -- 2026-07-13
 
 > Release note: theme — parallel schedules and autotuning; AMD HIP backend. Scope changes
 > vs. the original plan: **tensor cores are pushed out to v0.9**; conversely **autotuning**
 > was not on the original roadmap and lands here as multi-round, execution-measured beam search
-> over schedule compositions. See [ROADMAP.md](ROADMAP.md), whose older single-step/full-beam
-> distinction is superseded by the implementation described below.
+> over schedule compositions. See [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
-- **Schedule IR with automatic GPU schedules** (docs/proposals/axis-types-for-loops.md,
-  docs/proposals/schedule-ir-optops.md): `Low_level` loops carry an axis type
+- **Schedule IR with automatic GPU schedules**: `Low_level` loops carry an axis type
   (`Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized`); `Grid`/`Workgroup`
-  loops render as hardware index bindings with launch dimensions, barriers, workgroup-shared
-  declarations, and `Low_level.If` extent guards (a new guarded statement that is a barrier for
-  CSE/hoisting/virtualization). Schedule transforms are values (`Split`, `Swap`, `Retype`,
-  `Unroll`, `Stage` workgroup-shared/packed tiles, `Expand_zero`, `Privatize` accumulator
-  privatization, `Tensorize`) applied at the new `Context.compile ?lowered_transform` seam.
-  On cuda/hip/metal, kernels without an explicit transform get the default GPU schedule when a
-  conservative analysis proves them race-free (`automatic_gpu_schedule`, default true;
-  `gpu_schedule_block_size`, `gpu_schedule_min_parallel`); the annotator clamps block sizes to
-  the backend's new `hardware_limits` query, and compile validates every kernel's thread count
-  and shared-memory bytes (`Schedule.check_hardware_limits`), turning driver launch failures
-  into early named errors.
-- **Kernel fission** (`schedule_fission`, default true): routines are split into segment kernels
-  at the cross-workgroup dependency edges the race analysis would otherwise reject (materialized
-  producer/consumer and WAW/WAR pairs, bare materialized writes, whole-node zeroing); segments
-  launch in order with a device-side event chained at each boundary and each gets its own launch
-  geometry, while adjacent serial segments coalesce back to a single kernel. Aligned cross-nest
-  parallelism keeps race-free chains fused: nests linked by producer/consumer pairs stay in one
-  kernel when every member trims to a common equal-extent parallel prefix with per-axis-aligned
-  accesses, and fission merges across a materialized edge only when lossless (no nest's
-  parallelism shrinks). On Metal, a fissioned routine's segments encode into one command buffer
-  with a serial-dispatch compute pass (`sequence_segments` backend hook), replacing per-boundary
-  event command buffers (circles_conv sgd step 19.7 → 7.1 ms).
-- **Within-kernel CPU parallelism** (gh-ocannl-164): the default CPU schedule
-  (`automatic_cpu_schedule`, `cpu_schedule_min_parallel`) retypes each nest's outermost
-  parallelizable loop to `Grid`, which the C backend renders as contiguous chunks on a
-  process-global native pool — `dispatch_apply` on macOS, chunked OpenMP elsewhere
-  (`cc_parallel_grid=auto` probes the compiler; `cc_parallel_chunks`); worker threads run pure C
-  and never touch the OCaml runtime, and results are bitwise identical to serial execution.
-  The rest of the CPU-improvements bundle: `restrict`-qualified kernel pointers, 32-byte-aligned
-  pool bases and node offsets, pragma hints on `Vectorized` loops, and probed SIMD compiler
-  flags (`cc_backend_simd_flags=auto`).
-- **Explicit SIMD codegen on the C backends** (`cc_vector_bytes`, default automatic AVX2/NEON
-  width): eligible `Vectorized` loop bodies emit GCC/Clang vector-extension loads, arithmetic
-  (including fused vector FMA), stores, and a serial remainder instead of relying on the
-  auto-vectorizer; recognized accumulation bodies render as independent vector accumulator
-  chains with a horizontal reduce at loop exit, ggml's `vec_dot` pattern (gh-ocannl-468); and a
-  `Tile_mma` statement renders tinyBLAS-style register tiling — a grid of vector-register
-  accumulators held across the whole k-loop with splat/FMA updates and peeled edges
-  (gh-ocannl-469).
-- **Tensor-core / GPU vector rendering**: the `Tensorize` optop recognizes the matmul
-  micro-kernel and replaces it with a cooperative `Tile_mma` block statement (Metal emits
-  `simdgroup_matrix` MMA, CUDA has a draft wmma path with a lane-0 scalar fallback);
-  `Workgroup_reduce` accumulations render as llm.c's two-phase block reduction with warp /
-  simdgroup shuffle butterflies (gh-ocannl-462); `Vectorized` loops on CUDA and Metal emit
-  128-bit packed loads/stores through reinterpret casts with per-lane scalar arithmetic
-  preserving serial rounding (gh-ocannl-463).
-- **Autotuning**: `Autotune.tune` is a drop-in replacement for `Context.compile` that beam-searches
-  schedules (seeds: serial baseline, default annotator, block-size sweep; menu: splits, swaps,
-  unrolls, `Retype`-`Vectorized`, `Tensorize` permutations), timing each candidate on the real
-  device and returning the fastest routine (`autotune_beam_width`, `autotune_rounds`,
-  `autotune_repeats`, `autotune_log`). `Schedule_cache` gives schedules a structural identity —
-  canonical symbol/tnode naming with a digest that guards replay — plus a disk cache
-  (`autotune_cache_dir`) so re-running the same program skips the search. Follow-ups: fissioned
-  candidates with per-segment schedules keyed by pre-schedule segment digests, a matmul sketch
-  generator seeding register-blocktiled/SMEM/packed pipelines, `?timing_ctx` to search on a
-  scratch context lineage without touching live training state, and `Train.tune_placements`
-  which A/B-tunes default vs materialize-all placements (`Context.decide_materialized`) and
-  keeps the measured winner — tuned is now the fastest OCANNL variant in every benchmark cell.
-- **AMD HIP backend** via the hipjit bindings (gh-ocannl-411): `hip_backend.ml` mirrors the CUDA
-  backend with hiprtc compilation to a code object, device-keyed peer copies,
-  `__hip_bfloat16`/fp8 type support (conversions routed through float), ported builtins with
-  wave32/wave64-correct shuffles, and the lane-0 fallback for tile-MMA. Registers everywhere
-  the other backends do (`Backends.Hip`, `Context.hip`, the `Context.auto` fallback list,
-  per-backend test goldens, config key `hip_printf_fifo_size`), including on Windows.
-- **Cross-framework benchmark suite** under `benchmarks/`: OCANNL vs PyTorch (eager and
-  `torch.compile`) vs tinygrad (default and BEAM) training/inference steps on shared
-  safetensors fixtures — mlp_small/mlp_wide, LeNet-5, and a GPT-2-style gpt2_mini inference
-  workload — with an orchestrator that gates every cell on loss-trajectory parity against the
-  PyTorch CPU reference before timings count, and reports synced and queued per-step
-  percentiles with compile time separated out. Example reports checked in for Metal, CUDA, and
-  Windows/HIP. The parity gate doubles as a correctness oracle: its first run caught two real
-  backward-pass bugs (see the gradient-correctness entry under Fixed).
-- **Fused cross-entropy classifier** (gh-ocannl-464): `Nn_blocks.cross_entropy_loss` computes
-  log-sum-exp cross-entropy from raw logits (optional `?mask` / `?normalize_by`), detaching the
-  row max via `stop_gradient` (now exposed in the DSL `O` modules) so the backward accumulates
-  `probs - targets` directly into the logits gradient with no `[batch, vocab]` intermediate
-  materialized in either pass; `transformer_with_loss` uses it instead of the unstable
-  `log (softmax logits)`.
-- **GPT-2 with pretrained weights**: `Nn_blocks.gelu` (tanh-approximate), a HuggingFace
-  safetensors checkpoint reader (`Safetensors`, lazy payloads with exact buffer tiling), a
-  GPT-2 model module assembling HF `GPT2LMHeadModel` semantics from OCANNL operations (verified
-  exact against a NumPy reference), a full-scale 124M dry run, and a `gpt2_generate` tutorial
-  that downloads the pretrained tokenizer + weights and greedy-decodes. Plus the dataprep BPE
-  bridge `Nn_blocks.token_ids_of_array` / `token_ids_of_batch` (uint32 IDs, padding/truncation,
-  composing with the one-hot embedding gather) and a hermetic tokenizer-roundtrip test.
-- On-device epoch-loss accumulation: `Train.grad_update ?accum_loss` with
-  `Train.loss_accumulator` sequences `acc =+ loss` after the update, so training loops read the
-  loss once per epoch instead of forcing a device-serializing `Context.get_values` every step.
-- Interval analysis over index expressions and scalars (gh-ocannl-134 lineage): an interval
-  lattice with a total symbol environment lets `simplify_llc` fold interval-decided comparisons
-  and `Where` branches (construct-then-fold for schedule guards), erases provably-true
-  dynamic-gather guard conjuncts, and backs `Tnode` bounds propose/settle plus int32
-  launch-parameter width checks.
-- Recompute-cost guard for virtualization: nodes whose computation contains reduction loops
-  with trip-count product exceeding `virtualize_max_inline_reduction` (default 16) are decided
-  `Never_virtual`, since inlining would replay the reduction at every read site through chains
-  of virtual consumers (gpt2_mini on cc: ~13,000 → 2,361 ms/step at defaults).
-- Namespaces for tensor node IDs (gh-ocannl-372): `Tnode.t` carries a namespace derived from
-  the defining file (`<prefix>__<file_ns>` debug names), `Tensor.t.id` was dropped in favor of
-  the tnode's uid, per-routine node tables are keyed by uid rather than session-dependent ids,
-  schedule-minted tile nodes live in a reserved `tile` namespace, and checkpoints are
-  namespaced (`Persistence.load ?prefix_namespace`). (Listed under 0.7 in earlier drafts of
-  these notes, but merged after the 0.7 tag.)
-  `rewrite_one_hot_reductions` also recognizes the transposed one-hot pattern — the
-  embedding backward `d_C[o,v] += Σ_pos (v == ids[pos]) * g[pos,o]` — and replaces the
-  vocabulary loop with a guarded scatter-accumulate at the dynamic row (`Set_dynamic`,
-  the write counterpart of gh-343's `Get_dynamic` gather), dropping the O(vocab)
-  per-position work. Positions accumulate in their original serial order and the
-  schedule analyses treat dynamically-indexed writes as never parallelizable, so results
-  stay deterministic with no atomics (llm.c's encoder-backward invariant; host-side
-  bucketing for GPU position-parallelism is a possible phase 2).
-- Packed constants (gh-ocannl-470): `Schedule.Stage` gained `hoisted = true`, packing a
-  compile-time-constant operand once, out of the routine — the packed layout covers the
-  whole source, is computed on the host at link time from the operand's host-init data
-  (the compiler-native analog of ggml's `CPU_REPACK` `set_tensor` hook), and is uploaded
-  once per device into the constant pool; the kernel reads it directly, with no
-  per-invocation load nest. The CPU autotune sketch proposes hoisted and in-kernel
-  packing side by side for constant operands, so the choice stays measured. Constancy
-  rides a new `Tnode.host_constant` marker set by `Tensor.ndarray` (ndarray-backed
-  literals are minted `On_device`, so `Effectively_constant` intent could not stick).
+  loops render as hardware index bindings with launch dimensions, barriers, shared-memory
+  declarations and extent guards. Schedule transforms are values (`Split`, `Swap`, `Retype`,
+  `Unroll`, `Stage`, `Privatize`, `Tensorize`, …) applied at the `Context.compile
+  ?lowered_transform` seam; on cuda/hip/metal, race-free kernels get the default GPU schedule
+  automatically (`automatic_gpu_schedule`), clamped and validated against per-backend
+  `hardware_limits` so driver launch failures become early named errors.
+- **Kernel fission** (`schedule_fission`): routines split into segment kernels at cross-workgroup
+  dependency edges, each with its own launch geometry; aligned cross-nest parallelism keeps
+  race-free chains fused, and Metal encodes fissioned steps into one command buffer
+  (circles_conv sgd step 19.7 → 7.1 ms).
+- **Within-kernel CPU parallelism** (gh-ocannl-164): the default CPU schedule retypes the
+  outermost parallelizable loop to `Grid`, rendered as contiguous chunks on a process-global
+  native pool (`dispatch_apply` on macOS, OpenMP elsewhere); results bitwise identical to serial.
+- **Explicit SIMD codegen on the C backends** (`cc_vector_bytes`): vector-extension
+  loads/arithmetic/stores with serial remainders, ggml-style vector accumulator chains
+  (gh-ocannl-468), and tinyBLAS-style `Tile_mma` register tiling (gh-ocannl-469).
+- **Tensor-core / GPU vector rendering**: `Tensorize` recognizes the matmul micro-kernel and emits
+  a cooperative `Tile_mma` (Metal `simdgroup_matrix`; CUDA draft wmma with lane-0 fallback);
+  `Workgroup_reduce` renders llm.c's two-phase shuffle reduction (gh-ocannl-462); 128-bit packed
+  loads/stores on CUDA and Metal (gh-ocannl-463).
+- **Autotuning**: `Autotune.tune` is a drop-in for `Context.compile` — beam search over schedule
+  compositions timed on the real device, with a digest-guarded structural schedule cache and disk
+  persistence, per-segment schedules for fissioned routines, matmul sketch seeding, `?timing_ctx`
+  scratch lineages, and `Train.tune_placements` A/B-tuning default vs materialize-all placements.
+  Tuned is the fastest OCANNL variant in every benchmark cell.
+- **AMD HIP backend** (gh-ocannl-411) via the independent hipjit bindings, mirroring the CUDA
+  backend (hiprtc, peer copies, bf16/fp8 types, wave32/wave64-correct shuffles), including on
+  Windows.
+- **Cross-framework benchmark suite** under `benchmarks/`: OCANNL vs PyTorch (eager,
+  `torch.compile`) vs tinygrad (default, BEAM) on shared safetensors fixtures, every cell gated
+  on loss-trajectory parity before timings count. The parity gate doubled as a correctness
+  oracle: its first run caught two real backward-pass bugs (see Fixed).
+- **Fused cross-entropy classifier** (gh-ocannl-464): log-sum-exp cross-entropy from raw logits
+  with `stop_gradient` on the row max, accumulating `probs - targets` directly with no
+  `[batch, vocab]` intermediate in either pass.
+- **GPT-2 with pretrained weights**: `Safetensors` HF checkpoint reader, a GPT-2 module verified
+  exact against a NumPy reference, greedy-decoding tutorial, and the dataprep BPE tokenizer
+  bridge.
+- Embedding backward as a guarded scatter-accumulate (`Set_dynamic`, dropping O(vocab)
+  per-position work, deterministic without atomics); packed constants hoisted out of routines
+  into per-device constant pools (gh-ocannl-470); on-device epoch-loss accumulation
+  (`Train.grad_update ?accum_loss`); interval analysis folding interval-decided guards; a
+  recompute-cost guard capping virtualized reductions (`virtualize_max_inline_reduction` —
+  gpt2_mini on cc: ~13,000 → 2,361 ms/step); tensor-node ID namespaces (gh-ocannl-372 —
+  `Tensor.t.id` was dropped in favor of the tnode's uid, reached through `value`).
 
 ### Changed
 
-- **Breaking notation change**: in einsum and labels specs, a row whose kind separator
-  is omitted now reads as the context ellipsis instead of an empty row: `x` is
-  equivalent to `...|...->x`, so batch and input axes broadcast through terse specs by
-  default (e.g. `counts ++ "... => 0"` is a per-row softmax denominator). The empty-row
-  reading is preserved when the separator is written with an empty row spec: `| ->x`
-  means no batch and no input axes, `|x` no batch axes, `->x` no input axes. Because an
-  omitted row shares the context row variable with rows written `...`, reduce-over-
-  everything results must now close their rows — the sum-to-scalar idiom
-  `++ "...|... => 0"` becomes `++ "...|... => |->0"` — and multi-operand specs where
-  one slot passes batch through must close the other slots' batch rows (e.g. the
-  conv kernel slot `; |kh, kw, ..ic.. -> ..oc..` in `Nn_blocks.conv2d`).
-- **The default backend is now `cc`**; `sync_cc` was renamed to `cc` and `multicore_cc` to
-  `multidev_cc` (old names accepted as deprecated aliases). The `Multidev` scheduler exposes
-  multiple worker-domain CPU devices, each with its own FIFO queue, for debugging multi-device
-  parallel workflows (`multidev_num_devices`, 0 = recommended domain count).
-- **Breaking**: backends are process-wide singletons — `fresh_backend` became `get_backend`
-  returning a closed enum, `Backends.wrapped_context` is a closed disjunction over the
-  singleton context types (matching two values on the same constructor recovers type equality),
-  and `Context.copy` dispatches through it to backend-specific transfers. Backend module tower
-  cleanup retired `new_stream` and vestigial signatures. GPU driver init and device discovery
-  stay lazy.
-- Memory placement decisions are context-scoped: `Tnode.memory_mode` (streamlined to five
-  constructors, `Materialized`/`Device_only` folded away) is declared intent only — monotone and
-  never written by the compilation pipeline — while decisions land in per-lineage
-  `Tnode.Placements` tables riding `Low_level.optimize_ctx`, forked per compile so sibling
-  compiles from one context are hermetic (the autotuning forcing function); gradients'
-  `Never_virtual` was replaced by an `is_observable` intent.
-- Index arithmetic is now signed: `Ops.index_prec` is int32, or int64 under `large_models`
-  (unsigned precisions remain for data domains); loop counters and index kernel arguments are
-  signed across cc/CUDA/Metal (Metal pool-slot offsets deliberately stay unsigned), and each
-  tensor node's padded element count must fit int32 unless `large_models` (checked with a named
-  error when dims are forced).
-- Generated code and runtime logs go to per-executable subdirectories
-  `build_files/<exe>/` and `log_files/<exe>/` (override with `build_files_prefix`; `"."`
-  restores the flat layout), so concurrently running tests sharing a working directory no
-  longer race on same-named kernels or wholesale startup cleanup.
-- The four gated training tests (bigram, fsm_transformer, transformer_names, circles_conv)
-  moved from the `slow` alias back to `runtest`: they materialize all intermediates and compile
-  through `Autotune.tune ~rounds:0` with a scratch `timing_ctx`, cutting e.g. bigram on Metal
-  from 345 s to 25-29 s while keeping deterministic expected outputs.
-- Autotune and benchmark step timing uses the monotonic mtime clock
-  (QueryPerformanceCounter-backed on Windows): `Unix.gettimeofday` ticks at ~1 ms there, which
-  floored sub-millisecond step times to 0/1 ms and made the tuner pick winners by noise.
-- Workshop article: benchmarks section and appendix with Metal, CUDA, and partial AMD HIP
-  tables (including torch.compile and tinygrad BEAM rows), and automated Markdown-to-LaTeX
-  conversion.
+- **Breaking notation change**: an einsum/labels row with its kind separator omitted reads as the
+  context ellipsis, not an empty row — `x` means `...|...->x`, so terse specs broadcast batch and
+  input axes by default; the empty-row reading is kept by writing the separator (`| ->x`, `|x`,
+  `->x`), and sum-to-scalar becomes `++ "...|... => |->0"`. In multi-operand specs where one slot
+  passes batch through, the other slots must now close their batch rows explicitly (e.g. the conv
+  kernel slot `; |kh, kw, ..ic.. -> ..oc..`).
+- **The default backend is now `cc`**; `sync_cc` renamed to `cc`, `multicore_cc` to `multidev_cc`
+  (deprecated aliases kept); `Multidev` exposes multiple worker-domain CPU devices.
+- **Breaking**: backends are process-wide singletons — `fresh_backend` became `get_backend`, with
+  `Backends.wrapped_context` as a closed disjunction over the singleton context types; the module
+  tower cleanup retired `new_stream`.
+- Memory placement decisions are context-scoped: `Tnode.memory_mode` is declared intent only,
+  streamlined to five constructors (`Materialized`/`Device_only` folded away; gradients'
+  `Never_virtual` replaced by an `is_observable` intent); decisions land in per-lineage
+  `Placements` tables on `Low_level.optimize_ctx`, forked per compile so sibling compiles are
+  hermetic (the autotuning forcing function).
+- Index arithmetic is signed (`Ops.index_prec` int32, int64 under `large_models`), with
+  per-node element counts checked to fit.
+- Generated code and logs go to per-executable subdirectories `build_files/<exe>/` and
+  `log_files/<exe>/` (override with `build_files_prefix`; `.` restores the flat legacy layout);
+  step timing uses the monotonic clock (Windows' `gettimeofday` ticks at
+  ~1 ms); the gated training tests moved back to `runtest` via `Autotune.tune ~rounds:0` with
+  materialize-all placements (bigram on Metal 345 → 25-29 s).
 
 ### Fixed
 
-- Two executed-backward gradient-correctness bugs found by cross-framework loss parity
-  testing (regression test `test/training/virtual_grads_parity.ml`):
-  - Per-statement CSE (`Low_level.eliminate_common_subexpressions`, gh-ocannl-351) and
-    cross-statement hoisting treated *free* iterator symbols and scope ids as renameable
-    during alpha-equivalence, so a nested recomputation of a virtual node at inner loop
-    indices was deduplicated into a `Get_local` of the enclosing iteration's stale local
-    (e.g. `cross_entropy_loss` backward through a Virtual pre-activation used one class's
-    logit for every class in its exp-sum). Renamings are now registered only at binder
-    sites (`For_loop` indices, `Local_scope`/`Declare_local` scope ids); free names must
-    match exactly.
-  - The scalar simplifier rewrote `(a / b) / c` to `(a * c) / b` (a regression from the
-    precision-handling refactor; originally `a / (b * c)`), corrupting e.g. the division
-    backward of the standalone `Nn_blocks.softmax`.
-- 1-element `Reshape`/`rebatch` data no longer collapses to a scalar: when the rows
-  receive no other shape information, the leftover row variable keeps a single dim-1
-  axis (identity-reshape preference, `keep_axis` on the `Total_elems` constraint); also
-  fixed `Tnode.create_with_reshape` crashing on rank-0 targets (gh-ocannl-460).
-- `Nn_blocks.layer_norm` now computes the actual mean and variance: it used the `++`
-  add-reduction result as if it were a mean — `(x - sum(x))/d` instead of `x - sum(x)/d`, and
-  never divided the squared-deviation sum by `d` — an error not absorbable by the learned
-  gamma/beta (fixed by scaling the reduction operands, `sum(x /. d) = mean(x)`); added a
-  numeric forward+backward oracle test.
-- Shape-inference fixes surfaced by the layer_norm work: `compute_row_product` no longer
-  latches a product while the row has an open variable tail (xavier/kaiming fan_in was silently
-  1, producing wrong init scales — training tests retuned for real fan values, and
-  `TDSL.default_param_init` fans fixed likewise); fixed-index axes are kept out of the
-  singleton-bounds dimension equality; and GLB-closing a row variable re-emits its `Shape_row`
-  constraint so deferred guess-to-1 variables still resolve.
-- Repeated random values in inferred-shape parameter initialization: the PRNG counter's shape
-  is now pinned to the result in `uniform`/`uniform1` (and `box_muller` keeps its draws pinned)
-  via an optional `?spec` on the threefry ops — previously shape inference could close the
-  counter's rows smaller than the result and broadcast it, repeating values along the broadcast
-  axes (e.g. 50 unique of 5000 for a `[100 -> 50]` weight); regression test on realized
-  parameter std.
-- `Nn_blocks.conv2d` (and `depthwise_separable_conv2d`) inline bias is per-channel: least-
-  commitment inference broadcast the plain `+ { bias = 0. }` to the full feature map (4704
-  params for LeNet-5 conv1 where 6 are expected); the bias slot is now pinned to the channel
-  row via a spec'd `+++`.
-- Forward and backward fragment ordering (gh-ocannl-461): sibling forward fragments are ordered
-  topologically by embedded-nodes/read-nodes instead of tensor-id order (GPT-2's attention v
-  projection silently read zeros), backprop fragments are ordered by gradient-accumulation
-  dependencies with the forward edge reversed, and fragment cycles error instead of silently
-  reordering.
-- Worked around an Apple Metal shader-compiler miscompile of serial loops accumulating into a
-  loop-invariant address (only the last iteration contributed — cross-entropy sums collapsed to
-  `correct/batch_size`): affected read-modify-write statements go through a volatile shadow
-  pointer; standalone repro checked in. Also on Metal: every kernel launch is now ordered after
-  all previously enqueued work (back-to-back runs of the same routine raced, producing NaN),
-  `get_values`/`set_values` do full device awaits, and `from_host` uploads await pending device
-  work.
-- Metal default-schedule pathology on gpt2_mini (81 s → 0.3 s steps): `gpu_schedule_min_parallel`
-  default lowered to 64 — any real parallelism beats the serial 1×1 fallback — and `Local`
-  scratch crossing a statement boundary is promoted at fission instead of stranding.
-- Windows: the CUDA backend was restored (NVRTC targets compute_52 by default, but half
-  arithmetic intrinsics need compute_53+ and their bf16 overloads compute_80+ — the arch
-  heuristic now floors accordingly), and the test suite is green on the cc and hip backends
-  (binary-mode stdout for byte-identical goldens under autocrlf, `NUL` vs `/dev/null`,
-  reduction-order-tolerant loss printing, fixed-point formatting for mingw's `%g`).
+- **Two executed-backward gradient bugs found by cross-framework loss parity**: CSE and hoisting
+  treated *free* iterator symbols as renameable during alpha-equivalence, deduplicating a nested
+  virtual-node recomputation into a stale local; and the scalar simplifier rewrote `(a / b) / c`
+  to `(a * c) / b`. Regression test `test/training/virtual_grads_parity.ml`.
+- `Nn_blocks.layer_norm` computed with a sum where it needed a mean; the fix exposed shape
+  fixes in `compute_row_product` (fan_in silently 1 → wrong xavier/kaiming scales) and GLB
+  closing.
+- Repeated random values in inferred-shape parameter init: the PRNG counter's shape is pinned to
+  the result, instead of broadcasting 50 unique values over 5000 cells.
+- `Nn_blocks.conv2d` inline bias is per-channel, not broadcast to the full feature map.
+- Forward and backward fragment ordering is topological, not tensor-id order (GPT-2's attention v
+  projection silently read zeros); fragment cycles error (gh-ocannl-461).
+- Worked around an Apple Metal shader-compiler miscompile of serial accumulation at a
+  loop-invariant address (volatile shadow pointer; standalone repro checked in); Metal launches
+  are ordered after all previously enqueued work; Metal default-schedule pathology on gpt2_mini
+  fixed (81 s → 0.3 s steps — the `gpu_schedule_min_parallel` default is lowered to 64, so
+  kernels that used to stay on the serial 1x1 fallback now get the automatic GPU schedule).
+- Windows: the CUDA backend restored (NVRTC arch floors for half/bf16 intrinsics), test suite
+  green on cc and hip.
+- 1-element `Reshape`/`rebatch` data no longer collapses to a scalar (gh-ocannl-460).
 
 ## [0.7] -- 2026-07-03
 
@@ -2059,144 +611,61 @@
 
 ### Added
 
-- **Removed the hosted tensor mode** (gh-ocannl-333): dropped the `array` field of
-  `Tnode.t` and the "hosted" memory mode. Tensor value access and printing are now
-  context-mediated; host-init nodes self-initialize at link time. Removed the dead
-  `automatic_host_transfers` setting and the `use_host_memory` hook.
-- Tensor saving, loading, and restoring (gh-ocannl-373).
-- Ternary einsum notation: `Einsum_tern` in shape inference, PPX dispatch, a `Mul3`
-  ternary scalar op across all backends, and `einsum3` / where-with-spec (gh-ocannl-305).
-- Loop-invariant code motion (loop hoisting) prior to visit counting (gh-ocannl-350).
-- Common subexpression elimination after inlining (gh-ocannl-351).
-- Virtual-node inlining extended to non-scalar constants and ranges (gh-ocannl-142).
-- `Uint32`/`Uint64` precisions, with index-embedding operations selecting precision per
-  the `large_models` setting (formerly `big_models`, still accepted as a deprecated alias)
-  to avoid unnecessary conversions and to select Metal pool-slot width
-  (gh-ocannl-349, gh-ocannl-177, gh-ocannl-344).
-- `-march=native` C-compiler flag (gh-ocannl-311); restored CUDA pre-loaded builtins
-  referenced by pointer via a cudajit helper (gh-ocannl-353).
-- Sasha Rush Tensor Puzzles expressed in the extended einsum notation (gh-ocannl-308).
-- Universal pool allocator across backends (gh-ocannl-344): tensors are addressed by
-  `{ pool_id; offset }`; working tensors are bump-packed into per-context-delta pools,
-  constants into per-device constant pools, and merge buffers stay in their reserved pool.
-  Metal now binds pool slabs plus a slot table instead of one buffer per tensor node, staying
-  below the backend's binding limit for large routines. CUDA and C keep per-tnode pointer
-  kernel parameters resolved from the same pooled locations.
-- Data-parallel training: `shard_along` / `gather` sharding primitives and a driver
-  with merge-buffer gradient all-reduce (part of gh-ocannl-293).
-- Zero-copy slice views (`@|` / `Fetch.Slice`, gh-ocannl-293 subtask 293a): an
-  alias-eligible leading-axis slice no longer materializes a copy — it is lowered as a
-  view that redirects reads/writes to the parent buffer at the (runtime) batch index.
-  **Semantics change**: writing through such a slice now mutates the parent (and vice
-  versa). Slices fall back to the materializing copy loop when ineligible (padded,
-  precision-converting, virtual/constant parent, or non-leading-axis). Host-side value
-  access (`Context.get_values` / `set_values`) of an alias view is rejected with a clear
-  error — read or write the parent tensor instead.
-- Benchmark tables partitioned by `result_label` into per-group sub-records (gh-ocannl-140).
-
-- `Nn_blocks.batch_norm1d` — MLP batch normalization that normalizes over the
-  batch axis only. Mirrors `batch_norm2d`; inherits its running-statistics
-  FIXME (inference uses the learned `gamma`/`beta` on batch statistics rather
-  than population estimates).
-- `test/training/mlp_names.ml` — Bengio-style MLP (makemore Part 2): learned
-  character embeddings, `block_size = 3` context, einsum-contracted hidden
-  layer, deterministic 80/10/10 train/dev/test split. Prints numeric final
-  train/dev/test NLL plus threshold booleans, then three generated names.
-- `test/training/mlp_bn_names.ml` — MLP + `batch_norm1d` (makemore Part 3).
-  Same data pipeline as Part 2 with BatchNorm between the hidden linear and
-  `tanh`. Documents the single-example-inference collapse from the
-  running-stats FIXME.
-- `docs/makemore_tutorial.md` — walk-through of the makemore progression
-  (Parts 1–4 + cross-link to the transformer variant) mirroring Andrej
-  Karpathy's *Neural Networks: Zero to Hero* lectures, with a README entry
-  and Part 4 instructions for inspecting the generated backward code.
-- Axis concatenation/block tensor support in einsum notation (`a^b` syntax)
-  - Tensor concatenation (`a; b => a^b`)
-  - Axis slicing to extract prefix/suffix (`a^b => a`, `a^b => b`)
-  - Block tensor construction with n-ary einsum specs
-  - `invalid_vars` tracking for determining which dimension variables can be 0 in Block specs
-  - New `++^` operator for concatenation in DSL
-  - Concat projection unification in shape inference (`solve_proj_equations`)
-- Pointwise operations now optionally accept einsum/permute specs via `?spec` and `?capture_dims` parameters
-  - Binary ops: `add`, `sub`, `pointmul`, `pointpow`, `pointdiv`, `lt`, `eq`, `ne`
-  - Unary ops: `relu`, `sat01`, `exp`, `log`, `exp2`, `log2`, `sin`, `cos`, `sqrt`, `recip`, `recip_sqrt`, `tanh`, `neg`, `not`, `stop_gradient`
-- Common gotchas and idioms section in CLAUDE.md documentation
-- `Rev_sides` support in lowering for reverse-direction Block operations
-- Completed the workshop article in Markdown and LaTeX, with a rendered PDF published
-  under `docs/html/pdfs/ocannl_workshop_article_human.pdf`.
-- Added the standalone formal core technical report
-  (`docs/ocannl-formal-core-technical-report.md` / `.latex`) covering the core
-  shape/projection inference proof effort: dimensions, rows, broadcasting,
-  flat row equality, solving, closing, and projection inference.
-- Added `docs/shape-constraint-generation.md`, documenting how `tensor/shape.ml`
-  generates the core constraints and projection metadata used by inference.
-- Added regression coverage for shape-inference counterexamples, closing order,
-  and row-rank-cycle behavior used while validating the formalization.
+- **Removed the hosted tensor mode** (gh-ocannl-333): dropped the `array` field of `Tnode.t`;
+  tensor value access and printing are context-mediated, host-init nodes self-initialize at link
+  time. Removed with it: the `automatic_host_transfers` setting and the `use_host_memory` hook.
+- **Axis concatenation / block tensors in einsum notation** (`a^b`): concatenation
+  (`a; b => a^b`), slicing (`a^b => a`), n-ary block-tensor specs, the `++^` operator, and concat
+  projection unification in shape inference.
+- Ternary einsum notation (`einsum3`, where-with-spec, a `Mul3` scalar op across backends)
+  (gh-ocannl-305); pointwise operations optionally accept einsum/permute specs via
+  `?spec`/`?capture_dims`.
+- **Universal pool allocator across backends** (gh-ocannl-344): tensors addressed by
+  `{ pool_id; offset }` — working tensors bump-packed into per-context-delta pools, constants
+  into per-device pools, merge buffers reserved; Metal binds pool slabs plus a slot table,
+  staying under its binding limit for large routines.
+- Loop-invariant code motion (gh-ocannl-350) and common subexpression elimination after inlining
+  (gh-ocannl-351); virtual-node inlining extended to non-scalar constants and ranges
+  (gh-ocannl-142).
+- Data-parallel training: `shard_along` / `gather` primitives with merge-buffer gradient
+  all-reduce, and **zero-copy leading-axis slice views** (`@|` / `Fetch.Slice`) — writing through
+  an alias-eligible slice now mutates the parent; ineligible slices fall back to copies; and
+  host-side access (`Context.get_values` / `set_values`) of an alias view is rejected with a
+  clear error — read or write the parent tensor instead (gh-ocannl-293).
+- Tensor saving, loading, and restoring (gh-ocannl-373); `Uint32`/`Uint64` precisions with
+  index-embedding precision selected by `large_models` (formerly `big_models`, still accepted as a
+  deprecated alias) (gh-ocannl-349, gh-ocannl-177).
+- Makemore-progression examples and tutorial: `mlp_names` (Bengio MLP), `mlp_bn_names`
+  (+ `batch_norm1d`), `docs/makemore_tutorial.md`; Sasha Rush Tensor Puzzles in extended einsum
+  notation (gh-ocannl-308).
+- **Paper artifacts**: the workshop article (Markdown, LaTeX, rendered PDF), the standalone
+  formal core technical report covering the shape/projection inference proof effort, and
+  `docs/shape-constraint-generation.md`, with regression coverage for the formalization's
+  counterexamples.
 
 ### Changed
 
-- `test/training/bigram_mlp.ml` renamed to `test/training/mlp_names.ml` and
-  rewritten as a true multi-character-context Bengio MLP. The old file's name
-  misrepresented its architecture (bigram-width input but "MLP" label); the
-  new file is the makemore Part 2 example (see `docs/makemore_tutorial.md`).
-- Default `%op` parameter initialization now uses centered, scaled `uniform1` over
-  `[-0.25, 0.25)` while preserving `uniform1`'s flexible shape behavior.
-- Parser updated to allow n-ary einsum specs (e.g., `a;b;c;d=>result`)
-- Concat symbols are now grouped into connected components for iteration using union-find
-- Product space and product iterators now use list arrays to handle concatenated dimensions
-- Moved `datasets/` to separate `dataprep` package
-- Relaxed the required `ocannl_` prefix on commandline arguments; config keys are now
-  validated, and `ocannl_config.example` was renamed to `ocannl_config.reference`
-  (gh-ocannl-409).
-- Renamed routine/kernel parameters from `param`/`params` to `kparam`/`kparams`
-  (gh-ocannl-356).
-- Extended the identifier blacklist with C keywords, primitive-operator names, and
-  backend-specific reserved words (gh-ocannl-383); `debug_name` now collapses
-  consecutive identical label components, e.g. `ident` ×3 → `ident3` (gh-ocannl-281).
-- Removed remaining unnecessary buffer zeroing-out in backend code (gh-ocannl-382).
-- Upgraded slipshow presentation rendering to v0.11.0, with Mermaid diagrams
-  (gh-ocannl-425).
-- Heavy training integration tests are now gated behind Dune's `slow` alias, while
-  backend-divergent goldens and CUDA/Metal generated-source expectations were normalized
-  for release testing.
-- Documentation for the formal core now uses the direct row-subtyping/refinement
-  presentation consistently, including the closed-row equality and dimension-closing
-  policy clarifications made while preparing the workshop article.
-- **Breaking:** `Backend.device_to_device` now returns `context routine option` instead of `bool`.
-  Instead of scheduling the copy as a side effect, it builds a transfer *routine*: callers run
-  `r.schedule` (or link a consumer against `r.context`). `None` replaces the old `false` ("nothing
-  to transfer": node absent from `src`; or, for `into_merge_buffer:No`, node absent from `dst` or
-  identical source/destination buffers). The transfer routine's context records the produced
-  merge-buffer node in the new `Backend_intf.context.merge_buffer_node` field, so that linking a
-  consumer of the merge buffer against it statically verifies the node *at link time* (raising
-  `Utils.User_error` from `link`/`link_batch` on a mismatch), "in the right direction" — transfer
-  -> consumer (gh-ocannl-288). The runtime `check_merge_buffer` check is kept as a defensive
-  backstop.
+- **Breaking**: `Backend.device_to_device` returns `context routine option` instead of scheduling
+  a side-effect copy — callers run the transfer routine, and linking a merge-buffer consumer
+  against its context verifies the node at link time (gh-ocannl-288).
+- Default `%op` parameter initialization is a centered, scaled `uniform1` over `[-0.25, 0.25)`.
+- Moved `datasets/` to the separate `dataprep` package; relaxed the required `ocannl_` prefix on
+  commandline arguments with config-key validation, and renamed `ocannl_config.example` to
+  `ocannl_config.reference` (gh-ocannl-409).
+- Extended the identifier blacklist with C keywords and backend-reserved words (gh-ocannl-383);
+  renamed kernel parameters to `kparam`/`kparams` (gh-ocannl-356); removed remaining unnecessary
+  buffer zeroing (gh-ocannl-382).
+- Heavy training integration tests gated behind Dune's `slow` alias.
 
 ### Fixed
 
 - Detect rank cycles among row variables during shape inference (gh-ocannl-247).
-- CUDA `Where` expression codegen now parenthesizes ternaries correctly, and
-  `Uint32`/`Uint64` to `uint4x32` PRNG-counter conversions spread bits rather than
-  collapsing entropy.
-- Prohibit `~logic:"@"` (`Compose`) with `/` and `**` in the `%cd` extension, and fixed
-  ternary `~logic` being mapped to `compose_type` instead of `ternary_type`
-  (gh-ocannl-192).
-- C-syntax tracing `printf` statements no longer produce bad line breaks / indentation
-  (gh-ocannl-179).
-- Removed a duplicate `fsm_transformer` test stanza in `test/training/dune`
-  that tripped `dune build @check` with `Executable "fsm_transformer" appears
-  for the second time in this directory`.
-- Missing on-device margin initialization for `Fetch` cases
-- `invalid_vars` computation now uses correct four-quantifier logic
-- Zero-dimension components filtered out in `s_dim_one` substitution
-- Single remaining Concat component properly closed in `close_dim_terminal`
-- Inequality constraints preserved for Concat with `invalid_vars`
-- Dimension 0 (instead of 1) guessed for `invalid_vars` in all guessing locations
-- Concat lowering for unit dims
-- Concat index probing guarded against unknown projections
-- Concat lowering resolves indices with cumulative offsets correctly
-- `d=1` handling in Concat projection components
+- Concat lowering and projection fixes: cumulative offsets, unit dims, `d=1` components,
+  `invalid_vars` quantifier logic and dimension-0 guessing.
+- CUDA `Where` ternaries parenthesized; `Uint32`/`Uint64` to `uint4x32` PRNG-counter conversions
+  spread bits rather than collapsing entropy.
+- Prohibit `~logic:"@"` with `/` and `**` in `%cd`, and ternary `~logic` mapped to the right
+  projection type (gh-ocannl-192); C-syntax tracing `printf` line breaks (gh-ocannl-179).
 
 ## [0.6.3] -- 2025-12-19
 
