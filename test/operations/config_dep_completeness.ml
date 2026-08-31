@@ -51,6 +51,14 @@
 open Base
 open Stdio
 
+(* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+   teardown -- so the exit status, not the promotable golden diff, carries the verdict. A
+   golden-diff test that prints its failures and exits 0 can be `dune promote`d into passing,
+   blessing the FAIL text as the expected output (Codex P2, round 10); since a nonzero exit means
+   dune never writes the redirected stdout, the same lines go to stderr, where they survive to be
+   read (gh-ocannl-601). *)
+open Verdict.Claims
+
 let printf = Test_utils.Refusal_control_manifest.printf
 
 module Scan = Test_utils.Dune_stanza_scan
@@ -107,13 +115,6 @@ let () =
   if List.is_empty dune_files then (
     Verdict.fail "no dune files among the arguments -- the rule's globs match nothing";
     Stdlib.exit 1);
-  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
-     teardown -- so the exit status, not the promotable golden diff, carries the verdict. A
-     golden-diff test that prints its failures and exits 0 can be `dune promote`d into passing,
-     blessing the FAIL text as the expected output (Codex P2, round 10); since a nonzero exit means
-     dune never writes the redirected stdout, the same lines go to stderr, where they survive to be
-     read (gh-ocannl-601). *)
-  let fail = Verdict.fail in
   (* Every directory any dune file copies a config into, gathered before anything is checked: a
      stanza in one directory may run something in another, whose config a THIRD file materializes
      (Codex P2, round 14). Read from the stanzas rather than from the glob, which matches sources

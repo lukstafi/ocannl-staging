@@ -16,8 +16,7 @@
 
 open Base
 open Stdio
-
-let p = Verdict.p
+open Verdict.Claims
 
 (* The five positionals of `schedule_bench 256 20 -64 512`, the case from the issue, with the
    library's own flags interleaved the way a real invocation carries them. *)

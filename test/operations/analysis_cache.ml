@@ -31,7 +31,8 @@ let mul = Ll_test.mul
 let c = Ll_test.c
 let loop s body = Ll_test.loop ~upto:2 s body
 let seq = Ll_test.seq
-let p = Verdict.p
+
+open Verdict.Claims
 
 (* One "lowering" of the two-consumer routine: fresh loop symbols each call, tensor nodes fixed by
    the caller — the shape sibling candidate compiles produce. *)

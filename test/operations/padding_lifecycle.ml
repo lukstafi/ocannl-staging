@@ -15,9 +15,8 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Asgns = Ir.Assignments
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
 let pr fmt = Stdio.printf fmt
 
 let named name (comp : Asgns.comp) : Asgns.comp =

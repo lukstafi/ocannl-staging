@@ -21,6 +21,7 @@
 open Base
 module LL = Ir.Low_level
 module Ll = Ll_test
+open Verdict.Claims
 
 let tn = Ll.node_factory ~first_id:7130 ~dims:[| 1 |] () "konst"
 
@@ -75,16 +76,16 @@ let () =
   List.iter values ~f:(fun v ->
       Stdio.printf "%-26s %-26s %s\n" (Printf.sprintf "%h" v) (cd_token v) (ll_token v));
   let tokens = List.concat_map values ~f:(fun v -> [ (v, cd_token v); (v, ll_token v) ]) in
-  Ll.p "every dumped constant parses back to the double it names"
+  p "every dumped constant parses back to the double it names"
     (List.for_all tokens ~f:(fun (v, token) -> round_trips v token));
   (* A finite token that is neither is an integer literal, which is how the radix point went missing
      in the first place. *)
-  Ll.p "every finite constant is dumped as a floating literal, with a radix point or an exponent"
+  p "every finite constant is dumped as a floating literal, with a radix point or an exponent"
     (List.for_all tokens ~f:(fun (v, token) ->
          (not (Float.is_finite v))
          || String.exists token ~f:(function '.' | 'e' | 'E' -> true | _ -> false)));
-  Ll.p "the two zeros are dumped differently"
+  p "the two zeros are dumped differently"
     (String.(cd_token 0.0 <> cd_token (-0.0)) && String.(ll_token 0.0 <> ll_token (-0.0)));
-  Ll.p "a constant needing a 17th digit is dumped differently from its 16-digit neighbour"
+  p "a constant needing a 17th digit is dumped differently from its 16-digit neighbour"
     (String.(cd_token (0.1 +. 0.2) <> cd_token 0.3)
     && String.(ll_token (0.1 +. 0.2) <> ll_token 0.3))

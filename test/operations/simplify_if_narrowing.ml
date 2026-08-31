@@ -18,8 +18,8 @@ module Tn = Ir.Tnode
 module Ops = Ir.Ops
 module Idx = Ir.Indexing
 module Asgns = Ir.Assignments
+open Verdict.Claims
 
-let p = Verdict.p
 let single = Ops.single
 let iprec = Ops.index_prec ()
 

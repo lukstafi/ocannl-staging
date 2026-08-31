@@ -13,8 +13,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
 module Idx = Ir.Indexing
-
-let p = Ll_test.p
+open Verdict.Claims
 
 let rejection f =
   match f () with

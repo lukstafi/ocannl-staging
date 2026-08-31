@@ -496,25 +496,15 @@ let close ?(tol = 1e-5) values expected =
     length — a mismatched [~read] is a test bug, not a failed assertion. *)
 let same ?tol got expected = List.for_all2_exn got expected ~f:(close ?tol)
 
-(** Asserts a named boolean claim, printing [name: b]. Booleans keep [.expected] files
-    backend-stable; {!Verdict.p} is what keeps a [false] from being [dune promote]d into the golden
-    as the expected output, so every claim has to be phrased so that [true] is the passing reading —
-    a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
-let p = Verdict.p
+(** {1 Claims}
 
-(** The quantified claims, re-exported for the same reason {!p} is: a hand-built-IR test says "every
-    statement …" of a collection it derived from the walk, and over an empty one that reads as a
-    pass while checking nothing (gh-ocannl-729). {!Verdict.p_all} fails there instead. *)
-let p_all = Verdict.p_all
-
-let p_none = Verdict.p_none
-let p_exists = Verdict.p_exists
-let p_empty = Verdict.p_empty
-
-(** {!Verdict.p_all2}, the executed-parity form. A hand-built-IR test reaches it with the two
-    readbacks of a differential arm, which a placement regression empties TOGETHER — the reference
-    went through the same path (gh-ocannl-746). *)
-let p_all2 = Verdict.p_all2
+    A hand-built-IR test reaches the claim surface the same way every other test does, by
+    [open Verdict.Claims]: [p] for a named boolean, the quantified forms for a claim over a
+    collection the walk derived (over an empty one, [p] applied to a [for_all] reads as a pass while
+    checking nothing — gh-ocannl-729), and [p_all2] for the executed-parity form, whose two
+    readbacks a placement regression empties TOGETHER (gh-ocannl-746). This module re-exported six
+    of those names when [Verdict] had no open-able surface; the copy could only go stale against the
+    original, and it did (gh-ocannl-815). *)
 
 (** {1 Structural probes}
 

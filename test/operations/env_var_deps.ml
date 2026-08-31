@@ -84,6 +84,7 @@
 
 open Base
 open Stdio
+open Verdict.Claims
 module Scan = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
 module Refusals = Test_utils.Refusal_control_scan
@@ -862,7 +863,6 @@ let main () =
      stanzas do -- the gh-ocannl-665 argument, since a count moves whenever a test is added. *)
   let artifact_table = ref [] in
   let artifact_by_file = ref [] in
-  let fail = Verdict.fail in
   let exemptions = Map.of_alist_exn (module String) exempt_declarations in
   let exemptions_used = ref (Set.empty (module String)) in
   let gateless = Map.of_alist_exn (module String) gateless_dirs in

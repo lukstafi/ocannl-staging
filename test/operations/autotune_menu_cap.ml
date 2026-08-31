@@ -22,11 +22,8 @@ open Base
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module SC = Ir.Schedule_cache
-module V = Verdict
+open Verdict.Claims
 
-let p = V.p
-let p_empty = V.p_empty
-let p_all = V.p_all
 let cap = 48
 
 (* Category sizes: one overflowing category, one comfortably small, one empty, and two in between —

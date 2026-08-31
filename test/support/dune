@@ -79,4 +79,4 @@
  (name ll_test)
  (package neural_nets_lib)
  (modules ll_test)
- (libraries base stdio ocannl arrayjit.verdict))
+ (libraries base stdio ocannl))

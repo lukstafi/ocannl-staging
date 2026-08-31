@@ -23,6 +23,7 @@
 
 open Base
 open Ll_test
+open Verdict.Claims
 
 let mk = node_factory ~first_id:1000 ~dims:[| 3 |] ()
 let optimize ?materialized llc = optimize ?materialized ~name:"shared_loop" llc

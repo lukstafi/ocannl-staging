@@ -26,6 +26,7 @@
 
 open Base
 open Ll_test
+open Verdict.Claims
 
 let mk = node_factory ~first_id:2000 ~dims:[| 3; 3 |] ()
 let optimize ?materialized llc = optimize ?materialized ~name:"virtual_diagonal" llc

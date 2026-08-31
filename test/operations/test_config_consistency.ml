@@ -1,6 +1,13 @@
 open Base
 open Stdio
 
+(* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+   teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
+   passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
+   nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
+   they survive to be read (gh-ocannl-601). *)
+open Verdict.Claims
+
 let printf = Test_utils.Refusal_control_manifest.printf
 
 module Config_key_scan = Test_utils.Config_key_scan
@@ -62,12 +69,6 @@ let () =
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
   let source_keys = Config_key_scan.keys_in_files source_files in
-  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
-     teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
-     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
-     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
-     they survive to be read (gh-ocannl-601). *)
-  let fail = Verdict.fail in
   (* 1. Source call-site keys must all appear in the reference file *)
   let missing_in_ref = Set.diff source_keys file_keys in
   if not (Set.is_empty missing_in_ref) then

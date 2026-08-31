@@ -37,8 +37,7 @@ open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
 module Idx = Ir.Indexing
 module SO = Ir.Schedule_outcome
-
-let p = Verdict.p
+open Verdict.Claims
 
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means instead

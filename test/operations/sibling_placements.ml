@@ -12,6 +12,7 @@ module Idx = Ir.Indexing
 module Asgns = Ir.Assignments
 module Tn = Ir.Tnode
 module Ops = Ir.Ops
+open Verdict.Claims
 
 let single = Ops.single
 let next_id = ref 5000
@@ -89,7 +90,6 @@ let () =
   let ctx_b, routine_b = Context.compile ctx0 comp_b Idx.Empty in
   let ctx_a = Context.run ctx_a routine_a in
   let ctx_b = Context.run ctx_b routine_b in
-  let p = Verdict.p in
   p "lineage A virtualized x" (Tn.Placements.known_virtual (Context.placements ctx_a) x);
   p "lineage B kept x non-virtual" (Tn.Placements.known_non_virtual (Context.placements ctx_b) x);
   p "x declared intent untouched" (Option.is_none x.Tn.memory_mode_intent);

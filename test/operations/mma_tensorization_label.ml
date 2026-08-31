@@ -31,9 +31,8 @@ module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Cs = Ir.C_syntax
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* The register-tiled rendering is the C backends'; "cc" also matches "multidev_cc". *)

@@ -48,10 +48,9 @@ module Asgns = Ir.Assignments
 module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p = Verdict.p
-let p_all = Verdict.p_all
-let p_none = Verdict.p_none
-let p_empty = Verdict.p_empty
+
+open Verdict.Claims
+
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_gpu = Sched.backend_is_gpu backend_name

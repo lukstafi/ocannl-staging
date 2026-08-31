@@ -8,8 +8,7 @@
 
 open Base
 module SC = Ir.Schedule_cache
-
-let p = Verdict.p
+open Verdict.Claims
 
 let entry backend : SC.entry =
   {

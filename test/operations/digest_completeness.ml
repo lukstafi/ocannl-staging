@@ -24,6 +24,13 @@
 open Base
 open Stdio
 
+(* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+   teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
+   passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
+   nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
+   they survive to be read (gh-ocannl-601). *)
+open Verdict.Claims
+
 let printf = Test_utils.Refusal_control_manifest.printf
 
 module SC = Ir.Schedule_cache
@@ -66,12 +73,6 @@ let () =
       Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
   let by_file = Config_key_scan.keys_by_file source_files in
-  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
-     teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
-     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
-     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
-     they survive to be read (gh-ocannl-601). *)
-  let fail = Verdict.fail in
   let listing keys = String.concat ~sep:", " (Set.to_list keys) in
   (* [codegen_stage_modules] selects by basename, so two scanned files sharing a name would make the
      selection ambiguous -- possible only since the globs replaced the enumerated list. *)

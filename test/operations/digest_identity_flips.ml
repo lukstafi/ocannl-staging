@@ -17,8 +17,7 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module SC = Ir.Schedule_cache
-
-let p = Verdict.p
+open Verdict.Claims
 
 (* Config values resolve per lookup, so a config-file entry poked in is what later reads see —
    unless the commandline or the environment states the key, which take precedence. Each flip below

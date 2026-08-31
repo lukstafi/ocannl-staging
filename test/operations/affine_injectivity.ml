@@ -13,7 +13,8 @@ module Aff = Ir.Affine
 let sym () = Idx.get_symbol ()
 let aff terms offset = Idx.Affine { symbols = terms; offset }
 let ranges pairs s = List.Assoc.find pairs s ~equal:Idx.equal_symbol |> Option.value ~default:1
-let p = Verdict.p
+
+open Verdict.Claims
 
 (* Minimal projections: one single-symbol product axis per [product_axes] entry, [project_lhs] over
    those symbols. [is_injective] reads only [components] and [project_lhs]; [is_surjective]

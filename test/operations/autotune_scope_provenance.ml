@@ -33,8 +33,8 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module SC = Ir.Schedule_cache
+open Verdict.Claims
 
-let p = Ll_test.p
 let node = Ll_test.node_factory ~first_id:7100 ~dims:[| 4 |] ()
 let ni, nk = (4, 4)
 

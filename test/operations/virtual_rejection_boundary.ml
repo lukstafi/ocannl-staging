@@ -46,6 +46,7 @@
 
 open Base
 open Ll_test
+open Verdict.Claims
 
 let mk = node_factory ~first_id:2700 ~dims:[| 4 |] ()
 let n = 4

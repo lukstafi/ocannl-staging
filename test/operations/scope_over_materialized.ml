@@ -19,8 +19,7 @@
 open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
-
-let p = Ll_test.p
+open Verdict.Claims
 
 let () =
   let node = Ll_test.node_factory ~first_id:9800 ~dims:[| 8 |] () in

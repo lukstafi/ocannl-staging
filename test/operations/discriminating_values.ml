@@ -15,9 +15,8 @@
 
 open Base
 open Ocannl.Operation.DSL_modules
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
 let bf16_exact x = Float.equal x (Ir.Ops.bfloat16_to_single (Ir.Ops.single_to_bfloat16 x))
 let f32_exact x = Float.equal x (Stdlib.Int32.float_of_bits (Stdlib.Int32.bits_of_float x))
 

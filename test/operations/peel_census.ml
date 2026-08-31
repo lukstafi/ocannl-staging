@@ -30,8 +30,8 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Ops = Ir.Ops
+open Verdict.Claims
 
-let p = Verdict.p
 let rows = 3
 let cols = 8
 let guard_terms = 5

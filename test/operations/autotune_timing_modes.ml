@@ -20,8 +20,8 @@ module LL = Ir.Low_level
 module Tn = Ir.Tnode
 module Idx = Ir.Indexing
 module SC = Ir.Schedule_cache
+open Verdict.Claims
 
-let p = Verdict.p
 let backend () = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* {1 Sampling policy, with an injected clock} *)
