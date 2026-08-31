@@ -461,7 +461,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
                existing-buffer branch. *)
             Resource_fault_injection.hit From_host_before_await;
             Backend.await ctx.device;
-            { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst })
+            Backend_intf.evolve_with_buffer ctx tn dst)
     | Some _ ->
         raise
         @@ Utils.User_error
@@ -580,7 +580,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
                   Backend.get_name src.device,
                   "to",
                   Backend.get_name dst.device];
-                { dst with ctx_buffers = Map.add_exn dst.ctx_buffers ~key:tn ~data:d_loc }))
+                Backend_intf.evolve_with_buffer dst tn d_loc))
 
   type r = Backend.context routine [@@deriving sexp_of]
 
