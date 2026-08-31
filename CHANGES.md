@@ -85,7 +85,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   decodes, so pages are read lazily by the OS; the checkpoint format gained an `alignment` field
   (old readers and old files keep working); unaligned payloads are decoded rather than mapped (an
   unaligned mapping is undefined behaviour); and the Windows carve-out was measured, found
-  unnecessary, and retired — mapping defaults on for every platform, pinned by a cross-platform
+  unnecessary, and retired — mapping defaults on for every platform (opt out with
+  `checkpoint_load_mmap=false` or `?mmap:false`, for a filesystem that does refuse replacement
+  under a live mapping), pinned by a cross-platform
   regression test. **Behavior change**: `Safetensors.to_ndarray` returns each payload's own
   precision instead of forcing F32 — pass `?prec` for a fixed target — and I8/I16/F8_E4M3 payloads
   are refused rather than reinterpreted (`to_float32` keeps its F32-only contract).
@@ -179,8 +181,11 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   gh-ocannl-652): a configuration key is read from `OCANNL_<KEY>` and nothing else; a known key in
   a spelling nothing reads is a fatal startup error naming the spelling that works; a mistyped
   variable warns by name (gh-ocannl-629); and per-directory `env_spelling_gate` rules plus
-  `env_var_deps` make dune reruns track exactly the declared variables. Commandline spellings are
-  untouched. `Utils.env_var_names` became `Utils.env_var_name`.
+  `env_var_deps` make dune reruns track exactly the declared variables. On the commandline,
+  dashes now go all the way (`--ocannl-log-level=1` is read alongside `--ocannl_log_level=1`),
+  while a bare `ocannl_log_level=1` with no leading dash is no longer read at all — a positional
+  argument belongs to the host application (gh-ocannl-605). `Utils.env_var_names` became
+  `Utils.env_var_name`.
 - **Test seams that cannot report a false pass**: a test that decides its own verdict reports it
   through `Verdict`, which exits the process nonzero so a regression cannot be `dune promote`d
   into a golden — with a ratchet against unguarded claim prints and empty-collection-safe
@@ -199,7 +204,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   argv convention across `bin/`; and a green GPU sweep row records whether tests actually ran
   (`incremental-pass` vs `forced`).
 - **Startup chatter is opt-in, so a warning on stderr is legible** (gh-ocannl-593, gh-ocannl-595):
-  `log_config_sourcing` defaults to false, a default run's stderr is three lines, and the startup
+  `log_config_sourcing` now defaults to false and `log_level` to 0 (raise `log_level` to restore
+  the previous diagnostics), taking a default run's stderr to three lines; the startup
   streams (empty stdout, readable stderr) are pinned by test.
 
 ### Fixed
@@ -284,7 +290,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   placement arm dominates globally.
 - **Config profiles `reproducible` and `performance`** (gh-ocannl-559), picked through the
   ordinary sources with picker-inherited precedence (explicit keys beat a profile of equal
-  immediacy). `reproducible` is deterministic across machines; `performance` is the fastest
+  immediacy). `reproducible` is deterministic and, wherever reasonable, identical across machines
+  (cross-backend reproducibility is out of its scope); `performance` is the fastest
   configuration at unchanged semantics. The reference config now ships with every setting
   commented out.
 - **Honest search reporting**: `Autotune.report` gains `best_label`, `best_tensorized` (read off
@@ -430,8 +437,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **Search survivability**: typed candidate-failure containment with per-backend classifiers and
   damage tracking — a rejection that provably wrote nothing rolls back, one that may have written
   poisons the lineage by name (gh-ocannl-536); HIP scratch-budget pre-validation, since ROCm
-  aborts the queue instead of failing cleanly (gh-ocannl-533; `hip_scratch_validation`, default
-  true, disables it on a device where the occupancy model is wrong); and a decline census accounting
+  aborts the queue instead of failing cleanly (gh-ocannl-533; set `hip_scratch_validation=false`,
+  default true, on a device where the occupancy model is wrong); and a decline census accounting
   for every refusal, including undispatched and cap-evicted candidates (gh-ocannl-532,
   gh-ocannl-541, gh-ocannl-543).
 - **Benchmark matrix and sweep**: tuning and precision are independent cell axes (gh-ocannl-539);
@@ -449,7 +456,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   at f16. For padding masks that can cover a whole query row (where `-inf` makes the softmax's
   max-subtraction produce NaN), every mask-taking `Nn_blocks` entry point takes `?mask_fill` to
   select a finite fill.
-- `Tnode.t` renames: `memory_mode` → `memory_mode_intent`, `prec` → `storage_prec`.
+- `Tnode.t` renames: `memory_mode` → `memory_mode_intent` (intent-only since the context-scoped
+  `Placements` migration in 0.8) and `prec` → `storage_prec` (the settled bytes-in-buffers
+  precision, as opposed to the compute precisions the numerics policy governs).
 - Padding layout and neutral values are committed as tensor-node identity, so padded convolutions
   lower offset-free; incompatible later padding demands fail in shape inference.
 - Reserved identifiers are derived from each backend's own syntax rather than C's spellings
