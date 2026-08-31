@@ -107,10 +107,7 @@ let () =
   V.p "unmeasured keeps the enablement prior"
     (match resolves unmeasured with `Enablement -> true | `Cost -> false);
   let contention_affected =
-    {
-      (searched ~best_ms:1.0 ~mma_timed:4 ~mma_best_ms:0.5) with
-      Autotune.timings_contended = 1;
-    }
+    { (searched ~best_ms:1.0 ~mma_timed:4 ~mma_best_ms:0.5) with Autotune.timings_contended = 1 }
   in
   V.p "an incomplete contention-affected search contributes no profitability evidence"
     (match Autotune.family_profit_of_reports [ contention_affected ] with

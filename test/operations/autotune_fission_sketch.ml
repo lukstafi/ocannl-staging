@@ -11,17 +11,17 @@
    fissionable computation searches whole-routine and fissioned candidates and returns correct
    values; the second call hits the cache when the first search had no contention refusals, and
    otherwise retries; its search reaches several candidates, measuring the ones the backend can
-   dispatch and accounting for the rest in the decline census (gh-ocannl-543 — on
-   GPU backends only the fissioned preset is measured). - The matmul sketch generator detects a
-   32x32 matmul and seeds tile-size instantiations of the register-blocktiling (GPU) /
-   operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
-   cooperatively staged [Tensorize] on backends with an mma capability; whole-triple and Grid-split
-   register-tiled [Tile_mma] on the C backends); the tuned routine matches the serial twin, and the
-   schedules round-trip through the saved form when a sketch wins. - Per-fission-segment sketches
-   ([F_sketch]): on a fissionable chain whose consumer is a matmul, the matmul's [Zero_out] fissions
-   into its own [`Zeros] segment, so the whole-routine sketches never fit the segment's (unzeroed)
-   site — the per-segment seeds must apply instead ([fiss_sketch_candidates]), get timed
-   ([fiss_sketch_timed]), and the tuned routine matches the serial twin. *)
+   dispatch and accounting for the rest in the decline census (gh-ocannl-543 — on GPU backends only
+   the fissioned preset is measured). - The matmul sketch generator detects a 32x32 matmul and seeds
+   tile-size instantiations of the register-blocktiling (GPU) / operand-packing (CPU) pipelines,
+   plus the tensorized (tile-MMA) pipelines (unstaged and cooperatively staged [Tensorize] on
+   backends with an mma capability; whole-triple and Grid-split register-tiled [Tile_mma] on the C
+   backends); the tuned routine matches the serial twin, and the schedules round-trip through the
+   saved form when a sketch wins. - Per-fission-segment sketches ([F_sketch]): on a fissionable
+   chain whose consumer is a matmul, the matmul's [Zero_out] fissions into its own [`Zeros] segment,
+   so the whole-routine sketches never fit the segment's (unzeroed) site — the per-segment seeds
+   must apply instead ([fiss_sketch_candidates]), get timed ([fiss_sketch_timed]), and the tuned
+   routine matches the serial twin. *)
 
 open Base
 open Ocannl

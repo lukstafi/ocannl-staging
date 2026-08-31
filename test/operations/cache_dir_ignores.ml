@@ -57,8 +57,8 @@ let require_ignore_file ~fail = function
   | Some on_disk -> Some on_disk
   | None ->
       fail
-        "the repository-root .gitignore is not among the arguments -- the rule's dependency on \
-         it is missing";
+        "the repository-root .gitignore is not among the arguments -- the rule's dependency on it \
+         is missing";
       None
 
 let require_sources ~fail sources =
@@ -91,8 +91,8 @@ let read_source_or_refusal ~fail ~source content =
   | Error error ->
       fail
         (Printf.sprintf
-           "%s is among the sources this check scans and does not parse as OCaml (%s) -- if it \
-            is a build artifact rather than a source, exclude it beside the `.pp.ml` expansions"
+           "%s is among the sources this check scans and does not parse as OCaml (%s) -- if it is \
+            a build artifact rather than a source, exclude it beside the `.pp.ml` expansions"
            source
            (String.concat ~sep:" " (String.split_lines (Error.to_string_hum error))));
       None
@@ -108,7 +108,7 @@ let checked_name ~fail ~source ~line ~spelling = function
            source line spelling name Scan.required_glob Scan.required_prefix);
       None
   | Scan.Disabled | Scan.Forwarded _ -> None
-  | (Scan.Unresolved _ as resolution) ->
+  | Scan.Unresolved _ as resolution ->
       fail
         (Printf.sprintf
            "%s:%d: this `%s` argument %s, which this scan cannot resolve to a literal -- pass the \
@@ -157,9 +157,8 @@ let refusal_control () =
   in
   case "a missing repository-root ignore file reaches its refusal"
     ~format:
-      "the repository-root .gitignore is not among the arguments -- the rule's dependency on it \
-       is missing"
-    (fun fail -> ignore (require_ignore_file ~fail None : string option));
+      "the repository-root .gitignore is not among the arguments -- the rule's dependency on it is \
+       missing" (fun fail -> ignore (require_ignore_file ~fail None : string option));
   case "an empty OCaml source corpus reaches its refusal"
     ~format:"no OCaml sources among the arguments -- the rule's globs match nothing" (fun fail ->
       ignore (require_sources ~fail [] : bool));
@@ -167,25 +166,23 @@ let refusal_control () =
     ~format:
       "the root .gitignore no longer carries `%s` -- the prefix this check enforces buys nothing \
        without it, and covering the current names with bespoke entries instead is the name-by-name \
-       list this replaced"
-    (fun fail -> require_glob ~fail "");
+       list this replaced" (fun fail -> require_glob ~fail "");
   case "an unsupported root ignore pattern reaches its refusal"
     ~format:
       "the root .gitignore pattern `%s` could match a root-level directory and uses a glob form \
        Cache_dir_scan.glob_matches does not implement -- teach it that form rather than letting \
-       the pattern count as non-matching"
-    (fun fail -> Scan.ignore_patterns "/auto**tune_cache*/" |> refuse_unreadable_patterns ~fail);
+       the pattern count as non-matching" (fun fail ->
+      Scan.ignore_patterns "/auto**tune_cache*/" |> refuse_unreadable_patterns ~fail);
   case "an invalid OCaml source reaches the parse refusal"
     ~format:
       "%s is among the sources this check scans and does not parse as OCaml (%s) -- if it is a \
-       build artifact rather than a source, exclude it beside the `.pp.ml` expansions"
-    (fun fail -> ignore (read_source_or_refusal ~fail ~source:"bad.ml" "let ="));
+       build artifact rather than a source, exclude it beside the `.pp.ml` expansions" (fun fail ->
+      ignore (read_source_or_refusal ~fail ~source:"bad.ml" "let ="));
   case "a cache name outside the required prefix reaches its refusal"
     ~format:
       "%s:%d: `%s` names the cache directory %S, which `%s` does not cover -- it has to be a \
        single directory name starting with `%s`, since a glob segment stops at a separator and \
-       `ensure_dir` follows one wherever it leads"
-    (fun fail ->
+       `ensure_dir` follows one wherever it leads" (fun fail ->
       ignore
         (checked_name ~fail ~source:"bad.ml" ~line:1 ~spelling:"~cache_dir"
            (Scan.Names "leaked_cache")));
@@ -193,8 +190,7 @@ let refusal_control () =
     ~format:
       "%s:%d: this `%s` argument %s, which this scan cannot resolve to a literal -- pass the \
        directory as a literal here, or bind it to a name mentioning `%s` whose right-hand side is \
-       one, so that the prefix can be checked"
-    (fun fail ->
+       one, so that the prefix can be checked" (fun fail ->
       ignore
         (checked_name ~fail ~source:"bad.ml" ~line:1 ~spelling:"~cache_dir"
            (Scan.Unresolved "an expression")));
@@ -202,19 +198,18 @@ let refusal_control () =
     ~format:
       "no source reads `%s` with a non-empty default -- the directory a search uses when no `~%s` \
        is passed can no longer be recovered, so nothing checks that the glob still covers it. \
-       Point Cache_dir_scan.default_config_key at the key that names it now"
-    (fun fail -> check_defaults ~fail []);
+       Point Cache_dir_scan.default_config_key at the key that names it now" (fun fail ->
+      check_defaults ~fail []);
   case "a built-in default outside the required prefix reaches its refusal"
     ~format:
       "the built-in default of `%s` is %S, which `%s` does not cover -- a search that passes no \
-       `~%s` would create it in the working directory untracked"
-    (fun fail -> check_defaults ~fail [ "leaked_cache" ]);
+       `~%s` would create it in the working directory untracked" (fun fail ->
+      check_defaults ~fail [ "leaked_cache" ]);
   case "a later ignore negation reaches the effective-ignore refusal"
     ~format:
       "the sources name the cache directory %s, and the root .gitignore does not ignore it -- some \
-       pattern after `%s` un-ignores it, so the directory would be left untracked in the repository \
-       root"
-    (fun fail ->
+       pattern after `%s` un-ignores it, so the directory would be left untracked in the \
+       repository root" (fun fail ->
       check_effectively_ignored ~fail
         (Scan.ignore_patterns "/autotune_cache*/\n!/autotune_cache_leak/")
         "autotune_cache_leak");
@@ -265,7 +260,9 @@ let () =
      (gh-ocannl-601). *)
   let fail = Verdict.fail in
   let ignore_file =
-    match require_ignore_file ~fail ignore_file with Some on_disk -> on_disk | None -> Stdlib.exit 1
+    match require_ignore_file ~fail ignore_file with
+    | Some on_disk -> on_disk
+    | None -> Stdlib.exit 1
   in
   if not (require_sources ~fail sources) then Stdlib.exit 1;
   let ignore_content = In_channel.read_all ignore_file in

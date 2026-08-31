@@ -32,6 +32,7 @@
 ; The manifest lives in a child directory because Dune evaluates `%{read-lines:...}` while loading
 ; the consuming rule. The emitter prefixes each child-relative output with this directory, making
 ; every line relative to the parent consumer while the recursive globs stay repository-rooted.
+
 (rule
  (alias scans)
  ; ocannl-backend: none -- links no backend: it only maps generator inputs to output paths.

@@ -2086,9 +2086,7 @@ let main () =
   let refusal_key source diagnostic =
     Printf.sprintf "%s:%d:%s" source diagnostic.Refusals.line diagnostic.Refusals.identity
   in
-  let refusal_coverage =
-    Refusals.coverage ~control_text (List.map refusal_diagnostics ~f:snd)
-  in
+  let refusal_coverage = Refusals.coverage ~control_text (List.map refusal_diagnostics ~f:snd) in
   let orphan_refusals =
     List.zip_exn refusal_diagnostics refusal_coverage
     |> List.filter_map ~f:(fun ((source, diagnostic), covered) ->
@@ -2410,8 +2408,7 @@ let main () =
     if List.is_empty refusal_exemptions then printf "    (none)\n"
     else List.iter refusal_exemptions ~f:(fun (key, reason) -> printf "    %s -- %s\n" key reason);
     eprintf "Repository scanner refusal diagnostics (not diffed):\n";
-    List.iter2_exn refusal_diagnostics refusal_coverage
-      ~f:(fun (source, diagnostic) covered ->
+    List.iter2_exn refusal_diagnostics refusal_coverage ~f:(fun (source, diagnostic) covered ->
         eprintf "  %s:%d  %s%s\n" source diagnostic.Refusals.line diagnostic.fragment
           (if covered then ""
            else if Map.mem exemption_map (refusal_key source diagnostic) then " -- EXEMPT"
@@ -4123,9 +4120,9 @@ let () =
       floor_control ();
       guard_control ();
       family_control ();
-      (* Dune's repository-wide rule hands the same source to [main] as [./env_var_deps.ml]
-         after a full build has materialized the local build-tree copy. Exercise that spelling here
-         too: the manifest identity is repository-relative even when the file used to extract the
-         diagnostics is local to the action's cwd. *)
+      (* Dune's repository-wide rule hands the same source to [main] as [./env_var_deps.ml] after a
+         full build has materialized the local build-tree copy. Exercise that spelling here too: the
+         manifest identity is repository-relative even when the file used to extract the diagnostics
+         is local to the action's cwd. *)
       Refusal_manifest.print "./env_var_deps.ml"
   | _ -> main ()

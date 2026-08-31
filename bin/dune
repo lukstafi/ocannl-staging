@@ -101,7 +101,14 @@
    (run %{exe:narrow_storage_bench.exe} 2 1 1 --ocannl_backend=cc)
    (run %{exe:narrow_gebp_bench.exe} f32 2 1 1 1 --ocannl_backend=cc)
    (run %{exe:device_props.exe} --ocannl_backend=cc)
-   (run %{exe:projection_shape_bench.exe} 2 2 smoke fwd seeds --ocannl_backend=cc))))
+   (run
+    %{exe:projection_shape_bench.exe}
+    2
+    2
+    smoke
+    fwd
+    seeds
+    --ocannl_backend=cc))))
 
 (executable
  (package neural_nets_lib)

@@ -1092,8 +1092,8 @@ let contained_marker_contract source =
 let render_contained_issue = function
   | Scan.Malformed_marker { issue_line; issue_malformed; _ } ->
       Printf.sprintf "malformed at line %d: %s" issue_line
-        (Scan.marker_malformed_reason ~sentinel:contained_marker_sentinel
-           ~separator_subject:"value" ~grammar:contained_marker_grammar issue_malformed)
+        (Scan.marker_malformed_reason ~sentinel:contained_marker_sentinel ~separator_subject:"value"
+           ~grammar:contained_marker_grammar issue_malformed)
   | Scan.Marker_outside_stanza { issue_line; _ } ->
       Printf.sprintf "outside every stanza at line %d" issue_line
   | Scan.Marker_in_wrong_stanza { issue_line; issue_stanza; issue_why; _ } ->
@@ -1671,8 +1671,7 @@ let () =
   List.iter contained_marker_cases ~f:(fun (name, source, _expected) ->
       let contract = contained_marker_contract source in
       List.map contract.Scan.contract_issues ~f:render_contained_issue
-      |> List.iter ~f:(fun diagnostic ->
-          printf "  %s -- %s\n" name diagnostic));
+      |> List.iter ~f:(fun diagnostic -> printf "  %s -- %s\n" name diagnostic));
   printf "\n";
   List.iter (nested_marker_case :: refused_cases) ~f:(fun (name, source) ->
       match Scan.sites source with

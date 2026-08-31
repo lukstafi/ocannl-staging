@@ -676,10 +676,10 @@ type report = {
   mma_timed : int;
       (** Of [mma_candidates], those that compiled and were actually timed (dedup'd duplicates
           excluded — an identical candidate was already timed). Includes completed timing windows
-          refused as unusable; [timings_contended] identifies those verdicts.
-          [mma_candidates > 0] with [mma_timed = 0] means the search never reached a timing window
-          for a tensorized pipeline at all, the state gh-ocannl-521 recorded for every GPU backend:
-          candidates are cheap to enumerate and were being rejected in bulk at candidate compile. *)
+          refused as unusable; [timings_contended] identifies those verdicts. [mma_candidates > 0]
+          with [mma_timed = 0] means the search never reached a timing window for a tensorized
+          pipeline at all, the state gh-ocannl-521 recorded for every GPU backend: candidates are
+          cheap to enumerate and were being rejected in bulk at candidate compile. *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
@@ -1110,9 +1110,9 @@ val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 
 val search_measurements_cacheable : nothing_timed:bool -> timings_contended:int -> bool
 (** Pure cache-policy seam (gh-ocannl-855). A search result is cacheable only when at least one
-    candidate was timed and no timing window was refused as unusable. The current call may
-    still ship its best usable candidate, but an incomplete measurement set must be retried by a
-    later cache-cold search. *)
+    candidate was timed and no timing window was refused as unusable. The current call may still
+    ship its best usable candidate, but an incomplete measurement set must be retried by a later
+    cache-cold search. *)
 
 val timing_string : timing_mode -> string
 (** The mode's canonical spelling ([isolated] / [queued]) — what a cache key's ["timing"] component

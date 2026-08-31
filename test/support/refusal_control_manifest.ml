@@ -92,7 +92,8 @@ let raw_entries =
         "[scanner-refusal:200477f5fecf3e08ff5055af77a00298] prefix-free config flag";
         "[scanner-refusal:8acb2b9087cf4a7e4112382c5e058e1a] Utils.known_config_keys";
         "[scanner-refusal:085d7b5a19f012e46728008a42120c74] non-config environment exemptions";
-        "[scanner-refusal:5d123838dd21fb3fd4a7529e51b8a74f] non-config environment-mention occurrence";
+        "[scanner-refusal:5d123838dd21fb3fd4a7529e51b8a74f] non-config environment-mention \
+         occurrence";
         "[scanner-refusal:3252eebc4149f3005426dbd4385702c1] non-config assignment exemptions";
         "[scanner-refusal:4f2e0da970aa70c6ff3549e9e435561f] non-config assignment exemption";
         "[scanner-refusal:2908ea301f2b18efa6c95e6ab0302abf] historical invalid-config exemption";

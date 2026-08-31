@@ -1434,8 +1434,7 @@ let marker_malformed_reason ~sentinel ~separator_subject ~grammar = function
   | Missing_reason_separator ->
       Printf.sprintf "no `--` separating the %s from the reason -- the grammar is `; %s`"
         separator_subject grammar
-  | Short_reason reason ->
-      Printf.sprintf "the reason `%s` is one word -- say why, not what" reason
+  | Short_reason reason -> Printf.sprintf "the reason `%s` is one word -- say why, not what" reason
   | Declaration_error why -> why
 
 (** [parse_marker_text] is the grammar shared by every machine-checked Dune comment marker.
@@ -1466,20 +1465,20 @@ let parse_marker_text ~sentinel ~parse_declaration text =
               ( String.strip (String.sub rest ~pos:0 ~len:index),
                 String.strip (String.subo rest ~pos:(index + String.length separator)) ))
         in
-        (match split with
+        match split with
         | None -> Malformed_marker_text [ Missing_reason_separator ]
-        | Some (declaration, reason) ->
+        | Some (declaration, reason) -> (
             if
               List.length
                 (String.split_on_chars reason ~on:[ ' '; '\t' ]
                 |> List.filter ~f:(Fn.non String.is_empty))
               < 2
-            then
-              Malformed_marker_text [ Short_reason reason ]
-            else (
+            then Malformed_marker_text [ Short_reason reason ]
+            else
               match parse_declaration ~declaration ~reason with
               | Ok marker -> Parsed_marker marker
-              | Error why -> Malformed_marker_text (List.map why ~f:(fun s -> Declaration_error s)))))
+              | Error why -> Malformed_marker_text (List.map why ~f:(fun s -> Declaration_error s)))
+      )
 
 type marker_body = { backend : string; reason : string }
 (** [backend] is the comma-separated list as normalised by {!parse_marker}: the words with their
@@ -1525,14 +1524,10 @@ let parse_backend_declaration ~declaration:backend ~reason =
         Printf.sprintf
           "`%s` has an empty entry between commas -- name each backend, or drop the comma" backend;
       ]
-  else if
-    List.exists named ~f:(fun word -> not (List.mem marker_backends word ~equal:String.equal))
+  else if List.exists named ~f:(fun word -> not (List.mem marker_backends word ~equal:String.equal))
   then
     Error
-      [
-        Printf.sprintf "`%s` is not one of %s" backend
-          (String.concat ~sep:", " marker_backends);
-      ]
+      [ Printf.sprintf "`%s` is not one of %s" backend (String.concat ~sep:", " marker_backends) ]
   else if List.contains_dup named ~compare:String.compare then
     Error [ Printf.sprintf "`%s` names the same backend twice" backend ]
   else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
@@ -1553,10 +1548,11 @@ let parse_marker text =
       Some
         (Malformed
            (List.map malformed
-              ~f:(marker_malformed_reason ~sentinel:marker_sentinel ~separator_subject:"backend"
-                    ~grammar:
-                      (Printf.sprintf "%s <%s> -- <reason>" marker_sentinel
-                         (String.concat ~sep:"|" marker_backends)))
+              ~f:
+                (marker_malformed_reason ~sentinel:marker_sentinel ~separator_subject:"backend"
+                   ~grammar:
+                     (Printf.sprintf "%s <%s> -- <reason>" marker_sentinel
+                        (String.concat ~sep:"|" marker_backends)))
            |> String.concat ~sep:"; "))
 
 type marked_stanza = {
@@ -1637,25 +1633,22 @@ let marked_stanzas content =
   in
   List.concat (List.map2_exn raw parsed ~f:(go ""))
 
-(** A successfully parsed marker and the stanza whose parentheses contain it. *)
 type 'a contained_marker = {
   contained_line : int;
   contained_text : string;
   contained_value : 'a;
   containing_stanza : marked_stanza;
 }
+(** A successfully parsed marker and the stanza whose parentheses contain it. *)
 
+type 'a marker_stanza = { marker_stanza : marked_stanza; stanza_markers : 'a contained_marker list }
 (** A stanza paired with the valid markers the contained-marker contract attributed to it. *)
-type 'a marker_stanza = {
-  marker_stanza : marked_stanza;
-  stanza_markers : 'a contained_marker list;
-}
 
 (** Every refusal the generic contained-marker contract can make.
 
-    Convention-specific declaration errors arrive as [Malformed_marker]; the other constructors
-    are the reusable structural contract. A well-formed marker must be in a Dune comment, inside
-    one stanza, and accepted by that convention's [belongs] predicate. *)
+    Convention-specific declaration errors arrive as [Malformed_marker]; the other constructors are
+    the reusable structural contract. A well-formed marker must be in a Dune comment, inside one
+    stanza, and accepted by that convention's [belongs] predicate. *)
 type marker_issue =
   | Malformed_marker of {
       issue_line : int;
@@ -1688,10 +1681,10 @@ let sentinel_occurrences ~sentinel text =
 
 (** [contained_marker_contract] applies the complete reusable marker contract to one Dune file.
 
-    [parse_declaration] receives the containing stanza, the convention-specific declaration, and
-    the already-validated reason. [belongs] states which containing stanza may carry the parsed
-    marker. The result always retains every stanza; invalid markers become issues and are not
-    attributed as valid markers.
+    [parse_declaration] receives the containing stanza, the convention-specific declaration, and the
+    already-validated reason. [belongs] states which containing stanza may carry the parsed marker.
+    The result always retains every stanza; invalid markers become issues and are not attributed as
+    valid markers.
 
     Sentinel accounting deliberately compares the dumb text count with the lexer-derived comment
     count. This makes a marker in a quoted action argument or ordinary field a refusal rather than
@@ -1701,8 +1694,10 @@ let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
   let stanzas = marked_stanzas content in
   let _, comments = read_raw content in
   let comment_occurrences =
-    List.sum (module Int) comments ~f:(fun comment ->
-        sentinel_occurrences ~sentinel comment.comment_text)
+    List.sum
+      (module Int)
+      comments
+      ~f:(fun comment -> sentinel_occurrences ~sentinel comment.comment_text)
   in
   let issues = ref [] in
   let markers = ref [] in
@@ -1716,7 +1711,8 @@ let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
       let text = comment.comment_text in
       if sentinel_occurrences ~sentinel text > 0 then
         match stanza_of_comment line text with
-        | None -> issues := Marker_outside_stanza { issue_line = line; issue_text = text } :: !issues
+        | None ->
+            issues := Marker_outside_stanza { issue_line = line; issue_text = text } :: !issues
         | Some stanza -> (
             match
               parse_marker_text ~sentinel ~parse_declaration:(parse_declaration stanza) text
@@ -1791,14 +1787,13 @@ type backend_rule =
   | Names_twice of int  (** subject, and carrying more than one marker: the line of the second *)
   | Names_neither  (** subject, and carrying neither — the hole gh-ocannl-659 closed *)
 
-(** Apply the shared contained-marker contract to the backend declaration. A marker on a stanza
-    that runs nothing is a wrong-stanza issue and is not handed to {!backend_rule_of}. *)
+(** Apply the shared contained-marker contract to the backend declaration. A marker on a stanza that
+    runs nothing is a wrong-stanza issue and is not handed to {!backend_rule_of}. *)
 let backend_marker_contract content =
   contained_marker_contract content ~sentinel:marker_sentinel
     ~parse_declaration:(fun _stanza -> parse_backend_declaration)
     ~belongs:(fun stanza _marker ->
-      if List.is_empty stanza.marked_sites then
-        Error [ "the containing stanza runs no executable" ]
+      if List.is_empty stanza.marked_sites then Error [ "the containing stanza runs no executable" ]
       else Ok ())
 
 let backend_rule_of marked =

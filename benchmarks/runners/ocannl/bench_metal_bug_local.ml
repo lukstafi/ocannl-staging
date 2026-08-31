@@ -7,8 +7,7 @@
    from most kernels — the accumulator lives in a scope local and the node is stored once — and the
    same compiler pass can corrupt THAT form instead. OCANNL works around it with expression-level
    volatile pointer casts on device reads inside accumulating updates and their controlling guards
-   on Metal
-   ([volatile_serial_accumulation] in arrayjit/lib/c_syntax.ml).
+   on Metal ([volatile_serial_accumulation] in arrayjit/lib/c_syntax.ml).
 
    This program has two halves, and no OCANNL dependency at all:
 

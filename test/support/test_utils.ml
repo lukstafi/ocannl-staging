@@ -22,6 +22,7 @@ module Cache_dir_scan = Cache_dir_scan
     root [.gitignore] glob over their shared prefix covers all of them. *)
 
 module Refusal_control_scan = Refusal_control_scan
+
 module Refusal_control_manifest = Refusal_control_manifest
 (** Extracting static refusal-diagnostic fragments from repository scanners and relating them to
     permanent control goldens. *)

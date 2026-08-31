@@ -169,8 +169,7 @@ let parse_provenance_declaration ~backends ~directory ~containing_families ~decl
              else Some (Printf.sprintf "recorded-on backend `%s` is not one OCANNL has" recorded_on));
           ]
       in
-      if List.is_empty errors then
-        Ok { member; recorded_on; reason; containing_families }
+      if List.is_empty errors then Ok { member; recorded_on; reason; containing_families }
       else Error errors
 
 let marker_issue_errors ~dune_path = function
@@ -178,8 +177,7 @@ let marker_issue_errors ~dune_path = function
       let detail =
         match issue_malformed with
         | Dune_scan.Missing_reason_separator -> "provenance marker has no ` -- <reason>`"
-        | Dune_scan.Short_reason _ ->
-            "provenance marker reason must say why in more than one word"
+        | Dune_scan.Short_reason _ -> "provenance marker reason must say why in more than one word"
         | Dune_scan.Repeated_sentinel ->
             Printf.sprintf "more than one `%s` marker occurs on this line" marker
         | Dune_scan.Declaration_error why -> why
@@ -209,8 +207,7 @@ let scan ~backends ~expected_paths ~dune_files =
             ~belongs:(fun _stanza provenance ->
               match member_of_path ~backends provenance.member with
               | Ok (Some member)
-                when not
-                       (List.mem provenance.containing_families member.family ~equal:String.equal)
+                when not (List.mem provenance.containing_families member.family ~equal:String.equal)
                 ->
                   Error
                     [
@@ -238,12 +235,15 @@ let scan ~backends ~expected_paths ~dune_files =
               List.concat_map contract.contract_issues ~f:(marker_issue_errors ~dune_path)
             in
             let outside_stanza_occurrences =
-              List.sum (module Int) contract.contract_issues ~f:(function
-                | Dune_scan.Marker_outside_stanza { issue_text; _ } ->
-                    Dune_scan.sentinel_occurrences ~sentinel:marker issue_text
-                | Dune_scan.Malformed_marker _ | Dune_scan.Marker_in_wrong_stanza _
-                | Dune_scan.Marker_outside_comment _ ->
-                    0)
+              List.sum
+                (module Int)
+                contract.contract_issues
+                ~f:(function
+                  | Dune_scan.Marker_outside_stanza { issue_text; _ } ->
+                      Dune_scan.sentinel_occurrences ~sentinel:marker issue_text
+                  | Dune_scan.Malformed_marker _ | Dune_scan.Marker_in_wrong_stanza _
+                  | Dune_scan.Marker_outside_comment _ ->
+                      0)
             in
             let inside_stanzas =
               contract.contract_comment_occurrences - outside_stanza_occurrences
@@ -392,8 +392,7 @@ let control_results () =
       ~dune_files:
         [
           ( "test/synthetic/dune",
-            family_rule
-              ~marker:"; ocannl-golden-recorded-on: probe-metal.expected <- cc -- copied"
+            family_rule ~marker:"; ocannl-golden-recorded-on: probe-metal.expected <- cc -- copied"
               () );
         ]
   in
@@ -448,23 +447,23 @@ let control_results () =
   let has_exact_error result error = List.mem result.errors error ~equal:String.equal in
   let checks =
     [
-    ( "a complete synthesized family and valid contained marker are accepted",
-      List.equal String.equal complete.families [ expected_family ]
-      && List.is_empty complete.incomplete && List.is_empty complete.errors
-      && List.length complete.provenance = 1 );
-    ( "a synthesized family missing one backend is refused",
-      match incomplete.incomplete with
-      | [ (family, actual) ] ->
-          String.equal family expected_family && List.equal String.equal actual [ "cc" ]
-      | _ -> false );
-    ( "a rule whose whole family is absent is refused",
-      match empty.incomplete with
-      | [ (family, actual) ] -> String.equal family expected_family && List.is_empty actual
-      | _ -> false );
-    ( "repository-relative family paths stay slash-normalized",
-      String.equal
-        (join_path "test\\synthetic" ("probe-" ^ backend_placeholder ^ ".expected"))
-        expected_family );
+      ( "a complete synthesized family and valid contained marker are accepted",
+        List.equal String.equal complete.families [ expected_family ]
+        && List.is_empty complete.incomplete && List.is_empty complete.errors
+        && List.length complete.provenance = 1 );
+      ( "a synthesized family missing one backend is refused",
+        match incomplete.incomplete with
+        | [ (family, actual) ] ->
+            String.equal family expected_family && List.equal String.equal actual [ "cc" ]
+        | _ -> false );
+      ( "a rule whose whole family is absent is refused",
+        match empty.incomplete with
+        | [ (family, actual) ] -> String.equal family expected_family && List.is_empty actual
+        | _ -> false );
+      ( "repository-relative family paths stay slash-normalized",
+        String.equal
+          (join_path "test\\synthetic" ("probe-" ^ backend_placeholder ^ ".expected"))
+          expected_family );
       ( "a marker outside every stanza is refused",
         has_exact_error misplaced
           "test/synthetic/dune: found 1 `ocannl-golden-recorded-on:` occurrence(s) in the file but \

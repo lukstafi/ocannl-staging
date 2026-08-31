@@ -16,10 +16,10 @@
    serial form runs at full single-core speed and stays a legitimate competitor), while a
    contention-dominated CPU window is explicitly counted and refused; it is [infinity] on GPU ones.
    Where dispatch itself is refused, the refusal is recorded in the report's decline census under
-   [Not_dispatched_key "baseline"] (gh-ocannl-543). - Either way the search returns a working routine
-   whose winner carries a measurement. - The rule holds on the cache-replay path too: a planted
-   entry naming the serial form as the winner is rejected and re-searched on GPU, and honoured on
-   CPU. *)
+   [Not_dispatched_key "baseline"] (gh-ocannl-543). - Either way the search returns a working
+   routine whose winner carries a measurement. - The rule holds on the cache-replay path too: a
+   planted entry naming the serial form as the winner is rejected and re-searched on GPU, and
+   honoured on CPU. *)
 
 open Base
 open Ocannl

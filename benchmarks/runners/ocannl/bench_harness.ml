@@ -363,9 +363,8 @@ let tune_json t =
           ~state:(Autotune.outcome_name r.Autotune.outcome)
           ~searched ~cache_hit
           ~timing:(Autotune.timing_string r.Autotune.timing)
-          ~timings_contended:r.Autotune.timings_contended
-          ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
-          ~tensorized:r.Autotune.best_tensorized
+          ~timings_contended:r.Autotune.timings_contended ~best_ms:r.Autotune.best_ms
+          ~best_label:r.Autotune.best_label ~tensorized:r.Autotune.best_tensorized
           ~tensorization:
             (Option.map r.Autotune.best_tensorization ~f:Ir.C_syntax.tensorization_name)
           ~mma_statements:r.Autotune.best_mma_statements

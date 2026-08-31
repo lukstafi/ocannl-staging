@@ -1780,10 +1780,7 @@
  ; ocannl-backend: none -- links no backend: it reads embedded OCaml snippets through Config_key_scan as text.
  (name config_scan_lexing)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  digest_completeness.ml
-  test_config_consistency.ml)
+ (deps ocannl_config digest_completeness.ml test_config_consistency.ml)
  (modules config_scan_lexing)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -1802,9 +1799,7 @@
  ; ocannl-backend: none -- links no backend: it reads embedded dune-file text through Dune_stanza_scan as text.
  (name dune_scan_cases)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  config_dep_completeness.ml)
+ (deps ocannl_config config_dep_completeness.ml)
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2019,9 +2014,7 @@
  ; OCaml source, which links no backend and compiles nothing.
  (target env_var_deps_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  env_var_deps.ml)
+ (deps ocannl_config env_var_deps.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2073,9 +2066,7 @@
  ; ocannl-backend: none -- runs the scanner's missing-input refusal controls.
  (target cache_dir_ignores_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  cache_dir_ignores.ml)
+ (deps ocannl_config cache_dir_ignores.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2140,9 +2131,7 @@
  ; ocannl-backend: none -- runs only synthetic argument-validation refusals in the scanner executable.
  (target atomic_file_rename_scan_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  atomic_file_rename_scan.ml)
+ (deps ocannl_config atomic_file_rename_scan.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2154,7 +2143,9 @@
  (deps
   (alias runtest-env_spelling_gate))
  (action
-  (diff atomic_file_rename_scan_control.expected atomic_file_rename_scan_control.actual)))
+  (diff
+   atomic_file_rename_scan_control.expected
+   atomic_file_rename_scan_control.actual)))
 
 ; gh-ocannl-806: modules without interfaces implicitly export every top-level binding. The live
 ; scan ratchets every source-declared value in direct modules under arrayjit/lib and tensor against
@@ -2202,9 +2193,7 @@
  ; ocannl-backend: none -- runs the scanner's three synthetic direct-refusal branches.
  (target dead_export_scan_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  dead_export_scan.ml)
+ (deps ocannl_config dead_export_scan.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2292,9 +2281,7 @@
  ; ocannl-backend: none -- runs the inventory's synthetic empty-source refusal branch.
  (target optional_arg_inventory_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  optional_arg_inventory.ml)
+ (deps ocannl_config optional_arg_inventory.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2306,7 +2293,9 @@
  (deps
   (alias runtest-env_spelling_gate))
  (action
-  (diff optional_arg_inventory_control.expected optional_arg_inventory_control.actual)))
+  (diff
+   optional_arg_inventory_control.expected
+   optional_arg_inventory_control.actual)))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files as text.
@@ -2433,9 +2422,7 @@
  ; ocannl-backend: none -- runs the scanner's synthetic stale-exclusion refusal branch.
  (target codegen_text_inventory_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  codegen_text_inventory.ml)
+ (deps ocannl_config codegen_text_inventory.ml)
  (action
   (with-stdout-to
    %{target}
@@ -2447,7 +2434,9 @@
  (deps
   (alias runtest-env_spelling_gate))
  (action
-  (diff codegen_text_inventory_control.expected codegen_text_inventory_control.actual)))
+  (diff
+   codegen_text_inventory_control.expected
+   codegen_text_inventory_control.actual)))
 
 ; Interfaces built to break the emitter derivation: a library whose .mli declares every shape
 ; `Emitter_frontier` has to answer for, beside the near misses that decide the rule. Its second
@@ -2480,9 +2469,7 @@
  ; ocannl-backend: none -- links no backend: the fixtures are embedded strings it classifies as text.
  (name codegen_text_scan_cases)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  codegen_text_inventory.ml)
+ (deps ocannl_config codegen_text_inventory.ml)
  (modules codegen_text_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2511,9 +2498,7 @@
  ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
  (name cache_dir_scan_cases)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  cache_dir_ignores.ml)
+ (deps ocannl_config cache_dir_ignores.ml)
  (modules cache_dir_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -2521,9 +2506,7 @@
  ; ocannl-backend: none -- links no backend: it reads embedded format strings through Verdict_scan as text.
  (name verdict_scan_cases)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  verdict_ratchet.ml)
+ (deps ocannl_config verdict_ratchet.ml)
  (modules verdict_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -3332,7 +3315,14 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules reduction_accumulator_residency)
- (libraries base ocannl stdio arrayjit.utils test_utils ll_test arrayjit.verdict)
+ (libraries
+  base
+  ocannl
+  stdio
+  arrayjit.utils
+  test_utils
+  ll_test
+  arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -4659,9 +4649,7 @@
  ; ocannl-backend: none -- drives every direct config-usage refusal through injected state.
  (target config_usage_scan_refusal_control.actual)
  (package neural_nets_lib)
- (deps
-  ocannl_config
-  config_usage_scan.ml)
+ (deps ocannl_config config_usage_scan.ml)
  (action
   (with-stdout-to
    %{target}
@@ -4673,7 +4661,9 @@
  (deps
   (alias runtest-env_spelling_gate))
  (action
-  (diff config_usage_scan_refusal_control.expected config_usage_scan_refusal_control.actual)))
+  (diff
+   config_usage_scan_refusal_control.expected
+   config_usage_scan_refusal_control.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached. It shares a lock

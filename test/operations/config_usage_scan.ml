@@ -661,7 +661,6 @@ let non_config_assignment_mentions =
   ]
 
 let mention_site path key = path ^ "\000" ^ key
-
 let ambiguous_cli_value_site path spelling key = path ^ "\000" ^ spelling ^ "\000" ^ key
 
 let kind_name = function
@@ -852,8 +851,7 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
 
 let direct_refusal_formats =
   [
-    "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
-     spaced_config_mentions";
+    "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in spaced_config_mentions";
     "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
      prefix_free_config_mentions";
     "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys";
@@ -883,9 +881,7 @@ let refusal_control () =
   in
   let known_keys =
     let add_first_key mentions keys =
-      match mentions with
-      | (_, key, _) :: _ -> Set.add keys key
-      | [] -> keys
+      match mentions with (_, key, _) :: _ -> Set.add keys key | [] -> keys
     in
     Utils.known_config_keys
     |> add_first_key non_config_environment_mentions
@@ -901,8 +897,8 @@ let refusal_control () =
        (Some "backend"));
   check ~fail ~known_keys ~repository_census:true
     [
-      occurrence ~spaced_bare:true ~path:"missing-spaced.md" ~key:"backend"
-        ~spelling:"backend = cc" ~kind:Markdown_assignment ();
+      occurrence ~spaced_bare:true ~path:"missing-spaced.md" ~key:"backend" ~spelling:"backend = cc"
+        ~kind:Markdown_assignment ();
       occurrence ~path:"missing-prefix-free.ml" ~key:"backend" ~spelling:"--backend=cc"
         ~kind:Prefix_free_cli_flag ();
       occurrence ~path:"unknown.sh" ~key:"definitely_missing"
