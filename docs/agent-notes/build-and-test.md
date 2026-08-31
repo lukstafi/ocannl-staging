@@ -1122,6 +1122,15 @@ that they earn a lookup rather than always-loaded space.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- A red on merged master is presumptively CLAIMED work. `ci.yml`'s `notify-triage-routine` job
+  fires the "ocannl-staging CI-red triage" Claude Code cloud routine on any non-PR master red —
+  push and scheduled sweeps alike (a logged no-op until the `ROUTINE_FIRE_URL`/`ROUTINE_FIRE_TOKEN`
+  repo secrets are set; a lost fire is caught by the routine's own daily backstop sweep). The
+  routine claims the red via an issue titled `CI red on master@<short-sha>: <workflow>` and either
+  opens a `ci-fix/*` PR (it never merges its own PRs) or posts its diagnosis to that issue.
+  Merging sessions do not watch CI after landing (roll-forward, ahrefs/ocannl#861); before fixing
+  a master red by hand, find the claiming issue and any linked PR, and take over only where triage
+  visibly stopped short — saying so on the issue first.
 - The Ubuntu/OCaml 5.5 main job preprocesses `cc_backend.ml` with
   `OCANNL_LOG_LEVEL_CC_BACKEND=3` and builds both `@check` and
   `@test/operations/runtest-cc_backend_trace_name` in that environment. The focused runtime test
