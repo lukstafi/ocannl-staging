@@ -527,6 +527,16 @@ type ('dev, 'runner, 'event) context = {
 }
 [@@deriving sexp_of]
 
+(** The one constructor for evolving a context in place of itself with a newly allocated buffer:
+    the result supersedes [ctx] as the lineage leaf while deliberately keeping its lifecycle
+    identity — the same {!field:context.parent} link and the {e same} {!field:context.finalized}
+    flag, so at most one of the pair can ever free the pools they share — and no context creation
+    is counted in [Alloc_census]. The buffer-allocating transfer entry points ([init_from_host],
+    [init_from_device]) go through this; a compile/link result is a new lifecycle node and goes
+    through [Device.make_child] instead. *)
+let evolve_with_buffer ctx tn loc =
+  { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:loc }
+
 module type Device_types = sig
   include Device_config_common
 

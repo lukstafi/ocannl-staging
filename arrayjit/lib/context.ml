@@ -89,7 +89,8 @@ type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
   context_id : int;
       (** Identity of this logical backend-context child, used only to retire ledger registrations
-          when its leaf is released. [run] preserves it; operations that make a child mint one. *)
+          when its leaf is released. [run] preserves it; operations that make a child mint one
+          through [derive] below, the only constructor of derived contexts. *)
   ordinal : int;
       (** The backend's device ordinal this context runs on -- what {!Backends.make_context} was
           given. NOT {!Ir.Backend_intf.device.device_id}, which is a process-global counter across
@@ -102,10 +103,17 @@ type t = {
 
 let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
 
-let fresh_context_id ledger =
-  let id = ledger.next_context_id in
-  ledger.next_context_id <- id + 1;
-  id
+(* The one constructor for a derived logical context — the result of any operation that makes a
+   child (compiling, transfers that touch the wrapped context, decision recording). Minting the
+   fresh [context_id] here, and only here, is what lets [release] retire exactly the leaf's own
+   ledger registrations: a hand-assembled child that kept its parent's id would retire the parent's
+   merge-buffer reads along with its own. Frontier updates ride along when the operation produced
+   one. Operations that evolve the SAME logical context ([run], [mark_initialized],
+   [record_external_writes]) stay plain record updates: they must preserve the identity. *)
+let derive ?frontier ctx wrapped =
+  let context_id = ctx.ledger.next_context_id in
+  ctx.ledger.next_context_id <- context_id + 1;
+  { ctx with wrapped; context_id; frontier = Option.value frontier ~default:ctx.frontier }
 
 let buffer_key ctx tn =
   Backends.query ctx.wrapped
@@ -323,11 +331,11 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
 
       (* Register in shared ledger *)
       Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
-      let context_id = fresh_context_id ctx.ledger in
+      let updated_ctx = derive ~frontier:new_frontier ctx wrapped in
       Option.iter merge_buffer_input ~f:(fun _ ->
           let _, transfer_id = Option.value_exn ~here:[%here] frontier.merge_buffer_writer in
           Hashtbl.update ctx.ledger.merge_buffer_readers transfer_id ~f:(fun readers ->
-              (id, context_id) :: Option.value readers ~default:[]));
+              (id, updated_ctx.context_id) :: Option.value readers ~default:[]));
 
       (* Required inputs for the initialization check below: the backend routine's materialized
          read-only / read-before-write nodes, resolved against this compile's placements (the
@@ -341,8 +349,6 @@ let compile_outcome ?name ?lowered_transform ?prelowered ~provenance ?candidate 
 
       (* Outputs are all nodes written by the computation *)
       let outputs = backend_outputs in
-
-      let updated_ctx = { ctx with wrapped; context_id; frontier = new_frontier } in
 
       let routine =
         {
@@ -710,9 +716,7 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
             (c, ()));
       }
   in
-  record_external_writes
-    { ctx with wrapped; context_id = fresh_context_id ctx.ledger }
-    (Set.singleton (module Tn) tn)
+  record_external_writes (derive ctx wrapped) (Set.singleton (module Tn) tn)
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
@@ -827,9 +831,7 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
             check_merge_source_ready ();
             check_merge_destination_ready ());
         Ir.Task.run r.BI.schedule;
-        let dst =
-          { dst with wrapped = rewrap r.BI.context; context_id = fresh_context_id dst.ledger }
-        in
+        let dst = derive dst (rewrap r.BI.context) in
         match into_merge_buffer with
         | BI.No -> record_external_writes dst (Set.singleton (module Tn) tn)
         | BI.Copy -> record_merge_transfer dst ~name:r.BI.name)
@@ -839,11 +841,7 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
         else if not (Map.mem dctx.BI.ctx_buffers tn) then
           (* Present in [src], absent in [dst]: allocate in [dst] and schedule the copy. *)
           record_external_writes
-            {
-              dst with
-              wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx);
-              context_id = fresh_context_id dst.ledger;
-            }
+            (derive dst (rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx)))
             (Set.singleton (module Tn) tn)
         else
           (* The source and destination buffers are physically the same: nothing to transfer. *)
@@ -953,7 +951,7 @@ let decide_materialized ctx tns =
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in
-  { ctx with wrapped; context_id = fresh_context_id ctx.ledger }
+  derive ctx wrapped
 
 let decide_inline ctx tns =
   let wrapped, () =
@@ -975,4 +973,4 @@ let decide_inline ctx tns =
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in
-  { ctx with wrapped; context_id = fresh_context_id ctx.ledger }
+  derive ctx wrapped
