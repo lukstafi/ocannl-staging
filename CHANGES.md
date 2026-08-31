@@ -9,7 +9,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 
 ### Changed
 
-- Metal's serial-accumulation workaround is renamed `volatile_serial_accumulation`, reproduced
+- Metal's serial-accumulation workaround — the backend capability `volatile_scalar_rmw` — is
+  renamed `volatile_serial_accumulation`, reproduced
   standalone without OCANNL (`benchmarks/runners/ocannl/bench_metal_bug_local.ml`), and measured:
   1.06x cost memory-bound up to 4.1x on a single-threaded scalar-loss reduction; each compiled
   routine now carries a volatility census (`Context.routine.volatility`) (gh-ocannl-782).
@@ -151,8 +152,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   (`@slow-fp8_codec_exhaustive`, plus `tools/fp8_soak.exe` as the CUDA/HIP GPU arm).
 - **The flip chain's enablement promotion is weighed against measured profitability**
   (gh-ocannl-579, closing the gh-ocannl-514 arc): the new default `tune_flip_ordering=profitable`
-  demotes the enablement prior when the family it promotes measurably lost, using evidence the
-  placement A/B already pays for.
+  demotes the enablement prior when the family it promotes lost by more than
+  `tune_flip_profit_margin` (default 1.25), using evidence the placement A/B already pays for;
+  `=cost` and `=enablement` remain as the two unconditional baselines.
 - **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626): the
   `Tile_mma` rendering census is derived once inside `Context.compile` and carried on the routine
   (`Tensorized` / `Scalar_fallback` / `Not_requested`), printed wherever timings are reported and
@@ -178,7 +180,7 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   a spelling nothing reads is a fatal startup error naming the spelling that works; a mistyped
   variable warns by name (gh-ocannl-629); and per-directory `env_spelling_gate` rules plus
   `env_var_deps` make dune reruns track exactly the declared variables. Commandline spellings are
-  untouched.
+  untouched. `Utils.env_var_names` became `Utils.env_var_name`.
 - **Test seams that cannot report a false pass**: a test that decides its own verdict reports it
   through `Verdict`, which exits the process nonzero so a regression cannot be `dune promote`d
   into a golden — with a ratchet against unguarded claim prints and empty-collection-safe
@@ -409,7 +411,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **Deterministic split reductions made reachable** (gh-ocannl-537, gh-ocannl-541):
   `Swap`-hoisting composes interchange chains so conv-gradient accumulations — up to 89% of HIP
   lenet's step — reach the gh-ocannl-484 split-reduce family; detected sites are ranked by serial
-  work and capped with every eviction censused.
+  work and capped with every eviction censused (`autotune_split_reduce_max_sites`, default raised
+  4 → 8).
 - **Mixed-precision training recipe** (gh-ocannl-492): `Precision_policy.apply` assigns storage
   precisions by structural class; `Mixed_prec` implements torch-AMP-style master weights via cast
   twins, dynamic loss scaling with `Train.grad_checksum`, and a fused on-device loss-scaling gate
@@ -427,7 +430,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **Search survivability**: typed candidate-failure containment with per-backend classifiers and
   damage tracking — a rejection that provably wrote nothing rolls back, one that may have written
   poisons the lineage by name (gh-ocannl-536); HIP scratch-budget pre-validation, since ROCm
-  aborts the queue instead of failing cleanly (gh-ocannl-533); and a decline census accounting
+  aborts the queue instead of failing cleanly (gh-ocannl-533; `hip_scratch_validation`, default
+  true, disables it on a device where the occupancy model is wrong); and a decline census accounting
   for every refusal, including undispatched and cap-evicted candidates (gh-ocannl-532,
   gh-ocannl-541, gh-ocannl-543).
 - **Benchmark matrix and sweep**: tuning and precision are independent cell axes (gh-ocannl-539);
@@ -442,7 +446,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   gfx1151; CPU backends keep the serial form as a legitimate competitor.
 - **Attention masks fill with `-infinity`** instead of `-1e9` (gh-ocannl-548), and the fp16
   magnitude guard exempts infinities (gh-ocannl-547) — together unblocking every attention model
-  at f16.
+  at f16. For padding masks that can cover a whole query row (where `-inf` makes the softmax's
+  max-subtraction produce NaN), every mask-taking `Nn_blocks` entry point takes `?mask_fill` to
+  select a finite fill.
 - `Tnode.t` renames: `memory_mode` → `memory_mode_intent`, `prec` → `storage_prec`.
 - Padding layout and neutral values are committed as tensor-node identity, so padded convolutions
   lower offset-free; incompatible later padding demands fail in shape inference.
@@ -528,21 +534,27 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   into per-device constant pools (gh-ocannl-470); on-device epoch-loss accumulation
   (`Train.grad_update ?accum_loss`); interval analysis folding interval-decided guards; a
   recompute-cost guard capping virtualized reductions (`virtualize_max_inline_reduction` —
-  gpt2_mini on cc: ~13,000 → 2,361 ms/step); tensor-node ID namespaces (gh-ocannl-372).
+  gpt2_mini on cc: ~13,000 → 2,361 ms/step); tensor-node ID namespaces (gh-ocannl-372 —
+  `Tensor.t.id` was dropped in favor of the tnode's uid, reached through `value`).
 
 ### Changed
 
 - **Breaking notation change**: an einsum/labels row with its kind separator omitted reads as the
   context ellipsis, not an empty row — `x` means `...|...->x`, so terse specs broadcast batch and
   input axes by default; the empty-row reading is kept by writing the separator (`| ->x`, `|x`,
-  `->x`), and sum-to-scalar becomes `++ "...|... => |->0"`.
+  `->x`), and sum-to-scalar becomes `++ "...|... => |->0"`. In multi-operand specs where one slot
+  passes batch through, the other slots must now close their batch rows explicitly (e.g. the conv
+  kernel slot `; |kh, kw, ..ic.. -> ..oc..`).
 - **The default backend is now `cc`**; `sync_cc` renamed to `cc`, `multicore_cc` to `multidev_cc`
   (deprecated aliases kept); `Multidev` exposes multiple worker-domain CPU devices.
 - **Breaking**: backends are process-wide singletons — `fresh_backend` became `get_backend`, with
-  `Backends.wrapped_context` as a closed disjunction over the singleton context types.
-- Memory placement decisions are context-scoped: `Tnode.memory_mode` is declared intent only;
-  decisions land in per-lineage `Placements` tables on `Low_level.optimize_ctx`, forked per
-  compile so sibling compiles are hermetic (the autotuning forcing function).
+  `Backends.wrapped_context` as a closed disjunction over the singleton context types; the module
+  tower cleanup retired `new_stream`.
+- Memory placement decisions are context-scoped: `Tnode.memory_mode` is declared intent only,
+  streamlined to five constructors (`Materialized`/`Device_only` folded away; gradients'
+  `Never_virtual` replaced by an `is_observable` intent); decisions land in per-lineage
+  `Placements` tables on `Low_level.optimize_ctx`, forked per compile so sibling compiles are
+  hermetic (the autotuning forcing function).
 - Index arithmetic is signed (`Ops.index_prec` int32, int64 under `large_models`), with
   per-node element counts checked to fit.
 - Generated code and logs go to per-executable subdirectories `build_files/<exe>/` and
@@ -567,7 +579,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - Worked around an Apple Metal shader-compiler miscompile of serial accumulation at a
   loop-invariant address (volatile shadow pointer; standalone repro checked in); Metal launches
   are ordered after all previously enqueued work; Metal default-schedule pathology on gpt2_mini
-  fixed (81 s → 0.3 s steps).
+  fixed (81 s → 0.3 s steps — the `gpu_schedule_min_parallel` default is lowered to 64, so
+  kernels that used to stay on the serial 1x1 fallback now get the automatic GPU schedule).
 - Windows: the CUDA backend restored (NVRTC arch floors for half/bf16 intrinsics), test suite
   green on cc and hip.
 - 1-element `Reshape`/`rebatch` data no longer collapses to a scalar (gh-ocannl-460).
