@@ -6,6 +6,7 @@ open Base
 module LL = Ir.Low_level
 module Ops = Ir.Ops
 module Idx = Ir.Indexing
+open Verdict.Claims
 
 let fmas llc =
   Ll_test.count_scalar llc ~f:(function LL.Ternop (Ops.FMA, _, _, _) -> true | _ -> false)
@@ -26,8 +27,8 @@ let () =
   let float_llc, _, _ = scalar_case ~prec:Ops.single ~first_id:8250 "single" in
   let int_simplified = LL.simplify_llc [] int_llc in
   let float_simplified = LL.simplify_llc [] float_llc in
-  Ll_test.p "int64 mul-add remains integer arithmetic" (fmas int_simplified = 0);
-  Ll_test.p "single-precision mul-add still rewrites to FMA" (fmas float_simplified = 1);
+  p "int64 mul-add remains integer arithmetic" (fmas int_simplified = 0);
+  p "single-precision mul-add still rewrites to FMA" (fmas float_simplified = 1);
 
   (* [2^53] is exactly representable as both int64 and double, but [2^53 + 1] is not. The intended
      integer evaluation [(x * 1 + 1) - x] therefore returns 1; an intervening double [fma] rounds
@@ -38,4 +39,4 @@ let () =
       ~seed:[ (input, [| 9007199254740992. |]) ]
       ~read:[ output ]
   in
-  Ll_test.p "int64 mul-add preserves the unit past 2^53" (Ll_test.same got [ [| 1. |] ])
+  p "int64 mul-add preserves the unit past 2^53" (Ll_test.same got [ [| 1. |] ])

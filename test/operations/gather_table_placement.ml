@@ -23,8 +23,7 @@ open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
 module Ops = Ir.Ops
-
-let p = Ll_test.p
+open Verdict.Claims
 
 (* [table[dyn]] with the runtime row read out of [idx]: a one-axis gather, so the sole index slot is
    the dynamic one and [Ll_test.gather] plants the placeholder there. *)

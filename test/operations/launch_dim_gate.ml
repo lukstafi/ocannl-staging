@@ -23,6 +23,7 @@
 
 open Base
 open Ll_test
+open Verdict.Claims
 module Sched = Ir.Schedule
 module SO = Ir.Schedule_outcome
 module BI = Ir.Backend_intf

@@ -336,9 +336,12 @@ let names_in expr =
   iterator#expression expr;
   !names
 
+(* [Verdict] is the only module a claim is reached through: [Ll_test] re-exported six of these names
+   while [Verdict] had no open-able surface, and gh-ocannl-815 retired that copy in favour of [open
+   Verdict.Claims], which the environment below models. *)
 let claim_kind_of_path path =
   match path with
-  | ("Verdict" | "Ll_test") :: _ -> (
+  | "Verdict" :: _ -> (
       match List.last path with
       | Some "p" -> Some P
       | Some "pf" -> Some Pf

@@ -643,6 +643,17 @@ that they earn a lookup rather than always-loaded space.
   can always put its keys behind an abstraction — and the module header says so. If that trade stops
   holding, the answer is a structural contract for how a guard spells its keys, matched rather than
   inferred, not another name in its tables.
+- One claim surface, opened rather than copied. Every test that decides a verdict reaches the claim
+  names through `open Verdict.Claims`; nothing in the tree rebinds them per file any more
+  (gh-ocannl-815). The aliases the population used to carry were a maintenance defect with a
+  demonstrated failure: `Ll_test` re-exported six of the names for the hand-built-IR tests, and the
+  copy went stale — `pf`, `claimf`, `pass_fail` and the pairwise form were added to `Verdict` and
+  never reached it. So a NEW combinator goes into `Verdict.Claims` and is thereby available
+  everywhere; it does not get re-exported from a support library, and a test does not alias it.
+  What stays qualified is what `Claims` deliberately excludes: the run-state readers (`any_failed`)
+  and the backend-bound wrapper each backend-selecting test still builds for itself,
+  `let skipped = Verdict.skipped ~backend:backend_name` — a partial application, not an alias.
+  `verdict_ratchet` models the open explicitly, so helper-following still sees an unqualified `p`.
 - `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
   its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
   (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same

@@ -38,6 +38,7 @@
 open Base
 open Stdio
 open Ll_test
+open Verdict.Claims
 
 let mk = node_factory ~first_id:5620 ~dims:[| 4 |] ()
 

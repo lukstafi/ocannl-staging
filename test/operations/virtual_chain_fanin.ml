@@ -39,6 +39,7 @@
 
 open Base
 open Ll_test
+open Verdict.Claims
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
 
