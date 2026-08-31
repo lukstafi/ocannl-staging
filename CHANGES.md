@@ -21,10 +21,12 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   unified into one list-returning `?lowered_transform : Low_level.optimized ->
   Low_level.optimized list`, making their runtime mutual exclusion impossible to express
   (gh-ocannl-768).
-- `Context.t`'s device field and the `?device_id` parameters are renamed `ordinal` — the value is
-  the backend's device ordinal, not the process-global `device_id` — and the gh-ocannl-498
-  memory-budget planner moves out of `Context` into its own `arrayjit.memory_budget` library
-  (gh-ocannl-776).
+- `Context.t`'s device field and the `?device_id` parameters are renamed `ordinal` (no deprecated
+  alias) — the value is the backend's device ordinal, not the process-global `device_id` — and the
+  gh-ocannl-498 memory-budget planner moves out of `Context` into its own `arrayjit.memory_budget`
+  library: `Context.plan_memory_budget` is `Memory_budget.fit`, `Context.memory_budget` is
+  `Memory_budget.t`, `Context.budget_plan` is `Memory_budget.plan`, and `footprint` /
+  `compare_relief_ratio` move across unchanged (gh-ocannl-776).
 - The fp8 soak's vendor arms hold only their jit calls; all vendor-independent logic lives in
   `tools/fp8_soak.ml`, which every box compiles, so an edit can no longer ship having only ever
   been parsed (gh-ocannl-758).
@@ -92,7 +94,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   nothing raise at construction instead of compiling empty routines.
 - **The pre-driver launch gate covers every hardware launch dimension** (gh-ocannl-679,
   gh-ocannl-643, gh-ocannl-684): per-dimension workgroup caps (`max_workgroup_dims`) and the `.y`
-  grid extent join the checks, enumerated from one table rather than hand-copied per bound; new
+  grid extent join the checks, enumerated from one table rather than hand-copied per bound
+  (`Backend_intf.max_grid_z` became `max_grid_yz`); new
   `bin/device_props` prints the queried device properties and derived limits the gates compare
   against.
 - **Tuning ergonomics and verification**: `Autotune.tune` takes `?name` like `Context.compile`, so
@@ -109,7 +112,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658): one minimal,
   executed IR shape per outcome, stating which phase decides it and under which provenance; and
   hand-built lowered code can be executed, not only analyzed, via `Context.compile ?prelowered`
-  (gh-ocannl-562).
+  (gh-ocannl-562). **Behavior change**: `Context.get_values` / `set_values` on a node the
+  optimizer placed `Local` now raise instead of serving an unrelated uploaded copy — host access
+  requires materializing the node (gh-ocannl-599).
 - **A fault-injection inventory for resource-owning seams** (gh-ocannl-571), with a GPU-free
   harness over finalize/release, pool, merge-pool, transfer and cache seams — it found a real
   `from_host` leak before the harness was done; and the cost model's **memory leg is fittable**
@@ -299,12 +304,14 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   `cc_pool_core_class`): conv-sketch tuning wins that did not port across CPUs traced to pool
   *heterogeneity* — uniform subsets recover 25–34% of tuned time — and the pool signature enters
   the autotune cache key, because crowns do not transfer across pools.
-- **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516, config `fp16_arithmetic`):
-  where the hardware has genuine 16-bit arithmetic, fp16 computes in fp16 at twice f32's lanes —
+- **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516, config `fp16_arithmetic`,
+  default **false** — opt-in, since it trades mantissa for throughput): where the hardware has
+  genuine 16-bit arithmetic, fp16 computes in fp16 at twice f32's lanes —
   1.99x on an M-series compute-bound control. `cc_backend_arch_flags` defaults to `auto`
   (`-march=native` silently *downgrades* Apple clang arm64 targets; `auto` probes the family's
   right spelling).
-- **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517, `narrow_compute_f32`): a
+- **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517, `narrow_compute_f32`,
+  default **true**; setting it false restores the previous per-operator rounding): a
   node's precision is storage-only; `cc` computes narrow floats in f32 — strictly more accurate,
   and the precondition for vectorizing 16-bit nodes at all. Measured verdict recorded: fp16
   storage 1.97x on a bandwidth-bound add, bf16 0.91x (its narrowing costs more than the halved
@@ -314,8 +321,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   use-site resolution remains the rule for leaves, parameters and init expressions, and the new
   identity `stretch` requests it by name (`stretch 1.0` replaces the `0.5 + 0.5` idiom).
 - **Four explicit barriers per k-block become one** (gh-ocannl-567): load phases group at the same
-  anchor and elision keys on `workgroup_shared`. Free rather than faster on Metal (+0.2% against
-  a ±3–7% noise floor), measured and recorded.
+  anchor and elision keys on `workgroup_shared` (config `elide_pipelined_barriers` renamed
+  `elide_staged_barriers`). Free rather than faster on Metal (+0.2% against a ±3–7% noise floor),
+  measured and recorded.
 - **Config startup chatter goes to stderr** (gh-ocannl-581), so tools whose stdout is a data
   channel need no suppression incantation.
 - **CI on OCaml 5.5; Windows off the per-PR path onto a schedule; GPU backends on a daily
@@ -575,7 +583,7 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 
 - **Removed the hosted tensor mode** (gh-ocannl-333): dropped the `array` field of `Tnode.t`;
   tensor value access and printing are context-mediated, host-init nodes self-initialize at link
-  time.
+  time. Removed with it: the `automatic_host_transfers` setting and the `use_host_memory` hook.
 - **Axis concatenation / block tensors in einsum notation** (`a^b`): concatenation
   (`a; b => a^b`), slicing (`a^b => a`), n-ary block-tensor specs, the `++^` operator, and concat
   projection unification in shape inference.
@@ -595,7 +603,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   host-side access (`Context.get_values` / `set_values`) of an alias view is rejected with a
   clear error — read or write the parent tensor instead (gh-ocannl-293).
 - Tensor saving, loading, and restoring (gh-ocannl-373); `Uint32`/`Uint64` precisions with
-  index-embedding precision selected by `large_models` (gh-ocannl-349, gh-ocannl-177).
+  index-embedding precision selected by `large_models` (formerly `big_models`, still accepted as a
+  deprecated alias) (gh-ocannl-349, gh-ocannl-177).
 - Makemore-progression examples and tutorial: `mlp_names` (Bengio MLP), `mlp_bn_names`
   (+ `batch_norm1d`), `docs/makemore_tutorial.md`; Sasha Rush Tensor Puzzles in extended einsum
   notation (gh-ocannl-308).
