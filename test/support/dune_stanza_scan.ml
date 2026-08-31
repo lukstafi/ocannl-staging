@@ -1669,6 +1669,17 @@ type 'a marker_contract = {
   contract_issues : marker_issue list;
   contract_text_occurrences : int;
   contract_comment_occurrences : int;
+  contract_stanza_occurrences : int;
+      (** how many of the [contract_comment_occurrences] sit in a comment the walk attributed to a
+          stanza — the count a placement diagnostic actually wants, since a marker in a comment
+          between stanzas declares nothing. It is the contract's own answer rather than a
+          subtraction the caller performs: deriving it as "comments minus the ones the
+          [Marker_outside_stanza] issues mention" makes every consumer re-implement the
+          relationship between an issue and the occurrences it accounts for, and quietly returns
+          the wrong number the moment an issue carries more than one occurrence or the contract
+          gains another placement refusal. Malformed and wrong-stanza markers are counted here:
+          they were placed inside a stanza, and what is wrong with them is said by their own
+          issues. *)
 }
 
 let sentinel_occurrences ~sentinel text =
@@ -1689,7 +1700,10 @@ let sentinel_occurrences ~sentinel text =
     Sentinel accounting deliberately compares the dumb text count with the lexer-derived comment
     count. This makes a marker in a quoted action argument or ordinary field a refusal rather than
     invisible text. Comments inside a [(subdir ...)] wrapper but no child stanza likewise become
-    [Marker_outside_stanza], because {!marked_stanzas} attributes by actual parentheses. *)
+    [Marker_outside_stanza], because {!marked_stanzas} attributes by actual parentheses. The three
+    counts nest — [contract_stanza_occurrences] is at most [contract_comment_occurrences], which is
+    at most [contract_text_occurrences] — so a consumer states whichever placement it cares about by
+    comparing two of them rather than by reconstructing one. *)
 let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
   let stanzas = marked_stanzas content in
   let _, comments = read_raw content in
@@ -1701,6 +1715,7 @@ let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
   in
   let issues = ref [] in
   let markers = ref [] in
+  let stanza_occurrences = ref 0 in
   let stanza_of_comment line text =
     List.find stanzas ~f:(fun stanza ->
         List.exists stanza.marked_comments ~f:(fun (candidate_line, candidate_text) ->
@@ -1709,11 +1724,13 @@ let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
   List.iter comments ~f:(fun comment ->
       let line = line_of content comment.comment_start in
       let text = comment.comment_text in
-      if sentinel_occurrences ~sentinel text > 0 then
+      let occurrences = sentinel_occurrences ~sentinel text in
+      if occurrences > 0 then
         match stanza_of_comment line text with
         | None ->
             issues := Marker_outside_stanza { issue_line = line; issue_text = text } :: !issues
         | Some stanza -> (
+            stanza_occurrences := !stanza_occurrences + occurrences;
             match
               parse_marker_text ~sentinel ~parse_declaration:(parse_declaration stanza) text
             with
@@ -1767,6 +1784,7 @@ let contained_marker_contract content ~sentinel ~parse_declaration ~belongs =
     contract_issues = List.rev !issues;
     contract_text_occurrences = text_occurrences;
     contract_comment_occurrences = comment_occurrences;
+    contract_stanza_occurrences = !stanza_occurrences;
   }
 
 (** How gh-ocannl-659's rule reads ONE stanza: whether it is subject to the rule, and which of the

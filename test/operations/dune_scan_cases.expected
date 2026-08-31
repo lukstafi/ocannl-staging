@@ -266,6 +266,8 @@ ok: backend rule -- the same tool handed nothing of ours is counted by neither r
 ok: backend rule -- a launcher pointed at a sibling directory keeps its floor
 ok: backend marker sentinel -- in a comment
 ok: backend marker sentinel -- inside a quoted argument, where it declares nothing
+ok: backend marker sentinel -- in a comment above every stanza, which encloses it in none
+ok: backend marker sentinel -- a malformed marker inside a stanza is still placed
 ok: backend marker sentinel -- none at all
 ok: contained marker contract -- a valid contained marker
 ok: contained marker contract -- annotated prose before the sentinel remains a marker
