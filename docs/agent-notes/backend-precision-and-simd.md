@@ -1006,19 +1006,23 @@ files.
   route was broken and deleted it. One more caution: the logged command carries `-o <...>.so`, so
   rerunning it with `-S` added but `-o` unchanged writes assembly over the shared library, possibly
   one a running process still has mapped — repoint `-o` at a fresh `.s`.
-- **The mul-add → `Ternop (FMA, …)` rewrite is NOT restricted to floating point, and for integers
-  that looks like a defect rather than a rounding trade** (raised in review on the gh-ocannl-753
-  docs; unfiled, unmeasured, stated here so it is not rediscovered). The `Low_level` arm carries no
-  `Ops.is_float` guard even though its neighbouring reassociations do, and its own comment is
-  `(* TODO: this is tentative. *)`. Downstream, `Ops.ternop_c_syntax` renders `Byte`, `Uint16`,
-  `Int32`, `Uint32`, `Int64`, `Uint64` and `Fp8` precisions through the DOUBLE-precision `fma(`, and
-  `C_syntax.vec_acc_fma`'s per-lane arm sends anything that is neither `Double` nor `Half` to
-  `fmaf` — single precision. If an integer mul-add reaches either, `int64` operands past 2^53 lose
-  bits and wraparound semantics change, so there `a*b + c` would be the RESTORATION of correctness,
-  not a second rounding: the bit-parity rationale one bullet up is a floating-point argument only,
-  and must not be read as covering the integer path. What is NOT established is reachability — no
-  emitted kernel was inspected for an integer `Ternop (FMA, …)` — which is exactly what an issue on
-  this should settle first, before anything is changed.
+- **The mul-add → `Ternop (FMA, …)` rewrite is guarded to floating point, and that guard is
+  load-bearing rather than a rounding preference** (gh-ocannl-824). Downstream,
+  `Ops.ternop_c_syntax` renders `Byte`, `Uint16`, `Int32`, `Uint32`, `Int64`, `Uint64` and `Fp8`
+  precisions through the DOUBLE-precision `fma(`, and `C_syntax.vec_acc_fma`'s per-lane arm sends
+  anything that is neither `Double` nor `Half` to `fmaf` — single precision. So an integer mul-add
+  reaching either loses bits past 2^53 and changes wraparound semantics, and there `a*b + c` is the
+  RESTORATION of correctness, not a second rounding: the bit-parity rationale one bullet up is a
+  floating-point argument only, and must not be read as covering the integer path. Reachability is
+  established, not hypothetical — through hand-built low-level IR rather than ordinary
+  `Assignments` lowering: an `int64` `Set` of `(x * 1 + 1) - x` put through `Low_level.simplify_llc`
+  produced one integer `Ternop (FMA, …)`, and executing it with `x` at 2^53 returned 0 instead of
+  the exact 1, the double `fma` having rounded 2^53 + 1 back down to 2^53. The `Low_level` arm now
+  carries `Ops.is_float` like its neighbouring reassociations, and
+  `test/operations/simplify_fma_precision.ml` pins both directions — integer unfused, single
+  precision still fused — plus that executed witness. What the guard does NOT cover is the codegen
+  boundary: a hand-built integer-precision `Ternop (FMA, …)` is still renderable through the double
+  `fma(`, which gh-ocannl-873 tracks rejecting loudly before rendering.
 - **"No such hardware" is a claim about a machine, not about the project — so name the machine.**
   The rows above were written from an Arrow Lake-HX box, where AVX-512 is fused off across the
   whole hybrid part, and the note recorded that as if it held everywhere; the machine that actually
