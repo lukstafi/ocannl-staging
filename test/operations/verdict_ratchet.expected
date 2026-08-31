@@ -51,7 +51,9 @@ ignores a quantified helper that reaches no Verdict claim: true
 the shipping ratchet process refuses the planted helper fixture: true
 refuses a stale quantified-helper exemption: true
 a shadowed helper name resolves to two definitions, not one: true
-refuses an exemption key that names both of them: true
+refuses an exemption key that names both shadowed definitions: true
+a same-line shadowed helper name resolves to two definitions, not one: true
+refuses an exemption key that names both same-line shadowed definitions: true
 
 every test source decides its claims through Verdict: true
 every helper-wrapped quantified claim witnesses a non-empty population: true
