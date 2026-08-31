@@ -570,17 +570,25 @@ type timing_result = {
   contended : bool;
       (** At least half the sample window was more than 2x slower than its minimum. This is a
           refusal signal: the window mostly measured host stalls, so the autotuner does not rank or
-          cache the number (gh-ocannl-855). Also true when the minimum is non-positive or
-          non-finite, because the clock resolved no usable verdict. *)
+          cache the number (gh-ocannl-855). Dispersion only — a window whose minimum is non-positive
+          or non-finite is a clock that resolved nothing, a separate fact that {!admitted_timing_ms}
+          refuses on the number itself (gh-ocannl-888).
+
+          Because they are separate, [not contended] is HALF a proof of usability: a consumer
+          deciding whether to keep a number asks {!admitted_timing_ms}, never this field. Reading it
+          directly is for saying something about contention itself — a diagnostic, a test that
+          excuses a claim under host load. *)
   samples : int;
       (** The number of samples behind [ms] and [contended], for diagnostics and exact dispatch
           accounting. *)
 }
 
 val admitted_timing_ms : timing_result -> float option
-(** The shared admission gate for batching, ranking, and calibration/model checks. Returns a
-    positive finite [ms] only for an uncontended result; a refused or degenerate result is [None].
-*)
+(** The shared admission gate for the consumers that RANK: candidate selection, the calibration
+    rows, the roofline consistency check, cache attribution. Returns a positive finite [ms] only for
+    an uncontended result; a refused or degenerate result is [None]. Deliberately NOT the gate for
+    {!queued_batch_depth}, which chooses a scale rather than consuming a measurement
+    (gh-ocannl-888). *)
 
 (** What a candidate's timing is a measurement of (gh-ocannl-755), selected by config
     [autotune_timing].
@@ -1090,23 +1098,30 @@ val set_test_bindings : Context.routine -> unit
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
-val queued_batch_depth : timing_result -> int option
+val queued_batch_depth : timing_result -> int
 (** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
     synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
     at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
     {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
-    non-positive, NaN, or infinite estimate is a clock that resolved nothing and is refused. Total,
-    over every float: a positive subnormal estimate saturates rather than raising. Exposed because
-    those two boundaries are what a regression would cross silently: a depth stuck at 1 turns a
-    queued search back into an isolated one. Returns [None] for any result that
-    {!admitted_timing_ms} refuses, rather than turning a bad calibration into a depth. *)
+    non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel and
+    batches at the cap; an infinite one floors at 1, the far end of the scale the policy is for.
+    Total, over every float and every verdict: a positive subnormal estimate saturates rather than
+    raising. Exposed because those two boundaries are what a regression would cross silently: a
+    depth stuck at 1 turns a queued search back into an isolated one.
+
+    [contended] is deliberately unread (gh-ocannl-888). The 2x-majority rule judges a ~10 ms batch,
+    while this estimate is one dispatch plus one synchronization, whose dispersion on a GPU is the
+    round trip's own tail; refusing on it starved every search on both GPU backends. A depth is not
+    a measurement — an overestimate only shortens the batch, an underestimate is capped — and a
+    deeper batch is the remedy for that dispersion, so the refusal belongs downstream in the timed
+    loop, where the window judged IS a batch. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
     16 samples, then tops up until their accumulated [per_launch_ms] reaches ~25 ms or 64 samples
     have been taken. Reports [contended] when at least half the raw [contention_ms] samples exceed
-    their minimum by 2x, or when the minimum is non-positive/non-finite. Exposed so tests can inject
-    a deterministic clock. *)
+    their minimum by 2x — dispersion only; a minimum that is non-positive or non-finite is refused
+    by {!admitted_timing_ms} instead. Exposed so tests can inject a deterministic clock. *)
 
 val search_measurements_cacheable : nothing_timed:bool -> timings_contended:int -> bool
 (** Pure cache-policy seam (gh-ocannl-855). A search result is cacheable only when at least one
@@ -1136,10 +1151,11 @@ val time_routine :
     of per-launch samples has accumulated (at most 64 runs) so that a host stall cannot collapse the
     min-of-N. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth is
     calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
-    than that target is measured identically in both modes. The result reports when most samples
-    were stalled; the tuner refuses such a calibration or candidate measurement rather than ranking
-    and caching it. Since the budget is per-launch rather than batch wall, queued timing can spend
-    up to 64 batches on a fast candidate; [max_timing_runs] is its wall-cost bound.
+    than that target is measured identically in both modes. The calibration always yields a depth;
+    the result of the timed loop reports when most of ITS samples were stalled, and the tuner
+    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since
+    the budget is per-launch rather than batch wall, queued timing can spend up to 64 batches on a
+    fast candidate; [max_timing_runs] is its wall-cost bound.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
@@ -1152,15 +1168,14 @@ val time_routine :
     the scratch buffers, not about the measurement: the cap bounds dispatches while the ~25 ms
     budget accumulates per-launch samples, and a candidate's time is not what it accumulated. *)
 
-val on_batch_depth : (int option -> calibration_samples:int -> unit) ref
+val on_batch_depth : (int -> calibration_samples:int -> unit) ref
 (** Observation seam for the timing tests (gh-ocannl-851), called by each {!time_routine} call with
     the batch depth it settled on — after calibration, before the timed loop; {!Isolated} always
     reports 1. The negative control for a twice-divided queued reading needs the depth the call
     ACTUALLY used: the call recalibrates independently, so re-applying {!queued_batch_depth} to an
     estimate taken outside it guesses wrong exactly on the busy runners the control must survive.
-    [None] means calibration was contended and refused; [calibration_samples] is zero for
-    {!Isolated} and the actual number of single-launch samples for {!Queued}. The default is a no-op
-    and no configuration selects it. *)
+    [calibration_samples] is zero for {!Isolated} and the actual number of single-launch samples for
+    {!Queued}. The default is a no-op and no configuration selects it. *)
 
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's

@@ -589,9 +589,13 @@ let () =
                   Autotune.time_routine ~tag_failures:true ~timing ~repeats:tuner_repeats
                     !(lv.lv_ctx) lv.lv_routine
                 in
-                if not timing_result.Autotune.contended then
-                  let dt = timing_result.ms /. 1000. in
-                  if Float.(dt < !slot) then slot := dt)
+                (* Through the shared gate, never the [contended] flag alone: contention and a clock
+                   that resolved nothing are separate refusals (gh-ocannl-888), and a half-proof
+                   here would store a zero as the best tuner time and report it as infinite
+                   throughput. *)
+                Option.iter (Autotune.admitted_timing_ms timing_result) ~f:(fun ms ->
+                    let dt = ms /. 1000. in
+                    if Float.(dt < !slot) then slot := dt))
           in
           sample lv.lv_iso Autotune.Isolated;
           sample lv.lv_queued Autotune.Queued
