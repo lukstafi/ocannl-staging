@@ -591,7 +591,6 @@ let non_config_environment_mentions =
 let non_config_assignment_mentions =
   [
     (".claude/skills/slipshow/SKILL.md", "title", 1);
-    ("README.md", "i", 1);
     ("benchmarks/README.md", "lr", 1);
     ("benchmarks/README.md", "bench_tune", 3);
     ("benchmarks/README.md", "bench_materialize", 2);
