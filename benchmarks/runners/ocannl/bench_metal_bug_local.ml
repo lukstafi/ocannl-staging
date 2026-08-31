@@ -86,6 +86,22 @@ let slot_values = [| 3; 5; 7; 11 |]
    float comparison landing on a tie. *)
 let guard_threshold = 4.0
 
+(* [Utils.decimal_float_literal]'s rule, transcribed rather than called: this file links no OCANNL,
+   and what it is a reproduction OF is the text the backend emits — a literal spelled some other way
+   is a kernel the compiler may optimize differently, which for a source-sensitive defect is the one
+   liberty this program cannot take. Sixteen significant digits, seventeen where those do not
+   round-trip, and a radix point appended when [%g] produced none, so the token is a floating
+   literal rather than an integer one the cast happens to convert. Two departures, both because this
+   executable is macOS-only and its constants are ordinary finite dyadics: the non-finite spellings
+   and the Windows three-digit-exponent normalization are left out. The round-trip is what keeps the
+   kernel's constant and the oracle's the same number for any threshold someone later picks. *)
+let c_float_literal c =
+  let s =
+    let s16 = Printf.sprintf "%.16g" c in
+    if float_of_string s16 = c then s16 else Printf.sprintf "%.17g" c
+  in
+  if String.exists (function '.' | 'e' | 'E' -> true | _ -> false) s then s else s ^ ".0"
+
 (* The emitted body of [total_fwd__seg1] (scalar_rmw_accumulation's localized leg, Metal, f32): the
    accumulator opens into a scope local, the nest updates the local, the node is stored once.
 
@@ -166,10 +182,8 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
   let statement =
     match contribution with
     | `Guarded_read ->
-        (* [%h] spells the threshold as the hexadecimal float literal MSL, like C99, parses exactly,
-           so the kernel's guard and the oracle's cannot disagree about the constant. *)
-        Printf.sprintf "if (%s > (float)(%h)) {\n          %s\n        }" (node_read cell)
-          guard_threshold update
+        Printf.sprintf "if (%s > (float)(%s)) {\n          %s\n        }" (node_read cell)
+          (c_float_literal guard_threshold) update
     | `Pooled_read | `Slots_read | `Index_only -> update
   in
   Printf.sprintf
