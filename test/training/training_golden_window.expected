@@ -1,0 +1,9 @@
+the window averages the newest entries: (1+2+3)/3: true
+reversing the log gives the mean of the other three entries, near 67.67: true
+entries older than the window do not move the mean: true
+a window of one is the newest entry: true
+a window as long as the log is the whole-log mean: (1+2+3+4)/4: true
+a window one entry longer than the log is refused: true
+a window over an empty log is refused: true
+a window longer than the log is refused, by however much: true
+a non-positive window is refused: true

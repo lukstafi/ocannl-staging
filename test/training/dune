@@ -202,6 +202,26 @@
  (modules training_golden)
  (libraries base))
 
+; The host-side unit test of that library's window statistic (gh-ocannl-854). The `train`-tier
+; integrations rest their convergence claims on `recent_mean_exn` taking its window from the
+; NEWEST end of the epoch log and refusing an undersized one, and neither property is visible in
+; their goldens -- a run that averaged the wrong end, or averaged short, still prints one number
+; and one verdict. This test is pure host arithmetic over a float list: no tensors, no device, no
+; training loop, so it belongs on the default `runtest` path rather than the `train` tier, and
+; `dune build @test/training/runtest-training_golden_window` reruns it alone. It takes the
+; directory's lock like every other action here (see the ambient gate above), for the microseconds
+; it takes to average nine floats.
+
+(test
+ ; ocannl-backend: none -- host arithmetic over a float list; it links no backend, reads no
+ ; device, and starts no training loop.
+ (name training_golden_window)
+ (package neural_nets_lib)
+ (modules training_golden_window)
+ (locks ocannl_training_test)
+ (deps ocannl_config)
+ (libraries base training_golden arrayjit.verdict))
+
 (executable
  (name mlp_names)
  (modules mlp_names)
