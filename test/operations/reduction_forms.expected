@@ -407,3 +407,5 @@ tile-mma-fallback @ bf16 agrees with its reference value: true
 tile-mma-fallback @ f16 renders the form its composition claims: true
 tile-mma-fallback @ f16: codegen's peel decided what the leg declares: true
 tile-mma-fallback @ f16 agrees with its reference value: true
+a read-modify-write reads as one, in either spelling of its device read: true
+the volatile-cast spelling counts the same node accesses as the plain one: true

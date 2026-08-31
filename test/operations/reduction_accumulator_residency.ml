@@ -196,7 +196,12 @@ let () =
         let count st pattern =
           List.length (String.substr_index_all st ~may_overlap:false ~pattern)
         in
-        let node_accesses st = count st (ident ^ "[") in
+        (* Both spellings, as everywhere else in this file: a device read Metal renders through its
+           expression-level volatile cast is still a read of the node, and counting only the plain
+           one would let the read half of a read-modify-write go missing — which is the direction
+           that PASSES the "no statement both reads and writes the node" claim below over a kernel
+           that does exactly that. *)
+        let node_accesses st = count_node_accesses st ident in
         let accumulation_updates =
           List.filter statements ~f:(fun st ->
               node_accesses st = 0

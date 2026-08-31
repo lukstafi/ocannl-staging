@@ -190,12 +190,13 @@ test/operations/reduction_accumulator_residency.ml [also pins text this scan can
     "volatile float*)res_guard_mask"
     "volatile"
     ... ^ " = "
-    ... ^ "["
 test/operations/reduction_forms.ml [also pins text this scan cannot name]
     " = "
+    "*)"
     "Vectorized reduction rendering"
     "] = "
     "ocannl_shfl_xor"
+    "volatile "
     ... ^ "["
 test/operations/reserved_routine_names.ml
     "void " ^ "gh686_ordinary_name" ^ "("
