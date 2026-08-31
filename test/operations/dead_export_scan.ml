@@ -25,20 +25,6 @@ module Dune = Test_utils.Dune_stanza_scan
    decision. *)
 let exempt_zero_reference_exports =
   [
-    "Affine.ap_covered_chunk";
-    "Affine.ap_of_form";
-    "Affine.ap_subset";
-    "Affine.axis_index_to_string";
-    "Affine.ceil_div";
-    "Affine.equal_verdict";
-    "Affine.equation_of";
-    "Affine.floor_div";
-    "Affine.forced_pairs";
-    "Affine.gcd";
-    "Affine.infeasible";
-    "Affine.linear_terms";
-    "Affine.range_of_var";
-    "Affine.terms_of";
     "Backend_impl._get_local_debug_runtime";
     "Backend_impl.next_global_device_id";
     "Backend_intf.sexp_of_device";
@@ -62,22 +48,6 @@ let exempt_zero_reference_exports =
     "C_syntax.op_syntax_idents";
     "C_syntax.summarize_peel_census";
     "C_syntax.summarize_volatility_census";
-    "Compiler_options.clang_fast_math_options";
-    "Cpu_topology.affinity_mask_stub";
-    "Cpu_topology.effective_cpu_count_stub";
-    "Cpu_topology.hypervisor_present_stub";
-    "Cpu_topology.linux_classes";
-    "Cpu_topology.native_core_classes_str";
-    "Cpu_topology.read_sys_file";
-    "Cpu_topology.set_process_affinity_stub";
-    "Cpu_topology.sort_fastest_first";
-    "Cpu_topology.total_logical_count";
-    "Host_inits.table";
-    "Interval.all_finite";
-    "Interval.arith_result";
-    "Interval.endpoint_exact";
-    "Interval.float_exact_int_limit";
-    "Interval.value_fits";
     "Lexer.__ocaml_lex_multichar_token_rec";
     "Lexer.__ocaml_lex_single_char_token_rec";
     "Lexer.__ocaml_lex_tables";
