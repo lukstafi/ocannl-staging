@@ -749,6 +749,65 @@ let mentions_scope_local st =
   in
   go 0
 
+(* Erase the expression-level [volatile] pointer casts a backend may put on the READ side of a
+   device read-modify-write: a read of [rfout] parenthesized and prefixed with a cast to [device
+   volatile float *] becomes a plain [rfout] again. Metal is the backend that spells accumulating
+   reads this way ({!Ir.C_syntax.pp_device_read_ptr}, guarded by [volatile_serial_accumulation]); cc
+   and the other CPU renderings do not, so without this the same kernel reads as two different forms
+   on two backends.
+
+   Erasing rather than teaching {!subscripts} a second pattern, and erasing here rather than at each
+   count, because the cast is a SPELLING of the access and every reading has to agree about that:
+   [subscripts], [assigns_node] and [foreign_accesses] each decide from the same text, and a node
+   access counted by one and missed by another is a reading of nothing in particular.
+
+   The failure direction is what makes this load-bearing rather than cosmetic. An uncounted read
+   costs a statement its second subscript, so a genuine per-step read-modify-write reads as zero RMW
+   statements — which is [Unrecognized] for a member claiming {!Rmw} (a loud failure, and how this
+   was found), but is [Localized] for any member that also closes a cell from a scope local. That
+   second case is a kernel still hammering the device cell every step, classified as the localized
+   form this table exists to certify. *)
+let strip_volatile_casts src =
+  let n = String.length src in
+  let buf = Buffer.create n in
+  let i = ref 0 in
+  while !i < n do
+    (* Two opening parens, a cast to a volatile pointer that itself contains no nested parens, then
+       a bare identifier and the outer close: the shape the emitter builds around a device read.
+       Anything that does not match all of that is copied through. *)
+    let erased =
+      if !i + 1 < n && Char.equal src.[!i] '(' && Char.equal src.[!i + 1] '(' then
+        match String.substr_index src ~pos:(!i + 2) ~pattern:"*)" with
+        | None -> None
+        | Some close ->
+            let inner = String.sub src ~pos:(!i + 2) ~len:(close - (!i + 2)) in
+            if
+              String.is_substring inner ~substring:"volatile "
+              && (not (String.contains inner '('))
+              && not (String.contains inner ')')
+            then begin
+              let j = close + 2 in
+              let k = ref j in
+              while !k < n && is_ident_char src.[!k] do
+                Int.incr k
+              done;
+              if !k > j && !k < n && Char.equal src.[!k] ')' then
+                Some (String.sub src ~pos:j ~len:(!k - j), !k + 1)
+              else None
+            end
+            else None
+      else None
+    in
+    match erased with
+    | Some (ident, next) ->
+        Buffer.add_string buf ident;
+        i := next
+    | None ->
+        Buffer.add_char buf src.[!i];
+        Int.incr i
+  done;
+  Buffer.contents buf
+
 (* Occurrences of [ident] as a WHOLE identifier followed by a subscript. Substring counting is wrong
    here: [partials_rfout[..]] contains [rfout[], so a reduction whose partials node is named after
    its target would read as touching the target twice. *)
@@ -788,6 +847,7 @@ let lhs_array st =
           if !b < br then Some (String.sub prefix ~pos:!b ~len:(br - !b)) else None)
 
 let read_form src ~label =
+  let src = strip_volatile_casts src in
   match ident_for src ~label with
   | None -> None
   | Some ident ->
@@ -2039,3 +2099,37 @@ let () =
             (show want);
         p value_claim ok
       end)
+
+(* {1 The reading is backend-independent}
+
+   Everything above reads whichever kernel the run's backend emitted, so a spelling only one backend
+   produces is only ever exercised where that backend runs — and Metal is off the per-PR path. When
+   Metal's accumulation workaround moved from a volatile pointer DECLARATION to expression-level
+   casts on the read, the table's counter stopped seeing the read half of a read-modify-write and
+   every Metal decline leg went [Unrecognized], on a machine nobody was watching.
+
+   So the normalizer is checked here directly, on both spellings of one statement, on every backend:
+   the reading a kernel gets must not depend on how its backend spells a device read. Synthetic text
+   rather than a compiled kernel, deliberately — the point is to hold on the backends that cannot
+   produce the second spelling at all. *)
+let () =
+  let decl = "  device float* __restrict rfout = (device float*)(__pools[0]);\n" in
+  let plain = "  rfout[i] = (rfout[i] + rfxs[(i) * 64 + k]);\n" in
+  let cast =
+    "  rfout[i] = (((device volatile float*)rfout)[i] + ((device volatile float*)rfxs)[(i) * 64 + \
+     k]);\n"
+  in
+  let read src = read_form (decl ^ src) ~label:"rfout" in
+  match (read plain, read cast) with
+  | Some plain_reading, Some cast_reading ->
+      p "a read-modify-write reads as one, in either spelling of its device read"
+        (same_form (form_of plain_reading) Rmw && same_form (form_of cast_reading) Rmw);
+      p "the volatile-cast spelling counts the same node accesses as the plain one"
+        (cast_reading.node_accesses = plain_reading.node_accesses
+        && cast_reading.rmw_statements = plain_reading.rmw_statements
+        && cast_reading.stores_from_local = plain_reading.stores_from_local
+        && cast_reading.foreign_local_stores = plain_reading.foreign_local_stores)
+  | _ ->
+      Stdio.eprintf "  normalizer check: no accumulator identifier in the synthetic kernel\n";
+      p "a read-modify-write reads as one, in either spelling of its device read" false;
+      p "the volatile-cast spelling counts the same node accesses as the plain one" false
