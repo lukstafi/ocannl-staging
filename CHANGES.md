@@ -574,7 +574,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - Index arithmetic is signed (`Ops.index_prec` int32, int64 under `large_models`), with
   per-node element counts checked to fit.
 - Generated code and logs go to per-executable subdirectories `build_files/<exe>/` and
-  `log_files/<exe>/`; step timing uses the monotonic clock (Windows' `gettimeofday` ticks at
+  `log_files/<exe>/` (override with `build_files_prefix`; `.` restores the flat legacy layout);
+  step timing uses the monotonic clock (Windows' `gettimeofday` ticks at
   ~1 ms); the gated training tests moved back to `runtest` via `Autotune.tune ~rounds:0` with
   materialize-all placements (bigram on Metal 345 → 25-29 s).
 
