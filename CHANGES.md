@@ -18,7 +18,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   `Context.compile` and `Train.run_once` — out-of-tree callers get a type error whose fix is
   `let _, routine = ...` or, better, chaining the returned context; `Train`'s duplicated
   dump/budget blocks are shared helpers (gh-ocannl-772).
-- `?lowered_transform` / `?lowered_transforms` on `Context.compile` and backend `compile` are
+- `?lowered_transform` / `?lowered_transforms` on `Context.compile` / `Context.compile_outcome`
+  and backend `compile` are
   unified into one list-returning `?lowered_transform : Low_level.optimized ->
   Low_level.optimized list`, making their runtime mutual exclusion impossible to express
   (gh-ocannl-768).
@@ -115,7 +116,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658): one minimal,
   executed IR shape per outcome, stating which phase decides it and under which provenance; and
   hand-built lowered code can be executed, not only analyzed, via `Context.compile ?prelowered`
-  (gh-ocannl-562). **Behavior change**: `Context.get_values` / `set_values` on a node the
+  (gh-ocannl-562). **Behavior changes**: `Context.routine` became a `private` record — fields
+  stay readable, but out-of-tree code can no longer construct or functionally update one — and
+  `Context.get_values` / `set_values` on a node the
   optimizer placed `Local` now raise instead of serving an unrelated uploaded copy — host access
   requires materializing the node (gh-ocannl-599).
 - **A fault-injection inventory for resource-owning seams** (gh-ocannl-571), with a GPU-free
@@ -179,7 +182,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   silently collapsing to a `Get`.
 - **One environment spelling, and no silent demotion** (gh-ocannl-605, gh-ocannl-628,
   gh-ocannl-652): a configuration key is read from `OCANNL_<KEY>` and nothing else; a known key in
-  a spelling nothing reads is a fatal startup error naming the spelling that works; a mistyped
+  a spelling nothing reads is a fatal startup error naming the spelling that works (on
+  case-sensitive platforms — native Windows's case-insensitive environment reads the lowercase
+  spelling as the same variable); a mistyped
   variable warns by name (gh-ocannl-629); and per-directory `env_spelling_gate` rules plus
   `env_var_deps` make dune reruns track exactly the declared variables. On the commandline,
   dashes now go all the way (`--ocannl-log-level=1` is read alongside `--ocannl_log_level=1`),
@@ -292,8 +297,10 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   ordinary sources with picker-inherited precedence (explicit keys beat a profile of equal
   immediacy). `reproducible` is deterministic and, wherever reasonable, identical across machines
   (cross-backend reproducibility is out of its scope); `performance` is the fastest
-  configuration at unchanged semantics. The reference config now ships with every setting
-  commented out.
+  configuration at unchanged semantics, with one named exception — it enables
+  `fp16_arithmetic`, the mantissa-for-throughput trade — while result-changing gates like
+  `tf32_matmuls` stay on the orthogonal numerics axis. The reference config now ships with every
+  setting commented out.
 - **Honest search reporting**: `Autotune.report` gains `best_label`, `best_tensorized` (read off
   the winner's schedule, not its label) and `mma_best_ms`, and the placement A/B states when a
   tensorized winner is discarded (gh-ocannl-546, [report](benchmarks/report-gh546-metal.md));
