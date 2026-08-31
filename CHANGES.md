@@ -14,8 +14,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   1.06x cost memory-bound up to 4.1x on a single-threaded scalar-loss reduction; each compiled
   routine now carries a volatility census (`Context.routine.volatility`) (gh-ocannl-782).
 - `Train.to_routine` returns the post-compile context (`Context.t * Context.routine`), matching
-  `Context.compile` and `Train.run_once`; `Train`'s duplicated dump/budget blocks are shared
-  helpers (gh-ocannl-772).
+  `Context.compile` and `Train.run_once` — out-of-tree callers get a type error whose fix is
+  `let _, routine = ...` or, better, chaining the returned context; `Train`'s duplicated
+  dump/budget blocks are shared helpers (gh-ocannl-772).
 - `?lowered_transform` / `?lowered_transforms` on `Context.compile` and backend `compile` are
   unified into one list-returning `?lowered_transform : Low_level.optimized ->
   Low_level.optimized list`, making their runtime mutual exclusion impossible to express
@@ -29,7 +30,7 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   been parsed (gh-ocannl-758).
 - The test-suite configuration reader lives in `test/config` and resolves the backend once for the
   whole suite; a directory adopting a per-backend golden reads
-  `%{read:../config/ocannl_backend.txt}` and copies nothing.
+  `%{read:../config/ocannl_backend.txt}` and copies nothing (gh-ocannl-787).
 
 ### Fixed
 
@@ -78,10 +79,13 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   sliding-window z-score monitor. Executed-parity coverage against host oracles.
 - **Mapped checkpoint and safetensors loading** (gh-ocannl-467, gh-ocannl-587, gh-ocannl-588):
   payloads load as private, copy-on-write `Unix.map_file` regions instead of element-by-element
-  decodes, so pages are read lazily by the OS; the checkpoint format gained an `alignment` field;
-  unaligned payloads are decoded rather than mapped (an unaligned mapping is undefined
-  behaviour); and the Windows carve-out was measured, found unnecessary, and retired — mapping
-  defaults on for every platform, pinned by a cross-platform regression test.
+  decodes, so pages are read lazily by the OS; the checkpoint format gained an `alignment` field
+  (old readers and old files keep working); unaligned payloads are decoded rather than mapped (an
+  unaligned mapping is undefined behaviour); and the Windows carve-out was measured, found
+  unnecessary, and retired — mapping defaults on for every platform, pinned by a cross-platform
+  regression test. **Behavior change**: `Safetensors.to_ndarray` returns each payload's own
+  precision instead of forcing F32 — pass `?prec` for a fixed target — and I8/I16/F8_E4M3 payloads
+  are refused rather than reinterpreted (`to_float32` keeps its F32-only contract).
 - **Frozen parameters are not trained** (gh-ocannl-670, gh-ocannl-673): `Train.trainable_params`
   derives the trained subset from the backprop code (`?params` to override) while `loss.params`
   keeps its union semantics as the state set; params-driven helpers over a loss that trains
@@ -339,7 +343,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   per-candidate declines.
 - **The schedule cache key covers the numerics policy** (gh-ocannl-568): a default-flags run
   sharing a cache directory with a tf32-tuned search used to replay the tf32 winner at 5.9x
-  slower than not tuning at all, silently.
+  slower than not tuning at all, silently. Pre-existing cache entries are invalidated: one cold
+  search per program.
 - `simplify_llc` narrows its interval environment from enclosing `If` conditions, so schedule
   guards fold where the guard decides them (gh-ocannl-566); a roofline bound violation is
   reported once per process, not once per compile.
@@ -406,8 +411,11 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   optimizer-chosen, identical across sibling candidates; opt-in `tf32_matmuls` routes CUDA
   uniform-f32 GEMMs through wmma `precision::tf32`.
 - **Packed `uniform` total over shapes** (gh-ocannl-509): no more block-width divisibility
-  requirement; it becomes the default parameter init (`uniform1` deprecated), and packed uniform
-  results can be virtual via lane extraction, bitwise-equal to materialized runs on every backend.
+  requirement; it becomes the default parameter init, and packed uniform results can be virtual
+  via lane extraction, bitwise-equal to materialized runs on every backend. **Reproducibility
+  break**: this changes every default-initialized random stream even at an unchanged seed —
+  `uniform1` and `default_uniform1_param_init` are deprecated but kept exactly for reproducing
+  pre-0.9 streams.
 - **Search survivability**: typed candidate-failure containment with per-backend classifiers and
   damage tracking — a rejection that provably wrote nothing rolls back, one that may have written
   poisons the lineage by name (gh-ocannl-536); HIP scratch-budget pre-validation, since ROCm
@@ -583,8 +591,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   (gh-ocannl-142).
 - Data-parallel training: `shard_along` / `gather` primitives with merge-buffer gradient
   all-reduce, and **zero-copy leading-axis slice views** (`@|` / `Fetch.Slice`) — writing through
-  an alias-eligible slice now mutates the parent; ineligible slices fall back to copies
-  (gh-ocannl-293).
+  an alias-eligible slice now mutates the parent; ineligible slices fall back to copies; and
+  host-side access (`Context.get_values` / `set_values`) of an alias view is rejected with a
+  clear error — read or write the parent tensor instead (gh-ocannl-293).
 - Tensor saving, loading, and restoring (gh-ocannl-373); `Uint32`/`Uint64` precisions with
   index-embedding precision selected by `large_models` (gh-ocannl-349, gh-ocannl-177).
 - Makemore-progression examples and tutorial: `mlp_names` (Bengio MLP), `mlp_bn_names`
