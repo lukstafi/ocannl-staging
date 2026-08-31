@@ -23,8 +23,7 @@ module Tn = Ir.Tnode
 module Ops = Ir.Ops
 module Idx = Ir.Indexing
 module LL = Ir.Low_level
-
-let p = Verdict.p
+open Verdict.Claims
 
 let doc_to_string doc =
   let b = Buffer.create 4096 in

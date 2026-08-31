@@ -26,8 +26,7 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
+open Verdict.Claims
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }

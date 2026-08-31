@@ -47,6 +47,11 @@
 
 open Base
 open Stdio
+
+(* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+   teardown -- so the exit status, not the promotable golden diff, carries the verdict
+   (gh-ocannl-601). *)
+open Verdict.Claims
 module Scan = Test_utils.Cache_dir_scan
 
 let printf = Test_utils.Refusal_control_manifest.printf
@@ -255,10 +260,6 @@ let () =
     List.filter paths ~f:(fun (path, _) ->
         String.is_suffix path ~suffix:".ml" && not (derived path))
   in
-  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
-     teardown -- so the exit status, not the promotable golden diff, carries the verdict
-     (gh-ocannl-601). *)
-  let fail = Verdict.fail in
   let ignore_file =
     match require_ignore_file ~fail ignore_file with
     | Some on_disk -> on_disk

@@ -74,7 +74,9 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Generated.init ~backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
-let p = Verdict.p
+
+open Verdict.Claims
+
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* {1 The reduction}

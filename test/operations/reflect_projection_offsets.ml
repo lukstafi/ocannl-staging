@@ -16,9 +16,7 @@
 open Base
 open Ocannl.Operation.DSL_modules
 module Idx = Ir.Indexing
-
-let p = Verdict.p
-let p_all = Verdict.p_all
+open Verdict.Claims
 
 (* The value of an affine axis index under an assignment of the symbols. Deliberately partial: a
    [Sub_axis] or [Concat] never appears in what [reflect_projection] RETURNS (it always returns one

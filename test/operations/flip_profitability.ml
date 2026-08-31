@@ -19,7 +19,7 @@
    Pure functions over records: no context, no compile, no device. *)
 
 open Base
-module V = Verdict
+open Verdict.Claims
 
 (* A completed search that timed [mma_timed] tensorized candidates, the best of them at
    [mma_best_ms], with the search's overall best at [best_ms]. The objective is the default one and
@@ -78,38 +78,38 @@ let () =
         (ordering_name (resolves profit)));
   let profit_of name = List.Assoc.find_exn cells name ~equal:String.equal in
   (* The displacement case: measured to lose by ~12x, so the prior is void here. *)
-  V.p "metal's cell is measured out of profit"
+  p "metal's cell is measured out of profit"
     (match profit_of "metal f16" with Autotune.Loses _ -> true | _ -> false);
-  V.p "metal's losing family ranks the surface by cost"
+  p "metal's losing family ranks the surface by cost"
     (match resolves (profit_of "metal f16") with `Cost -> true | `Enablement -> false);
-  V.p "cuda's cell is measured out of profit too"
+  p "cuda's cell is measured out of profit too"
     (match resolves (profit_of "cuda f16") with `Cost -> true | `Enablement -> false);
   (* The negative control gh-558 closed on: the family IS the arm's winner there, so the prior — and
      with it the budget-5 reachability the enablement ordering bought — stands. *)
-  V.p "hip's winning family keeps the enablement prior"
+  p "hip's winning family keeps the enablement prior"
     (match profit_of "hip bf16" with Autotune.Pays _ -> true | _ -> false);
-  V.p "hip's paying family ranks the surface by enablement"
+  p "hip's paying family ranks the surface by enablement"
     (match resolves (profit_of "hip bf16") with `Enablement -> true | `Cost -> false);
   (* The other control: a family that lost by a hair could be won back by one more placement flip,
      so it stays promoted. Only a loss beyond the margin voids the prior. *)
   let hair =
     Autotune.family_profit_of_reports [ searched ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:7.6 ]
   in
-  V.p "a family that lost by 1% is still within profit"
+  p "a family that lost by 1% is still within profit"
     (match hair with Autotune.Pays _ -> true | _ -> false);
-  V.p "a family that lost by 1% keeps the enablement prior"
+  p "a family that lost by 1% keeps the enablement prior"
     (match resolves hair with `Enablement -> true | `Cost -> false);
   (* Absence of a confirmation is not evidence against: an arm that seeded tensorized candidates and
      timed none measured nothing about the family. *)
   let unmeasured = Autotune.family_profit_of_reports [ seeded_none ~best_ms:7.5 ] in
-  V.p "an arm that timed no tensorized candidate measures nothing"
+  p "an arm that timed no tensorized candidate measures nothing"
     (match unmeasured with Autotune.Unmeasured -> true | _ -> false);
-  V.p "unmeasured keeps the enablement prior"
+  p "unmeasured keeps the enablement prior"
     (match resolves unmeasured with `Enablement -> true | `Cost -> false);
   let contention_affected =
     { (searched ~best_ms:1.0 ~mma_timed:4 ~mma_best_ms:0.5) with Autotune.timings_contended = 1 }
   in
-  V.p "an incomplete contention-affected search contributes no profitability evidence"
+  p "an incomplete contention-affected search contributes no profitability evidence"
     (match Autotune.family_profit_of_reports [ contention_affected ] with
     | Autotune.Unmeasured -> true
     | _ -> false);
@@ -125,11 +125,11 @@ let () =
       mma_best_ms;
     }
   in
-  V.p "a cache replay reaches the verdict of the search that stored it"
+  p "a cache replay reaches the verdict of the search that stored it"
     (Float.equal
        (ratio (Autotune.family_profit_of_reports [ replayed ~best_ms:7.5 ~mma_best_ms:92.0 ]))
        (ratio (profit_of "metal f16")));
-  V.p "and a replay of a search that timed none still measures nothing"
+  p "and a replay of a search that timed none still measures nothing"
     (match
        Autotune.family_profit_of_reports [ replayed ~best_ms:7.5 ~mma_best_ms:Float.infinity ]
      with
@@ -156,13 +156,13 @@ let () =
       default_fingerprint = None;
     }
   in
-  V.p "a stored tensorized best survives the entry round-trip"
+  p "a stored tensorized best survives the entry round-trip"
     (match (round_trip (entry (Some 92.0))).Ir.Schedule_cache.mma_best_ms with
     | Some v -> Float.equal v 92.0
     | None -> false);
-  V.p "an entry without the field is readable and claims nothing"
+  p "an entry without the field is readable and claims nothing"
     (Option.is_none (round_trip (entry None)).Ir.Schedule_cache.mma_best_ms);
-  V.p "omitting it keeps the entry's sexp free of the field"
+  p "omitting it keeps the entry's sexp free of the field"
     (not
        (String.is_substring
           (Sexp.to_string (Ir.Schedule_cache.sexp_of_entry (entry None)))
@@ -171,11 +171,11 @@ let () =
   let beam_only =
     Autotune.family_profit_of_reports [ beam_appended ~best_ms:7.5 ~mma_best_ms:92.0 ]
   in
-  V.p "a beam-appended Tensorize measures the family though no label promised one"
+  p "a beam-appended Tensorize measures the family though no label promised one"
     (match beam_only with Autotune.Loses _ -> true | _ -> false);
-  V.p "and its losing measurement voids the prior"
+  p "and its losing measurement voids the prior"
     (match resolves beam_only with `Cost -> true | `Enablement -> false);
-  V.p "a report that never searched measures nothing"
+  p "a report that never searched measures nothing"
     (match
        Autotune.family_profit_of_reports [ Autotune.no_search_report ~timing:Autotune.Queued ]
      with
@@ -190,9 +190,9 @@ let () =
         searched ~best_ms:1.28 ~mma_timed:16 ~mma_best_ms:1.28;
       ]
   in
-  V.p "one arm's paying family outweighs another's losing one"
+  p "one arm's paying family outweighs another's losing one"
     (match mixed with Autotune.Pays _ -> true | _ -> false);
-  V.p "two losing arms report the more favourable ratio"
+  p "two losing arms report the more favourable ratio"
     (Float.equal
        (ratio
           (Autotune.family_profit_of_reports
@@ -209,18 +209,18 @@ let () =
     | _ -> false
     | exception Utils.User_error _ -> true
   in
-  V.p "a well-formed margin parses"
+  p "a well-formed margin parses"
     (Float.equal (Autotune.flip_profit_margin_of_string " 1.25 ") 1.25);
-  V.p "a margin below 1.0 is rejected" (rejects "0.5");
-  V.p "an unparseable margin is rejected" (rejects "generous");
-  V.p "an empty margin is rejected" (rejects "");
-  V.p "a non-finite margin is rejected" (rejects "inf");
+  p "a margin below 1.0 is rejected" (rejects "0.5");
+  p "an unparseable margin is rejected" (rejects "generous");
+  p "an empty margin is rejected" (rejects "");
+  p "a non-finite margin is rejected" (rejects "inf");
   (* The margin is the knob, and it is the only thing that moves these verdicts. *)
-  V.p "a margin above metal's ratio re-admits its family"
+  p "a margin above metal's ratio re-admits its family"
     (match Autotune.family_profit_of_reports ~margin:20.0 metal with
     | Autotune.Pays _ -> true
     | _ -> false);
-  V.p "a margin below hip's ratio is not reachable (its family won outright)"
+  p "a margin below hip's ratio is not reachable (its family won outright)"
     (Float.( <= ) (ratio (profit_of "hip bf16")) 1.0);
   (* The two configured orderings are unconditional: they are the evaluation baselines the gh-514
      report's cells C were measured under, and a term that moved them would make those cells
@@ -230,12 +230,12 @@ let () =
       ("unmeasured", unmeasured); ("paying", profit_of "hip bf16"); ("losing", profit_of "metal f16");
     ]
     ~f:(fun (name, profit) ->
-      V.p
+      p
         (Printf.sprintf "ordering=cost stays cost under %s evidence" name)
         (match Autotune.effective_flip_ordering ~ordering:`Cost ~profit with
         | `Cost -> true
         | `Enablement -> false);
-      V.p
+      p
         (Printf.sprintf "ordering=enablement stays enablement under %s evidence" name)
         (match Autotune.effective_flip_ordering ~ordering:`Enablement ~profit with
         | `Enablement -> true

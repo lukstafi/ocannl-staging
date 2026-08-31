@@ -19,9 +19,7 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Sched = Ir.Schedule
-
-let p = Verdict.p
-let p_all = Verdict.p_all
+open Verdict.Claims
 
 let fresh_tn =
   let c = ref 960_000_000 in

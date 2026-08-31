@@ -20,8 +20,7 @@ open Stdio
 module Asgns = Ir.Assignments
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
-
-let p = Verdict.p
+open Verdict.Claims
 
 (** Every [For_loop] binder of [llc], as [(symbol, width)] in preorder. *)
 let binders (llc : LL.t) : (Idx.symbol * int) list =

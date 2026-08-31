@@ -37,9 +37,7 @@ module Sched = Ir.Schedule
 module SO = Ir.Schedule_outcome
 module BI = Ir.Backend_intf
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
-let p_empty = Verdict.p_empty
+open Verdict.Claims
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }

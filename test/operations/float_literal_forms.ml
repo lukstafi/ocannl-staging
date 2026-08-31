@@ -50,8 +50,9 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
-let p = Verdict.p
-let p_empty = Verdict.p_empty
+
+open Verdict.Claims
+
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* On the bits, because the whole point is values a tolerance — or [Float.equal], which reports [-0.

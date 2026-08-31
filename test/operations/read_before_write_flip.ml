@@ -20,8 +20,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
-
-let p = Verdict.p
+open Verdict.Claims
 
 (* Deterministic input and (via [fixed_state_for_init]) deterministic conv params, so the two phases
    compute the same function. *)

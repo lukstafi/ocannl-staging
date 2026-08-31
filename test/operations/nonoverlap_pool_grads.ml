@@ -24,8 +24,7 @@ open Ocannl.Operation.DSL_modules
 open Stdio
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
+open Verdict.Claims
 
 (* Non-empty by construction (gh-ocannl-746): [Array.for_all2_exn] answers [true] on two empty
    arrays, and a readback and the reference it is compared against go empty TOGETHER -- the

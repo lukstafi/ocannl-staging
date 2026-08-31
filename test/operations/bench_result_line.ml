@@ -13,7 +13,7 @@
    negative control at the end shows it does — while accepting [null]. *)
 
 open Base
-module V = Verdict
+open Verdict.Claims
 
 let parses s = match Yojson.Safe.from_string s with _ -> true | exception _ -> false
 let member k j = Yojson.Safe.Util.member k j
@@ -23,9 +23,9 @@ let () =
   List.iter
     [ ("nan", Float.nan); ("inf", Float.infinity); ("-inf", Float.neg_infinity) ]
     ~f:(fun (name, v) ->
-      V.p (Printf.sprintf "num %s is null" name) (String.equal (Bench_json.num v) "null");
-      V.p (Printf.sprintf "fixed %s is null" name) (String.equal (Bench_json.fixed v) "null"));
-  V.p "num of a finite value is the number"
+      p (Printf.sprintf "num %s is null" name) (String.equal (Bench_json.num v) "null");
+      p (Printf.sprintf "fixed %s is null" name) (String.equal (Bench_json.fixed v) "null"));
+  p "num of a finite value is the number"
     (String.equal (Bench_json.num 1.25) "1.25" && String.equal (Bench_json.fixed 1.25) "1.250");
   Stdio.printf "nums of a diverged trajectory: [%s]\n"
     (Bench_json.nums ~prec:9 [| 1.5; Float.nan; Float.infinity; Float.neg_infinity |])
@@ -106,29 +106,29 @@ let () =
   List.iter
     [ ("ordinary", ordinary); ("diverged", diverged) ]
     ~f:(fun (name, line) ->
-      V.p (Printf.sprintf "%s line parses as JSON" name) (parses line);
-      V.p
+      p (Printf.sprintf "%s line parses as JSON" name) (parses line);
+      p
         (Printf.sprintf "%s line is one line" name)
         (not (String.exists line ~f:(fun c -> Char.equal c '\n' || Char.equal c '\r')));
-      V.p
+      p
         (Printf.sprintf "%s line has no byte below U+0020" name)
         (not (String.exists line ~f:(fun c -> Char.to_int c < 0x20))))
 
 let () =
   let j = Yojson.Safe.from_string diverged in
   let losses = member "losses" j in
-  V.p "a diverged loss trajectory keeps its finite steps and nulls the rest"
+  p "a diverged loss trajectory keeps its finite steps and nulls the rest"
     (Yojson.Safe.equal losses (`List [ `Float 1.5; `Null; `Null; `Null ]));
-  V.p "an unmeasured time is null, not a number"
+  p "an unmeasured time is null, not a number"
     (List.for_all [ "p10"; "p50"; "p90" ] ~f:(fun p ->
          Yojson.Safe.equal (member p (member "step_ms" j)) `Null)
     && Yojson.Safe.equal (member "queued_step_ms" j) `Null
     && Yojson.Safe.equal (member "compile_s" j) `Null);
   let arm_a = List.hd_exn (Yojson.Safe.Util.to_list (member "arms" (member "tune" j))) in
-  V.p "an arm that timed nothing reports null times"
+  p "an arm that timed nothing reports null times"
     (Yojson.Safe.equal (member "best_ms" arm_a) `Null
     && Yojson.Safe.equal (member "mma_best_ms" arm_a) `Null);
-  V.p "a diagnostic survives as a scrubbed string"
+  p "a diagnostic survives as a scrubbed string"
     (match member "terminal_failure" arm_a with
     | `String s -> String.is_prefix s ~prefix:"compile failed: 'kernel' / path"
     | _ -> false);
@@ -143,33 +143,33 @@ let () =
      it before it constructs any report, there is no arm that can omit it -- not even one that timed
      nothing (arm A). A reader comparing a [best_ms] with another artifact's needs this field to be
      there, since the two objectives differ by up to 2x and not by a constant (gh-ocannl-755). *)
-  V.p_all "every arm names the objective its times were measured under" arms ~f:(fun a ->
+  p_all "every arm names the objective its times were measured under" arms ~f:(fun a ->
       match member "timing" a with
       | `String spelling -> List.mem [ "queued"; "isolated" ] spelling ~equal:String.equal
       | _ -> false);
-  V.p "a contention-affected arm preserves its refusal count"
+  p "a contention-affected arm preserves its refusal count"
     (Yojson.Safe.equal (member "timings_contended" (arm "D")) (`Int 2));
-  V.p "an arm with no crowned candidate reports a null tensorization, not a label"
+  p "an arm with no crowned candidate reports a null tensorization, not a label"
     (List.for_all [ "A"; "C" ] ~f:(fun n ->
          Yojson.Safe.equal (member "tensorization" (arm n)) `Null));
-  V.p "the three tensorization labels reach the wire"
+  p "the three tensorization labels reach the wire"
     (List.for_all
        [ ("B", "scalar-fallback"); ("D", "tensorized"); ("E", "not-requested") ]
        ~f:(fun (n, label) -> Yojson.Safe.equal (member "tensorization" (arm n)) (`String label)));
-  V.p "a tensorized label over a scalar-fallback emission is visible as the pair"
+  p "a tensorized label over a scalar-fallback emission is visible as the pair"
     (Yojson.Safe.equal (member "tensorized" (arm "B")) (`Bool true)
     && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback")
     && Yojson.Safe.equal (member "mma_statements" (arm "B")) (`Int 2)
     && Yojson.Safe.equal (member "mma_scalar_fallbacks" (arm "B")) (`Int 2));
   (* The shipped artifact's own census, which the arms cannot always speak for. *)
   let shipped_mma = member "shipped_mma" (member "tune" j) in
-  V.p "the shipped artifact's census is carried apart from the arms'"
+  p "the shipped artifact's census is carried apart from the arms'"
     (Yojson.Safe.equal (member "tensorization" shipped_mma) (`String "tensorized")
     && Yojson.Safe.equal (member "statements" shipped_mma) (`Int 4)
     && Yojson.Safe.equal (member "scalar_fallbacks" shipped_mma) (`Int 0)
     (* And it is free to disagree with the arm named as shipped: that is the case it exists for. *)
     && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback"));
-  V.p "a tune object that recorded no shipped census says null, not a label"
+  p "a tune object that recorded no shipped census says null, not a label"
     (Yojson.Safe.equal
        (member "shipped_mma"
           (Yojson.Safe.from_string
@@ -181,9 +181,9 @@ let () =
    rejects each of them — which is what makes the verdicts above evidence rather than ceremony. (A
    JSON parser that admits `NaN` as an extension still rejects `nan`.) *)
 let () =
-  V.p "the pre-fix spellings do not parse"
+  p "the pre-fix spellings do not parse"
     (List.for_all [ "nan"; "inf"; "-inf" ] ~f:(fun spelling ->
          not (parses (Printf.sprintf {|{"losses":[%s]}|} spelling))));
-  V.p "OCaml's own float conversion spells them the way this oracle rejects"
+  p "OCaml's own float conversion spells them the way this oracle rejects"
     (List.for_all [ Float.nan; Float.infinity; Float.neg_infinity ] ~f:(fun v ->
          not (parses (Printf.sprintf {|{"losses":[%.9g]}|} v))))

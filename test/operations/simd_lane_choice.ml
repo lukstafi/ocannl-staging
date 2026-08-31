@@ -7,9 +7,8 @@
    narrower one"), and no single machine can exhibit both sides of it. *)
 
 open Base
+open Verdict.Claims
 
-let p = Verdict.p
-let p_all = Verdict.p_all
 let ladder = Ir.Backend_intf.simd_lane_ladder
 let lanes_for = Ir.Backend_intf.simd_lanes_for
 let reduce_lanes_for = Ir.Backend_intf.simd_reduce_lanes_for

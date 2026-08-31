@@ -38,9 +38,7 @@ module IDX = Train.IDX
 open Nn_blocks.DSL_modules
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
-
-let p = Verdict.p
-let p_all = Verdict.p_all
+open Verdict.Claims
 
 (* The gate's off position must really be off. An environment setting outranks the copied test
    config, so an ambient OCANNL_MEMORY_BUDGET would make the "budget off" phase plan after all and

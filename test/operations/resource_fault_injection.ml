@@ -9,8 +9,7 @@ open Ocannl.Operation.DSL_modules
 module FI = Ir.Resource_fault_injection
 module AC = Ir.Alloc_census
 module SC = Ir.Schedule_cache
-
-let p = Verdict.p
+open Verdict.Claims
 
 let injected ?(at = 1) point f =
   let hits = ref 0 in
