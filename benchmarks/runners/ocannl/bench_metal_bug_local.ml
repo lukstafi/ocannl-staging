@@ -177,13 +177,22 @@ let repro_body ?(qualifier = "") ?(restrict = " __restrict") ?(pointers = `Slots
   (* The update, and for [`Guarded_read] the [if] that controls it: the node read moves out of the
      accumulating expression into the guard, which is then the update's only device read. The
      threshold admits 43 of the 64 iterations, so a guard that is dropped, inverted or hoisted out
-     of the nest lands on a different total than an honoured one. *)
+     of the nest lands on a different total than an honoured one.
+
+     The guard is the only kernel text in this file not lifted verbatim from an emitted kernel, so
+     every token of it is one the backend can produce, and that is a constraint on anyone editing
+     it: the comparison is [Cmplt], which {!Ops.binop_c_syntax} spells [(a < b)] and Metal renders
+     through the shared default — there is no [>] in emitted code, because [Operation.( > )] is an
+     operand swap of [lt] (NaN-correct, unlike negation), so "greater than" reaches codegen already
+     swapped. Hence the constant on the left. The literal goes through [c_float_literal] above, the
+     [(float)] cast is what a double-typed constant's [convert_precision] emits at f32, and the
+     subscript is the same index expression the surrounding rows use. *)
   let update = Printf.sprintf "v33_total = (v33_total + %s);" term in
   let statement =
     match contribution with
     | `Guarded_read ->
-        Printf.sprintf "if (%s > (float)(%s)) {\n          %s\n        }" (node_read cell)
-          (c_float_literal guard_threshold) update
+        Printf.sprintf "if (((float)(%s) < %s)) {\n          %s\n        }"
+          (c_float_literal guard_threshold) (node_read cell) update
     | `Pooled_read | `Slots_read | `Index_only -> update
   in
   Printf.sprintf
@@ -221,8 +230,9 @@ let oracle ?(scale = 1.0) contribution =
   for n = 0 to (seq_len * width) - 1 do
     match contribution with
     | `Guarded_read ->
-        (* The guard reads the node; the update it controls reads nothing. *)
-        if scale *. produced n > guard_threshold then acc := !acc +. float_of_int n
+        (* The guard reads the node; the update it controls reads nothing. Spelled in the kernel's
+           own order, which is the backend's: the constant is the comparison's left operand. *)
+        if guard_threshold < scale *. produced n then acc := !acc +. float_of_int n
     | (`Pooled_read | `Slots_read | `Index_only) as contribution ->
         let term =
           match contribution with
