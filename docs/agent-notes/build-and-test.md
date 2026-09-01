@@ -592,6 +592,25 @@ that they earn a lookup rather than always-loaded space.
     build tree (`_build/default/test/operations` alone spends ~65), and every open of it fails with
     ENOENT. Gate such a leg with `Verdict.skipped ~aggregation:`Environment``, and make the gate a
     PROBE rather than `Sys.win32`: what is capped is the path this run actually got.
+- Windows caps a whole COMMAND LINE at 32,767 characters, and the repo-wide scans hand every file
+  they read to their executable as an argument, so they grow toward it with the repository. Past it
+  `CreateProcess` fails and dune reports `Error: CreateProcess(): No such file or directory` — an
+  error naming neither the length nor the executable, on whichever scan the last few merges pushed
+  over (three had crossed it and a fourth was 255 characters short when this was first hit). The
+  scans therefore pass their file lists as `@<path>` RESPONSE FILES: the rule writes the list with
+  dune's own `(echo "%{deps}")`, which runs inside dune and spawns nothing, into a second target of
+  the same rule, and `Test_utils.Scan_argv.expand` splices it back in where the `@` argument stood.
+  A new scan should be written that way from the start. `env_var_deps` knows the shape — a target
+  the rule hands back to its own action needs no golden diff — and recognizes it by the `@<target>`
+  reference rather than by the name, so a real output cannot be renamed out of the requirement.
+- A Windows checkout with `core.symlinks=false` (git's default there without Developer Mode) writes
+  every git symlink as a small TEXT FILE holding the link target. The repository has 19 of them —
+  `docs/in-progress/` and `docs/research/` are views onto `docs/proposals/` — so any scan that reads
+  documentation sees 29-byte stubs, and `config_usage_scan` reports an exemption count drifting to
+  zero. It is not a repository bug and must not be "fixed" in the exemption list: CI's Windows job
+  enables symlink evaluation (setup-ocaml runs `fsutil behavior set symlinkEvaluation`) and sees the
+  real files. On a hand-run Windows box, `git config core.symlinks true`, then delete and re-check-out
+  the 19 paths (`git ls-files -s | awk '$1=="120000"'`) before trusting any doc-reading scan.
 - `os.kill(pid, 0)` is not a liveness probe on Windows and must not be used as one. CPython
   implements `os.kill` there as `OpenProcess` followed by `TerminateProcess(handle, sig)`, so signal
   0 KILLS the process it was asked about, and a pid that already exited raises `OSError`

@@ -47,6 +47,11 @@ module Codegen_text_scan = Codegen_text_scan
 (** Deciding what pins the TEXT of generated code: goldens holding emitted kernel or IR source, and
     test sources asserting on it from a string literal. *)
 
+module Scan_argv = Scan_argv
+(** Response-file expansion for the repository-wide scans: a [@<path>] argument stands for the words
+    in that file. What a scan reads is handed to it on the command line, and Windows caps a command
+    line at 32,767 characters. *)
+
 module Scan_floors = Scan_floors
 (** Floors over a scanned census: the tripwire that keeps a scanning test from passing vacuously,
     shared by the scans that glob the repository. *)

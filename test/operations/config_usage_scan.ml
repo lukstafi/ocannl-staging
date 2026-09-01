@@ -12,6 +12,11 @@
 
 open Base
 open Stdio
+
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Markdown = Test_utils.Agent_notes_scan
 module Refusal_manifest = Test_utils.Refusal_control_manifest
 
@@ -1110,7 +1115,7 @@ let live workspace_root paths =
   Refusal_manifest.print "config_usage_scan.ml"
 
 let () =
-  match Array.to_list Stdlib.Sys.argv with
+  match Array.to_list argv with
   | _ :: [ "--refusal-control" ] -> refusal_control ()
   | _ :: [ "--fixture"; path; config_path; multiline_path ] ->
       fixture path config_path multiline_path

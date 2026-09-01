@@ -49,6 +49,9 @@
 open Base
 open Stdio
 
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
 let printf = Test_utils.Refusal_control_manifest.printf
 
 module Scan = Test_utils.Codegen_text_scan
@@ -118,18 +121,18 @@ let refusal_control () =
   Test_utils.Refusal_control_manifest.print source
 
 let () =
-  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+  if Array.length argv = 2 && String.equal argv.(1) "--refusal-control" then (
     refusal_control ();
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <file...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <file...>\n" argv.(0);
     Stdlib.exit 1);
   (* Reported repository-relative, opened as dune handed them over: the working directory is the
      rule's own, deep in the build tree. The translation is [Dune_stanza_scan]'s, shared with the
      other scans so that two of them cannot disagree about what a path names. *)
-  let base = Dune.base_dir Stdlib.Sys.argv.(1) in
+  let base = Dune.base_dir argv.(1) in
   let arguments =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Dune.repo_relative base path, path))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
