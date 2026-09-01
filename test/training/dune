@@ -410,26 +410,17 @@
 ; on device (batches via @| batch_n — no per-step host transfers), and the loss accumulates on
 ; device so the loop syncs once per epoch.
 ;
-; Its golden is PER BACKEND (gh-ocannl-787, the gh-ocannl-700 shape), which is why this is an
-; `(executable)` plus a diff rule rather than a `(test)` stanza: a `(test)` can only diff the one
-; `<name>.expected` beside it. The three sampled names at the end of the run are the human-legible
-; canary that the model learned name structure -- the loss thresholds are their quantitative proxy,
-; not their replacement -- and they are exact by construction only PER SCHEDULER: `Multidev` is free
-; to differ from `Sync` in execution order and device split, so its training trajectory and the
-; sampling RNG state legitimately diverge and no single promotion serves both. Every member is
-; recorded on its own backend: cc, multidev_cc and metal on this repository's reference Mac, cuda on
-; `rog-nv-wsl` and hip on `minix-amd-wsl`. The scheduler really is the only axis that splits them --
-; all four `Sync` backends agree byte for byte across three vendors' hardware, and `multidev_cc`
-; alone differs, in exactly the three sampled names. Re-record one with
+; The three sampled names at the end of the run are the human-legible canary that the model learned
+; name structure -- the loss thresholds are their quantitative proxy, not their replacement -- and
+; they are exact by construction, so ONE golden serves every backend: all five agree byte for byte
+; across three vendors' hardware and both CPU schedulers, the trajectory being a fixed sequence of
+; batches at a fixed learning-rate schedule and the autotune seeds preserving reduction order. The
+; static-index snapshot in `Backends.Add_device` is what makes that true of the asynchronous
+; scheduler too (`test/operations/async_launch_bindings` pins it): a dispatch launches on the index
+; bound for it, so `multidev_cc` runs the same sweep of batches as `cc`. Re-record with
 ; `OCANNL_BACKEND=<b> dune build @test/training/train-transformer_names` and `dune promote`; on a
-; backend-uniform golden, confirm which backend actually ran from `ocannl_backend.txt` rather than
-; from the diff passing, since a wrong backend would pass against an identical member.
-;
-; `../config/ocannl_backend.txt` is the resolved backend name, built by the shared rule in
-; `test/config/dune`: it reads the same configuration this run will -- config file, environment,
-; command line -- and normalizes the deprecated aliases, so `OCANNL_BACKEND=multicore_cc` names the
-; `multidev_cc` golden. A directory adopting a per-backend golden reads that path and copies
-; nothing -- which is why the rule lives there rather than beside each consumer.
+; backend-uniform golden, confirm which backend actually ran from the run's stderr rather than from
+; the diff passing, since a wrong backend would pass against the same golden.
 
 (executable
  (name transformer_names)
@@ -444,7 +435,7 @@
  (locks ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
-  "transformer_names-%{read:../config/ocannl_backend.txt}.expected"
+  transformer_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps transformer_names.actual from becoming a build target, so plain `dune build`
@@ -455,9 +446,7 @@
     (with-stdout-to
      transformer_names.actual
      (run %{dep:transformer_names.exe}))
-    (diff
-     "transformer_names-%{read:../config/ocannl_backend.txt}.expected"
-     transformer_names.actual)))))
+    (diff transformer_names.expected transformer_names.actual)))))
 
 ; tokenizer_roundtrip is a fast integration test for the dataprep BPE tokenizer -> tensor bridge
 ; (hermetic: it writes its own minimal tokenizer.json, no network access).

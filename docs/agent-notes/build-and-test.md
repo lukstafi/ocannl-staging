@@ -985,10 +985,7 @@ that they earn a lookup rather than always-loaded space.
 - **A `(test)` stanza can only diff the one `<name>.expected` beside it**, so a test whose output
   legitimately differs per backend converts to an `(executable)` plus a diff rule that reads the
   resolved backend name and diffs `<name>-%{read:../config/ocannl_backend.txt}.expected`. That is
-  the gh-ocannl-700 shape (`micrograd_demo_logging-<backend>-0-0.log.expected`), and gh-ocannl-787
-  gave it to `test/training/transformer_names`, whose sampled names are exact by construction per
-  SCHEDULER: `Multidev` differs from `Sync` in execution order and device split, so the training
-  trajectory and the sampling RNG state diverge and no promotion serves both. Three mechanics come
+  the gh-ocannl-700 shape (`micrograd_demo_logging-<backend>-0-0.log.expected`). Three mechanics come
   with the conversion. The resolved name is NOT produced per directory: `test/config/dune` — the
   directory every test directory already copies `ocannl_config` and `env_spelling_gate.ml` from —
   holds the `ocannl_read_config` executable and one rule per resolved file, `ocannl_backend.txt`
@@ -1006,18 +1003,26 @@ that they earn a lookup rather than always-loaded space.
   point, so the directory needs a `runtest-env_spelling_gate` rule for it to depend on and an
   `(alias (name runtest) (deps (alias runtest-<name>)))` stanza, both of which `env_var_deps`
   checks.
-- Splitting a golden per backend is a decision about WHAT the golden holds, not a formatting choice:
-  split only where a scheduler's freedom makes cross-backend determinism impossible, and only for
-  output worth keeping pinned. gh-ocannl-787 kept `transformer_names`' sampled names pinned rather
-  than relocating them under the gh-ocannl-725 rule, because that rule's own standard is that the
-  stdout claim replacing a relocated value must FAIL on a wrong value, and no cheap claim over
-  sampled names does — "non-empty, from the training alphabet, properly terminated" passes on an
-  untrained model sampling gibberish, while the name-likeness of `holern`/`cern` is the legible
-  canary that the model learned name structure. The cost of the split is a golden only some machine
-  re-records: cc, multidev_cc and metal are recorded on the reference Mac, cuda and hip only on the
-  sweep's GPU boxes, so a codegen change that moves the trajectory leaves those two stale until the
-  daily sweep says so — which is the gh-ocannl-700 lesson restated, and the reason the sweep's
-  multidev_cc leg exists.
+- Splitting a golden per backend is a decision about WHAT the golden holds, not a formatting choice,
+  and the bar is high in both directions. Its cost is a golden only some machine re-records — cc,
+  multidev_cc and metal on the reference Mac, cuda and hip only on the sweep's GPU boxes — so a
+  codegen change that moves the output leaves the members no local run touches stale until the daily
+  sweep says so. That is the gh-ocannl-700 lesson, and it makes a split worth paying for only where
+  the difference is a genuine backend fact. **A member that keeps diverging from its siblings AFTER
+  the split, or diverging from itself between runs, is evidence the split was a misdiagnosis**:
+  `transformer_names` was split per scheduler on the reading that `Multidev`'s execution order may
+  move a training trajectory, and the real cause was `multidev_cc` launching kernels on whichever
+  static index the host had raced ahead to (fixed by the dispatch-time snapshot in
+  `Backends.Add_device`; `test/operations/async_launch_bindings` pins it). One golden serves all five
+  backends again. Before splitting, get a run-to-run repeat of the diverging member: a stable
+  divergence can be a backend fact, a moving one never is.
+- Pinning output no claim can replace is the other half of that decision. The gh-ocannl-725 rule
+  relocates a device-produced float to stderr only when a stdout claim can be written that FAILS on
+  a wrong value, and no cheap claim over sampled text does — "non-empty, from the training alphabet,
+  properly terminated" passes on an untrained model sampling gibberish, while the name-likeness of
+  `holern`/`cern` is the legible canary that the model learned name structure. So `transformer_names`
+  keeps its three names pinned, and the burden falls where it belongs: on the backends being
+  deterministic and agreeing.
 - Every per-backend golden family covers the backend vocabulary derived from
   `Backends.all_of_backend`; `backend_golden_family_scan` derives active family templates from the
   dune rules that read `ocannl_backend.txt`, relates them to the expected-file census, and fails

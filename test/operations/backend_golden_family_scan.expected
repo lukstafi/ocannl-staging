@@ -1,6 +1,5 @@
 Backend golden families:
   test/operations/micrograd_demo_logging-<backend>-0-0.log.expected
-  test/training/transformer_names-<backend>.expected
 
 Members not yet recorded on their own backend:
 
