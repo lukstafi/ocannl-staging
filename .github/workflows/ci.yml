@@ -425,3 +425,50 @@ jobs:
         # Not covered: the second-launch lock refusal (exit 2), which needs a
         # run still holding the lock when the second arrives -- i.e. minutes of
         # real build, against a step meant to cost seconds.
+
+  # A red on master is nobody's to sit and watch: merging sessions do not poll
+  # CI after landing (roll-forward, ahrefs/ocannl#861). Instead this job fires
+  # the "ocannl-staging CI-red triage" Claude Code routine, which claims the
+  # failure with an issue on ahrefs/ocannl -- issues are disabled on this
+  # repository, and that is where the issues live anyway -- and then either
+  # opens a ci-fix/* PR here or posts its diagnosis to the claiming issue.
+  # Scheduled sweeps are included on purpose -- their reds (Windows, OCaml
+  # floor) are master reds that no merge event announces. PR runs are excluded:
+  # the PR's own session watches those. Until the ROUTINE_FIRE_URL and
+  # ROUTINE_FIRE_TOKEN secrets are set this job is a logged no-op, and a failed
+  # fire is soft (the routine's daily backstop sweep catches what a lost
+  # notification misses; a second red job here would only muddy an already-red
+  # run).
+  notify-triage-routine:
+    name: Fire CI-red triage routine
+    needs: run
+    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+        run: |
+          if [ -z "$ROUTINE_FIRE_URL" ] || [ -z "$ROUTINE_FIRE_TOKEN" ]; then
+            echo "ROUTINE_FIRE_URL/ROUTINE_FIRE_TOKEN not configured; skipping."
+            exit 0
+          fi
+          # Both non-default curl options exist to keep a failed fire from
+          # masquerading as a successful one. --fail-with-body: without it curl
+          # exits 0 on an HTTP 4xx/5xx, so a revoked token (generating a new one
+          # revokes the old), a changed beta header on this experimental
+          # endpoint, or a 429 would be logged as a fire that happened, and the
+          # soft-failure line below would never print; the body still reaches
+          # the log, which is where the error type and message are. --max-time:
+          # the endpoint returns as soon as the session is created, so seconds
+          # is the honest scale -- but one that accepts the connection and then
+          # stalls would otherwise hold this job to GitHub's job-level limit,
+          # delaying completion of every red master run rather than taking the
+          # soft-failure path.
+          curl -sS --fail-with-body --max-time 30 -X POST "$ROUTINE_FIRE_URL" \
+            -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"CI failed on master: workflow=$GITHUB_WORKFLOW event=$GITHUB_EVENT_NAME sha=$GITHUB_SHA run=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}" \
+            || echo "fire request failed (rc=$?); the routine's daily sweep will catch this red."
