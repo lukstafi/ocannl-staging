@@ -1447,3 +1447,20 @@ that they earn a lookup rather than always-loaded space.
   the window statistic ranged 0.115--0.301, so 0.4 leaves measured headroom and still excludes the
   0.80--1.06 epoch-100 means. The helper rejects fewer than ten values, so shortening a loop cannot
   silently turn the window claim back into a smaller, noisier sample.
+- The sibling of that rule, one axis over (gh-ocannl-892): WHICH measurements a tuning run produced
+  is as host-dependent as what they measured, so a golden must not pin the list either. A candidate
+  whose timing window is mostly host stalls is refused (`Autotune.admitted_timing_ms`), and a
+  refused candidate emits no calibration row and no timing — under enough load a whole routine's
+  candidates go, and the surviving list gets shorter. `bandwidth_calibration` pinned the four STREAM
+  kernels in order, and on cuda and hip a different subset went missing each run while cc and metal
+  passed; on idle boxes both GPU backends refuse nothing, and four processes sharing one GPU refuse
+  3--15 timings per run on cuda and 18--21 on hip. What survives the load is the RELATIONSHIP
+  between the two views of the emission path — a routine contributed rows exactly when its search
+  timed a candidate (`report.candidates_timed > 0`) — which is strictly more discriminating than the
+  list it replaces: rows going missing while the search timed something, and rows attributed to a
+  routine that timed nothing, both fail it, and a contended host moves both sides at once. The
+  biconditional alone still passes a routine whose every candidate failed compile or dispatch
+  (`candidates_failed`) — nothing timed, nothing contributed — so require the load's own evidence
+  for absence: a row-less routine must show `timings_contended > 0`. Put the per-routine
+  timed/refused/failed accounting on stderr so a red run names the refused routines instead of only
+  showing a shorter list.
