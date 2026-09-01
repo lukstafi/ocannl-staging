@@ -1347,6 +1347,25 @@ that they earn a lookup rather than always-loaded space.
   scheduled routine's report and notification foremost — see zero-coverage findings without
   opening the report file; the routine diffs the latest report's finding set against the previous
   `*-skip-coverage.txt` and treats `FAIL`, or a changed finding set, as notify-worthy.
+- Every test action a sweep unit runs inherits `OCANNL_BACKEND=<that unit's backend>`. The unit is
+  spelled `OCANNL_BACKEND=<backend> opam exec -- dune build @runtest @train`, and Dune hands its own
+  environment to the actions it runs whether or not a stanza declares the variable — `(env_var …)`
+  buys dependency tracking, never insulation. A test that CONSTRUCTS a child environment — a fixture
+  driving a script, a harness nesting a tool — must therefore neutralize what the launcher exported
+  rather than only adding to it; otherwise it reads the launcher's backend and is green everywhere
+  except inside the sweep, the one place its verdict gates anything. `test/operations/sweep_harness.sh`
+  is the worked example (gh-ocannl-893): the nested sweep's environment is built with
+  `env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP`, and one
+  aggregation is re-run with a hostile ambient backend so the neutralization cannot lapse unnoticed.
+  Reproduce the condition on any alias with `OCANNL_BACKEND=<backend> dune build --force @<alias>`;
+  a plain local run never sets it, which is what makes this class of failure look like flakiness.
+- In an errexit shell test, `! cmd` is not an assertion. Bash exempts a command whose value is being
+  inverted, so `! grep -q 'must not appear' "$out"` runs, returns 1 and the script carries on — the
+  negative half of a test can be entirely inert while reading as covered. Spell it as a function
+  whose body uses `if`, so the command errexit weighs is the CALL and the ERR trap names its line,
+  and have it print what matched: `$BASH_COMMAND` from inside a function names the body, not the
+  pattern. Same shape as the `p_all`/`p_none` rule for `Verdict` claims — a check that cannot fail is
+  worse than a missing one, because the golden and the roster both count it.
 - An unreachable machine records `skip (unreachable)`, and a sweep of skips is not a failure. It is
   not the expected steady state either: both GPU boxes are cabled and Wake-on-LAN armed, and wake
   over Ethernet from sleep and from full shutdown alike, so a run that is meant to cover CUDA or HIP
