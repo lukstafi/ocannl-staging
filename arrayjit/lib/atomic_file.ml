@@ -164,22 +164,47 @@ let remove_quietly path =
    the C runtime opens files without [FILE_SHARE_DELETE], so while another handle to the target is
    open — a concurrent reader of the same cache entry — replacing it is refused with a sharing
    violation. That refusal is transient by nature (it lasts as long as the other reader's handle),
-   so retry a bounded number of times before reporting it. Nothing here retries on POSIX: the first
-   attempt succeeds, and the loop costs one call. *)
-let commit_attempts = 8
-let commit_backoff_seconds = 0.002
+   so retry before reporting it. Nothing here retries on POSIX: the first attempt succeeds, and the
+   loop costs one call.
+
+   The budget is a DEADLINE and not a number of attempts, because on Windows a count of attempts is
+   not a duration. [Unix.sleepf] there cannot sleep for less than the system timer tick: measured on
+   Windows 11, 0.5 ms returns IMMEDIATELY -- the request truncates to nothing -- while everything
+   from 1 ms up costs a full 15.6 ms. The tick is machine-wide and anything in the session can move
+   it to 1 ms with `timeBeginPeriod`, so the eight attempts 2 ms apart this used to make were a
+   budget of somewhere between 16 ms and 110 ms depending on what else was running.
+
+   No budget makes the commit unconditionally succeed, and the size is chosen knowing that. The
+   refusals are not independent draws: measured under the contention
+   `test/operations/atomic_file_race` manufactures -- two reader domains opening the target back to
+   back while four writers publish -- most are over within one or two polls, but a few percent of a
+   percent are refused on EVERY poll for a full second, because a reader that reopens the target as
+   fast as it closes it leaves no window at all. So the budget is set where "transient" stops being
+   a fair description of the refusal rather than where the last one would have cleared, and a
+   refusal that outlives it is reported to the caller, whose business it is: [Schedule_cache.store]
+   treats one as a future cache miss. A second is also short enough to report a PERMANENT refusal
+   promptly, which matters because nothing here can recognize one -- a read-only target, an ACL, a
+   directory in the way and a sharing violation all arrive as the same `Sys_error "Permission
+   denied"`. *)
+let commit_deadline_seconds = 1.0
+
+(* One Windows timer tick, near enough. Shorter would busy-spin there rather than wait (see above);
+   longer would coarsen a budget that is already only a second. *)
+let commit_poll_seconds = 0.016
 
 let publish_staged ~staging ~path =
-  let rec attempt n =
+  (* Forced by a first refusal and not before, so an uncontended publish still costs one call. *)
+  let deadline = lazy (Unix.gettimeofday () +. commit_deadline_seconds) in
+  let rec attempt () =
     match Stdlib.Sys.rename staging path with
     | () -> ()
     | exception (Stdlib.Sys_error _ as exn) ->
-        if n >= commit_attempts then raise exn
+        if Float.(Unix.gettimeofday () > force deadline) then raise exn
         else (
-          Unix.sleepf (commit_backoff_seconds *. Float.of_int n);
-          attempt (n + 1))
+          Unix.sleepf commit_poll_seconds;
+          attempt ())
   in
-  attempt 1
+  attempt ()
 
 (* No [ensure_dir] here: publishing is not directory management, and creating one silently would
    turn a save to a mistyped path into a save that succeeds somewhere nobody looks. A caller whose

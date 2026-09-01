@@ -568,6 +568,30 @@ that they earn a lookup rather than always-loaded space.
   `test/support/test_utils.ml` packages the rules — `hex_float` and `set_binary_stdout` are
   portable by construction, while `print_float`/`print_floats` delegate to `concise_float` and so
   still need tie-free inputs.
+- Three more Windows facts, each of which makes POSIX-shaped code silently wrong rather than broken,
+  all measured on a stock Windows 11 box while making the scheduled sweep green again (gh-ocannl-588):
+  - `Unix.sleepf` cannot sleep for less than the system timer tick. A request below 1 ms truncates to
+    NO sleep at all; everything from 1 ms up costs a full 15.6 ms. A budget written as "N turns of a
+    short sleep" is therefore not a duration there: `atomic_file_race`'s "20,000 × 0.5 ms = ten
+    seconds" was a sub-second busy-spin that also burned the core its peer domain needed, and
+    `Atomic_file`'s "8 attempts, 2 ms apart" was anywhere between 16 ms and 110 ms. Write every wait
+    as a DEADLINE in seconds — the tick is machine-wide and anything in the session can move it to
+    1 ms with `timeBeginPeriod`, so even a count of full-tick sleeps is not a fixed budget.
+  - Neither `open_in`/`open_in_bin` nor `Unix.openfile` asks for `FILE_SHARE_DELETE`, so an open
+    reader and a `Sys.rename` over the same target refuse EACH OTHER with `EACCES` — arriving as
+    `Sys_error "Permission denied"`, and from the rename with no filename in the message, which is
+    how a commit refusal is told from an `open_staging` one. Both refusals are transient and both are
+    retried, but a reader that reopens the target as fast as it closes it leaves no window at all and
+    then no retry budget wins: measured, one or two publishes in six hundred are refused on every
+    poll for a full second. Hence `atomic_file.mli` states the consequence rather than promising
+    against it — on Windows a publish MAY be refused — and a test of publication under load must
+    claim what is true (every publication committed or was refused, none went missing, refusals stay
+    rare) instead of claiming liveness the platform does not provide.
+  - `MAX_PATH` caps the whole path at 260 characters, which is a different budget from the 255-byte
+    per-COMPONENT limit. A fixture named at the component limit has no directory it fits in inside a
+    build tree (`_build/default/test/operations` alone spends ~65), and every open of it fails with
+    ENOENT. Gate such a leg with `Verdict.skipped ~aggregation:`Environment``, and make the gate a
+    PROBE rather than `Sys.win32`: what is capped is the path this run actually got.
 - `os.kill(pid, 0)` is not a liveness probe on Windows and must not be used as one. CPython
   implements `os.kill` there as `OpenProcess` followed by `TerminateProcess(handle, sig)`, so signal
   0 KILLS the process it was asked about, and a pid that already exited raises `OSError`

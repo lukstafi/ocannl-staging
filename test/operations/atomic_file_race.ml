@@ -6,9 +6,12 @@
    writers sharing one staging artifact (uniqueness), a writer that fails between staging and commit
    (failure cleanup), and a writer killed in that window (crash-stale cleanup).
 
-   Everything here is bounded by fixed iteration counts rather than by wall-clock time, and every
-   place a domain waits for another spins under an explicit cap that FAILS the run rather than
-   hanging it. Two things make the stress leg able to fail rather than merely pass:
+   The WORK here is a fixed number of publications and reads; every place a domain waits for another
+   is bounded in seconds, under an explicit cap that FAILS the run rather than hanging it. Counting
+   turns of a sleeping loop instead was the same bug in three places: [Unix.sleepf] on Windows
+   truncates a sub-millisecond request to no sleep at all and rounds everything else up to a 15.6 ms
+   timer tick, so a cap of "20,000 turns of half a millisecond" was ten seconds on Linux and macOS
+   and a fraction of one there. Two things make the stress leg able to fail rather than merely pass:
 
    - Its readers are compared against the EXACT set of payloads the writers published, not against a
    shape. A shape check accepted a torn read whose truncation happened to land on the length lattice
@@ -132,22 +135,87 @@ let is_well_formed data =
       | _ -> false)
   | _ -> false
 
-let read_published () = try Some (Stdio.In_channel.read_all target) with _ -> None
+(* Bounded wait: the deterministic-interleaving leg needs one domain to reach a known state before
+   the other proceeds, and a wait that cannot end must fail rather than hang the suite.
 
-(* Bounded spin: the deterministic-interleaving leg needs one domain to reach a known state before
-   the other proceeds, and a wait that cannot end must fail rather than hang the suite. *)
-let spin_limit = 20_000
-let spin_pause = 0.0005
+   Bounded in SECONDS, not in turns of a loop. `20_000` turns of a 0.5 ms sleep reads as ten seconds
+   and is ten seconds on Linux and macOS, but [Unix.sleepf] on Windows cannot sleep for less than
+   the system timer tick and truncates a sub-millisecond request to nothing at all -- measured
+   there, 0.5 ms returns immediately while everything from 1 ms up costs a full 15.6 ms. So on
+   Windows the same loop was a bare busy-spin that gave up in well under a second, while burning the
+   core its peer domain needed to make the progress it was waiting for. That is how "the blocked
+   writer waited rather than timing out" failed on Windows and nowhere else: the writer did not time
+   out of anything the test meant to give it. *)
+let wait_seconds = 10.0
 
-let await_flag flag =
-  let rec loop n =
-    if Atomic.get flag then true
-    else if n >= spin_limit then false
+(* Long enough to be a real sleep on Windows (one timer tick) and short enough to be a fine-grained
+   one everywhere else. *)
+let spin_pause = 0.002
+
+let await ?(seconds = wait_seconds) predicate =
+  let deadline = Unix.gettimeofday () +. seconds in
+  let rec loop () =
+    if predicate () then true
+    else if Float.(Unix.gettimeofday () > deadline) then false
     else (
       Unix.sleepf spin_pause;
-      loop (n + 1))
+      loop ())
   in
-  loop 0
+  loop ()
+
+let await_flag flag = await (fun () -> Atomic.get flag)
+
+(* What one read of the published path found -- three outcomes, because they are three different
+   facts and `try Some (read_all target) with _ -> None` reported them as one.
+
+   [Absent] is a failure of the property this whole module exists for: the publish let the path
+   cease to exist. A refusal says nothing about the bytes at all. On Windows the C runtime opens
+   files without FILE_SHARE_DELETE, so an open and a commit that overlap refuse EACH OTHER --
+   `atomic_file.ml` documents the writer's half of that, and this is the reader's. Conflated, every
+   claim below read "the path went missing" on Windows whenever a read merely collided with a
+   rename, which is what they did.
+
+   Opened through [Unix.openfile] rather than [In_channel.read_all] so that the refusal can be TOLD
+   from the absence: [Sys_error] carries only a message, while the [Unix_error] says [ENOENT] or
+   does not, which is the whole distinction. *)
+type observation = Bytes_read of string | Absent | Refused of string
+
+let open_published () =
+  match Unix.openfile target [ Unix.O_RDONLY ] 0o400 with
+  | fd ->
+      let ic = Unix.in_channel_of_descr fd in
+      Stdlib.set_binary_mode_in ic true;
+      Exn.protect
+        ~finally:(fun () -> Stdlib.close_in_noerr ic)
+        ~f:(fun () -> Bytes_read (Stdio.In_channel.input_all ic))
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> Absent
+  | exception Unix.Unix_error (error, _, _) -> Refused (Unix.error_message error)
+
+(* How long a reader keeps trying past a refusal. A reader of a concurrently published file has to
+   retry one on Windows, and this reader stands in for a real one -- but the retry is COUNTED and
+   claimed on below rather than assumed away, so a refusal that never resolves is still a reported
+   failure and not a silent wait. *)
+let read_retry_seconds = 1.0
+let refusals_retried = Atomic.make 0
+
+let observe_published () =
+  let deadline = lazy (Unix.gettimeofday () +. read_retry_seconds) in
+  let rec attempt () =
+    match open_published () with
+    | (Bytes_read _ | Absent) as found -> found
+    | Refused _ as refused ->
+        Atomic.incr refusals_retried;
+        if Float.(Unix.gettimeofday () > force deadline) then refused
+        else (
+          Unix.sleepf spin_pause;
+          attempt ())
+  in
+  attempt ()
+
+(* The sequential legs read at moments they arranged, where the only interesting answer is which
+   bytes are there. *)
+let read_published () =
+  match observe_published () with Bytes_read data -> Some data | Absent | Refused _ -> None
 
 (* Control: the reader's verdict discriminates. Without this, "every read was complete" is a claim
    about a predicate nobody checked. *)
@@ -218,20 +286,13 @@ let readers = 2
 let reads_per_reader = 400
 
 (* A ceiling on the reader loop, so a starved writer domain cannot turn "read until the writers
-   finish" into an unbounded run. Far above [reads_per_reader]: reaching it is a pathology, and the
-   overlap claim below is what would then fail. *)
-let max_reads = 20_000
+   finish" into an unbounded run. In SECONDS rather than in reads, for the reason [await] gives and
+   one more: how many reads a reader gets through before the writers finish is a ratio between two
+   speeds, and on Windows a publish that has to wait out a sharing violation is orders of magnitude
+   slower than a read, so a ceiling counted in reads is a different amount of patience on every
+   platform. Reaching it is a pathology, and the overlap claim below is what then fails. *)
+let reader_ceiling_seconds = 120.0
 let total_publications = writers * rounds
-
-let await ?(limit = spin_limit) predicate =
-  let rec loop n =
-    if predicate () then true
-    else if n >= limit then false
-    else (
-      Unix.sleepf spin_pause;
-      loop (n + 1))
-  in
-  loop 0
 
 let () =
   reset_dir ();
@@ -249,20 +310,38 @@ let () =
   let refusals = Array.create ~len:writers 0 in
   (* Each observation carries the number of publications completed when it was taken, which is how a
      reader reports where in the run it read. *)
-  let no_reads = ((None, 0), []) in
+  (* What a reader domain that never wrote its slot leaves behind. Chosen so it fails every claim
+     it reaches rather than reading as a satisfied one. *)
+  let no_reads = ((Refused "the reader domain recorded nothing", 0), []) in
   let observations = Array.create ~len:readers no_reads in
   let committed = Atomic.make 0 in
+  (* Publications that have ENDED, either way. This, and not [committed], is what a reader records
+     beside each read: "the writers are done" is a fact about the work being over, not about all of
+     it having succeeded, and a publication the platform refused (see the liveness claims below)
+     never advances [committed] -- so keying a reader on that counter made a Windows refusal fail a
+     claim about the READER, in a leg where refusals are expected and separately accounted for. *)
+  let concluded = Atomic.make 0 in
   let readers_read = Atomic.make 0 in
   let writers_finished = Atomic.make 0 in
   let half_written = Atomic.make false in
   let writers_met = Array.create ~len:writers false in
   let readers_met = Array.create ~len:readers false in
+  (* Why a publish was refused, kept alongside the count. The golden carries the claim alone, so
+     without this a red run says a writer lost a round and nothing about what refused it -- and on
+     Windows the candidates (a sharing violation on the commit, an exhausted staging name, a path
+     the host cannot hold) are different bugs that look identical from the count. First refusal per
+     writer; each domain writes only its own slot. *)
+  let refusal_notes = Array.create ~len:writers "" in
+  let refused i exn =
+    refusals.(i) <- refusals.(i) + 1;
+    if String.is_empty refusal_notes.(i) then refusal_notes.(i) <- Stdlib.Printexc.to_string exn
+  in
   let publish_round i writer round =
     (try
        AF.write_all ~path:target ~data:(payload ~writer ~round) ();
        Atomic.incr committed
-     with _ -> refusals.(i) <- refusals.(i) + 1);
-    ()
+     with exn -> refused i exn);
+    Atomic.incr concluded
   in
   (* The gate. One writer stops HALFWAY THROUGH ITS PAYLOAD -- not between two publications -- and
      every reader takes a read before it continues. Pausing between publications was not enough
@@ -281,8 +360,8 @@ let () =
            writers_met.(i) <- await (fun () -> Atomic.get readers_read >= readers);
            Stdlib.output_string oc (String.drop_prefix whole half));
        Atomic.incr committed
-     with _ -> refusals.(i) <- refusals.(i) + 1);
-    ()
+     with exn -> refused i exn);
+    Atomic.incr concluded
   in
   let writer_domains =
     Array.init writers ~f:(fun i ->
@@ -302,21 +381,22 @@ let () =
         Domain.spawn (fun () ->
             readers_met.(i) <- await (fun () -> Atomic.get half_written);
             (* Taken with a payload half-written on disk. *)
-            let seen = ref [ (read_published (), Atomic.get committed) ] in
+            let seen = ref [ (observe_published (), Atomic.get concluded) ] in
             let during_write = List.hd_exn !seen in
             Atomic.incr readers_read;
+            let ceiling = Unix.gettimeofday () +. reader_ceiling_seconds in
             let rec loop n =
-              if n >= max_reads then ()
+              if Float.(Unix.gettimeofday () > ceiling) then ()
               else if n >= reads_per_reader && Atomic.get writers_finished >= writers then ()
               else (
-                seen := (read_published (), Atomic.get committed) :: !seen;
+                seen := (observe_published (), Atomic.get concluded) :: !seen;
                 loop (n + 1))
             in
             loop 1;
             (* One last read after the loop's exit condition held, so the final observation is taken
                with every writer finished: that is what makes "kept reading until the writers were
                done" a fact about this reader rather than about the loop's shape. *)
-            seen := (read_published (), Atomic.get committed) :: !seen;
+            seen := (observe_published (), Atomic.get concluded) :: !seen;
             observations.(i) <- (during_write, !seen)))
   in
   Array.iter writer_domains ~f:Domain.join;
@@ -331,25 +411,87 @@ let () =
      read below was taken while a writer sat inside its payload with half of it already on disk. *)
   Verdict.p_all ~min:readers
     "every reader's gated read saw a whole payload while one was half-written" per_reader
-    ~f:(fun ((data, _), _) -> Option.value_map data ~default:false ~f:(Hash_set.mem published));
+    ~f:(fun ((found, _), _) ->
+      match found with
+      | Bytes_read data -> Hash_set.mem published data
+      | Absent | Refused _ -> false);
   Verdict.p_all ~min:readers "every reader kept reading until the writers were done" per_reader
     ~f:(fun (_, obs) -> List.exists obs ~f:(fun (_, at) -> at = total_publications));
+  (* The platform's refusals are neither ignored nor folded into the two claims about the BYTES:
+     they get one of their own, and the reads they cost are what the count on stderr names. Every
+     read is therefore accounted for by exactly one of the three. *)
+  Stdio.eprintf "reads refused and retried by the platform: %d (not part of the golden)\n"
+    (Atomic.get refusals_retried);
   Verdict.p_all ~min:(readers * reads_per_reader)
-    "every read under concurrent publication observes a payload some writer published" seen
-    ~f:(function
-    | None, _ -> false
-    | Some data, _ -> Hash_set.mem published data);
+    "every read under concurrent publication resolved rather than staying refused" seen
+    ~f:(fun (found, _) -> match found with Refused _ -> false | Bytes_read _ | Absent -> true);
+  Verdict.p_all ~min:(readers * reads_per_reader)
+    "every read under concurrent publication observes a payload some writer published"
+    (List.filter_map seen ~f:(function
+      | Bytes_read data, _ -> Some data
+      | (Absent | Refused _), _ -> None))
+    ~f:(Hash_set.mem published);
   Verdict.p_none ~min:(readers * reads_per_reader)
-    "no read under concurrent publication finds the path missing" seen ~f:(fun (data, _) ->
-      Option.is_none data);
-  Verdict.p_all ~min:writers "every concurrent writer committed every round"
-    (Array.to_list refusals) ~f:(fun n -> n = 0);
-  Verdict.p "every publication was accounted for" (Atomic.get committed = total_publications);
+    "no read under concurrent publication finds the path missing" seen ~f:(fun (found, _) ->
+      match found with Absent -> true | Bytes_read _ | Refused _ -> false);
+  Array.iteri refusal_notes ~f:(fun i note ->
+      if not (String.is_empty note) then
+        Stdio.eprintf "writer %d lost %d of %d rounds; first refusal: %s (not part of the golden)\n"
+          i refusals.(i) rounds note);
+  (* Liveness, and this is as much of it as the module HAS on Windows. The readers above never
+     release the target for longer than it takes to reopen it, and OCaml's opens carry no
+     FILE_SHARE_DELETE, so a commit can be refused on every poll for the whole second
+     `publish_staged` waits -- measured here, a couple of rounds in six hundred. Nothing in
+     `atomic_file.ml` can prevent that; the sharing rule belongs to the platform, and the module's
+     contract says a publish may be refused (`atomic_file.mli`, "Windows"). "Every writer committed
+     every round" was therefore a claim about the host rather than about the module, and it is
+     replaced by the three that are true wherever this runs: every publication ends in exactly one
+     of the two outcomes the contract names, none goes missing between them, and refusal stays rare
+     enough to still be called an exception. The claims that carry the module's actual promise --
+     nothing torn, nothing absent, no staging file left behind -- are unchanged and unweakened. *)
+  Verdict.p "every publication either committed or was refused"
+    (Atomic.get committed + Array.fold refusals ~init:0 ~f:( + ) = total_publications);
+  (* Which failure it was, not merely that there was one. `publish_staged` propagates `Sys.rename`'s
+     bare message; `open_staging` formats its own around the staging path, and a path this host
+     cannot hold arrives as a third thing again -- so pinning the exact text is what keeps a lost
+     round attributable to the commit rather than to whichever of them happened. A different message
+     is a different fact and should fail here; the note is on stderr above to read it by. *)
+  Verdict.p_all ~min:writers "every writer that lost a round lost it to a refused commit"
+    (Array.to_list (Array.mapi refusals ~f:(fun i n -> (n, refusal_notes.(i)))))
+    ~f:(fun (n, note) -> n = 0 || String.equal note {|Sys_error("Permission denied")|});
+  (* A hundredth is the line between "the platform refused a commit" and "publication is broken":
+     four writers publishing 150 rounds each may lose six between them and no more. *)
+  Verdict.p "publication was refused for fewer than one round in a hundred"
+    (100 * Array.fold refusals ~init:0 ~f:( + ) < total_publications);
   Verdict.p "the file left by the race is a complete payload"
     (Option.value_map (read_published ()) ~default:false ~f:is_well_formed);
   Verdict.p "the race leaves no staging file behind" (List.is_empty (staging_leftovers ()));
   Verdict.p "the race leaves only the published file"
     (List.equal String.equal (listing ()) [ "published.bin" ])
+
+(* Whether a basename at the per-component limit can exist in [dir] on this host at all.
+
+   A component limit and a PATH limit are different budgets, and Windows has both: 255 bytes for one
+   component, and 260 characters (MAX_PATH) for the whole thing. The build tree spends about 65 of
+   those before the fixture's 244 are added, so every open of the long fixtures below fails there
+   with ENOENT -- and did, invisibly, because the exception reached the runtime after [Verdict]'s
+   at_exit had already exited 1 over the failures this file's Windows legs were also producing.
+
+   Asked by TRYING rather than by [Sys.win32], because the budget belongs to the path this run
+   actually got: a Windows checkout near the drive root would have the room, and a deeply nested
+   POSIX one still has no such cap. The probe is a name of the fixtures' own length, so it answers
+   the question the fixtures ask. *)
+let long_names_fit_here =
+  lazy
+    (let probe = Stdlib.Filename.concat dir (String.make 240 'p' ^ ".probe") in
+     match Unix.openfile probe [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] 0o600 with
+     | fd ->
+         Unix.close fd;
+         (try Stdlib.Sys.remove probe with _ -> ());
+         true
+     | exception Unix.Unix_error _ -> false)
+
+let path_budget_gate = "a host that caps the whole path (MAX_PATH)"
 
 (* A staging name is a DERIVED name, and the two things derivation must guarantee are that it fits
    where the target fits and that no two attempts pick the same one. Both are observed through the
@@ -360,15 +502,6 @@ let () =
      with a naive suffix it would not (Codex P2, round 2). *)
   let long_name = String.make 240 'n' ^ ".bin" in
   let long_target = Stdlib.Filename.concat dir long_name in
-  let staged = ref [] in
-  let capture () = staged := staging_leftovers () @ !staged in
-  AF.write_all ~path:long_target ~data:"payload" ~before_commit:capture ();
-  Verdict.p "a target named to the filesystem's limit publishes"
-    (Stdlib.Sys.file_exists long_target);
-  Verdict.p_all "every staging name fits one filesystem component" !staged ~f:(fun name ->
-      String.length name <= 255);
-  Verdict.p_all "a long target's staging file is recognized as that target's" !staged
-    ~f:(AF.is_staging_file_for ~path:long_target);
   (* A long name whose characters are multibyte: a byte-wise cut can land inside one, and the
      malformed name that results is refused by Windows and by APFS alike (Codex P2, round 4). The
      3-byte character makes the budget's cut fall mid-character. 70 of them, not 90: a component
@@ -378,27 +511,61 @@ let () =
      every filesystem accepts, or it tests the filesystem instead. *)
   let utf8_name = String.concat (List.init 70 ~f:(fun _ -> "\xe2\x98\x83")) ^ ".bin" in
   let utf8_target = Stdlib.Filename.concat dir utf8_name in
-  let utf8_staged = ref [] in
-  AF.write_all ~path:utf8_target ~data:"payload"
-    ~before_commit:(fun () -> utf8_staged := staging_leftovers () @ !utf8_staged)
-    ();
+  (* About the FIXTURES and not about this host, so it is asked wherever the file runs -- including
+     where the two claims' subjects cannot be created. *)
   Verdict.p_all "every fixture name is a valid component on a 255-byte filesystem"
     [ long_name; utf8_name ] ~f:(fun name -> String.length name <= 255);
+  (* Every remaining claim of this leg goes through one of these two: evaluated where the host has
+     the path budget for the fixtures, announced as skipped where it does not. [Verdict.skipped]
+     prints the line [p] would, so the golden stays uniform across hosts while a reader of the run's
+     stderr still sees exactly what was not checked. The collections are thunks because under the
+     gate nothing published, and a quantified claim over the empty list they would then be is a
+     refusal rather than a skip. *)
+  let fits = force long_names_fit_here in
+  let long_claim name b =
+    if fits then Verdict.p name (b ())
+    else Verdict.skipped ~aggregation:`Environment ~backend:path_budget_gate name
+  in
+  let long_claim_all ?min name items ~f =
+    if fits then Verdict.p_all ?min name (items ()) ~f
+    else Verdict.skipped ~aggregation:`Environment ~backend:path_budget_gate name
+  in
+  let staged = ref [] in
+  let utf8_staged = ref [] in
+  if fits then (
+    let capture () = staged := staging_leftovers () @ !staged in
+    AF.write_all ~path:long_target ~data:"payload" ~before_commit:capture ();
+    AF.write_all ~path:utf8_target ~data:"payload"
+      ~before_commit:(fun () -> utf8_staged := staging_leftovers () @ !utf8_staged)
+      ());
+  long_claim "a target named to the filesystem's limit publishes" (fun () ->
+      Stdlib.Sys.file_exists long_target);
+  long_claim_all "every staging name fits one filesystem component"
+    (fun () -> !staged)
+    ~f:(fun name -> String.length name <= 255);
+  long_claim_all "a long target's staging file is recognized as that target's"
+    (fun () -> !staged)
+    ~f:(AF.is_staging_file_for ~path:long_target);
   (* Both fixtures must actually reach the truncating path, or they test the short-name branch under
      a long-looking name: a stem that fit would appear in the staging name verbatim. *)
-  Verdict.p_all "the long fixtures exercise the truncating stem" (!staged @ !utf8_staged)
+  long_claim_all "the long fixtures exercise the truncating stem"
+    (fun () -> !staged @ !utf8_staged)
     ~f:(fun name ->
       not (String.is_prefix name ~prefix:long_name || String.is_prefix name ~prefix:utf8_name));
-  Verdict.p "a multibyte target name publishes" (Stdlib.Sys.file_exists utf8_target);
-  Verdict.p_all "every staging name of a multibyte target is itself valid UTF-8" !utf8_staged
+  long_claim "a multibyte target name publishes" (fun () -> Stdlib.Sys.file_exists utf8_target);
+  long_claim_all "every staging name of a multibyte target is itself valid UTF-8"
+    (fun () -> !utf8_staged)
     ~f:Stdlib.String.is_valid_utf_8;
-  Verdict.p_all "a multibyte target's staging file fits one filesystem component" !utf8_staged
+  long_claim_all "a multibyte target's staging file fits one filesystem component"
+    (fun () -> !utf8_staged)
     ~f:(fun name -> String.length name <= 255);
-  Verdict.p_all "a multibyte target's staging file is recognized as that target's" !utf8_staged
+  long_claim_all "a multibyte target's staging file is recognized as that target's"
+    (fun () -> !utf8_staged)
     ~f:(AF.is_staging_file_for ~path:utf8_target);
   (* Case: on Windows and on a default macOS volume these two spellings are one file. *)
   let shouting = Stdlib.Filename.concat dir (String.uppercase long_name) in
-  Verdict.p_all "a differently-cased spelling of the target claims its staging files" !staged
+  long_claim_all "a differently-cased spelling of the target claims its staging files"
+    (fun () -> !staged)
     ~f:(AF.is_staging_file_for ~path:shouting);
   (* Uniqueness within a process, observed rather than assumed: each attempt's staging file is
      captured in its own commit window, and no name repeats. Uniqueness ACROSS processes rests on
@@ -719,7 +886,22 @@ let () =
   let stale = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:0) ~age:7200. in
   let fresh = plant_staging ~name:(staged_name ~target:"published.bin" ~counter:1) ~age:0. in
   let bystander = plant_staging ~name:"unrelated.bin" ~age:7200. in
-  let planted_near_misses = List.map near_misses ~f:(fun name -> plant_staging ~name ~age:7200.) in
+  (* The overlong-stem near-miss is a 240-character name BY CONSTRUCTION -- a stem past the
+     generator's 191-byte budget is what it is -- so on a host that caps the whole path there is no
+     directory it fits in at all (see [long_names_fit_here]). It is dropped from the PLANTED corpus
+     there and from nothing else: the two recognizer claims above are about the name, and they ask
+     it wherever this runs. Named rather than filtered by a length, so that a corpus that grows a
+     second long member fails here instead of being silently trimmed. *)
+  let plantable =
+    if force long_names_fit_here then near_misses
+    else (
+      Stdio.eprintf
+        "not planted, and this host has no directory it would fit in: the %d-character \
+         overlong-stem near-miss (not part of the golden)\n"
+        (String.length overlong_stem_near_miss);
+      List.filter near_misses ~f:(Fn.non (String.equal overlong_stem_near_miss)))
+  in
+  let planted_near_misses = List.map plantable ~f:(fun name -> plant_staging ~name ~age:7200.) in
   Verdict.p_all "every planted staging file is recognized as one" [ stale; fresh ] ~f:(fun path ->
       AF.is_staging_file (Stdlib.Filename.basename path));
   Verdict.p "the bystander is not recognized as a staging file"
@@ -747,8 +929,9 @@ let () =
   Verdict.p "the sweep spares the published file" (Stdlib.Sys.file_exists target);
   Verdict.p "the sweep spares an aged file that is not a staging artifact"
     (Stdlib.Sys.file_exists bystander);
-  Verdict.p_all "the sweep spares every aged systematically perturbed near-miss" planted_near_misses
-    ~f:Stdlib.Sys.file_exists;
+  (* Fifteen: the corpus is sixteen, and the one member a path-capped host cannot plant is one. *)
+  Verdict.p_all ~min:15 "the sweep spares every aged systematically perturbed near-miss"
+    planted_near_misses ~f:Stdlib.Sys.file_exists;
   Verdict.p "the published file still reads as it was written"
     (Option.equal String.equal (read_published ()) (Some seed));
   (* A cache's reader calls the once-per-process sweep before its first writer has created the

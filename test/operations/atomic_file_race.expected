@@ -16,17 +16,19 @@ every writer met the readers at the rendezvous: true
 every reader saw a payload go half-written: true
 every reader's gated read saw a whole payload while one was half-written: true
 every reader kept reading until the writers were done: true
+every read under concurrent publication resolved rather than staying refused: true
 every read under concurrent publication observes a payload some writer published: true
 no read under concurrent publication finds the path missing: true
-every concurrent writer committed every round: true
-every publication was accounted for: true
+every publication either committed or was refused: true
+every writer that lost a round lost it to a refused commit: true
+publication was refused for fewer than one round in a hundred: true
 the file left by the race is a complete payload: true
 the race leaves no staging file behind: true
 the race leaves only the published file: true
+every fixture name is a valid component on a 255-byte filesystem: true
 a target named to the filesystem's limit publishes: true
 every staging name fits one filesystem component: true
 a long target's staging file is recognized as that target's: true
-every fixture name is a valid component on a 255-byte filesystem: true
 the long fixtures exercise the truncating stem: true
 a multibyte target name publishes: true
 every staging name of a multibyte target is itself valid UTF-8: true
