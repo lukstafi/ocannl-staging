@@ -195,6 +195,24 @@ files.
   `(1024 1024 1024)`, i.e. `max_grid_yz = 65535` and a `max_workgroup_dims` that equals the product
   cap — that device cannot exercise the per-dimension cliff; CUDA's `.z` of 64 is the one that
   can.
+- **A dispatch's launch parameters are read on the HOST, at `Context.run`, and carried to the
+  device** — never re-read from the caller's refs when the device gets around to the task. Only
+  `Schedulers.Multidev` defers a task at all (`Sync.schedule_task` is `Task.run`, and the GPU
+  backends enqueue into their stream from inside the task, on the host thread), so it is the one
+  scheduler where the distinction is observable, and the observation is a wrong answer rather than a
+  slowdown: `Indexing.apply` dereferences the static indices inside the kernel task, while a caller's
+  loop — `Train.sequential_loop`, and every training loop — has rebound them for the next step by
+  then. Sharing one ref made `multidev_cc` launch on whichever batch the host had raced ahead to, so
+  batches were skipped and repeated and the learning rate keyed on the step counter was read at the
+  wrong point; the training trajectory diverged from `cc` systematically AND moved run to run.
+  `Backends.Add_device` therefore hands the caller refs of its own and snapshots them per dispatch,
+  the task copying the snapshot into the kernel's refs on the worker, in queue order, just before
+  the launch reads them (`Task.enschedule ?snapshot`). `Context.check_launch_bindings` validating the
+  caller's values at dispatch is the same contract stated from the validation side. Extending this:
+  any launch input a HOST loop can mutate between dispatches belongs in that snapshot; a merge
+  buffer does not, because its writer is itself a task on the same queue and FIFO order covers it.
+  `test/operations/async_launch_bindings` is the probe — sweep a static index with nothing between
+  the dispatch and the next rebind, accumulate two moments of the bound value on device, sync once.
 - **`static_properties` has one shape across the backends, and it is a contract**
   (gh-ocannl-710): `(<backend>_devices (device (key value) ...) (device ...) ...)` — a group atom
   naming the dump, then exactly one `Sexp.message`-shaped entry per device, in ordinal order, each

@@ -340,7 +340,10 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?g
 
 (** All and only bindings with associated ranges are iterated, with the binding's initial value
     lost. Bindings without ranges remain at their initial values, as do symbolic extents (gh-490):
-    an extent is a size set once by the user, not an index to iterate. *)
+    an extent is a size set once by the user, not an index to iterate.
+
+    [f] need not wait for the device: {!Context.run} reads the bindings at the dispatch, so the next
+    iteration may rebind them immediately whatever the backend schedules asynchronously. *)
 let%track3_sexp sequential_loop ~f lowered_bindings =
   let rec loop = function
     | [] -> f ()

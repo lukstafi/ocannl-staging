@@ -3,10 +3,11 @@
 ; files a per-backend golden names, produced HERE rather than once per consuming directory.
 ;
 ; The `ocannl_read_config` executable resolves a configuration key exactly the way a test run will:
-; the config file beside it, the environment, the command line. It lives here because it had two
-; consumers in different directories (`test/operations`' emitted-code extension and gh-ocannl-787's
-; `test/training/transformer_names` goldens) and was about to be copied for a third. Its
-; `(public_name)` is what makes `%{bin:ocannl_read_config}` resolve from anywhere in the workspace.
+; the config file beside it, the environment, the command line. It lives here rather than beside a
+; consumer because any test directory can need it -- `test/operations` reads the emitted-code
+; extension in its codegen rules and the resolved backend name in its `micrograd_demo_logging` log
+; goldens -- and a copy per consumer is a second resolution to keep in step. Its `(public_name)` is
+; what makes `%{bin:ocannl_read_config}` resolve from anywhere in the workspace.
 
 (executable
  (name ocannl_read_config)
