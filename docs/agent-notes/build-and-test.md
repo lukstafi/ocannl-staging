@@ -1126,8 +1126,11 @@ that they earn a lookup rather than always-loaded space.
   fires the "ocannl-staging CI-red triage" Claude Code cloud routine on any non-PR master red —
   push and scheduled sweeps alike (a logged no-op until the `ROUTINE_FIRE_URL`/`ROUTINE_FIRE_TOKEN`
   repo secrets are set; a lost fire is caught by the routine's own daily backstop sweep). The
-  routine claims the red via an issue titled `CI red on master@<short-sha>: <workflow>` and either
-  opens a `ci-fix/*` PR (it never merges its own PRs) or posts its diagnosis to that issue.
+  routine claims the red with an issue on **ahrefs/ocannl** titled
+  `CI red on master@<short-sha>: <workflow>` — issues are disabled on the staging repository, and
+  ahrefs/ocannl is where the issues live anyway (AGENTS.md's two-repository rule) — and either
+  opens a `ci-fix/*` PR on staging (it never merges its own PRs) or posts its diagnosis to that
+  issue.
   Merging sessions do not watch CI after landing (roll-forward, ahrefs/ocannl#861); before fixing
   a master red by hand, find the claiming issue and any linked PR, and take over only where triage
   visibly stopped short — saying so on the issue first.

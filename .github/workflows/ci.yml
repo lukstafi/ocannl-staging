@@ -429,7 +429,9 @@ jobs:
   # A red on master is nobody's to sit and watch: merging sessions do not poll
   # CI after landing (roll-forward, ahrefs/ocannl#861). Instead this job fires
   # the "ocannl-staging CI-red triage" Claude Code routine, which claims the
-  # failure via an issue and either opens a ci-fix/* PR or posts a diagnosis.
+  # failure with an issue on ahrefs/ocannl -- issues are disabled on this
+  # repository, and that is where the issues live anyway -- and then either
+  # opens a ci-fix/* PR here or posts its diagnosis to the claiming issue.
   # Scheduled sweeps are included on purpose -- their reds (Windows, OCaml
   # floor) are master reds that no merge event announces. PR runs are excluded:
   # the PR's own session watches those. Until the ROUTINE_FIRE_URL and
@@ -451,7 +453,13 @@ jobs:
             echo "ROUTINE_FIRE_URL/ROUTINE_FIRE_TOKEN not configured; skipping."
             exit 0
           fi
-          curl -sS -X POST "$ROUTINE_FIRE_URL" \
+          # --fail-with-body, not a bare curl: without it curl exits 0 on an
+          # HTTP 4xx/5xx, so a revoked token (generating a new one revokes the
+          # old), a changed beta header on this experimental endpoint, or a 429
+          # would be logged as a fire that happened, and the soft-failure line
+          # below would never print. The body still reaches the log, which is
+          # where the error type and message are.
+          curl -sS --fail-with-body -X POST "$ROUTINE_FIRE_URL" \
             -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
             -H "anthropic-version: 2023-06-01" \
             -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
