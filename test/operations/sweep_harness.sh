@@ -11,13 +11,49 @@ set -euo pipefail
 # under errexit, name the exact site before cleanup removes its evidence; the
 # expected-error controls temporarily disable errexit and therefore stay quiet.
 on_error() {
-  local rc=$1 line=$2 command=$3
+  local rc=$1 line=$2 command=$3 name
   case $- in
     *e*) printf 'sweep_harness: line %s failed (exit %s): %s\n' "$line" "$rc" "$command" >&2 ;;
+    *) return "$rc" ;;
   esac
+  # And what the run under test actually said. Nearly every assertion here is a
+  # quiet predicate over a CAPTURED string that no file holds, so without this a
+  # failure reaches CI as a bare `grep -q` and reproducing it is the only way to
+  # learn what the sweep printed (gh-ocannl-893 was diagnosed that way). Named
+  # indirectly rather than by a per-capture dump, so a capture added later is
+  # covered by adding its name here and nothing else.
+  for name in incremental forced slow_forced coverage hostile; do
+    [ -n "${!name:-}" ] || continue
+    printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
+  done
   return "$rc"
 }
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
+# `! cmd` is exempt from errexit -- bash does not exit on a command whose value
+# is being inverted -- so a negative assertion spelled that way can never fail
+# this harness. All eight of them were inert, which is why the ambient-backend
+# leak below was reported three assertions past the site that saw it first
+# (gh-ocannl-893). Routed through a function, the command errexit weighs is the
+# CALL, and the ERR trap above names its line. Spelled with `if` rather than the
+# inversion it replaces, and saying what matched: from inside a function the
+# trap's `$BASH_COMMAND` is the body, which would name no pattern at all.
+absent() {
+  if grep -q "$@"; then
+    printf 'sweep_harness: unexpected match for %s\n' "$1" >&2
+    return 1
+  fi
+}
+
+# The fixture's inputs come from this file and nowhere else. This harness runs
+# as a test action INSIDE a sweep unit, so anything the launching sweep exports
+# is in scope here; the SWEEP_TEST_ names are what the fake opam below reads, and
+# an inherited one would rewrite a unit's log without appearing at any call site.
+# The nested sweep's own variables are neutralized at `run_sweep_args`, which is
+# where its environment is built.
+unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
+  SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
+  SWEEP_TEST_OPAM_OUT_METAL
 
 sweep=$1
 aggregate=$2
@@ -65,6 +101,11 @@ case ${OCANNL_BACKEND:-} in
     [ -n "${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" ] &&
       printf '%s\n' "$SWEEP_TEST_OPAM_OUT_MULTIDEV_CC"
     ;;
+  # A backend no aggregation control selects, so that the hermeticity control
+  # can hand the nested sweep an AMBIENT backend belonging to neither unit and
+  # still be answered. Without an arm here a leaked `metal` produces nothing and
+  # the control passes for the wrong reason.
+  metal) [ -n "${SWEEP_TEST_OPAM_OUT_METAL:-}" ] && printf '%s\n' "$SWEEP_TEST_OPAM_OUT_METAL" ;;
 esac
 if [ -n "${SWEEP_TEST_WAIT_PREFIX:-}" ]; then
   : >"$SWEEP_TEST_WAIT_PREFIX.ready"
@@ -85,16 +126,32 @@ printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n' >"$s
 printf '20260820T000000Z\tlocal\tcc\tdeadbee\tpass\t1\t<all>\t0\t-\n' >>"$state/history.tsv"
 
 run_sweep_args() {
-  HOME=$tmp/home \
-  PATH=$fake_bin:$PATH \
-  SWEEP_TEST_CALLS=$calls \
-  SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-} \
-  SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0} \
-  SWEEP_TEST_OPAM_OUT=${SWEEP_TEST_OPAM_OUT:-} \
-  SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-} \
-  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-} \
-  OCANNL_TOOL_SWEEP_REPO=$main \
-  OCANNL_TOOL_SWEEP_STATE=$state \
+  # The nested sweep's environment, constructed in full rather than added to.
+  # `-u` is the load-bearing half: `tools/sweep.sh` runs a unit's tests as
+  # `OCANNL_BACKEND=<backend> opam exec -- dune build ...`, so when the sweep
+  # runs this harness the backend it selected is exported into it -- and the
+  # nested sweep's own forced-clean leg carries no backend of its own, so the
+  # fake opam answered the launcher's and wrote one unit's skip records into
+  # another unit's log, reading a union as an intersection (gh-ocannl-893). The
+  # sweep's caps go with it: an ambient one would silently rewrite the budgets
+  # the cancellation controls below depend on. The hostile-ambient control after
+  # the coverage assertions is what keeps this from rotting back.
+  #
+  # Quoted, unlike the assignment prefix this replaces: these are `env`'s
+  # ARGUMENTS now, so the multi-line fixture logs would otherwise be split into
+  # words and `env` would try to run one of them as the command.
+  env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP \
+    "HOME=$tmp/home" \
+    "PATH=$fake_bin:$PATH" \
+    "SWEEP_TEST_CALLS=$calls" \
+    "SWEEP_TEST_WAIT_PREFIX=${SWEEP_TEST_WAIT_PREFIX:-}" \
+    "SWEEP_TEST_OPAM_RC=${SWEEP_TEST_OPAM_RC:-0}" \
+    "SWEEP_TEST_OPAM_OUT=${SWEEP_TEST_OPAM_OUT:-}" \
+    "SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-}" \
+    "SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" \
+    "SWEEP_TEST_OPAM_OUT_METAL=${SWEEP_TEST_OPAM_OUT_METAL:-}" \
+    "OCANNL_TOOL_SWEEP_REPO=$main" \
+    "OCANNL_TOOL_SWEEP_STATE=$state" \
     "$sweep" "$@"
 }
 
@@ -140,12 +197,10 @@ common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_TOOL_VER
 cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
 multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
 environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_TOOL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
-coverage=$(SWEEP_TEST_OPAM_OUT_CC="$common
-$cc_only
-$environment" \
-  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC="$common
-$multidev_only
-$environment" \
+cc_unit_log=$common$'\n'$cc_only$'\n'$environment
+multidev_unit_log=$common$'\n'$multidev_only$'\n'$environment
+coverage=$(SWEEP_TEST_OPAM_OUT_CC=$cc_unit_log \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=$multidev_unit_log \
   run_sweep_args --force --only cc --only multidev_cc)
 coverage_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$coverage" | tail -1)
 [ -f "$coverage_report" ]
@@ -153,9 +208,9 @@ grep -q '^status: partial (2 of 5 known backends completed)$' "$coverage_report"
 grep -q '^missing backends: metal, cuda, hip$' "$coverage_report"
 grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common unevaluated claim$' \
   "$coverage_report"
-! grep -q 'cc-only unevaluated claim' "$coverage_report"
-! grep -q 'multidev-only unevaluated claim' "$coverage_report"
-! grep -q 'environment-gated claim' "$coverage_report"
+absent 'cc-only unevaluated claim' "$coverage_report"
+absent 'multidev-only unevaluated claim' "$coverage_report"
+absent 'environment-gated claim' "$coverage_report"
 
 # The verdict and each finding must reach the sweep's OWN summary, not only the
 # report file: the scheduled routine's notification path quotes sweep output,
@@ -168,9 +223,36 @@ grep -q '^  result: POTENTIAL -- 1 claim(s) skipped on every completed backend; 
   <<<"$coverage"
 grep -q '^  POTENTIAL: skipped on every completed backend: fixture.exe: common unevaluated claim$' \
   <<<"$coverage"
-! grep -q 'cc-only unevaluated claim' <<<"$coverage"
-! grep -q 'multidev-only unevaluated claim' <<<"$coverage"
-! grep -q 'environment-gated claim' <<<"$coverage"
+absent 'cc-only unevaluated claim' <<<"$coverage"
+absent 'multidev-only unevaluated claim' <<<"$coverage"
+absent 'environment-gated claim' <<<"$coverage"
+
+# The same fixture with a hostile backend in the AMBIENT environment. This is
+# the harness's own running condition: the sweep runs a unit's tests as
+# `OCANNL_BACKEND=<backend> opam exec -- dune build ...`, so the launcher's
+# choice of backend is exported into every test action of that unit, this one
+# included. It used to reach the nested sweep, whose forced-clean leg names no
+# backend of its own -- so the fake opam answered the AMBIENT one and wrote the
+# cc unit's skip records into the multidev_cc unit's log, turning the
+# intersection this exists to take into a union (gh-ocannl-893). The ambient
+# value names a backend NEITHER selected unit runs, carrying a claim of its own:
+# a leak then appears in both units' logs and grows the intersection, so what is
+# pinned is that the nested sweep answers only the backends the SWEEP selected,
+# not merely that these two particular ones survive.
+#
+# The aggregation is compared rather than restated: the clean run's findings are
+# already pinned to their exact text above, and their extraction is an errexit
+# assignment that fails loudly on no match -- so an empty pair cannot agree
+# vacuously, which is the failure mode a comparison invites.
+leaked=$'SKIPPED on fixture (vacuous): leaked-ambient claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tleaked-ambient claim'
+coverage_findings=$(grep -E '^  (result|FAIL|POTENTIAL): ' <<<"$coverage")
+hostile=$(OCANNL_BACKEND=metal \
+  SWEEP_TEST_OPAM_OUT_CC=$cc_unit_log \
+  SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=$multidev_unit_log \
+  SWEEP_TEST_OPAM_OUT_METAL=$leaked \
+  run_sweep_args --force --only cc --only multidev_cc)
+[ "$(grep -E '^  (result|FAIL|POTENTIAL): ' <<<"$hostile")" = "$coverage_findings" ]
+
 # A single-backend forced run cannot aggregate, and its summary says so through
 # the same channel rather than staying silent about the report it wrote.
 grep -q '^  result: NOT AGGREGATED$' <<<"$forced"
@@ -195,7 +277,7 @@ set -e
 grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
 grep -q '^FAIL: skipped on every known backend: verdict_skip_probe.exe: common unevaluated claim$' \
   <<<"$complete_fail"
-! grep -q 'common environment-gated claim' <<<"$complete_fail"
+absent 'common environment-gated claim' <<<"$complete_fail"
 
 printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
 complete_pass=$("$aggregate" "${aggregate_args[@]}")
@@ -343,7 +425,7 @@ run_sweep_backend metal >"$tmp/metal_pass.out" 2>&1
 grep -q 'local/metal: incremental-pass' "$tmp/metal_pass.out"
 metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail -1)
 [ -f "$metal_pass_log" ]
-! grep -q 'rtc-context' "$metal_pass_log"
+absent 'rtc-context' "$metal_pass_log"
 
 # Both of dune's location spellings must reach the fingerprint, and a dune
 # location must reduce to the stanza it names. `lines N-M` is what a stanza
