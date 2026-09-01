@@ -1203,15 +1203,17 @@ val on_candidate_preflight : (string -> unit) ref
     their exceptions here exercises the containment machinery with a realistic payload but does not
     mirror where a real one is now raised. Default a no-op; no configuration selects it. *)
 
-val on_candidate_timed : (string -> unit) ref
+val on_candidate_timed : (string -> timed_so_far:int -> unit) ref
 (** Observation seam for the containment tests (gh-ocannl-898), called with a routine's name each
     time a timing run's window yields an admitted measurement — the moment the search's
     [candidates_timed] accounting grows, for the dispatched baseline and candidates alike.
-    {!on_candidate_preflight} is upstream of that verdict and not a substitute: under the {!Queued}
-    objective a preflighted run can still be refused (a contended window, a degenerate clock
-    reading; gh-ocannl-855) and then times nothing, so a fault-injection precondition of the form
-    "the arm under injection has timed candidates of its own" must count admitted timings, not
-    preflights — counted in preflights it fires, on a loaded device, on an arm whose report says it
+    [timed_so_far] is that accounting's own value after this admission — what a report cut at this
+    instant would state as [candidates_timed] — passed so a precondition of the form "the arm under
+    injection has timed N candidates" pins the tuner's number rather than maintaining a second
+    counter that can drift from it. {!on_candidate_preflight} is upstream of the window's verdict
+    and not a substitute: under the {!Queued} objective a preflighted run can still be refused (a
+    contended window, a degenerate clock reading; gh-ocannl-855) and then times nothing, so counted
+    in preflights such a precondition fires, on a loaded device, on an arm whose report says it
     timed nothing. Default a no-op; no configuration selects it. *)
 
 val tune :

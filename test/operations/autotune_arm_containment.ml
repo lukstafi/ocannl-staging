@@ -65,13 +65,14 @@ let clean_cache dir =
    contended without growing [candidates_timed] (gh-ocannl-855), and on a loaded CUDA device arm
    B's first two windows were both refused, so a preflight-counted precondition fired the injection
    on an arm with no timed best — again asserting the opposite of what the scenario says
-   (gh-ocannl-898). [on_candidate_timed] fires exactly when [candidates_timed] grows, which states
-   the precondition directly. *)
+   (gh-ocannl-898). [on_candidate_timed] fires exactly when [candidates_timed] grows and carries
+   the tuner's own count, so [timed] below is a copy of the number the arm's report will state,
+   not a second counter that could drift from it. *)
 let with_injected_failure ?exn ?(after_arm_timed = 0) ~arms_reported ~at ~message f =
   let attempts = ref 0 in
   let timed = ref 0 in
   (Autotune.on_candidate_timed :=
-     fun _routine_name -> if !arms_reported >= 1 then Int.incr timed);
+     fun _routine_name ~timed_so_far -> if !arms_reported >= 1 then timed := timed_so_far);
   (Autotune.on_candidate_attempt :=
      fun label ->
        (* Arm A reports exactly once, when its search ends, so this fires within arm B only. *)
@@ -83,7 +84,7 @@ let with_injected_failure ?exn ?(after_arm_timed = 0) ~arms_reported ~at ~messag
                 ~default:(Failure (Printf.sprintf "%s at candidate %s" message label)))));
   Exn.protect ~f ~finally:(fun () ->
       (Autotune.on_candidate_attempt := fun _ -> ());
-      Autotune.on_candidate_timed := fun _ -> ())
+      Autotune.on_candidate_timed := fun _ ~timed_so_far:_ -> ())
 
 (* gh-ocannl-564: the same discipline at the pre-dispatch validation seam. [at] counts preflights
    across the whole call — 1 is arm A's baseline timing, 2 the first candidate it times — and the
