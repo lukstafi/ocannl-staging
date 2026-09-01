@@ -623,7 +623,75 @@ record() {
 # and a sweep that shouts on every red is a sweep nobody reads.
 fingerprint() {
   {
-    grep -hoE '^File "[^"]+", line [0-9]+' "$1"
+    # Error SITES, in BOTH of dune's spellings: a diagnostic anchored to one
+    # line says `line N`, one anchored to a span -- notably a whole stanza whose
+    # action exited non-zero, which is how every explicit-rule test here fails --
+    # says `lines N-M`. Matching only the singular left a unit whose ONLY failure
+    # had that shape with an EMPTY fingerprint, and empty compares equal to
+    # empty, so the consumer that diffs against the previous non-pass run read a
+    # red suite as "unchanged since the last sweep" and said nothing.
+    #
+    # A location in a dune FILE is additionally reduced to the stanza it names.
+    # Line numbers there shift under any edit to that file, so a fingerprint
+    # keyed on them reports wholesale change whenever an unrelated stanza is
+    # inserted above -- overstating exactly the thing the diff is asked to
+    # measure. The stanza's own alias/name survives such edits, and is what a
+    # reader needs anyway. A stanza is named by whichever of alias/name/target
+    # it declares first -- a bare `(rule (target x.actual) ...)` has no alias to
+    # give. Dune elides the middle of a long excerpt, so nothing identifying is
+    # always quoted; the location stands in when none was.
+    awk '
+      function flush() {
+        if (loc == "") return
+        if (name != "") print prefix ", " name; else print loc
+        loc = ""; name = ""; want = ""; opened = 0
+      }
+      /^File "[^"]+", lines? [0-9]+/ {
+        flush()
+        match($0, /^File "[^"]+", lines? [0-9]+(-[0-9]+)?/)
+        here = substr($0, 1, RLENGTH)
+        match($0, /^File "[^"]+"/)
+        head = substr($0, 1, RLENGTH)
+        if (head ~ /\/dune"$/ || head == "File \"dune\"") {
+          loc = here; prefix = head; next
+        }
+        print here
+        next
+      }
+      loc != "" {
+        # The quoted excerpt: numbered source lines, plus the elision marker
+        # dune prints for a long one. Anything else ends the excerpt, which
+        # then never named its stanza.
+        if ($0 ~ /^\.\.\.+$/) { want = ""; opened = 0; next }
+        if ($0 !~ /^[0-9 ]*[0-9] \|/) { flush(); next }
+        if (name != "") next
+        text = $0
+        sub(/^[0-9 ]*[0-9] \| ?/, "", text)
+        # Tokenized rather than matched as one regex, because the identifier is
+        # not reliably a bare word sitting on its keywords line: it can be
+        # quoted, and dune wraps a long field so that `(targets` ends one line
+        # and its first target begins the next. A same-line regex reads both as
+        # unnamed and falls back to the shifting span -- which is the failure
+        # this normalization exists to avoid.
+        gsub(/\(/, " ( ", text)
+        gsub(/\)/, " ) ", text)
+        n = split(text, tok, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+          if (tok[i] == "") continue
+          # A dune comment runs to end of line: never the stanzas identifier.
+          if (tok[i] ~ /^;/) break
+          # An opening paren abandons a pending keyword: the field held a
+          # nested form, as `(alias (name slow))` does, and the name is inside.
+          if (tok[i] == "(") { opened = 1; want = ""; continue }
+          if (tok[i] == ")") { opened = 0; want = ""; continue }
+          if (want != "") { name = want " " tok[i]; break }
+          if (opened && tok[i] ~ /^(alias|name|names|target|targets)$/) want = tok[i]
+          opened = 0
+        }
+        next
+      }
+      END { flush() }
+    ' "$1"
     grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$1"
     # The one PRODUCTION option vector a sweep can ever hold: `cuda_to_ptx`
     # appends it to the nvrtc message it re-raises, so a CUDA compile failure --
@@ -643,6 +711,26 @@ fingerprint() {
   # vector then shows up as a diff beside the failure it explains, which is the
   # whole point (gh-ocannl-784).
   sed -n '/^=== rtc-context /,/^=== end rtc-context ===$/p' "$1" 2>/dev/null | head -40
+}
+
+# An outcome that is not a pass, with nothing extractable from its log, is its
+# own condition -- not a fingerprint of zero failures. The consumer diffs this
+# file against the previous non-pass run's, and an empty file compares equal to
+# an empty file, so such a unit was filed as "unchanged since the last sweep"
+# and reported to nobody; that is how the missing `lines N-M` spelling above
+# survived two sweeps. The sentinel makes the file differ from a real
+# fingerprint in either direction, and the summary line is what a human
+# actually sees: the scheduled routine quotes sweep output, so a finding that
+# lives only in a written file is one nobody reads (gh-ocannl-792).
+EMPTY_FINGERPRINT='(no fingerprintable diagnostics -- read the log)'
+
+write_fingerprint() {
+  local log=$1 label=$2 fp=${1%.log}.fingerprint
+  fingerprint "$log" >"$fp"
+  if [ ! -s "$fp" ]; then
+    printf '%s\n' "$EMPTY_FINGERPRINT" >"$fp"
+    echo "  $label: $EMPTY_FINGERPRINT -- $log"
+  fi
 }
 
 if [ "$FORCE" = 1 ]; then
@@ -710,7 +798,7 @@ for unit in "${UNITS[@]}"; do
          >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
-      fingerprint "$log" >"${log%.log}.fingerprint"
+      write_fingerprint "$log" "$machine/$backend"
       continue
     fi
     # The cap is applied on the FAR side: killing the local ssh would leave the
@@ -753,7 +841,7 @@ for unit in "${UNITS[@]}"; do
     if ! /bin/sh -c "$(prep_cmd "$MAIN" "$wt")" >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $wt to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
-      fingerprint "$log" >"${log%.log}.fingerprint"
+      write_fingerprint "$log" "$machine/$backend"
       continue
     fi
     run_capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
@@ -803,7 +891,7 @@ for unit in "${UNITS[@]}"; do
       ;;
   esac
   case $outcome in
-    fail | timeout | error) fingerprint "$log" >"${log%.log}.fingerprint" ;;
+    fail | timeout | error) write_fingerprint "$log" "$machine/$backend" ;;
   esac
 done
 

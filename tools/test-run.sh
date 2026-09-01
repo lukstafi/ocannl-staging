@@ -662,6 +662,11 @@ resolve_run() {
 # The compact report `run`, `wait` and `status` all end with. Fingerprint in
 # the sweep.sh sense: the `File "..."` and `Error ...` lines, deduplicated, so
 # a new failure is distinguishable from a standing one without opening the log.
+# Both of dune's location spellings, since a stanza-level diagnostic -- what a
+# failing explicit-rule test produces -- says `lines N-M` and would otherwise
+# fall through to the raw log tail. The line numbers are kept as printed: this
+# report is read against the tree that produced it, unlike sweep.sh's, which is
+# diffed across commits and so normalizes a dune location to its stanza.
 digest() {
   local dir=$1 rc verdict fp
   rc=$(cat "$dir/exit" 2>/dev/null) || die "no verdict recorded in $dir"
@@ -688,7 +693,7 @@ digest() {
          "(tools/promote.sh on Windows)"
   fi
   if [ "$rc" != 0 ]; then
-    fp=$({ scan_log | grep -oE '^File "[^"]+", line [0-9]+'
+    fp=$({ scan_log | grep -oE '^File "[^"]+", lines? [0-9]+(-[0-9]+)?'
            scan_log | grep -oE '^(Error|Fatal error|Exception)[^,]*'
          } 2>/dev/null | sort -u | head -40)
     if [ -n "$fp" ]; then
