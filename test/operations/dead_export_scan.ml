@@ -16,6 +16,11 @@
 
 open Base
 open Stdio
+
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Read = Test_utils.Config_key_scan
 module Scan = Test_utils.Dead_export_scan
 module Dune = Test_utils.Dune_stanza_scan
@@ -356,15 +361,15 @@ let refusal_control () =
   Test_utils.Refusal_control_manifest.print source
 
 let () =
-  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+  if Array.length argv = 2 && String.equal argv.(1) "--refusal-control" then (
     refusal_control ();
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <source...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <source...>\n" argv.(0);
     Stdlib.exit 1);
-  let base = Dune.base_dir Stdlib.Sys.argv.(1) in
+  let base = Dune.base_dir argv.(1) in
   let arguments =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Dune.repo_relative base path, path))
   in
   let on_disk = Map.of_alist_reduce (module String) arguments ~f:(fun first _ -> first) in

@@ -1979,7 +1979,12 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files and OCaml sources as text.
- (target env_var_deps.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has no
+ ; length limit, and handed over as a `@<path>` response file. Expanded into argv instead, this
+ ; scan's command line had reached 37,548 characters against Windows' cap of 32,767, where
+ ; `CreateProcess` fails with `No such file or directory` and names neither. See
+ ; `test/support/scan_argv.ml`.
+ (targets env_var_deps.actual env_var_deps.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -2001,9 +2006,13 @@
   (glob_files_rec ../../test/*.expected)
   (glob_files_rec ../../arrayjit/test/*.expected))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:env_var_deps.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    env_var_deps.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    env_var_deps.actual
+    (run %{dep:env_var_deps.exe} %{workspace_root} @env_var_deps.filelist)))))
 
 (rule
  (alias runtest-env_var_deps)
@@ -2052,7 +2061,11 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads `.gitignore` and every OCaml source in the repository as text.
- (target cache_dir_ignores.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has
+ ; no length limit, and handed over as a `@<path>` response file -- expanded into argv, a
+ ; repository-wide list outgrows Windows' 32,767-character command line, where `CreateProcess`
+ ; fails with `No such file or directory` and names neither. See `test/support/scan_argv.ml`.
+ (targets cache_dir_ignores.actual cache_dir_ignores.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -2062,9 +2075,13 @@
   ; and it would fail by staying green rather than by failing to build (Codex P2, round 6).
   (glob_files_rec ../../*.ml))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:cache_dir_ignores.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    cache_dir_ignores.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    cache_dir_ignores.actual
+    (run %{dep:cache_dir_ignores.exe} %{workspace_root} @cache_dir_ignores.filelist)))))
 
 (rule
  (alias runtest-cache_dir_ignores)
@@ -2107,7 +2124,17 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it parses every repository OCaml source.
- (target atomic_file_rename_scan.actual)
+ ; The three file lists are written by dune's own `echo`, which spawns nothing and so has no length
+ ; limit, and handed over as `@<path>` response files -- expanded into argv, a repository-wide list
+ ; outgrows Windows' 32,767-character command line, where `CreateProcess` fails with `No such file
+ ; or directory` and names neither. One file per GROUP, because the groups are what the scan's own
+ ; flags separate: a response file splices in where it stood, so `--sources @<list>` reaches the
+ ; program as the expanded `--sources a b c` did. See `test/support/scan_argv.ml`.
+ (targets
+  atomic_file_rename_scan.actual
+  atomic_file_rename_scan.generators
+  atomic_file_rename_scan.generated
+  atomic_file_rename_scan.sources)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -2119,17 +2146,27 @@
   (:sources
    (glob_files_rec ../../*.ml)))
  (action
-  (with-stdout-to
-   %{target}
-   (run
-    %{dep:atomic_file_rename_scan.exe}
-    %{workspace_root}
-    --generators
-    %{generators}
-    --generated
-    %{generated}
-    --sources
-    %{sources}))))
+  (progn
+   (with-stdout-to
+    atomic_file_rename_scan.generators
+    (echo "%{generators}"))
+   (with-stdout-to
+    atomic_file_rename_scan.generated
+    (echo "%{generated}"))
+   (with-stdout-to
+    atomic_file_rename_scan.sources
+    (echo "%{sources}"))
+   (with-stdout-to
+    atomic_file_rename_scan.actual
+    (run
+     %{dep:atomic_file_rename_scan.exe}
+     %{workspace_root}
+     --generators
+     @atomic_file_rename_scan.generators
+     --generated
+     @atomic_file_rename_scan.generated
+     --sources
+     @atomic_file_rename_scan.sources)))))
 
 (rule
  (alias runtest-atomic_file_rename_scan)
@@ -2180,7 +2217,11 @@
 
 (rule
  ; ocannl-backend: none -- parses repository OCaml sources and opens no backend.
- (target dead_export_scan.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has
+ ; no length limit, and handed over as a `@<path>` response file -- expanded into argv, a
+ ; repository-wide list outgrows Windows' 32,767-character command line, where `CreateProcess`
+ ; fails with `No such file or directory` and names neither. See `test/support/scan_argv.ml`.
+ (targets dead_export_scan.actual dead_export_scan.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -2189,9 +2230,13 @@
   (glob_files_rec ../../*.ml)
   (glob_files_rec ../../*.mli))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:dead_export_scan.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    dead_export_scan.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    dead_export_scan.actual
+    (run %{dep:dead_export_scan.exe} %{workspace_root} @dead_export_scan.filelist)))))
 
 (rule
  (alias runtest-dead_export_scan)
@@ -2404,7 +2449,11 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads goldens, test sources and compiled interfaces.
- (target codegen_text_inventory.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has
+ ; no length limit, and handed over as a `@<path>` response file -- expanded into argv, a
+ ; repository-wide list outgrows Windows' 32,767-character command line, where `CreateProcess`
+ ; fails with `No such file or directory` and names neither. See `test/support/scan_argv.ml`.
+ (targets codegen_text_inventory.actual codegen_text_inventory.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -2418,9 +2467,13 @@
   (glob_files_rec ../../arrayjit/test/*.expected)
   (glob_files_rec ../../arrayjit/test/*.ml))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:codegen_text_inventory.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    codegen_text_inventory.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    codegen_text_inventory.actual
+    (run %{dep:codegen_text_inventory.exe} %{workspace_root} @codegen_text_inventory.filelist)))))
 
 (rule
  (alias runtest-codegen_text_inventory)
@@ -4570,7 +4623,11 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads shell scripts and Markdown as text.
- (target config_usage_scan.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has
+ ; no length limit, and handed over as a `@<path>` response file -- expanded into argv, a
+ ; repository-wide list outgrows Windows' 32,767-character command line, where `CreateProcess`
+ ; fails with `No such file or directory` and names neither. See `test/support/scan_argv.ml`.
+ (targets config_usage_scan.actual config_usage_scan.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
@@ -4602,9 +4659,13 @@
   (glob_files_rec ../../lib/*.ml)
   (glob_files_rec ../../lib/*.mli))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:config_usage_scan.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    config_usage_scan.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    config_usage_scan.actual
+    (run %{dep:config_usage_scan.exe} %{workspace_root} @config_usage_scan.filelist)))))
 
 (rule
  ; ocannl-backend: none -- runs the same text scanner on a synthetic unknown key and requires its
@@ -4724,7 +4785,17 @@
   ocannl_config
   (glob_files_rec ../../.gitignore))
  (modules atomic_file_race)
- (libraries base stdio unix arrayjit.utils test_utils arrayjit.verdict))
+ ; `mtime.clock.os` for the same reason `arrayjit.utils` links it: every bound in this file is a
+ ; duration, and a wall clock can move under one.
+ (libraries
+  base
+  stdio
+  unix
+  mtime
+  mtime.clock.os
+  arrayjit.utils
+  test_utils
+  arrayjit.verdict))
 
 ; The exactness of [diff.zero_grads.embedded_nodes] (gh-ocannl-771), at both ends of the
 ; recursion: a parameter's singleton, and a composite loss's set equality against what its

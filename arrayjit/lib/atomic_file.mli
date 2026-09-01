@@ -34,10 +34,14 @@
     - The staging file is closed before it is renamed and before it is removed. The C runtime opens
       files without [FILE_SHARE_DELETE], so on Windows both operations fail while this process still
       holds the handle.
-    - For the same sharing reason a rename can fail transiently while ANOTHER process has the target
-      open for reading. The commit retries a bounded number of times with a short backoff before
-      propagating the failure; on POSIX the first attempt always succeeds and the retry costs
-      nothing.
+    - For the same sharing reason a rename can fail while ANOTHER process, or another domain, has
+      the target open for reading. The commit polls for up to a second before propagating the
+      failure; on POSIX the first attempt always succeeds and the retry costs nothing. A second is
+      not a guarantee and is not meant as one: a reader that reopens the target as fast as it closes
+      it leaves no window for the rename at all, and against one of those the publish is REFUSED —
+      so a caller on Windows must be prepared for {!write_all} and {!with_channel} to raise
+      [Sys_error] where no POSIX caller ever would. What it may rely on is that a refusal changes
+      nothing: the target still holds a complete payload, and the staging file is cleaned up.
     - Staging names are matched caselessly, because on Windows and on a default macOS volume two
       spellings of one name address one file. See {!is_staging_file_for}. *)
 

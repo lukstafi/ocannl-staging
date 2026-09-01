@@ -568,6 +568,64 @@ that they earn a lookup rather than always-loaded space.
   `test/support/test_utils.ml` packages the rules — `hex_float` and `set_binary_stdout` are
   portable by construction, while `print_float`/`print_floats` delegate to `concise_float` and so
   still need tie-free inputs.
+- Three more Windows facts, each of which makes POSIX-shaped code silently wrong rather than broken,
+  all measured on a stock Windows 11 box while making the scheduled sweep green again (gh-ocannl-588):
+  - `Unix.sleepf` cannot sleep for less than the system timer tick. A request below 1 ms truncates to
+    NO sleep at all; everything from 1 ms up costs a full 15.6 ms. A budget written as "N turns of a
+    short sleep" is therefore not a duration there: `atomic_file_race`'s "20,000 × 0.5 ms = ten
+    seconds" was a sub-second busy-spin that also burned the core its peer domain needed, and
+    `Atomic_file`'s "8 attempts, 2 ms apart" was anywhere between 16 ms and 110 ms. Write every wait
+    as a DEADLINE in seconds — the tick is machine-wide and anything in the session can move it to
+    1 ms with `timeBeginPeriod`, so even a count of full-tick sleeps is not a fixed budget — and
+    measure that deadline with `Mtime_clock`, never `Unix.gettimeofday`: a bound on a DURATION that
+    a wall clock can move under is cut short or extended by any NTP step, manual correction or VM
+    resynchronization. `arrayjit.utils` links `mtime.clock.os` for exactly this.
+  - Neither `open_in`/`open_in_bin` nor `Unix.openfile` asks for `FILE_SHARE_DELETE`, so an open
+    reader and a `Sys.rename` over the same target refuse EACH OTHER with `EACCES` — arriving as
+    `Sys_error "Permission denied"`, and from the rename with no filename in the message, which is
+    how a commit refusal is told from an `open_staging` one. Both refusals are transient and both are
+    retried, but a reader that reopens the target as fast as it closes it leaves no window at all and
+    then no retry budget wins: measured, one or two publishes in six hundred are refused on every
+    poll for a full second. Hence `atomic_file.mli` states the consequence rather than promising
+    against it — on Windows a publish MAY be refused — and a test of publication under load must
+    claim what is true (every publication committed or was refused, none went missing, refusals stay
+    rare) instead of claiming liveness the platform does not provide.
+  - `MAX_PATH` caps the whole path at 260 characters, which is a different budget from the 255-byte
+    per-COMPONENT limit. A fixture named at the component limit has no directory it fits in inside a
+    build tree (`_build/default/test/operations` alone spends ~65), and every open of it fails with
+    ENOENT. Gate such a leg with `Verdict.skipped ~aggregation:`Environment``, and make the gate a
+    PROBE rather than `Sys.win32`: what is capped is the path this run actually got.
+- Windows caps a whole COMMAND LINE at 32,767 characters, and the repo-wide scans hand every file
+  they read to their executable as an argument, so they grow toward it with the repository. Past it
+  `CreateProcess` fails and dune reports `Error: CreateProcess(): No such file or directory` — an
+  error naming neither the length nor the executable, on whichever scan the last few merges pushed
+  over (three had crossed it and a fourth was 255 characters short when this was first hit). The
+  scans therefore pass their file lists as `@<path>` RESPONSE FILES: the rule writes the list with
+  dune's own `(echo "%{deps}")`, which runs inside dune and spawns nothing, into a second target of
+  the same rule, and `Test_utils.Scan_argv.expand` splices it back in where the `@` argument stood.
+  A new scan should be written that way from the start. `env_var_deps` knows the shape — a target
+  the rule hands back to its own action needs no golden diff — and recognizes it by the `@<target>`
+  reference rather than by the name, so a real output cannot be renamed out of the requirement.
+  The one thing this transport gives up is a path containing WHITESPACE: `%{deps}` is space-joined
+  and dune has no boundary-preserving expansion, where argv preserved boundaries. It is given up
+  loudly — every word of a response file is a dependency dune materialized, so `Scan_argv.expand`
+  refuses a word that names nothing on disk rather than scanning two phantoms in place of one file.
+  The repository has no such path today.
+- A Windows checkout with `core.symlinks=false` (git's default there without Developer Mode) writes
+  every git symlink as a small TEXT FILE holding the link target. The repository has 19 of them —
+  `docs/in-progress/` and `docs/research/` are views onto `docs/proposals/` — so any scan that reads
+  documentation sees 29-byte stubs, and `config_usage_scan` reports an exemption count drifting to
+  zero. It is not a repository bug and must not be "fixed" in the exemption list: CI's Windows job
+  enables symlink evaluation (setup-ocaml runs `fsutil behavior set symlinkEvaluation`) and sees the
+  real files. On a hand-run Windows box, `git config core.symlinks true`, then delete and re-check-out
+  the 19 paths (`git ls-files -s | awk '$1=="120000"'`) before trusting any doc-reading scan.
+- `os.kill(pid, 0)` is not a liveness probe on Windows and must not be used as one. CPython
+  implements `os.kill` there as `OpenProcess` followed by `TerminateProcess(handle, sig)`, so signal
+  0 KILLS the process it was asked about, and a pid that already exited raises `OSError`
+  (`WinError 87`) rather than `ProcessLookupError`, which no POSIX-shaped handler catches.
+  `benchmarks/cell_group.process_is_alive` is the portable form — a zero-timeout wait on a process
+  handle, where `WAIT_TIMEOUT` means "still running". `signal.SIGKILL` does not exist there either;
+  `os.kill` with any other signal is `TerminateProcess`.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target

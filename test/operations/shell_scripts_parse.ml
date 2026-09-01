@@ -510,6 +510,63 @@ let executable path =
     true
   with Unix.Unix_error _ -> false
 
+(** Where Git for Windows keeps the shells it ships, most preferred first; empty off Windows.
+
+    `C:\Windows\System32\bash.exe` is the WSL launcher stub, and on a stock Windows runner image
+    System32 precedes Git's `bin` on PATH. The stub is not a shell and parses nothing: it prints
+    "Windows Subsystem for Linux has no installed distributions." and exits nonzero without ever
+    opening the file. It is also not something [available] may call absent, and must not become one:
+    it EXECS, so "exists" is the true answer to the question that function asks, and answering false
+    there would send a present-but-broken shell to a stand-in and judge a script by a grammar its
+    shebang never named -- the defect its comment above records. The shadowing is a defect of the
+    LOOKUP, so it is fixed in the lookup: a shell Git ships is named by its own absolute path, which
+    nothing on PATH can precede.
+
+    The environment variables come first because they are what a non-default install has;
+    `C:\Progra~1\Git` is the last resort and the same 8.3 spelling `ci.yml` pins for its Git Bash
+    smoke step -- space-free, because a path with a space is a path something downstream will
+    eventually split. *)
+let windows_git_roots =
+  lazy
+    (if not Stdlib.Sys.win32 then []
+     else
+       let under name suffix =
+         match Stdlib.Sys.getenv_opt name with
+         | Some dir when not (String.is_empty dir) ->
+             [ List.fold suffix ~init:dir ~f:Stdlib.Filename.concat ]
+         | _ -> []
+       in
+       under "ProgramFiles" [ "Git" ] @ under "ProgramW6432" [ "Git" ]
+       @ under "ProgramFiles(x86)" [ "Git" ]
+       @ under "LOCALAPPDATA" [ "Programs"; "Git" ]
+       @ [ {|C:\Progra~1\Git|} ])
+
+(** The absolute path of [command] as Git for Windows ships it, if it ships it and it runs.
+
+    `bin\<shell>.exe` before `usr\bin\<shell>.exe`: the former is Git's LAUNCHER, which prepends its
+    own `/mingw64/bin:/usr/bin` to whatever PATH it inherits, and it is the file `ci.yml` vouches
+    for on this image; the raw binary under `usr\bin` provisions nothing. `-n` needs no
+    provisioning, but preferring the file CI already exercises keeps one answer to "which bash". Git
+    ships `bash`, `sh` and `dash` and no `ksh` or `zsh`, which simply find no candidate here and
+    fall back to the name on PATH. *)
+let git_for_windows command =
+  List.find_map (force windows_git_roots) ~f:(fun root ->
+      List.find
+        [
+          Stdlib.Filename.concat (Stdlib.Filename.concat root "bin") (command ^ ".exe");
+          Stdlib.Filename.concat
+            (Stdlib.Filename.concat (Stdlib.Filename.concat root "usr") "bin")
+            (command ^ ".exe");
+        ]
+        ~f:(fun path -> Stdlib.Sys.file_exists path && available path))
+
+(** [command] as a program this host can run: what Git for Windows ships under that name, else the
+    name itself for PATH to resolve. Off Windows this is exactly [available]. *)
+let resolvable command =
+  match git_for_windows command with
+  | Some shipped -> Some shipped
+  | None -> if available command then Some command else None
+
 (** Resolve one wanted interpreter to a program that exists here, or say why it does not.
 
     Two rules, and round 9 is what made them one rule rather than two. Every path the KERNEL would
@@ -533,9 +590,15 @@ let rec resolve ~rel ?(ours = false) launch =
       if available path then Ok path
       else if Stdlib.Sys.win32 then (
         let name = Shebang.basename path in
-        eprintf "%s: no `%s` on this host (Windows resolves the shebang itself), using `%s`\n" rel
-          path name;
-        resolve ~rel ~ours (Shebang.Via_env { env_path = ""; command = name }))
+        (* Announced AFTER resolving, so the name in the message is the program that will actually
+           be handed the file rather than the basename the lookup started from. *)
+        let resolved = resolve ~rel ~ours (Shebang.Via_env { env_path = ""; command = name }) in
+        (match resolved with
+        | Ok prog ->
+            eprintf "%s: no `%s` on this host (Windows resolves the shebang itself), using `%s`\n"
+              rel path prog
+        | Error _ -> ());
+        resolved)
       else kernel_path_missing path
   | Shebang.Via_env { env_path; command } -> (
       if
@@ -543,17 +606,27 @@ let rec resolve ~rel ?(ours = false) launch =
            where there is no env binary in the picture. *)
         (not (String.is_empty env_path)) && (not Stdlib.Sys.win32) && not (executable env_path)
       then kernel_path_missing env_path
-      else if available command then Ok command
-      else if not ours then
-        Error
-          (Printf.sprintf
-             "`%s` is not installed here, and a shell a shebang names is not substituted" command)
       else
-        match List.find (stand_ins command) ~f:available with
-        | Some substitute ->
-            eprintf "%s: no `%s` on this host, parsing with `%s` instead\n" rel command substitute;
-            Ok substitute
-        | None -> Error (Printf.sprintf "neither `%s` nor a stand-in is installed here" command))
+        match resolvable command with
+        | Some prog -> Ok prog
+        | None -> (
+            if not ours then
+              Error
+                (Printf.sprintf
+                   "`%s` is not installed here, and a shell a shebang names is not substituted"
+                   command)
+            else
+              (* The stand-in is announced by NAME -- which grammar checked the file is the fact a
+                 reader needs -- while the program run is whatever that name resolved to. *)
+              match
+                List.find_map (stand_ins command) ~f:(fun name ->
+                    Option.map (resolvable name) ~f:(fun prog -> (name, prog)))
+              with
+              | Some (name, prog) ->
+                  eprintf "%s: no `%s` on this host, parsing with `%s` instead\n" rel command name;
+                  Ok prog
+              | None ->
+                  Error (Printf.sprintf "neither `%s` nor a stand-in is installed here" command)))
 
 (** The first line of a file, or [None] if it cannot be read as text at all. Binary files reach here
     through the directory globs, so a failure to read one is "not a script", not an error.

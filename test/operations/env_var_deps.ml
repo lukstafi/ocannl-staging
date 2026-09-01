@@ -85,6 +85,11 @@
 open Base
 open Stdio
 open Verdict.Claims
+
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Scan = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
 module Refusals = Test_utils.Refusal_control_scan
@@ -547,6 +552,21 @@ let targets_of stanza =
       | None -> []
       | Some args -> List.filter_map args ~f:(function Sexp.Atom a -> Some a | _ -> None))
 
+let rec mentions_atom text = function
+  | Sexp.Atom a -> String.equal a text
+  | Sexp.List items -> List.exists items ~f:(mentions_atom text)
+
+(* A target a rule hands straight back to its OWN action is an input it wrote for itself, not a
+   verdict anybody diffs. The one shape this covers is the response file a repo-wide scan writes to
+   get its file list off the command line: dune's `echo` spawns nothing and so has no length limit,
+   while `CreateProcess` on Windows caps a whole command line at 32,767 characters, which three of
+   these scans had crossed (`test/support/scan_argv.ml`). Recognized by the `@<target>` REFERENCE in
+   the rule's own action rather than by the target's name, so a rule cannot opt a real output out of
+   the golden-diff requirement by calling it something. *)
+let is_own_response_file stanza target =
+  Option.value_map (Scan.field stanza "action") ~default:false ~f:(fun args ->
+      List.exists args ~f:(mentions_atom ("@" ^ target)))
+
 let rec diffs_file ?(named = []) target = function
   | Sexp.List (Sexp.Atom ("diff" | "diff?") :: args) ->
       (* Modulo the pform spelling: `(diff foo.expected %{dep:foo.actual})` is dune's ordinary way
@@ -740,12 +760,12 @@ let refuse name =
   printf "\n"
 
 let main () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" argv.(0);
     Stdlib.exit 1);
-  let base = Scan.base_dir Stdlib.Sys.argv.(1) in
+  let base = Scan.base_dir argv.(1) in
   let paths =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Scan.repo_relative base path, path))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
@@ -1326,8 +1346,16 @@ let main () =
                declaring a target says where its diagnostics go, not that a second rule judges them
                -- a scan can assert by exit status and still write one (Codex P2, round 8). Asked
                before the target hunt, so both shapes are accepted the same way. *)
+            (* The targets a second rule could be JUDGING. A response file the rule wrote for its
+               own action is not one, and it is subtracted before the emptiness question rather
+               than inside the iteration: a scan whose only target is its response file would
+               otherwise reach the loop, iterate over nothing and pass -- the round-4 fail-open
+               again, one shape over. *)
+            let judged_targets =
+              List.filter (targets_of producer) ~f:(Fn.non (is_own_response_file producer))
+            in
             if List.exists (aliases_of producer) ~f:(Set.mem scans_reaches) then ()
-            else if List.is_empty (targets_of producer) then
+            else if List.is_empty judged_targets then
               (* A scan that declares no target writes and checks in one action -- the `no-infer`
                  shape this repository uses elsewhere, or an assertion by exit status. There is no
                  second rule to look for, so the family has to aggregate THIS rule's own alias;
@@ -1348,7 +1376,7 @@ let main () =
                      scans_suite scans_suite)
               else ()
             else
-              List.iter (targets_of producer) ~f:(fun target ->
+              List.iter judged_targets ~f:(fun target ->
                   let checkers =
                     List.filter stanzas ~f:(fun s ->
                         is_golden_diff s
@@ -4112,7 +4140,7 @@ let guard_control () =
   try remove_tree root with Unix.Unix_error _ -> ()
 
 let () =
-  match Array.to_list Stdlib.Sys.argv with
+  match Array.to_list argv with
   | _ :: [ "--control" ] ->
       per_directory_control ();
       refusal_control ();

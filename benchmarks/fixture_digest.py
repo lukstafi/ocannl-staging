@@ -106,10 +106,17 @@ def cli_command():
     Remediation text is read by an operator who will paste it, and the canonical sweep command
     (`benchmarks/.venv/bin/python benchmarks/orchestrate.py`) runs from the repository root, where
     a bare `fixture_digest.py` names nothing.
+
+    Forward slashes, on every platform. The relative form is a path ARGUMENT, and cmd, PowerShell
+    and every shell a Windows operator might paste it into take `benchmarks/fixture_digest.py`
+    just as happily as the backslashed spelling `str()` would give them there -- while the
+    advertised command being the same string everywhere is what lets one sentence of remediation
+    be pinned by one test. The absolute fallback keeps the platform's own spelling: it is not a
+    relative path anyone reassembles, and on Windows a drive letter belongs with backslashes.
     """
     here = Path(__file__).resolve()
     try:
-        return str(here.relative_to(Path.cwd().resolve()))
+        return here.relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
         return str(here)
 

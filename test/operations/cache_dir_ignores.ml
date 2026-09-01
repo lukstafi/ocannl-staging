@@ -52,6 +52,11 @@ open Stdio
    teardown -- so the exit status, not the promotable golden diff, carries the verdict
    (gh-ocannl-601). *)
 open Verdict.Claims
+
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Scan = Test_utils.Cache_dir_scan
 
 let printf = Test_utils.Refusal_control_manifest.printf
@@ -221,17 +226,17 @@ let refusal_control () =
   Test_utils.Refusal_control_manifest.print source
 
 let () =
-  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+  if Array.length argv = 2 && String.equal argv.(1) "--refusal-control" then (
     refusal_control ();
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <.gitignore and source files...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <.gitignore and source files...>\n" argv.(0);
     Stdlib.exit 1);
-  let base = base_dir Stdlib.Sys.argv.(1) in
+  let base = base_dir argv.(1) in
   (* Reported repository-relative, opened as dune handed them over: the working directory is the
      rule's own, deep in the build tree. *)
   let paths =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (repo_relative base path, path))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in

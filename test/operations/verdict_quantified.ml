@@ -80,6 +80,17 @@ let got = [| 1.0; 2.0; 3.0 |]
 let want = [| 1.0; 2.0; 3.0 |]
 let distinct = [ 2; 4; 6 ]
 
+(* Every claim below is checked BYTE for byte, including its newline, so stdout has to be the bytes
+   `Verdict` wrote rather than the bytes a platform decided they should become. OCaml's stdout is in
+   TEXT mode on Windows, which rewrites each "\n" to "\r\n" on the way out; the three shape checks
+   that compare a capture against a literal ("the claim: true\n") then failed there and only there,
+   while the four that compare two captures against each other passed -- both children being
+   rewritten identically. Normalising the comparison instead would have made those three checks pass
+   without checking what the module actually prints, which is the whole question. Dune's `(diff)` is
+   a TEXT diff, so putting this process's own golden output in binary changes nothing for the
+   `.expected` on any platform. *)
+let () = Stdlib.set_binary_mode_out Stdlib.stdout true
+
 let () =
   let mode =
     match Array.to_list Stdlib.Sys.argv with

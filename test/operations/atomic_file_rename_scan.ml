@@ -19,6 +19,11 @@
 
 open Base
 open Stdio
+
+(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
+   a Windows command line may be; see [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Read = Test_utils.Config_key_scan
 module Ast_traverse = Ppxlib.Ast_traverse
 
@@ -176,21 +181,20 @@ let refusal_control () =
   Test_utils.Refusal_control_manifest.print source
 
 let () =
-  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+  if Array.length argv = 2 && String.equal argv.(1) "--refusal-control" then (
     refusal_control ();
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv >= 3 && String.equal Stdlib.Sys.argv.(1) "--generated-deps" then (
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:3)
-    |> emit_generated_dependencies Stdlib.Sys.argv.(2);
+  if Array.length argv >= 3 && String.equal argv.(1) "--generated-deps" then (
+    Array.to_list (Array.subo argv ~pos:3) |> emit_generated_dependencies argv.(2);
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv < 8 then (
+  if Array.length argv < 8 then (
     eprintf
       "Usage: %s <workspace_root> --generators <input...> --generated <output...> --sources \
        <source...>\n"
-      Stdlib.Sys.argv.(0);
+      argv.(0);
     Stdlib.exit 1);
-  let base = Test_utils.Dune_stanza_scan.base_dir Stdlib.Sys.argv.(1) in
-  let corpus = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2) |> parse_corpus in
+  let base = Test_utils.Dune_stanza_scan.base_dir argv.(1) in
+  let corpus = Array.to_list (Array.subo argv ~pos:2) |> parse_corpus in
   let repo_relative path = Test_utils.Dune_stanza_scan.repo_relative base path in
   let generators = List.map corpus.generators ~f:repo_relative in
   let generated = List.map corpus.generated ~f:repo_relative in
