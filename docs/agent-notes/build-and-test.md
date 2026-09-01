@@ -568,6 +568,13 @@ that they earn a lookup rather than always-loaded space.
   `test/support/test_utils.ml` packages the rules — `hex_float` and `set_binary_stdout` are
   portable by construction, while `print_float`/`print_floats` delegate to `concise_float` and so
   still need tie-free inputs.
+- `os.kill(pid, 0)` is not a liveness probe on Windows and must not be used as one. CPython
+  implements `os.kill` there as `OpenProcess` followed by `TerminateProcess(handle, sig)`, so signal
+  0 KILLS the process it was asked about, and a pid that already exited raises `OSError`
+  (`WinError 87`) rather than `ProcessLookupError`, which no POSIX-shaped handler catches.
+  `benchmarks/cell_group.process_is_alive` is the portable form — a zero-timeout wait on a process
+  handle, where `WAIT_TIMEOUT` means "still running". `signal.SIGKILL` does not exist there either;
+  `os.kill` with any other signal is `TerminateProcess`.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target

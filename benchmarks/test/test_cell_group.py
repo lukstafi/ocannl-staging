@@ -33,9 +33,10 @@ class CellGroupTest(unittest.TestCase):
         self.assertTrue(path.exists(), f"child did not publish {path}")
 
     def alive(self, pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        # Through `cell_group`, not `os.kill(pid, 0)`: on Windows that call TERMINATES the process
+        # it is asked about and raises `WinError 87` once it has exited.  The zombie refinement
+        # below stays here, since only POSIX has zombies.
+        if not cell_group.process_is_alive(pid):
             return False
         if Path(f"/proc/{pid}/stat").exists():
             with contextlib.suppress(OSError, IndexError):
@@ -93,7 +94,12 @@ class CellGroupTest(unittest.TestCase):
         child.communicate(timeout=10)
         self.wait_file(pidfile)
         orphan = int(pidfile.read_text())
-        self.addCleanup(lambda: self.alive(orphan) and os.kill(orphan, signal.SIGKILL))
+        # `signal.SIGKILL` does not exist on Windows, and this lambda only reaches the kill when
+        # the orphan survived -- so the platform where the cleanup matters most is the one where it
+        # would have raised `AttributeError` instead of killing anything.  `os.kill` with any other
+        # signal is `TerminateProcess` there, which is what is wanted.
+        hard_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        self.addCleanup(lambda: self.alive(orphan) and os.kill(orphan, hard_kill))
 
         self.assertIsNot(child.observe(), cell_group.GONE)
         result = cell_group.terminate(child, grace=0.2)

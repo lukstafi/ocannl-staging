@@ -216,6 +216,10 @@ if os.name == "nt":
     _kernel32.OpenThread.restype = wintypes.HANDLE
     _kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
     _kernel32.ResumeThread.restype = wintypes.DWORD
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
 
 def _resume_windows_initial_thread(pid):
@@ -308,7 +312,16 @@ class ManagedProcess:
     def observe(self, allow_zombie_gone=False):
         if self.job is not None:
             return self.job.observe()
-        return _observe_posix_group(self.pgid, allow_zombie_gone=allow_zombie_gone)
+        if self.pgid is not None:
+            return _observe_posix_group(self.pgid, allow_zombie_gone=allow_zombie_gone)
+        # A Windows group whose Job handle has been closed.  `close` is called once the group was
+        # observed GONE -- and KILL_ON_JOB_CLOSE means the closing itself took anything that had
+        # somehow outlived that observation -- so there is nothing left to look at, and GONE is the
+        # answer.  Dispatching on the job alone sent this case to the POSIX census instead, which is
+        # how `_run_cell`'s leftover probe, taken after a timeout already killed and closed the
+        # group, came to call `os.killpg` on Windows: an AttributeError, out of the one call whose
+        # whole job is to report on cleanup.
+        return GONE
 
     def signal(self, force):
         if self.job is not None:
@@ -318,6 +331,8 @@ class ManagedProcess:
                 with contextlib.suppress(ProcessLookupError, OSError):
                     self.proc.send_signal(signal.CTRL_BREAK_EVENT)
             return
+        if self.pgid is None:
+            return  # Closed Windows group; see `observe`.  KILL_ON_JOB_CLOSE has done the signalling.
         sig = signal.SIGKILL if force else signal.SIGTERM
         try:
             os.killpg(self.pgid, sig)
@@ -374,6 +389,42 @@ def spawn(args, **kwargs):
             _cleanup_failed_windows_spawn(job, proc)
             raise
     raise NotImplementedError(f"no child-group implementation for os.name={os.name!r}")
+
+
+def process_is_alive(pid):
+    """Whether ``pid`` names a process that has not exited yet.
+
+    ``os.kill(pid, 0)`` is the POSIX spelling of this question and is the wrong thing to run on
+    Windows for two independent reasons.  CPython implements ``os.kill`` there as ``OpenProcess``
+    followed by ``TerminateProcess(handle, sig)``, so asking with signal 0 KILLS the process it was
+    supposed to be asking about; and a pid that has already exited fails the ``OpenProcess`` with
+    ``ERROR_INVALID_PARAMETER``, which surfaces as a bare ``OSError`` (``WinError 87``) that no
+    ``ProcessLookupError`` handler catches.  A probe that either kills its subject or raises is not
+    a probe.
+
+    The Windows answer is a handle wait: a process object becomes signalled when the process exits
+    and stays that way while a handle is open, so a zero-timeout wait that TIMES OUT means "still
+    running".  ``ERROR_ACCESS_DENIED`` from the open is a live process this account may not look
+    at, which is alive; anything else is gone.
+    """
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x00000102
+    ERROR_ACCESS_DENIED = 5
+    handle = _kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return _kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        _kernel32.CloseHandle(handle)
 
 
 def _observe_posix_group(pgid, allow_zombie_gone=False):

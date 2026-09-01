@@ -1494,13 +1494,14 @@ class CellTimeoutTest(unittest.TestCase):
         at once; in a container whose PID 1 does not reap, it stays a zombie indefinitely — and
         `kill(pid, 0)` succeeds for a zombie, so a bare signal-0 probe would report the process
         the kill did remove as alive and fail the test in exactly the environments CI runs in.
+
+        The liveness question itself goes through `cell_group.process_is_alive`, which is where the
+        answer stops being `os.kill(pid, 0)`: on Windows that call terminates its subject and
+        raises `WinError 87` for a pid that already exited. Only the zombie refinement is left
+        here, because only POSIX has zombies.
         """
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not cell_group.process_is_alive(pid):
             return False
-        except PermissionError:
-            return True
         stat = Path(f"/proc/{pid}/stat")
         if not stat.exists():
             return True  # not Linux, or no procfs: the signal-0 answer is all there is
