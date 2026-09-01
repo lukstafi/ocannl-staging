@@ -1367,7 +1367,11 @@ that they earn a lookup rather than always-loaded space.
     `dune` file is reduced to the stanza it names (`File "test/operations/dune", alias
     runtest-foo`), because line numbers there shift under any edit to that file and a diff keyed on
     them reports wholesale change whenever an unrelated stanza is inserted above — overstating
-    exactly what it is asked to measure. Dune spells a location two ways, `line N` for a
+    exactly what it is asked to measure. The identifier is not reliably a bare word on its
+    keyword's line: it can be quoted, wrapped so `(targets` ends one line and its first target
+    begins the next, or nested as `(alias (name slow))`. A same-line reading of the bare form
+    handles none of those and falls back to the span *silently*, which looks like it works.
+    Dune spells a location two ways, `line N` for a
     single-line diagnostic and `lines N-M` for a span, and a failing explicit-rule test — the whole
     scanning/golden-diff family here — produces the latter, so a selector must accept both.
   - **A non-pass with nothing extracted is its own condition, not a fingerprint of zero failures.**

@@ -644,7 +644,7 @@ fingerprint() {
       function flush() {
         if (loc == "") return
         if (name != "") print prefix ", " name; else print loc
-        loc = ""; name = ""
+        loc = ""; name = ""; want = ""; opened = 0
       }
       /^File "[^"]+", lines? [0-9]+/ {
         flush()
@@ -662,9 +662,32 @@ fingerprint() {
         # The quoted excerpt: numbered source lines, plus the elision marker
         # dune prints for a long one. Anything else ends the excerpt, which
         # then never named its stanza.
-        if ($0 !~ /^[0-9 ]*[0-9] \|/ && $0 !~ /^\.\.\.+$/) { flush(); next }
-        if (name == "" && match($0, /\((alias|name|names|target|targets) [A-Za-z0-9_.@-]+/))
-          name = substr($0, RSTART + 1, RLENGTH - 1)
+        if ($0 ~ /^\.\.\.+$/) { want = ""; opened = 0; next }
+        if ($0 !~ /^[0-9 ]*[0-9] \|/) { flush(); next }
+        if (name != "") next
+        text = $0
+        sub(/^[0-9 ]*[0-9] \| ?/, "", text)
+        # Tokenized rather than matched as one regex, because the identifier is
+        # not reliably a bare word sitting on its keywords line: it can be
+        # quoted, and dune wraps a long field so that `(targets` ends one line
+        # and its first target begins the next. A same-line regex reads both as
+        # unnamed and falls back to the shifting span -- which is the failure
+        # this normalization exists to avoid.
+        gsub(/\(/, " ( ", text)
+        gsub(/\)/, " ) ", text)
+        n = split(text, tok, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+          if (tok[i] == "") continue
+          # A dune comment runs to end of line: never the stanzas identifier.
+          if (tok[i] ~ /^;/) break
+          # An opening paren abandons a pending keyword: the field held a
+          # nested form, as `(alias (name slow))` does, and the name is inside.
+          if (tok[i] == "(") { opened = 1; want = ""; continue }
+          if (tok[i] == ")") { opened = 0; want = ""; continue }
+          if (want != "") { name = want " " tok[i]; break }
+          if (opened && tok[i] ~ /^(alias|name|names|target|targets)$/) want = tok[i]
+          opened = 0
+        }
         next
       }
       END { flush() }

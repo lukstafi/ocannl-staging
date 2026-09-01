@@ -353,12 +353,37 @@ metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" |
 # consumer that diffs against the previous non-pass run filed a red suite as
 # unchanged and said nothing. The excerpt below is a real dune stanza-error
 # shape, elision marker included.
+#
+# The identifier is NOT reliably a bare word on its keyword's line, so the
+# shapes this repository's dune files actually use are all present below: bare,
+# quoted, wrapped so the keyword ends one line and its value begins the next,
+# and nested as `(alias (name x))`. Reading only the same-line bare form leaves
+# the others falling back to the shifting span -- the very thing this
+# normalization exists to avoid -- while looking like it works, because the
+# fallback is silent.
 dune_failure='File "test/operations/dune", lines 4683-4700, characters 0-533:
 4683 | (rule
 4684 |  ; ocannl-backend: none -- a comment, not a name
 4685 |  (alias runtest-fixture_stanza)
 ......
 4700 |    %{dep:fixture.exe})))
+File "test/operations/dune", lines 273-280, characters 0-100:
+ 273 | (rule
+ 274 |  (target "backend-0-0.log.actual")
+ 275 |  (package neural_nets_lib)
+File "test/operations/dune", lines 669-676, characters 0-100:
+ 669 | (rule
+ 670 |  (targets
+ 671 |   zero_out_local_decl-unoptimized.ll.actual
+ 672 |   zero_out_local_decl.extension.actual)
+File "test/operations/dune", lines 72-80, characters 0-100:
+  72 | (alias
+  73 |  (name slow)
+  74 |  (deps
+File "test/operations/dune", lines 990-999, characters 0-100:
+ 990 | (rule
+......
+ 999 |    %{dep:whatever.exe})))
 File "test/operations/fixture.expected", line 1, characters 0-0:
 FAILED: 1 check did not hold.'
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$dune_failure \
@@ -374,6 +399,17 @@ grep -q '^File "test/operations/dune", alias runtest-fixture_stanza$' "$dune_fai
 ! grep -q '4683' "$dune_fail_fp"
 # A comment preceding the stanza field must not be mistaken for its name.
 ! grep -q 'ocannl-backend' "$dune_fail_fp"
+# A quoted identifier, and one dune wrapped onto the line after its keyword.
+grep -q '^File "test/operations/dune", target "backend-0-0.log.actual"$' "$dune_fail_fp"
+grep -q '^File "test/operations/dune", targets zero_out_local_decl-unoptimized.ll.actual$' \
+  "$dune_fail_fp"
+# `(alias (name x))` is named by the nested field, not by the outer keyword:
+# a keyword left pending must be abandoned when the value turns out to be a form.
+grep -q '^File "test/operations/dune", name slow$' "$dune_fail_fp"
+! grep -q 'alias name' "$dune_fail_fp"
+# The one honest fallback: dune elided everything identifying, so the span is
+# all there is. Silence here would be a stanza mis-attributed to a neighbour.
+grep -q '^File "test/operations/dune", lines 990-999$' "$dune_fail_fp"
 # A non-dune location keeps its line number, which is stable and is what a
 # reader needs there.
 grep -q '^File "test/operations/fixture.expected", line 1$' "$dune_fail_fp"
