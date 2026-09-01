@@ -1378,7 +1378,12 @@ that they earn a lookup rather than always-loaded space.
   reaching it: the sweep addresses the `-wsl` aliases, and WSL starts on demand or at login, never
   at boot, so a woken box answers on its Windows alias while `rog-nv-wsl`/`minix-amd-wsl` are still
   refused. Kick it with `ssh <box>-win 'wsl.exe -d Ubuntu -e true'` and re-probe for a minute or two
-  while tailscaled registers. What IS a failure is silent non-coverage: track the age of the last
+  while tailscaled registers. On a box woken from power-down (as opposed to resuming from
+  sleep/hibernate with the owner's interactive WSL shell still open, in which case the VM survives
+  the resume and none of this applies), a kicked VM can also terminate again within minutes if
+  nothing connects to it — `-win` up, `-wsl` refused again — so re-kick right before actually using
+  `-wsl` rather than trusting a wake from earlier; once a real ssh session is running inside, the
+  VM stays up for the duration. What IS a failure is silent non-coverage: track the age of the last
   `pass` per backend, because nothing else in the project tests CUDA or HIP at all — and read a long
   skip streak as a decision nobody made, not as coverage that was unavailable.
 - Report changes in the failure set, not the presence of failures. A backend's suite goes red in
