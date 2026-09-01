@@ -453,13 +453,19 @@ jobs:
             echo "ROUTINE_FIRE_URL/ROUTINE_FIRE_TOKEN not configured; skipping."
             exit 0
           fi
-          # --fail-with-body, not a bare curl: without it curl exits 0 on an
-          # HTTP 4xx/5xx, so a revoked token (generating a new one revokes the
-          # old), a changed beta header on this experimental endpoint, or a 429
-          # would be logged as a fire that happened, and the soft-failure line
-          # below would never print. The body still reaches the log, which is
-          # where the error type and message are.
-          curl -sS --fail-with-body -X POST "$ROUTINE_FIRE_URL" \
+          # Both non-default curl options exist to keep a failed fire from
+          # masquerading as a successful one. --fail-with-body: without it curl
+          # exits 0 on an HTTP 4xx/5xx, so a revoked token (generating a new one
+          # revokes the old), a changed beta header on this experimental
+          # endpoint, or a 429 would be logged as a fire that happened, and the
+          # soft-failure line below would never print; the body still reaches
+          # the log, which is where the error type and message are. --max-time:
+          # the endpoint returns as soon as the session is created, so seconds
+          # is the honest scale -- but one that accepts the connection and then
+          # stalls would otherwise hold this job to GitHub's job-level limit,
+          # delaying completion of every red master run rather than taking the
+          # soft-failure path.
+          curl -sS --fail-with-body --max-time 30 -X POST "$ROUTINE_FIRE_URL" \
             -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
             -H "anthropic-version: 2023-06-01" \
             -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
