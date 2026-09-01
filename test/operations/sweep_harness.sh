@@ -478,9 +478,9 @@ dune_fail_fp=${dune_fail_fp%.log}.fingerprint
 # when an unrelated stanza is inserted above -- overstating the very thing the
 # diff is asked to measure.
 grep -q '^File "test/operations/dune", alias runtest-fixture_stanza$' "$dune_fail_fp"
-! grep -q '4683' "$dune_fail_fp"
+absent '4683' "$dune_fail_fp"
 # A comment preceding the stanza field must not be mistaken for its name.
-! grep -q 'ocannl-backend' "$dune_fail_fp"
+absent 'ocannl-backend' "$dune_fail_fp"
 # A quoted identifier, and one dune wrapped onto the line after its keyword.
 grep -q '^File "test/operations/dune", target "backend-0-0.log.actual"$' "$dune_fail_fp"
 grep -q '^File "test/operations/dune", targets zero_out_local_decl-unoptimized.ll.actual$' \
@@ -488,7 +488,7 @@ grep -q '^File "test/operations/dune", targets zero_out_local_decl-unoptimized.l
 # `(alias (name x))` is named by the nested field, not by the outer keyword:
 # a keyword left pending must be abandoned when the value turns out to be a form.
 grep -q '^File "test/operations/dune", name slow$' "$dune_fail_fp"
-! grep -q 'alias name' "$dune_fail_fp"
+absent 'alias name' "$dune_fail_fp"
 # The one honest fallback: dune elided everything identifying, so the span is
 # all there is. Silence here would be a stanza mis-attributed to a neighbour.
 grep -q '^File "test/operations/dune", lines 990-999$' "$dune_fail_fp"
