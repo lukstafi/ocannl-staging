@@ -345,4 +345,52 @@ metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" |
 [ -f "$metal_pass_log" ]
 ! grep -q 'rtc-context' "$metal_pass_log"
 
-printf 'sweep execution accounting, RTC context and skip aggregation: PASS\n'
+# Both of dune's location spellings must reach the fingerprint, and a dune
+# location must reduce to the stanza it names. `lines N-M` is what a stanza
+# whose action exited non-zero produces -- how every explicit-rule test in this
+# repository fails -- and matching only the singular `line N` left such a unit
+# with an EMPTY fingerprint, which compares equal to any other empty one: the
+# consumer that diffs against the previous non-pass run filed a red suite as
+# unchanged and said nothing. The excerpt below is a real dune stanza-error
+# shape, elision marker included.
+dune_failure='File "test/operations/dune", lines 4683-4700, characters 0-533:
+4683 | (rule
+4684 |  ; ocannl-backend: none -- a comment, not a name
+4685 |  (alias runtest-fixture_stanza)
+......
+4700 |    %{dep:fixture.exe})))
+File "test/operations/fixture.expected", line 1, characters 0-0:
+FAILED: 1 check did not hold.'
+SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$dune_failure \
+  run_sweep >"$tmp/dune_fail.out" 2>&1
+grep -q 'local/cc: fail' "$tmp/dune_fail.out"
+dune_fail_fp=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
+dune_fail_fp=${dune_fail_fp%.log}.fingerprint
+# The stanza name, not the span: line numbers in a dune file shift under any
+# edit to that file, so a fingerprint keyed on them reports wholesale change
+# when an unrelated stanza is inserted above -- overstating the very thing the
+# diff is asked to measure.
+grep -q '^File "test/operations/dune", alias runtest-fixture_stanza$' "$dune_fail_fp"
+! grep -q '4683' "$dune_fail_fp"
+# A comment preceding the stanza field must not be mistaken for its name.
+! grep -q 'ocannl-backend' "$dune_fail_fp"
+# A non-dune location keeps its line number, which is stable and is what a
+# reader needs there.
+grep -q '^File "test/operations/fixture.expected", line 1$' "$dune_fail_fp"
+
+# A non-pass whose log yields nothing extractable is its own condition, not a
+# fingerprint of zero failures. Left empty it compares equal to the previous
+# empty one, so the diffing consumer reports no change; the sentinel makes the
+# file differ from a real fingerprint in either direction, and the summary
+# carries it to the human, the channel the scheduled routine actually quotes.
+SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT='a red suite that named no error site' \
+  run_sweep >"$tmp/blank_fail.out" 2>&1
+grep -q 'local/cc: fail' "$tmp/blank_fail.out"
+grep -q '^  local/cc: (no fingerprintable diagnostics -- read the log) -- ' \
+  "$tmp/blank_fail.out"
+blank_fail_fp=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
+blank_fail_fp=${blank_fail_fp%.log}.fingerprint
+[ -s "$blank_fail_fp" ]
+grep -q '^(no fingerprintable diagnostics -- read the log)$' "$blank_fail_fp"
+
+printf 'sweep execution accounting, RTC context, fingerprinting and skip aggregation: PASS\n'

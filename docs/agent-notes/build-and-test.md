@@ -1361,7 +1361,20 @@ that they earn a lookup rather than always-loaded space.
   bursts and comes back (Metal's `test/operations` was red for a stretch, green again after
   gh-ocannl-632), so a sweep that shouts on every red is one that gets ignored inside a week;
   `sweep.sh` writes a sorted `.fingerprint` next to each non-pass log precisely so the previous
-  run's can be diffed against it.
+  run's can be diffed against it. Two properties are what make that diff mean what the consumer
+  reads it as, and both are easy to lose:
+  - **A fingerprint entry is a stable IDENTIFIER, not a source coordinate.** A location inside a
+    `dune` file is reduced to the stanza it names (`File "test/operations/dune", alias
+    runtest-foo`), because line numbers there shift under any edit to that file and a diff keyed on
+    them reports wholesale change whenever an unrelated stanza is inserted above — overstating
+    exactly what it is asked to measure. Dune spells a location two ways, `line N` for a
+    single-line diagnostic and `lines N-M` for a span, and a failing explicit-rule test — the whole
+    scanning/golden-diff family here — produces the latter, so a selector must accept both.
+  - **A non-pass with nothing extracted is its own condition, not a fingerprint of zero failures.**
+    Empty compares equal to empty, so a unit whose diagnostics the selectors cannot reach is
+    otherwise filed as "unchanged since the last sweep" and reported to nobody — the one failure
+    shape a diffing consumer cannot see. It gets a sentinel line in the file and a line in the
+    sweep's own summary, the channel the scheduled routine quotes.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other
