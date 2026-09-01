@@ -380,6 +380,20 @@ let queued_batch_depth { ms = est_ms; contended = _; samples = _ } =
    and cannot express "this one declined, the search went on". *)
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
+(* Observation seam for the containment tests (gh-ocannl-898), fired with a routine's name exactly
+   where a timing run's window yields an ADMITTED measurement — the moment the [candidates_timed]
+   accounting grows, for the dispatched baseline and candidates alike — and with [timed_so_far],
+   the search's own accounting value after this admission (what a report cut at this instant would
+   state as [candidates_timed]). A preflight is upstream of that verdict: under the queued
+   objective a preflighted run can still be refused (a contended window, a degenerate clock
+   reading; gh-ocannl-855), so a fault-injection precondition of the form "this arm has timed N
+   candidates" counted in preflights fires on an arm the report says timed nothing. The count is
+   passed rather than left to the observer to re-derive, so such a precondition pins the tuner's
+   number instead of maintaining a second counter that can drift from it (PR #593 P1). Default a
+   no-op; no configuration selects it. *)
+let on_candidate_timed : (string -> timed_so_far:int -> unit) ref =
+  ref (fun _routine_name ~timed_so_far:_ -> ())
+
 (* Observation seam for the timing tests (gh-ocannl-851), reporting the batch depth each
    [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] reports 1.
    The negative control for a twice-divided queued reading needs the depth the call ACTUALLY used:
@@ -3189,6 +3203,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                   (Printf.sprintf
                      "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)" backend)));
         let n_timed = ref (if baseline_timed then 1 else 0) in
+        (* Fired from the counter itself rather than from the admission match above, so the
+           reported [timed_so_far] is the accounting value and not a restatement of it. *)
+        if baseline_timed then
+          Option.iter baseline ~f:(fun b ->
+              !on_candidate_timed b.routine.Context.name ~timed_so_far:!n_timed);
         let n_timings_contended = ref (if !baseline_contended then 1 else 0) in
         (* Live search state for an honest partial report. Each counter starts at the amount of work
            completed so far and is updated at its ordinary accounting site below. [best_so_far] is
@@ -3536,6 +3555,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     | Ok timing_result ->
                         let ms = Option.value_exn (admitted_timing_ms timing_result) in
                         Int.incr n_timed;
+                        !on_candidate_timed c.routine.Context.name ~timed_so_far:!n_timed;
                         Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
                         Hashtbl.set label_by_digest ~key:c.digest_after ~data:(spec_label spec);
                         if spec_expects_mma spec then Int.incr n_mma_timed;

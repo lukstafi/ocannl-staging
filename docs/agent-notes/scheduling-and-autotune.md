@@ -278,8 +278,13 @@ files.
   backend-dependent and silently vacuous: how many attempts precede an arm's first *timed* candidate
   varies. On Metal a small matmul's materialize-all arm has a baseline binding no hardware dimension
   (gh-532), and its whole `W_preset` block then dedups against that same digest — six attempts, none
-  timed. Count timing runs with `Autotune.on_candidate_preflight` (one per timing run) and inject
-  relative to that. Relatedly, hoisted (link-time packed) `Stage` candidates are a CPU family only —
+  timed. Counting timing runs with `Autotune.on_candidate_preflight` is the same trap one level down
+  (gh-ocannl-898): a preflight fires before the window's verdict, and under the queued objective the
+  window can be refused as contended (gh-855) without growing `candidates_timed` — on a loaded CUDA
+  device an arm's first two windows were both refused, so a preflight-counted "has timed candidates
+  of its own" precondition fired the injection on an arm whose report said it timed nothing. Count
+  admitted timings with `Autotune.on_candidate_timed`, which fires exactly where `candidates_timed`
+  grows, and inject relative to that. Relatedly, hoisted (link-time packed) `Stage` candidates are a CPU family only —
   `matmul_seed_params` proposes `sk_hoist` from its `is_cpu` branch — so any test precondition about
   packed-constant pools is false on GPU backends and has to be stated as an equivalence.
 - "Seeded" is not "timed". An autotune family can be enumerated in bulk and rejected in bulk at
