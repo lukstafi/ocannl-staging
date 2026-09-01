@@ -1,0 +1,2 @@
+each dispatch launched on the index bound for it (sum over the sweep): true
+each dispatch launched on the index bound for it (sum of squares over the sweep): true

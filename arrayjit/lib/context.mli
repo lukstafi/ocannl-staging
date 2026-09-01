@@ -206,7 +206,14 @@ val decision_surface :
 
 val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
-    initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)
+    initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied.
+
+    The routine's static-index bindings are read HERE, not when the device gets to the work: the
+    dispatch carries the values they hold at this call, so a caller may rebind them for the next run
+    the moment this returns, without syncing, on every backend. That is what makes the bind/run/
+    rebind loop — {!Train.sequential_loop}, and every training loop — mean the same thing under an
+    asynchronous scheduler as under a synchronous one. Execution itself may still be asynchronous;
+    {!sync}, or a host read, is what waits for it. *)
 
 val check_runnable : t -> routine -> unit
 (** {!run}'s pre-dispatch validation on its own — poisoned lineage, uninitialized inputs,

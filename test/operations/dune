@@ -327,6 +327,18 @@
  (libraries base stdio ll_test arrayjit.verdict))
 
 (test
+ ; ocannl-backend: multidev_cc -- selects the scheduler under test itself, `Context.cpu ~threads:2`,
+ ; because an asynchronous dispatch is what the claim is about; the configured backend never
+ ; reaches it.
+ (name async_launch_bindings)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules async_launch_bindings)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name one_element_reshape)
  (package neural_nets_lib)
  (deps

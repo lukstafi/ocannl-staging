@@ -36,9 +36,21 @@ let append ~work (Task task) =
           work ());
     }
 
-let enschedule ~schedule_task ~get_stream_name stream (Task { description; _ } as task) =
+(* [?snapshot] carries a dispatch's launch parameters across the hand-off to an asynchronous
+   scheduler. The scheduled task reads them when the WORKER gets to it, so a caller's loop --
+   [Train.sequential_loop], or any hand-written bind/run/rebind -- has by then rebound them for the
+   next dispatch. Called on the scheduling thread, [snapshot ()] captures the current values and
+   returns the closure that restores them; that closure is prepended to the task, so the restore
+   happens on the worker, in queue order, immediately before the launch reads them. Absent, the task
+   is scheduled as-is: a synchronous scheduler has nothing to carry, and paying an allocation per
+   dispatch for it would be waste. *)
+let enschedule ?snapshot ~schedule_task ~get_stream_name stream (Task { description; _ } as task) =
   (* [%log_result "enschedule", description, "on", get_stream_name stream]; *)
-  let work () = schedule_task stream task in
+  let work () =
+    match snapshot with
+    | None -> schedule_task stream task
+    | Some snapshot -> schedule_task stream (prepend ~work:(snapshot ()) task)
+  in
   Task
     {
       context_lifetime = ();

@@ -699,6 +699,37 @@ struct
     let procs = compile_batch ~names bindings lowereds in
     { procs; bindings }
 
+  (* The static-index launch parameters the CALLER writes through, and the snapshot that carries a
+     dispatch's values to the kernel's own refs.
+
+     [Indexing.apply] dereferences a launch's static indices inside the kernel task, and an
+     asynchronous scheduler ([Schedulers.Multidev]) runs that task on a worker domain some time
+     after [Context.run] returned -- by which point the caller's loop ([Train.sequential_loop], or
+     any hand-written bind/run/rebind) has rebound them for the next dispatch. Sharing one ref
+     between the two would launch the kernel on whichever index the host had reached, which is a
+     silent wrong answer -- batches skipped and repeated, and any host schedule keyed on a static
+     index (a learning rate on the step counter) read at the wrong point.
+
+     So the caller gets refs of its own, and each dispatch snapshots them on the scheduling thread;
+     the task copies the snapshot into the kernel's refs on the worker, in queue order, immediately
+     before the launch reads them. [Context.check_launch_bindings] already validates the caller's
+     values at dispatch time, so this is the launch honouring the contract that validation states.
+     Under [Schedulers.Sync] the task runs inline, which makes it the same read at the same moment,
+     one indirection later. *)
+  let caller_bindings_and_snapshot (kernel_bindings : Indexing.lowered_bindings) =
+    let paired = List.map kernel_bindings ~f:(fun (s, kernel) -> ((s, ref !kernel), kernel)) in
+    let snapshot =
+      match paired with
+      | [] -> None
+      | _ ->
+          let cells = List.map paired ~f:(fun ((_, caller), kernel) -> (caller, kernel)) in
+          Some
+            (fun () ->
+              let values = List.map cells ~f:(fun (caller, kernel) -> (kernel, !caller)) in
+              fun () -> List.iter values ~f:(fun (kernel, value) -> kernel := value))
+    in
+    (List.map paired ~f:fst, snapshot)
+
   let link context (code : code) ctx_buffers : Indexing.lowered_bindings * Task.t =
     let runner_label = get_name context.device in
     let merge_buffer = context.device.merge_buffer in
@@ -706,11 +737,12 @@ struct
        the (eager) [ctx_buffers] and (lazy) merge-buffer resolution with it, backend-side. The
        generic shared layer never sees a raw pointer. *)
     let resolve = resolve_pool context.device in
-    let bindings, to_schedule =
+    let kernel_bindings, to_schedule =
       link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers code.proc
     in
+    let bindings, snapshot = caller_bindings_and_snapshot kernel_bindings in
     let schedule =
-      Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule
+      Task.enschedule ?snapshot ~schedule_task ~get_stream_name:get_name context.device to_schedule
     in
     (bindings, schedule)
 
@@ -722,18 +754,24 @@ struct
        batch's procedures — in particular the segment kernels of one fissioned routine — must see
        the same static-index refs, or setting a binding through the routine would reach only one of
        them. *)
-    let lowered_bindings : Indexing.lowered_bindings =
+    let kernel_bindings : Indexing.lowered_bindings =
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
+    (* One caller-side assoc for the whole batch too, and one snapshot closure: the segments of a
+       fissioned routine are dispatched by a single [Context.run], so they all carry the same
+       values. *)
+    let bindings, snapshot = caller_bindings_and_snapshot kernel_bindings in
     let schedules =
       Array.map code_batch.procs ~f:(fun proc ->
           let bindings', to_schedule =
-            link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
+            link_compiled ~lowered_bindings:kernel_bindings ~merge_buffer ~resolve ~runner_label
+              ctx_buffers proc
           in
-          assert (phys_equal bindings' lowered_bindings);
-          Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
+          assert (phys_equal bindings' kernel_bindings);
+          Task.enschedule ?snapshot ~schedule_task ~get_stream_name:get_name context.device
+            to_schedule)
     in
-    (lowered_bindings, schedules)
+    (bindings, schedules)
 
   (* CPU segment tasks are host closures the stream runner executes in order; the generic event
      chain degenerates to no-ops there, so there is nothing cheaper to provide. *)
