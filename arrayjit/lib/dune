@@ -13,8 +13,18 @@
   (env_var OCANNL_LOG_LEVEL_UTILS))
  (modules utils datatypes cpu_topology atomic_file)
  ; `unix` for `Unix.environment`, which the unknown-environment-variable warning walks, and for
- ; `Atomic_file`'s pid, mtime and sub-second sleep.
- (libraries base stdio unix pprint ppx_minidebug.runtime ppx_minidebug.db)
+ ; `Atomic_file`'s pid, file mtime and sub-second sleep. `mtime.clock.os` for the one thing `unix`
+ ; has no clock for: `Atomic_file`'s commit retry is bounded by a DURATION, and a wall clock that
+ ; an NTP step moves would either cut that bound short or extend it by the size of the adjustment.
+ (libraries
+  base
+  stdio
+  unix
+  mtime
+  mtime.clock.os
+  pprint
+  ppx_minidebug.runtime
+  ppx_minidebug.db)
  (foreign_stubs
   (language c)
   (names utils_stubs))

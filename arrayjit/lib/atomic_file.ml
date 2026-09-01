@@ -193,13 +193,18 @@ let commit_deadline_seconds = 1.0
 let commit_poll_seconds = 0.016
 
 let publish_staged ~staging ~path =
-  (* Forced by a first refusal and not before, so an uncontended publish still costs one call. *)
-  let deadline = lazy (Unix.gettimeofday () +. commit_deadline_seconds) in
+  (* Monotonic, not [Unix.gettimeofday]: this is a DURATION, and a wall clock can move under it. An
+     NTP step, a manual correction or a VM resynchronizing on resume would either extend the second
+     by the size of the adjustment or end it on the first refusal, and both silently change the
+     bound this function exists to hold (Codex P2, round 1). Started by a first refusal and not
+     before, so an uncontended publish still costs one call. *)
+  let started = lazy (Mtime_clock.counter ()) in
+  let elapsed () = Mtime.Span.to_float_ns (Mtime_clock.count (force started)) /. 1e9 in
   let rec attempt () =
     match Stdlib.Sys.rename staging path with
     | () -> ()
     | exception (Stdlib.Sys_error _ as exn) ->
-        if Float.(Unix.gettimeofday () > force deadline) then raise exn
+        if Float.(elapsed () > commit_deadline_seconds) then raise exn
         else (
           Unix.sleepf commit_poll_seconds;
           attempt ())

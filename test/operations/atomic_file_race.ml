@@ -152,11 +152,15 @@ let wait_seconds = 10.0
    one everywhere else. *)
 let spin_pause = 0.002
 
+(* Monotonic, for the reason `publish_staged` gives: every bound here is a DURATION, and a wall
+   clock an NTP step moves would cut one short or extend it by the size of the adjustment. *)
+let since counter = Mtime.Span.to_float_ns (Mtime_clock.count counter) /. 1e9
+
 let await ?(seconds = wait_seconds) predicate =
-  let deadline = Unix.gettimeofday () +. seconds in
+  let started = Mtime_clock.counter () in
   let rec loop () =
     if predicate () then true
-    else if Float.(Unix.gettimeofday () > deadline) then false
+    else if Float.(since started > seconds) then false
     else (
       Unix.sleepf spin_pause;
       loop ())
@@ -199,13 +203,13 @@ let read_retry_seconds = 1.0
 let refusals_retried = Atomic.make 0
 
 let observe_published () =
-  let deadline = lazy (Unix.gettimeofday () +. read_retry_seconds) in
+  let started = lazy (Mtime_clock.counter ()) in
   let rec attempt () =
     match open_published () with
     | (Bytes_read _ | Absent) as found -> found
     | Refused _ as refused ->
         Atomic.incr refusals_retried;
-        if Float.(Unix.gettimeofday () > force deadline) then refused
+        if Float.(since (force started) > read_retry_seconds) then refused
         else (
           Unix.sleepf spin_pause;
           attempt ())
@@ -384,9 +388,9 @@ let () =
             let seen = ref [ (observe_published (), Atomic.get concluded) ] in
             let during_write = List.hd_exn !seen in
             Atomic.incr readers_read;
-            let ceiling = Unix.gettimeofday () +. reader_ceiling_seconds in
+            let reading_since = Mtime_clock.counter () in
             let rec loop n =
-              if Float.(Unix.gettimeofday () > ceiling) then ()
+              if Float.(since reading_since > reader_ceiling_seconds) then ()
               else if n >= reads_per_reader && Atomic.get writers_finished >= writers then ()
               else (
                 seen := (observe_published (), Atomic.get concluded) :: !seen;

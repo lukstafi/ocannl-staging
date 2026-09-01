@@ -14,7 +14,20 @@
     argument spelled [@<path>] stands for the whitespace-separated words in that file, spliced in
     where it stood. The [@] convention is the one gcc, javac and ld already use, and splicing in
     place is what lets a scan keep its fixed leading arguments — [<root> @list] and [<root> a b c]
-    reach the rest of the program as the same argv. *)
+    reach the rest of the program as the same argv.
+
+    {2 Whitespace}
+
+    A response file written by [%{deps}] is space-joined, and dune has no boundary-preserving
+    expansion to write it with — so a dependency path containing whitespace cannot be read back as
+    one path. Passing the list through argv, as these scans used to, did preserve those boundaries,
+    which makes this a real thing given up rather than one that never worked (Codex P2, round 1).
+
+    It is given up LOUDLY. Every word of a response file here is a dependency dune has already
+    materialized, so every one of them names something on disk; a path that lost a boundary shows up
+    as two words that name nothing, and {!expand} refuses rather than scanning a set that quietly
+    lost a file and gained two phantoms. The repository has no such path today (checked: zero
+    tracked paths contain a space), and if one arrives the failure names it and says what to do. *)
 
 open Base
 
@@ -31,6 +44,22 @@ let expand argv =
             with Stdlib.Sys_error message ->
               raise (Stdlib.Sys_error (Printf.sprintf "response file `%s`: %s" path message))
           in
-          String.split_on_chars contents ~on:[ ' '; '\t'; '\n'; '\r' ]
-          |> List.filter ~f:(Fn.non String.is_empty))
+          let words =
+            String.split_on_chars contents ~on:[ ' '; '\t'; '\n'; '\r' ]
+            |> List.filter ~f:(Fn.non String.is_empty)
+          in
+          (match List.filter words ~f:(Fn.non Stdlib.Sys.file_exists) with
+          | [] -> ()
+          | missing ->
+              raise
+                (Stdlib.Sys_error
+                   (Printf.sprintf
+                      "response file `%s` lists %d name(s) that are not on disk: %s. Every word of \
+                       it is a dependency dune materialized, so this is what a path containing \
+                       whitespace looks like after `%%{deps}` joined the list with spaces -- the \
+                       boundary is not recoverable here. Rename the path, or give the rule a \
+                       transport that keeps boundaries."
+                      path (List.length missing)
+                      (String.concat ~sep:" " (List.take missing 5)))));
+          words)
   |> Array.of_list

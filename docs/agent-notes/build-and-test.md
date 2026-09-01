@@ -576,7 +576,10 @@ that they earn a lookup rather than always-loaded space.
     seconds" was a sub-second busy-spin that also burned the core its peer domain needed, and
     `Atomic_file`'s "8 attempts, 2 ms apart" was anywhere between 16 ms and 110 ms. Write every wait
     as a DEADLINE in seconds — the tick is machine-wide and anything in the session can move it to
-    1 ms with `timeBeginPeriod`, so even a count of full-tick sleeps is not a fixed budget.
+    1 ms with `timeBeginPeriod`, so even a count of full-tick sleeps is not a fixed budget — and
+    measure that deadline with `Mtime_clock`, never `Unix.gettimeofday`: a bound on a DURATION that
+    a wall clock can move under is cut short or extended by any NTP step, manual correction or VM
+    resynchronization. `arrayjit.utils` links `mtime.clock.os` for exactly this.
   - Neither `open_in`/`open_in_bin` nor `Unix.openfile` asks for `FILE_SHARE_DELETE`, so an open
     reader and a `Sys.rename` over the same target refuse EACH OTHER with `EACCES` — arriving as
     `Sys_error "Permission denied"`, and from the rename with no filename in the message, which is
@@ -603,6 +606,11 @@ that they earn a lookup rather than always-loaded space.
   A new scan should be written that way from the start. `env_var_deps` knows the shape — a target
   the rule hands back to its own action needs no golden diff — and recognizes it by the `@<target>`
   reference rather than by the name, so a real output cannot be renamed out of the requirement.
+  The one thing this transport gives up is a path containing WHITESPACE: `%{deps}` is space-joined
+  and dune has no boundary-preserving expansion, where argv preserved boundaries. It is given up
+  loudly — every word of a response file is a dependency dune materialized, so `Scan_argv.expand`
+  refuses a word that names nothing on disk rather than scanning two phantoms in place of one file.
+  The repository has no such path today.
 - A Windows checkout with `core.symlinks=false` (git's default there without Developer Mode) writes
   every git symlink as a small TEXT FILE holding the link target. The repository has 19 of them —
   `docs/in-progress/` and `docs/research/` are views onto `docs/proposals/` — so any scan that reads

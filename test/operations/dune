@@ -4785,7 +4785,17 @@
   ocannl_config
   (glob_files_rec ../../.gitignore))
  (modules atomic_file_race)
- (libraries base stdio unix arrayjit.utils test_utils arrayjit.verdict))
+ ; `mtime.clock.os` for the same reason `arrayjit.utils` links it: every bound in this file is a
+ ; duration, and a wall clock can move under one.
+ (libraries
+  base
+  stdio
+  unix
+  mtime
+  mtime.clock.os
+  arrayjit.utils
+  test_utils
+  arrayjit.verdict))
 
 ; The exactness of [diff.zero_grads.embedded_nodes] (gh-ocannl-771), at both ends of the
 ; recursion: a parameter's singleton, and a composite loss's set equality against what its
