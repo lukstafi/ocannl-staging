@@ -9,125 +9,105 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 
 ### Added
 
-- **f16 accumulator residency is policy, not a coincidence of seeding** (gh-ocannl-680,
-  gh-ocannl-789): `fp16_arithmetic` is ternary (`auto|true|false`, default `auto` — each backend's
-  structural residency, numerically identical to the old default); `false` selects `Fp16_wide`,
-  f32 residency for every f16 reduction accumulator, which also makes the f16 warp-shuffle
-  rendering reachable (now executed by test); HIP keeps its uniform-f16 legs tensorized under
-  `Fp16_wide` through a converted rocWMMA `d` boundary, so Metal is the one backend that unseeds
-  them (`simdgroup_matrix` is uniform-precision).
+- **f16 accumulator residency is policy** (gh-ocannl-680, gh-ocannl-789): `fp16_arithmetic` is
+  ternary (`auto|true|false`, default `auto` = each backend's structural residency); `false`
+  selects f32 residency for every f16 reduction accumulator, which also makes the f16
+  warp-shuffle rendering reachable. HIP keeps its uniform-f16 legs tensorized through a converted
+  rocWMMA `d` boundary; Metal unseeds them (`simdgroup_matrix` is uniform-precision).
 - **Merge-buffer reads are execution dependencies** (gh-ocannl-766, gh-ocannl-779): a routine
-  reading `p.merge` depends on the `Context.copy` transfer generation that filled the slab,
-  `Context.copy` validates the source's effective writer and refuses to overwrite a generation
-  while a compiled consumer is pending, and merge-slab ownership is one shared invalidate/commit
-  transaction across `Make_slab`, CUDA and HIP instead of three hand-copied ones.
-- **Dead zero stores before localized serial reductions are elided** (gh-ocannl-821): when the
-  localized reduction provably overwrites every cell, the whole-node zeroing store is dropped and
-  the accumulator opens from zero; partial coverage, guarded closing stores and vectorized
+  reading `p.merge` depends on the `Context.copy` transfer that filled the slab, `Context.copy`
+  validates the source's writer and refuses to overwrite a slab a compiled consumer still awaits,
+  and slab ownership is one shared invalidate/commit transaction across the CPU, CUDA and HIP
+  backends.
+- **Dead zero stores before localized serial reductions are elided** (gh-ocannl-821) when the
+  reduction provably overwrites every cell; partial coverage, guarded stores and vectorized
   declines keep the store.
-- **Schedule-cache key regimes are stamped and pruned** (gh-ocannl-835, gh-ocannl-780,
-  gh-ocannl-803): a cache directory carries a regime stamp under a lock — an older stamp deletes
-  the unreachable `.sexp` generation once, a newer or malformed one refuses reads and writes so an
-  older binary cannot repopulate a newer directory — and every temp-then-rename publication goes
-  through `Utils.Atomic_file`, with crash-stale temp cleanup.
+- **Schedule-cache regime stamps** (gh-ocannl-835, gh-ocannl-780, gh-ocannl-803): a cache
+  directory carries a regime stamp under a lock — an older stamp prunes the unreachable `.sexp`
+  generation once, a newer or malformed one refuses reads and writes — and every temp-then-rename
+  publication goes through `Utils.Atomic_file`, with stale-temp cleanup.
 - **A third test tier, `@train`**, for the toy training integrations (`mlp_names`,
   `mlp_bn_names`, `circles_conv`, `fsm_transformer`, `transformer_names`), with per-test
-  `train-<name>` aliases: per-PR CI no longer runs the serialized training tail, and the daily
-  sweep builds `@runtest @train` on every backend. Training-golden thresholds are window means
-  rather than one sampled epoch (gh-ocannl-854).
-- **Benchmark provenance and supervision**: `fixtures/DIGESTS.txt` records which box's fixture
-  bytes each published number was measured on — the boxes differ (gh-ocannl-759); every sweep
-  child runs in a supervised process group with a per-cell wall-clock cap, so tinygrad's
-  intermittently deadlocking beam search costs the cell rather than the sweep (gh-ocannl-842,
-  gh-ocannl-760); benches flush every line and announce a slow leg before it runs
-  (gh-ocannl-829); `bin/compilation_speed` runs again (gh-ocannl-831).
+  `train-<name>` aliases. Per-PR CI runs it as a separate macOS shard instead of a serialized
+  tail of `@runtest`; the daily sweep builds `@runtest @train` on every backend. Training-golden
+  thresholds are window means rather than one sampled epoch (gh-ocannl-854).
+- **Benchmark provenance and supervision**: `benchmarks/fixtures/DIGESTS.txt` records which
+  box's fixture bytes each published number was measured on (gh-ocannl-759); every sweep child
+  runs in a supervised process group with a per-cell wall-clock cap, so a deadlocking tinygrad
+  beam search costs the cell, not the sweep (gh-ocannl-842, gh-ocannl-760); benches flush every
+  line and announce a slow leg before it runs (gh-ocannl-829); `bin/compilation_speed` runs
+  again (gh-ocannl-831).
 
 ### Changed
 
-- **Autotune times steady state, and refuses what it cannot trust** (gh-ocannl-755,
-  gh-ocannl-855, gh-ocannl-888): a candidate is timed under queue depth rather than as one launch
-  followed by one sync, which read up to 2.6x above steady state with the offset varying by
-  geometry; timing budgets accumulate per-launch samples (at least 16, at most 64) and each result
-  carries `{ ms; contended; samples }`, a window counting as contended when half its samples exceed
-  the minimum by 2x; contended, non-positive and non-finite timings are withheld from ranking and
-  calibration through one `admitted_timing_ms` gate; a batch depth is a scale estimate, not a
-  measurement (the 2026-08-31 sweep found GPU autotuning timing nothing on both boxes);
-  `Autotune.report.timing` is a `timing_mode`, no longer an option.
+- **Autotune times steady state and refuses what it cannot trust** (gh-ocannl-755,
+  gh-ocannl-855, gh-ocannl-888): candidates are timed under queue depth rather than as one
+  launch plus one sync, which read up to 2.6x above steady state; each result carries
+  `{ ms; contended; samples }` (16–64 per-launch samples), and contended, non-positive and
+  non-finite timings are withheld from ranking and calibration. `Autotune.report.timing` is a
+  `timing_mode`, no longer an option.
 - **RTC options are pure, pinned state on every GPU backend** (gh-ocannl-784, gh-ocannl-848):
   `Compiler_options.nvrtc` and `.metal` join the hiprtc one, pinned GPU-free by test, printed by
-  sweeps and carried on compile failures; the reassociation boundary was measured rather than
-  assumed — Metal on macOS 15+ selects `mathMode=Safe` with `mathFloatingPointFunctions=Fast`.
+  sweeps and carried on compile failures. Metal on macOS 15+ selects `mathMode=Safe` with
+  `mathFloatingPointFunctions=Fast`.
 - **Metal's serial-accumulation workaround is a volatile read, and it is measured**
-  (gh-ocannl-782, gh-ocannl-820): the backend capability `volatile_scalar_rmw` is renamed
-  `volatile_serial_accumulation`, the miscompile reproduces standalone without OCANNL
-  (`benchmarks/runners/ocannl/bench_metal_bug_local.ml`), and the workaround's form is now an
-  expression-level volatile cast on device reads inside the accumulating update — 1.03x on the
-  reproducer where the volatile accumulator cost 1.06x memory-bound up to 4.1x on a single-threaded
-  scalar-loss reduction; accumulator declarations stay register-resident, and each compiled
-  routine carries a volatility census (`Context.routine.volatility`) saying which sites took it.
+  (gh-ocannl-782, gh-ocannl-820): the capability `volatile_scalar_rmw` is renamed
+  `volatile_serial_accumulation`, the miscompile reproduces standalone
+  (`benchmarks/runners/ocannl/bench_metal_bug_local.ml`), and the workaround is now a volatile
+  cast on device reads inside the accumulating update — 1.03x on the reproducer, where the
+  volatile accumulator cost 1.06x to 4.1x. Each compiled routine carries a volatility census
+  (`Context.routine.volatility`).
 - **Retired and narrowed API** (gh-ocannl-767, gh-ocannl-771, gh-ocannl-812, gh-ocannl-775,
-  gh-ocannl-764, gh-ocannl-765, gh-ocannl-810, gh-ocannl-806): the assignments-level batch
-  compilation path (`Backend.compile_batch` / `link_batch` over `Assignments.comp` arrays) is gone
-  — zero callers, unreachable from `Context`; `Tensor.raw_unop` / `raw_binop` / `raw_ternop`
-  collapse onto `Tensor.raw_accum`, with `Tensor.buffer_of` as the PPX-facing seam;
-  `Indexing.projections` carries one `components : (int * symbol) list array` instead of the
-  `product_space` / `product_iterators` pair, lowering has one product-loop walker, and concat
-  lowering mints one loop symbol per segment; the footprint record lives at
-  `Ir.Low_level.footprint` and `Context.Backends_deprecated` is `Context.Backends`; `Affine`,
-  `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit interfaces, guarded
-  by a dead-export scan.
+  gh-ocannl-764, gh-ocannl-765, gh-ocannl-810, gh-ocannl-806): `Backend.compile_batch` /
+  `link_batch` over `Assignments.comp` arrays are gone (zero callers); `Tensor.raw_unop` /
+  `raw_binop` / `raw_ternop` collapse onto `Tensor.raw_accum`, with `Tensor.buffer_of` as the
+  PPX-facing seam; `Indexing.projections` carries one `components` array instead of the
+  `product_space` / `product_iterators` pair; the footprint record lives at
+  `Ir.Low_level.footprint`; `Context.Backends_deprecated` is `Context.Backends`; `Affine`,
+  `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit interfaces,
+  guarded by a dead-export scan.
 - `Train.to_routine` returns the post-compile context (`Context.t * Context.routine`), matching
-  `Context.compile` and `Train.run_once` — out-of-tree callers get a type error whose fix is
-  `let _, routine = ...` or, better, chaining the returned context; `Train`'s duplicated
-  dump/budget blocks are shared helpers (gh-ocannl-772).
-- `?lowered_transform` / `?lowered_transforms` on `Context.compile` / `Context.compile_outcome`
-  and backend `compile` are
-  unified into one list-returning `?lowered_transform : Low_level.optimized ->
-  Low_level.optimized list`, making their runtime mutual exclusion impossible to express
-  (gh-ocannl-768).
+  `Context.compile` and `Train.run_once`; out-of-tree callers fix the type error with
+  `let _, routine = ...` or by chaining the returned context (gh-ocannl-772).
+- `?lowered_transform` / `?lowered_transforms` on `Context.compile`, `Context.compile_outcome`
+  and backend `compile` are one list-returning
+  `?lowered_transform : Low_level.optimized -> Low_level.optimized list` (gh-ocannl-768).
 - `Context.t`'s device field and the `?device_id` parameters are renamed `ordinal` (no deprecated
-  alias) — the value is the backend's device ordinal, not the process-global `device_id` — and the
-  gh-ocannl-498 memory-budget planner moves out of `Context` into its own `arrayjit.memory_budget`
-  library: `Context.plan_memory_budget` is `Memory_budget.fit`, `Context.memory_budget` is
-  `Memory_budget.t`, `Context.budget_plan` is `Memory_budget.plan`, and `footprint` /
-  `compare_relief_ratio` move across unchanged (gh-ocannl-776).
-- Dynamic-gather tables (`Get_dynamic`) decide their own placement before cleanup — a table that
-  recomputation cannot serve materializes, and the one reading that cannot be satisfied says so
-  in the author's terms instead of in provenance numbers (gh-ocannl-734).
-- `lib/`'s public optional arguments are held to doing something (gh-ocannl-811): one was fatally
-  broken and three were accepted and ignored; each is now exercised.
-- Every checked-in configuration consumer — shell and Python scripts, dune actions, workflow
-  YAML, documentation, `ocannl_config` files — is scanned against `Utils.known_config_keys`, so a
-  renamed or removed key fails the scans instead of drifting (gh-ocannl-790).
-- The fp8 soak's vendor arms hold only their jit calls; all vendor-independent logic lives in
-  `tools/fp8_soak.ml`, which every box compiles, so an edit can no longer ship having only ever
-  been parsed (gh-ocannl-758).
-- Test seams: the test-suite configuration reader lives in `test/config` and resolves the backend
-  once for the whole suite, and a directory adopting a per-backend golden reads
-  `%{read:../config/ocannl_backend.txt}` (gh-ocannl-787); `Verdict.Claims` is the one claim
-  surface tests open (gh-ocannl-815), skipped claims are aggregated across backend sweeps
-  (gh-ocannl-792), and `reduction_forms` members pin which decision produced their kernel, not
-  only which form rendered (gh-ocannl-733). AGENTS.md is the single agent guide, included by
+  alias), and the memory-budget planner moves out of `Context` into its own
+  `arrayjit.memory_budget` library: `Context.plan_memory_budget` is `Memory_budget.fit`,
+  `Context.memory_budget` is `Memory_budget.t`, `Context.budget_plan` is `Memory_budget.plan`
+  (gh-ocannl-776).
+- Dynamic-gather tables (`Get_dynamic`) decide their own placement before cleanup: a table that
+  recomputation cannot serve materializes (gh-ocannl-734).
+- `lib/`'s public optional arguments are held to doing something (gh-ocannl-811): one was
+  broken and three were ignored; each is now exercised.
+- Every checked-in configuration consumer — scripts, dune actions, workflow YAML, documentation,
+  `ocannl_config` files — is scanned against `Utils.known_config_keys`, so a renamed or removed
+  key fails the scans instead of drifting (gh-ocannl-790).
+- The fp8 soak's vendor arms hold only their jit calls; the vendor-independent logic in
+  `tools/fp8_soak.ml` compiles on every box (gh-ocannl-758).
+- Test seams: the suite configuration reader lives in `test/config` and resolves the backend
+  once, read by per-backend goldens as `%{read:../config/ocannl_backend.txt}` (gh-ocannl-787);
+  `Verdict.Claims` is the one claim surface tests open (gh-ocannl-815); skipped claims are
+  aggregated across backend sweeps (gh-ocannl-792); `reduction_forms` members pin which decision
+  produced their kernel (gh-ocannl-733). AGENTS.md is the single agent guide, included by
   CLAUDE.md (gh-ocannl-653).
 
 ### Fixed
 
 - **`multidev_cc` launched kernels on whichever static index the host had raced ahead to**:
-  `Indexing.apply` dereferenced a launch's static-index refs inside the kernel task, and the
-  `Multidev` scheduler returns before the task runs, so `Train.sequential_loop`'s
-  rebind-then-run shape skipped and repeated batches and read host schedules at the wrong step —
-  a silent wrong answer on that backend alone. Launches now bind the static index at dispatch,
-  and `transformer_names` has one golden again.
-- `Train.sgd_update ~momentum` works (gh-ocannl-772): the momentum buffer — optimizer state, read
-  before written — was left a virtualization candidate, so any `~momentum:x > 0` failed at
-  lowering on every backend; `sgd_one` now materializes it, and `test/operations/sgd_variants`
-  drives momentum, nesterov, weight decay and `grad_scale` against a host simulation.
+  static-index refs were dereferenced inside the kernel task, after the `Multidev` scheduler
+  had returned, so `Train.sequential_loop` skipped and repeated batches — a silent wrong answer
+  on that backend alone. Launches now bind the static index at dispatch.
+- `Train.sgd_update ~momentum` works (gh-ocannl-772): the momentum buffer was left a
+  virtualization candidate, so any `~momentum:x > 0` failed at lowering; `sgd_one` now
+  materializes it, and `test/operations/sgd_variants` drives momentum, nesterov, weight decay
+  and `grad_scale` against a host simulation.
 - The mul-add→FMA rewrite is guarded to floating-point precisions (gh-ocannl-824): integer
-  mul-add was reachable through the `?prelowered` seam and routed through double `fma`, losing
-  the unit at the int64 boundary.
+  mul-add reachable through `?prelowered` routed through double `fma`, losing the unit at the
+  int64 boundary.
 - `Set_vec_unop` refuses a launch-bound symbolic extent instead of writing packed vectors
-  unguarded (gh-ocannl-817), and `Tensor.op` checks, rather than assumes, that nothing derives
-  projections before the neutral element is installed.
+  unguarded (gh-ocannl-817).
 - `OCANNL_LOG_LEVEL_CC_BACKEND=1` and `=3` compile again (gh-ocannl-823).
 
 ## [1.0.1] -- 2026-08-26
