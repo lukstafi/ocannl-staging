@@ -48,7 +48,7 @@ let raw_entries =
         "[scanner-refusal:7683b7af923c70f62f8dca5e0155d4bf] Unreleased section carries";
         "[scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet";
         "[scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN";
-        "[scanner-refusal:58d555e31796542390cbc8a53029fbd1] thirteen synthetic control";
+        "[scanner-refusal:086b121132e14770caf4e146af792441] fourteen synthetic control";
         "[scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet";
         "[scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth";
         "[scanner-refusal:7b3a395ea497f63898dd51e1c28d4539] bullet whose fourth";
@@ -59,6 +59,7 @@ let raw_entries =
         "[scanner-refusal:bb0069493c829780cec5ca1d66feab8d] issue number running";
         "[scanner-refusal:6e22c3db47b0a6937bb1ab9c0855ebb5] citation rule flags";
         "[scanner-refusal:3ca66d41359dc51f6ab5f7ac84b8b907] citation rule flags";
+        "[scanner-refusal:c9449faf44ed458347e1d657e626adee] issue prefix embedded";
         "[scanner-refusal:f517d12e9916c479313e517d39c992aa] citing a staging";
         "[scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl";
         "[scanner-refusal:5bcdaf0ef54cbe80e0d80101fe648b77] section reader refuses";
@@ -73,6 +74,8 @@ let raw_entries =
         "[scanner-refusal:194c1e57cc9420634205a146c56e16d0] an anchor quoted";
         "[scanner-refusal:f3befecb42f5ce5ca62d20d3ec29b4e5] anchor quoted inside";
         "[scanner-refusal:6dc88ec5eacbebd072ebf1b0741266ef] heading indented up";
+        "[scanner-refusal:cb6d2d6feb45fe4d789cf93c0cafdac3] block quote under";
+        "[scanner-refusal:8d85b5a872954cff5a8c20b7ad997075] backtick fence's info";
         "[scanner-refusal:5b3f45ee369cc10ca978db8f30e90719] four-space-indented copy of";
       ] );
     ( "backend_golden_family_scan.ml",

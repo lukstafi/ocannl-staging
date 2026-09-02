@@ -40,7 +40,7 @@ changelog_unreleased_scan.ml: [scanner-refusal:bc1a2e143477bd6d1eeb53a36718c4b8]
 changelog_unreleased_scan.ml: [scanner-refusal:7683b7af923c70f62f8dca5e0155d4bf] Unreleased section carries (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN (claim) is catalogued beside changelog_unreleased_scan.expected: true
-changelog_unreleased_scan.ml: [scanner-refusal:58d555e31796542390cbc8a53029fbd1] thirteen synthetic control (claim) is catalogued beside changelog_unreleased_scan.expected: true
+changelog_unreleased_scan.ml: [scanner-refusal:086b121132e14770caf4e146af792441] fourteen synthetic control (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:7b3a395ea497f63898dd51e1c28d4539] bullet whose fourth (claim) is catalogued beside changelog_unreleased_scan.expected: true
@@ -51,6 +51,7 @@ changelog_unreleased_scan.ml: [scanner-refusal:1f0ae7533580b5e4beb238c4275c1ab4]
 changelog_unreleased_scan.ml: [scanner-refusal:bb0069493c829780cec5ca1d66feab8d] issue number running (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:6e22c3db47b0a6937bb1ab9c0855ebb5] citation rule flags (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:3ca66d41359dc51f6ab5f7ac84b8b907] citation rule flags (claim) is catalogued beside changelog_unreleased_scan.expected: true
+changelog_unreleased_scan.ml: [scanner-refusal:c9449faf44ed458347e1d657e626adee] issue prefix embedded (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:f517d12e9916c479313e517d39c992aa] citing a staging (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:5bcdaf0ef54cbe80e0d80101fe648b77] section reader refuses (claim) is catalogued beside changelog_unreleased_scan.expected: true
@@ -65,6 +66,8 @@ changelog_unreleased_scan.ml: [scanner-refusal:050c661161bb4c1cfe2dff2047ad2b14]
 changelog_unreleased_scan.ml: [scanner-refusal:194c1e57cc9420634205a146c56e16d0] an anchor quoted (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:f3befecb42f5ce5ca62d20d3ec29b4e5] anchor quoted inside (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:6dc88ec5eacbebd072ebf1b0741266ef] heading indented up (claim) is catalogued beside changelog_unreleased_scan.expected: true
+changelog_unreleased_scan.ml: [scanner-refusal:cb6d2d6feb45fe4d789cf93c0cafdac3] block quote under (claim) is catalogued beside changelog_unreleased_scan.expected: true
+changelog_unreleased_scan.ml: [scanner-refusal:8d85b5a872954cff5a8c20b7ad997075] backtick fence's info (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:5b3f45ee369cc10ca978db8f30e90719] four-space-indented copy of (claim) is catalogued beside changelog_unreleased_scan.expected: true
 cache_dir_ignores.ml has exactly the explicitly assigned refusal controls: true
 cache_dir_ignores.ml: [scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true

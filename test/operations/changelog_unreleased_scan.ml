@@ -123,7 +123,24 @@ let opens_item line ~markers =
   && List.mem markers line.[0] ~equal:Char.equal
   && (String.length line = 1 || Char.is_whitespace line.[1])
 
-let is_top_level_bullet line = opens_item line ~markers:marker_chars
+(** A thematic break: three or more of [-], [*] or [_], with nothing but whitespace between them. It
+    is a separator, not a list item, and the spaced forms ([* * *], [- - -]) present exactly the
+    marker-then-whitespace shape the item recognizer looks for — so a break in the section would be
+    read as an uncited bullet and fail the scan over something that is not an entry at all. *)
+let thematic_chars = [ '-'; '*'; '_' ]
+
+let is_thematic_break line =
+  indent_of line <= block_indent
+  &&
+  let body = String.filter (String.strip line) ~f:(Fn.non Char.is_whitespace) in
+  String.length body >= 3
+  &&
+  match String.to_list body with
+  | c :: _ when List.mem thematic_chars c ~equal:Char.equal -> String.for_all body ~f:(Char.equal c)
+  | _ -> false
+
+let is_top_level_bullet line =
+  (not (is_thematic_break line)) && opens_item line ~markers:marker_chars
 
 (** The text an item's own line carries, after its marker. Empty for a marker alone on its line: an
     empty item, which opens no paragraph, so unindented prose beneath it is a separate paragraph
@@ -158,14 +175,23 @@ let is_indented_marker line =
   let bare = String.lstrip line in
   is_top_level_bullet bare || is_top_level_ordered bare
 
+(** An unindented block-quote opener. It starts a block of its own, so it ends the item above it
+    rather than continuing its paragraph — and a quote carrying a citation would otherwise lend it
+    to the uncited bullet before it. *)
+let opens_block_quote line =
+  let start = indent_of line in
+  start <= block_indent && start < String.length line && Char.equal line.[start] '>'
+
 (** A lazy continuation: an unindented prose line inside an open paragraph. Markdown keeps it in the
-    item; only a structural boundary — a blank line, a heading, the next top-level item — closes it.
-*)
+    item; only a structural boundary — a blank line, a heading, a block quote, a thematic break, the
+    next top-level item — closes it. *)
 let is_lazy_continuation line =
   (not (is_blank line))
   && (not (is_heading line))
   && (not (is_top_level_bullet line))
-  && not (is_top_level_ordered line)
+  && (not (is_top_level_ordered line))
+  && (not (is_thematic_break line))
+  && not (opens_block_quote line)
 
 let unreleased_heading = "## [Unreleased]"
 
@@ -193,7 +219,11 @@ let fence_at line =
     else
       let rec run j = if j < n && Char.equal line.[j] c then run (j + 1) else j in
       let stop = run start in
-      if stop - start >= 3 then Some (c, stop - start, String.strip (String.drop_prefix line stop))
+      let info = String.strip (String.drop_prefix line stop) in
+      (* A backtick fence's info string cannot itself contain a backtick, so such a line opens no
+         block. Accepting it would swallow the structure that follows until some later delimiter. *)
+      if stop - start >= 3 && not (Char.equal c '`' && String.contains info '`') then
+        Some (c, stop - start, info)
       else None
 
 let opens_fence line = Option.is_some (fence_at line)
@@ -294,12 +324,17 @@ let number_at text k =
 
 (** Whether [text] carries [prefix] followed by a well-formed number. Bare "gh-ocannl-" prose with
     no number is not a citation, which is why the number is part of the question. *)
+let starts_token text i = i = 0 || token_boundary text (i - 1)
+
 let cites_number text ~prefix =
   let plen = String.length prefix and tlen = String.length text in
   let rec at i =
     if i + plen >= tlen then false
-    else if String.equal (String.sub text ~pos:i ~len:plen) prefix && number_at text (i + plen) then
-      true
+    else if
+      starts_token text i
+      && String.equal (String.sub text ~pos:i ~len:plen) prefix
+      && number_at text (i + plen)
+    then true
     else at (i + 1)
   in
   at 0
@@ -329,7 +364,11 @@ let cites_staging_pr text =
   in
   let rec at i =
     if i + rlen > tlen then false
-    else if String.equal (String.sub text ~pos:i ~len:rlen) repo && qualifies (i + rlen) then true
+    else if
+      starts_token text i
+      && String.equal (String.sub text ~pos:i ~len:rlen) repo
+      && qualifies (i + rlen)
+    then true
     else at (i + 1)
   in
   at 0
@@ -383,6 +422,7 @@ let control_section =
     "- A bullet whose number runs into a typo, gh-ocannl-807oops, and cites nothing else.";
     "- A bullet citing `lukstafi/ocannl-staging` PR #601oops, and nothing else.";
     "- A bullet citing lukstafi/ocannl-stagingPR #601, with the separator missing.";
+    "- A bullet citing notgh-ocannl-807, where the prefix is embedded in another token.";
   ]
 
 (* Two Unreleased anchors, the shape a merge leaves behind: the second one's bullets are what a
@@ -461,6 +501,10 @@ let control_long_fence =
     "## [Unreleased]";
     "````";
   ]
+
+(* A block quote directly under an uncited bullet: Markdown ends the item, so the quote's citation
+   is not the bullet's (Codex P2, round 6). *)
+let control_block_quote = [ "- An uncited change,"; "> See gh-ocannl-807 for the details." ]
 
 let control_ordered_item =
   [ "- one (gh-ocannl-807)."; "1. An ordered top-level item."; "2) Another." ]
@@ -544,7 +588,7 @@ let () =
   p "every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN"
     (List.for_all bullets ~f:cites_record);
   let control = bullets_of control_section in
-  p "the section reader finds the thirteen synthetic control bullets" (List.length control = 13);
+  p "the section reader finds the fourteen synthetic control bullets" (List.length control = 14);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -568,6 +612,8 @@ let () =
       (not (cites_record bullet)) && mentions bullet "PR #601oops");
   p_exists "the citation rule flags a repository run into `PR #` with no separator" control
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "stagingPR #601");
+  p_exists "the citation rule flags an issue prefix embedded in another token" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "notgh-ocannl-807");
   p_exists "both rules pass a bullet citing a staging PR" control ~f:(fun bullet ->
       within_line_budget bullet && cites_record bullet && mentions bullet development_repo);
   (* One positive control per ACCEPTED form, each excluding the other: a single "some bullet passes"
@@ -589,7 +635,7 @@ let () =
     [ "-  two spaces"; "*\ttab"; "+ one space"; "-" ]
     ~f:is_top_level_bullet;
   p_none "the bullet reader takes neither a rule nor emphasis for a bullet"
-    [ "---"; "***"; "*emphasis* opens this line"; "-1 is a number" ]
+    [ "---"; "***"; "* * *"; "- - -"; "_ _ _"; "*emphasis* opens this line"; "-1 is a number" ]
     ~f:is_top_level_bullet;
   let deep = bullets_of (Option.value (unreleased_section control_deep_subheading) ~default:[]) in
   p "a level-4 subheading stays inside Unreleased, and the released section does not"
@@ -623,6 +669,14 @@ let () =
     &&
     let section = Option.value (unreleased_section control_indented_headings) ~default:[] in
     List.length (bullets_of section) = 1);
+  p "a block quote under a bullet is not part of it"
+    (match bullets_of control_block_quote with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "a backtick fence's info string may not contain a backtick"
+    (Option.is_none (fence_at "```lang`option")
+    && Option.is_some (fence_at "```lang")
+    && Option.is_some (fence_at "~~~lang~option"));
   p "a four-space-indented copy of the anchor is code, not a second anchor"
     (List.length (unreleased_headings control_code_indented_anchor) = 1
     &&
