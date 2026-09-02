@@ -131,10 +131,13 @@ type update_step = {
   logic : logic;
   id : update_id;
   mutable unsafe_projections : Idx.projections option;
-  mutable neutral_elem : float option;
-      (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
-          update step use the same neutral element [v], [None] when different operations have
-          different neutral elements or when there are no accumulator operations. *)
+  neutral_elem : float option;
+      (** The neutral element of the operation's accumulation, fixed at creation: [Some v] when all
+          assignment ops in the update step use the same neutral element [v], [None] when different
+          operations have different neutral elements or when there are no accumulator operations.
+          [derive_projections] reads it for the clamped-window decision (gh-504) and to commit the
+          margins' neutral ([padding_elem]), so a step is only created once its operation's
+          assignments are known -- see [Tensor.op]. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -1338,6 +1341,13 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
       (proj_env, dim_var_set_empty, inequalities)
 
 let state = ref Row.empty_env
+
+(* Depth of tensor-operation constructions in progress: [Tensor.op] raises it around its [op_asn]
+   (see [with_construction_window]). While it is positive, finalizing inference is refused at the
+   finalizer: the operation whose assignments are being built has not registered its constraints
+   yet, so a [finish_inference] here would close its operands without them and commit that to the
+   shapes, which no later step can undo (gh-ocannl-830). *)
+let construction_depth = ref 0
 let active_update_steps = ref []
 let active_constraints = ref []
 
@@ -1376,13 +1386,13 @@ let infer_equal (sh1 : t) (sh2 : t) =
     Raises [Row.Shape_error] when the product space is not expressible as a shape: a non-einsum
     operation, more than one reduced-over row variable, or a reduced-over row variable combined with
     an open result input row. *)
-let product_space_shape (update_step : update_step) : t =
-  let cur_sh = update_step.shape in
+let product_space_shape ~(shape : t) ~(logic : logic) : t =
+  let cur_sh = shape in
   let invalid msg error_shapes =
     raise @@ Row.Shape_error ("product_space_shape: " ^ msg, [ Shape_mismatch error_shapes ])
   in
   let spec, ls_rhs_list, ls_lhs, rhs_shapes =
-    match update_step.logic with
+    match logic with
     | Broadcast (Einsum (spec, _), sh1, sh2) -> (
         match einsum_of_spec spec with
         | [ ls1; ls2 ], ls_lhs -> (spec, [ ls1; ls2 ], ls_lhs, [ sh1; sh2 ])
@@ -1929,7 +1939,8 @@ let unsafe_reinitialize () =
   update_uid := 0;
   state := Row.empty_env;
   active_update_steps := [];
-  active_constraints := []
+  active_constraints := [];
+  construction_depth := 0
 
 let iter_shapes update_step ~f =
   f update_step.shape;
@@ -2542,7 +2553,19 @@ let%debug4_sexp propagate_shapes (update_step : update_step) : unit =
   apply_env_step env update_step;
   state := env
 
+let with_construction_window f =
+  Int.incr construction_depth;
+  Exn.protect ~f ~finally:(fun () -> Int.decr construction_depth)
+
 let%debug4_sexp finish_inference (() : unit) : unit =
+  if !construction_depth > 0 then
+    raise
+    @@ Row.Shape_error
+         ( "finish_inference: shape inference was finalized from within [op_asn], mid-construction \
+            of a tensor operation (via Shape.to_dims, Shape.to_padding or the projections handle) \
+            -- not supported: the operation's own constraints are not registered yet, so its \
+            operands would close without them. Fix the [op_asn] and reinitialize the session.",
+           [] );
   let unsolved =
     List.filter !active_constraints ~f:(function
       | Shape_row (r, _) | Terminal_row (_, r, _) ->

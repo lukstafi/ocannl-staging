@@ -298,10 +298,13 @@ type update_step = {
   logic : logic;
   id : update_id;
   mutable unsafe_projections : Ir.Indexing.projections option;
-  mutable neutral_elem : float option;
-      (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
-          update step use the same neutral element [v], [None] when different operations have
-          different neutral elements or when there are no accumulator operations. *)
+  neutral_elem : float option;
+      (** The neutral element of the operation's accumulation, fixed at creation: [Some v] when all
+          assignment ops in the update step use the same neutral element [v], [None] when different
+          operations have different neutral elements or when there are no accumulator operations.
+          [derive_projections] reads it for the clamped-window decision (gh-504) and to commit the
+          margins' neutral ([padding_elem]), so a step is only created once its operation's
+          assignments are known -- see [Tensor.op]. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -313,7 +316,7 @@ type update_step = {
 val to_dims : t -> int array
 (** Uses the matrix convention of putting the input axes last. *)
 
-val product_space_shape : update_step -> t
+val product_space_shape : shape:t -> logic:logic -> t
 (** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes followed
     by the reduced-over (contracted) axes, in the product-space order of the derived projections.
     The proxy shares the operation's shape-inference solution (its constraints are emitted on
@@ -329,6 +332,13 @@ val to_padding : t -> (Ir.Ops.axis_padding array * float) option
     when all operations use the same neutral element, [None] when different operations require
     different neutral elements (margin must be reset before each operation). Uses the matrix
     convention of putting the input axes last. *)
+
+val with_construction_window : (unit -> 'a) -> 'a
+(** Runs [f] with the construction-in-progress depth raised. While it is positive, every entry point
+    that finalizes inference ([to_dims], [to_padding], [get_projections]) raises [Row.Shape_error]
+    at the finalizer, before anything is committed: [Tensor.op] runs its [op_asn] under it, since
+    the operation has not registered its constraints yet and a finalization there would close its
+    operands without them (gh-ocannl-830). *)
 
 val propagate_shapes : update_step -> unit
 
