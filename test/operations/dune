@@ -4789,8 +4789,11 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
-  (glob_files_rec ../../.github/workflows/*.yml)
-  (glob_files_rec ../../.github/workflows/*.yaml))
+  ; Every file under the workflows directory, with no suffix list here: WHICH of them is a
+  ; workflow is one fact, and it lives in the scanner's `is_workflow`, where the controls exercise
+  ; it. A second copy in this glob could only drift -- silently, since the repository has no
+  ; `.yaml` workflow today for a dropped spelling to fail on.
+  (glob_files_rec ../../.github/workflows/*))
  (action
   (progn
    (with-stdout-to

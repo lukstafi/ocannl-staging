@@ -1,10 +1,3 @@
-GitHub workflow jobs and the runtime ceiling each one declares:
-  .github/workflows/ci.yml run: timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 45 }}
-  .github/workflows/ci.yml notify-triage-routine: timeout-minutes: 5
-  .github/workflows/claude.yml claude: timeout-minutes: 60
-  .github/workflows/gh-pages-api.yml deploy: timeout-minutes: 30
-  .github/workflows/gh-pages-docs.yml deploy: timeout-minutes: 30
-
 every checked-in GitHub workflow file presents jobs this scan can read: true
 every workflow job declares a job-level runtime ceiling, unless it calls a reusable workflow: true
 every workflow job states that ceiling ahead of the steps it bounds: true
@@ -28,6 +21,8 @@ an inline jobs value is refused as a shape this reader cannot decide: true
 a jobs key with no entries under it is refused rather than read as a file of no jobs: true
 an inline job body is refused, its keys being unreadable to this reader: true
 a job with no keys under it is refused rather than read as a job without a ceiling: true
+an unreadable line inside an otherwise valid job is refused, ceiling and all: true
+the same job with that key spelled plainly is read and passes: true
 a quoted job key is refused rather than passed over, ceiling and all: true
 a tab-indented workflow is refused, this reader measuring indentation in spaces: true
 a workflow file with no jobs mapping is refused rather than read as having no jobs: true
@@ -53,6 +48,8 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:a4809b85dfbba2c0a2c42ed01d417e17] refused rather than
   [scanner-refusal:90eaa52d68d4ad193b704ab3d1946e09] keys being unreadable
   [scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than
+  [scanner-refusal:06c1a18e5c944d59c7a4558c689db819] unreadable line inside
+  [scanner-refusal:781d64c7cd92fd55d5eb911b61f21dbe] key spelled plainly
   [scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than
   [scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation
   [scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than

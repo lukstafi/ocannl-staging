@@ -287,13 +287,17 @@ let scan workspace_root paths =
     List.concat_map scanned ~f:(fun (_, reading) ->
         match reading with Jobs jobs -> jobs | Unreadable _ -> [])
   in
-  printf "GitHub workflow jobs and the runtime ceiling each one declares:\n";
+  (* The inventory goes to stderr, where the other repo-wide scans put their censuses: a bounded job
+     renamed, or a ceiling tuned from 30 to 45, changes none of the claims below, and a golden that
+     moved with it would make every workflow edit promote this file -- a conflict point for branches
+     that have nothing to do with the rule. Stdout keeps what is stably true. *)
+  eprintf
+    "GitHub workflow jobs and the runtime ceiling each one declares (not part of the golden):\n";
   List.iter scanned ~f:(fun (relative, reading) ->
       match reading with
-      | Unreadable reason -> printf "  %s: UNREADABLE -- %s\n" relative (explain reason)
+      | Unreadable reason -> eprintf "  %s: UNREADABLE -- %s\n" relative (explain reason)
       | Jobs jobs ->
-          List.iter jobs ~f:(fun job -> printf "  %s %s: %s\n" relative job.name (describe job)));
-  printf "\n";
+          List.iter jobs ~f:(fun job -> eprintf "  %s %s: %s\n" relative job.name (describe job)));
   List.iter scanned ~f:(fun (relative, reading) ->
       match reading with
       | Jobs _ -> ()
@@ -571,6 +575,33 @@ let control () =
       ("name: fixture\non: workflow_dispatch\njobs:\n  \"quoted job\":\n"
      ^ "    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo hi\n")
   in
+  (* An unreadable line INSIDE an otherwise valid job -- ceiling and all. A reader that skipped it
+     would report the job as fully examined, so the refusal is the point; the counterpart is the
+     same job with the same key spelled plainly. *)
+  let unreadable_key_in_job =
+    run
+      (workflow
+         [
+           "  build:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 10\n\
+           \    \"quoted key\": value\n\
+           \    steps:\n\
+           \      - run: echo hi\n";
+         ])
+  in
+  let readable_key_in_job =
+    run
+      (workflow
+         [
+           "  build:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 10\n\
+           \    continue-on-error: false\n\
+           \    steps:\n\
+           \      - run: echo hi\n";
+         ])
+  in
   let tab_indented =
     run "name: fixture\non: workflow_dispatch\njobs:\n\tbuild:\n\t\truns-on: ubuntu-latest\n"
   in
@@ -655,6 +686,12 @@ let control () =
     (refused "job without keys"
        ~messages:[ unreadable "no keys at all under job `build`" ]
        job_without_keys);
+  p "an unreadable line inside an otherwise valid job is refused, ceiling and all"
+    (refused "unreadable key inside a job"
+       ~messages:[ "which is not a key this reader can parse" ]
+       unreadable_key_in_job);
+  p "the same job with that key spelled plainly is read and passes"
+    (passed "readable key inside a job" readable_key_in_job);
   p "a quoted job key is refused rather than passed over, ceiling and all"
     (refused "unreadable job key"
        ~messages:[ "which is not a key this reader can parse" ]
