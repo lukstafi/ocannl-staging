@@ -200,7 +200,19 @@ let opens_raw_html line =
   let text = String.lowercase (String.strip line) in
   if indent_of line > block_indent then None
   else
-    match List.find raw_html_tags ~f:(fun tag -> String.is_prefix text ~prefix:("<" ^ tag)) with
+    (* The tag NAME has to end there: `<prelude>` is not a `<pre>` block but a generic one, and
+       reading it as `<pre>` leaves the state open until a `</pre>` that never comes -- hiding every
+       heading after it, the anchor included. *)
+    let names tag =
+      String.is_prefix text ~prefix:("<" ^ tag)
+      &&
+      let k = 1 + String.length tag in
+      k >= String.length text
+      ||
+      let next = text.[k] in
+      Char.is_whitespace next || Char.equal next '>' || Char.equal next '/'
+    in
+    match List.find raw_html_tags ~f:names with
     (* A block that closes on its own opening line -- [<pre>example</pre>] -- opens no state at all;
        keeping one would hide every following line until some later closer. *)
     | Some tag -> if closes_raw_html_tag ~tag line then None else Some (`Until_close tag)
@@ -288,7 +300,19 @@ let is_plain_text text =
      in this changelog open with one -- so it takes a fence's three backticks to matter here. *)
   let fence = (Char.equal c '`' || Char.equal c '~') && run_of c >= 3 in
   let marker = is_one_of '-' '*' '+' && String.length text > 1 && Char.is_whitespace text.[1] in
-  (not thematic) && (not fence) && (not marker)
+  (* An ordered marker opens a list too, and a nested one under a bullet would otherwise ride in on
+     that bullet's citation as a continuation line. *)
+  let ordered =
+    Char.is_digit c
+    &&
+    let n = String.length text in
+    let rec run i = if i < n && Char.is_digit text.[i] then run (i + 1) else i in
+    let stop = run 0 in
+    stop < n
+    && (Char.equal text.[stop] '.' || Char.equal text.[stop] ')')
+    && (stop + 1 = n || Char.is_whitespace text.[stop + 1])
+  in
+  (not thematic) && (not fence) && (not marker) && (not ordered)
   (* Nor may it start with whitespace: a marker followed by two spaces, or by a tab, indents its
      content past the one column this grammar names. *)
   && (not (Char.is_whitespace c))
@@ -320,7 +344,7 @@ let is_canonical line =
 
 (** The bullets of a canonical section. Under the gate the extent is exact rather than inferred: an
     item runs to the first line that is neither a continuation nor a blank run followed by one. *)
-let bullets_of lines =
+let parse_section lines =
   let rec item acc rest =
     match rest with
     | line :: tail when is_continuation line -> item (line :: acc) tail
@@ -331,14 +355,21 @@ let bullets_of lines =
         | _ -> (List.rev acc, rest))
     | _ -> (List.rev acc, rest)
   in
-  let rec loop acc = function
-    | [] -> List.rev acc
+  let rec loop bullets others = function
+    | [] -> (List.rev bullets, List.rev others)
     | line :: rest when is_bullet line ->
         let continuation, rest = item [] rest in
-        loop ({ first_line = line; lines = line :: continuation } :: acc) rest
-    | _ :: rest -> loop acc rest
+        loop ({ first_line = line; lines = line :: continuation } :: bullets) others rest
+    | line :: rest -> loop bullets (line :: others) rest
   in
-  loop [] lines
+  loop [] [] lines
+
+let bullets_of lines = fst (parse_section lines)
+
+(** Continuation lines no bullet took: a two-space line under a subheading, or after a blank run
+    that ended the item above it. It passes the gate line by line and then belongs to nothing —
+    neither rule ever reads it — so the gate has to ask the parse, not just the lines. *)
+let orphan_continuations lines = List.filter (snd (parse_section lines)) ~f:is_continuation
 
 let max_lines = 3
 let within_line_budget bullet = List.count bullet.lines ~f:(Fn.non is_blank) <= max_lines
@@ -481,7 +512,12 @@ let non_canonical =
     ("a three-space indent", "   not quite a continuation");
     ("a four-space indent", "    an indented code block");
     ("an indented heading", "  ## Details");
+    ("a nested ordered item", "  1. A nested ordered entry.");
+    ("a nested ordered item with a paren", "  2) Another nested one.");
   ]
+
+(* A continuation line with no bullet above it: canonical line by line, and read by neither rule. *)
+let control_orphan_continuation = [ "### Added"; ""; "  Added uncited behaviour." ]
 
 let canonical_shapes =
   [ ""; "### Added"; "#### Security"; "- An entry (gh-ocannl-807)."; "  a continuation line" ]
@@ -511,6 +547,10 @@ let control_mismatched_html_close =
   released_history [ "<pre>"; "</script>"; "## [Unreleased]"; "</pre>" ]
 
 let control_one_line_html = released_history [ "<pre>example</pre>"; "## [Unreleased]" ]
+
+(* A generic HTML block whose tag merely STARTS with a raw-HTML tag name: it ends at the blank line,
+   so the anchor after it is visible. *)
+let control_generic_html = released_history [ "<prelude>"; ""; "## [Unreleased]" ]
 
 let control_deep_subheading =
   [
@@ -563,6 +603,9 @@ let () =
   List.iter uncanonical ~f:(fun line -> eprintf "  not a canonical line: %s\n" line);
   p "every line in Unreleased is blank, a subheading, a bullet, or a two-space continuation"
     (List.is_empty uncanonical);
+  let orphans = orphan_continuations section in
+  List.iter orphans ~f:(fun line -> eprintf "  a continuation with no bullet above it: %s\n" line);
+  p "every continuation line in Unreleased belongs to a bullet" (List.is_empty orphans);
   (* Unguarded universals, deliberately, and this is the one site in the file where emptiness is a
      PASSING case: an editorial pass at release prep moves every bullet into the new released
      section, and the Unreleased section that remains is legitimately empty until the next merge. A
@@ -613,6 +656,9 @@ let () =
   p_all "the gate refuses every shape this grammar does not name" non_canonical ~f:(fun (_, line) ->
       not (is_canonical line));
   p_all "the gate accepts every shape it names" canonical_shapes ~f:is_canonical;
+  p "the gate refuses a continuation with no bullet above it"
+    (List.is_empty (bullets_of control_orphan_continuation)
+    && List.length (orphan_continuations control_orphan_continuation) = 1);
   (* The anchor, and released history that must not fail the scan. *)
   let one_anchor_one_bullet control =
     List.length (unreleased_headings control) = 1
@@ -643,6 +689,8 @@ let () =
     (one_anchor_one_bullet control_mismatched_html_close);
   p "a raw HTML block that closes on its opening line hides nothing after it"
     (List.length (unreleased_headings control_one_line_html) = 2);
+  p "a tag merely starting with a raw-HTML name is a generic block, ending at the blank line"
+    (List.length (unreleased_headings control_generic_html) = 2);
   p "a comment opener inside a code span is literal text, not an HTML comment"
     ((not (List.exists control_code_span_comment ~f:opens_comment))
     && List.length (bullets_of control_code_span_comment) = 1

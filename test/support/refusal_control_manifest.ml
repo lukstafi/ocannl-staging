@@ -43,6 +43,7 @@ let raw_entries =
       [
         "[scanner-refusal:29e846ac8743ceba34a4cdcd5c90a431] CHANGES.md";
         "[scanner-refusal:2a02d6286a27aef4f8d7e61e279f8c4e] a two-space continuation";
+        "[scanner-refusal:0ec3ef6e76a1b717d0c1be40a6364fa2] every continuation line";
         "[scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet";
         "[scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN";
         "[scanner-refusal:ee5324f434a2c71e255bdf7f227a957b] synthetic control bullets";
@@ -59,6 +60,7 @@ let raw_entries =
         "[scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl";
         "[scanner-refusal:b58186611079f33f0c1982b767655695] refuses every shape";
         "[scanner-refusal:13ab4d5a9f0385a905c692cb883674ab] accepts every shape";
+        "[scanner-refusal:d6e62794b51d807f87aec4370f3a751a] refuses a continuation";
         "[scanner-refusal:5bcdaf0ef54cbe80e0d80101fe648b77] section reader refuses";
         "[scanner-refusal:276a908bf7fcd396f224bf426067c796] Unreleased line counts";
         "[scanner-refusal:c4907873eb4e13a193737314f62d9d0b] the anchor's text";
@@ -69,6 +71,7 @@ let raw_entries =
         "[scanner-refusal:b1060c3264fad2b26750763e08dbc86f] anchor inside released";
         "[scanner-refusal:05a94c42ce59cc69276bc3f89d99172e] unrelated closing tag";
         "[scanner-refusal:2b7eb419ed7900fbb86ba90fcfb6d542] hides nothing after";
+        "[scanner-refusal:5992ccadeb90a0283af47dd6b29ab152] merely starting with";
         "[scanner-refusal:94e0ae3ae9122bb909f3b9ff7c93f98c] comment opener inside";
         "[scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays";
       ] );
