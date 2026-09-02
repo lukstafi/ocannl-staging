@@ -391,8 +391,16 @@ let raw_entries =
     ( "workflow_job_timeouts.ml",
       [
         "[scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow";
-        "[scanner-refusal:201243f86a1362b8687f10a1ffba6ead] job-level runtime ceiling";
+        "[scanner-refusal:5c0ba3bcf03da17c20f587f737d8937b] job-level runtime ceiling";
         "[scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states";
+        "[scanner-refusal:e2fcdedf2103db72a9b3c2b933471215] reusable-workflow call passes";
+        "[scanner-refusal:d19a5eafc27ec268076c5d7ca7dbe979] GitHub's 6-hour default";
+        "[scanner-refusal:5df256dd2c78f0fb5ea7e3a3c757c976] ceiling declared after";
+        "[scanner-refusal:ac061fc23855d36465a9bd2ac3df8a14] ceiling that exists";
+        "[scanner-refusal:42f8936ed74b6847e68661e48376b771] per-step ceiling is";
+        "[scanner-refusal:77aa0c14bff72954feb09cf4c386a264] reusable-workflow call that";
+        "[scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than";
+        "[scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows";
       ] );
   ]
 
