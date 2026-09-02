@@ -149,6 +149,17 @@ let item_content line = String.strip (String.drop_prefix line 1)
 
 let has_content line = not (String.is_empty (item_content line))
 
+(** The column at which an item's own content starts — its marker plus the whitespace after it.
+    Markdown measures a later block of the same item against this column, not against "indented at
+    all": under [- uncited], a blank line, and a ONE-space-indented paragraph, the paragraph is
+    outside the item, and folding it in would lend the bullet a citation that is not its own. *)
+let content_column line =
+  let n = String.length line in
+  let start = indent_of line in
+  let rec skip i = if i < n && Char.is_whitespace line.[i] then skip (i + 1) else i in
+  let content = skip (start + 1) in
+  if content >= n then start + 2 else content
+
 (** A top-level ORDERED item: digits at column 0 followed by [.] or [)], closed the same way.
     Recognized only to refuse it — an ordered changelog entry is not a shape this scan knows how to
     read, and skipping it would drop it out of the population silently. *)
@@ -157,7 +168,9 @@ let is_top_level_ordered line =
     let rec run i = if i < String.length line && Char.is_digit line.[i] then run (i + 1) else i in
     run 0
   in
-  digits > 0 && opens_item (String.drop_prefix line digits) ~markers:[ '.'; ')' ]
+  (* CommonMark allows one to nine digits. A longer run is prose — an identifier, a phone number —
+     and classifying it as an item would fail the scan over a line Markdown makes no list of. *)
+  digits > 0 && digits <= 9 && opens_item (String.drop_prefix line digits) ~markers:[ '.'; ')' ]
 
 (** An indented, non-blank line: the continuation of whatever item is open, in any position. Any
     leading whitespace indents, tabs included. *)
@@ -227,7 +240,60 @@ let fence_at line =
       else None
 
 let opens_fence line = Option.is_some (fence_at line)
-let opens_comment line = String.is_substring line ~substring:"<!--"
+
+(** The line with its code spans removed. A backtick run opens a span that the matching run closes,
+    and what is inside renders as literal text — so an entry describing comment syntax, [`<!--`],
+    carries no comment opener. Unclosed backticks are left alone: they open no span. *)
+let outside_code_spans line =
+  let n = String.length line in
+  let buffer = Buffer.create n in
+  let rec ticks i = if i < n && Char.equal line.[i] '`' then ticks (i + 1) else i in
+  let rec loop i =
+    if i >= n then ()
+    else if Char.equal line.[i] '`' then (
+      let opening = ticks i in
+      let width = opening - i in
+      let rec find j =
+        if j >= n then None
+        else if Char.equal line.[j] '`' then
+          let closing = ticks j in
+          if closing - j = width then Some closing else find closing
+        else find (j + 1)
+      in
+      match find opening with
+      | Some closing -> loop closing
+      | None ->
+          Buffer.add_string buffer (String.drop_prefix line i);
+          ())
+    else (
+      Buffer.add_char buffer line.[i];
+      loop (i + 1))
+  in
+  loop 0;
+  Buffer.contents buffer
+
+let opens_comment line = String.is_substring (outside_code_spans line) ~substring:"<!--"
+
+(** A raw HTML block, in the two shapes that can hold a line reading exactly like a heading: a
+    [<pre>], [<script>], [<style>] or [<textarea>] block, which runs to its closing tag, and any
+    other block-level tag, which runs to the next blank line. Released history is searched for the
+    anchor like everything else, and a [## [Unreleased]] inside such a block renders as HTML content
+    — counting it would fail the scan over history that must stay untouched. *)
+let raw_html_tags = [ "<pre"; "<script"; "<style"; "<textarea" ]
+
+let closes_raw_html_tag line =
+  let text = String.lowercase line in
+  List.exists [ "</pre>"; "</script>"; "</style>"; "</textarea>" ] ~f:(fun tag ->
+      String.is_substring text ~substring:tag)
+
+let opens_raw_html line =
+  let text = String.lowercase (String.strip line) in
+  if indent_of line > block_indent then None
+  else if List.exists raw_html_tags ~f:(fun tag -> String.is_prefix text ~prefix:tag) then
+    Some `Until_close
+  else if String.is_prefix text ~prefix:"<" && not (String.is_prefix text ~prefix:"<!--") then
+    Some `Until_blank
+  else None
 
 (** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
     HTML comments. The whole file is searched for the anchor, released history included, and a
@@ -235,19 +301,24 @@ let opens_comment line = String.is_substring line ~substring:"<!--"
     second anchor: reading it as one would fail the scan over history the convention says to leave
     untouched, and take the live section down with it. *)
 let structural_lines lines =
-  let fence = ref None and comment = ref false in
+  let fence = ref None and comment = ref false and html = ref None in
   List.map lines ~f:(fun line ->
-      let structural = (not !comment) && Option.is_none !fence in
+      let structural = (not !comment) && Option.is_none !fence && Option.is_none !html in
       (if !comment then (if String.is_substring line ~substring:"-->" then comment := false)
        else
-         match (!fence, fence_at line) with
-         | Some (opened, length), Some (c, run, info) ->
-             if Char.equal opened c && run >= length && String.is_empty info then fence := None
-         | Some _, None -> ()
-         | None, Some (c, run, _) -> fence := Some (c, run)
-         | None, None ->
-             if opens_comment line && not (String.is_substring line ~substring:"-->") then
-               comment := true);
+         match !html with
+         | Some `Until_close -> if closes_raw_html_tag line then html := None
+         | Some `Until_blank -> if is_blank line then html := None
+         | None -> (
+             match (!fence, fence_at line) with
+             | Some (opened, length), Some (c, run, info) ->
+                 if Char.equal opened c && run >= length && String.is_empty info then fence := None
+             | Some _, None -> ()
+             | None, Some (c, run, _) -> fence := Some (c, run)
+             | None, None ->
+                 if opens_comment line && not (String.is_substring line ~substring:"-->") then
+                   comment := true
+                 else html := opens_raw_html line));
       (line, structural))
 
 let unreleased_headings lines =
@@ -274,20 +345,34 @@ let unreleased_section lines =
       find (structural_lines lines)
   | _ -> None
 
+(** Whether an item's own content opens a PARAGRAPH, which is what a lazy continuation continues.
+    [- # Feature] holds a heading, so unindented prose beneath it is a block of its own and its
+    citation is not the item's. *)
+let opens_paragraph line =
+  has_content line
+  &&
+  let content = item_content line in
+  (not (is_heading content))
+  && (not (opens_block_quote content))
+  && (not (opens_fence content))
+  && (not (is_thematic_break content))
+  && (not (is_top_level_bullet content))
+  && not (is_top_level_ordered content)
+
 (** The lines of one open item, and what is left after it. [lazy_ok] says whether a paragraph is
     open, so an unindented prose line continues the item; a blank run belongs to the item only when
     an indented line follows it, which is the second-paragraph shape. A blank run at the end of a
     section, or one followed by a heading or the next item, closes the item and is not consumed. *)
-let rec item_lines ~lazy_ok acc rest =
+let rec item_lines ~column ~lazy_ok acc rest =
   match rest with
-  | line :: tail when is_indented line -> item_lines ~lazy_ok:true (line :: acc) tail
+  | line :: tail when is_indented line -> item_lines ~column ~lazy_ok:true (line :: acc) tail
   | line :: tail when lazy_ok && is_lazy_continuation line ->
-      item_lines ~lazy_ok:true (line :: acc) tail
+      item_lines ~column ~lazy_ok:true (line :: acc) tail
   | line :: _ when is_blank line -> (
       let blanks, after = List.split_while rest ~f:is_blank in
       match after with
-      | next :: _ when is_indented next ->
-          item_lines ~lazy_ok:true (List.rev_append blanks acc) after
+      | next :: _ when (not (is_blank next)) && indent_of next >= column ->
+          item_lines ~column ~lazy_ok:true (List.rev_append blanks acc) after
       | _ -> (List.rev acc, rest))
   | _ -> (List.rev acc, rest)
 
@@ -296,7 +381,9 @@ let bullets_of lines =
   let rec loop acc = function
     | [] -> List.rev acc
     | line :: rest when is_top_level_bullet line ->
-        let continuation, rest = item_lines ~lazy_ok:(has_content line) [] rest in
+        let continuation, rest =
+          item_lines ~column:(content_column line) ~lazy_ok:(opens_paragraph line) [] rest
+        in
         loop ({ first_line = line; lines = line :: continuation } :: acc) rest
     | _ :: rest -> loop acc rest
   in
@@ -502,6 +589,32 @@ let control_long_fence =
     "````";
   ]
 
+(* Blocks that a bullet does NOT reach, each of which would otherwise lend it a citation (Codex P2,
+   rounds 6 and 7): a paragraph indented less than the item's content column, and prose under an
+   item whose own content is a heading rather than a paragraph. *)
+let control_under_indented =
+  [ "- An uncited change,"; ""; " a one-space paragraph carrying (gh-ocannl-807)." ]
+
+let control_heading_content = [ "- # Feature"; "See gh-ocannl-807 for the details." ]
+
+(* A raw HTML block in released history, holding a line that reads exactly like the anchor. *)
+let control_raw_html =
+  [
+    "## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "## [1.0.1] -- 2026-08-26";
+    "";
+    "<pre>";
+    "## [Unreleased]";
+    "</pre>";
+  ]
+
+(* An entry describing comment syntax in a code span: literal text, not an HTML comment. *)
+let control_code_span_comment =
+  [ ""; "### Added"; ""; "- The parser now handles `<!--` in prose (gh-ocannl-807)." ]
+
 (* A block quote directly under an uncited bullet: Markdown ends the item, so the quote's citation
    is not the bullet's (Codex P2, round 6). *)
 let control_block_quote = [ "- An uncited change,"; "> See gh-ocannl-807 for the details." ]
@@ -677,6 +790,31 @@ let () =
     (Option.is_none (fence_at "```lang`option")
     && Option.is_some (fence_at "```lang")
     && Option.is_some (fence_at "~~~lang~option"));
+  p "a paragraph indented less than the item's content column is not part of it"
+    (match bullets_of control_under_indented with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "prose under an item whose content is a heading is not part of it"
+    (match bullets_of control_heading_content with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "an anchor inside released raw HTML is not a second anchor"
+    (List.length (unreleased_headings control_raw_html) = 1
+    &&
+    let section = Option.value (unreleased_section control_raw_html) ~default:[] in
+    List.length (bullets_of section) = 1);
+  p "a comment opener inside a code span is literal text, not an HTML comment"
+    ((not
+        (List.exists control_code_span_comment ~f:(fun line ->
+             opens_comment line || opens_fence line)))
+    && List.length (bullets_of control_code_span_comment) = 1
+    && List.for_all (bullets_of control_code_span_comment) ~f:cites_record);
+  p_all "an ordered marker is one to nine digits"
+    [ "1. x"; "9. x"; "123456789. x"; "1) x" ]
+    ~f:is_top_level_ordered;
+  p_none "a ten-digit run opens no ordered item"
+    [ "1234567890. is the external identifier"; "12345678901) x" ]
+    ~f:is_top_level_ordered;
   p "a four-space-indented copy of the anchor is code, not a second anchor"
     (List.length (unreleased_headings control_code_indented_anchor) = 1
     &&

@@ -76,6 +76,12 @@ let raw_entries =
         "[scanner-refusal:6dc88ec5eacbebd072ebf1b0741266ef] heading indented up";
         "[scanner-refusal:cb6d2d6feb45fe4d789cf93c0cafdac3] block quote under";
         "[scanner-refusal:8d85b5a872954cff5a8c20b7ad997075] backtick fence's info";
+        "[scanner-refusal:9862e082288f5a38f3f86ddc74f1066f] paragraph indented less";
+        "[scanner-refusal:1ea6ab22791d2fe2b7ee6f2135f828c2] item whose content";
+        "[scanner-refusal:b1060c3264fad2b26750763e08dbc86f] anchor inside released";
+        "[scanner-refusal:94e0ae3ae9122bb909f3b9ff7c93f98c] comment opener inside";
+        "[scanner-refusal:fc07dc90b94890938a9673f75a3d80db] an ordered marker";
+        "[scanner-refusal:92f2ca3e763f588a9794345474befede] ten-digit run opens";
         "[scanner-refusal:5b3f45ee369cc10ca978db8f30e90719] four-space-indented copy of";
       ] );
     ( "backend_golden_family_scan.ml",
