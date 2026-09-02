@@ -121,6 +121,14 @@ jobs:
                {"os": "windows-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]'
           || '[{"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]') }}
     runs-on: ${{ matrix.os }}
+    # Hard ceilings, not budgets: a hung job otherwise runs to GitHub's six-hour
+    # default. The ceiling is fixed when the job starts, before the opam cache
+    # step knows whether it hit, so it has to clear a COLD switch, not the
+    # designed ~15min: ubuntu has run 29-31min and macOS ~20min on a miss, so
+    # 45min means the job hung. Windows is the honest exception: its cold switch
+    # and the serialized train tier have run 47-175min on the scheduled matrix,
+    # so it gets a ceiling that only a genuine hang can reach.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 45 }}
     # No dune shared cache in CI, and explicitly so. Two things rule it out.
     # Dune's `enabled-except-user-rules` mode -- its default, and what this job
     # used to set -- excludes OCaml compilation from the shared cache by
@@ -465,6 +473,7 @@ jobs:
     needs: run
     if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}

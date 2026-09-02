@@ -24,6 +24,7 @@ jobs:
   deploy:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
     runs-on: ubuntu-22.04
+    timeout-minutes: 30 # ~1min normally; a ceiling only a hang can reach
     steps:
       - uses: actions/checkout@v7
 
