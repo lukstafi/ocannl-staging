@@ -36,15 +36,15 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   the volatile accumulator; the capability is `volatile_serial_accumulation` and
   `Context.routine.volatility` says which sites took it (gh-ocannl-782, gh-ocannl-820).
 - Retired API: `Backend.compile_batch` / `link_batch` (gh-ocannl-767); `Tensor.raw_unop` /
-  `raw_binop` / `raw_ternop`, collapsed onto `Tensor.raw_accum` (gh-ocannl-812);
+  `raw_binop` / `raw_ternop`, collapsed onto `Tensor.raw_accum` + `Tensor.buffer_of` (gh-ocannl-812);
   `Tensor.diff.zero_grads` is a `comp`, not an `asgns` — read `.asgns` (gh-ocannl-771).
 - `Indexing.projections` carries one `components` array, not `product_space` /
   `product_iterators` (gh-ocannl-775).
 - `Context.Backends_deprecated.footprint` is `Ir.Low_level.footprint` and
   `Context.Backends_deprecated` is `Context.Backends` (gh-ocannl-810).
-- `Affine`, `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit
-  interfaces that hide their zero-reference helpers (`Ir.Affine.equal_verdict`,
-  `Ir.Interval.value_fits`, ...); the removed surface is listed under gh-ocannl-806.
+- `Assignments`, `Indexing`, `Affine`, `Interval`, `Host_inits`, `Compiler_options` and
+  `Cpu_topology` have explicit interfaces that hide their zero-reference helpers
+  (`Assignments.fold_leaves`, `Affine.equal_verdict`, ...); the removed surface is under gh-ocannl-806.
 - `Train.to_routine` returns `Context.t * Context.routine`, like `Context.compile`; fix the type
   error with `let _, routine = ...` or chain the context (gh-ocannl-772).
 - `?lowered_transform` / `?lowered_transforms` on `Context.compile`, `compile_outcome` and backend
@@ -72,6 +72,9 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   `grad_scale` against a host simulation (gh-ocannl-772).
 - The mul-add→FMA rewrite is guarded to floating-point precisions; int64 mul-add went through
   double `fma` and lost integers above 2^53 (gh-ocannl-824).
+- `Tensor.op` raises `Session_error` when a custom `op_asn` forces projections before the
+  neutral element is installed, which silently miscomputed padding and guards
+  (`lukstafi/ocannl-staging` PR #506).
 - `Set_vec_unop` lowering refuses a launch-bound symbolic extent, a defensive guard behind the
   shape solver's existing rejection of such graphs (gh-ocannl-817).
 - `OCANNL_LOG_LEVEL_CC_BACKEND=1` and `=3` compile again (gh-ocannl-823).
