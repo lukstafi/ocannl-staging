@@ -419,6 +419,7 @@ let raw_entries =
         "[scanner-refusal:5175d9278abfe05422915dbfd01d2789] multiline quoted scalar";
         "[scanner-refusal:78a687bff8c4929259602012af00edb7] same field written";
         "[scanner-refusal:410e5f2257be17b30c49cbabd3debfb3] an apostrophe inside";
+        "[scanner-refusal:b2e9a89191c1483a6cbafac957165abc] before it notwithstanding";
         "[scanner-refusal:b1d9df243c7ef140743dbb4b09a54c86] leading byte-order mark";
         "[scanner-refusal:4ed00663149579fcce944aba3b286b51] document-end marker leaves";
         "[scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes";

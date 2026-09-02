@@ -145,38 +145,41 @@ let is_block_scalar value =
       (String.for_all ~f:(fun c ->
            Char.equal c '-' || Char.equal c '+' || (Char.is_digit c && not (Char.equal c '0'))))
 
-(* Whether a line leaves a quoted scalar open at its end. A quote only QUOTES where a scalar may
-   begin -- at the start of the line's content, after a [:] or after a sequence [-] -- so an
-   apostrophe inside an ordinary plain scalar ([name: Don't stop]) is text, as YAML reads it. Inside
-   a scalar, a backslash escapes in the double-quoted form and a doubled quote escapes in the
-   single-quoted one. Outside one, a [#] preceded by space starts a comment and ends the
-   question. *)
+(* Whether a line leaves a quoted scalar open at its end. A quote only QUOTES where a scalar BEGINS
+   -- as the first character after a [:] or a sequence [-], or at the start of the line's content.
+   Once a plain scalar is under way its quotes are ordinary characters, which is how YAML reads
+   [name: Publish the 'next branch] and [name: Don't stop]. Inside a quoted scalar, a backslash
+   escapes in the double-quoted form and a doubled quote in the single-quoted one; outside one, a
+   [#] preceded by space starts a comment and ends the question. *)
 let opens_unterminated_quote text =
   let text = String.strip text in
   let length = String.length text in
   let quote_character c = Char.equal c '"' || Char.equal c '\'' in
-  let rec outside index ~scalar_may_begin =
+  (* [at_scalar_start] is true only for the first character of a scalar: it is set by an indicator
+     ([:] or [-]) and survives the whitespace that follows it, and nothing else turns it back on. *)
+  let rec outside index ~at_scalar_start =
     if index >= length then false
     else
       let character = text.[index] in
-      if quote_character character && scalar_may_begin then inside (index + 1) character
+      if quote_character character && at_scalar_start then inside (index + 1) character
       else if Char.equal character '#' && index > 0 && Char.is_whitespace text.[index - 1] then
         false
       else
-        let scalar_may_begin =
-          Char.equal character ':' || Char.equal character '-' || Char.is_whitespace character
+        let at_scalar_start =
+          Char.equal character ':' || Char.equal character '-'
+          || (at_scalar_start && Char.is_whitespace character)
         in
-        outside (index + 1) ~scalar_may_begin
+        outside (index + 1) ~at_scalar_start
   and inside index opening =
     if index >= length then true
     else if Char.equal text.[index] '\\' && Char.equal opening '"' then inside (index + 2) opening
     else if Char.equal text.[index] opening then
       if Char.equal opening '\'' && index + 1 < length && Char.equal text.[index + 1] '\'' then
         inside (index + 2) opening
-      else outside (index + 1) ~scalar_may_begin:false
+      else outside (index + 1) ~at_scalar_start:false
     else inside (index + 1) opening
   in
-  outside 0 ~scalar_may_begin:true
+  outside 0 ~at_scalar_start:true
 
 (* A block scalar is introduced by a KEY, and that key may itself sit in a sequence entry -- [- run:
    |] is how every step in this repository spells it. Strip the entry markers before asking whether
@@ -747,6 +750,9 @@ let control () =
   let apostrophe_in_plain_scalar =
     run ("name: Don't stop the build\non: workflow_dispatch\njobs:\n" ^ sound_job ~name:"build")
   in
+  let quote_mid_plain_scalar =
+    run ("name: Publish the 'next branch\non: workflow_dispatch\njobs:\n" ^ sound_job ~name:"build")
+  in
   let byte_order_mark = run ("\xef\xbb\xbf" ^ workflow [ sound_job ~name:"build" ]) in
   let document_end_marker =
     run
@@ -910,6 +916,8 @@ let control () =
     (passed "single-line quoted scalar" single_line_quoted_scalar);
   p "an apostrophe inside a plain scalar is text, not a quote this reader must follow"
     (passed "apostrophe in a plain scalar" apostrophe_in_plain_scalar);
+  p "a quote partway through a plain scalar is text too, whitespace before it notwithstanding"
+    (passed "quote mid plain scalar" quote_mid_plain_scalar);
   p "a leading byte-order mark does not hide the first key"
     (passed "byte-order mark" byte_order_mark);
   p "a document-end marker leaves an indented root mapping readable"
