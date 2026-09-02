@@ -112,8 +112,9 @@ that they earn a lookup rather than always-loaded space.
   not permission to leave that case undefined.
 - Configuration consumers outside typed config call sites are covered by `config_usage_scan`
   (gh-ocannl-790). Its
-  script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, and
-  `benchmarks/`; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
+  script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, `benchmarks/`,
+  and `test/` -- test harness scripts select backends through the same keys, so a rename drifts
+  there too; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
   `test/` joins it (generated `*.pp.ml`/`*.pp.mli` renderings are excluded), as do implementation
   `*.ml`/`*.mli` sources under `arrayjit/lib/`, `tensor/`, and `lib/`. Its prose corpus is `AGENTS.md`,
   the root README, and every `*.md` under `docs/`

@@ -1031,8 +1031,8 @@ let live workspace_root paths =
     List.filter scripts ~f:(fun (path, _) -> String.is_prefix path ~prefix:root)
   in
   let markdown = List.filter files ~f:(fun (path, _) -> String.is_suffix path ~suffix:".md") in
-  let roots = [ "tools/"; "scripts/"; "benchmarks/" ] in
-  Verdict.p_all "the scan reaches script files under tools, scripts, and benchmarks" roots
+  let roots = [ "tools/"; "scripts/"; "benchmarks/"; "test/" ] in
+  Verdict.p_all "the scan reaches script files under tools, scripts, benchmarks, and test" roots
     ~f:(fun root -> not (List.is_empty (scripts_under root)));
   let ocaml_help_roots = [ "tools/"; "benchmarks/"; "bin/" ] in
   Verdict.p_all "the scan reaches OCaml help text under tools, benchmarks, and bin" ocaml_help_roots
@@ -1104,8 +1104,8 @@ let live workspace_root paths =
   if not (Verdict.any_failed ()) then (
     printf
       "OK: qualified OCANNL command-line flags and OCANNL_<KEY> environment mentions in scripts \
-       and user-facing OCaml help text under tools/, scripts/, and benchmarks/ name registered \
-       keys.\n";
+       under tools/, scripts/, benchmarks/, and test/, and in user-facing OCaml help text, name \
+       registered keys.\n";
     printf
       "OK: inline key=value assignments in scanned Markdown name registered keys or explicit \
        non-config notation.\n";

@@ -103,7 +103,7 @@ let raw_entries =
         "[scanner-refusal:e592c4ffcb391edf546553bd50accc7a] runtime value separator";
         "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";
         "[scanner-refusal:ed12f66c93e310aaa2996f755dd93a06] config-usage refusal control";
-        "[scanner-refusal:76078f2cfdfe324da2bc29249943c6a9] scripts and benchmarks";
+        "[scanner-refusal:f399eac2002ea39f1205a4bf86641d99] tools scripts benchmarks";
         "[scanner-refusal:bf02240774c91428eb2d9e12479f6ade] under tools benchmarks";
         "[scanner-refusal:c70062d940bba6a9b13ae0e4dd0aea0f] reaches OCaml tutorial";
         "[scanner-refusal:e58cf294bf65466dac521681df692812] OCaml implementation diagnostics";
