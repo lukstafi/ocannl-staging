@@ -142,10 +142,13 @@ val binop :
     expression. [op_label] is prepended to [label] of the {!op_fun} signature.
 
     The operation's neutral element is read off the assignments [op_asn] returns, and its shape
-    update step is created afterwards, so [op_asn] must not force [projections.projections] (the
-    construction is rejected, before any operand shape is touched); [projections.product_shape] and
-    [*_pspace] intermediates are fine. An operation that needs shape information uses
-    [Shape.set_dim] or the einsum capture syntax instead. *)
+    update step is created afterwards, so [op_asn] must not force [projections.projections]: the
+    construction is rejected with a [Session_error]. The rejection is a bug report, not a recovery
+    API -- shape inference is not transactional (gh-ocannl-903), so the session is reset rather than
+    continued. [projections.product_shape] and [*_pspace] intermediates are fine. An operation that
+    needs shape information uses [Shape.set_dim] or the einsum capture syntax instead; captured
+    references are bound at registration, after [op_asn], so relating them
+    ([Shape.set_equal]/[set_scale]) belongs at the operation-expression level. *)
 
 val unop :
   ?op_label:string ->

@@ -5,8 +5,10 @@ open Ocannl.Operation.DSL_modules
    [op_asn] built, and [Shape.derive_projections] consumes it (the clamped-window decision and the
    margins' neutral). So the operation's shape update step, whose [neutral_elem] is immutable, is
    only created once [op_asn] has returned, and the [projections] handle [op_asn] receives is a
-   promise for it. Forcing the handle from within [op_asn] is rejected before anything happens: the
-   step is not registered, nothing is derived, no operand shape is touched.
+   promise for it. Forcing the handle from within [op_asn] is rejected before this operation's step
+   is registered or anything is derived for it. The rejection is a bug report, not a recovery API:
+   shape inference is not transactional (gh-ocannl-903), so the legs below reuse operands only in
+   the pure-force case, where the probe [op_asn] forces before it does anything else.
 
    The rejection is on the invariant and not on whether the missing neutral element would have
    changed a decision, so the legs below span the cases a narrower rule would let through -- no
@@ -20,7 +22,8 @@ open Ocannl.Operation.DSL_modules
    The last two legs pin what rejecting early buys. The operand of the rejected padded-window leg
    carries no committed padding afterwards -- a derivation that had run against an unknown neutral
    element would have committed margins on it -- and the very same operands then serve the accepted
-   control, whose derivation commits their padding with the operation's actual neutral. *)
+   control, whose derivation commits their padding with the operation's actual neutral. That reuse
+   is the pure-force case above, not a general guarantee. *)
 
 let%cd summing_op_asn ~t ~t1 ~projections = v =:+ relu v1
 let%cd maxing_op_asn ~t ~t1 ~projections = v =:@^ relu v1

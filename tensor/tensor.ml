@@ -454,14 +454,22 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      element is not yet known -- there is no such step. The [projections] handle [op_asn] receives
      is a promise for the step: it is only redeemed during lowering.
 
-     Forcing the handle from within [op_asn] is therefore rejected, and rejected before anything
-     happens -- the step is not registered, nothing is derived, and the operand shapes are
-     untouched, so the operands remain usable. There is no supported reason to force it there:
-     forcing the projections runs {!Shape.finish_inference}, which solves and derives for EVERY
-     active update step in the session, mid-construction of this tensor; no [op_asn] in this
-     repository does it, and a caller that needs shape information has [Shape.set_dim] and the
-     einsum capture syntax instead. The product-space proxy shape, which [%cd] [*_pspace]
-     intermediates force, is a function of the shape and logic alone and stays available. *)
+     Forcing the handle from within [op_asn] is therefore rejected: this operation's step is not
+     registered and nothing is derived for it. The rejection is a bug report, not a recovery API.
+     Shape inference is session-global and not transactional -- an [op_asn] may have emitted
+     constraints, set delayed references or propagated shapes before forcing, and any construction
+     that fails mid-way (an ordinary shape error at registration included) leaves the solver partly
+     updated -- so the error means "fix the [op_asn]", and the session is reset with
+     {!unsafe_reinitialize} rather than continued; the transaction boundary that would make a
+     rejected construction reusable is gh-ocannl-903, not this seam. There is no supported reason to
+     force it there: forcing the projections runs {!Shape.finish_inference}, which solves and
+     derives for EVERY active update step in the session, mid-construction of this tensor; no
+     [op_asn] in this repository does it, and a caller that needs shape information has
+     [Shape.set_dim] and the einsum capture syntax instead. The product-space proxy shape, which
+     [%cd] [*_pspace] intermediates force, is a function of the shape and logic alone and stays
+     available. Captured dimension and row references are bound at registration, so relating them
+     ([Shape.set_equal]/[set_scale]) belongs at the operation-expression level, where the [%op]
+     capture syntax puts it, not in an [op_asn]. *)
   let update_step : Shape.update_step option ref = ref None in
   let forced_early = ref false in
   let get_step () =
@@ -475,8 +483,10 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                  "Tensor.op: the projections of tensor #%{id#Int} were forced from within \
                   [op_asn], before the operation's assignments (and so its neutral element) exist \
                   -- not supported, as it would finalize shape inference for the whole session \
-                  mid-construction. Nothing was derived or mutated. If the [op_asn] is OCANNL's \
-                  own, report this as a bug."],
+                  mid-construction. The operation is not registered, but whatever else the \
+                  [op_asn] did before forcing stays in the session: fix the [op_asn] and \
+                  reinitialize the session (Tensor.unsafe_reinitialize) rather than reusing the \
+                  operands. If the [op_asn] is OCANNL's own, report this as a bug."],
                Some t )
   in
   let projections = make_projections ~shape ~shape_logic ~get_step in
@@ -491,7 +501,8 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     @@ Session_error
          ( [%string
              "Tensor.op: the [op_asn] of tensor #%{id#Int} forced its projections and caught the \
-              rejection; the operation cannot be built. Nothing was derived or mutated."],
+              rejection; the operation cannot be built. Fix the [op_asn] and reinitialize the \
+              session (Tensor.unsafe_reinitialize) rather than reusing the operands."],
            Some t );
   let forward = Asgns.sequence @@ fwds @ [ this_op_asn ] in
   (* Extract the neutral element from THIS operation's assignments only, not the whole forward
