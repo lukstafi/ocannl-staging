@@ -1365,6 +1365,20 @@ that they earn a lookup rather than always-loaded space.
   answer to a package genuinely missing from the cache, and not a reason to drop menhir: the
   einsum parser (`tensor/parser.mly`) is what `ppx_ocannl` and the tensor library are built on,
   and the exposure is generic to every GitLab-hosted package, not menhir's.
+- `ci.yml` sets `DUNE_CACHE: disabled`, on purpose. Dune's default mode,
+  `enabled-except-user-rules`, excludes OCaml compilation from the shared cache by construction
+  (`module_compilation.ml`'s `cm_kind_can_go_in_shared_cache` is true only for Melange, and under
+  that mode every other rule defaults to not cacheable), so the dune cache setup-ocaml's
+  now-deprecated `dune-cache: true` input saved for this job was a ~400-byte empty tar on every
+  platform, and the "compilation still caches" premise the setting was kept under was false —
+  check the post step's `Cache Size` line before believing any CI cache works. The other mode,
+  `enabled`, caches user rules, i.e. the test executions whose output depends on the runner's C
+  toolchain, ISA and core count — a recorded result standing in for an execution is a false green.
+  A compile-only cache is possible but is its own design: dune's rule digest includes the
+  cacheability flag, so a `@check` walk against a shared cache root followed by a test walk with
+  the cache disabled rebuilds everything; the second walk has to stay `enabled` against a
+  throwaway `DUNE_CACHE_ROOT` instead, which also loses the single-walk overlap of compilation
+  with the serialized training chain. That design is gh-ocannl-901.
 - `gh-pages-api.yml` runs for pull requests and `workflow_dispatch` as well as pushes to master, but
   only a push deploys; validation runs receive their own concurrency group and exercise the build
   and cache topology without publishing. Publishing pushes share `gh-pages-deploy` with the other
