@@ -24,17 +24,18 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   declines keep the store.
 - **Schedule-cache regime stamps** (gh-ocannl-835, gh-ocannl-780, gh-ocannl-803): a cache
   directory carries a regime stamp under a lock — an older stamp prunes the unreachable `.sexp`
-  generation once, a newer or malformed one refuses reads and writes — and every temp-then-rename
-  publication goes through `Utils.Atomic_file`, with stale-temp cleanup.
+  generation once, a newer or malformed one refuses reads and writes — and the library's
+  temp-then-rename publications go through `Utils.Atomic_file`, with stale-temp cleanup.
 - **A third test tier, `@train`**, for the toy training integrations (`mlp_names`,
   `mlp_bn_names`, `circles_conv`, `fsm_transformer`, `transformer_names`), with per-test
   `train-<name>` aliases. Per-PR CI runs it as a separate macOS shard instead of a serialized
   tail of `@runtest`; the daily sweep builds `@runtest @train` on every backend. Training-golden
   thresholds are window means rather than one sampled epoch (gh-ocannl-854).
 - **Benchmark provenance and supervision**: `benchmarks/fixtures/DIGESTS.txt` records which
-  box's fixture bytes each published number was measured on (gh-ocannl-759); every sweep child
-  runs in a supervised process group with a per-cell wall-clock cap, so a deadlocking tinygrad
-  beam search costs the cell, not the sweep (gh-ocannl-842, gh-ocannl-760); benches flush every
+  box's fixture bytes each published number was measured on (gh-ocannl-759); sweep children
+  run in supervised process groups under a per-cell wall-clock cap, on by default
+  (`--cell-timeout 0` opts out), so a deadlocking tinygrad beam search costs the cell, not the
+  sweep (gh-ocannl-842, gh-ocannl-760); benches flush every
   line and announce a slow leg before it runs (gh-ocannl-829); `bin/compilation_speed` runs
   again (gh-ocannl-831).
 
@@ -66,8 +67,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   PPX-facing seam; `Indexing.projections` carries one `components` array instead of the
   `product_space` / `product_iterators` pair; the footprint record lives at
   `Ir.Low_level.footprint`; `Context.Backends_deprecated` is `Context.Backends`; `Affine`,
-  `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit interfaces,
-  guarded by a dead-export scan.
+  `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit interfaces, and
+  a dead-export scan ratchets the implicit exports of the modules still without one.
 - `Train.to_routine` returns the post-compile context (`Context.t * Context.routine`), matching
   `Context.compile` and `Train.run_once`; out-of-tree callers fix the type error with
   `let _, routine = ...` or by chaining the returned context (gh-ocannl-772).
@@ -91,16 +92,11 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   (gh-ocannl-790). This changelog is outside the scan.
 - The fp8 soak's vendor arms hold only their jit calls; the vendor-independent logic in
   `tools/fp8_soak.ml` compiles on every box (gh-ocannl-758).
-- Test seams: the suite configuration reader lives in `test/config` and resolves the backend
-  once, read by per-backend goldens as `%{read:../config/ocannl_backend.txt}` (gh-ocannl-787);
-  `Verdict.Claims` is the one claim surface tests open (gh-ocannl-815); skipped claims are
-  aggregated across backend sweeps (gh-ocannl-792); `reduction_forms` members pin which decision
-  produced their kernel (gh-ocannl-733). AGENTS.md is the single agent guide, included by
-  CLAUDE.md (gh-ocannl-653).
 
 ### Fixed
 
-- **`multidev_cc` launched kernels on whichever static index the host had raced ahead to**:
+- **`multidev_cc` launched kernels on whichever static index the host had raced ahead to**
+  (`lukstafi/ocannl-staging` PR #592, found and fixed there; no separate issue):
   static-index refs were dereferenced inside the kernel task, after the `Multidev` scheduler
   had returned, so `Train.sequential_loop` skipped and repeated batches — a silent wrong answer
   on that backend alone. Launches now bind the static index at dispatch.
