@@ -1348,6 +1348,23 @@ that they earn a lookup rather than always-loaded space.
   lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
   older switch. And both install non-Windows depexts unconditionally after restore, because those
   are system packages absent from `_opam` (gh-ocannl-809).
+- Every workflow that installs dependencies sets opam's global `archive-mirrors` to
+  `https://opam.ocaml.org/cache` right after setup-ocaml, before any pin or install. setup-ocaml
+  points opam at the GIT opam-repository, whose `repo` file declares no mirror (the HTTP one at
+  opam.ocaml.org does), so a bare CI switch downloads every archive from its package's upstream
+  `url` — and GitLab builds tag archives on demand with no byte-stability promise, so a pinned
+  checksum can stop matching what `gitlab.inria.fr` serves until opam-repository re-pins it
+  (menhir 20260209, gh-ocannl-889: `Bad checksum`, exit 40, on every leg that had to fetch, while
+  legs with a warm `_opam` cache sailed past it). opam consults archive mirrors BEFORE the
+  upstream URLs, keyed by checksum (`<mirror>/md5/<xx>/<hash>`), and the cache holds every archive
+  opam-repository's CI has verified, so a package still falls through to upstream only when it is
+  absent there. Reproduced with a scratch `OPAMROOT`: a package whose `url` points at an invalid
+  host but carries a cached archive's md5 installs with the mirror set and exits 40 without it. It
+  is the set form, `opam option 'archive-mirrors="…"'` (a quoted opam string — the bare URL is a
+  parse error), because `+=` on a restored opam root would accumulate a duplicate per run. Not an
+  answer to a package genuinely missing from the cache, and not a reason to drop menhir: the
+  einsum parser (`tensor/parser.mly`) is what `ppx_ocannl` and the tensor library are built on,
+  and the exposure is generic to every GitLab-hosted package, not menhir's.
 - `gh-pages-api.yml` runs for pull requests and `workflow_dispatch` as well as pushes to master, but
   only a push deploys; validation runs receive their own concurrency group and exercise the build
   and cache topology without publishing. Publishing pushes share `gh-pages-deploy` with the other

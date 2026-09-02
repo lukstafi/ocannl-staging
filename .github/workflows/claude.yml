@@ -36,8 +36,11 @@ jobs:
           dune-cache: true
           allow-prerelease-opam: false
 
+      # Archives from opam.ocaml.org's checksum-keyed cache before upstream, as
+      # ci.yml does and explains (gh-ocannl-889).
       - name: Setup project
         run: |
+          opam option 'archive-mirrors="https://opam.ocaml.org/cache"'
           opam pin -n .
           opam install . -y --deps-only --with-test --with-doc
 
