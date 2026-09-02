@@ -388,6 +388,49 @@ let raw_entries =
         "[scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments";
         "[scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory";
       ] );
+    ( "workflow_job_timeouts.ml",
+      [
+        "[scanner-refusal:ad8d2fa1c69a86cbbb71c86de6fa1311] checked-in GitHub workflow";
+        "[scanner-refusal:5c0ba3bcf03da17c20f587f737d8937b] job-level runtime ceiling";
+        "[scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states";
+        "[scanner-refusal:e2fcdedf2103db72a9b3c2b933471215] reusable-workflow call passes";
+        "[scanner-refusal:d19a5eafc27ec268076c5d7ca7dbe979] GitHub's 6-hour default";
+        "[scanner-refusal:5df256dd2c78f0fb5ea7e3a3c757c976] ceiling declared after";
+        "[scanner-refusal:ac061fc23855d36465a9bd2ac3df8a14] ceiling that exists";
+        "[scanner-refusal:42f8936ed74b6847e68661e48376b771] per-step ceiling is";
+        "[scanner-refusal:77aa0c14bff72954feb09cf4c386a264] reusable-workflow call that";
+        "[scanner-refusal:9f23eda281ea0c55a77c9e409e9471f6] timeout-minutes key with";
+        "[scanner-refusal:fbfd4638215ae05bcb97101b459be8e4] timeout-minutes key whose";
+        "[scanner-refusal:186c72d23e1ef379b2b9d5bd606fc1aa] real ceiling wearing";
+        "[scanner-refusal:7d12059cdf4ae071e9bf2d7e0576b7ae] reusable-workflow call carrying";
+        "[scanner-refusal:9a63876ae18ab76d104686433857254d] workflow is discovered";
+        "[scanner-refusal:c8c51a8f093266f7fc1d691b313d9558] steps sequence starts";
+        "[scanner-refusal:9c0d4e8cb577c3910eed5b4e88a437de] reader cannot decide";
+        "[scanner-refusal:a4809b85dfbba2c0a2c42ed01d417e17] refused rather than";
+        "[scanner-refusal:90eaa52d68d4ad193b704ab3d1946e09] keys being unreadable";
+        "[scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than";
+        "[scanner-refusal:06c1a18e5c944d59c7a4558c689db819] unreadable line inside";
+        "[scanner-refusal:781d64c7cd92fd55d5eb911b61f21dbe] key spelled plainly";
+        "[scanner-refusal:028700f84c8213b498760b2e7f50530c] bounded job passes";
+        "[scanner-refusal:aa6e1fd6dbb8b02a479bd6e8ca1f9466] quoting hides nothing";
+        "[scanner-refusal:62c5c78cf77044d66c80af05a68c6cea] sequence entry where";
+        "[scanner-refusal:7607f0476a95ee77b5b691412ab32180] body staying content";
+        "[scanner-refusal:2fff1ce44fe968a0f0b0a8600c33dc29] indented root mapping";
+        "[scanner-refusal:5175d9278abfe05422915dbfd01d2789] multiline quoted scalar";
+        "[scanner-refusal:78a687bff8c4929259602012af00edb7] same field written";
+        "[scanner-refusal:410e5f2257be17b30c49cbabd3debfb3] an apostrophe inside";
+        "[scanner-refusal:b2e9a89191c1483a6cbafac957165abc] before it notwithstanding";
+        "[scanner-refusal:0dcbc70ff6b0ed1e7ccb8334ea44f89f] scalar indicates nothing";
+        "[scanner-refusal:833ecfa7cd822e9a1a7f177bbf9dc3fe] carrying YAML's separation";
+        "[scanner-refusal:b1d9df243c7ef140743dbb4b09a54c86] leading byte-order mark";
+        "[scanner-refusal:4ed00663149579fcce944aba3b286b51] document-end marker leaves";
+        "[scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes";
+        "[scanner-refusal:f1d6bc11067a6db9ea16f25c8e526f98] carrying YAML's indentation";
+        "[scanner-refusal:63a7ea671879e6eb8a95504d21ae4856] document indents uniformly";
+        "[scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation";
+        "[scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than";
+        "[scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows";
+      ] );
   ]
 
 let entries =
