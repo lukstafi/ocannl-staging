@@ -298,10 +298,13 @@ type update_step = {
   logic : logic;
   id : update_id;
   mutable unsafe_projections : Ir.Indexing.projections option;
-  mutable neutral_elem : float option;
-      (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
-          update step use the same neutral element [v], [None] when different operations have
-          different neutral elements or when there are no accumulator operations. *)
+  neutral_elem : float option;
+      (** The neutral element of the operation's accumulation, fixed at creation: [Some v] when all
+          assignment ops in the update step use the same neutral element [v], [None] when different
+          operations have different neutral elements or when there are no accumulator operations.
+          [derive_projections] reads it for the clamped-window decision (gh-504) and to commit the
+          margins' neutral ([padding_elem]), so a step is only created once its operation's
+          assignments are known -- see [Tensor.op]. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -313,7 +316,7 @@ type update_step = {
 val to_dims : t -> int array
 (** Uses the matrix convention of putting the input axes last. *)
 
-val product_space_shape : update_step -> t
+val product_space_shape : shape:t -> logic:logic -> t
 (** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes followed
     by the reduced-over (contracted) axes, in the product-space order of the derived projections.
     The proxy shares the operation's shape-inference solution (its constraints are emitted on

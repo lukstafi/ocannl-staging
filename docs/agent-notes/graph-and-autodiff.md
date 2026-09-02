@@ -13,6 +13,15 @@ files.
   are topologically ordered (owner-first forward, owner-last backward) — the old id-ascending
   order silently zeroed shared paths (regressions `forward_fragment_order.ml`,
   `backprop_fragment_order.ml`).
+- The `projections` handle an `op_asn` receives is a promise: `Tensor.op` creates the operation's
+  shape update step only after `op_asn` returns, because the step's `neutral_elem` is immutable and
+  is read off the assignments (`Shape.derive_projections` consumes it for the gh-504 clamped-window
+  decision and for committing the margins' neutral, so a step with an unknown neutral element must
+  never exist). Consequences: an `op_asn` must not force `projections.projections` — rejected
+  before the step is registered or any operand shape is touched, so the operands stay usable
+  (`neutral_elem_guard.ml`) — while `product_shape` and `*_pspace` intros stay usable there (the
+  proxy shape is a function of the shape and logic alone). An operation that knows its accumulation
+  up-front (`Tensor.raw_accum`) creates the step directly.
 - Per-(result, reduced-position) facts in `%cd` grad code belong in a product-space intermediate
   (`*_pspace` suffix): its shape unifies with `Shape.product_space_shape` (result rows +
   contracted axes appended; fixed-index axes pinned to 1 — pinned projection means never a

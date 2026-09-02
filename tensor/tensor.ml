@@ -18,7 +18,9 @@ type projections = {
   product_shape : Shape.t Lazy.t;
       (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
           intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so it
-          must be forced (if at all) while the operation's code is being built. *)
+          must be forced (if at all) while the operation's code is being built. Unlike
+          [projections], it does not need the operation's shape update step, which {!op} creates
+          only after [op_asn] returns: forcing [projections] from within an [op_asn] is rejected. *)
 }
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
@@ -191,27 +193,29 @@ let fetch_zeros array shape =
 
 let max_sublabel_length = ref 25
 
-(** Registers a shape update step for an operation, propagates shapes eagerly, and packages the
-    resulting lazy projections. Returns the update step alongside them because {!op} must set its
-    [neutral_elem] {e after} the operation's assignments are built: the field is read only when the
-    [projections] thunk is forced (during lowering), so the late mutation is observed — an implicit
-    invariant this seam makes explicit, and which {!op} enforces by refusing to mutate once
-    [unsafe_projections] is set. Raw accumulations know their neutral element up-front and pass it
-    here. *)
-let make_projections ?neutral_elem ~shape ~shape_logic () : projections * Shape.update_step =
+(** Creates the shape update step of an operation, complete, and registers it with shape inference
+    (propagating shapes eagerly). A step carries the neutral element of its operation's accumulation
+    from birth: {!Shape.derive_projections} reads it, so there is no window in which a derivation
+    could observe a step without it. {!raw_accum} knows its accumulation up-front; {!op} reads the
+    neutral element off the assignments [op_asn] built, and creates the step afterwards. *)
+let register_update_step ~neutral_elem ~shape ~shape_logic : Shape.update_step =
   let update_step =
     Shape.
       { shape; logic = shape_logic; id = get_update_id (); unsafe_projections = None; neutral_elem }
   in
   Shape.propagate_shapes update_step;
-  let projections =
-    {
-      projections_debug = Shape.logic_to_spec update_step.logic;
-      projections = lazy (Shape.get_projections update_step);
-      product_shape = lazy (Shape.product_space_shape update_step);
-    }
-  in
-  (projections, update_step)
+  update_step
+
+(** The lazy projections handle of an operation, over [get_step], which yields its update step. The
+    step need not exist yet: only the derived projections need it, and they are forced during
+    lowering, while the product-space proxy shape is a function of the operation's shape and logic
+    alone. This is what lets {!op} hand the handle to [op_asn] before the step exists. *)
+let make_projections ~shape ~shape_logic ~(get_step : unit -> Shape.update_step) : projections =
+  {
+    projections_debug = Shape.logic_to_spec shape_logic;
+    projections = lazy (Shape.get_projections (get_step ()));
+    product_shape = lazy (Shape.product_space_shape ~shape ~logic:shape_logic);
+  }
 
 (** The node an operand triple [(t, is_grad, is_merge)] denotes, as an assignment buffer. *)
 let buffer_of ~is_grad ~is_merge (t : t) : Asgns.buffer =
@@ -220,8 +224,13 @@ let buffer_of ~is_grad ~is_merge (t : t) : Asgns.buffer =
 
 let raw_accum ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~shape_logic
     ~(rhs : Asgns.accum_rhs) : Asgns.t =
-  let projections, _ =
-    make_projections ~neutral_elem:(Ir.Ops.neutral_elem accum) ~shape:t.shape ~shape_logic ()
+  let update_step =
+    register_update_step
+      ~neutral_elem:(Some (Ir.Ops.neutral_elem accum))
+      ~shape:t.shape ~shape_logic
+  in
+  let projections =
+    make_projections ~shape:t.shape ~shape_logic ~get_step:(fun () -> update_step)
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   Asgns.Accum_op
@@ -434,55 +443,62 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         (Set.add used ti.value.id, { subtensor = ti; embedded }))
   in
   let params = Set.union_list (module T) @@ List.map ordered_ts ~f:(fun ti -> ti.params) in
-  (* Create a preliminary shape_update to get projections_debug and projections for op_asn. Its
-     [neutral_elem] is only known once [op_asn] has produced the assignments, and is set below --
-     see {!make_projections} for why the late mutation is observed. *)
-  let projections, preliminary_shape_update = make_projections ~shape ~shape_logic () in
   let t =
     { params; forward = Asgns.empty_comp; diff = None; value = v; top_down_prec; shape; children }
   in
+  (* The operation's shape update step is created only once [op_asn] has returned: the step carries
+     the neutral element of the operation's accumulation, which is read off the assignments [op_asn]
+     builds, and {!Shape.derive_projections} consumes it (the clamped-window decision and the
+     margins' neutral). Creating the step complete, rather than creating it first and filling the
+     neutral element in afterwards, means no derivation can ever run against a step whose neutral
+     element is not yet known -- there is no such step. The [projections] handle [op_asn] receives
+     is a promise for the step: it is only redeemed during lowering.
+
+     Forcing the handle from within [op_asn] is therefore rejected, and rejected before anything
+     happens -- the step is not registered, nothing is derived, and the operand shapes are
+     untouched, so the operands remain usable. There is no supported reason to force it there:
+     forcing the projections runs {!Shape.finish_inference}, which solves and derives for EVERY
+     active update step in the session, mid-construction of this tensor; no [op_asn] in this
+     repository does it, and a caller that needs shape information has [Shape.set_dim] and the
+     einsum capture syntax instead. The product-space proxy shape, which [%cd] [*_pspace]
+     intermediates force, is a function of the shape and logic alone and stays available. *)
+  let update_step : Shape.update_step option ref = ref None in
+  let forced_early = ref false in
+  let get_step () =
+    match !update_step with
+    | Some update_step -> update_step
+    | None ->
+        forced_early := true;
+        raise
+        @@ Session_error
+             ( [%string
+                 "Tensor.op: the projections of tensor #%{id#Int} were forced from within \
+                  [op_asn], before the operation's assignments (and so its neutral element) exist \
+                  -- not supported, as it would finalize shape inference for the whole session \
+                  mid-construction. Nothing was derived or mutated. If the [op_asn] is OCANNL's \
+                  own, report this as a bug."],
+               Some t )
+  in
+  let projections = make_projections ~shape ~shape_logic ~get_step in
   let fwds =
     List.filter_map ordered_ts ~f:(fun ti -> if is_fwd_root ti then Some ti.forward else None)
   in
   let this_op_asn = op_asn ~t ~projections in
+  (* An [op_asn] that forced the handle and swallowed the rejection has built its assignments over a
+     poisoned thunk (a forced lazy re-raises); the operation is unusable either way. *)
+  if !forced_early then
+    raise
+    @@ Session_error
+         ( [%string
+             "Tensor.op: the [op_asn] of tensor #%{id#Int} forced its projections and caught the \
+              rejection; the operation cannot be built. Nothing was derived or mutated."],
+           Some t );
   let forward = Asgns.sequence @@ fwds @ [ this_op_asn ] in
   (* Extract the neutral element from THIS operation's assignments only, not the whole forward
      chain. The dependencies may have different accumulation operations which would cause false
      conflicts. *)
   let neutral_elem = Asgns.collect_neutral_elem this_op_asn.asgns in
-  (* Enforce the invariant {!make_projections} documents rather than merely assuming it: the field
-     is set here, after [op_asn], and read when the projections are derived, so the whole scheme
-     rests on nothing deriving them in between. The "already derived" test is [unsafe_projections],
-     not [Lazy.is_val] on the [projections] thunk — derivation records its result in that field, and
-     {!Shape.finish_inference} derives in bulk for every active update step without anyone forcing
-     the thunk.
-
-     The check is on the invariant itself, not on whether breaking it happened to matter for this
-     operation. Only two decisions read [neutral_elem] today — the clamped-window test, which a
-     non-finite identity flips, and the margin-neutral commitment — so a narrower rule could let
-     some early derivations through. It would have to track those decisions from here, down into
-     {!Row.solve_proj_equations} where the first is actually consulted, and follow them as they
-     change; and what it would buy is permission to call something whose cost is not local anyway.
-     Forcing the projections runs {!Shape.finish_inference}, which solves and derives for EVERY
-     active update step in the session, mid-construction of this tensor. There is no supported
-     reason to do that from an [op_asn], no [op_asn] in this repository does it, and a caller that
-     needs shape information has [Shape.set_dim] and the einsum capture syntax instead.
-
-     A violation is unrecoverable rather than merely reported: by the time it is detectable,
-     {!Shape.derive_projections} has already committed padding and [padding_elem] on this shape and
-     on the shared operand shapes. Catching this exception and reusing the operands carries that
-     forward, which is why it reads as a bug report rather than a condition to handle. *)
-  if Option.is_some preliminary_shape_update.unsafe_projections then
-    raise
-    @@ Session_error
-         ( [%string
-             "Tensor.op: the projections of tensor #%{id#Int} were derived before its neutral \
-              element was set — forcing shape inference or the projections from within [op_asn] is \
-              not supported (it finalizes shape inference for the whole session mid-construction), \
-              and the operand shapes are already mutated, so the session cannot continue. Report \
-              this as a bug."],
-           Some t );
-  preliminary_shape_update.neutral_elem <- neutral_elem;
+  update_step := Some (register_update_step ~neutral_elem ~shape ~shape_logic);
   let forward =
     Asgns.
       { asgns = forward.asgns; embedded_nodes = Set.union forward.embedded_nodes !embedded_nodes }

@@ -131,10 +131,13 @@ type update_step = {
   logic : logic;
   id : update_id;
   mutable unsafe_projections : Idx.projections option;
-  mutable neutral_elem : float option;
-      (** The neutral element for the accumulator operation. [Some v] when all assignment ops in the
-          update step use the same neutral element [v], [None] when different operations have
-          different neutral elements or when there are no accumulator operations. *)
+  neutral_elem : float option;
+      (** The neutral element of the operation's accumulation, fixed at creation: [Some v] when all
+          assignment ops in the update step use the same neutral element [v], [None] when different
+          operations have different neutral elements or when there are no accumulator operations.
+          [derive_projections] reads it for the clamped-window decision (gh-504) and to commit the
+          margins' neutral ([padding_elem]), so a step is only created once its operation's
+          assignments are known -- see [Tensor.op]. *)
 }
 [@@deriving sexp_of]
 (** Data required for a shape inference update step. Ideally, an update should be performed at least
@@ -1376,13 +1379,13 @@ let infer_equal (sh1 : t) (sh2 : t) =
     Raises [Row.Shape_error] when the product space is not expressible as a shape: a non-einsum
     operation, more than one reduced-over row variable, or a reduced-over row variable combined with
     an open result input row. *)
-let product_space_shape (update_step : update_step) : t =
-  let cur_sh = update_step.shape in
+let product_space_shape ~(shape : t) ~(logic : logic) : t =
+  let cur_sh = shape in
   let invalid msg error_shapes =
     raise @@ Row.Shape_error ("product_space_shape: " ^ msg, [ Shape_mismatch error_shapes ])
   in
   let spec, ls_rhs_list, ls_lhs, rhs_shapes =
-    match update_step.logic with
+    match logic with
     | Broadcast (Einsum (spec, _), sh1, sh2) -> (
         match einsum_of_spec spec with
         | [ ls1; ls2 ], ls_lhs -> (spec, [ ls1; ls2 ], ls_lhs, [ sh1; sh2 ])
