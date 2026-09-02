@@ -50,6 +50,10 @@ ok: bullets -- a blank line makes the same prose a paragraph
 ok: bullets -- a heading written without a space after the hashes
 ok: bullets -- a pull request cited at a continuation's first column
 ok: bullets -- a heading written against a word at a continuation's first column
+ok: bullets -- a numeric title written without its space is still a heading
+ok: bullets -- a citation ending against a letter is a word, not a citation
+ok: bullets -- two hashes against a number is not a citation either
+ok: bullets -- a citation ending at a comma is still a citation
 ok: bullets -- a comparison wrapped onto a continuation's first column is a quote
 ok: bullets -- a comparison written without its own space is a quote too
 ok: bullets -- a quote written without the space after its marker

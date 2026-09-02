@@ -223,6 +223,22 @@ let structure_cases =
     ( "a heading written against a word at a continuation's first column",
       "# Title\n\n- A fact, stated.\n  #Title is not a heading here.\n",
       [ "bullet-integrity @ f.md:4" ] );
+    (* The exemption is to a citation, not to a leading digit: a title that starts with a number is
+       exactly the malformed heading the rule exists for, and reading the digit alone would have
+       retired the rule for every such title (Codex P2, round 1). What separates them is where the
+       number ends -- against a letter it is a word, and the line is a heading missing its space. *)
+    ( "a numeric title written without its space is still a heading",
+      "# Title\n\n- A fact, stated.\n  #3D convolution, as written.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a citation ending against a letter is a word, not a citation",
+      "# Title\n\n- A fact, stated.\n  #598abc is no reference.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "two hashes against a number is not a citation either",
+      "# Title\n\n- A fact, stated.\n  ##598 as a heading nobody writes.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a citation ending at a comma is still a citation",
+      "# Title\n\n- A fact about the loop that\n  #598, and its successors, settled.\n",
+      [] );
     (* The block-quote marker's space is OPTIONAL, and block structure is settled before any of the
        line reads as arithmetic -- so a comparison wrapped onto a line's first visible column is a
        quote whatever follows the operator. The requirement therefore lands on the PROSE, and what
