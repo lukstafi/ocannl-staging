@@ -40,6 +40,24 @@
       substring hits let "development happens in `lukstafi/ocannl-staging`; dependency Foo PR #123"
       qualify another project's pull request.
 
+    {1 What it refuses rather than guesses}
+
+    The corner cases below that round is the reason this file draws a line rather than growing a
+    Markdown parser. An indented list marker, a marker-only item, and a fenced block or HTML comment
+    inside the Unreleased section are all ambiguous without tracking each item's content column:
+    Markdown reads one to three leading spaces as still top-level and more as nested content, and
+    either reading of a guess costs something real — one drops an entry out of the population, the
+    other folds it into its neighbour. None of the three occurs in the changelog, so each is a claim
+    of its own that FAILS on the shape rather than a branch that decides it. Refusing costs nothing
+    today and says so loudly the day the changelog starts using one, which is the point at which
+    somebody should decide what these rules mean for it — rather than the scan deciding quietly.
+
+    Inert copies of the anchor are the exception that has to be parsed rather than refused: the
+    whole file is searched for it, released history included, and a released entry quoting
+    [## [Unreleased]] in a fence or leaving one in a comment is not history anyone may edit to
+    satisfy this scan. So fenced blocks and HTML comments are tracked across the file, and only
+    lines Markdown renders as structure can be an anchor or a section boundary.
+
     {1 What the golden holds}
 
     The claims, and no tally: the number of bullets in Unreleased moves on every editorial pass and
@@ -60,16 +78,18 @@ type bullet = { first_line : string; lines : string list }
 
 let is_blank line = String.is_empty (String.strip line)
 
-(** The level of an ATX heading — the run of [#] at column 0, closed by whitespace or the end of the
-    line — and [None] for anything else. A prefix test cannot answer this: [### Added] and
-    [#### Security] are both subsections of the entry they sit under, while [## [1.0.1]] ends it. *)
+(** The level of an ATX heading — the run of [#] at column 0, at most six of them, closed by
+    whitespace or the end of the line — and [None] for anything else. A prefix test cannot answer
+    this: [### Added] and [#### Security] are both subsections of the entry they sit under, while
+    [## [1.0.1]] ends it. Seven or more hashes is prose, and reading it as a heading would cut an
+    open bullet short at a line that renders as part of it. *)
 let heading_level line =
   let hashes =
     let rec run i = if i < String.length line && Char.equal line.[i] '#' then run (i + 1) else i in
     run 0
   in
-  if hashes > 0 && (hashes = String.length line || Char.is_whitespace line.[hashes]) then
-    Some hashes
+  if hashes > 0 && hashes <= 6 && (hashes = String.length line || Char.is_whitespace line.[hashes])
+  then Some hashes
   else None
 
 let is_heading line = Option.is_some (heading_level line)
@@ -87,6 +107,13 @@ let opens_item line ~markers =
 
 let is_top_level_bullet line = opens_item line ~markers:marker_chars
 
+(** The text an item's own line carries, after its marker. Empty for a marker alone on its line: an
+    empty item, which opens no paragraph, so unindented prose beneath it is a separate paragraph
+    rather than a lazy continuation of it. *)
+let item_content line = String.strip (String.drop_prefix line 1)
+
+let has_content line = not (String.is_empty (item_content line))
+
 (** A top-level ORDERED item: digits at column 0 followed by [.] or [)], closed the same way.
     Recognized only to refuse it — an ordered changelog entry is not a shape this scan knows how to
     read, and skipping it would drop it out of the population silently. *)
@@ -101,6 +128,18 @@ let is_top_level_ordered line =
     leading whitespace indents, tabs included. *)
 let is_indented line = (not (is_blank line)) && Char.is_whitespace line.[0]
 
+(** An indented list marker, which this scan refuses rather than guesses. Markdown reads one to
+    three leading spaces as still top-level and deeper indentation as content nested inside the open
+    item, and the two are told apart only by tracking each item's content column — a parser this
+    scan has no business growing. The changelog uses neither, so an indented marker is a typo or a
+    shape outside what these rules were written for, and a loud refusal is the honest answer where a
+    guess would either drop the entry from the population or fold it into its neighbour. *)
+let is_indented_marker line =
+  is_indented line
+  &&
+  let bare = String.lstrip line in
+  is_top_level_bullet bare || is_top_level_ordered bare
+
 (** A lazy continuation: an unindented prose line inside an open paragraph. Markdown keeps it in the
     item; only a structural boundary — a blank line, a heading, the next top-level item — closes it.
 *)
@@ -112,8 +151,40 @@ let is_lazy_continuation line =
 
 let unreleased_heading = "## [Unreleased]"
 let is_unreleased_heading line = String.equal (String.strip line) unreleased_heading
-let unreleased_headings lines = List.filter lines ~f:is_unreleased_heading
 let ends_section line = match heading_level line with Some level -> level <= 2 | None -> false
+let fence_markers = [ "```"; "~~~" ]
+
+let opens_fence line =
+  let stripped = String.strip line in
+  List.exists fence_markers ~f:(fun marker -> String.is_prefix stripped ~prefix:marker)
+
+let opens_comment line = String.is_substring line ~substring:"<!--"
+
+(** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
+    HTML comments. The whole file is searched for the anchor, released history included, and a
+    released entry that quotes `## [Unreleased]` inside a fence or leaves one in a comment is not a
+    second anchor: reading it as one would fail the scan over history the convention says to leave
+    untouched, and take the live section down with it. *)
+let structural_lines lines =
+  let fence = ref None and comment = ref false in
+  List.map lines ~f:(fun line ->
+      let structural = (not !comment) && Option.is_none !fence in
+      let stripped = String.strip line in
+      let marker = List.find fence_markers ~f:(fun m -> String.is_prefix stripped ~prefix:m) in
+      (if !comment then (if String.is_substring line ~substring:"-->" then comment := false)
+       else
+         match (!fence, marker) with
+         | Some opened, Some m when String.equal opened m -> fence := None
+         | Some _, _ -> ()
+         | None, Some m -> fence := Some m
+         | None, None ->
+             if opens_comment line && not (String.is_substring line ~substring:"-->") then
+               comment := true);
+      (line, structural))
+
+let unreleased_headings lines =
+  List.filter_map (structural_lines lines) ~f:(fun (line, structural) ->
+      if structural && is_unreleased_heading line then Some line else None)
 
 (** The lines under `## [Unreleased]`, to the next heading of level 1 or 2, or the end of file.
     Subheadings (`### Added`, `#### Security`) stay in: they separate bullets, they never continue
@@ -125,11 +196,14 @@ let unreleased_section lines =
   | [ _ ] ->
       let rec find = function
         | [] -> None
-        | line :: rest when is_unreleased_heading line ->
-            Some (List.take_while rest ~f:(Fn.non ends_section))
+        | (line, structural) :: rest when structural && is_unreleased_heading line ->
+            Some
+              (List.take_while rest ~f:(fun (line, structural) ->
+                   not (structural && ends_section line))
+              |> List.map ~f:fst)
         | _ :: rest -> find rest
       in
-      find lines
+      find (structural_lines lines)
   | _ -> None
 
 (** The lines of one open item, and what is left after it. [lazy_ok] says whether a paragraph is
@@ -154,7 +228,7 @@ let bullets_of lines =
   let rec loop acc = function
     | [] -> List.rev acc
     | line :: rest when is_top_level_bullet line ->
-        let continuation, rest = item_lines ~lazy_ok:true [] rest in
+        let continuation, rest = item_lines ~lazy_ok:(has_content line) [] rest in
         loop ({ first_line = line; lines = line :: continuation } :: acc) rest
     | _ :: rest -> loop acc rest
   in
@@ -164,14 +238,30 @@ let max_lines = 3
 let within_line_budget bullet = List.count bullet.lines ~f:(Fn.non is_blank) <= max_lines
 let development_repo = "lukstafi/ocannl-staging"
 
-(** Whether [text] carries [prefix] with a digit right behind it. Bare "gh-ocannl-" prose with no
-    number is not a citation, which is why the digit is part of the question. *)
-let followed_by_digit text ~prefix =
+(** Where a number ENDS matters as much as that one starts: [gh-ocannl-807oops] is a typo, not a
+    record anyone can follow, and a predicate satisfied by the first digit accepts it. A number is a
+    full digit run closed by a token boundary — anything but an alphanumeric, a dash or an
+    underscore, the end of the text included. *)
+let token_boundary text k =
+  k >= String.length text
+  ||
+  let c = text.[k] in
+  not (Char.is_alphanum c || Char.equal c '-' || Char.equal c '_')
+
+let number_at text k =
+  let tlen = String.length text in
+  let rec digits j = if j < tlen && Char.is_digit text.[j] then digits (j + 1) else j in
+  let stop = digits k in
+  stop > k && token_boundary text stop
+
+(** Whether [text] carries [prefix] followed by a well-formed number. Bare "gh-ocannl-" prose with
+    no number is not a citation, which is why the number is part of the question. *)
+let cites_number text ~prefix =
   let plen = String.length prefix and tlen = String.length text in
   let rec at i =
     if i + plen >= tlen then false
-    else if String.equal (String.sub text ~pos:i ~len:plen) prefix && Char.is_digit text.[i + plen]
-    then true
+    else if String.equal (String.sub text ~pos:i ~len:plen) prefix && number_at text (i + plen) then
+      true
     else at (i + 1)
   in
   at 0
@@ -185,7 +275,7 @@ let cites_staging_pr text =
   let repo = development_repo in
   let rlen = String.length repo and tlen = String.length text in
   let qualifies j =
-    if j < tlen && Char.equal text.[j] '#' then j + 1 < tlen && Char.is_digit text.[j + 1]
+    if j < tlen && Char.equal text.[j] '#' then number_at text (j + 1)
     else
       let j = if j < tlen && Char.equal text.[j] '`' then j + 1 else j in
       let rec skip k = if k < tlen && Char.is_whitespace text.[k] then skip (k + 1) else k in
@@ -193,7 +283,7 @@ let cites_staging_pr text =
       let pr = "PR #" in
       k + String.length pr < tlen
       && String.equal (String.sub text ~pos:k ~len:(String.length pr)) pr
-      && Char.is_digit text.[k + String.length pr]
+      && number_at text (k + String.length pr)
   in
   let rec at i =
     if i + rlen > tlen then false
@@ -204,7 +294,7 @@ let cites_staging_pr text =
 
 let cites_record bullet =
   let text = String.concat ~sep:" " bullet.lines in
-  followed_by_digit text ~prefix:"gh-ocannl-" || cites_staging_pr text
+  cites_number text ~prefix:"gh-ocannl-" || cites_staging_pr text
 
 let mentions bullet substring = String.is_substring (String.concat ~sep:" " bullet.lines) ~substring
 
@@ -248,7 +338,8 @@ let control_section =
     "* An asterisk-marked entry, with no citation of any kind behind it.";
     "-  A double-spaced marker, and no citation behind it either.";
     "*\tA tab-separated marker, with no citation behind it.";
-    "-";
+    "- A bullet whose number runs into a typo, gh-ocannl-807oops, and cites nothing else.";
+    "- A bullet citing `lukstafi/ocannl-staging` PR #601oops, and nothing else.";
   ]
 
 (* Two Unreleased anchors, the shape a merge leaves behind: the second one's bullets are what a
@@ -260,6 +351,41 @@ let control_duplicate_anchors =
    anchor, and a historical variant is not a duplicate of it. *)
 let control_inexact_anchors =
   [ "## [Unreleased] (draft)"; ""; "- one (gh-ocannl-807)."; ""; "## [Unreleased] old"; "" ]
+
+(* An empty item followed by unindented prose: Markdown opens no paragraph on a marker-only line, so
+   the prose is a paragraph of its own rather than a lazy continuation, and its citation is not the
+   item's (Codex P2, round 4). *)
+let control_empty_item = [ "-"; "A separate paragraph, carrying the citation (gh-ocannl-807)." ]
+
+(* Seven hashes is prose, not a heading: it must not cut an open bullet short. *)
+let control_deep_hashes =
+  [
+    "- Line one of this entry,";
+    "  line two of it,";
+    "  line three of it (gh-ocannl-807),";
+    "####### and a fourth line that only looks like a heading.";
+  ]
+
+(* A list marker the scan refuses rather than guesses at. *)
+let control_indented_marker = [ "- one (gh-ocannl-807)."; "  - a nested or top-level marker?" ]
+
+(* An inert copy of the anchor in released history: quoted in a fence, and left in a comment. *)
+let control_inert_anchors =
+  [
+    "## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "## [1.0.1] -- 2026-08-26";
+    "";
+    "```markdown";
+    "## [Unreleased]";
+    "```";
+    "";
+    "<!--";
+    "## [Unreleased]";
+    "-->";
+  ]
 
 let control_ordered_item =
   [ "- one (gh-ocannl-807)."; "1. An ordered top-level item."; "2) Another." ]
@@ -310,6 +436,22 @@ let () =
   let ordered = List.filter section ~f:is_top_level_ordered in
   List.iter ordered ~f:(fun line -> eprintf "  ordered top-level item: %s\n" (String.strip line));
   p "every top-level list item in Unreleased is unordered" (List.is_empty ordered);
+  (* Three more shapes whose absence is the passing case, refused rather than guessed at: each is
+     ambiguous without a Markdown parser this scan has no business growing, and each would resolve
+     one way into dropping an entry from the population and the other into folding it into its
+     neighbour. None occurs in the changelog, so refusing costs nothing, and one that starts
+     occurring says so instead of quietly changing what the rules mean. *)
+  let indented = List.filter section ~f:is_indented_marker in
+  List.iter indented ~f:(fun line -> eprintf "  indented list marker: %s\n" (String.strip line));
+  p "no list marker in Unreleased is indented" (List.is_empty indented);
+  let empty_items =
+    List.filter section ~f:(fun line -> is_top_level_bullet line && not (has_content line))
+  in
+  List.iter empty_items ~f:(fun _ -> eprintf "  a bullet carries no text on its marker line\n");
+  p "every Unreleased bullet carries text on its marker line" (List.is_empty empty_items);
+  let embedded = List.filter section ~f:(fun line -> opens_fence line || opens_comment line) in
+  List.iter embedded ~f:(fun line -> eprintf "  fence or comment: %s\n" (String.strip line));
+  p "the Unreleased section carries no fenced code block or HTML comment" (List.is_empty embedded);
   (* Unguarded universals, deliberately, and this is the one site in the file where emptiness is a
      PASSING case: an editorial pass at release prep moves every bullet into the new released
      section, and the Unreleased section that remains is legitimately empty until the next merge. A
@@ -325,7 +467,7 @@ let () =
   p "every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN"
     (List.for_all bullets ~f:cites_record);
   let control = bullets_of control_section in
-  p "the section reader finds the eleven synthetic control bullets" (List.length control = 11);
+  p "the section reader finds the twelve synthetic control bullets" (List.length control = 12);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -343,6 +485,10 @@ let () =
     ~f:(fun bullet ->
       (not (cites_record bullet))
       && mentions bullet development_repo && mentions bullet "Foo PR #123");
+  p_exists "the citation rule flags an issue number running into a typo" control ~f:(fun bullet ->
+      (not (cites_record bullet)) && mentions bullet "gh-ocannl-807oops");
+  p_exists "the citation rule flags a PR number running into a typo" control ~f:(fun bullet ->
+      (not (cites_record bullet)) && mentions bullet "PR #601oops");
   p_exists "both rules pass a bullet citing a staging PR" control ~f:(fun bullet ->
       within_line_budget bullet && cites_record bullet && mentions bullet development_repo);
   p_exists "both rules pass a synthetic compliant bullet" control ~f:(fun bullet ->
@@ -365,4 +511,21 @@ let () =
   p "a level-4 subheading stays inside Unreleased, and the released section does not"
     (List.length deep = 2
     && List.exists deep ~f:(fun bullet -> mentions bullet "inside Unreleased")
-    && not (List.exists deep ~f:(fun bullet -> mentions bullet "released, uncited")))
+    && not (List.exists deep ~f:(fun bullet -> mentions bullet "released, uncited")));
+  p "prose under a marker-only item is not folded into it"
+    (match bullets_of control_empty_item with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "seven hashes are prose, and stay inside the open bullet"
+    (Option.is_none (heading_level "####### and a fourth line")
+    &&
+    match bullets_of control_deep_hashes with
+    | [ bullet ] -> not (within_line_budget bullet)
+    | _ -> false);
+  p_exists "the indented-marker refusal sees an indented marker" control_indented_marker
+    ~f:is_indented_marker;
+  p "an anchor quoted in a fence or a comment is not a second anchor"
+    (List.length (unreleased_headings control_inert_anchors) = 1
+    &&
+    let section = Option.value (unreleased_section control_inert_anchors) ~default:[] in
+    List.length (bullets_of section) = 1)

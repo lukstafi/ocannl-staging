@@ -5,9 +5,12 @@ pass (gh-ocannl-665).
 
 CHANGES.md carries exactly one `## [Unreleased]` heading: true
 every top-level list item in Unreleased is unordered: true
+no list marker in Unreleased is indented: true
+every Unreleased bullet carries text on its marker line: true
+the Unreleased section carries no fenced code block or HTML comment: true
 every Unreleased bullet is at most three lines: true
 every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN: true
-the section reader finds the eleven synthetic control bullets: true
+the section reader finds the twelve synthetic control bullets: true
 the length rule flags a synthetic four-line bullet: true
 the length rule flags a bullet whose fourth line follows a blank one: true
 the length rule flags a bullet whose fourth line is a lazy continuation: true
@@ -15,6 +18,8 @@ the bullet reader takes an asterisk-marked entry: true
 the citation rule flags a synthetic uncited bullet: true
 the citation rule flags an unqualified `PR #NNN`: true
 the citation rule flags a repository name not qualifying the PR number: true
+the citation rule flags an issue number running into a typo: true
+the citation rule flags a PR number running into a typo: true
 both rules pass a bullet citing a staging PR: true
 both rules pass a synthetic compliant bullet: true
 the section reader refuses a changelog with two Unreleased anchors: true
@@ -23,3 +28,7 @@ the ordered-item refusal sees a top-level ordered item: true
 the bullet reader takes a marker separated by any whitespace, or none: true
 the bullet reader takes neither a rule nor emphasis for a bullet: true
 a level-4 subheading stays inside Unreleased, and the released section does not: true
+prose under a marker-only item is not folded into it: true
+seven hashes are prose, and stay inside the open bullet: true
+the indented-marker refusal sees an indented marker: true
+an anchor quoted in a fence or a comment is not a second anchor: true
