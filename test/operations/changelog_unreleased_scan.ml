@@ -78,19 +78,37 @@ type bullet = { first_line : string; lines : string list }
 
 let is_blank line = String.is_empty (String.strip line)
 
-(** The level of an ATX heading — the run of [#] at column 0, at most six of them, closed by
-    whitespace or the end of the line — and [None] for anything else. A prefix test cannot answer
-    this: [### Added] and [#### Security] are both subsections of the entry they sit under, while
-    [## [1.0.1]] ends it. Seven or more hashes is prose, and reading it as a heading would cut an
-    open bullet short at a line that renders as part of it. *)
+(** The count of leading spaces, and where the line's content starts. Markdown allows up to three
+    before a block-level construct and reads a fourth as an indented code block, so the same
+    allowance decides headings and fence delimiters alike. *)
+let indent_of line =
+  let n = String.length line in
+  let rec run i = if i < n && Char.equal line.[i] ' ' then run (i + 1) else i in
+  run 0
+
+let block_indent = 3
+
+(** The level of an ATX heading — up to three spaces, then the run of [#], at most six of them,
+    closed by whitespace or the end of the line — and [None] for anything else. A prefix test cannot
+    answer this: [### Added] and [#### Security] are both subsections of the entry they sit under,
+    while [## [1.0.1]] ends it. Seven or more hashes is prose, and reading it as a heading would cut
+    an open bullet short at a line that renders as part of it. The indent allowance is what keeps
+    this recognizer and the anchor's agreeing: an indented release heading has to close the section
+    it would close in a renderer, and a four-space-indented anchor is code, not an anchor. *)
 let heading_level line =
-  let hashes =
-    let rec run i = if i < String.length line && Char.equal line.[i] '#' then run (i + 1) else i in
-    run 0
-  in
-  if hashes > 0 && hashes <= 6 && (hashes = String.length line || Char.is_whitespace line.[hashes])
-  then Some hashes
-  else None
+  let start = indent_of line in
+  if start > block_indent then None
+  else
+    let hashes =
+      let rec run i =
+        if i < String.length line && Char.equal line.[i] '#' then run (i + 1) else i
+      in
+      run start
+    in
+    let count = hashes - start in
+    if count > 0 && count <= 6 && (hashes = String.length line || Char.is_whitespace line.[hashes])
+    then Some count
+    else None
 
 let is_heading line = Option.is_some (heading_level line)
 
@@ -150,14 +168,35 @@ let is_lazy_continuation line =
   && not (is_top_level_ordered line)
 
 let unreleased_heading = "## [Unreleased]"
-let is_unreleased_heading line = String.equal (String.strip line) unreleased_heading
+
+(** The anchor: a level-2 heading, by the same indent rule as any other, whose text is exactly
+    [[Unreleased]]. Stripping the line without asking what indentation means let a four-space
+    indented copy — an indented code block, rendered as text — count as a second anchor. *)
+let is_unreleased_heading line =
+  match heading_level line with
+  | Some 2 -> String.equal (String.strip line) unreleased_heading
+  | _ -> false
+
 let ends_section line = match heading_level line with Some level -> level <= 2 | None -> false
-let fence_markers = [ "```"; "~~~" ]
 
-let opens_fence line =
-  let stripped = String.strip line in
-  List.exists fence_markers ~f:(fun marker -> String.is_prefix stripped ~prefix:marker)
+(** A fence delimiter: up to three spaces, then at least three [`] or [~], as (character, run
+    length, whatever follows). A fence closes only on the same character, a run at least as long,
+    and nothing after it — so a three-backtick line inside a four-backtick fence is content, and
+    released history that quotes one cannot reopen the file's structure. *)
+let fence_at line =
+  let n = String.length line in
+  let start = indent_of line in
+  if start > block_indent || start >= n then None
+  else
+    let c = line.[start] in
+    if not (Char.equal c '`' || Char.equal c '~') then None
+    else
+      let rec run j = if j < n && Char.equal line.[j] c then run (j + 1) else j in
+      let stop = run start in
+      if stop - start >= 3 then Some (c, stop - start, String.strip (String.drop_prefix line stop))
+      else None
 
+let opens_fence line = Option.is_some (fence_at line)
 let opens_comment line = String.is_substring line ~substring:"<!--"
 
 (** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
@@ -169,14 +208,13 @@ let structural_lines lines =
   let fence = ref None and comment = ref false in
   List.map lines ~f:(fun line ->
       let structural = (not !comment) && Option.is_none !fence in
-      let stripped = String.strip line in
-      let marker = List.find fence_markers ~f:(fun m -> String.is_prefix stripped ~prefix:m) in
       (if !comment then (if String.is_substring line ~substring:"-->" then comment := false)
        else
-         match (!fence, marker) with
-         | Some opened, Some m when String.equal opened m -> fence := None
-         | Some _, _ -> ()
-         | None, Some m -> fence := Some m
+         match (!fence, fence_at line) with
+         | Some (opened, length), Some (c, run, info) ->
+             if Char.equal opened c && run >= length && String.is_empty info then fence := None
+         | Some _, None -> ()
+         | None, Some (c, run, _) -> fence := Some (c, run)
          | None, None ->
              if opens_comment line && not (String.is_substring line ~substring:"-->") then
                comment := true);
@@ -271,6 +309,8 @@ let cites_number text ~prefix =
     whitespace ([`lukstafi/ocannl-staging` PR #601]) or directly ([lukstafi/ocannl-staging#601]).
     Two independent substring hits would let a sentence naming the repository qualify any other
     project's `PR #NNN`. *)
+let pr_prefix = "PR #"
+
 let cites_staging_pr text =
   let repo = development_repo in
   let rlen = String.length repo and tlen = String.length text in
@@ -280,10 +320,12 @@ let cites_staging_pr text =
       let j = if j < tlen && Char.equal text.[j] '`' then j + 1 else j in
       let rec skip k = if k < tlen && Char.is_whitespace text.[k] then skip (k + 1) else k in
       let k = skip j in
-      let pr = "PR #" in
-      k + String.length pr < tlen
-      && String.equal (String.sub text ~pos:k ~len:(String.length pr)) pr
-      && number_at text (k + String.length pr)
+      (* At least one space: `lukstafi/ocannl-stagingPR #601` is neither documented form, and
+         letting the skip consume nothing turned that typo into a citation (Codex P2, round 5). *)
+      k > j
+      && k + String.length pr_prefix < tlen
+      && String.equal (String.sub text ~pos:k ~len:(String.length pr_prefix)) pr_prefix
+      && number_at text (k + String.length pr_prefix)
   in
   let rec at i =
     if i + rlen > tlen then false
@@ -340,6 +382,7 @@ let control_section =
     "*\tA tab-separated marker, with no citation behind it.";
     "- A bullet whose number runs into a typo, gh-ocannl-807oops, and cites nothing else.";
     "- A bullet citing `lukstafi/ocannl-staging` PR #601oops, and nothing else.";
+    "- A bullet citing lukstafi/ocannl-stagingPR #601, with the separator missing.";
   ]
 
 (* Two Unreleased anchors, the shape a merge leaves behind: the second one's bullets are what a
@@ -387,6 +430,38 @@ let control_inert_anchors =
     "-->";
   ]
 
+(* Headings carrying Markdown's block indentation: up to three spaces is still a heading, and a
+   fourth makes it an indented code block rather than an anchor (Codex P2, round 5). *)
+let control_indented_headings =
+  [
+    "   ## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "  ## [1.0.1] -- 2026-08-26";
+    "";
+    "- released, and none of this scan's business.";
+  ]
+
+let control_code_indented_anchor =
+  [ "## [Unreleased]"; ""; "- one (gh-ocannl-807)."; ""; "    ## [Unreleased]"; "" ]
+
+(* A four-backtick fence in released history, carrying a three-backtick line: Markdown keeps the
+   fence open, so the anchor quoted after it is still inert. *)
+let control_long_fence =
+  [
+    "## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "## [1.0.1] -- 2026-08-26";
+    "";
+    "````markdown";
+    "```";
+    "## [Unreleased]";
+    "````";
+  ]
+
 let control_ordered_item =
   [ "- one (gh-ocannl-807)."; "1. An ordered top-level item."; "2) Another." ]
 
@@ -414,7 +489,9 @@ let () =
     match Array.to_list (Sys.get_argv ()) with
     | _ :: path :: _ -> path
     | _ ->
-        fail "the changelog scan is handed the path to CHANGES.md";
+        (* Not a claim: the run never started, so there is no verdict to record -- the scan was
+           invoked wrongly, which the dune rule cannot do. *)
+        eprintf "FAILED: expected the path to CHANGES.md as the one argument\n";
         Stdlib.exit 1
   in
   let contents = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all in
@@ -467,7 +544,7 @@ let () =
   p "every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN"
     (List.for_all bullets ~f:cites_record);
   let control = bullets_of control_section in
-  p "the section reader finds the twelve synthetic control bullets" (List.length control = 12);
+  p "the section reader finds the thirteen synthetic control bullets" (List.length control = 13);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -489,10 +566,17 @@ let () =
       (not (cites_record bullet)) && mentions bullet "gh-ocannl-807oops");
   p_exists "the citation rule flags a PR number running into a typo" control ~f:(fun bullet ->
       (not (cites_record bullet)) && mentions bullet "PR #601oops");
+  p_exists "the citation rule flags a repository run into `PR #` with no separator" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "stagingPR #601");
   p_exists "both rules pass a bullet citing a staging PR" control ~f:(fun bullet ->
       within_line_budget bullet && cites_record bullet && mentions bullet development_repo);
-  p_exists "both rules pass a synthetic compliant bullet" control ~f:(fun bullet ->
-      within_line_budget bullet && cites_record bullet);
+  (* One positive control per ACCEPTED form, each excluding the other: a single "some bullet passes"
+     claim is satisfied by whichever form still works, so breaking `gh-ocannl-NNN` acceptance
+     outright would leave this golden green on the strength of the staging-PR fixture (Codex P2,
+     round 5). *)
+  p_exists "both rules pass a bullet citing a gh-ocannl issue" control ~f:(fun bullet ->
+      within_line_budget bullet && cites_record bullet && mentions bullet "(gh-ocannl-807)"
+      && not (mentions bullet development_repo));
   p "the section reader refuses a changelog with two Unreleased anchors"
     (Option.is_none (unreleased_section control_duplicate_anchors)
     && List.length (unreleased_headings control_duplicate_anchors) = 2);
@@ -528,4 +612,20 @@ let () =
     (List.length (unreleased_headings control_inert_anchors) = 1
     &&
     let section = Option.value (unreleased_section control_inert_anchors) ~default:[] in
-    List.length (bullets_of section) = 1)
+    List.length (bullets_of section) = 1);
+  p "an anchor quoted inside a longer fence stays inert"
+    (List.length (unreleased_headings control_long_fence) = 1
+    &&
+    let section = Option.value (unreleased_section control_long_fence) ~default:[] in
+    List.length (bullets_of section) = 1);
+  p "a heading indented up to three spaces is still a heading, anchor and boundary alike"
+    (List.length (unreleased_headings control_indented_headings) = 1
+    &&
+    let section = Option.value (unreleased_section control_indented_headings) ~default:[] in
+    List.length (bullets_of section) = 1);
+  p "a four-space-indented copy of the anchor is code, not a second anchor"
+    (List.length (unreleased_headings control_code_indented_anchor) = 1
+    &&
+    let section = Option.value (unreleased_section control_code_indented_anchor) ~default:[] in
+    List.length (bullets_of section) = 1);
+  Test_utils.Refusal_control_manifest.print "changelog_unreleased_scan.ml"

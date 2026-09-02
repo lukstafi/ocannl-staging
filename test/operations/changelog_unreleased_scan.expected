@@ -10,7 +10,7 @@ every Unreleased bullet carries text on its marker line: true
 the Unreleased section carries no fenced code block or HTML comment: true
 every Unreleased bullet is at most three lines: true
 every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN: true
-the section reader finds the twelve synthetic control bullets: true
+the section reader finds the thirteen synthetic control bullets: true
 the length rule flags a synthetic four-line bullet: true
 the length rule flags a bullet whose fourth line follows a blank one: true
 the length rule flags a bullet whose fourth line is a lazy continuation: true
@@ -20,8 +20,9 @@ the citation rule flags an unqualified `PR #NNN`: true
 the citation rule flags a repository name not qualifying the PR number: true
 the citation rule flags an issue number running into a typo: true
 the citation rule flags a PR number running into a typo: true
+the citation rule flags a repository run into `PR #` with no separator: true
 both rules pass a bullet citing a staging PR: true
-both rules pass a synthetic compliant bullet: true
+both rules pass a bullet citing a gh-ocannl issue: true
 the section reader refuses a changelog with two Unreleased anchors: true
 only the exact `## [Unreleased]` line counts as the anchor: true
 the ordered-item refusal sees a top-level ordered item: true
@@ -32,3 +33,41 @@ prose under a marker-only item is not folded into it: true
 seven hashes are prose, and stay inside the open bullet: true
 the indented-marker refusal sees an indented marker: true
 an anchor quoted in a fence or a comment is not a second anchor: true
+an anchor quoted inside a longer fence stays inert: true
+a heading indented up to three spaces is still a heading, anchor and boundary alike: true
+a four-space-indented copy of the anchor is code, not a second anchor: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:29e846ac8743ceba34a4cdcd5c90a431] CHANGES.md
+  [scanner-refusal:c2d9250ec03438047de2517db77f6755] Unreleased is unordered
+  [scanner-refusal:5118828f5ded8400ee2fb7ba2ca44a63] Unreleased is indented
+  [scanner-refusal:bc1a2e143477bd6d1eeb53a36718c4b8] Unreleased bullet carries
+  [scanner-refusal:7683b7af923c70f62f8dca5e0155d4bf] Unreleased section carries
+  [scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet
+  [scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN
+  [scanner-refusal:58d555e31796542390cbc8a53029fbd1] thirteen synthetic control
+  [scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet
+  [scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth
+  [scanner-refusal:7b3a395ea497f63898dd51e1c28d4539] bullet whose fourth
+  [scanner-refusal:444f7a725b192b8628d1ea311e6af84a] takes an asterisk-marked
+  [scanner-refusal:c4aa67d124cb4749d1889edf6983c9a9] synthetic uncited bullet
+  [scanner-refusal:23fceb1687bd50c5958f39301e78e77a] flags an unqualified
+  [scanner-refusal:1f0ae7533580b5e4beb238c4275c1ab4] citation rule flags
+  [scanner-refusal:bb0069493c829780cec5ca1d66feab8d] issue number running
+  [scanner-refusal:6e22c3db47b0a6937bb1ab9c0855ebb5] citation rule flags
+  [scanner-refusal:3ca66d41359dc51f6ab5f7ac84b8b907] citation rule flags
+  [scanner-refusal:f517d12e9916c479313e517d39c992aa] citing a staging
+  [scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl
+  [scanner-refusal:5bcdaf0ef54cbe80e0d80101fe648b77] section reader refuses
+  [scanner-refusal:276a908bf7fcd396f224bf426067c796] Unreleased line counts
+  [scanner-refusal:4827ea38da58bf1e201515800d21552b] ordered-item refusal sees
+  [scanner-refusal:baf2b55e174379e34c6470d993a58760] bullet reader takes
+  [scanner-refusal:deda66041fc928d4b063d1b5c347dfea] reader takes neither
+  [scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays
+  [scanner-refusal:dd711119952ab1fe430c340ca3aa2af2] under a marker-only
+  [scanner-refusal:32111d4b8d56a140be98de1272897f73] seven hashes are
+  [scanner-refusal:050c661161bb4c1cfe2dff2047ad2b14] indented-marker refusal sees
+  [scanner-refusal:194c1e57cc9420634205a146c56e16d0] an anchor quoted
+  [scanner-refusal:f3befecb42f5ce5ca62d20d3ec29b4e5] anchor quoted inside
+  [scanner-refusal:6dc88ec5eacbebd072ebf1b0741266ef] heading indented up
+  [scanner-refusal:5b3f45ee369cc10ca978db8f30e90719] four-space-indented copy of

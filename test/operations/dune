@@ -1834,6 +1834,8 @@
   agent_notes_structure.expected
   backend_golden_family_scan.ml
   backend_golden_family_scan.expected
+  changelog_unreleased_scan.ml
+  changelog_unreleased_scan.expected
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
   cache_dir_ignores.expected
@@ -1878,6 +1880,8 @@
    agent_notes_structure.expected
    backend_golden_family_scan.ml
    backend_golden_family_scan.expected
+   changelog_unreleased_scan.ml
+   changelog_unreleased_scan.expected
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
    codegen_text_inventory.ml
@@ -4851,7 +4855,7 @@
 (executable
  (name changelog_unreleased_scan)
  (modules changelog_unreleased_scan)
- (libraries base stdio arrayjit.verdict))
+ (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads CHANGES.md as text.
