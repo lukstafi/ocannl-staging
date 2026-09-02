@@ -59,27 +59,47 @@ type bullet = { first_line : string; lines : string list }
     where they sit between two blocks of the same item. *)
 
 let is_blank line = String.is_empty (String.strip line)
-let is_heading line = String.is_prefix line ~prefix:"#"
-let unordered_markers = [ "- "; "* "; "+ " ]
 
-let is_top_level_bullet line =
-  List.exists unordered_markers ~f:(fun marker -> String.is_prefix line ~prefix:marker)
+(** The level of an ATX heading — the run of [#] at column 0, closed by whitespace or the end of the
+    line — and [None] for anything else. A prefix test cannot answer this: [### Added] and
+    [#### Security] are both subsections of the entry they sit under, while [## [1.0.1]] ends it. *)
+let heading_level line =
+  let hashes =
+    let rec run i = if i < String.length line && Char.equal line.[i] '#' then run (i + 1) else i in
+    run 0
+  in
+  if hashes > 0 && (hashes = String.length line || Char.is_whitespace line.[hashes]) then
+    Some hashes
+  else None
 
-(** A top-level ORDERED item: digits at column 0 followed by [.] or [)] and a space. Recognized only
-    to refuse it — an ordered changelog entry is not a shape this scan knows how to read, and
-    skipping it would drop it out of the population silently. *)
+let is_heading line = Option.is_some (heading_level line)
+
+(** A top-level list marker: [-], [*] or [+] at column 0, closed by whitespace or the end of the
+    line. The separator is any whitespace, and any amount of it — [-  two spaces] and a tab-indented
+    entry are ordinary Markdown items, and one omitted from the population is one whose violations
+    the scan never sees. A marker alone on its line is an empty item, which is still an item. *)
+let marker_chars = [ '-'; '*'; '+' ]
+
+let opens_item line ~markers =
+  (not (String.is_empty line))
+  && List.mem markers line.[0] ~equal:Char.equal
+  && (String.length line = 1 || Char.is_whitespace line.[1])
+
+let is_top_level_bullet line = opens_item line ~markers:marker_chars
+
+(** A top-level ORDERED item: digits at column 0 followed by [.] or [)], closed the same way.
+    Recognized only to refuse it — an ordered changelog entry is not a shape this scan knows how to
+    read, and skipping it would drop it out of the population silently. *)
 let is_top_level_ordered line =
   let digits =
     let rec run i = if i < String.length line && Char.is_digit line.[i] then run (i + 1) else i in
     run 0
   in
-  digits > 0
-  &&
-  let rest = String.drop_prefix line digits in
-  List.exists [ ". "; ") " ] ~f:(fun marker -> String.is_prefix rest ~prefix:marker)
+  digits > 0 && opens_item (String.drop_prefix line digits) ~markers:[ '.'; ')' ]
 
-(** An indented, non-blank line: the continuation of whatever item is open, in any position. *)
-let is_indented line = String.is_prefix line ~prefix:"  " && not (is_blank line)
+(** An indented, non-blank line: the continuation of whatever item is open, in any position. Any
+    leading whitespace indents, tabs included. *)
+let is_indented line = (not (is_blank line)) && Char.is_whitespace line.[0]
 
 (** A lazy continuation: an unindented prose line inside an open paragraph. Markdown keeps it in the
     item; only a structural boundary — a blank line, a heading, the next top-level item — closes it.
@@ -93,12 +113,13 @@ let is_lazy_continuation line =
 let unreleased_heading = "## [Unreleased]"
 let is_unreleased_heading line = String.equal (String.strip line) unreleased_heading
 let unreleased_headings lines = List.filter lines ~f:is_unreleased_heading
-let ends_section line = is_heading line && not (String.is_prefix line ~prefix:"### ")
+let ends_section line = match heading_level line with Some level -> level <= 2 | None -> false
 
-(** The lines under `## [Unreleased]`, to the next heading of its level or above, or the end of
-    file. Subheadings (`### Added` and friends) stay in: they separate bullets, they never continue
-    one. Returns [None] unless there is exactly ONE Unreleased anchor — with two, a first-match
-    reader silently stops looking before the second one's bullets. *)
+(** The lines under `## [Unreleased]`, to the next heading of level 1 or 2, or the end of file.
+    Subheadings (`### Added`, `#### Security`) stay in: they separate bullets, they never continue
+    one, and one nested deeper than the pass happened to use is no boundary. Returns [None] unless
+    there is exactly ONE Unreleased anchor — with two, a first-match reader silently stops looking
+    before the second one's bullets. *)
 let unreleased_section lines =
   match unreleased_headings lines with
   | [ _ ] ->
@@ -225,6 +246,9 @@ let control_section =
     "- A bullet saying development happens in `lukstafi/ocannl-staging`, and separately";
     "  mentioning that dependency Foo PR #123 changed something.";
     "* An asterisk-marked entry, with no citation of any kind behind it.";
+    "-  A double-spaced marker, and no citation behind it either.";
+    "*\tA tab-separated marker, with no citation behind it.";
+    "-";
   ]
 
 (* Two Unreleased anchors, the shape a merge leaves behind: the second one's bullets are what a
@@ -239,6 +263,25 @@ let control_inexact_anchors =
 
 let control_ordered_item =
   [ "- one (gh-ocannl-807)."; "1. An ordered top-level item."; "2) Another." ]
+
+(* A subsection nested deeper than the pass happened to use, and the released section behind it: the
+   first is no boundary, the second is (Codex P2, round 3). *)
+let control_deep_subheading =
+  [
+    "## [Unreleased]";
+    "";
+    "### Added";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "#### Security";
+    "";
+    "- two, uncited and inside Unreleased.";
+    "";
+    "## [1.0.1] -- 2026-08-26";
+    "";
+    "- released, uncited, and none of this scan's business.";
+  ]
 
 let () =
   let path =
@@ -267,13 +310,22 @@ let () =
   let ordered = List.filter section ~f:is_top_level_ordered in
   List.iter ordered ~f:(fun line -> eprintf "  ordered top-level item: %s\n" (String.strip line));
   p "every top-level list item in Unreleased is unordered" (List.is_empty ordered);
+  (* Unguarded universals, deliberately, and this is the one site in the file where emptiness is a
+     PASSING case: an editorial pass at release prep moves every bullet into the new released
+     section, and the Unreleased section that remains is legitimately empty until the next merge. A
+     population guard here would fail the release-prep build for having nothing to complain about
+     (Codex P2, round 3). What the guard is normally for -- a scan that reports nothing because it
+     read nothing -- is carried instead by the anchor claim above, which fails when the section
+     cannot be found at all, and by the synthetic controls below, whose population is fixed,
+     non-empty, and exercises both rules in both directions on every run. *)
   report "over three lines" (List.filter bullets ~f:(Fn.non within_line_budget));
-  p_all "every Unreleased bullet is at most three lines" bullets ~f:within_line_budget;
+  p "every Unreleased bullet is at most three lines" (List.for_all bullets ~f:within_line_budget);
   report "no gh-ocannl-NNN or `lukstafi/ocannl-staging` PR #NNN citation"
     (List.filter bullets ~f:(Fn.non cites_record));
-  p_all "every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN" bullets ~f:cites_record;
+  p "every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN"
+    (List.for_all bullets ~f:cites_record);
   let control = bullets_of control_section in
-  p "the section reader finds the eight synthetic control bullets" (List.length control = 8);
+  p "the section reader finds the eleven synthetic control bullets" (List.length control = 11);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -302,4 +354,15 @@ let () =
     (List.is_empty (unreleased_headings control_inexact_anchors)
     && Option.is_none (unreleased_section control_inexact_anchors));
   p_exists "the ordered-item refusal sees a top-level ordered item" control_ordered_item
-    ~f:is_top_level_ordered
+    ~f:is_top_level_ordered;
+  p_all "the bullet reader takes a marker separated by any whitespace, or none"
+    [ "-  two spaces"; "*\ttab"; "+ one space"; "-" ]
+    ~f:is_top_level_bullet;
+  p_none "the bullet reader takes neither a rule nor emphasis for a bullet"
+    [ "---"; "***"; "*emphasis* opens this line"; "-1 is a number" ]
+    ~f:is_top_level_bullet;
+  let deep = bullets_of (Option.value (unreleased_section control_deep_subheading) ~default:[]) in
+  p "a level-4 subheading stays inside Unreleased, and the released section does not"
+    (List.length deep = 2
+    && List.exists deep ~f:(fun bullet -> mentions bullet "inside Unreleased")
+    && not (List.exists deep ~f:(fun bullet -> mentions bullet "released, uncited")))

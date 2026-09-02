@@ -7,7 +7,7 @@ CHANGES.md carries exactly one `## [Unreleased]` heading: true
 every top-level list item in Unreleased is unordered: true
 every Unreleased bullet is at most three lines: true
 every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN: true
-the section reader finds the eight synthetic control bullets: true
+the section reader finds the eleven synthetic control bullets: true
 the length rule flags a synthetic four-line bullet: true
 the length rule flags a bullet whose fourth line follows a blank one: true
 the length rule flags a bullet whose fourth line is a lazy continuation: true
@@ -20,3 +20,6 @@ both rules pass a synthetic compliant bullet: true
 the section reader refuses a changelog with two Unreleased anchors: true
 only the exact `## [Unreleased]` line counts as the anchor: true
 the ordered-item refusal sees a top-level ordered item: true
+the bullet reader takes a marker separated by any whitespace, or none: true
+the bullet reader takes neither a rule nor emphasis for a bullet: true
+a level-4 subheading stays inside Unreleased, and the released section does not: true
