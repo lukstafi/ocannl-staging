@@ -121,25 +121,25 @@ jobs:
                {"os": "windows-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]'
           || '[{"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]') }}
     runs-on: ${{ matrix.os }}
-    # setup-ocaml's `dune-cache: true` exports DUNE_CACHE_ROOT but never
-    # DUNE_CACHE, and dune's shared cache is opt-in -- so the cache it saves is
-    # ~400 bytes on every platform and every run recompiles from scratch.
-    # Enabling it here is what makes that input do anything.
-    #
-    # `enabled-except-user-rules` rather than `enabled`: our test suite is
-    # largely user-written rules that run executables, and what those print
-    # depends on runner state dune does not model as a dependency -- the C
-    # toolchain the cc backend shells out to, the host ISA that reaches
-    # `-march=native`, the core count behind pool-rendered Grid loops. Caching
-    # those outputs would let a result recorded on one runner stand in for an
-    # execution that never happened on this one, which is a false green rather
-    # than a speedup. Compilation and linking, the dominant cost, still cache.
+    # No dune shared cache in CI, and explicitly so. Two things rule it out.
+    # Dune's `enabled-except-user-rules` mode -- its default, and what this job
+    # used to set -- excludes OCaml compilation from the shared cache by
+    # construction (module_compilation.ml opts only Melange rules in), so the
+    # cache setup-ocaml used to save for us was a ~400-byte empty tar on every
+    # platform: the "compilation and linking still cache" premise it was kept
+    # under was false, and every run recompiled from scratch anyway. The other
+    # mode, `enabled`, caches user rules too, and our test suite is largely
+    # user-written rules that run executables whose output depends on runner
+    # state dune does not model as a dependency -- the C toolchain the cc
+    # backend shells out to, the host ISA that reaches `-march=native`, the
+    # core count behind pool-rendered Grid loops. A result recorded on one
+    # runner standing in for an execution that never happened on this one is a
+    # false green, not a speedup. `disabled` says so rather than leaving the
+    # default's silence to be mistaken for a working cache again. A compile-only
+    # shared cache that never sees test outputs is a design of its own (two
+    # dune walks over two cache roots) and is gh-ocannl-901.
     env:
-      DUNE_CACHE: enabled-except-user-rules
-      # DUNE_CACHE_ROOT is C:\dune while the workspace lives on D:\, and dune's
-      # default hardlink storage mode cannot cross volumes. `runner.os` is not
-      # available in a job-level `env`, hence the matrix test.
-      DUNE_CACHE_STORAGE_MODE: ${{ matrix.os == 'windows-latest' && 'copy' || 'auto' }}
+      DUNE_CACHE: disabled
     steps:
     - name: Set git to use LF
       run: |
@@ -156,7 +156,7 @@ jobs:
       if: runner.os == 'Windows'
       continue-on-error: true
       run: |
-        foreach ($path in 'D:\a', 'C:\.opam', 'C:\dune', $env:TEMP) {
+        foreach ($path in 'D:\a', 'C:\.opam', $env:TEMP) {
           try { Add-MpPreference -ExclusionPath $path -ErrorAction Stop }
           catch { Write-Host "could not exclude ${path}: $($_.Exception.Message)" }
         }
@@ -176,8 +176,25 @@ jobs:
     - uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ matrix.ocaml-compiler }}
-        dune-cache: true
         allow-prerelease-opam: false
+    # Fetch package archives from opam.ocaml.org's cache before their upstream
+    # URLs. setup-ocaml points opam at the GIT opam-repository, whose `repo` file
+    # declares no `archive-mirrors` (the HTTP mirror's does), so a bare switch
+    # here downloads every archive from wherever its package's `url` says --
+    # and GitLab generates tag archives on demand with no byte-stability
+    # promise, so an opam-repository checksum can stop matching what
+    # gitlab.inria.fr serves until someone re-pins it (menhir, gh-ocannl-889;
+    # exit 40 on every leg that had to fetch). The cache is keyed by checksum,
+    # holds every archive opam-repository's CI has verified, and is what the
+    # default HTTP repository consults first; a package absent from it still
+    # falls through to upstream. The set form (not `+=`) keeps a restored opam
+    # root from accumulating duplicates. `shell: bash` because the value is
+    # opam syntax and must reach opam with its double quotes intact, which
+    # PowerShell's native-command quoting does not guarantee; either bash on the
+    # Windows image serves for one opam invocation.
+    - name: Route archive fetches through the opam.ocaml.org cache
+      shell: bash
+      run: opam option 'archive-mirrors="https://opam.ocaml.org/cache"'
     # FIXME: We need to pin printbox-text until > 0.12.0 is released.
     - run: opam pin -n printbox-text https://github.com/c-cube/printbox.git
     # FIXME: pin pcre until a release > 8.0.5: released stubs fail to compile with
@@ -195,7 +212,11 @@ jobs:
     # pin that can move while the project opam files stay byte-identical, or a hit
     # serves stale dependency revisions indefinitely. The action derives both
     # from live solver state, so a new compatible release and a new pin join the
-    # key without caller-owned lists. It carries the rest of the
+    # key without caller-owned lists -- and leaves the project's own pinned
+    # definitions out, since opam records the checkout's git ref in them
+    # (`#master` here, `#HEAD` on a pull request's detached checkout), which
+    # keyed the cache by event type and made every PR run miss the switch
+    # master had just saved (gh-ocannl-889). It carries the rest of the
     # reasoning; `gh-pages-api.yml` calls the same one, keeping the workflows
     # from diverging again (gh-ocannl-732, gh-ocannl-809).
     - name: Resolve opam dependency source revisions

@@ -33,14 +33,36 @@ solution=$(opam --cli=2.1 list --safe --color=never --resolve="$request" \
   || { echo "opam dependency solution was empty" >&2; exit 1; }
 echo "Resolved opam package solution:"
 printf '%s\n' "$solution" | sed 's/^/  /'
-solution_packages=()
+# The digest also covers the solved packages' definitions as the switch holds
+# them, so a metadata-only change to a selected version (a new patch, a depext)
+# still invalidates the key. The project's own packages are left out of that
+# part: the caller pins them from the checkout, and opam records the checkout's
+# git ref in the pinned definition -- `#master` on a branch, `#HEAD` on the
+# detached checkout every pull_request run gets -- so hashing them keyed the
+# cache by EVENT TYPE. Every pull request missed the switch master had just
+# saved for the same tree and paid the full dependency build; the fetch that
+# then died on a rolled upstream archive checksum is what surfaced it
+# (gh-ocannl-889). Their content is already in the callers' keys through
+# `hashFiles('*.opam')`.
+definition_packages=()
+project_packages=
 while IFS= read -r package; do
-  solution_packages+=("$package")
+  name=${package%%.*}
+  if printf '%s\n' "$package_names" | grep -qxF -- "$name"; then
+    project_packages="$project_packages $name"
+  else
+    definition_packages+=("$package")
+  fi
 done <<< "$solution"
+# Without this guard an all-project solution would run `opam show` with no
+# package argument, which describes the current directory instead of failing.
+[ "${#definition_packages[@]}" -gt 0 ] \
+  || { echo "opam dependency solution holds only project packages" >&2; exit 1; }
+echo "Project packages left out of the definition digest:$project_packages"
 solution_digest=$(
   {
     printf '%s\n' "$solution"
-    opam --cli=2.1 show --safe --color=never --raw --sort "${solution_packages[@]}"
+    opam --cli=2.1 show --safe --color=never --raw --sort "${definition_packages[@]}"
   } | hash12
 )
 echo "solution-digest=$solution_digest" >>"$GITHUB_OUTPUT"

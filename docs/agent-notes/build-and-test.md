@@ -1319,8 +1319,18 @@ that they earn a lookup rather than always-loaded space.
   solution digest and resolved-pin digest from `.github/actions/pin-revisions`. That action runs
   after setup-ocaml updates the repositories and after the workflows' `opam pin -n` steps. It asks
   opam's solver for the selected package/version set under the install's test/doc flags, hashes the
-  normalized definitions of those exact versions too, then derives every remote git pin from
-  opam's live registry, resolves it with `git ls-remote`, and digests the shas. A key over
+  normalized definitions of those exact versions too — minus the project's own packages — then
+  derives every remote git pin from opam's live registry, resolves it with `git ls-remote`, and
+  digests the shas. The project packages are left out of the definition hash because `opam pin .`
+  records the checkout's git ref in the pinned definition (`opam show --raw` prints
+  `git+file://…#master` on a branch and `#HEAD` on the detached checkout every `pull_request` run
+  gets), so hashing them keyed the cache by EVENT TYPE: for two days every PR run missed the
+  switch master had just saved for the same tree and paid the 2–6 minute dependency build, while
+  master's own runs hit — and a miss is also a fetch, which is how a rolled upstream archive
+  checksum surfaced as a per-branch red (gh-ocannl-889). `hashFiles('*.opam')` already covers
+  their content. When a key you expected to hit misses, diff the two runs' `Resolved opam package
+  solution` and pin-spec listings first: identical listings with different digests mean the raw
+  definitions differ, and the definitions are not logged. A key over
   `hashFiles('*.opam')` alone is blind both to new compatible
   ordinary-package releases and to the
   branch-tracking pins
@@ -1329,13 +1339,46 @@ that they earn a lookup rather than always-loaded space.
   without a second caller-owned list to update. The action delegates to
   `.github/actions/pin-revisions/resolve.sh`, and `tools/test-pin-revisions.sh` exercises that exact
   production script with fake opam 2.5.2 and git outputs: sorting, duplicates, local-pin exclusion,
-  color suppression, empty registries and failed resolutions all have fault-injected negative
-  controls. CI runs the harness once on its Ubuntu main leg because this is POSIX action plumbing,
-  not an OCaml test or a repository scan, and the fixtures need neither setup-ocaml nor network.
+  project-package exclusion from the definition digest (and the loud failure when the solution
+  holds nothing else), color suppression, empty registries and failed resolutions all have
+  fault-injected negative controls. CI runs the harness once on its Ubuntu main leg because this
+  is POSIX action plumbing, not an OCaml test or a repository scan, and the fixtures need neither
+  setup-ocaml nor network.
   Both workflows use exact-key restores only: cache
   lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
   older switch. And both install non-Windows depexts unconditionally after restore, because those
   are system packages absent from `_opam` (gh-ocannl-809).
+- Every workflow that installs dependencies sets opam's global `archive-mirrors` to
+  `https://opam.ocaml.org/cache` right after setup-ocaml, before any pin or install. setup-ocaml
+  points opam at the GIT opam-repository, whose `repo` file declares no mirror (the HTTP one at
+  opam.ocaml.org does), so a bare CI switch downloads every archive from its package's upstream
+  `url` — and GitLab builds tag archives on demand with no byte-stability promise, so a pinned
+  checksum can stop matching what `gitlab.inria.fr` serves until opam-repository re-pins it
+  (menhir 20260209, gh-ocannl-889: `Bad checksum`, exit 40, on every leg that had to fetch, while
+  legs with a warm `_opam` cache sailed past it). opam consults archive mirrors BEFORE the
+  upstream URLs, keyed by checksum (`<mirror>/md5/<xx>/<hash>`), and the cache holds every archive
+  opam-repository's CI has verified, so a package still falls through to upstream only when it is
+  absent there. Reproduced with a scratch `OPAMROOT`: a package whose `url` points at an invalid
+  host but carries a cached archive's md5 installs with the mirror set and exits 40 without it. It
+  is the set form, `opam option 'archive-mirrors="…"'` (a quoted opam string — the bare URL is a
+  parse error), because `+=` on a restored opam root would accumulate a duplicate per run. Not an
+  answer to a package genuinely missing from the cache, and not a reason to drop menhir: the
+  einsum parser (`tensor/parser.mly`) is what `ppx_ocannl` and the tensor library are built on,
+  and the exposure is generic to every GitLab-hosted package, not menhir's.
+- `ci.yml` sets `DUNE_CACHE: disabled`, on purpose. Dune's default mode,
+  `enabled-except-user-rules`, excludes OCaml compilation from the shared cache by construction
+  (`module_compilation.ml`'s `cm_kind_can_go_in_shared_cache` is true only for Melange, and under
+  that mode every other rule defaults to not cacheable), so the dune cache setup-ocaml's
+  now-deprecated `dune-cache: true` input saved for this job was a ~400-byte empty tar on every
+  platform, and the "compilation still caches" premise the setting was kept under was false —
+  check the post step's `Cache Size` line before believing any CI cache works. The other mode,
+  `enabled`, caches user rules, i.e. the test executions whose output depends on the runner's C
+  toolchain, ISA and core count — a recorded result standing in for an execution is a false green.
+  A compile-only cache is possible but is its own design: dune's rule digest includes the
+  cacheability flag, so a `@check` walk against a shared cache root followed by a test walk with
+  the cache disabled rebuilds everything; the second walk has to stay `enabled` against a
+  throwaway `DUNE_CACHE_ROOT` instead, which also loses the single-walk overlap of compilation
+  with the serialized training chain. That design is gh-ocannl-901.
 - `gh-pages-api.yml` runs for pull requests and `workflow_dispatch` as well as pushes to master, but
   only a push deploys; validation runs receive their own concurrency group and exercise the build
   and cache topology without publishing. Publishing pushes share `gh-pages-deploy` with the other
