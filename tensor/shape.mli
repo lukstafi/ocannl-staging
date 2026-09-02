@@ -333,6 +333,13 @@ val to_padding : t -> (Ir.Ops.axis_padding array * float) option
     different neutral elements (margin must be reset before each operation). Uses the matrix
     convention of putting the input axes last. *)
 
+val with_construction_window : (unit -> 'a) -> 'a
+(** Runs [f] with the construction-in-progress depth raised. While it is positive, every entry point
+    that finalizes inference ([to_dims], [to_padding], [get_projections]) raises [Row.Shape_error]
+    at the finalizer, before anything is committed: [Tensor.op] runs its [op_asn] under it, since
+    the operation has not registered its constraints yet and a finalization there would close its
+    operands without them (gh-ocannl-830). *)
+
 val propagate_shapes : update_step -> unit
 
 val get_projections : update_step -> Ir.Indexing.projections

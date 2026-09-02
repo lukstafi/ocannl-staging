@@ -455,11 +455,14 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      is a promise for the step: it is only redeemed during lowering.
 
      Forcing the handle from within [op_asn] is therefore rejected: this operation's step is not
-     registered and nothing is derived for it. The rejection is a bug report, not a recovery API.
-     Shape inference is session-global and not transactional -- an [op_asn] may have emitted
-     constraints, set delayed references or propagated shapes before forcing, and any construction
-     that fails mid-way (an ordinary shape error at registration included) leaves the solver partly
-     updated -- so the error means "fix the [op_asn]", and the session is reset with
+     registered and nothing is derived for it. So is finalizing inference by any other route
+     ([Shape.to_dims]/[to_padding]): [op_asn] runs under {!Shape.with_construction_window}, and
+     [Shape.finish_inference] refuses while it is open, since this operation's constraints are not
+     registered yet and its operands would close without them. The rejection is a bug report, not a
+     recovery API. Shape inference is session-global and not transactional -- an [op_asn] may have
+     emitted constraints, set delayed references or propagated shapes before forcing, and any
+     construction that fails mid-way (an ordinary shape error at registration included) leaves the
+     solver partly updated -- so the error means "fix the [op_asn]", and the session is reset with
      {!unsafe_reinitialize} rather than continued; the transaction boundary that would make a
      rejected construction reusable is gh-ocannl-903, not this seam. There is no supported reason to
      force it there: forcing the projections runs {!Shape.finish_inference}, which solves and
@@ -493,7 +496,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
   let fwds =
     List.filter_map ordered_ts ~f:(fun ti -> if is_fwd_root ti then Some ti.forward else None)
   in
-  let this_op_asn = op_asn ~t ~projections in
+  let this_op_asn = Shape.with_construction_window (fun () -> op_asn ~t ~projections) in
   (* An [op_asn] that forced the handle and swallowed the rejection has built its assignments over a
      poisoned thunk (a forced lazy re-raises); the operation is unusable either way. *)
   if !forced_early then

@@ -17,8 +17,11 @@ files.
   shape update step only after `op_asn` returns, because the step's `neutral_elem` is immutable and
   is read off the assignments (`Shape.derive_projections` consumes it for the gh-504 clamped-window
   decision and for committing the margins' neutral, so a step with an unknown neutral element must
-  never exist). Consequences: an `op_asn` must not force `projections.projections` — rejected with
-  a `Session_error` before the step is registered (`neutral_elem_guard.ml`) — while `product_shape`
+  never exist). Consequences: an `op_asn` must not force `projections.projections`, nor finalize
+  inference by any other route (`to_dims`/`to_padding`): `Tensor.op` runs `op_asn` under
+  `Shape.with_construction_window`, and `finish_inference` refuses while it is open, since the
+  operation's constraints are not registered yet and its operands would close without them —
+  rejected before the step is registered, at the finalizer (`neutral_elem_guard.ml`) — while `product_shape`
   and `*_pspace` intros stay usable there (the proxy shape is a function of the shape and logic
   alone); captured references are bound at registration, so `set_equal`/`set_scale` on them belong
   at the `%op` level, not in an `op_asn`. The rejection is a BUG REPORT, not a recovery API: shape
