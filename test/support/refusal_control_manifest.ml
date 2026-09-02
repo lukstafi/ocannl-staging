@@ -412,6 +412,7 @@ let raw_entries =
         "[scanner-refusal:06c1a18e5c944d59c7a4558c689db819] unreadable line inside";
         "[scanner-refusal:781d64c7cd92fd55d5eb911b61f21dbe] key spelled plainly";
         "[scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than";
+        "[scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes";
         "[scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation";
         "[scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than";
         "[scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows";

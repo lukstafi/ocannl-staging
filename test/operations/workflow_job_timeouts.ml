@@ -111,6 +111,21 @@ let is_block_scalar value =
   Option.value_map after_indicator ~default:false
     ~f:(String.for_all ~f:(fun c -> Char.equal c '-' || Char.equal c '+'))
 
+(* A block scalar is introduced by a KEY, and that key may itself sit in a sequence entry -- [- run:
+   |] is how every step in this repository spells it. Strip the entry markers before asking whether
+   the line opens a block, or the scripts under `steps:` are never dropped and their contents are
+   read as workflow structure. *)
+let block_scalar_opener line =
+  let rec strip_markers text =
+    let stripped = String.lstrip text in
+    match String.chop_prefix stripped ~prefix:"-" with
+    | Some rest when String.is_prefix rest ~prefix:" " || String.is_empty rest -> strip_markers rest
+    | _ -> stripped
+  in
+  match key_of { line with text = strip_markers line.text } with
+  | Some (_, value) -> is_block_scalar value
+  | None -> false
+
 let drop_block_scalars lines =
   let skip_below = ref None in
   List.filter lines ~f:(fun line ->
@@ -124,9 +139,7 @@ let drop_block_scalars lines =
       in
       if inside then false
       else (
-        (match key_of line with
-        | Some (_, value) when is_block_scalar value -> skip_below := Some line.indent
-        | _ -> ());
+        if block_scalar_opener line then skip_below := Some line.indent;
         true))
 
 (* The lines strictly under [head], i.e. up to the next line at [head]'s indentation or
@@ -179,9 +192,10 @@ let jobs_of ~file text =
   let refuse reason = raise (Refuse reason) in
   let required option ~reason = match option with Some value -> value | None -> refuse reason in
   let read () =
-    let lines = content_lines text in
+    (* Block scalars first: a tab is legal CONTENT (a Makefile recipe in a `run: |` body), and only
+       a tab this reader would have to measure as indentation is a refusal. *)
+    let lines = drop_block_scalars (content_lines text) in
     if List.exists lines ~f:(fun { text; _ } -> leading_tab text) then refuse Tab_indentation;
-    let lines = drop_block_scalars lines in
     let position, head = required (jobs_head lines) ~reason:No_jobs_key in
     (match key_of head with
     | Some (_, value) when not (String.is_empty (strip_trailing_comment value)) ->
@@ -602,6 +616,21 @@ let control () =
            \      - run: echo hi\n";
          ])
   in
+  let tab_inside_block_scalar =
+    run
+      (workflow
+         [
+           "  build:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 10\n\
+           \    steps:\n\
+           \      - run: |\n\
+           \          cat > Makefile <<'EOF'\n\
+           \          all:\n\
+           \          \techo hi\n\
+           \          EOF\n";
+         ])
+  in
   let tab_indented =
     run "name: fixture\non: workflow_dispatch\njobs:\n\tbuild:\n\t\truns-on: ubuntu-latest\n"
   in
@@ -696,6 +725,8 @@ let control () =
     (refused "unreadable job key"
        ~messages:[ "which is not a key this reader can parse" ]
        unreadable_job_key);
+  p "a tab inside a run block scalar is content, and its workflow passes"
+    (passed "tab inside a block scalar" tab_inside_block_scalar);
   p "a tab-indented workflow is refused, this reader measuring indentation in spaces"
     (refused "tab indentation"
        ~messages:[ unreadable "a line indented with tabs, which this reader measures in spaces" ]
