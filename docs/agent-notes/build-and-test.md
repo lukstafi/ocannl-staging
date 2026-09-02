@@ -72,9 +72,18 @@ that they earn a lookup rather than always-loaded space.
   growing under it for as long as the PR is open. So fetch the STAGING remote — whose name is local
   and need not be `origin` (AGENTS.md, Pull Requests) — rebase onto its `master`, or merge it in
   where the branch is shared and rewriting is not yours to do (as #413 did), and re-run the scan
-  BEFORE opening such a PR and again before merging it; where neither is welcome, build the merge
-  commit on a scratch branch and run it there. What the omission buys is a false failure on a
-  colleague's correct work, which is the outcome that gets a check disabled rather than fixed.
+  BEFORE opening such a PR; where neither is welcome, build the merge commit on a scratch branch
+  and run it there. What the omission buys is a false failure on a colleague's correct work, which
+  is the outcome that gets a check disabled rather than fixed. Merging does NOT repeat the
+  exercise: under the roll-forward policy (gh-ocannl-861) the gate is one green full-matrix run
+  for the PR's last commit, and a clean merge proceeds on it however far the base has moved —
+  re-verifying after every sibling merge is exactly the cost the policy removed (staging#533 ran
+  three clean rebases and three full CI cycles over an unchanged topic diff before it). Only a
+  merge that needed a conflict-resolving commit waits for green CI on that commit, which the
+  checks gate reads naturally as the new head; rebase again before merging only when the base's
+  drift visibly touches the files the PR changes (`git diff origin/master..HEAD --stat`, two
+  dots). A scan that turns red on the merged tree anyway is a master red like any other, owned by
+  the CI-red triage routine (the CI section below) rather than by the session that merged.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
   about it, and that is the more expensive half of the same story. #413's fixtures came from a
   survey of the notes as they stood; the survey found no bullet continued after a blank line, so
