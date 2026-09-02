@@ -353,7 +353,7 @@ verdict_ratchet.ml: [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read stri
 verdict_ratchet.ml: [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 workflow_job_timeouts.ml has exactly the explicitly assigned refusal controls: true
-workflow_job_timeouts.ml: [scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:ad8d2fa1c69a86cbbb71c86de6fa1311] checked-in GitHub workflow (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:5c0ba3bcf03da17c20f587f737d8937b] job-level runtime ceiling (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:e2fcdedf2103db72a9b3c2b933471215] reusable-workflow call passes (claim) is catalogued beside workflow_job_timeouts.expected: true
@@ -365,5 +365,14 @@ workflow_job_timeouts.ml: [scanner-refusal:77aa0c14bff72954feb09cf4c386a264] reu
 workflow_job_timeouts.ml: [scanner-refusal:9f23eda281ea0c55a77c9e409e9471f6] timeout-minutes key with (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:fbfd4638215ae05bcb97101b459be8e4] timeout-minutes key whose (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:186c72d23e1ef379b2b9d5bd606fc1aa] real ceiling wearing (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:7d12059cdf4ae071e9bf2d7e0576b7ae] reusable-workflow call carrying (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:9a63876ae18ab76d104686433857254d] workflow is discovered (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:c8c51a8f093266f7fc1d691b313d9558] steps sequence starts (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:9c0d4e8cb577c3910eed5b4e88a437de] reader cannot decide (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:a4809b85dfbba2c0a2c42ed01d417e17] refused rather than (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:90eaa52d68d4ad193b704ab3d1946e09] keys being unreadable (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than (claim) is catalogued beside workflow_job_timeouts.expected: true
+workflow_job_timeouts.ml: [scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than (claim) is catalogued beside workflow_job_timeouts.expected: true
 workflow_job_timeouts.ml: [scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows (claim) is catalogued beside workflow_job_timeouts.expected: true

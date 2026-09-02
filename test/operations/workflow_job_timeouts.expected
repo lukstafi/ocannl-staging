@@ -5,7 +5,7 @@ GitHub workflow jobs and the runtime ceiling each one declares:
   .github/workflows/gh-pages-api.yml deploy: timeout-minutes: 30
   .github/workflows/gh-pages-docs.yml deploy: timeout-minutes: 30
 
-every checked-in GitHub workflow file declares a top-level jobs mapping: true
+every checked-in GitHub workflow file presents jobs this scan can read: true
 every workflow job declares a job-level runtime ceiling, unless it calls a reusable workflow: true
 every workflow job states that ceiling ahead of the steps it bounds: true
 
@@ -21,11 +21,20 @@ a reusable-workflow call that declares a ceiling GitHub would reject is refused 
 a timeout-minutes key with nothing behind it declares no ceiling and is refused: true
 a timeout-minutes key whose whole value is a comment is refused the same way: true
 a real ceiling wearing a trailing comment is a ceiling, and its job passes: true
+a reusable-workflow call carrying the key with no value is refused on the key, not the value: true
+a .yaml workflow is discovered and judged like a .yml one: true
+a job whose steps sequence starts at its own key indentation is still judged, and refused unbounded: true
+an inline jobs value is refused as a shape this reader cannot decide: true
+a jobs key with no entries under it is refused rather than read as a file of no jobs: true
+an inline job body is refused, its keys being unreadable to this reader: true
+a job with no keys under it is refused rather than read as a job without a ceiling: true
+a quoted job key is refused rather than passed over, ceiling and all: true
+a tab-indented workflow is refused, this reader measuring indentation in spaces: true
 a workflow file with no jobs mapping is refused rather than read as having no jobs: true
 a YAML file nested under .github/workflows is no workflow, and its unbounded job is not judged: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow
+  [scanner-refusal:ad8d2fa1c69a86cbbb71c86de6fa1311] checked-in GitHub workflow
   [scanner-refusal:5c0ba3bcf03da17c20f587f737d8937b] job-level runtime ceiling
   [scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states
   [scanner-refusal:e2fcdedf2103db72a9b3c2b933471215] reusable-workflow call passes
@@ -37,5 +46,14 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:9f23eda281ea0c55a77c9e409e9471f6] timeout-minutes key with
   [scanner-refusal:fbfd4638215ae05bcb97101b459be8e4] timeout-minutes key whose
   [scanner-refusal:186c72d23e1ef379b2b9d5bd606fc1aa] real ceiling wearing
+  [scanner-refusal:7d12059cdf4ae071e9bf2d7e0576b7ae] reusable-workflow call carrying
+  [scanner-refusal:9a63876ae18ab76d104686433857254d] workflow is discovered
+  [scanner-refusal:c8c51a8f093266f7fc1d691b313d9558] steps sequence starts
+  [scanner-refusal:9c0d4e8cb577c3910eed5b4e88a437de] reader cannot decide
+  [scanner-refusal:a4809b85dfbba2c0a2c42ed01d417e17] refused rather than
+  [scanner-refusal:90eaa52d68d4ad193b704ab3d1946e09] keys being unreadable
+  [scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than
+  [scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than
+  [scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation
   [scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than
   [scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows

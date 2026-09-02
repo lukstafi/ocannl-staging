@@ -390,7 +390,7 @@ let raw_entries =
       ] );
     ( "workflow_job_timeouts.ml",
       [
-        "[scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow";
+        "[scanner-refusal:ad8d2fa1c69a86cbbb71c86de6fa1311] checked-in GitHub workflow";
         "[scanner-refusal:5c0ba3bcf03da17c20f587f737d8937b] job-level runtime ceiling";
         "[scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states";
         "[scanner-refusal:e2fcdedf2103db72a9b3c2b933471215] reusable-workflow call passes";
@@ -402,6 +402,15 @@ let raw_entries =
         "[scanner-refusal:9f23eda281ea0c55a77c9e409e9471f6] timeout-minutes key with";
         "[scanner-refusal:fbfd4638215ae05bcb97101b459be8e4] timeout-minutes key whose";
         "[scanner-refusal:186c72d23e1ef379b2b9d5bd606fc1aa] real ceiling wearing";
+        "[scanner-refusal:7d12059cdf4ae071e9bf2d7e0576b7ae] reusable-workflow call carrying";
+        "[scanner-refusal:9a63876ae18ab76d104686433857254d] workflow is discovered";
+        "[scanner-refusal:c8c51a8f093266f7fc1d691b313d9558] steps sequence starts";
+        "[scanner-refusal:9c0d4e8cb577c3910eed5b4e88a437de] reader cannot decide";
+        "[scanner-refusal:a4809b85dfbba2c0a2c42ed01d417e17] refused rather than";
+        "[scanner-refusal:90eaa52d68d4ad193b704ab3d1946e09] keys being unreadable";
+        "[scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than";
+        "[scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than";
+        "[scanner-refusal:501e8a68f00d9f02dc169f32d4980a9f] reader measuring indentation";
         "[scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than";
         "[scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows";
       ] );

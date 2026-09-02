@@ -23,6 +23,16 @@
    if it does -- and the jobs it runs are bounded in the workflow it calls. So a caller job is
    required NOT to declare one, rather than exempted from the question.
 
+   {1 What the reader refuses}
+
+   The two levels this scan reads -- the job keys under [jobs:], and the keys under each job -- must
+   present a shape it can DECIDE. Anything else is refused by name rather than read generously: a
+   file with no [jobs:] key, an inline [jobs: {}] value, a [jobs:] block with no entries, a job
+   whose body is inline, a job with no keys, a line at either level this reader cannot parse as a
+   key, and a file indented with tabs. The alternative -- accepting what it cannot parse -- makes a
+   file that was never examined indistinguishable from one that passed, which is the failure mode
+   this whole scan exists to prevent.
+
    The live tree is valid, which is exactly why its refusals need synthetic controls: green because
    intact and green because blind are the same output. [control] builds workflow trees that differ
    from a legitimate one in one respect each, runs this same executable over them as a CHILD, and
@@ -123,66 +133,114 @@ let drop_block_scalars lines =
    shallower. *)
 let body_of ~head rest = List.take_while rest ~f:(fun line -> line.indent > head.indent)
 
-let jobs_block lines =
-  match
-    List.findi lines ~f:(fun _ line ->
-        line.indent = 0 && match key_of line with Some ("jobs", _) -> true | _ -> false)
-  with
-  | None -> None
-  | Some (position, head) -> Some (body_of ~head (List.drop lines (position + 1)))
+(* Why a file cannot be judged, in the words its refusal will use. Keeping the reasons in one type
+   is what makes "the reader refuses what it cannot decide" checkable: a new shape adds a
+   constructor here and an arm to the controls, rather than a silent acceptance nobody sees. *)
+type unreadable =
+  | Tab_indentation
+  | No_jobs_key
+  | Inline_jobs_value
+  | Empty_jobs_block
+  | Unreadable_key of int
+  | Inline_job_body of string
+  | Job_without_keys of string
+
+let explain = function
+  | Tab_indentation -> "a line indented with tabs, which this reader measures in spaces"
+  | No_jobs_key -> "no top-level `jobs:` key"
+  | Inline_jobs_value -> "an inline `jobs:` value rather than a block of job entries"
+  | Empty_jobs_block -> "a `jobs:` key with no job entries under it"
+  | Unreadable_key line -> Printf.sprintf "line %d, which is not a key this reader can parse" line
+  | Inline_job_body name -> Printf.sprintf "an inline body for job `%s`" name
+  | Job_without_keys name -> Printf.sprintf "no keys at all under job `%s`" name
+
+type reading = Jobs of job list | Unreadable of unreadable
+
+let leading_tab text =
+  let rec scan index =
+    index < String.length text
+    && (Char.equal text.[index] '\t' || (Char.equal text.[index] ' ' && scan (index + 1)))
+  in
+  scan 0
+
+let jobs_head lines =
+  List.findi lines ~f:(fun _ line ->
+      line.indent = 0 && match key_of line with Some ("jobs", _) -> true | _ -> false)
 
 let minimum_indent lines =
   List.min_elt (List.map lines ~f:(fun { indent; _ } -> indent)) ~compare:Int.compare
 
+(* Reads the two levels this scan decides, and refuses -- by name -- every shape it cannot. The
+   refusal is raised rather than returned so that no arm can degrade into an empty job list, which
+   is the shape that would make an unexamined file look like a passing one. *)
+exception Refuse of unreadable
+
 let jobs_of ~file text =
-  let lines = drop_block_scalars (content_lines text) in
-  match jobs_block lines with
-  | None -> None
-  | Some block ->
-      let job_indent = Option.value (minimum_indent block) ~default:0 in
-      let rec collect found = function
-        | [] -> List.rev found
-        | head :: rest when head.indent = job_indent -> (
-            let body = body_of ~head rest in
-            match key_of head with
-            | None -> collect found rest
-            | Some (name, _) ->
-                let key_indent = Option.value (minimum_indent body) ~default:0 in
-                let job_keys =
-                  List.filter_map body ~f:(fun line ->
-                      if line.indent = key_indent then
-                        Option.map (key_of line) ~f:(fun (key, value) -> (line.number, key, value))
-                      else None)
-                in
-                let timeout =
-                  List.find_map job_keys ~f:(fun (number, key, value) ->
-                      Option.some_if
-                        (String.equal key "timeout-minutes")
-                        (number, strip_trailing_comment value))
-                in
-                let steps_line =
-                  List.find_map job_keys ~f:(fun (number, key, _) ->
-                      Option.some_if (String.equal key "steps") number)
-                in
-                let calls_reusable =
-                  List.exists job_keys ~f:(fun (_, key, _) -> String.equal key "uses")
-                in
-                collect ({ file; name; timeout; steps_line; calls_reusable } :: found) rest)
-        | _ :: rest -> collect found rest
-      in
-      Some (collect [] block)
+  let refuse reason = raise (Refuse reason) in
+  let required option ~reason = match option with Some value -> value | None -> refuse reason in
+  let read () =
+    let lines = content_lines text in
+    if List.exists lines ~f:(fun { text; _ } -> leading_tab text) then refuse Tab_indentation;
+    let lines = drop_block_scalars lines in
+    let position, head = required (jobs_head lines) ~reason:No_jobs_key in
+    (match key_of head with
+    | Some (_, value) when not (String.is_empty (strip_trailing_comment value)) ->
+        refuse Inline_jobs_value
+    | _ -> ());
+    let block = body_of ~head (List.drop lines (position + 1)) in
+    let job_indent = required (minimum_indent block) ~reason:Empty_jobs_block in
+    let rec collect found = function
+      | [] -> List.rev found
+      | head :: rest when head.indent = job_indent ->
+          let body = body_of ~head rest in
+          let name, inline = required (key_of head) ~reason:(Unreadable_key head.number) in
+          if not (String.is_empty (strip_trailing_comment inline)) then
+            refuse (Inline_job_body name);
+          let key_indent = required (minimum_indent body) ~reason:(Job_without_keys name) in
+          let job_keys =
+            (* A block sequence may be written at its key's own indentation ([steps:] then [- name:
+               …] both at four), and those entries are the key's VALUE, not further keys of the job.
+               `.github/workflows/ci.yml` is written that way. *)
+            List.filter body ~f:(fun line ->
+                line.indent = key_indent
+                && not (String.is_prefix (String.strip line.text) ~prefix:"-"))
+            |> List.map ~f:(fun line ->
+                let key, value = required (key_of line) ~reason:(Unreadable_key line.number) in
+                (line.number, key, value))
+          in
+          let timeout =
+            List.find_map job_keys ~f:(fun (number, key, value) ->
+                Option.some_if
+                  (String.equal key "timeout-minutes")
+                  (number, strip_trailing_comment value))
+          in
+          let steps_line =
+            List.find_map job_keys ~f:(fun (number, key, _) ->
+                Option.some_if (String.equal key "steps") number)
+          in
+          let calls_reusable =
+            List.exists job_keys ~f:(fun (_, key, _) -> String.equal key "uses")
+          in
+          collect ({ file; name; timeout; steps_line; calls_reusable } :: found) rest
+      | line :: rest ->
+          if line.indent < job_indent then refuse (Unreadable_key line.number)
+          else collect found rest
+    in
+    match collect [] block with [] -> refuse Empty_jobs_block | jobs -> jobs
+  in
+  match read () with jobs -> Jobs jobs | exception Refuse reason -> Unreadable reason
 
 let declared_timeout job =
   match job.timeout with
   | None -> None
   | Some (_, value) -> Option.some_if (not (String.is_empty value)) value
 
-(* Two-sided: an ordinary job must declare a ceiling, and a caller job must not -- GitHub rejects
+(* Two-sided: an ordinary job must declare a ceiling, and a caller job must not. GitHub rejects
    `timeout-minutes` on the job-level `uses:` form, so requiring it there would demand a workflow
-   that cannot run. *)
+   that cannot run -- and for a caller it is the KEY that GitHub rejects, whatever value follows it,
+   which is why this side asks about [job.timeout] rather than about a value that survived. *)
 let bounded job =
-  if job.calls_reusable then Option.is_none (declared_timeout job)
-  else Option.is_some (declared_timeout job)
+  if job.calls_reusable then Option.is_none job.timeout else Option.is_some (declared_timeout job)
 
 let ahead_of_steps job =
   match (job.timeout, job.steps_line) with
@@ -192,9 +250,11 @@ let ahead_of_steps job =
 
 let describe job =
   if job.calls_reusable then
-    match declared_timeout job with
+    match job.timeout with
     | None -> "calls a reusable workflow, which carries its own ceilings"
-    | Some value -> "calls a reusable workflow AND declares timeout-minutes: " ^ value
+    | Some (_, value) ->
+        "calls a reusable workflow AND declares timeout-minutes: "
+        ^ if String.is_empty value then "(no value)" else value
   else
     match declared_timeout job with
     | Some value -> "timeout-minutes: " ^ value
@@ -223,17 +283,23 @@ let scan workspace_root paths =
     List.map files ~f:(fun (relative, path) ->
         (relative, jobs_of ~file:relative (In_channel.read_all path)))
   in
-  let jobs = List.concat_map scanned ~f:(fun (_, jobs) -> Option.value jobs ~default:[]) in
+  let jobs =
+    List.concat_map scanned ~f:(fun (_, reading) ->
+        match reading with Jobs jobs -> jobs | Unreadable _ -> [])
+  in
   printf "GitHub workflow jobs and the runtime ceiling each one declares:\n";
-  List.iter scanned ~f:(fun (relative, jobs) ->
-      match jobs with
-      | None -> printf "  %s: no top-level jobs block\n" relative
-      | Some jobs ->
+  List.iter scanned ~f:(fun (relative, reading) ->
+      match reading with
+      | Unreadable reason -> printf "  %s: UNREADABLE -- %s\n" relative (explain reason)
+      | Jobs jobs ->
           List.iter jobs ~f:(fun job -> printf "  %s %s: %s\n" relative job.name (describe job)));
   printf "\n";
-  List.iter scanned ~f:(fun (relative, jobs) ->
-      if Option.is_none jobs then
-        eprintf "%s: no top-level `jobs:` key; this scan cannot answer for its jobs\n" relative);
+  List.iter scanned ~f:(fun (relative, reading) ->
+      match reading with
+      | Jobs _ -> ()
+      | Unreadable reason ->
+          eprintf "%s: this scan cannot answer for its jobs -- it found %s\n" relative
+            (explain reason));
   List.iter jobs ~f:(fun job ->
       if not (bounded job) then
         if job.calls_reusable then
@@ -248,8 +314,8 @@ let scan workspace_root paths =
             job.file job.name
       else if not (ahead_of_steps job) then
         eprintf "%s: job `%s` declares `timeout-minutes` after its `steps:`\n" job.file job.name);
-  p_all ~min:4 "every checked-in GitHub workflow file declares a top-level jobs mapping" scanned
-    ~f:(fun (_, jobs) -> Option.is_some jobs);
+  p_all ~min:4 "every checked-in GitHub workflow file presents jobs this scan can read" scanned
+    ~f:(fun (_, reading) -> match reading with Jobs _ -> true | Unreadable _ -> false);
   p_all
     "every workflow job declares a job-level runtime ceiling, unless it calls a reusable workflow"
     jobs ~f:bounded;
@@ -325,21 +391,21 @@ let control () =
   in
   let fixture = Stdlib.Filename.temp_dir "workflow timeouts control " "" in
   let case_index = ref 0 in
-  let run ?(extra = []) subject =
+  (* One filler is a `.yaml`, so the accepted arms exercise both discovered spellings; a refusing
+     arm names its subject `.yaml` too, which is what makes discovery of that spelling load-bearing
+     rather than incidental. *)
+  let run ?(extra = []) ?(subject_name = "subject.yml") subject =
     Int.incr case_index;
     let root = Stdlib.Filename.concat fixture (Printf.sprintf "case%d" !case_index) in
     let workflows = Stdlib.Filename.concat root ".github/workflows" in
-    let filler index = Printf.sprintf "filler%d.yml" index in
-    List.iter [ 1; 2; 3 ] ~f:(fun index ->
-        write_file
-          (Stdlib.Filename.concat workflows (filler index))
-          (workflow [ sound_job ~name:"build" ]));
-    write_file (Stdlib.Filename.concat workflows "subject.yml") subject;
+    let fillers = [ "filler1.yml"; "filler2.yml"; "filler3.yaml" ] in
+    List.iter fillers ~f:(fun name ->
+        write_file (Stdlib.Filename.concat workflows name) (workflow [ sound_job ~name:"build" ]));
+    write_file (Stdlib.Filename.concat workflows subject_name) subject;
     List.iter extra ~f:(fun (path, content) ->
         write_file (Stdlib.Filename.concat root path) content);
     let files =
-      ("subject.yml" :: List.map [ 1; 2; 3 ] ~f:filler
-      |> List.map ~f:(Stdlib.Filename.concat ".github/workflows"))
+      (subject_name :: fillers |> List.map ~f:(Stdlib.Filename.concat ".github/workflows"))
       @ List.map extra ~f:fst
     in
     run_child ~exe ~root ~files
@@ -365,9 +431,15 @@ let control () =
     if not ok then report label outcome;
     ok
   in
-  let missing_timeout name =
-    Printf.sprintf ".github/workflows/subject.yml: job `%s` declares no job-level `timeout-minutes`"
+  let missing_timeout ?(file = "subject.yml") name =
+    Printf.sprintf ".github/workflows/%s: job `%s` declares no job-level `timeout-minutes`" file
       name
+  in
+  let unreadable reason =
+    Printf.sprintf "this scan cannot answer for its jobs -- it found %s" reason
+  in
+  let unbounded_job name =
+    Printf.sprintf "  %s:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n" name
   in
   let legitimate =
     run
@@ -380,6 +452,14 @@ let control () =
            \      - run: |\n\
            \          echo 'a block scalar mentioning timeout-minutes: 1'\n";
            "  caller:\n    uses: ./.github/workflows/filler1.yml\n";
+           (* The shape `ci.yml` is written in: the sequence under `steps:` starts at the key's own
+              indentation rather than deeper. *)
+           "  flush_sequence:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 15\n\
+           \    steps:\n\
+           \    - name: one\n\
+           \      run: echo hi\n";
            sound_job ~name:"plain";
          ])
   in
@@ -461,7 +541,39 @@ let control () =
            \      - run: echo hi\n";
          ])
   in
+  let caller_with_empty_timeout =
+    run
+      (workflow [ "  caller:\n    uses: ./.github/workflows/filler1.yml\n    timeout-minutes:\n" ])
+  in
+  let yaml_subject = run ~subject_name:"subject.yaml" (workflow [ unbounded_job "unbounded" ]) in
+  let flush_sequence_unbounded =
+    run
+      (workflow
+         [
+           "  flush_sequence:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    steps:\n\
+           \    - name: one\n\
+           \      run: echo hi\n";
+         ])
+  in
   let no_jobs = run "name: fixture\non: workflow_dispatch\n" in
+  (* The shapes the reader refuses rather than reads generously. Each is a file that would otherwise
+     be examined by nobody while every claim stayed green. *)
+  let inline_jobs = run "name: fixture\non: workflow_dispatch\njobs: {}\n" in
+  let empty_jobs_block = run "name: fixture\non: workflow_dispatch\njobs:\n" in
+  let inline_job_body =
+    run "name: fixture\non: workflow_dispatch\njobs:\n  build: { runs-on: ubuntu-latest }\n"
+  in
+  let job_without_keys = run "name: fixture\non: workflow_dispatch\njobs:\n  build:\n" in
+  let unreadable_job_key =
+    run
+      ("name: fixture\non: workflow_dispatch\njobs:\n  \"quoted job\":\n"
+     ^ "    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo hi\n")
+  in
+  let tab_indented =
+    run "name: fixture\non: workflow_dispatch\njobs:\n\tbuild:\n\t\truns-on: ubuntu-latest\n"
+  in
   (* A YAML file in a subdirectory of `.github/workflows` is not a workflow: GitHub discovers only
      the files sitting directly there. The recursive glob hands this one over anyway, which is what
      makes the depth check load-bearing rather than decorative. *)
@@ -509,17 +621,60 @@ let control () =
        comment_only_value);
   p "a real ceiling wearing a trailing comment is a ceiling, and its job passes"
     (passed "commented ceiling" commented_ceiling);
+  p "a reusable-workflow call carrying the key with no value is refused on the key, not the value"
+    (refused "caller with an empty ceiling key"
+       ~messages:
+         [
+           "job `caller` calls a reusable workflow and declares `timeout-minutes`, which GitHub \
+            rejects on that form";
+         ]
+       caller_with_empty_timeout);
+  p "a .yaml workflow is discovered and judged like a .yml one"
+    (refused "yaml-spelled subject"
+       ~messages:[ missing_timeout ~file:"subject.yaml" "unbounded" ]
+       yaml_subject);
+  p
+    "a job whose steps sequence starts at its own key indentation is still judged, and refused \
+     unbounded"
+    (refused "flush sequence, no ceiling"
+       ~messages:[ missing_timeout "flush_sequence" ]
+       flush_sequence_unbounded);
+  p "an inline jobs value is refused as a shape this reader cannot decide"
+    (refused "inline jobs value"
+       ~messages:[ unreadable "an inline `jobs:` value rather than a block of job entries" ]
+       inline_jobs);
+  p "a jobs key with no entries under it is refused rather than read as a file of no jobs"
+    (refused "empty jobs block"
+       ~messages:[ unreadable "a `jobs:` key with no job entries under it" ]
+       empty_jobs_block);
+  p "an inline job body is refused, its keys being unreadable to this reader"
+    (refused "inline job body"
+       ~messages:[ unreadable "an inline body for job `build`" ]
+       inline_job_body);
+  p "a job with no keys under it is refused rather than read as a job without a ceiling"
+    (refused "job without keys"
+       ~messages:[ unreadable "no keys at all under job `build`" ]
+       job_without_keys);
+  p "a quoted job key is refused rather than passed over, ceiling and all"
+    (refused "unreadable job key"
+       ~messages:[ "which is not a key this reader can parse" ]
+       unreadable_job_key);
+  p "a tab-indented workflow is refused, this reader measuring indentation in spaces"
+    (refused "tab indentation"
+       ~messages:[ unreadable "a line indented with tabs, which this reader measures in spaces" ]
+       tab_indented);
   p "a workflow file with no jobs mapping is refused rather than read as having no jobs"
-    (refused "no jobs mapping"
-       ~messages:[ "no top-level `jobs:` key; this scan cannot answer for its jobs" ]
-       no_jobs);
+    (refused "no jobs mapping" ~messages:[ unreadable "no top-level `jobs:` key" ] no_jobs);
   p "a YAML file nested under .github/workflows is no workflow, and its unbounded job is not judged"
     (passed "nested fixture" nested_fixture);
   Test_utils.Refusal_control_manifest.print "workflow_job_timeouts.ml";
   remove_tree fixture
 
+(* Every file this scan reads arrives as a `@<path>` response file, because the list a repository-
+   wide glob produces may be longer than a Windows command line; see [Test_utils.Scan_argv]. The
+   synthetic controls pass their handful of paths directly, which reaches the same argv. *)
 let () =
-  match Array.to_list Stdlib.Sys.argv with
+  match Array.to_list (Test_utils.Scan_argv.expand Stdlib.Sys.argv) with
   | _ :: "--scan-only" :: workspace_root :: paths -> scan workspace_root paths
   | _ :: workspace_root :: paths ->
       scan workspace_root paths;

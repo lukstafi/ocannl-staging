@@ -4781,16 +4781,27 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads .github/workflows YAML as text.
- (target workflow_job_timeouts.actual)
+ ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has no
+ ; length limit, and handed over as a `@<path>` response file rather than as argv -- the transport
+ ; every repository-wide scan here uses, so no growth of the globbed set can reach Windows'
+ ; 32,767-character command line. See `test/support/scan_argv.ml`.
+ (targets workflow_job_timeouts.actual workflow_job_timeouts.filelist)
  (package neural_nets_lib)
  (deps
   ocannl_config
   (glob_files_rec ../../.github/workflows/*.yml)
   (glob_files_rec ../../.github/workflows/*.yaml))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:workflow_job_timeouts.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    workflow_job_timeouts.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    workflow_job_timeouts.actual
+    (run
+     %{dep:workflow_job_timeouts.exe}
+     %{workspace_root}
+     @workflow_job_timeouts.filelist)))))
 
 (rule
  (alias runtest-workflow_job_timeouts)
