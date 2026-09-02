@@ -86,12 +86,16 @@ that they earn a lookup rather than always-loaded space.
   verdict. Bring the base in again before merging only when its advance touched the PR's own
   files — which the endpoint diff `<staging>/master..HEAD` cannot tell you, since it includes the
   PR's edits and so makes every nonempty PR look drifted. Anchor the question at the branch point
-  instead: `git diff --stat $(git merge-base <staging>/master HEAD) <staging>/master -- $(git
-  diff --name-only --no-renames <staging>/master...HEAD)`, with `<staging>` the remote name
-  resolved above, prints nothing when the base never touched those paths (`--no-renames` lists
-  both names of a file the PR renamed, so an edit the base made to the old name still shows). A
-  scan that turns red on the merged tree anyway is a master red like any other, owned by the
-  CI-red triage routine (the CI section below) rather than by the session that merged.
+  instead, as the intersection of two name lists — `git diff --name-only --no-renames $(git
+  merge-base <staging>/master HEAD) <staging>/master | grep -Fxf <(git diff --name-only
+  --no-renames <staging>/master...HEAD)`, with `<staging>` the remote name resolved above — which
+  prints exactly the PR's files that the base's advance also touched, and nothing when there are
+  none. The pieces are there for reasons: `--no-renames` lists both names of a file the PR
+  renamed, so an edit the base made to the old name still shows, and `grep -Fx` matches whole
+  lines, so a path with spaces is compared as one path instead of being word-split into
+  pathspec fragments. A scan that turns red on the merged tree anyway is a master red like any
+  other, owned by the CI-red triage routine (the CI section below) rather than by the session
+  that merged.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
   about it, and that is the more expensive half of the same story. #413's fixtures came from a
   survey of the notes as they stood; the survey found no bullet continued after a blank line, so
