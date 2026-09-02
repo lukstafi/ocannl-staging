@@ -1329,8 +1329,13 @@ that they earn a lookup rather than always-loaded space.
   master's own runs hit — and a miss is also a fetch, which is how a rolled upstream archive
   checksum surfaced as a per-branch red (gh-ocannl-889). `hashFiles('*.opam')` already covers
   their content. When a key you expected to hit misses, diff the two runs' `Resolved opam package
-  solution` and pin-spec listings first: identical listings with different digests mean the raw
-  definitions differ, and the definitions are not logged. A key over
+  solution` and pin-spec listings first; if those are identical the raw definitions differ, and the
+  `Definition digests:` listing right below the solution names the culprit — one
+  `<name>.<version> <12 hex>` line per non-project definition, hashing that package's own
+  `opam show --raw` block, so the line that moved between the two runs IS the package whose
+  definition changed. That listing costs no extra opam call: it splits the one solver-wide
+  `opam show --raw --sort` the digest already runs, on its `opam-version:` block boundary
+  (~50ms for ~200 packages). A key over
   `hashFiles('*.opam')` alone is blind both to new compatible
   ordinary-package releases and to the
   branch-tracking pins
@@ -1340,8 +1345,10 @@ that they earn a lookup rather than always-loaded space.
   `.github/actions/pin-revisions/resolve.sh`, and `tools/test-pin-revisions.sh` exercises that exact
   production script with fake opam 2.5.2 and git outputs: sorting, duplicates, local-pin exclusion,
   project-package exclusion from the definition digest (and the loud failure when the solution
-  holds nothing else), color suppression, empty registries and failed resolutions all have
-  fault-injected negative controls. CI runs the harness once on its Ubuntu main leg because this
+  holds nothing else), the per-definition digest listing (asserted to carry a DISTINCT hash per
+  definition, so a per-run constant naming nothing would go red), color suppression, empty
+  registries and failed resolutions all have fault-injected negative controls. CI runs the harness
+  once on its Ubuntu main leg because this
   is POSIX action plumbing, not an OCaml test or a repository scan, and the fixtures need neither
   setup-ocaml nor network.
   Both workflows use exact-key restores only: cache
