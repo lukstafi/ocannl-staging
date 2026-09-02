@@ -1543,4 +1543,13 @@ that they earn a lookup rather than always-loaded space.
   (`candidates_failed`) — nothing timed, nothing contributed — so require the load's own evidence
   for absence: a row-less routine must show `timings_contended > 0`. Put the per-routine
   timed/refused/failed accounting on stderr so a red run names the refused routines instead of only
-  showing a shorter list.
+  showing a shorter list. The same load empties a SEARCH, not only its rows: on the hip iGPU the
+  09-02 sweep (and 08-31 before it) ran `test/operations` in parallel and the small searches in
+  `autotune_routine_name` and `autotune_serial_baseline` had every window refused, so
+  `candidates_timed >= 1`, `default_ms` being `Some`, and "the passed name reached the rows" were all
+  false with nothing wrong in the tuner (they pass alone, and six concurrent copies of each passed
+  here while logging `NOT TIMED` refusals). Every claim of the form "the search timed / measured X"
+  in a tuner test therefore admits `timings_contended > 0` as the one alternative, and the rows
+  claims take the biconditional shape above. The admission gate itself is not the bug: refusing to
+  rank a stalled window is the gh-855 design, and a search that refused everything ships untuned
+  and uncached so a later cold call retries it.
