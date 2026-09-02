@@ -411,7 +411,11 @@ let raw_entries =
         "[scanner-refusal:78e566c471ad4160d6823ebd5e6bf4d0] refused rather than";
         "[scanner-refusal:06c1a18e5c944d59c7a4558c689db819] unreadable line inside";
         "[scanner-refusal:781d64c7cd92fd55d5eb911b61f21dbe] key spelled plainly";
-        "[scanner-refusal:8f2a013854d8d2d3b9a375c2c760bbff] refused rather than";
+        "[scanner-refusal:028700f84c8213b498760b2e7f50530c] bounded job passes";
+        "[scanner-refusal:aa6e1fd6dbb8b02a479bd6e8ca1f9466] quoting hides nothing";
+        "[scanner-refusal:62c5c78cf77044d66c80af05a68c6cea] sequence entry where";
+        "[scanner-refusal:7607f0476a95ee77b5b691412ab32180] body staying content";
+        "[scanner-refusal:2fff1ce44fe968a0f0b0a8600c33dc29] indented root mapping";
         "[scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes";
         "[scanner-refusal:f1d6bc11067a6db9ea16f25c8e526f98] carrying YAML's indentation";
         "[scanner-refusal:63a7ea671879e6eb8a95504d21ae4856] document indents uniformly";

@@ -75,24 +75,48 @@ let content_lines text =
       let stripped = String.strip text in
       (not (String.is_empty stripped))
       && (not (String.is_prefix stripped ~prefix:"#"))
+      (* A `%YAML`/`%TAG` directive and a document marker are not content, and a directive left in
+         would drag the document's base indentation down to its own column zero. *)
+      && (not (String.is_prefix stripped ~prefix:"%"))
       && not (String.is_prefix stripped ~prefix:"---"))
 
 (* A key line is [<name>:] or [<name>: <value>]. The name is unquoted in every workflow this
    repository has, and an unrecognized line is simply not a key -- it cannot become one by being
    read more generously. *)
+(* A key line is [<name>:] or [<name>: <value>], with the name plain or quoted. Quoting is decided
+   HERE and nowhere else, so every level that asks what a key is -- the root mapping, the job keys,
+   the keys inside a job, the header that opens a block scalar -- reads the same grammar; a quoted
+   spelling handled at one of those sites and not the others is how a valid workflow gets refused
+   in one place while passing in another. An unrecognized line is simply not a key: it cannot
+   become one by being read more generously, and its caller refuses it by name. *)
+let plain_key_char c = Char.is_alphanum c || List.mem [ '_'; '-'; '.' ] c ~equal:Char.equal
+
+let quoted_key stripped =
+  let quote = stripped.[0] in
+  if not (Char.equal quote '"' || Char.equal quote '\'') then None
+  else
+    match String.index_from stripped 1 quote with
+    | None -> None
+    | Some closing ->
+        let name = String.sub stripped ~pos:1 ~len:(closing - 1) in
+        let rest = String.drop_prefix stripped (closing + 1) in
+        if String.is_prefix rest ~prefix:":" then
+          Some (name, String.strip (String.drop_prefix rest 1))
+        else None
+
 let key_of { text; _ } =
   let stripped = String.strip text in
-  match String.lsplit2 stripped ~on:':' with
-  | Some (name, rest)
-    when (not (String.is_empty name))
-         && String.for_all name ~f:(fun c ->
-             Char.is_alphanum c || List.mem [ '_'; '-'; '.' ] c ~equal:Char.equal) ->
-      Some (name, String.strip rest)
-  | _ -> None
+  if String.is_empty stripped then None
+  else
+    match quoted_key stripped with
+    | Some key -> Some key
+    | None -> (
+        match String.lsplit2 stripped ~on:':' with
+        | Some (name, rest)
+          when (not (String.is_empty name)) && String.for_all name ~f:plain_key_char ->
+            Some (name, String.strip rest)
+        | _ -> None)
 
-(* A comment is not a value: `timeout-minutes: # decide later` declares the key and no ceiling, and
-   so does a bare `timeout-minutes:`. Both reduce to the empty string here, which is what
-   [declared_timeout] refuses. *)
 let strip_trailing_comment value =
   if String.is_prefix (String.strip value) ~prefix:"#" then ""
   else
@@ -594,14 +618,22 @@ let control () =
     run "name: fixture\non: workflow_dispatch\njobs:\n  build: { runs-on: ubuntu-latest }\n"
   in
   let job_without_keys = run "name: fixture\non: workflow_dispatch\njobs:\n  build:\n" in
-  let unreadable_job_key =
+  let quoted_job_key =
     run
       ("name: fixture\non: workflow_dispatch\njobs:\n  \"quoted job\":\n"
      ^ "    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo hi\n")
   in
-  (* An unreadable line INSIDE an otherwise valid job -- ceiling and all. A reader that skipped it
-     would report the job as fully examined, so the refusal is the point; the counterpart is the
-     same job with the same key spelled plainly. *)
+  let quoted_job_key_unbounded =
+    run
+      ("name: fixture\non: workflow_dispatch\njobs:\n  \"quoted job\":\n"
+     ^ "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")
+  in
+  let unreadable_job_key =
+    run "name: fixture\non: workflow_dispatch\njobs:\n  - a sequence entry where a job belongs\n"
+  in
+  (* A line inside an otherwise valid job -- ceiling and all -- that is no key in any spelling. A
+     reader that skipped it would report that job as fully examined. The counterpart is the same job
+     with a real key in its place. *)
   let unreadable_key_in_job =
     run
       (workflow
@@ -609,7 +641,7 @@ let control () =
            "  build:\n\
            \    runs-on: ubuntu-latest\n\
            \    timeout-minutes: 10\n\
-           \    \"quoted key\": value\n\
+           \    a line that is no key at all\n\
            \    steps:\n\
            \      - run: echo hi\n";
          ])
@@ -625,6 +657,28 @@ let control () =
            \    steps:\n\
            \      - run: echo hi\n";
          ])
+  in
+  let quoted_block_scalar_key =
+    run
+      (workflow
+         [
+           "  build:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 10\n\
+           \    steps:\n\
+           \      - \"run\": |\n\
+           \          all:\n\
+           \          \techo hi\n";
+         ])
+  in
+  let directive_header =
+    run
+      ("%YAML 1.2\n---\n  name: fixture\n  on: workflow_dispatch\n  jobs:\n"
+     ^ "    build:\n\
+       \      runs-on: ubuntu-latest\n\
+       \      timeout-minutes: 10\n\
+       \      steps:\n\
+       \        - run: echo hi\n")
   in
   let tab_inside_block_scalar =
     run
@@ -756,10 +810,20 @@ let control () =
        unreadable_key_in_job);
   p "the same job with that key spelled plainly is read and passes"
     (passed "readable key inside a job" readable_key_in_job);
-  p "a quoted job key is refused rather than passed over, ceiling and all"
+  p "a quoted job key is a job like any other, and its bounded job passes"
+    (passed "quoted job key" quoted_job_key);
+  p "the same quoted job without a ceiling is refused, so quoting hides nothing"
+    (refused "quoted job key, no ceiling"
+       ~messages:[ missing_timeout "quoted job" ]
+       quoted_job_key_unbounded);
+  p "a sequence entry where a job mapping belongs is refused, not skipped"
     (refused "unreadable job key"
        ~messages:[ "which is not a key this reader can parse" ]
        unreadable_job_key);
+  p "a quoted key opens a block scalar too, its body staying content"
+    (passed "quoted block-scalar key" quoted_block_scalar_key);
+  p "a document with a YAML directive and an indented root mapping is read"
+    (passed "directive header" directive_header);
   p "a tab inside a run block scalar is content, and its workflow passes"
     (passed "tab inside a block scalar" tab_inside_block_scalar);
   p "a block header carrying YAML's indentation and chomping indicators still opens a block"
