@@ -72,6 +72,7 @@ let raw_entries =
         "[scanner-refusal:05a94c42ce59cc69276bc3f89d99172e] unrelated closing tag";
         "[scanner-refusal:2b7eb419ed7900fbb86ba90fcfb6d542] hides nothing after";
         "[scanner-refusal:5992ccadeb90a0283af47dd6b29ab152] merely starting with";
+        "[scanner-refusal:515b34b740d4146ebf521dfdde7f936b] is still structure";
         "[scanner-refusal:94e0ae3ae9122bb909f3b9ff7c93f98c] comment opener inside";
         "[scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays";
       ] );

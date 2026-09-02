@@ -217,8 +217,30 @@ let opens_raw_html line =
        keeping one would hide every following line until some later closer. *)
     | Some tag -> if closes_raw_html_tag ~tag line then None else Some (`Until_close tag)
     | None ->
-        if String.is_prefix text ~prefix:"<" && not (String.is_prefix text ~prefix:"<!--") then
-          Some `Until_blank
+        (* A generic HTML block opens with a TAG: `<`, an optional `/`, a name, then a boundary.
+           `<https://example.com>` is an autolink -- inline Markdown -- and reading it as a block
+           would hide every heading up to the next blank line, the anchor included. *)
+        let opens_tag =
+          let after_slash = if String.is_prefix text ~prefix:"</" then 2 else 1 in
+          String.length text > after_slash
+          && Char.is_alpha text.[after_slash]
+          &&
+          let n = String.length text in
+          let rec name i =
+            if i < n && (Char.is_alphanum text.[i] || Char.equal text.[i] '-') then name (i + 1)
+            else i
+          in
+          let stop = name after_slash in
+          stop >= n
+          ||
+          let next = text.[stop] in
+          Char.is_whitespace next || Char.equal next '>' || Char.equal next '/'
+        in
+        if
+          String.is_prefix text ~prefix:"<"
+          && (not (String.is_prefix text ~prefix:"<!--"))
+          && opens_tag
+        then Some `Until_blank
         else None
 
 (** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
@@ -308,11 +330,23 @@ let is_plain_text text =
     let n = String.length text in
     let rec run i = if i < n && Char.is_digit text.[i] then run (i + 1) else i in
     let stop = run 0 in
-    stop < n
+    (* One to nine digits, per CommonMark: a longer run is prose -- an identifier, a year, a phone
+       number -- and refusing it would fail the gate over an ordinary entry. *)
+    stop <= 9 && stop < n
     && (Char.equal text.[stop] '.' || Char.equal text.[stop] ')')
     && (stop + 1 = n || Char.is_whitespace text.[stop + 1])
   in
-  (not thematic) && (not fence) && (not marker) && (not ordered)
+  (* A link-reference definition renders as NOTHING: `[record]: gh-ocannl-807` is invisible in the
+     changelog, so a citation inside one is a citation no reader can follow -- exactly what these
+     rules exist to guarantee. *)
+  let link_reference =
+    Char.equal c '['
+    &&
+    match String.index text ']' with
+    | Some close -> close + 1 < String.length text && Char.equal text.[close + 1] ':'
+    | None -> false
+  in
+  (not thematic) && (not fence) && (not marker) && (not ordered) && (not link_reference)
   (* Nor may it start with whitespace: a marker followed by two spaces, or by a tab, indents its
      content past the one column this grammar names. *)
   && (not (Char.is_whitespace c))
@@ -339,8 +373,13 @@ let is_continuation line =
 let is_subheading line =
   indent_of line = 0 && match heading_level line with Some level -> level >= 3 | None -> false
 
+(** A line of the canonical section. An HTML COMMENT disqualifies any of them, wherever it sits: a
+    comment renders as nothing, so [- An uncited change <!-- gh-ocannl-807 -->] reads as uncited to
+    everyone but this scan. [opens_comment] looks outside code spans, so an entry describing comment
+    syntax in backticks stays an ordinary entry. *)
 let is_canonical line =
-  is_blank line || is_subheading line || is_bullet line || is_continuation line
+  (not (opens_comment line))
+  && (is_blank line || is_subheading line || is_bullet line || is_continuation line)
 
 (** The bullets of a canonical section. Under the gate the extent is exact rather than inferred: an
     item runs to the first line that is neither a continuation nor a blank run followed by one. *)
@@ -514,13 +553,25 @@ let non_canonical =
     ("an indented heading", "  ## Details");
     ("a nested ordered item", "  1. A nested ordered entry.");
     ("a nested ordered item with a paren", "  2) Another nested one.");
+    ("a link reference definition", "  [record]: gh-ocannl-807");
+    ("an HTML comment after prose", "- An uncited change <!-- gh-ocannl-807 -->");
   ]
 
 (* A continuation line with no bullet above it: canonical line by line, and read by neither rule. *)
 let control_orphan_continuation = [ "### Added"; ""; "  Added uncited behaviour." ]
 
 let canonical_shapes =
-  [ ""; "### Added"; "#### Security"; "- An entry (gh-ocannl-807)."; "  a continuation line" ]
+  [
+    "";
+    "### Added";
+    "#### Security";
+    "- An entry (gh-ocannl-807).";
+    "  a continuation line";
+    (* Prose that only looks structural: a ten-digit number is no ordered marker (CommonMark allows
+       nine), and comment syntax inside a code span is an ordinary description. *)
+    "- 1234567890. is the external identifier for it (gh-ocannl-807).";
+    "- The parser now handles `<!--` in prose (gh-ocannl-807).";
+  ]
 
 (* Anchors, and history that must not fail the scan. *)
 let control_duplicate_anchors =
@@ -549,8 +600,10 @@ let control_mismatched_html_close =
 let control_one_line_html = released_history [ "<pre>example</pre>"; "## [Unreleased]" ]
 
 (* A generic HTML block whose tag merely STARTS with a raw-HTML tag name: it ends at the blank line,
-   so the anchor after it is visible. *)
+   so the anchor after it is visible. And an autolink, which is inline Markdown and opens no block
+   at all -- the heading right after it is still structure. *)
 let control_generic_html = released_history [ "<prelude>"; ""; "## [Unreleased]" ]
+let control_autolink = released_history [ "<https://example.com>"; "## [Unreleased]" ]
 
 let control_deep_subheading =
   [
@@ -691,6 +744,8 @@ let () =
     (List.length (unreleased_headings control_one_line_html) = 2);
   p "a tag merely starting with a raw-HTML name is a generic block, ending at the blank line"
     (List.length (unreleased_headings control_generic_html) = 2);
+  p "an autolink opens no HTML block, so the heading after it is still structure"
+    (List.length (unreleased_headings control_autolink) = 2);
   p "a comment opener inside a code span is literal text, not an HTML comment"
     ((not (List.exists control_code_span_comment ~f:opens_comment))
     && List.length (bullets_of control_code_span_comment) = 1

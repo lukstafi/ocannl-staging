@@ -64,6 +64,7 @@ changelog_unreleased_scan.ml: [scanner-refusal:b1060c3264fad2b26750763e08dbc86f]
 changelog_unreleased_scan.ml: [scanner-refusal:05a94c42ce59cc69276bc3f89d99172e] unrelated closing tag (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:2b7eb419ed7900fbb86ba90fcfb6d542] hides nothing after (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:5992ccadeb90a0283af47dd6b29ab152] merely starting with (claim) is catalogued beside changelog_unreleased_scan.expected: true
+changelog_unreleased_scan.ml: [scanner-refusal:515b34b740d4146ebf521dfdde7f936b] is still structure (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:94e0ae3ae9122bb909f3b9ff7c93f98c] comment opener inside (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays (claim) is catalogued beside changelog_unreleased_scan.expected: true
 cache_dir_ignores.ml has exactly the explicitly assigned refusal controls: true
