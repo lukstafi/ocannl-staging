@@ -103,13 +103,18 @@ let strip_trailing_comment value =
 (* [run: |] and its relatives introduce a literal block: everything indented under such a key is
    text, not structure. Dropping those lines is what keeps a step's shell script from contributing
    keys of its own. *)
+(* [|] and [>] may each carry YAML's two header indicators -- an explicit indentation digit and a
+   chomping [+]/[-] -- in either order ([|2-] and [|-2] are both legal). What matters here is only
+   that the line OPENS a block, so the indicators are accepted and not interpreted. *)
 let is_block_scalar value =
   let value = strip_trailing_comment value in
-  let after_indicator =
+  let after_style =
     Option.first_some (String.chop_prefix value ~prefix:"|") (String.chop_prefix value ~prefix:">")
   in
-  Option.value_map after_indicator ~default:false
-    ~f:(String.for_all ~f:(fun c -> Char.equal c '-' || Char.equal c '+'))
+  Option.value_map after_style ~default:false
+    ~f:
+      (String.for_all ~f:(fun c ->
+           Char.equal c '-' || Char.equal c '+' || (Char.is_digit c && not (Char.equal c '0'))))
 
 (* A block scalar is introduced by a KEY, and that key may itself sit in a sequence entry -- [- run:
    |] is how every step in this repository spells it. Strip the entry markers before asking whether
@@ -176,12 +181,17 @@ let leading_tab text =
   in
   scan 0
 
-let jobs_head lines =
-  List.findi lines ~f:(fun _ line ->
-      line.indent = 0 && match key_of line with Some ("jobs", _) -> true | _ -> false)
-
 let minimum_indent lines =
   List.min_elt (List.map lines ~f:(fun { indent; _ } -> indent)) ~compare:Int.compare
+
+(* The root mapping's own indentation, which YAML does not require to be column zero: a document
+   whose every root key carries two spaces is still a root mapping. Reading "top level" as literal
+   zero would refuse such a workflow, and a scan that refuses valid files is one people switch
+   off. *)
+let jobs_head lines =
+  let base = Option.value (minimum_indent lines) ~default:0 in
+  List.findi lines ~f:(fun _ line ->
+      line.indent = base && match key_of line with Some ("jobs", _) -> true | _ -> false)
 
 (* Reads the two levels this scan decides, and refuses -- by name -- every shape it cannot. The
    refusal is raised rather than returned so that no arm can degrade into an empty job list, which
@@ -631,6 +641,31 @@ let control () =
            \          EOF\n";
          ])
   in
+  (* A block header carrying YAML's indentation and chomping indicators, and a root mapping the
+     document indents uniformly. Neither is how these workflows are written, and both are valid YAML
+     that GitHub accepts -- a scan that refused them would be a scan people switch off. *)
+  let indicator_block_scalar =
+    run
+      (workflow
+         [
+           "  build:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 10\n\
+           \    steps:\n\
+           \      - run: |2-\n\
+           \          all:\n\
+           \          \techo hi\n";
+         ])
+  in
+  let indented_root_mapping =
+    run
+      ("  name: fixture\n  on: workflow_dispatch\n  jobs:\n"
+     ^ "    build:\n\
+       \      runs-on: ubuntu-latest\n\
+       \      timeout-minutes: 10\n\
+       \      steps:\n\
+       \        - run: echo hi\n")
+  in
   let tab_indented =
     run "name: fixture\non: workflow_dispatch\njobs:\n\tbuild:\n\t\truns-on: ubuntu-latest\n"
   in
@@ -727,6 +762,12 @@ let control () =
        unreadable_job_key);
   p "a tab inside a run block scalar is content, and its workflow passes"
     (passed "tab inside a block scalar" tab_inside_block_scalar);
+  p "a block header carrying YAML's indentation and chomping indicators still opens a block"
+    (passed "indicator block scalar" indicator_block_scalar);
+  p
+    "a root mapping the document indents uniformly is read, `jobs:` not having to sit at column \
+     zero"
+    (passed "indented root mapping" indented_root_mapping);
   p "a tab-indented workflow is refused, this reader measuring indentation in spaces"
     (refused "tab indentation"
        ~messages:[ unreadable "a line indented with tabs, which this reader measures in spaces" ]
