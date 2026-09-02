@@ -284,6 +284,41 @@ let is_repo_wide_scan stanza =
   && Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
       List.exists args ~f:escapes_directory)
 
+(* A recursive glob is not the only corpus a repo-wide scan can have. One whose subject is a single
+   file at the repository ROOT -- `CHANGES.md`, `AGENTS.md`, `.gitignore`, `ocannl_config.reference`
+   -- reads the repository just as much: it is a rule in a test directory that answers for a
+   document the whole repository shares, it goes stale on exactly the changes `@scans` exists to
+   revalidate, and nothing else in the tree would run it. Left out of the derivation, such a scan
+   sits in the family list by hand and drops out of it silently the day someone edits that list
+   (Codex P2, round 5 on lukstafi/ocannl-staging#603).
+
+   A root file is `../../<name>` with nothing further: `../../tools/sweep.sh` is a script a harness
+   happens to drive, not a document the repository is about, and reading one says nothing about
+   whether the rule scans anything. *)
+let rec reads_repository_root_file = function
+  | Sexp.Atom path ->
+      let path = String.substr_replace_all path ~pattern:"\\" ~with_:"/" in
+      let path =
+        match String.chop_prefix path ~prefix:"%{dep:" with
+        | Some rest -> String.chop_suffix_if_exists rest ~suffix:"}"
+        | None -> path
+      in
+      Option.value_map (String.chop_prefix path ~prefix:"../../") ~default:false ~f:(fun name ->
+          (not (String.is_empty name))
+          && (not (String.contains name '/'))
+          && not (String.contains name '*'))
+  | Sexp.List (Sexp.Atom "glob_files_rec" :: _) -> false
+  | Sexp.List l -> List.exists l ~f:reads_repository_root_file
+
+let is_repo_wide_scan stanza =
+  is_repo_wide_scan stanza
+  ||
+  match stanza with
+  | Sexp.List (Sexp.Atom "rule" :: _) ->
+      Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
+          List.exists args ~f:reads_repository_root_file)
+  | _ -> false
+
 (* The focused aggregates beyond `scans` (gh-ocannl-783), and the same completeness question asked
    of them. A family is an `(alias (name <family>) (deps …))` stanza per directory, aggregating the
    per-test aliases of the tests that belong to it, so that `dune build @<family>` from the

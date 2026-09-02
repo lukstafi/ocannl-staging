@@ -39,6 +39,55 @@ let raw_entries =
         "[scanner-refusal:348bb1f1fa0be73fb4796a31a76abaad] each flagged bullet";
         "[scanner-refusal:ec62d0a7d728c7ab15a2c9b8608c6404] every exemption still";
       ] );
+    ( "changelog_unreleased_scan.ml",
+      [
+        "[scanner-refusal:29e846ac8743ceba34a4cdcd5c90a431] CHANGES.md";
+        "[scanner-refusal:2a02d6286a27aef4f8d7e61e279f8c4e] a two-space continuation";
+        "[scanner-refusal:0ec3ef6e76a1b717d0c1be40a6364fa2] every continuation line";
+        "[scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet";
+        "[scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN";
+        "[scanner-refusal:e2c181fc0e256bd7f1088f4936eb3f67] eighteen synthetic control";
+        "[scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet";
+        "[scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth";
+        "[scanner-refusal:c4aa67d124cb4749d1889edf6983c9a9] synthetic uncited bullet";
+        "[scanner-refusal:23fceb1687bd50c5958f39301e78e77a] flags an unqualified";
+        "[scanner-refusal:1f0ae7533580b5e4beb238c4275c1ab4] citation rule flags";
+        "[scanner-refusal:bb0069493c829780cec5ca1d66feab8d] issue number running";
+        "[scanner-refusal:6e22c3db47b0a6937bb1ab9c0855ebb5] citation rule flags";
+        "[scanner-refusal:3ca66d41359dc51f6ab5f7ac84b8b907] citation rule flags";
+        "[scanner-refusal:c9449faf44ed458347e1d657e626adee] issue prefix embedded";
+        "[scanner-refusal:ba18f4595ed7faf639f772d898467c81] citation rule flags";
+        "[scanner-refusal:d25d6e7f710421f3a575ba500564cfde] citation rule flags";
+        "[scanner-refusal:62d1e4f42c52ac0924aa8f4d9c39f570] citation rule flags";
+        "[scanner-refusal:591e045974c801797d7307f579cdfe66] quoted tag attribute";
+        "[scanner-refusal:0d3e616cb68f4ff90f733dd0e2c4e994] citation rule flags";
+        "[scanner-refusal:04232f9c257b6d2ecbf350399d42c1f0] citation rule flags";
+        "[scanner-refusal:19ad9fb4c83fa6fb1dade7ec100c1fd6] span wrapped across";
+        "[scanner-refusal:f517d12e9916c479313e517d39c992aa] citing a staging";
+        "[scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl";
+        "[scanner-refusal:b58186611079f33f0c1982b767655695] refuses every shape";
+        "[scanner-refusal:13ab4d5a9f0385a905c692cb883674ab] accepts every shape";
+        "[scanner-refusal:d6e62794b51d807f87aec4370f3a751a] refuses a continuation";
+        "[scanner-refusal:5bcdaf0ef54cbe80e0d80101fe648b77] section reader refuses";
+        "[scanner-refusal:276a908bf7fcd396f224bf426067c796] Unreleased line counts";
+        "[scanner-refusal:c4907873eb4e13a193737314f62d9d0b] the anchor's text";
+        "[scanner-refusal:5b3f45ee369cc10ca978db8f30e90719] four-space-indented copy of";
+        "[scanner-refusal:194c1e57cc9420634205a146c56e16d0] an anchor quoted";
+        "[scanner-refusal:f3befecb42f5ce5ca62d20d3ec29b4e5] anchor quoted inside";
+        "[scanner-refusal:8d85b5a872954cff5a8c20b7ad997075] backtick fence's info";
+        "[scanner-refusal:b1060c3264fad2b26750763e08dbc86f] anchor inside released";
+        "[scanner-refusal:05a94c42ce59cc69276bc3f89d99172e] unrelated closing tag";
+        "[scanner-refusal:2b7eb419ed7900fbb86ba90fcfb6d542] hides nothing after";
+        "[scanner-refusal:5992ccadeb90a0283af47dd6b29ab152] merely starting with";
+        "[scanner-refusal:515b34b740d4146ebf521dfdde7f936b] is still structure";
+        "[scanner-refusal:7ed0378e940ae971901b7ba2832b2902] with content after";
+        "[scanner-refusal:809c8d3c58f68a68e3b81ccdd786a91d] terminator and hides";
+        "[scanner-refusal:4ecb12e641c9ece3bcdf86b758da156d] lowercase cdata opener";
+        "[scanner-refusal:1ccaa2c011552dd2a20a501a8a08a652] lowercase declaration opener";
+        "[scanner-refusal:5275f7cebe83a0e8088068748c8f9ade] setext heading ends";
+        "[scanner-refusal:897949d8f847215283e8799badf7f07f] comment opener inside";
+        "[scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays";
+      ] );
     ( "backend_golden_family_scan.ml",
       [ "[scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families" ] );
     ( "cache_dir_ignores.ml",

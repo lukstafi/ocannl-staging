@@ -110,6 +110,7 @@
   (alias runtest-codegen_text_inventory)
   (alias runtest-codegen_text_inventory_control)
   (alias runtest-agent_notes_structure)
+  (alias runtest-changelog_unreleased_scan)
   (alias runtest-config_usage_scan)
   (alias runtest-config_usage_scan_control)
   (alias runtest-config_usage_scan_refusal_control)
@@ -210,6 +211,7 @@
   (alias runtest-flip_bound_pruning)
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
+  (alias runtest-changelog_unreleased_scan)
   (alias runtest-codegen_text_inventory)
   (alias runtest-codegen_text_inventory_control)
   (alias runtest-config_usage_scan)
@@ -1832,6 +1834,8 @@
   agent_notes_structure.expected
   backend_golden_family_scan.ml
   backend_golden_family_scan.expected
+  changelog_unreleased_scan.ml
+  changelog_unreleased_scan.expected
   cache_dir_ignores.ml
   cache_dir_scan_cases.expected
   cache_dir_ignores.expected
@@ -1876,6 +1880,8 @@
    agent_notes_structure.expected
    backend_golden_family_scan.ml
    backend_golden_family_scan.expected
+   changelog_unreleased_scan.ml
+   changelog_unreleased_scan.expected
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
    codegen_text_inventory.ml
@@ -4843,3 +4849,32 @@
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-807: the changelog's `## [Unreleased]` section against the editorial convention. The
+; two rules -- a top-level bullet is at most three lines, and it cites `gh-ocannl-NNN` or a
+; `lukstafi/ocannl-staging` `PR #NNN` -- were enforced by hand in two of the eight review rounds on
+; PR #601, the 2026-09-02 batch catch-up. Both are decidable from the text, so a reviewer should
+; never spend a round on them again. Released sections are history and stay unread.
+
+(executable
+ (name changelog_unreleased_scan)
+ (modules changelog_unreleased_scan)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads CHANGES.md as text.
+ (target changelog_unreleased_scan.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config ../../CHANGES.md)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:changelog_unreleased_scan.exe} ../../CHANGES.md))))
+
+(rule
+ (alias runtest-changelog_unreleased_scan)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff changelog_unreleased_scan.expected changelog_unreleased_scan.actual)))
