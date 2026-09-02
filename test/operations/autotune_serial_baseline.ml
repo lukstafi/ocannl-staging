@@ -131,17 +131,34 @@ let () =
             match d.Autotune.key with
             | Ir.Schedule_outcome.Not_dispatched_key origin -> String.equal origin "baseline"
             | _ -> false)));
-  p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
-  p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
+  (* Which candidates a search times is host-dependent (gh-ocannl-892): a window that is mostly
+     host stalls is refused ([Autotune.admitted_timing_ms]) and grows [timings_contended] instead of
+     [candidates_timed]; processes sharing one GPU refuse whole searches this small (the 08-31 and
+     09-02 hip sweeps ran the directory in parallel). So a search that timed nothing passes only on
+     the load's own evidence: a search whose every candidate failed compile or dispatch shows no
+     refusals and still fails here. *)
+  let accounting stage (r : Autotune.report) =
+    Stdio.eprintf
+      "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
+       failed, default %s\n"
+      stage r.Autotune.candidates_timed r.Autotune.timings_contended r.Autotune.candidates_failed
+      (match r.Autotune.default_ms with Some _ -> "measured" | None -> "not measured")
+  in
+  accounting "search" r;
+  p "the search timed at least one candidate, or was refused its timings by contention"
+    (r.Autotune.candidates_timed >= 1 || r.Autotune.timings_contended > 0);
+  p "the winner carries a measurement exactly when a candidate was timed"
+    (Bool.equal (Float.is_finite r.Autotune.best_ms) (r.Autotune.candidates_timed >= 1));
   (* gh-ocannl-552: [baseline_ms] cannot answer "did tuning beat what the user gets without tuning?"
      on GPU (it is [infinity] there), so the untuned default pipeline's own seed is the reference.
      Attributed by digest: on CPU backends the config thresholds may leave the code unparallelized,
      in which case the seed dedups against the timed serial baseline and inherits its
-     measurement. *)
-  p "the untuned default pipeline is measured as the reference (gh-ocannl-552)"
+     measurement. The default seed's own window can be the refused one, which leaves no
+     measurement to be the reference -- admitted only against the refusal count. *)
+  p "the untuned default pipeline is measured as the reference, or refused by contention (gh-552)"
     (match r.Autotune.default_ms with
     | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)
-    | None -> false);
+    | None -> r.Autotune.timings_contended > 0);
   p_all2 "tuned routine values correct" got mm_expected ~f:approx;
 
   (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
@@ -195,11 +212,16 @@ let () =
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx mc.Tensor.value in
   let r = Option.value_exn ~here:[%here] !report in
+  accounting "poisoned-cache search" r;
   p "a serial cache entry is rejected on GPU backends and honoured on CPU ones"
     (Bool.equal (replayed r) (not is_gpu));
+  (* A replay times nothing and refuses nothing, so on GPU either counter is evidence of the
+     re-search; a refused window is still a window the replay would not have opened. *)
   p "rejecting it re-searches rather than returning the serial routine"
-    (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
-  p "a pre-gh-552 entry reports no default measurement; a re-search measures one"
-    (Bool.equal (Option.is_some r.Autotune.default_ms) is_gpu);
+    (if is_gpu then r.Autotune.candidates_timed >= 1 || r.Autotune.timings_contended > 0
+     else r.Autotune.candidates_timed = 0 && r.Autotune.timings_contended = 0);
+  p "a pre-gh-552 entry reports no default measurement; a re-search measures one or is refused"
+    (if is_gpu then Option.is_some r.Autotune.default_ms || r.Autotune.timings_contended > 0
+     else Option.is_none r.Autotune.default_ms);
   p_all2 "the routine from the poisoned-cache path computes correct values" got mm_expected
     ~f:approx

@@ -60,9 +60,11 @@ let () =
 
   let tuned_name = "gh669_nameless_tuned" in
   let ctx = Context.auto () in
+  let treport = ref None in
   let ctx, routine =
-    Autotune.tune ~name:tuned_name ~beam_width:1 ~rounds:0 ~repeats:1 ~cache_dir:"" ctx nameless
-      Ir.Indexing.Empty
+    Autotune.tune ~name:tuned_name ~beam_width:1 ~rounds:0 ~repeats:1 ~cache_dir:""
+      ~report:(fun r -> treport := Some r)
+      ctx nameless Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   p_all2 "tune ~name searches and runs a comp with no block comment"
@@ -118,7 +120,7 @@ let () =
     (Context.get_values ectx e.Tensor.value)
     expected ~f:approx;
   let r = Option.value_exn ~here:[%here] !ereport in
-  p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
+  let tr = Option.value_exn ~here:[%here] !treport in
 
   (* --- The rows both searches appended. --- *)
   let rows =
@@ -126,12 +128,34 @@ let () =
       List.filter_map (Stdio.In_channel.read_lines file) ~f:Cal.of_line
     else []
   in
-  p "calibration rows were appended" (not (List.is_empty rows));
-  p "the overriding name reached the calibration rows"
-    (List.exists rows ~f:(fun row -> String.equal row.Cal.routine passed_name));
-  (* The discriminating claim: re-deriving the column would have named the block comment here. *)
+  let named name = List.filter rows ~f:(fun row -> String.equal row.Cal.routine name) in
+  let contributed name = not (List.is_empty (named name)) in
+  let searches = [ (tuned_name, tr); (passed_name, r) ] in
+  List.iter searches ~f:(fun (name, rep) ->
+      Stdio.eprintf
+        "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
+         failed, %s\n"
+        name rep.Autotune.candidates_timed rep.Autotune.timings_contended
+        rep.Autotune.candidates_failed
+        (if contributed name then "contributed rows" else "NO ROWS"));
+  (* WHICH candidates a search timed is host-dependent (gh-ocannl-892): a timing window that is
+     mostly host stalls is refused ([Autotune.admitted_timing_ms]), a refused candidate emits no
+     row, and processes sharing one GPU refuse whole searches this small -- the 08-31 and 09-02
+     hip sweeps ran the directory in parallel and this search timed nothing. So the claims below
+     are the RELATIONSHIP between the report and the rows, which load moves on both sides at once:
+     a search contributed rows exactly when it timed a candidate, and a row-less search must show
+     the refusals that emptied it, so a search whose every candidate failed compile or dispatch
+     ([candidates_failed]) -- nothing timed, nothing refused, nothing contributed -- still fails. *)
+  p_all "a search contributed rows exactly when it timed a candidate" searches
+    ~f:(fun (name, rep) -> Bool.equal (contributed name) (rep.Autotune.candidates_timed > 0));
+  p_all "a search with no rows was refused its timings, not silently lost" searches
+    ~f:(fun (name, rep) -> contributed name || rep.Autotune.timings_contended > 0);
+  (* The discriminating claim: re-deriving the column would have named the block comment here.
+     Every row that exists names one of the two searches by the name it was given -- counted rather
+     than quantified, because a run refused all its timings has no rows and the two claims above
+     have already required the evidence for that. *)
   p "no calibration row names the block comment the search overrode"
-    (not (List.exists rows ~f:(fun row -> String.equal row.Cal.routine block_name)));
-  p_all "every calibration row names one of the searches by the name it was given" rows
-    ~f:(fun row ->
-      String.equal row.Cal.routine tuned_name || String.equal row.Cal.routine passed_name)
+    (not (contributed block_name));
+  p "every calibration row names one of the searches by the name it was given"
+    (List.length rows
+    = List.sum (module Int) searches ~f:(fun (name, _) -> List.length (named name)))
