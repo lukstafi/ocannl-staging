@@ -27,6 +27,7 @@ jobs:
   deploy:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
     runs-on: ubuntu-22.04
+    timeout-minutes: 30 # ~1min normally; a ceiling only a hang can reach
     steps:
       # Refresh the apt index: the runner image's package lists go stale, making
       # opam's depext step 404 on superseded package versions. `ci.yml` carries
