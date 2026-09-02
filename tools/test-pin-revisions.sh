@@ -242,6 +242,24 @@ has_escape() { # has_escape FILE...
   LC_ALL=C grep -q "$(printf '\033')" "$@"
 }
 
+# The per-definition listing is what names the package whose definition moved
+# when two runs digest differently -- the listings above are identical in that
+# case, which is what forced gh-ocannl-889 to be diagnosed locally. Each line
+# must carry its own digest: three definitions differing only in `name:` and
+# `version:` must produce three DIFFERENT hashes, or the listing is a per-run
+# constant that names nothing.
+oracle_definition_digests() { # oracle_definition_digests DIR
+  local dir=$1
+  grep -q '^Definition digests:$' "$dir/stdout" \
+    && grep -qE '^  alpha\.1\.0 [0-9a-f]{12}$' "$dir/stdout" \
+    && grep -qE '^  beta\.2\.0 [0-9a-f]{12}$' "$dir/stdout" \
+    && grep -qE '^  ocannl\.dev [0-9a-f]{12}$' "$dir/stdout" \
+    && [ "$(grep -cE '^  (alpha\.1\.0|beta\.2\.0|ocannl\.dev) [0-9a-f]{12}$' \
+      "$dir/stdout")" -eq 3 ] \
+    && [ "$(grep -oE '^  (alpha\.1\.0|beta\.2\.0|ocannl\.dev) [0-9a-f]{12}$' \
+      "$dir/stdout" | awk '{ print $2 }' | LC_ALL=C sort -u | wc -l)" -eq 3 ]
+}
+
 oracle_happy() { # oracle_happy SUBJECT LABEL PIN_FIXTURE
   local subject=$1 label=$2 pins=${3:-mixed-a} dir="$TMP/runs/$2"
   run_subject "$subject" "$label" "$pins" ok
@@ -252,6 +270,7 @@ oracle_happy() { # oracle_happy SUBJECT LABEL PIN_FIXTURE
     && grep -q '^  beta\.2\.0$' "$dir/stdout" \
     && grep -q '^  arrayjit\.dev$' "$dir/stdout" \
     && grep -q '^Project packages left out of the definition digest: arrayjit neural_nets_lib$' "$dir/stdout" \
+    && oracle_definition_digests "$dir" \
     && grep -q '^  git+https://example\.invalid/alpha\.git$' "$dir/stdout" \
     && ! grep -q 'git+file:' "$dir/stdout" \
     && [ "$(grep -c -- '--color=never' "$dir/opam.calls")" -eq 3 ] \
@@ -294,6 +313,7 @@ if oracle_happy "$SRC" shipping-happy mixed-a; then
   report 0 "opam 2.5.2 output: exact solution and pin digests"
   report 0 "local git+file pins: excluded from resolution and digest"
   report 0 "project packages: excluded from the definition digest"
+  report 0 "definition digests: one distinct per-package hash per definition"
   report 0 "OPAMCOLOR=always: no ANSI reaches names, URLs, or outputs"
 else
   report 1 "shipping happy path" "see $TMP/runs/shipping-happy"
@@ -348,6 +368,14 @@ if [ -n "$project_mutant" ]; then
   expect_rejected "removing project-package exclusion is detected" "$project_mutant" oracle_happy
 else
   report 1 "negative control: project-package mutant constructed"
+fi
+
+definitions_mutant=$(mutant definition-digest-listing \
+  'index($0, "echo \"Definition digests:\"") { skip = 1 } skip { changed++; if (index($0, "paste -d")) skip = 0; next } { print } END { if (changed != 2) exit 9 }')
+if [ -n "$definitions_mutant" ]; then
+  expect_rejected "dropping the per-definition listing is detected" "$definitions_mutant" oracle_happy
+else
+  report 1 "negative control: definition-listing mutant constructed"
 fi
 
 project_guard_mutant=$(mutant project-only-guard \

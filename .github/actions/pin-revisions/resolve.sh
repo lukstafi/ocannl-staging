@@ -14,6 +14,19 @@ hash12() {
   fi
 }
 
+# One process for the whole batch: the per-definition listing below hashes
+# ~180 files on every CI job, and a `hash12` per file would be ~180 spawns.
+hash12_files() { # hash12_files FILE...
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@" | cut -c1-12
+  else
+    shasum -a 256 "$@" | cut -c1-12
+  fi
+}
+
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pin-revisions.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT
+
 # setup-ocaml updates opam-repository before this action. Ask opam's solver for
 # the self-contained package set selected for every project package with the
 # same test/doc dependency flags as the install steps. This keys the actual
@@ -59,12 +72,58 @@ done <<< "$solution"
 [ "${#definition_packages[@]}" -gt 0 ] \
   || { echo "opam dependency solution holds only project packages" >&2; exit 1; }
 echo "Project packages left out of the definition digest:$project_packages"
+definitions="$work_dir/definitions"
+opam --cli=2.1 show --safe --color=never --raw --sort "${definition_packages[@]}" \
+  >"$definitions"
 solution_digest=$(
   {
     printf '%s\n' "$solution"
-    opam --cli=2.1 show --safe --color=never --raw --sort "${definition_packages[@]}"
+    cat "$definitions"
   } | hash12
 )
+# Which package's definition moved is the question a cache miss actually poses,
+# and neither the solution listing nor the pin specs answer it: two runs can
+# print byte-identical listings and still digest differently (gh-ocannl-889 was
+# diagnosed by local reproduction for exactly this reason). So report a per
+# package digest of that package's own definition -- diffing two runs' listings
+# names the culprit directly. `opam show --raw --sort` concatenates the
+# definitions it was asked for, each opening with `opam-version:` at column 0,
+# so splitting that one solver-wide answer costs no extra opam call; the block's
+# own `name:`/`version:` fields label it, since `--sort` returns them in
+# dependency order rather than the order they were requested in.
+blocks_dir="$work_dir/blocks"
+mkdir -p "$blocks_dir"
+awk -v dir="$blocks_dir" '
+  /^opam-version:/ {
+    # awk keeps every redirection target open; ~180 of them exhausts the
+    # descriptor limit on the awks that do not juggle them.
+    if (file != "") close(file)
+    n += 1
+    file = sprintf("%s/%06d", dir, n)
+    name = ""
+    version = ""
+  }
+  n > 0 { print > file }
+  n > 0 && name == "" && /^name: "/ {
+    name = $0; sub(/^name: "/, "", name); sub(/"$/, "", name); names[n] = name
+  }
+  n > 0 && version == "" && /^version: "/ {
+    version = $0; sub(/^version: "/, "", version); sub(/"$/, "", version)
+    versions[n] = version
+  }
+  END {
+    for (i = 1; i <= n; i += 1)
+      printf "%s.%s\n", (i in names ? names[i] : "?"), (i in versions ? versions[i] : "?")
+  }
+' "$definitions" >"$work_dir/labels"
+# An empty split with a non-empty package list means the definitions never
+# arrived: the digest above then covers the solution listing alone, which is
+# exactly the silent key freeze the guards in this script exist to prevent.
+[ -s "$work_dir/labels" ] \
+  || { echo "no package definitions parsed from opam show output" >&2; exit 1; }
+hash12_files "$blocks_dir"/* >"$work_dir/hashes"
+echo "Definition digests:"
+paste -d' ' "$work_dir/labels" "$work_dir/hashes" | sed 's/^/  /'
 echo "solution-digest=$solution_digest" >>"$GITHUB_OUTPUT"
 
 # `--cli=2.1` fixes the table format this parser consumes across opam upgrades.
