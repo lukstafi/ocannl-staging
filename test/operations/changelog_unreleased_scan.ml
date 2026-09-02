@@ -153,12 +153,35 @@ let has_content line = not (String.is_empty (item_content line))
     Markdown measures a later block of the same item against this column, not against "indented at
     all": under [- uncited], a blank line, and a ONE-space-indented paragraph, the paragraph is
     outside the item, and folding it in would lend the bullet a citation that is not its own. *)
+let tab_stop = 4
+
+(** The DISPLAY column of character [i], with tabs advancing to the next stop of four. Markdown
+    measures indentation in columns, so [-\tAn entry] puts its content at column four, and a
+    two-space paragraph beneath it is outside the item rather than inside. *)
+let display_column line i =
+  let limit = min i (String.length line) in
+  let rec walk j column =
+    if j >= limit then column
+    else
+      walk (j + 1)
+        (if Char.equal line.[j] '\t' then ((column / tab_stop) + 1) * tab_stop else column + 1)
+  in
+  walk 0 0
+
+let first_content line =
+  let n = String.length line in
+  let rec skip i = if i < n && Char.is_whitespace line.[i] then skip (i + 1) else i in
+  skip 0
+
+(** The display column at which a line's own text starts. *)
+let indent_columns line = display_column line (first_content line)
+
 let content_column line =
   let n = String.length line in
   let start = indent_of line in
   let rec skip i = if i < n && Char.is_whitespace line.[i] then skip (i + 1) else i in
   let content = skip (start + 1) in
-  if content >= n then start + 2 else content
+  if content >= n then display_column line (start + 1) + 1 else display_column line content
 
 (** A top-level ORDERED item: digits at column 0 followed by [.] or [)], closed the same way.
     Recognized only to refuse it — an ordered changelog entry is not a shape this scan knows how to
@@ -195,6 +218,13 @@ let opens_block_quote line =
   let start = indent_of line in
   start <= block_indent && start < String.length line && Char.equal line.[start] '>'
 
+(** An ordered item may INTERRUPT an open paragraph only when it is numbered 1 (CommonMark). So a
+    lazy continuation reading [2026. remains supported (gh-ocannl-807)] is prose belonging to the
+    bullet above it, not a list of its own — dropping it would both lose the citation and refuse the
+    entry as an ordered item. *)
+let interrupts_paragraph_as_ordered line =
+  is_top_level_ordered line && String.is_prefix (String.lstrip line) ~prefix:"1"
+
 (** A lazy continuation: an unindented prose line inside an open paragraph. Markdown keeps it in the
     item; only a structural boundary — a blank line, a heading, a block quote, a thematic break, the
     next top-level item — closes it. *)
@@ -202,18 +232,24 @@ let is_lazy_continuation line =
   (not (is_blank line))
   && (not (is_heading line))
   && (not (is_top_level_bullet line))
-  && (not (is_top_level_ordered line))
+  && (not (interrupts_paragraph_as_ordered line))
   && (not (is_thematic_break line))
   && not (opens_block_quote line)
 
 let unreleased_heading = "## [Unreleased]"
 
-(** The anchor: a level-2 heading, by the same indent rule as any other, whose text is exactly
-    [[Unreleased]]. Stripping the line without asking what indentation means let a four-space
-    indented copy — an indented code block, rendered as text — count as a second anchor. *)
+(** The anchor: a level-2 heading at COLUMN ZERO whose text is exactly [[Unreleased]].
+
+    Indentation is where "is this the shared anchor" and "is this a heading" part company. A heading
+    may carry up to three spaces and still be a heading — which is why the section BOUNDARY keeps
+    that allowance — but an indented one is not the document-level section every reader and every
+    editorial pass means by the anchor: two spaces inside a released list item makes it that item's
+    child heading, and four makes it code. Column zero is the decidable form of "document-level",
+    and it costs nothing: an anchor that ever picks up indentation fails the uniqueness claim
+    loudly, rather than a nested copy being read as a second one. *)
 let is_unreleased_heading line =
   match heading_level line with
-  | Some 2 -> String.equal (String.strip line) unreleased_heading
+  | Some 2 -> indent_of line = 0 && String.equal (String.strip line) unreleased_heading
   | _ -> false
 
 let ends_section line = match heading_level line with Some level -> level <= 2 | None -> false
@@ -279,21 +315,23 @@ let opens_comment line = String.is_substring (outside_code_spans line) ~substrin
     other block-level tag, which runs to the next blank line. Released history is searched for the
     anchor like everything else, and a [## [Unreleased]] inside such a block renders as HTML content
     — counting it would fail the scan over history that must stay untouched. *)
-let raw_html_tags = [ "<pre"; "<script"; "<style"; "<textarea" ]
+let raw_html_tags = [ "pre"; "script"; "style"; "textarea" ]
 
-let closes_raw_html_tag line =
-  let text = String.lowercase line in
-  List.exists [ "</pre>"; "</script>"; "</style>"; "</textarea>" ] ~f:(fun tag ->
-      String.is_substring text ~substring:tag)
+(** Only the opener's OWN closing tag ends its block: a literal [</script>] inside a [<pre>] leaves
+    the [<pre>] open, and closing on it would expose what follows as structure. *)
+let closes_raw_html_tag ~tag line =
+  String.is_substring (String.lowercase line) ~substring:("</" ^ tag ^ ">")
 
 let opens_raw_html line =
   let text = String.lowercase (String.strip line) in
   if indent_of line > block_indent then None
-  else if List.exists raw_html_tags ~f:(fun tag -> String.is_prefix text ~prefix:tag) then
-    Some `Until_close
-  else if String.is_prefix text ~prefix:"<" && not (String.is_prefix text ~prefix:"<!--") then
-    Some `Until_blank
-  else None
+  else
+    match List.find raw_html_tags ~f:(fun tag -> String.is_prefix text ~prefix:("<" ^ tag)) with
+    | Some tag -> Some (`Until_close tag)
+    | None ->
+        if String.is_prefix text ~prefix:"<" && not (String.is_prefix text ~prefix:"<!--") then
+          Some `Until_blank
+        else None
 
 (** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
     HTML comments. The whole file is searched for the anchor, released history included, and a
@@ -307,7 +345,7 @@ let structural_lines lines =
       (if !comment then (if String.is_substring line ~substring:"-->" then comment := false)
        else
          match !html with
-         | Some `Until_close -> if closes_raw_html_tag line then html := None
+         | Some (`Until_close tag) -> if closes_raw_html_tag ~tag line then html := None
          | Some `Until_blank -> if is_blank line then html := None
          | None -> (
              match (!fence, fence_at line) with
@@ -365,30 +403,37 @@ let opens_paragraph line =
     section, or one followed by a heading or the next item, closes the item and is not consumed. *)
 let rec item_lines ~column ~lazy_ok acc rest =
   match rest with
-  | line :: tail when is_indented line -> item_lines ~column ~lazy_ok:true (line :: acc) tail
+  (* Indented, and either continuing an open paragraph -- where any indentation does -- or reaching
+     the item's content column, which is what a NEW block of the item has to do. Under `- # Feature`
+     no paragraph is open, so a one-space line beneath it is a block of its own. *)
+  | line :: tail when is_indented line && (lazy_ok || indent_columns line >= column) ->
+      item_lines ~column ~lazy_ok:true (line :: acc) tail
   | line :: tail when lazy_ok && is_lazy_continuation line ->
       item_lines ~column ~lazy_ok:true (line :: acc) tail
   | line :: _ when is_blank line -> (
       let blanks, after = List.split_while rest ~f:is_blank in
       match after with
-      | next :: _ when (not (is_blank next)) && indent_of next >= column ->
+      | next :: _ when (not (is_blank next)) && indent_columns next >= column ->
           item_lines ~column ~lazy_ok:true (List.rev_append blanks acc) after
       | _ -> (List.rev acc, rest))
   | _ -> (List.rev acc, rest)
 
-(** The top-level bullets of a section. *)
-let bullets_of lines =
-  let rec loop acc = function
-    | [] -> List.rev acc
+(** The top-level bullets of a section, and the lines no bullet absorbed. The leftovers are what the
+    refusals below ask about: a line inside an open item is that item's prose, whatever it looks
+    like, so asking the raw section would refuse an entry over its own continuation lines. *)
+let parse_section lines =
+  let rec loop bullets others = function
+    | [] -> (List.rev bullets, List.rev others)
     | line :: rest when is_top_level_bullet line ->
         let continuation, rest =
           item_lines ~column:(content_column line) ~lazy_ok:(opens_paragraph line) [] rest
         in
-        loop ({ first_line = line; lines = line :: continuation } :: acc) rest
-    | _ :: rest -> loop acc rest
+        loop ({ first_line = line; lines = line :: continuation } :: bullets) others rest
+    | line :: rest -> loop bullets (line :: others) rest
   in
-  loop [] lines
+  loop [] [] lines
 
+let bullets_of lines = fst (parse_section lines)
 let max_lines = 3
 let within_line_budget bullet = List.count bullet.lines ~f:(Fn.non is_blank) <= max_lines
 let development_repo = "lukstafi/ocannl-staging"
@@ -561,7 +606,7 @@ let control_inert_anchors =
    fourth makes it an indented code block rather than an anchor (Codex P2, round 5). *)
 let control_indented_headings =
   [
-    "   ## [Unreleased]";
+    "## [Unreleased]";
     "";
     "- one (gh-ocannl-807).";
     "";
@@ -569,6 +614,10 @@ let control_indented_headings =
     "";
     "- released, and none of this scan's business.";
   ]
+
+(* An indented copy of the anchor's text: a heading, but not the document-level section the anchor
+   is -- two spaces is what a released list item's child heading carries (Codex P2, round 8). *)
+let control_indented_anchor = [ "  ## [Unreleased]"; ""; "- one (gh-ocannl-807)." ]
 
 let control_code_indented_anchor =
   [ "## [Unreleased]"; ""; "- one (gh-ocannl-807)."; ""; "    ## [Unreleased]"; "" ]
@@ -597,6 +646,20 @@ let control_under_indented =
 
 let control_heading_content = [ "- # Feature"; "See gh-ocannl-807 for the details." ]
 
+(* An item whose content is a block rather than a paragraph, followed by an under-indented line: no
+   paragraph is open, so the line is not the item's however slightly it is indented. And a
+   tab-separated marker, whose content column is four, so a two-space paragraph beneath it is
+   outside the item (Codex P2, round 8). *)
+let control_block_content_indent = [ "- # Feature"; " a one-space line with (gh-ocannl-807)." ]
+
+let control_tab_marker =
+  [ "-\tAn uncited change,"; ""; "  a two-space paragraph carrying (gh-ocannl-807)." ]
+
+(* A lazy continuation that looks like an ordered item but cannot interrupt a paragraph, since only
+   a marker numbered 1 may: it is the bullet's own prose, and carries its citation. *)
+let control_lazy_ordered =
+  [ "- An entry whose second line reads like a list,"; "2026. remains supported (gh-ocannl-807)." ]
+
 (* A raw HTML block in released history, holding a line that reads exactly like the anchor. *)
 let control_raw_html =
   [
@@ -612,6 +675,21 @@ let control_raw_html =
   ]
 
 (* An entry describing comment syntax in a code span: literal text, not an HTML comment. *)
+(* An unrelated closing tag inside a `<pre>`: Markdown keeps the block open until `</pre>`. *)
+let control_mismatched_html_close =
+  [
+    "## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "## [1.0.1] -- 2026-08-26";
+    "";
+    "<pre>";
+    "</script>";
+    "## [Unreleased]";
+    "</pre>";
+  ]
+
 let control_code_span_comment =
   [ ""; "### Added"; ""; "- The parser now handles `<!--` in prose (gh-ocannl-807)." ]
 
@@ -662,12 +740,12 @@ let () =
   if anchors <> 1 then eprintf "  CHANGES.md carries %d `%s` headings\n" anchors unreleased_heading;
   p "CHANGES.md carries exactly one `## [Unreleased]` heading" (anchors = 1);
   let section = Option.value (unreleased_section lines) ~default:[] in
-  let bullets = bullets_of section in
+  let bullets, others = parse_section section in
   eprintf "Read %d lines of `## [Unreleased]`, %d top-level bullets.\n" (List.length section)
     (List.length bullets);
   (* Emptiness is the passing case here: an ordered top-level item has no extent this scan knows how
      to read, so it is refused rather than skipped. *)
-  let ordered = List.filter section ~f:is_top_level_ordered in
+  let ordered = List.filter others ~f:is_top_level_ordered in
   List.iter ordered ~f:(fun line -> eprintf "  ordered top-level item: %s\n" (String.strip line));
   p "every top-level list item in Unreleased is unordered" (List.is_empty ordered);
   (* Three more shapes whose absence is the passing case, refused rather than guessed at: each is
@@ -675,12 +753,10 @@ let () =
      one way into dropping an entry from the population and the other into folding it into its
      neighbour. None occurs in the changelog, so refusing costs nothing, and one that starts
      occurring says so instead of quietly changing what the rules mean. *)
-  let indented = List.filter section ~f:is_indented_marker in
+  let indented = List.filter others ~f:is_indented_marker in
   List.iter indented ~f:(fun line -> eprintf "  indented list marker: %s\n" (String.strip line));
   p "no list marker in Unreleased is indented" (List.is_empty indented);
-  let empty_items =
-    List.filter section ~f:(fun line -> is_top_level_bullet line && not (has_content line))
-  in
+  let empty_items = List.filter bullets ~f:(fun bullet -> not (has_content bullet.first_line)) in
   List.iter empty_items ~f:(fun _ -> eprintf "  a bullet carries no text on its marker line\n");
   p "every Unreleased bullet carries text on its marker line" (List.is_empty empty_items);
   let embedded = List.filter section ~f:(fun line -> opens_fence line || opens_comment line) in
@@ -777,11 +853,14 @@ let () =
     &&
     let section = Option.value (unreleased_section control_long_fence) ~default:[] in
     List.length (bullets_of section) = 1);
-  p "a heading indented up to three spaces is still a heading, anchor and boundary alike"
+  p "an indented release heading still closes the section"
     (List.length (unreleased_headings control_indented_headings) = 1
     &&
     let section = Option.value (unreleased_section control_indented_headings) ~default:[] in
     List.length (bullets_of section) = 1);
+  p "an indented copy of the anchor's text is not the anchor"
+    (List.is_empty (unreleased_headings control_indented_anchor)
+    && Option.is_some (heading_level "  ## [Unreleased]"));
   p "a block quote under a bullet is not part of it"
     (match bullets_of control_block_quote with
     | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
@@ -809,6 +888,26 @@ let () =
              opens_comment line || opens_fence line)))
     && List.length (bullets_of control_code_span_comment) = 1
     && List.for_all (bullets_of control_code_span_comment) ~f:cites_record);
+  p "an under-indented line under block content is not part of the item"
+    (match bullets_of control_block_content_indent with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "a tab-separated marker puts its content column at four"
+    (content_column "-\tAn uncited change," = 4
+    &&
+    match bullets_of control_tab_marker with
+    | [ bullet ] -> List.length bullet.lines = 1 && not (cites_record bullet)
+    | _ -> false);
+  p "an ordered marker other than 1 does not interrupt a bullet's paragraph"
+    (match parse_section control_lazy_ordered with
+    | [ bullet ], others ->
+        List.length bullet.lines = 2 && cites_record bullet && List.is_empty others
+    | _ -> false);
+  p "an unrelated closing tag leaves a raw HTML block open"
+    (List.length (unreleased_headings control_mismatched_html_close) = 1
+    &&
+    let section = Option.value (unreleased_section control_mismatched_html_close) ~default:[] in
+    List.length (bullets_of section) = 1);
   p_all "an ordered marker is one to nine digits"
     [ "1. x"; "9. x"; "123456789. x"; "1) x" ]
     ~f:is_top_level_ordered;
