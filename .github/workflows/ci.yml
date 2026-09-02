@@ -195,7 +195,11 @@ jobs:
     # pin that can move while the project opam files stay byte-identical, or a hit
     # serves stale dependency revisions indefinitely. The action derives both
     # from live solver state, so a new compatible release and a new pin join the
-    # key without caller-owned lists. It carries the rest of the
+    # key without caller-owned lists -- and leaves the project's own pinned
+    # definitions out, since opam records the checkout's git ref in them
+    # (`#master` here, `#HEAD` on a pull request's detached checkout), which
+    # keyed the cache by event type and made every PR run miss the switch
+    # master had just saved (gh-ocannl-889). It carries the rest of the
     # reasoning; `gh-pages-api.yml` calls the same one, keeping the workflows
     # from diverging again (gh-ocannl-732, gh-ocannl-809).
     - name: Resolve opam dependency source revisions

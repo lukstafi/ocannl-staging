@@ -1319,8 +1319,18 @@ that they earn a lookup rather than always-loaded space.
   solution digest and resolved-pin digest from `.github/actions/pin-revisions`. That action runs
   after setup-ocaml updates the repositories and after the workflows' `opam pin -n` steps. It asks
   opam's solver for the selected package/version set under the install's test/doc flags, hashes the
-  normalized definitions of those exact versions too, then derives every remote git pin from
-  opam's live registry, resolves it with `git ls-remote`, and digests the shas. A key over
+  normalized definitions of those exact versions too — minus the project's own packages — then
+  derives every remote git pin from opam's live registry, resolves it with `git ls-remote`, and
+  digests the shas. The project packages are left out of the definition hash because `opam pin .`
+  records the checkout's git ref in the pinned definition (`opam show --raw` prints
+  `git+file://…#master` on a branch and `#HEAD` on the detached checkout every `pull_request` run
+  gets), so hashing them keyed the cache by EVENT TYPE: for two days every PR run missed the
+  switch master had just saved for the same tree and paid the 2–6 minute dependency build, while
+  master's own runs hit — and a miss is also a fetch, which is how a rolled upstream archive
+  checksum surfaced as a per-branch red (gh-ocannl-889). `hashFiles('*.opam')` already covers
+  their content. When a key you expected to hit misses, diff the two runs' `Resolved opam package
+  solution` and pin-spec listings first: identical listings with different digests mean the raw
+  definitions differ, and the definitions are not logged. A key over
   `hashFiles('*.opam')` alone is blind both to new compatible
   ordinary-package releases and to the
   branch-tracking pins
@@ -1329,9 +1339,11 @@ that they earn a lookup rather than always-loaded space.
   without a second caller-owned list to update. The action delegates to
   `.github/actions/pin-revisions/resolve.sh`, and `tools/test-pin-revisions.sh` exercises that exact
   production script with fake opam 2.5.2 and git outputs: sorting, duplicates, local-pin exclusion,
-  color suppression, empty registries and failed resolutions all have fault-injected negative
-  controls. CI runs the harness once on its Ubuntu main leg because this is POSIX action plumbing,
-  not an OCaml test or a repository scan, and the fixtures need neither setup-ocaml nor network.
+  project-package exclusion from the definition digest (and the loud failure when the solution
+  holds nothing else), color suppression, empty registries and failed resolutions all have
+  fault-injected negative controls. CI runs the harness once on its Ubuntu main leg because this
+  is POSIX action plumbing, not an OCaml test or a repository scan, and the fixtures need neither
+  setup-ocaml nor network.
   Both workflows use exact-key restores only: cache
   lookup happens after derivation, so a prefix fallback could overwrite the live registry with an
   older switch. And both install non-Windows depexts unconditionally after restore, because those

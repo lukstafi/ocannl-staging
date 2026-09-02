@@ -138,9 +138,31 @@ case " $* " in
       && has_arg --columns=package "$@" && has_arg --short "$@" \
       && has_arg --resolve=arrayjit,neural_nets_lib "$@" \
       || { echo "unexpected opam list contract: $*" >&2; exit 64; }
-    printf '%s\n' beta.2.0 ocannl.dev alpha.1.0 beta.2.0 | emit "$@"
+    case "${FAKE_LIST_FIXTURE:-mixed}" in
+      # The solution carries the project's own packages, as `--resolve` does.
+      mixed)
+        printf '%s\n' beta.2.0 ocannl.dev arrayjit.dev alpha.1.0 \
+          neural_nets_lib.dev beta.2.0 | emit "$@"
+        ;;
+      project-only)
+        printf '%s\n' neural_nets_lib.dev arrayjit.dev | emit "$@"
+        ;;
+      *) echo "unknown list fixture: $FAKE_LIST_FIXTURE" >&2; exit 64 ;;
+    esac
     ;;
   *" show "*)
+    # The project's pinned definitions carry the checkout's git ref, so they
+    # must never reach the definition digest (gh-ocannl-889).
+    if has_arg arrayjit.dev "$@" || has_arg neural_nets_lib.dev "$@"; then
+      echo "project package reached opam show: $*" >&2
+      exit 64
+    fi
+    # No package argument at all: answer silently, so the guard mutant below
+    # completes with a digest and the loud-failure oracle proves the guard
+    # itself rather than this fixture's refusal.
+    if ! has_arg alpha.1.0 "$@" && ! has_arg beta.2.0 "$@" && ! has_arg ocannl.dev "$@"; then
+      exit 0
+    fi
     has_arg --cli=2.1 "$@" && has_arg --safe "$@" \
       && has_arg --raw "$@" && has_arg --sort "$@" \
       && has_arg alpha.1.0 "$@" && has_arg beta.2.0 "$@" \
@@ -185,7 +207,7 @@ FAKE_GIT
 chmod +x "$TMP/bin/opam" "$TMP/bin/git"
 
 printf '%s\n' \
-  'solution-digest=b5782e031996' \
+  'solution-digest=62b0fa2f1d12' \
   'digest=623c3bf9bb0e' >"$TMP/expected-output"
 printf '%s\n' \
   'ls-remote https://example.invalid/alpha.git HEAD' \
@@ -203,6 +225,7 @@ run_subject() { # run_subject SUBJECT LABEL PIN_FIXTURE RESOLUTION
     PATH="$TMP/bin:$PATH" \
       OPAMCOLOR=always \
       FAKE_PIN_FIXTURE="$pins" \
+      FAKE_LIST_FIXTURE="${FAKE_LIST_FIXTURE:-mixed}" \
       FAKE_RESOLUTION="$resolution" \
       FAKE_OPAM_ROOT="$TMP/opam-root" \
       FAKE_OPAM_CALLS="$dir/opam.calls" \
@@ -227,6 +250,8 @@ oracle_happy() { # oracle_happy SUBJECT LABEL PIN_FIXTURE
     && cmp -s "$TMP/expected-git-calls" "$dir/git.calls" \
     && grep -q '^  alpha\.1\.0$' "$dir/stdout" \
     && grep -q '^  beta\.2\.0$' "$dir/stdout" \
+    && grep -q '^  arrayjit\.dev$' "$dir/stdout" \
+    && grep -q '^Project packages left out of the definition digest: arrayjit neural_nets_lib$' "$dir/stdout" \
     && grep -q '^  git+https://example\.invalid/alpha\.git$' "$dir/stdout" \
     && ! grep -q 'git+file:' "$dir/stdout" \
     && [ "$(grep -c -- '--color=never' "$dir/opam.calls")" -eq 3 ] \
@@ -257,12 +282,26 @@ oracle_resolution_loud() { # oracle_resolution_loud SUBJECT LABEL
     && ! grep -q '^digest=' "$dir/github-output"
 }
 
+oracle_project_only_loud() { # oracle_project_only_loud SUBJECT LABEL
+  local subject=$1 label=$2 dir="$TMP/runs/$2"
+  FAKE_LIST_FIXTURE=project-only run_subject "$subject" "$label" mixed-a ok
+  [ "$(cat "$dir/status")" -ne 0 ] \
+    && grep -q '^opam dependency solution holds only project packages$' "$dir/stderr" \
+    && ! grep -q '^solution-digest=' "$dir/github-output"
+}
+
 if oracle_happy "$SRC" shipping-happy mixed-a; then
   report 0 "opam 2.5.2 output: exact solution and pin digests"
   report 0 "local git+file pins: excluded from resolution and digest"
+  report 0 "project packages: excluded from the definition digest"
   report 0 "OPAMCOLOR=always: no ANSI reaches names, URLs, or outputs"
 else
   report 1 "shipping happy path" "see $TMP/runs/shipping-happy"
+fi
+if oracle_project_only_loud "$SRC" shipping-project-only; then
+  report 0 "all-project solution: fails loudly without a solution digest"
+else
+  report 1 "all-project solution" "see $TMP/runs/shipping-project-only"
 fi
 if oracle_deterministic "$SRC" shipping-order; then
   report 0 "pin ordering and duplicates: one stable resolution order and digest"
@@ -301,6 +340,22 @@ if [ -n "$local_mutant" ]; then
   expect_rejected "removing local-pin exclusion is detected" "$local_mutant" oracle_happy
 else
   report 1 "negative control: local-pin mutant constructed"
+fi
+
+project_mutant=$(mutant project-package-filter \
+  'index($0, "grep -qxF -- \"$name\"") { print "  if false; then"; changed++; next } { print } END { if (changed != 1) exit 9 }')
+if [ -n "$project_mutant" ]; then
+  expect_rejected "removing project-package exclusion is detected" "$project_mutant" oracle_happy
+else
+  report 1 "negative control: project-package mutant constructed"
+fi
+
+project_guard_mutant=$(mutant project-only-guard \
+  'index($0, "#definition_packages[@]") { print "true \\"; changed++; next } { print } END { if (changed != 1) exit 9 }')
+if [ -n "$project_guard_mutant" ]; then
+  expect_rejected "silent all-project digest is detected" "$project_guard_mutant" oracle_project_only_loud
+else
+  report 1 "negative control: project-only guard mutant constructed"
 fi
 
 empty_mutant=$(mutant empty-registry-guard \
