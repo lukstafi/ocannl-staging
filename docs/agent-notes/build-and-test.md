@@ -87,10 +87,11 @@ that they earn a lookup rather than always-loaded space.
   files — which the endpoint diff `<staging>/master..HEAD` cannot tell you, since it includes the
   PR's edits and so makes every nonempty PR look drifted. Anchor the question at the branch point
   instead: `git diff --stat $(git merge-base <staging>/master HEAD) <staging>/master -- $(git
-  diff --name-only <staging>/master...HEAD)`, with `<staging>` the remote name resolved above,
-  prints nothing when the base never touched those paths. A scan that turns red on the merged
-  tree anyway is a master red like any other, owned by the CI-red triage routine (the CI section
-  below) rather than by the session that merged.
+  diff --name-only --no-renames <staging>/master...HEAD)`, with `<staging>` the remote name
+  resolved above, prints nothing when the base never touched those paths (`--no-renames` lists
+  both names of a file the PR renamed, so an edit the base made to the old name still shows). A
+  scan that turns red on the merged tree anyway is a master red like any other, owned by the
+  CI-red triage routine (the CI section below) rather than by the session that merged.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
   about it, and that is the more expensive half of the same story. #413's fixtures came from a
   survey of the notes as they stood; the survey found no bullet continued after a blank line, so
