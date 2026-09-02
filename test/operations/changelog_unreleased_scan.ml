@@ -173,6 +173,7 @@ let closes_raw_html_tag ~tag line =
   String.is_substring (String.lowercase line) ~substring:("</" ^ tag ^ ">")
 
 let opens_raw_html line =
+  (* Tag NAMES are case-insensitive; `<![CDATA[` is not, so the raw text decides that one. *)
   let text = String.lowercase (String.strip line) in
   if indent_of line > block_indent then None
   else
@@ -222,10 +223,13 @@ let opens_raw_html line =
            history quoting an XML example is inert content, not a second anchor. *)
         (* A block whose terminator is already on its opening line opens no state at all -- the
            same reason a `<pre>example</pre>` does not. *)
-        let declaration prefix marker =
-          if not (String.is_prefix text ~prefix) then None
+        let declaration ?(raw = false) prefix marker =
+          let subject = if raw then String.strip line else text in
+          if not (String.is_prefix subject ~prefix) then None
           else if
-            String.is_substring (String.drop_prefix text (String.length prefix)) ~substring:marker
+            String.is_substring
+              (String.drop_prefix subject (String.length prefix))
+              ~substring:marker
           then Some None
           else Some (Some (`Until_marker marker))
         in
@@ -241,7 +245,7 @@ let opens_raw_html line =
         match declaration "<?" "?>" with
         | Some state -> state
         | None -> (
-            match declaration "<![cdata[" "]]>" with
+            match declaration ~raw:true "<![CDATA[" "]]>" with
             | Some state -> state
             | None -> (
                 match doctype () with
@@ -360,8 +364,22 @@ let is_plain_text text =
         let rest = String.drop_prefix text (close + 2) in
         match String.split rest ~on:' ' |> List.filter ~f:(Fn.non String.is_empty) with
         | [ _destination ] -> true
-        | _destination :: title :: _ ->
-            (not (String.is_empty title)) && List.mem [ '"'; '\''; '(' ] title.[0] ~equal:Char.equal
+        | _destination :: _ :: _ ->
+            (* A title, and NOTHING after it: `[API]: behavior "changed" for users` has words beyond
+               the quotes, which makes the whole line ordinary paragraph text. *)
+            let after_destination =
+              let trimmed = String.lstrip rest in
+              match String.index trimmed ' ' with
+              | Some space -> String.lstrip (String.drop_prefix trimmed space)
+              | None -> ""
+            in
+            let closes opening close =
+              String.length after_destination >= 2
+              && Char.equal after_destination.[0] opening
+              && Char.equal after_destination.[String.length after_destination - 1] close
+              && String.count (String.drop_prefix after_destination 1) ~f:(Char.equal close) = 1
+            in
+            closes '"' '"' || closes '\'' '\'' || closes '(' ')'
         | [] -> false)
     | _ -> false
   in
@@ -373,9 +391,13 @@ let is_plain_text text =
   (* Nor may it start with whitespace: a marker followed by two spaces, or by a tab, indents its
      content past the one column this grammar names. *)
   && (not (Char.is_whitespace c))
-  && (not (Char.equal c '#'))
-  && (not (Char.equal c '>'))
-  && not (Char.equal c '<')
+  (* A leading `#` or `<` is refused only where it actually opens a block, which the recognizers
+     already decide: `#include` is no heading and `<5 ms` no HTML block, and refusing either would
+     fail the gate over ordinary prose. A block quote has no such lookalike -- `>` opening a line's
+     text always opens one. *)
+  && (not (Option.is_some (heading_level text)))
+  && (not (Option.is_some (opens_raw_html text)))
+  && not (Char.equal c '>')
 
 (** A bullet: [- ] at column zero, ONE space, then text that opens no block of its own. *)
 let is_bullet line =
@@ -442,11 +464,14 @@ let token_boundary text k =
   let c = text.[k] in
   not (Char.is_alphanum c || Char.equal c '-' || Char.equal c '_')
 
+(** A record number: a digit run closed by a token boundary, and not zero — GitHub numbers issues
+    and pull requests from one, so `gh-ocannl-0` identifies nothing a reader can open. *)
 let number_at text k =
   let tlen = String.length text in
   let rec digits j = if j < tlen && Char.is_digit text.[j] then digits (j + 1) else j in
   let stop = digits k in
   stop > k && token_boundary text stop
+  && String.count (String.sub text ~pos:k ~len:(stop - k)) ~f:(Fn.non (Char.equal '0')) > 0
 
 (** Whether [text] carries [prefix] followed by a well-formed number. Bare "gh-ocannl-" prose with
     no number is not a citation, which is why the number is part of the question. *)
@@ -535,6 +560,22 @@ let visible_text bullet =
       match String.substr_index joined ~pos:i ~pattern:"-->" with
       | Some close -> loop (close + 3)
       | None -> ()
+    else if
+      (* Inline tag markup renders as nothing a reader can follow either: a citation in `<span
+         data-issue="gh-ocannl-807">` is an attribute, not text. A `<` that opens no tag -- `<5 ms`
+         -- is ordinary prose and stays. *)
+      Char.equal joined.[i] '<'
+      && i + 1 < n
+      && (Char.is_alpha joined.[i + 1]
+         || (Char.equal joined.[i + 1] '/' || Char.equal joined.[i + 1] '!')
+            && i + 2 < n
+            && Char.is_alpha joined.[i + 2])
+    then (
+      match String.index_from joined i '>' with
+      | Some close -> loop (close + 1)
+      | None ->
+          Buffer.add_char buffer joined.[i];
+          loop (i + 1))
     else (
       Buffer.add_char buffer joined.[i];
       loop (i + 1))
@@ -591,6 +632,9 @@ let control_section =
     "- A bullet whose only citation hides in a comment <!-- gh-ocannl-807 -->";
     "- A bullet explaining `<!--";
     "  syntax` across a wrapped code span (gh-ocannl-807).";
+    "- A bullet whose citation hides in <span data-issue=\"gh-ocannl-807\">an attribute</span>.";
+    "- A bullet citing gh-ocannl-0, a number no record has.";
+    "- A bullet citing `lukstafi/ocannl-staging` PR #0, which is no pull request either.";
   ]
 
 (** Every shape the gate refuses, each one a defect an earlier round found in the parser this file
@@ -639,6 +683,11 @@ let canonical_shapes =
     (* Prose that opens with a bracketed label is not a link-reference definition: the words after
        the destination are no title, so it renders, and refusing it would fail a real entry. *)
     "- [API]: behavior changed (gh-ocannl-807).";
+    "- [API]: behavior \"changed\" for users (gh-ocannl-807).";
+    (* Prose whose first character only looks structural: `#include` is no heading, `<5 ms` no HTML
+       block. The recognizers decide, so neither fails the gate. *)
+    "- `#include` ordering is stable now (gh-ocannl-807).";
+    "- <5 ms per step on the tuned path (gh-ocannl-807).";
   ]
 
 (* Anchors, and history that must not fail the scan. *)
@@ -677,6 +726,10 @@ let control_declaration = released_history [ "<?xml version=\"1.0\"?>"; "## [Unr
 
 let control_cdata =
   released_history [ "<![CDATA["; "## [Unreleased]"; "]]>"; ""; "- still released." ]
+
+(* `<![CDATA[` is case-SENSITIVE: a lowercase one opens no block, so the anchor behind it is
+   seen. *)
+let control_lowercase_cdata = released_history [ "<![cdata["; "## [Unreleased]" ]
 
 let control_deep_subheading =
   [
@@ -747,7 +800,7 @@ let () =
     (List.for_all bullets ~f:cites_record);
   (* The controls. *)
   let control = bullets_of control_section in
-  p "the section reader finds the thirteen synthetic control bullets" (List.length control = 13);
+  p "the section reader finds the sixteen synthetic control bullets" (List.length control = 16);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -770,6 +823,12 @@ let () =
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "notgh-ocannl-807");
   p_exists "the citation rule flags a citation that hides in an HTML comment" control
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "hides in a comment");
+  p_exists "the citation rule flags a citation that hides in an HTML attribute" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "data-issue");
+  p_exists "the citation rule flags issue number zero" control ~f:(fun bullet ->
+      (not (cites_record bullet)) && mentions bullet "gh-ocannl-0,");
+  p_exists "the citation rule flags PR number zero" control ~f:(fun bullet ->
+      (not (cites_record bullet)) && mentions bullet "PR #0");
   p_exists "a code span wrapped across a bullet's lines is canonical, and its citation counts"
     control ~f:(fun bullet ->
       cites_record bullet
@@ -831,6 +890,8 @@ let () =
   p "a declaration runs to its own terminator, and hides the anchor inside it"
     (List.length (unreleased_headings control_declaration) = 2
     && one_anchor_one_bullet control_cdata);
+  p "a lowercase cdata opener is not a CDATA block, so the anchor behind it is seen"
+    (List.length (unreleased_headings control_lowercase_cdata) = 2);
   p "a comment opener inside prose or a code span opens no HTML block"
     ((not (List.exists control_code_span_comment ~f:opens_comment_block))
     && (not (opens_comment_block "- An uncited change <!-- gh-ocannl-807 -->"))
