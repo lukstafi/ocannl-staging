@@ -20,32 +20,31 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - Schedule-cache directories carry a regime stamp: an older one prunes the stale generation, a
   newer or malformed one refuses reads and writes; the library's temp-then-rename publications go
   through `Utils.Atomic_file` (gh-ocannl-835, gh-ocannl-780, gh-ocannl-803).
-- A third test tier, `@train` (per-test `train-<name>` aliases), for the toy training
-  integrations; per-PR CI runs it as a separate macOS shard, the daily sweep on every backend.
-  Training-golden thresholds are window means, not one sampled epoch (gh-ocannl-854).
 - Benchmark provenance and supervision: `benchmarks/fixtures/DIGESTS.txt` records which box's
   fixture bytes each published number was measured on (gh-ocannl-759); sweep children run under a
-  per-cell wall-clock cap, on by default (gh-ocannl-842, gh-ocannl-760, gh-ocannl-829).
+  per-cell wall-clock cap, on by default (gh-ocannl-842, gh-ocannl-760).
 
 ### Changed
 
-- Autotune times candidates under queue depth (one launch plus one sync read up to 2.6x high),
-  withholds contended or non-finite timings from ranking, and reports `{ ms; contended; samples }`;
-  `Autotune.report.timing` is a `timing_mode` (gh-ocannl-755, gh-ocannl-855, gh-ocannl-888).
+- Autotune's default `Queued` timing measures candidates under queue depth (`Isolated` stays
+  selectable), withholds contended or non-finite timings from ranking, and reports
+  `{ ms; contended; samples }`; `report.timing` is a `timing_mode` (gh-ocannl-755, gh-ocannl-855, gh-ocannl-888).
 - RTC options (`Compiler_options.nvrtc`, `.metal`, `.hiprtc`) are pure, pinned state, printed by
   sweeps and appended to CUDA and Metal compile failures; Metal on macOS 15+ selects
   `mathMode=Safe` with fast float functions (gh-ocannl-784, gh-ocannl-848).
-- Metal's serial-accumulation workaround is a volatile cast on device reads (1.03x, where the
-  volatile accumulator cost 1.06x to 4.1x); the capability is `volatile_serial_accumulation` and
+- Metal's serial-accumulation workaround is a volatile cast on device reads, far cheaper than
+  the volatile accumulator; the capability is `volatile_serial_accumulation` and
   `Context.routine.volatility` says which sites took it (gh-ocannl-782, gh-ocannl-820).
 - Retired API: `Backend.compile_batch` / `link_batch` (gh-ocannl-767); `Tensor.raw_unop` /
   `raw_binop` / `raw_ternop`, collapsed onto `Tensor.raw_accum`; `Tensor.diff.zero_grads` is a
   `comp`, not an `asgns` — read `.asgns` for the tree (gh-ocannl-771).
 - Narrowed API: `Indexing.projections` carries one `components` array, not `product_space` /
-  `product_iterators` (gh-ocannl-812, gh-ocannl-775); `Ir.Low_level.footprint` (gh-ocannl-764,
-  gh-ocannl-765); `Context.Backends_deprecated` is `Context.Backends` (gh-ocannl-810).
+  `product_iterators` (gh-ocannl-812, gh-ocannl-775); `Context.Backends_deprecated.footprint` is
+  `Ir.Low_level.footprint` (gh-ocannl-764, gh-ocannl-765) and `Context.Backends_deprecated` is
+  `Context.Backends` (gh-ocannl-810).
 - `Affine`, `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit
-  interfaces (gh-ocannl-806).
+  interfaces that hide their zero-reference helpers (`Ir.Affine.equal_verdict`,
+  `Ir.Interval.value_fits`, ...); the removed surface is listed under gh-ocannl-806.
 - `Train.to_routine` returns `Context.t * Context.routine`, like `Context.compile`; fix the type
   error with `let _, routine = ...` or chain the context (gh-ocannl-772).
 - `?lowered_transform` / `?lowered_transforms` on `Context.compile`, `compile_outcome` and backend
@@ -57,13 +56,11 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   `compare_relief_ratio` → `Memory_budget.*` (gh-ocannl-776).
 - `Get_dynamic` gather tables decide their own placement: one recomputation cannot serve
   materializes (gh-ocannl-734).
-- `lib/` optional arguments audited: `batch_norm1d`/`batch_norm2d ?_momentum` and `mobile_cnn
-  ?_width_mult` are labelled placeholders with no effect (gh-ocannl-811).
+- `batch_norm1d`/`batch_norm2d ?momentum` are `?_momentum` and `mobile_cnn ?width_mult` is
+  `?_width_mult`: placeholders with no effect, now labelled as such (gh-ocannl-811).
 - Scripts, dune actions, workflow YAML, `ocannl_config` files and the documentation under
   `docs/`, `AGENTS.md` and `README.md` are scanned against `Utils.known_config_keys`, so a
   renamed key fails the scans instead of drifting; this changelog is outside it (gh-ocannl-790).
-- The fp8 soak's vendor-independent logic lives in `tools/fp8_soak.ml`, which every box compiles
-  (gh-ocannl-758).
 
 ### Fixed
 
@@ -73,8 +70,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - `Train.sgd_update ~momentum` works: the momentum buffer was left a virtualization candidate,
   failing at lowering; `test/operations/sgd_variants` pins momentum, nesterov, weight decay and
   `grad_scale` against a host simulation (gh-ocannl-772).
-- The mul-add→FMA rewrite is guarded to floating-point precisions; integer mul-add lost the unit
-  at the int64 boundary (gh-ocannl-824).
+- The mul-add→FMA rewrite is guarded to floating-point precisions; int64 mul-add went through
+  double `fma` and lost integers above 2^53 (gh-ocannl-824).
 - `Set_vec_unop` refuses a launch-bound symbolic extent instead of writing packed vectors
   unguarded (gh-ocannl-817).
 - `OCANNL_LOG_LEVEL_CC_BACKEND=1` and `=3` compile again (gh-ocannl-823).
