@@ -117,9 +117,12 @@ let key_of { text; _ } =
     | Some key -> Some key
     | None -> (
         match String.lsplit2 stripped ~on:':' with
+        (* YAML permits separation space before the colon ([jobs :]), so the name is right-trimmed
+           before it is judged. *)
         | Some (name, rest)
-          when (not (String.is_empty name)) && String.for_all name ~f:plain_key_char ->
-            Some (name, String.strip rest)
+          when let name = String.rstrip name in
+               (not (String.is_empty name)) && String.for_all name ~f:plain_key_char ->
+            Some (String.rstrip name, String.strip rest)
         | _ -> None)
 
 let strip_trailing_comment value =
@@ -157,6 +160,15 @@ let opens_unterminated_quote text =
   let quote_character c = Char.equal c '"' || Char.equal c '\'' in
   (* [at_scalar_start] is true only for the first character of a scalar: it is set by an indicator
      ([:] or [-]) and survives the whitespace that follows it, and nothing else turns it back on. *)
+  let indicator index character =
+    (* A [:] indicates only when a space or the line's end follows it, and a [-] only as the line's
+       leading sequence marker. Anywhere else both are ordinary plain-scalar text -- which is what
+       [name: Publish - 'next branch] is, apostrophe included. *)
+    (Char.equal character ':' && (index + 1 >= length || Char.is_whitespace text.[index + 1]))
+    || Char.equal character '-' && index = 0
+       && index + 1 < length
+       && Char.is_whitespace text.[index + 1]
+  in
   let rec outside index ~at_scalar_start =
     if index >= length then false
     else
@@ -166,8 +178,7 @@ let opens_unterminated_quote text =
         false
       else
         let at_scalar_start =
-          Char.equal character ':' || Char.equal character '-'
-          || (at_scalar_start && Char.is_whitespace character)
+          indicator index character || (at_scalar_start && Char.is_whitespace character)
         in
         outside (index + 1) ~at_scalar_start
   and inside index opening =
@@ -753,6 +764,18 @@ let control () =
   let quote_mid_plain_scalar =
     run ("name: Publish the 'next branch\non: workflow_dispatch\njobs:\n" ^ sound_job ~name:"build")
   in
+  let hyphen_in_plain_scalar =
+    run ("name: Publish - 'next branch\non: workflow_dispatch\njobs:\n" ^ sound_job ~name:"build")
+  in
+  let spaced_keys =
+    run
+      ("name : fixture\non : workflow_dispatch\njobs :\n"
+     ^ "  build :\n\
+       \    runs-on : ubuntu-latest\n\
+       \    timeout-minutes : 10\n\
+       \    steps :\n\
+       \      - run : echo hi\n")
+  in
   let byte_order_mark = run ("\xef\xbb\xbf" ^ workflow [ sound_job ~name:"build" ]) in
   let document_end_marker =
     run
@@ -918,6 +941,10 @@ let control () =
     (passed "apostrophe in a plain scalar" apostrophe_in_plain_scalar);
   p "a quote partway through a plain scalar is text too, whitespace before it notwithstanding"
     (passed "quote mid plain scalar" quote_mid_plain_scalar);
+  p "a hyphen partway through a plain scalar indicates nothing, quotes after it included"
+    (passed "hyphen in a plain scalar" hyphen_in_plain_scalar);
+  p "keys carrying YAML's separation space before the colon are read as the keys they are"
+    (passed "spaced keys" spaced_keys);
   p "a leading byte-order mark does not hide the first key"
     (passed "byte-order mark" byte_order_mark);
   p "a document-end marker leaves an indented root mapping readable"
