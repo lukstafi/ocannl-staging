@@ -399,6 +399,9 @@ let raw_entries =
         "[scanner-refusal:ac061fc23855d36465a9bd2ac3df8a14] ceiling that exists";
         "[scanner-refusal:42f8936ed74b6847e68661e48376b771] per-step ceiling is";
         "[scanner-refusal:77aa0c14bff72954feb09cf4c386a264] reusable-workflow call that";
+        "[scanner-refusal:9f23eda281ea0c55a77c9e409e9471f6] timeout-minutes key with";
+        "[scanner-refusal:fbfd4638215ae05bcb97101b459be8e4] timeout-minutes key whose";
+        "[scanner-refusal:186c72d23e1ef379b2b9d5bd606fc1aa] real ceiling wearing";
         "[scanner-refusal:de56c44843177e1b1a86d6d0970e8ec9] refused rather than";
         "[scanner-refusal:ea2e7502608bb8e1195b7ec15868624a] nested under github/workflows";
       ] );

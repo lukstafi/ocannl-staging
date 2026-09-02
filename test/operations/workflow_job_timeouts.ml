@@ -80,10 +80,15 @@ let key_of { text; _ } =
       Some (name, String.strip rest)
   | _ -> None
 
+(* A comment is not a value: `timeout-minutes: # decide later` declares the key and no ceiling, and
+   so does a bare `timeout-minutes:`. Both reduce to the empty string here, which is what
+   [declared_timeout] refuses. *)
 let strip_trailing_comment value =
-  match String.substr_index value ~pattern:" #" with
-  | Some position -> String.strip (String.prefix value position)
-  | None -> value
+  if String.is_prefix (String.strip value) ~prefix:"#" then ""
+  else
+    match String.substr_index value ~pattern:" #" with
+    | Some position -> String.strip (String.prefix value position)
+    | None -> value
 
 (* [run: |] and its relatives introduce a literal block: everything indented under such a key is
    text, not structure. Dropping those lines is what keeps a step's shell script from contributing
@@ -421,6 +426,41 @@ let control () =
       (workflow
          [ "  caller:\n    uses: ./.github/workflows/filler1.yml\n    timeout-minutes: 30\n" ])
   in
+  (* The key present with nothing behind it: a declaration that names no ceiling, against its
+     nearest counterpart, a real ceiling wearing a trailing comment. *)
+  let empty_value =
+    run
+      (workflow
+         [
+           "  hollow:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes:\n\
+           \    steps:\n\
+           \      - run: echo hi\n";
+         ])
+  in
+  let comment_only_value =
+    run
+      (workflow
+         [
+           "  deferred:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: # decide later\n\
+           \    steps:\n\
+           \      - run: echo hi\n";
+         ])
+  in
+  let commented_ceiling =
+    run
+      (workflow
+         [
+           "  annotated:\n\
+           \    runs-on: ubuntu-latest\n\
+           \    timeout-minutes: 20 # ~2min normally; a ceiling only a hang can reach\n\
+           \    steps:\n\
+           \      - run: echo hi\n";
+         ])
+  in
   let no_jobs = run "name: fixture\non: workflow_dispatch\n" in
   (* A YAML file in a subdirectory of `.github/workflows` is not a workflow: GitHub discovers only
      the files sitting directly there. The recursive glob hands this one over anyway, which is what
@@ -461,6 +501,14 @@ let control () =
             rejects on that form";
          ]
        caller_with_timeout);
+  p "a timeout-minutes key with nothing behind it declares no ceiling and is refused"
+    (refused "empty ceiling value" ~messages:[ missing_timeout "hollow" ] empty_value);
+  p "a timeout-minutes key whose whole value is a comment is refused the same way"
+    (refused "comment-only ceiling value"
+       ~messages:[ missing_timeout "deferred" ]
+       comment_only_value);
+  p "a real ceiling wearing a trailing comment is a ceiling, and its job passes"
+    (passed "commented ceiling" commented_ceiling);
   p "a workflow file with no jobs mapping is refused rather than read as having no jobs"
     (refused "no jobs mapping"
        ~messages:[ "no top-level `jobs:` key; this scan cannot answer for its jobs" ]
