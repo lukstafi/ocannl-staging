@@ -1674,12 +1674,11 @@ type 'a marker_contract = {
           stanza — the count a placement diagnostic actually wants, since a marker in a comment
           between stanzas declares nothing. It is the contract's own answer rather than a
           subtraction the caller performs: deriving it as "comments minus the ones the
-          [Marker_outside_stanza] issues mention" makes every consumer re-implement the
-          relationship between an issue and the occurrences it accounts for, and quietly returns
-          the wrong number the moment an issue carries more than one occurrence or the contract
-          gains another placement refusal. Malformed and wrong-stanza markers are counted here:
-          they were placed inside a stanza, and what is wrong with them is said by their own
-          issues. *)
+          [Marker_outside_stanza] issues mention" makes every consumer re-implement the relationship
+          between an issue and the occurrences it accounts for, and quietly returns the wrong number
+          the moment an issue carries more than one occurrence or the contract gains another
+          placement refusal. Malformed and wrong-stanza markers are counted here: they were placed
+          inside a stanza, and what is wrong with them is said by their own issues. *)
 }
 
 let sentinel_occurrences ~sentinel text =

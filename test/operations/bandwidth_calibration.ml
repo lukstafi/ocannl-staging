@@ -13,10 +13,10 @@
    WHICH kernels contribute rows is a property of the host, not of the pass (gh-ocannl-892). A
    timing window whose samples are mostly host stalls is refused ([Autotune.admitted_timing_ms]),
    and a refused candidate emits no row; on a busy machine a whole kernel's candidates can be
-   refused, and then that kernel has no rows at all. So the golden pins the RELATIONSHIP -- a
-   kernel contributed rows exactly when its search timed a candidate, and a kernel with no rows
-   shows refused timings as the evidence -- rather than an ordered list of the four names, which on
-   the GPU backends made the golden a function of the load the sweep happened to be under. *)
+   refused, and then that kernel has no rows at all. So the golden pins the RELATIONSHIP -- a kernel
+   contributed rows exactly when its search timed a candidate, and a kernel with no rows shows
+   refused timings as the evidence -- rather than an ordered list of the four names, which on the
+   GPU backends made the golden a function of the load the sweep happened to be under. *)
 
 open Base
 open Ocannl
@@ -63,10 +63,10 @@ let () =
     ~f:(fun (name, rep) -> Bool.equal (contributed name) (rep.Autotune.candidates_timed > 0));
   (* The biconditional alone would also accept a kernel whose every candidate failed compile or
      dispatch ([candidates_failed]): nothing timed, nothing contributed, both sides false. That is
-     the loss of coverage the ordered list used to catch, and it is not what load does -- a
-     refused timing window increments [timings_contended]. So a kernel may go row-less only on
-     that evidence. Cache replay would zero both counters, but [Calibrate.stream] passes
-     [~cache_dir:""], so every search here times live. *)
+     the loss of coverage the ordered list used to catch, and it is not what load does -- a refused
+     timing window increments [timings_contended]. So a kernel may go row-less only on that
+     evidence. Cache replay would zero both counters, but [Calibrate.stream] passes [~cache_dir:""],
+     so every search here times live. *)
   Verdict.p_all "a kernel with no rows was refused its timings, not silently lost" reports
     ~f:(fun (name, rep) -> contributed name || rep.Autotune.timings_contended > 0);
   let exact_bytes =

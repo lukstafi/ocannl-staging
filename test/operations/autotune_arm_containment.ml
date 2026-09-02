@@ -62,12 +62,12 @@ let clean_cache dir =
    against that same digest, so attempts 1-6 time nothing at all and a fixed [~at:4] lands inside
    that prefix — leaving the scenario asserting the opposite of what it says. Nor is it a fixed
    count of timing RUNS: under the queued objective a preflighted run's window can be refused as
-   contended without growing [candidates_timed] (gh-ocannl-855), and on a loaded CUDA device arm
-   B's first two windows were both refused, so a preflight-counted precondition fired the injection
-   on an arm with no timed best — again asserting the opposite of what the scenario says
-   (gh-ocannl-898). [on_candidate_timed] fires exactly when [candidates_timed] grows and carries
-   the tuner's own count, so [timed] below is a copy of the number the arm's report will state,
-   not a second counter that could drift from it. *)
+   contended without growing [candidates_timed] (gh-ocannl-855), and on a loaded CUDA device arm B's
+   first two windows were both refused, so a preflight-counted precondition fired the injection on
+   an arm with no timed best — again asserting the opposite of what the scenario says
+   (gh-ocannl-898). [on_candidate_timed] fires exactly when [candidates_timed] grows and carries the
+   tuner's own count, so [timed] below is a copy of the number the arm's report will state, not a
+   second counter that could drift from it. *)
 let with_injected_failure ?exn ?(after_arm_timed = 0) ~arms_reported ~at ~message f =
   let attempts = ref 0 in
   let timed = ref 0 in
@@ -138,8 +138,8 @@ let () =
   let message = "injected candidate failure" in
   (* The first attempt after arm B has two admitted timings: on a backend whose baseline is
      dispatchable that is its baseline plus one candidate, and on one whose baseline is not (Metal
-     here) it is two candidates — either way arm B has a timed best of its own to lose, which is
-     the point of this scenario. *)
+     here) it is two candidates — either way arm B has a timed best of its own to lose, which is the
+     point of this scenario. *)
   let ctx_t, routine_t =
     with_injected_failure ~arms_reported ~after_arm_timed:2 ~at:1 ~message (fun () ->
         Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir ~report

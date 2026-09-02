@@ -234,10 +234,9 @@ let scan ~backends ~expected_paths ~dune_files =
             let contract_errors =
               List.concat_map contract.contract_issues ~f:(marker_issue_errors ~dune_path)
             in
-            (* The contract counts the placed occurrences itself: this check only compares the
-               dumb text count against it, so a marker written outside a comment and one written
-               between stanzas are the same report -- the author declared something no stanza
-               carries. *)
+            (* The contract counts the placed occurrences itself: this check only compares the dumb
+               text count against it, so a marker written outside a comment and one written between
+               stanzas are the same report -- the author declared something no stanza carries. *)
             let inside_stanzas = contract.contract_stanza_occurrences in
             let errors =
               if Int.equal contract.contract_text_occurrences inside_stanzas then

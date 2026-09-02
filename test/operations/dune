@@ -2081,7 +2081,10 @@
     (echo "%{deps}"))
    (with-stdout-to
     cache_dir_ignores.actual
-    (run %{dep:cache_dir_ignores.exe} %{workspace_root} @cache_dir_ignores.filelist)))))
+    (run
+     %{dep:cache_dir_ignores.exe}
+     %{workspace_root}
+     @cache_dir_ignores.filelist)))))
 
 (rule
  (alias runtest-cache_dir_ignores)
@@ -2236,7 +2239,10 @@
     (echo "%{deps}"))
    (with-stdout-to
     dead_export_scan.actual
-    (run %{dep:dead_export_scan.exe} %{workspace_root} @dead_export_scan.filelist)))))
+    (run
+     %{dep:dead_export_scan.exe}
+     %{workspace_root}
+     @dead_export_scan.filelist)))))
 
 (rule
  (alias runtest-dead_export_scan)
@@ -2473,7 +2479,10 @@
     (echo "%{deps}"))
    (with-stdout-to
     codegen_text_inventory.actual
-    (run %{dep:codegen_text_inventory.exe} %{workspace_root} @codegen_text_inventory.filelist)))))
+    (run
+     %{dep:codegen_text_inventory.exe}
+     %{workspace_root}
+     @codegen_text_inventory.filelist)))))
 
 (rule
  (alias runtest-codegen_text_inventory)
@@ -4665,7 +4674,10 @@
     (echo "%{deps}"))
    (with-stdout-to
     config_usage_scan.actual
-    (run %{dep:config_usage_scan.exe} %{workspace_root} @config_usage_scan.filelist)))))
+    (run
+     %{dep:config_usage_scan.exe}
+     %{workspace_root}
+     @config_usage_scan.filelist)))))
 
 (rule
  ; ocannl-backend: none -- runs the same text scanner on a synthetic unknown key and requires its

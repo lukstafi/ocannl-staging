@@ -1061,9 +1061,9 @@ let backend_rule_cases =
 (* The dumb reading against the placed one, in the contract's own three counts: the whole text, the
    comments the lexer finds, and the comments a stanza's parentheses contain. A marker written where
    the comment lexer does not look -- into a quoted argument, into a field -- shows up as the first
-   gap, and one written in a comment no stanza encloses as the second. Both are the same shape,
-   "the author declared something no stanza carries", which is why the contract answers the placed
-   count itself instead of leaving each consumer to subtract its way to it (gh-ocannl-863). *)
+   gap, and one written in a comment no stanza encloses as the second. Both are the same shape, "the
+   author declared something no stanza carries", which is why the contract answers the placed count
+   itself instead of leaving each consumer to subtract its way to it (gh-ocannl-863). *)
 let sentinel_counting_cases =
   [
     ( "in a comment",
@@ -1674,8 +1674,8 @@ let () =
         ("backend marker sentinel -- " ^ name)
         [ render in_text in_comments in_stanzas ]
         [
-          render contract.Scan.contract_text_occurrences
-            contract.Scan.contract_comment_occurrences contract.Scan.contract_stanza_occurrences;
+          render contract.Scan.contract_text_occurrences contract.Scan.contract_comment_occurrences
+            contract.Scan.contract_stanza_occurrences;
         ]);
   List.iter contained_marker_cases ~f:(fun (name, source, expected) ->
       let found =
