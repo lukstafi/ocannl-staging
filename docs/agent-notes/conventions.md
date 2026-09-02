@@ -11,8 +11,11 @@ files.
   prep, or an explicitly-requested batch catch-up, derive `CHANGES.md` entries from the records the
   work already left — merge commits (`git log --first-parent`), PR bodies, issue closing comments.
   Bullets are user-facing (what changed for someone using the library; internal test/tooling
-  plumbing usually earns none), one to three lines each, citing `gh-ocannl-NNN`; the mechanism,
-  rationale and measured numbers stay in the PR, the issue and these notes.
+  plumbing usually earns none), one to three lines each, citing `gh-ocannl-NNN` or a
+  `lukstafi/ocannl-staging` `PR #NNN`; the mechanism, rationale and measured numbers stay in the
+  PR, the issue and these notes. Those last two rules are decidable from the text and are checked
+  by `test/operations/changelog_unreleased_scan`, over the `## [Unreleased]` section alone —
+  released sections are history and stay untouched.
 - `ocannl_config.reference` ships with every setting COMMENTED OUT, and the two forms are
   load-bearing: a commented-out setting is `#key=value` with NO space after the `#`, while prose
   (and the verbatim profile-payload blocks at the end of the file) always uses `# `. That is how

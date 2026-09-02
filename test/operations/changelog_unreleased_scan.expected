@@ -1,0 +1,11 @@
+The `## [Unreleased]` section of CHANGES.md against the editorial convention stated in
+docs/agent-notes/conventions.md (gh-ocannl-807). Released sections are history and are not
+read; the counts scanned go to stderr, since a tally in a golden moves on every editorial
+pass (gh-ocannl-665).
+
+every Unreleased bullet is at most three lines: true
+every Unreleased bullet cites gh-ocannl-NNN or a PR #NNN: true
+the section reader finds the three synthetic control bullets: true
+the length rule flags a synthetic four-line bullet: true
+the citation rule flags a synthetic uncited bullet: true
+both rules pass a synthetic compliant bullet: true
