@@ -76,14 +76,21 @@ that they earn a lookup rather than always-loaded space.
   and run it there. What the omission buys is a false failure on a colleague's correct work, which
   is the outcome that gets a check disabled rather than fixed. Merging does NOT repeat the
   exercise: under the roll-forward policy (gh-ocannl-861) the gate is one green full-matrix run
-  for the PR's last commit, and a clean merge proceeds on it however far the base has moved —
+  for the PR's current head, and a clean merge proceeds on it however far the base has moved —
   re-verifying after every sibling merge is exactly the cost the policy removed (staging#533 ran
-  three clean rebases and three full CI cycles over an unchanged topic diff before it). Only a
-  merge that needed a conflict-resolving commit waits for green CI on that commit, which the
-  checks gate reads naturally as the new head; rebase again before merging only when the base's
-  drift visibly touches the files the PR changes (`git diff origin/master..HEAD --stat`, two
-  dots). A scan that turns red on the merged tree anyway is a master red like any other, owned by
-  the CI-red triage routine (the CI section below) rather than by the session that merged.
+  three clean rebases and three full CI cycles over an unchanged topic diff before it). The gate
+  reads whatever the head is: a merge that adds no commit to the branch restarts nothing, while
+  any commit that moves the head — a conflict resolution, a rebase, a merge of the base — waits
+  for its own green run, conflicts or not. A diff the `ci` path filter ignores entirely
+  (`docs/**`) gets no run at all; there an absent check is the filter's answer, not a missing
+  verdict. Bring the base in again before merging only when its advance touched the PR's own
+  files — which the endpoint diff `<staging>/master..HEAD` cannot tell you, since it includes the
+  PR's edits and so makes every nonempty PR look drifted. Anchor the question at the branch point
+  instead: `git diff --stat $(git merge-base <staging>/master HEAD) <staging>/master -- $(git
+  diff --name-only <staging>/master...HEAD)`, with `<staging>` the remote name resolved above,
+  prints nothing when the base never touched those paths. A scan that turns red on the merged
+  tree anyway is a master red like any other, owned by the CI-red triage routine (the CI section
+  below) rather than by the session that merged.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
   about it, and that is the more expensive half of the same story. #413's fixtures came from a
   survey of the notes as they stood; the survey found no bullet continued after a blank line, so
