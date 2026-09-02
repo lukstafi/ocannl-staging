@@ -553,8 +553,17 @@ let atx_heading line =
       else None
 
 (** Whether a line opens with something that WANTS to be a heading, so that a malformed one is
-    reported rather than read as prose. *)
-let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
+    reported rather than read as prose.
+
+    A hash followed immediately by a DIGIT wants nothing of the kind: ["#598"] is an issue or a pull
+    request, and the notes cite those constantly, so a citation that wrapped onto a continuation's
+    first column was read as a broken heading and intact prose was reported -- twice over, since
+    closing the list there made the next continuation an orphan too (lukstafi/ocannl-staging#598).
+    No ATX heading is lost to the exception: a real one has a space or the line's end after its hash
+    run, never a digit. Every other hash-prefixed line that is not a heading stays a finding. *)
+let looks_like_heading line =
+  let s = String.strip line in
+  String.is_prefix s ~prefix:"#" && not (String.length s > 1 && Char.is_digit s.[1])
 
 (** The headings a reader actually sees: a heading-looking line inside a multiline code span or an
     HTML comment is an example, and an index anchor naming its slug points at nothing (Codex P2,
