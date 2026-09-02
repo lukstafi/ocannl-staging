@@ -416,6 +416,11 @@ let raw_entries =
         "[scanner-refusal:62c5c78cf77044d66c80af05a68c6cea] sequence entry where";
         "[scanner-refusal:7607f0476a95ee77b5b691412ab32180] body staying content";
         "[scanner-refusal:2fff1ce44fe968a0f0b0a8600c33dc29] indented root mapping";
+        "[scanner-refusal:5175d9278abfe05422915dbfd01d2789] multiline quoted scalar";
+        "[scanner-refusal:78a687bff8c4929259602012af00edb7] same field written";
+        "[scanner-refusal:410e5f2257be17b30c49cbabd3debfb3] an apostrophe inside";
+        "[scanner-refusal:b1d9df243c7ef140743dbb4b09a54c86] leading byte-order mark";
+        "[scanner-refusal:4ed00663149579fcce944aba3b286b51] document-end marker leaves";
         "[scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes";
         "[scanner-refusal:f1d6bc11067a6db9ea16f25c8e526f98] carrying YAML's indentation";
         "[scanner-refusal:63a7ea671879e6eb8a95504d21ae4856] document indents uniformly";

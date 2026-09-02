@@ -28,6 +28,11 @@ the same quoted job without a ceiling is refused, so quoting hides nothing: true
 a sequence entry where a job mapping belongs is refused, not skipped: true
 a quoted key opens a block scalar too, its body staying content: true
 a document with a YAML directive and an indented root mapping is read: true
+a decoy jobs mapping inside a multiline quoted scalar is refused, never read as the real one: true
+the same field written on one line, colon and quotes and all, is read normally: true
+an apostrophe inside a plain scalar is text, not a quote this reader must follow: true
+a leading byte-order mark does not hide the first key: true
+a document-end marker leaves an indented root mapping readable: true
 a tab inside a run block scalar is content, and its workflow passes: true
 a block header carrying YAML's indentation and chomping indicators still opens a block: true
 a root mapping the document indents uniformly is read, `jobs:` not having to sit at column zero: true
@@ -62,6 +67,11 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:62c5c78cf77044d66c80af05a68c6cea] sequence entry where
   [scanner-refusal:7607f0476a95ee77b5b691412ab32180] body staying content
   [scanner-refusal:2fff1ce44fe968a0f0b0a8600c33dc29] indented root mapping
+  [scanner-refusal:5175d9278abfe05422915dbfd01d2789] multiline quoted scalar
+  [scanner-refusal:78a687bff8c4929259602012af00edb7] same field written
+  [scanner-refusal:410e5f2257be17b30c49cbabd3debfb3] an apostrophe inside
+  [scanner-refusal:b1d9df243c7ef140743dbb4b09a54c86] leading byte-order mark
+  [scanner-refusal:4ed00663149579fcce944aba3b286b51] document-end marker leaves
   [scanner-refusal:d41b6151de5f78d82eecb470d7ce97d4] its workflow passes
   [scanner-refusal:f1d6bc11067a6db9ea16f25c8e526f98] carrying YAML's indentation
   [scanner-refusal:63a7ea671879e6eb8a95504d21ae4856] document indents uniformly

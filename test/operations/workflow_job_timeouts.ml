@@ -58,6 +58,10 @@ type job = {
 
 let strip_cr text = Option.value (String.chop_suffix text ~suffix:"\r") ~default:text
 
+(* A UTF-8 BOM is permitted at the start of a workflow, and left in place it would attach itself to
+   the first key's name -- so the file's own `jobs:` would not be one. *)
+let strip_bom text = Option.value (String.chop_prefix text ~prefix:"\xef\xbb\xbf") ~default:text
+
 let indent_of text =
   let rec count index =
     if index < String.length text && Char.equal text.[index] ' ' then count (index + 1) else index
@@ -69,7 +73,7 @@ let indent_of text =
 let content_lines text =
   String.split_lines text
   |> List.mapi ~f:(fun index raw ->
-      let raw = strip_cr raw in
+      let raw = strip_cr (if index = 0 then strip_bom raw else raw) in
       { number = index + 1; indent = indent_of raw; text = String.rstrip raw })
   |> List.filter ~f:(fun { text; _ } ->
       let stripped = String.strip text in
@@ -78,7 +82,8 @@ let content_lines text =
       (* A `%YAML`/`%TAG` directive and a document marker are not content, and a directive left in
          would drag the document's base indentation down to its own column zero. *)
       && (not (String.is_prefix stripped ~prefix:"%"))
-      && not (String.is_prefix stripped ~prefix:"---"))
+      && (not (String.is_prefix stripped ~prefix:"---"))
+      && not (String.is_prefix stripped ~prefix:"..."))
 
 (* A key line is [<name>:] or [<name>: <value>]. The name is unquoted in every workflow this
    repository has, and an unrecognized line is simply not a key -- it cannot become one by being
@@ -140,6 +145,39 @@ let is_block_scalar value =
       (String.for_all ~f:(fun c ->
            Char.equal c '-' || Char.equal c '+' || (Char.is_digit c && not (Char.equal c '0'))))
 
+(* Whether a line leaves a quoted scalar open at its end. A quote only QUOTES where a scalar may
+   begin -- at the start of the line's content, after a [:] or after a sequence [-] -- so an
+   apostrophe inside an ordinary plain scalar ([name: Don't stop]) is text, as YAML reads it. Inside
+   a scalar, a backslash escapes in the double-quoted form and a doubled quote escapes in the
+   single-quoted one. Outside one, a [#] preceded by space starts a comment and ends the
+   question. *)
+let opens_unterminated_quote text =
+  let text = String.strip text in
+  let length = String.length text in
+  let quote_character c = Char.equal c '"' || Char.equal c '\'' in
+  let rec outside index ~scalar_may_begin =
+    if index >= length then false
+    else
+      let character = text.[index] in
+      if quote_character character && scalar_may_begin then inside (index + 1) character
+      else if Char.equal character '#' && index > 0 && Char.is_whitespace text.[index - 1] then
+        false
+      else
+        let scalar_may_begin =
+          Char.equal character ':' || Char.equal character '-' || Char.is_whitespace character
+        in
+        outside (index + 1) ~scalar_may_begin
+  and inside index opening =
+    if index >= length then true
+    else if Char.equal text.[index] '\\' && Char.equal opening '"' then inside (index + 2) opening
+    else if Char.equal text.[index] opening then
+      if Char.equal opening '\'' && index + 1 < length && Char.equal text.[index + 1] '\'' then
+        inside (index + 2) opening
+      else outside (index + 1) ~scalar_may_begin:false
+    else inside (index + 1) opening
+  in
+  outside 0 ~scalar_may_begin:true
+
 (* A block scalar is introduced by a KEY, and that key may itself sit in a sequence entry -- [- run:
    |] is how every step in this repository spells it. Strip the entry markers before asking whether
    the line opens a block, or the scripts under `steps:` are never dropped and their contents are
@@ -186,6 +224,7 @@ type unreadable =
   | Unreadable_key of int
   | Inline_job_body of string
   | Job_without_keys of string
+  | Multiline_quoted_scalar of int
 
 let explain = function
   | Tab_indentation -> "a line indented with tabs, which this reader measures in spaces"
@@ -195,6 +234,9 @@ let explain = function
   | Unreadable_key line -> Printf.sprintf "line %d, which is not a key this reader can parse" line
   | Inline_job_body name -> Printf.sprintf "an inline body for job `%s`" name
   | Job_without_keys name -> Printf.sprintf "no keys at all under job `%s`" name
+  | Multiline_quoted_scalar line ->
+      Printf.sprintf "line %d, which opens a quoted scalar this reader will not follow across lines"
+        line
 
 type reading = Jobs of job list | Unreadable of unreadable
 
@@ -230,6 +272,14 @@ let jobs_of ~file text =
        a tab this reader would have to measure as indentation is a refusal. *)
     let lines = drop_block_scalars (content_lines text) in
     if List.exists lines ~f:(fun { text; _ } -> leading_tab text) then refuse Tab_indentation;
+    (* A quoted scalar may legally run across lines, and a reader that does not follow it would read
+       its continuation as structure -- which is how a decoy `jobs:` inside a string could stand in
+       for the real one and let a whole workflow go unexamined. Rather than follow it, this refuses:
+       no workflow here writes one, and a loud refusal is what the contract owes a shape the reader
+       cannot decide. *)
+    (match List.find lines ~f:(fun line -> opens_unterminated_quote line.text) with
+    | Some line -> refuse (Multiline_quoted_scalar line.number)
+    | None -> ());
     let position, head = required (jobs_head lines) ~reason:No_jobs_key in
     (match key_of head with
     | Some (_, value) when not (String.is_empty (strip_trailing_comment value)) ->
@@ -680,6 +730,34 @@ let control () =
        \      steps:\n\
        \        - run: echo hi\n")
   in
+  (* A decoy `jobs:` inside a multiline quoted scalar is the one shape that could have made a real
+     workflow go UNEXAMINED rather than merely refused, so it is refused by name; the counterpart is
+     the same field on one line. The BOM and document-end arms are the other direction: valid files
+     this reader must not turn away. *)
+  let multiline_quoted_scalar =
+    run
+      ("name: \"a description that runs on\n  jobs:\n    decoy:\n      timeout-minutes: 1\"\n"
+     ^ "on: workflow_dispatch\njobs:\n" ^ unbounded_job "unbounded")
+  in
+  let single_line_quoted_scalar =
+    run
+      ("name: \"a description with a colon: and quotes\"\non: workflow_dispatch\njobs:\n"
+     ^ sound_job ~name:"build")
+  in
+  let apostrophe_in_plain_scalar =
+    run ("name: Don't stop the build\non: workflow_dispatch\njobs:\n" ^ sound_job ~name:"build")
+  in
+  let byte_order_mark = run ("\xef\xbb\xbf" ^ workflow [ sound_job ~name:"build" ]) in
+  let document_end_marker =
+    run
+      ("---\n  name: fixture\n  on: workflow_dispatch\n  jobs:\n"
+     ^ "    build:\n\
+       \      runs-on: ubuntu-latest\n\
+       \      timeout-minutes: 10\n\
+       \      steps:\n\
+       \        - run: echo hi\n\
+        ...\n")
+  in
   let tab_inside_block_scalar =
     run
       (workflow
@@ -824,6 +902,18 @@ let control () =
     (passed "quoted block-scalar key" quoted_block_scalar_key);
   p "a document with a YAML directive and an indented root mapping is read"
     (passed "directive header" directive_header);
+  p "a decoy jobs mapping inside a multiline quoted scalar is refused, never read as the real one"
+    (refused "multiline quoted scalar"
+       ~messages:[ "opens a quoted scalar this reader will not follow across lines" ]
+       multiline_quoted_scalar);
+  p "the same field written on one line, colon and quotes and all, is read normally"
+    (passed "single-line quoted scalar" single_line_quoted_scalar);
+  p "an apostrophe inside a plain scalar is text, not a quote this reader must follow"
+    (passed "apostrophe in a plain scalar" apostrophe_in_plain_scalar);
+  p "a leading byte-order mark does not hide the first key"
+    (passed "byte-order mark" byte_order_mark);
+  p "a document-end marker leaves an indented root mapping readable"
+    (passed "document-end marker" document_end_marker);
   p "a tab inside a run block scalar is content, and its workflow passes"
     (passed "tab inside a block scalar" tab_inside_block_scalar);
   p "a block header carrying YAML's indentation and chomping indicators still opens a block"
