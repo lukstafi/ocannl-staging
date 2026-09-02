@@ -80,33 +80,52 @@ case "$repo" in */*) ;; *) die "--repo wants owner/name, got: $repo" ;; esac
 case "$runs" in '' | *[!0-9]*) die "-n wants a positive integer, got: $runs" ;; esac
 [ "$runs" -gt 0 ] || die "-n wants a positive integer, got: $runs"
 
-# The runs listing is bounded by -n, so ask for exactly that page when it fits
-# in one; `--paginate` on this endpoint would otherwise walk the workflow's
-# whole history to serve thirty rows.
-query="status=completed"
-# `[ ... ] && q=...` would abort the whole script under `set -e` whenever the
+# Every filter goes through `gh api --method GET -f`, which URL-encodes each
+# value, rather than being concatenated into the path: a branch name may legally
+# contain `#` or `&` (`release#1`, `feature&hotfix`), and interpolated those
+# truncate or split the query, so the script would silently aggregate the wrong
+# runs or none at all.
+run_params=(-f status=completed)
+# `[ ... ] && arr+=(…)` would abort the whole script under `set -e` whenever the
 # filter is unset, which is the default; spell the conditionals out.
-if [ -n "$branch" ]; then query="$query&branch=$branch"; fi
-if [ -n "$event" ]; then query="$query&event=$event"; fi
+if [ -n "$branch" ]; then run_params+=(-f "branch=$branch"); fi
+if [ -n "$event" ]; then run_params+=(-f "event=$event"); fi
 
-if [ "$runs" -le 100 ]; then
-  run_ids=$(gh api "repos/$repo/actions/workflows/$workflow/runs?per_page=$runs&$query" \
+# Page explicitly rather than with `--paginate`: that flag requests pages until
+# the endpoint runs out, and a downstream `head`/`awk` only stops PRINTING --
+# the walk continues, so a `-n 101` over a long workflow history would issue
+# thousands of requests (and can exhaust the rate limit) after the first two
+# pages already held the answer.  Here the loop stops as soon as it has -n ids
+# or the API serves a short page.
+per_page=100
+if [ "$runs" -lt "$per_page" ]; then per_page=$runs; fi
+run_ids=
+run_count=0
+page=1
+while [ "$run_count" -lt "$runs" ]; do
+  page_ids=$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
+    "${run_params[@]}" -f "per_page=$per_page" -f "page=$page" \
     --jq '.workflow_runs[].id') || die "listing runs of $workflow on $repo failed"
-else
-  run_ids=$(gh api --paginate "repos/$repo/actions/workflows/$workflow/runs?per_page=100&$query" \
-    --jq '.workflow_runs[].id' | awk -v n="$runs" 'NR <= n') ||
-    die "listing runs of $workflow on $repo failed"
-fi
+  page_count=$(printf '%s\n' "$page_ids" | awk 'NF { n++ } END { print n + 0 }')
+  if [ "$page_count" -eq 0 ]; then break; fi
+  run_ids=$(printf '%s\n%s' "$run_ids" "$page_ids" | awk 'NF')
+  run_count=$((run_count + page_count))
+  if [ "$page_count" -lt "$per_page" ]; then break; fi
+  page=$((page + 1))
+done
 
 [ -n "$run_ids" ] || die "no completed runs of $workflow on $repo matched (branch=${branch:-any}, event=${event:-any})"
 
-run_count=$(printf '%s\n' "$run_ids" | grep -c .)
+# The last page can overshoot -n; keep the newest -n of what arrived.
+run_ids=$(printf '%s\n' "$run_ids" | awk -v n="$runs" 'NR <= n')
+run_count=$(printf '%s\n' "$run_ids" | awk 'NF { n++ } END { print n + 0 }')
 
 # One `name<TAB>conclusion<TAB>started_at<TAB>completed_at` line per job.  Jobs
-# of a run can exceed one page on the extended matrix, hence --paginate here.
+# of a run can exceed one page on the extended matrix, and every page of them is
+# wanted, so `--paginate` is right here in a way it is not above.
 jobs_tsv=$(
   for id in $run_ids; do
-    gh api --paginate "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+    gh api --paginate --method GET "repos/$repo/actions/runs/$id/jobs" -f per_page=100 \
       --jq '.jobs[] | [.name, (.conclusion // "null"), (.started_at // "null"), (.completed_at // "null")] | @tsv' ||
       die "fetching jobs of run $id failed"
   done
