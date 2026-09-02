@@ -1293,6 +1293,14 @@ that they earn a lookup rather than always-loaded space.
   than the macOS SDK, ABI, linker or runtime. It therefore complements CI and gh-ocannl-794 rather
   than replacing either. Fetches, extraction and the test harness are attached children: an outer
   cancellation forwards `TERM` and reaps the active child before scratch cleanup.
+- `tools/ci-durations.sh` is the source for revisiting the `timeout-minutes` ceilings in
+  `ci.yml`: it aggregates the last N completed runs of a workflow (`--repo`, `--workflow`,
+  `--branch`, `--event`, `-n`) into one row per (job name, conclusion) with count/min/median/max
+  minutes, derived from each job's `started_at`/`completed_at`. Do not reach for
+  `runs/<id>/timing` instead — that endpoint reports zero billable milliseconds on every job
+  here. Filter by `--event schedule` for the extended (Windows, 5.3 floor) matrix, whose jobs are
+  the ones with the widest spread. `tools/ci-times.sh` answers the neighbouring question for a
+  SINGLE run: where its minutes went, step by step.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the

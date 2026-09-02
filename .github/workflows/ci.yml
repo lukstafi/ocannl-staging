@@ -127,7 +127,8 @@ jobs:
     # designed ~15min: ubuntu has run 29-31min and macOS ~20min on a miss, so
     # 45min means the job hung. Windows is the honest exception: its cold switch
     # and the serialized train tier have run 47-175min on the scheduled matrix,
-    # so it gets a ceiling that only a genuine hang can reach.
+    # so it gets a ceiling that only a genuine hang can reach. `tools/ci-durations.sh`
+    # prints the per-job distribution these have to clear; re-read it before moving them.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 45 }}
     # No dune shared cache in CI, and explicitly so. Two things rule it out.
     # Dune's `enabled-except-user-rules` mode -- its default, and what this job
