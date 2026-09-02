@@ -553,8 +553,37 @@ let atx_heading line =
       else None
 
 (** Whether a line opens with something that WANTS to be a heading, so that a malformed one is
-    reported rather than read as prose. *)
-let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
+    reported rather than read as prose.
+
+    A hash against a COMPLETE NUMBER wants nothing of the kind: ["#598"] is an issue or a pull
+    request, and the notes cite those constantly, so a citation that wrapped onto a continuation's
+    first column was read as a broken heading and intact prose was reported -- twice over, since
+    closing the list there made the next continuation an orphan too (lukstafi/ocannl-staging#598).
+
+    The number has to END for it to be a citation, which is what keeps the exemption off a title:
+    ["#3D convolution"] is a level-one heading missing its space, and exempting it on its leading
+    digit alone would have retired the malformed-heading rule for every title that starts with a
+    number (Codex P2, round 1). So the digit run is read whole and the character after it must not
+    continue a word -- a boundary the possessive ["#598's"] and the trailing comma both clear.
+
+    No ATX heading is lost to the exception either way: a real one has a space or the line's end
+    after its hash run, never a digit. Every other hash-prefixed line that is not a heading stays a
+    finding, ["##598"] among them: two hashes against a number is a heading nobody writes as a
+    citation. *)
+let looks_like_heading line =
+  let s = String.strip line in
+  let is_citation =
+    String.length s > 1
+    && Char.is_digit s.[1]
+    &&
+    let after =
+      match String.lfindi s ~f:(fun i c -> i > 0 && not (Char.is_digit c)) with
+      | Some i -> Some s.[i]
+      | None -> None
+    in
+    match after with None -> true | Some c -> not (Char.is_alphanum c || Char.equal c '_')
+  in
+  String.is_prefix s ~prefix:"#" && not is_citation
 
 (** The headings a reader actually sees: a heading-looking line inside a multiline code span or an
     HTML comment is an example, and an index anchor naming its slug points at nothing (Codex P2,
