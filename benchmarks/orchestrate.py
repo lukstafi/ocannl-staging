@@ -68,6 +68,12 @@ DEFAULT_CELL_TIMEOUT_S = 1800
 # in a futex and its pool workers in a socket read, so the handler usually never runs; the grace
 # is for the cells that CAN unwind (a Python runner's atexit, a backend's device teardown).
 CELL_KILL_GRACE_S = 10
+# Wall-clock budget for the `tinygrad_cachedb` probe subprocess (spawn a fresh interpreter, import
+# the framework). Deliberately its own constant rather than a reuse of `CELL_KILL_GRACE_S`: a test
+# that patches the kill grace down to speed up an unrelated SIGTERM/SIGKILL assertion must not also
+# starve this probe of the time a real interpreter start + import needs, which is exactly what
+# made `test_the_tinygrad_cache_probe_collects_helpers_it_spawned` flake under CI load.
+TINYGRAD_PROBE_TIMEOUT_S = 10
 # Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4), with roughly
 # 10x headroom over the largest drift measured by the macOS cc/Metal sweep.
 PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
@@ -700,7 +706,7 @@ def tinygrad_cachedb(env=None):
             env=env,
             cwd=str(HERE),
             capture_output=True,
-            timeout=CELL_KILL_GRACE_S,
+            timeout=TINYGRAD_PROBE_TIMEOUT_S,
         )
         if probe.returncode == 0 and probe.stdout.strip():
             return Path(probe.stdout.strip())
