@@ -1,0 +1,15 @@
+GitHub workflow jobs and the runtime ceiling each one declares:
+  .github/workflows/ci.yml run: timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 45 }}
+  .github/workflows/ci.yml notify-triage-routine: timeout-minutes: 5
+  .github/workflows/claude.yml claude: timeout-minutes: 60
+  .github/workflows/gh-pages-api.yml deploy: timeout-minutes: 30
+  .github/workflows/gh-pages-docs.yml deploy: timeout-minutes: 30
+
+every checked-in GitHub workflow file declares a top-level jobs mapping: true
+every workflow job declares a job-level runtime ceiling of its own: true
+every workflow job states that ceiling ahead of the steps it bounds: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow
+  [scanner-refusal:201243f86a1362b8687f10a1ffba6ead] job-level runtime ceiling
+  [scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states

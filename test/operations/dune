@@ -115,6 +115,7 @@
   (alias runtest-config_usage_scan_control)
   (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
+  (alias runtest-workflow_job_timeouts)
   (alias runtest-shell_scripts_parse)
   (alias runtest-refusal_control_scan_cases)
   (alias runtest-optional_arg_inventory)
@@ -218,6 +219,7 @@
   (alias runtest-config_usage_scan_control)
   (alias runtest-config_usage_scan_refusal_control)
   (alias runtest-ocamlformat_ignore_scan)
+  (alias runtest-workflow_job_timeouts)
   (alias runtest-shell_scripts_parse)
   (alias runtest-optional_arg_inventory)
   (alias runtest-optional_arg_inventory_control)
@@ -1870,7 +1872,9 @@
   test_config_consistency.expected
   verdict_ratchet.ml
   verdict_scan_cases.expected
-  verdict_ratchet.expected)
+  verdict_ratchet.expected
+  workflow_job_timeouts.ml
+  workflow_job_timeouts.expected)
  (action
   (run
    %{test}
@@ -1905,7 +1909,9 @@
    test_config_consistency.ml
    config_scan_lexing.expected,test_config_consistency.expected
    verdict_ratchet.ml
-   verdict_scan_cases.expected,verdict_ratchet.expected))
+   verdict_scan_cases.expected,verdict_ratchet.expected
+   workflow_job_timeouts.ml
+   workflow_job_timeouts.expected))
  (modules refusal_control_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -4759,6 +4765,40 @@
   (diff
    config_usage_scan_refusal_control.expected
    config_usage_scan_refusal_control.actual)))
+
+; gh-ocannl-605: every GitHub Actions job declares a runtime ceiling. A job without
+; `timeout-minutes` runs to GitHub's 6-hour default, so one hung step spends six hours of runner
+; time before anything notices. The ceilings were added to every job by hand; this holds the next
+; job someone adds to the same rule. It reads the workflow files as lines -- no YAML library is a
+; dependency here -- and decides only the block-mapping shape these files are written in: the
+; top-level `jobs:` key, the job keys under it, and the keys under each job, with block scalars
+; (`run: |`) skipped so a shell script contributes no keys.
+
+(executable
+ (name workflow_job_timeouts)
+ (modules workflow_job_timeouts)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads .github/workflows YAML as text.
+ (target workflow_job_timeouts.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../.github/workflows/*.yml)
+  (glob_files_rec ../../.github/workflows/*.yaml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:workflow_job_timeouts.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-workflow_job_timeouts)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate))
+ (action
+  (diff workflow_job_timeouts.expected workflow_job_timeouts.actual)))
 
 ; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
 ; the harness through a fake opam, so no backend or OCANNL executable is reached. It shares a lock

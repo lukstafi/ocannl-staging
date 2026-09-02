@@ -388,6 +388,12 @@ let raw_entries =
         "[scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments";
         "[scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory";
       ] );
+    ( "workflow_job_timeouts.ml",
+      [
+        "[scanner-refusal:ab7fa3ce485bfb4b41964657368ea179] checked-in GitHub workflow";
+        "[scanner-refusal:201243f86a1362b8687f10a1ffba6ead] job-level runtime ceiling";
+        "[scanner-refusal:60c7ecc729f54888b5505b2a62d74bc5] workflow job states";
+      ] );
   ]
 
 let entries =
