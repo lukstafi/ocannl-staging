@@ -43,12 +43,14 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - **Autotune times steady state and refuses what it cannot trust** (gh-ocannl-755,
   gh-ocannl-855, gh-ocannl-888): candidates are timed under queue depth rather than as one
   launch plus one sync, which read up to 2.6x above steady state; each result carries
-  `{ ms; contended; samples }` (16–64 per-launch samples), and contended, non-positive and
+  `{ ms; contended; samples }` (at least 16 per-launch samples, topped up to 64 while the window
+  is short of its budget; a larger `~repeats` raises the floor), and contended, non-positive and
   non-finite timings are withheld from ranking and calibration. `Autotune.report.timing` is a
   `timing_mode`, no longer an option.
 - **RTC options are pure, pinned state on every GPU backend** (gh-ocannl-784, gh-ocannl-848):
   `Compiler_options.nvrtc` and `.metal` join the hiprtc one, pinned GPU-free by test, printed by
-  sweeps and carried on compile failures. Metal on macOS 15+ selects `mathMode=Safe` with
+  sweeps and appended to CUDA and Metal compile failures (HIP's failure path does not append
+  them yet, gh-ocannl-794). Metal on macOS 15+ selects `mathMode=Safe` with
   `mathFloatingPointFunctions=Fast`.
 - **Metal's serial-accumulation workaround is a volatile read, and it is measured**
   (gh-ocannl-782, gh-ocannl-820): the capability `volatile_scalar_rmw` is renamed
@@ -79,11 +81,14 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
   (gh-ocannl-776).
 - Dynamic-gather tables (`Get_dynamic`) decide their own placement before cleanup: a table that
   recomputation cannot serve materializes (gh-ocannl-734).
-- `lib/`'s public optional arguments are held to doing something (gh-ocannl-811): one was
-  broken and three were ignored; each is now exercised.
-- Every checked-in configuration consumer — scripts, dune actions, workflow YAML, documentation,
-  `ocannl_config` files — is scanned against `Utils.known_config_keys`, so a renamed or removed
-  key fails the scans instead of drifting (gh-ocannl-790).
+- `lib/`'s public optional arguments are audited (gh-ocannl-811): the broken one
+  (`Train.sgd_update ~momentum`, below) is exercised; the three silently ignored ones
+  (`batch_norm1d`/`batch_norm2d ?_momentum`, `mobile_cnn ?_width_mult`) are labelled as
+  unimplemented placeholders and documented as having no effect.
+- Checked-in configuration consumers — scripts, dune actions, workflow YAML, `ocannl_config`
+  files, and the documentation under `docs/`, `AGENTS.md` and `README.md` — are scanned against
+  `Utils.known_config_keys`, so a renamed or removed key fails the scans instead of drifting
+  (gh-ocannl-790). This changelog is outside the scan.
 - The fp8 soak's vendor arms hold only their jit calls; the vendor-independent logic in
   `tools/fp8_soak.ml` compiles on every box (gh-ocannl-758).
 - Test seams: the suite configuration reader lives in `test/config` and resolves the backend
