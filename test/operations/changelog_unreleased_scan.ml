@@ -128,6 +128,17 @@ let is_unreleased_heading line =
 let ends_section line =
   indent_of line = 0 && match heading_level line with Some level -> level <= 2 | None -> false
 
+(** A setext underline: a line of only [=] or only [-], which turns the NON-BLANK line above it into
+    a document-level heading. `Release 1.0` over `-----------` is a level-2 heading as much as `##
+    Release 1.0` is, and a section that does not end there reads released history as its own. *)
+let is_setext_underline line =
+  indent_of line = 0
+  &&
+  let body = String.strip line in
+  (not (String.is_empty body))
+  && (String.count body ~f:(Fn.non (Char.equal '=')) = 0
+     || String.count body ~f:(Fn.non (Char.equal '-')) = 0)
+
 (** A fence delimiter: up to three spaces, then at least three [`] or [~], as (character, run
     length, whatever follows). A fence closes only on the same character, a run at least as long,
     and nothing after it — so a three-backtick line inside a four-backtick fence is content, and
@@ -234,12 +245,15 @@ let opens_raw_html line =
           else Some (Some (`Until_marker marker))
         in
         let doctype () =
+          (* CommonMark's declaration opener takes an UPPERCASE letter, so the raw text decides this
+             one too: a lowercase `<!note` opens no block. *)
+          let raw = String.strip line in
           if
-            String.is_prefix text ~prefix:"<!"
-            && (not (String.is_prefix text ~prefix:"<!--"))
-            && String.length text > 2
-            && Char.is_alpha text.[2]
-          then declaration "<!" ">"
+            String.is_prefix raw ~prefix:"<!"
+            && (not (String.is_prefix raw ~prefix:"<!--"))
+            && String.length raw > 2
+            && Char.is_uppercase raw.[2]
+          then declaration ~raw:true "<!" ">"
           else None
         in
         match declaration "<?" "?>" with
@@ -297,10 +311,20 @@ let unreleased_section lines =
       let rec find = function
         | [] -> None
         | (line, structural) :: rest when structural && is_unreleased_heading line ->
-            Some
-              (List.take_while rest ~f:(fun (line, structural) ->
-                   not (structural && ends_section line))
-              |> List.map ~f:fst)
+            (* The boundary is the heading's TEXT line, which a setext heading only reveals on the
+               line after it -- hence the lookahead rather than a plain predicate. *)
+            let rec upto = function
+              | [] -> []
+              | (line, structural) :: _ when structural && ends_section line -> []
+              | (line, structural) :: ((next, next_structural) :: _ as tail)
+                when structural && next_structural
+                     && (not (is_blank line))
+                     && is_setext_underline next ->
+                  ignore tail;
+                  []
+              | (line, _) :: tail -> line :: upto tail
+            in
+            Some (upto rest)
         | _ :: rest -> find rest
       in
       find (structural_lines lines)
@@ -395,6 +419,9 @@ let is_plain_text text =
      already decide: `#include` is no heading and `<5 ms` no HTML block, and refusing either would
      fail the gate over ordinary prose. A block quote has no such lookalike -- `>` opening a line's
      text always opens one. *)
+  (* A leading `|` is a GitHub table row: block syntax the canonical form does not have, and one
+     whose cells would otherwise supply a citation from inside a table nobody declared. *)
+  && (not (Char.equal c '|'))
   && (not (Option.is_some (heading_level text)))
   && (not (Option.is_some (opens_raw_html text)))
   && not (Char.equal c '>')
@@ -571,7 +598,33 @@ let visible_text bullet =
             && i + 2 < n
             && Char.is_alpha joined.[i + 2])
     then (
-      match String.index_from joined i '>' with
+      (* The tag ends at a `>` OUTSIDE its attribute quotes: `<span title="> gh-ocannl-807">` ends
+         at the second one, and stopping at the first would leave the attribute's text visible. *)
+      let rec close j quote =
+        if j >= n then None
+        else
+          match quote with
+          | Some q -> close (j + 1) (if Char.equal joined.[j] q then None else quote)
+          | None ->
+              if Char.equal joined.[j] '>' then Some j
+              else if Char.equal joined.[j] '"' || Char.equal joined.[j] '\'' then
+                close (j + 1) (Some joined.[j])
+              else close (j + 1) None
+      in
+      match close i None with
+      | Some stop -> loop (stop + 1)
+      | None ->
+          Buffer.add_char buffer joined.[i];
+          loop (i + 1))
+    else if
+      (* A link DESTINATION renders as a target, not as text: `[details](…/gh-ocannl-807)` shows the
+         reader "details", and a record named only in the URL is one they cannot see. The link text
+         itself is kept -- it is what the entry says. *)
+      Char.equal joined.[i] '('
+      && Buffer.length buffer > 0
+      && Char.equal (Buffer.nth buffer (Buffer.length buffer - 1)) ']'
+    then (
+      match String.index_from joined i ')' with
       | Some close -> loop (close + 1)
       | None ->
           Buffer.add_char buffer joined.[i];
@@ -635,6 +688,8 @@ let control_section =
     "- A bullet whose citation hides in <span data-issue=\"gh-ocannl-807\">an attribute</span>.";
     "- A bullet citing gh-ocannl-0, a number no record has.";
     "- A bullet citing `lukstafi/ocannl-staging` PR #0, which is no pull request either.";
+    "- A bullet whose record hides in a link [destination](https://example.invalid/gh-ocannl-807).";
+    "- A bullet hiding one in <span title=\"> gh-ocannl-807\">a quoted attribute</span>.";
   ]
 
 (** Every shape the gate refuses, each one a defect an earlier round found in the parser this file
@@ -661,6 +716,8 @@ let non_canonical =
     ("an indented heading", "  ## Details");
     ("a nested ordered item", "  1. A nested ordered entry.");
     ("a nested ordered item with a paren", "  2) Another nested one.");
+    ("a table row", "  | Change | behavior (gh-ocannl-807) |");
+    ("a table row opening a bullet", "- | Change |");
     ("a link reference definition", "  [record]: gh-ocannl-807");
     ("a link reference definition with a title", "  [record]: gh-ocannl-807 \"the record\"");
     ("a setext underline", "  ===");
@@ -730,6 +787,21 @@ let control_cdata =
 (* `<![CDATA[` is case-SENSITIVE: a lowercase one opens no block, so the anchor behind it is
    seen. *)
 let control_lowercase_cdata = released_history [ "<![cdata["; "## [Unreleased]" ]
+let control_lowercase_declaration = released_history [ "<!note"; "## [Unreleased]" ]
+
+(* A released section headed the setext way: the section above it has to end there too, or its
+   bullets are read as Unreleased entries and judged by rules they never lived under. *)
+let control_setext_boundary =
+  [
+    "## [Unreleased]";
+    "";
+    "- one (gh-ocannl-807).";
+    "";
+    "Release 1.0";
+    "-----------";
+    "";
+    "- released, uncited, and none of this scan's business.";
+  ]
 
 let control_deep_subheading =
   [
@@ -800,7 +872,7 @@ let () =
     (List.for_all bullets ~f:cites_record);
   (* The controls. *)
   let control = bullets_of control_section in
-  p "the section reader finds the sixteen synthetic control bullets" (List.length control = 16);
+  p "the section reader finds the eighteen synthetic control bullets" (List.length control = 18);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -825,6 +897,10 @@ let () =
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "hides in a comment");
   p_exists "the citation rule flags a citation that hides in an HTML attribute" control
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "data-issue");
+  p_exists "the citation rule flags a record named only in a link destination" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "example.invalid");
+  p_exists "the citation rule flags a record inside a quoted tag attribute" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "a quoted attribute");
   p_exists "the citation rule flags issue number zero" control ~f:(fun bullet ->
       (not (cites_record bullet)) && mentions bullet "gh-ocannl-0,");
   p_exists "the citation rule flags PR number zero" control ~f:(fun bullet ->
@@ -892,6 +968,12 @@ let () =
     && one_anchor_one_bullet control_cdata);
   p "a lowercase cdata opener is not a CDATA block, so the anchor behind it is seen"
     (List.length (unreleased_headings control_lowercase_cdata) = 2);
+  p "a lowercase declaration opener is no declaration, so the anchor behind it is seen"
+    (List.length (unreleased_headings control_lowercase_declaration) = 2);
+  p "a setext heading ends the section, like the ATX form"
+    (match bullets_of (Option.value (unreleased_section control_setext_boundary) ~default:[]) with
+    | [ bullet ] -> cites_record bullet
+    | _ -> false);
   p "a comment opener inside prose or a code span opens no HTML block"
     ((not (List.exists control_code_span_comment ~f:opens_comment_block))
     && (not (opens_comment_block "- An uncited change <!-- gh-ocannl-807 -->"))

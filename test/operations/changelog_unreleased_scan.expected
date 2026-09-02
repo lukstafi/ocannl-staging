@@ -8,7 +8,7 @@ every line in Unreleased is blank, a subheading, a bullet, or a two-space contin
 every continuation line in Unreleased belongs to a bullet: true
 every Unreleased bullet is at most three lines: true
 every Unreleased bullet cites gh-ocannl-NNN or a staging PR #NNN: true
-the section reader finds the sixteen synthetic control bullets: true
+the section reader finds the eighteen synthetic control bullets: true
 the length rule flags a synthetic four-line bullet: true
 the length rule flags a bullet whose fourth line follows a blank one: true
 the citation rule flags a synthetic uncited bullet: true
@@ -20,6 +20,8 @@ the citation rule flags a repository run into `PR #` with no separator: true
 the citation rule flags an issue prefix embedded in another token: true
 the citation rule flags a citation that hides in an HTML comment: true
 the citation rule flags a citation that hides in an HTML attribute: true
+the citation rule flags a record named only in a link destination: true
+the citation rule flags a record inside a quoted tag attribute: true
 the citation rule flags issue number zero: true
 the citation rule flags PR number zero: true
 a code span wrapped across a bullet's lines is canonical, and its citation counts: true
@@ -43,6 +45,8 @@ an autolink opens no HTML block, so the heading after it is still structure: tru
 inline HTML with content after the tag opens no block: true
 a declaration runs to its own terminator, and hides the anchor inside it: true
 a lowercase cdata opener is not a CDATA block, so the anchor behind it is seen: true
+a lowercase declaration opener is no declaration, so the anchor behind it is seen: true
+a setext heading ends the section, like the ATX form: true
 a comment opener inside prose or a code span opens no HTML block: true
 a level-4 subheading stays inside Unreleased, and the released section does not: true
 
@@ -52,7 +56,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:0ec3ef6e76a1b717d0c1be40a6364fa2] every continuation line
   [scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet
   [scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN
-  [scanner-refusal:5f90953863a797a098d13dbb937e47e1] sixteen synthetic control
+  [scanner-refusal:e2c181fc0e256bd7f1088f4936eb3f67] eighteen synthetic control
   [scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet
   [scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth
   [scanner-refusal:c4aa67d124cb4749d1889edf6983c9a9] synthetic uncited bullet
@@ -64,6 +68,8 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:c9449faf44ed458347e1d657e626adee] issue prefix embedded
   [scanner-refusal:ba18f4595ed7faf639f772d898467c81] citation rule flags
   [scanner-refusal:d25d6e7f710421f3a575ba500564cfde] citation rule flags
+  [scanner-refusal:62d1e4f42c52ac0924aa8f4d9c39f570] citation rule flags
+  [scanner-refusal:591e045974c801797d7307f579cdfe66] quoted tag attribute
   [scanner-refusal:0d3e616cb68f4ff90f733dd0e2c4e994] citation rule flags
   [scanner-refusal:04232f9c257b6d2ecbf350399d42c1f0] citation rule flags
   [scanner-refusal:19ad9fb4c83fa6fb1dade7ec100c1fd6] span wrapped across
@@ -87,5 +93,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:7ed0378e940ae971901b7ba2832b2902] with content after
   [scanner-refusal:809c8d3c58f68a68e3b81ccdd786a91d] terminator and hides
   [scanner-refusal:4ecb12e641c9ece3bcdf86b758da156d] lowercase cdata opener
+  [scanner-refusal:1ccaa2c011552dd2a20a501a8a08a652] lowercase declaration opener
+  [scanner-refusal:5275f7cebe83a0e8088068748c8f9ade] setext heading ends
   [scanner-refusal:897949d8f847215283e8799badf7f07f] comment opener inside
   [scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays
