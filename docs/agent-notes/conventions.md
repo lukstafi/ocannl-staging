@@ -15,7 +15,10 @@ files.
   `lukstafi/ocannl-staging` `PR #NNN`; the mechanism, rationale and measured numbers stay in the
   PR, the issue and these notes. Those last two rules are decidable from the text and are checked
   by `test/operations/changelog_unreleased_scan`, over the `## [Unreleased]` section alone —
-  released sections are history and stay untouched.
+  released sections are history and stay untouched. That section is also held to the shape it has
+  always had — blank lines, `### ` subheadings, `- ` bullets and two-space continuations — and any
+  other Markdown in it fails the scan by name rather than being parsed: the scan decides one
+  grammar, so its imprecision cannot pass a bullet nobody checked.
 - `ocannl_config.reference` ships with every setting COMMENTED OUT, and the two forms are
   load-bearing: a commented-out setting is `#key=value` with NO space after the `#`, while prose
   (and the verbatim profile-payload blocks at the end of the file) always uses `# `. That is how
