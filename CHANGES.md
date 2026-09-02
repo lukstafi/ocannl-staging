@@ -38,10 +38,10 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - Retired API: `Backend.compile_batch` / `link_batch` (gh-ocannl-767); `Tensor.raw_unop` /
   `raw_binop` / `raw_ternop`, collapsed onto `Tensor.raw_accum`; `Tensor.diff.zero_grads` is a
   `comp`, not an `asgns` — read `.asgns` for the tree (gh-ocannl-771).
-- Narrowed API: `Indexing.projections` carries one `components` array, not `product_space` /
-  `product_iterators` (gh-ocannl-812, gh-ocannl-775); `Context.Backends_deprecated.footprint` is
-  `Ir.Low_level.footprint` (gh-ocannl-764, gh-ocannl-765) and `Context.Backends_deprecated` is
-  `Context.Backends` (gh-ocannl-810).
+- `Indexing.projections` carries one `components` array, not `product_space` /
+  `product_iterators` (gh-ocannl-812, gh-ocannl-775).
+- `Context.Backends_deprecated.footprint` is `Ir.Low_level.footprint` (gh-ocannl-764,
+  gh-ocannl-765) and `Context.Backends_deprecated` is `Context.Backends` (gh-ocannl-810).
 - `Affine`, `Interval`, `Host_inits`, `Compiler_options` and `Cpu_topology` have explicit
   interfaces that hide their zero-reference helpers (`Ir.Affine.equal_verdict`,
   `Ir.Interval.value_fits`, ...); the removed surface is listed under gh-ocannl-806.
