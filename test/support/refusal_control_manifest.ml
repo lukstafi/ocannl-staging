@@ -46,7 +46,7 @@ let raw_entries =
         "[scanner-refusal:0ec3ef6e76a1b717d0c1be40a6364fa2] every continuation line";
         "[scanner-refusal:8d06b043d3c8178f1e392a5d83d4e288] every Unreleased bullet";
         "[scanner-refusal:ea9d824f2fc10de3c98ef75465ca880b] bullet cites gh-ocannl-NNN";
-        "[scanner-refusal:ee5324f434a2c71e255bdf7f227a957b] synthetic control bullets";
+        "[scanner-refusal:58d555e31796542390cbc8a53029fbd1] thirteen synthetic control";
         "[scanner-refusal:30ee8e64c0adfe9a46f60a7f898e7b70] synthetic four-line bullet";
         "[scanner-refusal:39d8ffc71b6ccd79bc151918c558c2b6] bullet whose fourth";
         "[scanner-refusal:c4aa67d124cb4749d1889edf6983c9a9] synthetic uncited bullet";
@@ -56,6 +56,8 @@ let raw_entries =
         "[scanner-refusal:6e22c3db47b0a6937bb1ab9c0855ebb5] citation rule flags";
         "[scanner-refusal:3ca66d41359dc51f6ab5f7ac84b8b907] citation rule flags";
         "[scanner-refusal:c9449faf44ed458347e1d657e626adee] issue prefix embedded";
+        "[scanner-refusal:ba18f4595ed7faf639f772d898467c81] citation rule flags";
+        "[scanner-refusal:19ad9fb4c83fa6fb1dade7ec100c1fd6] span wrapped across";
         "[scanner-refusal:f517d12e9916c479313e517d39c992aa] citing a staging";
         "[scanner-refusal:ec0eb57bb1e3bf8c0c0fd7d145ab5b3e] citing a gh-ocannl";
         "[scanner-refusal:b58186611079f33f0c1982b767655695] refuses every shape";
@@ -73,7 +75,9 @@ let raw_entries =
         "[scanner-refusal:2b7eb419ed7900fbb86ba90fcfb6d542] hides nothing after";
         "[scanner-refusal:5992ccadeb90a0283af47dd6b29ab152] merely starting with";
         "[scanner-refusal:515b34b740d4146ebf521dfdde7f936b] is still structure";
-        "[scanner-refusal:94e0ae3ae9122bb909f3b9ff7c93f98c] comment opener inside";
+        "[scanner-refusal:7ed0378e940ae971901b7ba2832b2902] with content after";
+        "[scanner-refusal:809c8d3c58f68a68e3b81ccdd786a91d] terminator and hides";
+        "[scanner-refusal:897949d8f847215283e8799badf7f07f] comment opener inside";
         "[scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays";
       ] );
     ( "backend_golden_family_scan.ml",

@@ -151,38 +151,14 @@ let fence_at line =
 
 let opens_fence line = Option.is_some (fence_at line)
 
-(** The line with its code spans removed. A backtick run opens a span that the matching run closes,
-    and what is inside renders as literal text — so an entry describing comment syntax, [`<!--`],
-    carries no comment opener. Unclosed backticks are left alone: they open no span. *)
-let outside_code_spans line =
-  let n = String.length line in
-  let buffer = Buffer.create n in
-  let rec ticks i = if i < n && Char.equal line.[i] '`' then ticks (i + 1) else i in
-  let rec loop i =
-    if i >= n then ()
-    else if Char.equal line.[i] '`' then (
-      let opening = ticks i in
-      let width = opening - i in
-      let rec find j =
-        if j >= n then None
-        else if Char.equal line.[j] '`' then
-          let closing = ticks j in
-          if closing - j = width then Some closing else find closing
-        else find (j + 1)
-      in
-      match find opening with
-      | Some closing -> loop closing
-      | None ->
-          Buffer.add_string buffer (String.drop_prefix line i);
-          ())
-    else (
-      Buffer.add_char buffer line.[i];
-      loop (i + 1))
-  in
-  loop 0;
-  Buffer.contents buffer
-
-let opens_comment line = String.is_substring (outside_code_spans line) ~substring:"<!--"
+(** A comment that opens an HTML BLOCK: one that begins the line. A `<!--` in the middle of a
+    sentence is inline raw HTML — it hides its own contents from the reader, which is
+    {!visible_text}'s business, but it starts no block. Reading one as a block opener was worse than
+    a missed comment: an entry ending in an unclosed code span before a `<!--` swallowed the rest of
+    the file, so the scan read released history as the Unreleased section and reported hundreds of
+    failures against history it must not touch. *)
+let opens_comment_block line =
+  indent_of line <= block_indent && String.is_prefix (String.strip line) ~prefix:"<!--"
 
 (** A raw HTML block, in the two shapes that can hold a line reading exactly like a heading: a
     [<pre>], [<script>], [<style>] or [<textarea>] block, which runs to its closing tag, and any
@@ -216,32 +192,63 @@ let opens_raw_html line =
     (* A block that closes on its own opening line -- [<pre>example</pre>] -- opens no state at all;
        keeping one would hide every following line until some later closer. *)
     | Some tag -> if closes_raw_html_tag ~tag line then None else Some (`Until_close tag)
-    | None ->
+    | None -> (
         (* A generic HTML block opens with a TAG: `<`, an optional `/`, a name, then a boundary.
            `<https://example.com>` is an autolink -- inline Markdown -- and reading it as a block
            would hide every heading up to the next blank line, the anchor included. *)
-        let opens_tag =
-          let after_slash = if String.is_prefix text ~prefix:"</" then 2 else 1 in
-          String.length text > after_slash
-          && Char.is_alpha text.[after_slash]
-          &&
+        (* A complete tag ALONE on its line, which is the only generic form that opens a block
+           (CommonMark type 7). `<span>text</span>` is inline HTML and opens nothing, where reading
+           it as a block would hide every heading up to the next blank line. *)
+        let one_complete_tag =
           let n = String.length text in
+          let after_slash = if String.is_prefix text ~prefix:"</" then 2 else 1 in
+          n > after_slash
+          && Char.is_alpha text.[after_slash]
+          && Char.equal text.[n - 1] '>'
+          && String.count text ~f:(Char.equal '<') = 1
+          && String.count text ~f:(Char.equal '>') = 1
+          &&
+          (* ... and the NAME has to end at a tag boundary: `<https://example.com>` is an autolink,
+             whose "name" runs into a colon. *)
           let rec name i =
             if i < n && (Char.is_alphanum text.[i] || Char.equal text.[i] '-') then name (i + 1)
             else i
           in
           let stop = name after_slash in
-          stop >= n
-          ||
           let next = text.[stop] in
           Char.is_whitespace next || Char.equal next '>' || Char.equal next '/'
         in
-        if
-          String.is_prefix text ~prefix:"<"
-          && (not (String.is_prefix text ~prefix:"<!--"))
-          && opens_tag
-        then Some `Until_blank
-        else None
+        (* Declarations, processing instructions and CDATA run to their own terminators. Released
+           history quoting an XML example is inert content, not a second anchor. *)
+        (* A block whose terminator is already on its opening line opens no state at all -- the
+           same reason a `<pre>example</pre>` does not. *)
+        let declaration prefix marker =
+          if not (String.is_prefix text ~prefix) then None
+          else if
+            String.is_substring (String.drop_prefix text (String.length prefix)) ~substring:marker
+          then Some None
+          else Some (Some (`Until_marker marker))
+        in
+        let doctype () =
+          if
+            String.is_prefix text ~prefix:"<!"
+            && (not (String.is_prefix text ~prefix:"<!--"))
+            && String.length text > 2
+            && Char.is_alpha text.[2]
+          then declaration "<!" ">"
+          else None
+        in
+        match declaration "<?" "?>" with
+        | Some state -> state
+        | None -> (
+            match declaration "<![cdata[" "]]>" with
+            | Some state -> state
+            | None -> (
+                match doctype () with
+                | Some state -> state
+                | None ->
+                    if String.is_prefix text ~prefix:"<" && one_complete_tag then Some `Until_blank
+                    else None)))
 
 (** Each line paired with whether Markdown reads it as STRUCTURE — outside fenced code blocks and
     HTML comments. The whole file is searched for the anchor, released history included, and a
@@ -256,6 +263,8 @@ let structural_lines lines =
        else
          match !html with
          | Some (`Until_close tag) -> if closes_raw_html_tag ~tag line then html := None
+         | Some (`Until_marker marker) ->
+             if String.is_substring line ~substring:marker then html := None
          | Some `Until_blank -> if is_blank line then html := None
          | None -> (
              match (!fence, fence_at line) with
@@ -264,7 +273,7 @@ let structural_lines lines =
              | Some _, None -> ()
              | None, Some (c, run, _) -> fence := Some (c, run)
              | None, None ->
-                 if opens_comment line && not (String.is_substring line ~substring:"-->") then
+                 if opens_comment_block line && not (String.is_substring line ~substring:"-->") then
                    comment := true
                  else html := opens_raw_html line));
       (line, structural))
@@ -339,14 +348,28 @@ let is_plain_text text =
   (* A link-reference definition renders as NOTHING: `[record]: gh-ocannl-807` is invisible in the
      changelog, so a citation inside one is a citation no reader can follow -- exactly what these
      rules exist to guarantee. *)
+  (* A COMPLETE link-reference definition, and only that: `[label]: destination`, with at most a
+     title behind it. It renders as nothing, so a citation inside one is invisible. But
+     `- [API]: behavior changed (gh-ocannl-807).` is ordinary paragraph text -- the words after the
+     destination are no title -- and refusing it would fail the gate over a legitimate entry. *)
   let link_reference =
     Char.equal c '['
     &&
     match String.index text ']' with
-    | Some close -> close + 1 < String.length text && Char.equal text.[close + 1] ':'
-    | None -> false
+    | Some close when close + 1 < String.length text && Char.equal text.[close + 1] ':' -> (
+        let rest = String.drop_prefix text (close + 2) in
+        match String.split rest ~on:' ' |> List.filter ~f:(Fn.non String.is_empty) with
+        | [ _destination ] -> true
+        | _destination :: title :: _ ->
+            (not (String.is_empty title)) && List.mem [ '"'; '\''; '(' ] title.[0] ~equal:Char.equal
+        | [] -> false)
+    | _ -> false
   in
+  (* A setext underline turns the line above it into a heading; `===` under a bullet's first line is
+     block syntax the canonical form does not have. The `-` form is covered by the break check. *)
+  let setext = Char.equal c '=' && String.count body ~f:(Fn.non (Char.equal '=')) = 0 in
   (not thematic) && (not fence) && (not marker) && (not ordered) && (not link_reference)
+  && (not setext)
   (* Nor may it start with whitespace: a marker followed by two spaces, or by a tab, indents its
      content past the one column this grammar names. *)
   && (not (Char.is_whitespace c))
@@ -373,13 +396,8 @@ let is_continuation line =
 let is_subheading line =
   indent_of line = 0 && match heading_level line with Some level -> level >= 3 | None -> false
 
-(** A line of the canonical section. An HTML COMMENT disqualifies any of them, wherever it sits: a
-    comment renders as nothing, so [- An uncited change <!-- gh-ocannl-807 -->] reads as uncited to
-    everyone but this scan. [opens_comment] looks outside code spans, so an entry describing comment
-    syntax in backticks stays an ordinary entry. *)
 let is_canonical line =
-  (not (opens_comment line))
-  && (is_blank line || is_subheading line || is_bullet line || is_continuation line)
+  is_blank line || is_subheading line || is_bullet line || is_continuation line
 
 (** The bullets of a canonical section. Under the gate the extent is exact rather than inferred: an
     item runs to the first line that is neither a continuation nor a blank run followed by one. *)
@@ -481,8 +499,51 @@ let cites_staging_pr text =
   in
   at 0
 
+(** A bullet's VISIBLE text: its lines joined, with HTML comments removed. A comment renders as
+    nothing, so `- An uncited change <!-- gh-ocannl-807 -->` reads as uncited to every reader, and a
+    citation found only inside one is not a citation. Comments are stripped rather than refused
+    (round 11 refused them): a code span can wrap across a bullet's lines, [- Explain `<!--] then
+    [  syntax` (gh-ocannl-807).], and a per-line refusal failed that legitimate entry. Code spans
+    are honoured here, so backticked comment syntax is ordinary text and the citation beside it
+    counts. *)
+let visible_text bullet =
+  let joined = String.concat ~sep:" " bullet.lines in
+  let n = String.length joined in
+  let buffer = Buffer.create n in
+  let rec ticks i c = if i < n && Char.equal joined.[i] c then ticks (i + 1) c else i in
+  let rec loop i =
+    if i >= n then ()
+    else if Char.equal joined.[i] '`' then (
+      (* Inside a code span nothing opens a comment; an unclosed run opens no span. *)
+      let opening = ticks i '`' in
+      let width = opening - i in
+      let rec find j =
+        if j >= n then None
+        else if Char.equal joined.[j] '`' then
+          let closing = ticks j '`' in
+          if closing - j = width then Some closing else find closing
+        else find (j + 1)
+      in
+      match find opening with
+      | Some closing ->
+          Buffer.add_string buffer (String.sub joined ~pos:i ~len:(closing - i));
+          loop closing
+      | None ->
+          Buffer.add_string buffer (String.drop_prefix joined i);
+          ())
+    else if i + 4 <= n && String.equal (String.sub joined ~pos:i ~len:4) "<!--" then
+      match String.substr_index joined ~pos:i ~pattern:"-->" with
+      | Some close -> loop (close + 3)
+      | None -> ()
+    else (
+      Buffer.add_char buffer joined.[i];
+      loop (i + 1))
+  in
+  loop 0;
+  Buffer.contents buffer
+
 let cites_record bullet =
-  let text = String.concat ~sep:" " bullet.lines in
+  let text = visible_text bullet in
   cites_number text ~prefix:"gh-ocannl-" || cites_staging_pr text
 
 let mentions bullet substring = String.is_substring (String.concat ~sep:" " bullet.lines) ~substring
@@ -527,6 +588,9 @@ let control_section =
     "- A bullet citing `lukstafi/ocannl-staging` PR #601oops, and nothing else.";
     "- A bullet citing lukstafi/ocannl-stagingPR #601, with the separator missing.";
     "- A bullet citing notgh-ocannl-807, where the prefix is embedded in another token.";
+    "- A bullet whose only citation hides in a comment <!-- gh-ocannl-807 -->";
+    "- A bullet explaining `<!--";
+    "  syntax` across a wrapped code span (gh-ocannl-807).";
   ]
 
 (** Every shape the gate refuses, each one a defect an earlier round found in the parser this file
@@ -554,7 +618,8 @@ let non_canonical =
     ("a nested ordered item", "  1. A nested ordered entry.");
     ("a nested ordered item with a paren", "  2) Another nested one.");
     ("a link reference definition", "  [record]: gh-ocannl-807");
-    ("an HTML comment after prose", "- An uncited change <!-- gh-ocannl-807 -->");
+    ("a link reference definition with a title", "  [record]: gh-ocannl-807 \"the record\"");
+    ("a setext underline", "  ===");
   ]
 
 (* A continuation line with no bullet above it: canonical line by line, and read by neither rule. *)
@@ -571,6 +636,9 @@ let canonical_shapes =
        nine), and comment syntax inside a code span is an ordinary description. *)
     "- 1234567890. is the external identifier for it (gh-ocannl-807).";
     "- The parser now handles `<!--` in prose (gh-ocannl-807).";
+    (* Prose that opens with a bracketed label is not a link-reference definition: the words after
+       the destination are no title, so it renders, and refusing it would fail a real entry. *)
+    "- [API]: behavior changed (gh-ocannl-807).";
   ]
 
 (* Anchors, and history that must not fail the scan. *)
@@ -604,6 +672,11 @@ let control_one_line_html = released_history [ "<pre>example</pre>"; "## [Unrele
    at all -- the heading right after it is still structure. *)
 let control_generic_html = released_history [ "<prelude>"; ""; "## [Unreleased]" ]
 let control_autolink = released_history [ "<https://example.com>"; "## [Unreleased]" ]
+let control_inline_html = released_history [ "<span>text</span>"; "## [Unreleased]" ]
+let control_declaration = released_history [ "<?xml version=\"1.0\"?>"; "## [Unreleased]" ]
+
+let control_cdata =
+  released_history [ "<![CDATA["; "## [Unreleased]"; "]]>"; ""; "- still released." ]
 
 let control_deep_subheading =
   [
@@ -674,7 +747,7 @@ let () =
     (List.for_all bullets ~f:cites_record);
   (* The controls. *)
   let control = bullets_of control_section in
-  p "the section reader finds the eleven synthetic control bullets" (List.length control = 11);
+  p "the section reader finds the thirteen synthetic control bullets" (List.length control = 13);
   p_exists "the length rule flags a synthetic four-line bullet" control
     ~f:(Fn.non within_line_budget);
   p_exists "the length rule flags a bullet whose fourth line follows a blank one" control
@@ -695,6 +768,13 @@ let () =
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "stagingPR #601");
   p_exists "the citation rule flags an issue prefix embedded in another token" control
     ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "notgh-ocannl-807");
+  p_exists "the citation rule flags a citation that hides in an HTML comment" control
+    ~f:(fun bullet -> (not (cites_record bullet)) && mentions bullet "hides in a comment");
+  p_exists "a code span wrapped across a bullet's lines is canonical, and its citation counts"
+    control ~f:(fun bullet ->
+      cites_record bullet
+      && mentions bullet "across a wrapped code span"
+      && List.for_all bullet.lines ~f:is_canonical);
   (* One positive control per ACCEPTED form, each excluding the other: a single "some bullet passes"
      claim is satisfied by whichever form still works, so breaking one acceptance path outright
      would leave the golden green on the strength of the other's fixture. *)
@@ -746,8 +826,14 @@ let () =
     (List.length (unreleased_headings control_generic_html) = 2);
   p "an autolink opens no HTML block, so the heading after it is still structure"
     (List.length (unreleased_headings control_autolink) = 2);
-  p "a comment opener inside a code span is literal text, not an HTML comment"
-    ((not (List.exists control_code_span_comment ~f:opens_comment))
+  p "inline HTML with content after the tag opens no block"
+    (List.length (unreleased_headings control_inline_html) = 2);
+  p "a declaration runs to its own terminator, and hides the anchor inside it"
+    (List.length (unreleased_headings control_declaration) = 2
+    && one_anchor_one_bullet control_cdata);
+  p "a comment opener inside prose or a code span opens no HTML block"
+    ((not (List.exists control_code_span_comment ~f:opens_comment_block))
+    && (not (opens_comment_block "- An uncited change <!-- gh-ocannl-807 -->"))
     && List.length (bullets_of control_code_span_comment) = 1
     && List.for_all (bullets_of control_code_span_comment) ~f:cites_record);
   p "a level-4 subheading stays inside Unreleased, and the released section does not"
