@@ -46,6 +46,31 @@ usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# Percent-encode one PATH segment.  Nothing the caller supplies reaches a URL
+# raw: query parameters go through `gh api -f` (which encodes them), and the
+# owner, repository and workflow file name are segments, where `-f` cannot help
+# and `gh` passes the path through verbatim -- so a workflow legitimately named
+# `ci#nightly.yml` would otherwise query `/actions/workflows/ci`, the `#`
+# starting a fragment.  LC_ALL=C so the loop walks bytes, which is what a
+# percent-encoding is defined over.
+urlenc() {
+  local LC_ALL=C s=$1 out= c i n
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in
+    [A-Za-z0-9._~-]) out=$out$c ;;
+    *)
+      # `"'$c"` is the byte's value, sign-extended for anything above 0x7F, so
+      # mask it back to a byte before formatting: an unmasked non-ASCII
+      # character renders as %FFFFFFFFFFFFFFC3 rather than %C3.
+      printf -v n '%d' "'$c"
+      out=$out$(printf '%%%02X' "$((n & 255))")
+      ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
   --repo)
@@ -76,7 +101,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$repo" in */*) ;; *) die "--repo wants owner/name, got: $repo" ;; esac
+case "$repo" in
+*/*/* | /* | */) die "--repo wants owner/name, got: $repo" ;;
+*/*) ;;
+*) die "--repo wants owner/name, got: $repo" ;;
+esac
+[ -n "$workflow" ] || die "--workflow wants a workflow file name"
+repo_path=$(urlenc "${repo%%/*}")/$(urlenc "${repo#*/}")
+workflow_path=$(urlenc "$workflow")
 case "$runs" in '' | *[!0-9]*) die "-n wants a positive integer, got: $runs" ;; esac
 [ "$runs" -gt 0 ] || die "-n wants a positive integer, got: $runs"
 
@@ -103,7 +135,7 @@ run_ids=
 run_count=0
 page=1
 while [ "$run_count" -lt "$runs" ]; do
-  page_ids=$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
+  page_ids=$(gh api --method GET "repos/$repo_path/actions/workflows/$workflow_path/runs" \
     "${run_params[@]}" -f "per_page=$per_page" -f "page=$page" \
     --jq '.workflow_runs[].id') || die "listing runs of $workflow on $repo failed"
   page_count=$(printf '%s\n' "$page_ids" | awk 'NF { n++ } END { print n + 0 }')
@@ -125,7 +157,7 @@ run_count=$(printf '%s\n' "$run_ids" | awk 'NF { n++ } END { print n + 0 }')
 # wanted, so `--paginate` is right here in a way it is not above.
 jobs_tsv=$(
   for id in $run_ids; do
-    gh api --paginate --method GET "repos/$repo/actions/runs/$id/jobs" -f per_page=100 \
+    gh api --paginate --method GET "repos/$repo_path/actions/runs/$id/jobs" -f per_page=100 \
       --jq '.jobs[] | [.name, (.conclusion // "null"), (.started_at // "null"), (.completed_at // "null")] | @tsv' ||
       die "fetching jobs of run $id failed"
   done
