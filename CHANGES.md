@@ -10,8 +10,8 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 ### Added
 
 - `fp16_arithmetic` is ternary (`auto|true|false`, default `auto`): `false` gives every f16
-  reduction accumulator f32 residency, which also makes the f16 warp-shuffle rendering reachable
-  (gh-ocannl-680, gh-ocannl-789).
+  reduction accumulator f32 residency. `Numerics.policy.fp16_arithmetic` is `Fp16_auto` (old
+  `false`) | `Fp16_narrow` (old `true`) | `Fp16_wide` (new) (gh-ocannl-680, gh-ocannl-789).
 - Merge-buffer reads are execution dependencies: a routine reading `p.merge` depends on the
   `Context.copy` that filled the slab, which refuses to overwrite a slab a compiled consumer still
   awaits (gh-ocannl-766, gh-ocannl-779).
@@ -54,13 +54,13 @@ commits, PR pages (development happens in `lukstafi/ocannl-staging`), and issue 
 - The memory-budget planner is the `arrayjit.memory_budget` library: `Context.plan_memory_budget`
   → `Memory_budget.fit`, `memory_budget` → `.t`, `budget_plan` → `.plan`, `footprint` and
   `compare_relief_ratio` → `Memory_budget.*` (gh-ocannl-776).
-- `Get_dynamic` gather tables decide their own placement: one recomputation cannot serve
-  materializes (gh-ocannl-734).
+- `Get_dynamic` gather tables decide their own placement: a table that recomputation cannot
+  serve materializes (gh-ocannl-734).
 - `batch_norm1d`/`batch_norm2d ?momentum` are `?_momentum` and `mobile_cnn ?width_mult` is
   `?_width_mult`: placeholders with no effect, now labelled as such (gh-ocannl-811).
-- Scripts, dune actions, workflow YAML, `ocannl_config` files and the documentation under
-  `docs/`, `AGENTS.md` and `README.md` are scanned against `Utils.known_config_keys`, so a
-  renamed key fails the scans instead of drifting; this changelog is outside it (gh-ocannl-790).
+- Scripts under `tools/`, `scripts/` and `benchmarks/`, dune files, workflow YAML,
+  `ocannl_config` files and the docs under `docs/`, `AGENTS.md`, `README.md` are scanned against
+  `Utils.known_config_keys`, so a renamed key fails the scans instead of drifting (gh-ocannl-790).
 
 ### Fixed
 
