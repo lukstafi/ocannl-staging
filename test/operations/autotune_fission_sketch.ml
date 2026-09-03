@@ -233,10 +233,15 @@ let () =
   accounting "chain second call" r2;
   p_all2 "tuned fissionable chain values correct" got_t1 expected_e ~f:approx;
   let chain_first_cacheable = r1.Autotune.timings_contended = 0 in
-  (* The load's own evidence, for the claims below that a refused search cannot satisfy. Both
-     reports, since a first search whose windows were refused is left uncached and the second call
-     searches again rather than replaying. *)
-  let chain_refused = r1.Autotune.timings_contended > 0 || r2.Autotune.timings_contended > 0 in
+  (* The load's own evidence, for the claims below that a refused search cannot satisfy — scoped to
+     the report whose absence it explains, never a union over the two (Codex P2 on PR #608): a
+     refusal in one call says nothing about what the other could measure, and taking the union would
+     let a contended first search excuse a second one that was free to measure and did not. *)
+  let reference_measured (r : Autotune.report) =
+    match r.Autotune.default_ms with
+    | Some d -> Float.is_finite d
+    | None -> r.Autotune.timings_contended > 0
+  in
   p "chain tune replays exactly after a contention-free search"
     (completed r1 && Bool.equal (replayed r2) chain_first_cacheable);
   let chain_cache_committed =
@@ -251,10 +256,11 @@ let () =
   p
     "the default reference is measured and survives the cache round-trip, or is contention-refused \
      (gh-ocannl-552)"
-    (match (r1.Autotune.default_ms, r2.Autotune.default_ms) with
-    | Some d1, Some d2 ->
-        Float.is_finite d1 && Float.is_finite d2 && Float.(r1.Autotune.best_ms <= d1)
-    | _ -> chain_refused);
+    (reference_measured r1 && reference_measured r2
+    &&
+    match r1.Autotune.default_ms with
+    | Some d1 -> Float.(r1.Autotune.best_ms <= d1)
+    | None -> true);
   (* Codex P2 on PR #279: the cache key covers neither the scheduling gates nor the preset
      thresholds, so a config change can redefine the default pipeline without missing the cache.
      Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner replay
@@ -285,9 +291,12 @@ let () =
      hardware dimension — so a GPU backend times exactly one candidate (the fissioned preset) and
      refuses the rest under gh-ocannl-532, where cc times all of them at full single-core speed. The
      portable statement is over the population the census now covers: at least one candidate reached
-     a timing window, and the search reached several — counting, alongside the measured ones, both
-     kinds of refusal the census records: unparallelized, and the contention refusals a loaded host
-     imposes (gh-ocannl-892). *)
+     a timing window, and the search reached several, whether measured or refused as unparallelized.
+     A contention refusal is the load's evidence for waiving the second of those, not a term in it
+     (Codex P2 on PR #608): [timings_contended] counts WINDOWS, and a refused digest is dropped from
+     [seen] so an equivalent seed can retry it, so adding it in would let one candidate refused
+     twice stand for two distinct candidates — exactly the candidate-generation regression the claim
+     guards. Reaching a window is a per-window fact and does take the sum. *)
   let not_dispatched (r : Autotune.report) =
     List.sum
       (module Int)
@@ -299,8 +308,10 @@ let () =
   in
   p "chain tune dispatched a candidate to a timing window (timed, or refused by contention)"
     (r1.Autotune.candidates_timed + r1.Autotune.timings_contended >= 1);
-  p "chain tune reached multiple candidates (timed, refused by contention, or unparallelized)"
-    (r1.Autotune.candidates_timed + r1.Autotune.timings_contended + not_dispatched r1 >= 2);
+  p
+    "chain tune reached multiple candidates (timed, or refused as unparallelized), or the load \
+     refused it every timing"
+    (r1.Autotune.candidates_timed + not_dispatched r1 >= 2 || r1.Autotune.timings_contended > 0);
   p "chain tune: candidates refused as unparallelized exactly on GPU"
     (if is_gpu then not_dispatched r1 > 0 else not_dispatched r1 = 0);
   p_all2 "chain cache-hit values correct" got_t2 expected_e ~f:approx;

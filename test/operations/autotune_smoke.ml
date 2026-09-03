@@ -363,9 +363,13 @@ let () =
   winner_contract ~which:"second report" r2;
   (* A winner is named exactly when one was timed (the conjunct above), so the second call names one
      unless its own windows were refused: a replay carries the cached label, and a re-search that
-     the load emptied has none to carry (gh-ocannl-892). *)
+     the load emptied has none to carry (gh-ocannl-892). EVERY window, not merely one (Codex P2 on
+     PR #608): a search that admitted a timing and still crowned nothing is the winner-selection
+     regression the five [winner_contract] conjuncts accept as internally consistent, and it is this
+     claim that catches it. *)
   p "second report names its winner, or the load refused it every timing"
-    ((not (String.is_empty r2.Autotune.best_label)) || r2.Autotune.timings_contended > 0);
+    ((not (String.is_empty r2.Autotune.best_label))
+    || (r2.Autotune.candidates_timed = 0 && r2.Autotune.timings_contended > 0));
   p_all2 "cached schedule replays to correct elementwise values" got2 expected_c ~f:approx;
   p_all2 "cached schedule replays to correct matmul values" got_mm2 mm_expected ~f:approx;
 

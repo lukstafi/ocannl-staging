@@ -157,22 +157,31 @@ let () =
      own precondition rather than just one of its claims: the injection fires on the attempt after
      arm B's second ADMITTED timing, so a run with no admitted timings never injects and arm B
      completes instead of dying. Each claim about what the arms timed or did therefore admits the
-     load's own evidence as its one alternative -- a run that refused nothing still has to satisfy
-     all of them, and the injection failing to fire for any other reason still fails here. *)
-  let run1_refused = arm_a.Autotune.timings_contended > 0 || arm_b.Autotune.timings_contended > 0 in
+     load's own evidence as its one alternative -- and each waiver is scoped to the absence it
+     explains, never to a union over the two arms (Codex P2 on PR #608): partial contention in one
+     arm is no evidence about the other, and an arm B that DID reach the threshold has no excuse
+     whatever its sibling suffered. So arm A's winner is waived only by arm A having timed nothing
+     with refusals to show for it, and arm B's three scenario claims only by arm B having stopped
+     short of the injection threshold -- with refusals as the reason, since an arm that stopped
+     short for any other reason is the regression this test exists to catch. *)
+  let arm_a_emptied = arm_a.Autotune.candidates_timed = 0 && arm_a.Autotune.timings_contended > 0 in
+  (* [~after_arm_timed:2] above: the injection fires on the attempt AFTER arm B's second admitted
+     timing, so [candidates_timed >= 2] is exactly "the scenario was staged". *)
+  let arm_b_staged = arm_b.Autotune.candidates_timed >= 2 in
+  let arm_b_short_of_injection = (not arm_b_staged) && arm_b.Autotune.timings_contended > 0 in
   Stdio.eprintf
     "run 1 (not part of the golden): arm A timed %d refused %d, arm B timed %d refused %d\n"
     arm_a.Autotune.candidates_timed arm_a.Autotune.timings_contended arm_b.Autotune.candidates_timed
     arm_b.Autotune.timings_contended;
   p "arm A crowned a timed winner, or the load refused it every timing"
-    (Float.is_finite arm_a.Autotune.best_ms || run1_refused);
-  p "arm B is reported as a search that died mid-way, or the load refused it every timing"
-    (died_mid_search arm_b || run1_refused);
-  p "arm B's report carries the terminal failure, or the load refused it every timing"
-    (Option.value_map (Autotune.terminal_failure arm_b) ~default:run1_refused ~f:(fun tf ->
-         String.is_substring tf.Autotune.detail ~substring:message));
-  p "arm B had timed candidates before failing, or the load refused it every timing"
-    ((arm_b.Autotune.candidates_timed > 0 && Float.is_finite arm_b.Autotune.best_ms) || run1_refused);
+    (Float.is_finite arm_a.Autotune.best_ms || arm_a_emptied);
+  p "arm B is reported as a search that died mid-way, or the load left it short of the injection"
+    (died_mid_search arm_b || arm_b_short_of_injection);
+  p "arm B's report carries the terminal failure, or the load left it short of the injection"
+    (Option.value_map (Autotune.terminal_failure arm_b) ~default:arm_b_short_of_injection
+       ~f:(fun tf -> String.is_substring tf.Autotune.detail ~substring:message));
+  p "arm B had timed candidates before failing, or the load left it short of the injection"
+    ((arm_b_staged && Float.is_finite arm_b.Autotune.best_ms) || arm_b_short_of_injection);
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
   p_all2 "the surviving arm's routine ships and computes the right values" got expected ~f:approx;
