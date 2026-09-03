@@ -10,7 +10,7 @@ saved schedule roundtrips through sexp: true
 tuned elementwise values correct: true
 tuned matmul values correct: true
 first tune call searches (cache miss): true
-first tune call timed at least the baseline: true
+first tune call timed at least the baseline, or was refused its timings by contention: true
 a completed search carries no terminal failure: true
 decline census sums to candidates_failed: true
 second tune call replays exactly when the first search had no contention refusals: true
@@ -25,7 +25,7 @@ second report's tensorized flag agrees with the schedule it carries: PASS
 second report's scalar fallbacks do not exceed its Tile_mma statements: PASS
 second report's best tensorized time undercuts the winner only inside the beam's progress band: PASS
 second report's tensorizing winner was itself timed in the tensorized family: PASS
-second report names its winner: true
+second report names its winner, or the load refused it every timing: true
 cached schedule replays to correct elementwise values: true
 cached schedule replays to correct matmul values: true
 search off without a cache times nothing: true

@@ -349,12 +349,30 @@ let () =
   in
   (* Any cell of the experiment that could not be measured is a failure of the run, not a blank in a
      table: a harness that exits 0 with "n/a" in the column the caller asked for lets automation
-     accept an invalid experiment. *)
+     accept an invalid experiment.
+
+     One cause of an unmeasured cell is not the run's fault, and is counted apart from the rest: a
+     timing window refused because host contention dominated its samples (gh-ocannl-855) is a fact
+     about the machine, and on a shared one every window of a tiny cell can go. That is what the
+     [bin-smoke] canary hit on a GitHub runner (PR #608), where the cell is 2x2 and the question
+     being asked is whether the pipeline runs end to end, not what it measures. So the canary passes
+     [--allow-unmeasured] and a refusal leaves it green, while an ordinary run — which was asked for
+     numbers and got none — still exits 1. Refusals print their [!!] line either way; a silent
+     "n/a" is what neither caller wants. *)
   let failures = ref 0 in
+  let unmeasured = ref 0 in
+  let allow_unmeasured = Bench_args.flag args ~name:"allow-unmeasured" in
   let fail fmt =
     Printf.ksprintf
       (fun m ->
         Int.incr failures;
+        p "   !! %s\n" m)
+      fmt
+  in
+  let refused fmt =
+    Printf.ksprintf
+      (fun m ->
+        Int.incr unmeasured;
         p "   !! %s\n" m)
       fmt
   in
@@ -651,7 +669,7 @@ let () =
               record_result lv (report lv)
             else (
               lv.lv_failed := true;
-              fail "%s / %s: every %s tuner timing was refused for host contention" lv.lv_tag
+              refused "%s / %s: every %s tuner timing was refused for host contention" lv.lv_tag
                 lv.lv_label
                 (if Float.is_finite !(lv.lv_iso) then "queued"
                  else if Float.is_finite !(lv.lv_queued) then "isolated"
@@ -886,9 +904,10 @@ let () =
         (match Hashtbl.find tuned s.tag with
         | Some l when Option.is_some tn -> l
         | _ -> Option.value_map best_of ~default:"-" ~f:fst));
-  if !failures > 0 then (
+  if !failures > 0 || !unmeasured > 0 then
     p
       "\n\
-       %d cell(s) of this experiment could not be measured or failed parity -- see the !! lines.\n"
-      !failures;
-    Stdlib.exit 1)
+       %d cell(s) of this experiment could not be measured or failed parity, and %d had every \
+       timing refused for host contention -- see the !! lines.\n"
+      !failures !unmeasured;
+  if !failures > 0 || (!unmeasured > 0 && not allow_unmeasured) then Stdlib.exit 1

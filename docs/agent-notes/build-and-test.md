@@ -1633,3 +1633,51 @@ that they earn a lookup rather than always-loaded space.
   claims take the biconditional shape above. The admission gate itself is not the bug: refusing to
   rank a stalled window is the gh-855 design, and a search that refused everything ships untuned
   and uncached so a later cold call retries it.
+- Applying that rule test-by-test as each sweep day names one is what kept the family red for a
+  week (`autotune_serial_baseline` and `bandwidth_calibration` 08-31/09-01, `autotune_routine_name`
+  09-02, `autotune_fission_sketch` 09-03). The way to finish it in one pass is a **negative
+  control**: set `Autotune.contention_ratio` (a constant in `arrayjit/lib/autotune.ml`, not a
+  config key) to `0.`, which refuses every window by construction, and run the tuner tests — what
+  fails is exactly what a load-emptied search would fail. Under it `autotune_fission_sketch`'s
+  chain search and `autotune_arm_containment`'s run 1 lose their claims about what was timed, and
+  `autotune_smoke` additionally loses "second report names its winner", which no sweep day had
+  reached yet. Revert the constant afterwards. Read the control as a model, not a verdict: it is
+  stronger than any real load, so a test it breaks whose claims a real sweep has never broken is
+  not thereby a defect to weaken — the cc-pinned bound-pruning tests (`autotune_bound_pruning`,
+  `flip_bound_pruning`, `cost_model_selection`) time on a backend with no round trip to disperse,
+  and `bandwidth_calibration`'s remaining claims are about rows existing AT ALL, which needs every
+  one of the four stream kernels emptied at once. `autotune_timing_modes` fails the control because
+  it pins the contention policy itself, which is the control working.
+- Waive on the evidence that explains THAT absence, never on a report-wide count (Codex, PR #608).
+  `report.timings_contended` counts WINDOWS and answers exactly one question — was this search's
+  measurement set complete — because a refused digest is dropped from `seen` so an equivalent seed
+  can retry it: on an idle cuda box `autotune_fission_sketch`'s chain search refuses 4 windows over
+  0 distinct candidates, so a claim that added the counter into a candidate population credited four
+  candidates that were the same one, four times. Two report fields carry the narrower facts
+  (gh-ocannl-892 follow-up): `candidates_contended`, the distinct digests refused that no later seed
+  timed — the term that composes with `candidates_timed` and the `Not_dispatched_key` declines into
+  "how many distinct candidates did this search reach" — and `default_refused`, which separates a
+  contention-refused untuned-default reference from the gh-ocannl-552 regression of never proposing
+  or attributing that seed. A per-arm or per-report scoping is the same rule one level up: a union
+  over two arms lets partial contention in one excuse the other, and `autotune_arm_containment`'s
+  injected-failure scenario is waived only by arm B stopping short of the injection threshold
+  (`candidates_timed < 2` for `~after_arm_timed:2`), never by arm A's refusals.
+- `autotune_fission_sketch`'s chain search has NO margin on a GPU backend by construction: the
+  whole-routine presets dedup to the unscheduled base and the beam's moves off it bind no hardware
+  dimension (gh-ocannl-543), so exactly one candidate — the fissioned preset — is dispatchable, and
+  one refused window takes `candidates_timed` to zero. Its stderr accounting line names the numbers;
+  a sweep log that has it is diagnosable, and before 09-03 no tuner test but `serial_baseline`
+  printed one.
+- The family reaches CI through `@bin-smoke`, not only through the sweep: `projection_shape_bench`'s
+  `smoke_2x2` canary is a 2x2 cell, and a shared GitHub runner refused every one of its timing
+  windows on 2026-09-03, exiting 1 and reddening a PR whose diff could not have caused it. A refused
+  window is now counted apart from a failed cell there — the canary passes `--allow-unmeasured`,
+  since it asks whether the pipeline runs end to end, while an ordinary bench run that was asked for
+  numbers and got none still exits 1. Both still print the `!!` line. If a `bin/` bench ever reads
+  green with `n/a` in the column you asked for, that flag is the first thing to check.
+- A sweep log line reading `autotune: partial-report callback failed:
+  ("Report_callback_failed(\"Exit\", _, _)")` is NOT a fault to chase: it is
+  `autotune_arm_containment`'s designed scenario (a report callback raising the same nullary
+  exception the injected arm failure raises, which is why the tuner wraps it) reaching stderr, and
+  dune interleaves it with whatever else runs in parallel — in the 09-03 sweep it landed directly
+  above an unrelated test's failure and read as its cause.

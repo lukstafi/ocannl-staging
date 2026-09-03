@@ -618,7 +618,22 @@ type report = {
           samples or the clock result was non-positive/non-finite (gh-ocannl-855). Zero on cache
           replay and search-disabled calls, which time nothing in this process. Lets a completed
           search distinguish transient measurement refusal from structural candidate declines and
-          retry when appropriate. *)
+          retry when appropriate. Counts WINDOWS: a refused digest is dropped from the dedup set so
+          an equivalent seed can retry it, so one candidate refused twice contributes two. Sound
+          evidence for "was this search's measurement set complete?", and for nothing narrower —
+          see [candidates_contended] and [default_refused] for the per-candidate facts. *)
+  candidates_contended : int;
+      (** Distinct candidate digests whose timing window was refused and which no later equivalent
+          seed managed to time — the population [timings_contended] over-counts (Codex P2 on PR
+          #608). This is the count that composes with [candidates_timed] and the
+          [Not_dispatched_key] declines into "how many distinct candidates did this search reach",
+          which a sum over refused windows cannot answer. *)
+  default_refused : bool;
+      (** The untuned-default seed's own digest had a refused timing window. Separates the two
+          reasons [default_ms] can be [None] on a completed search: the load refused the
+          reference's measurement, or the default seed was never proposed or never attributed —
+          the gh-ocannl-552 regression, which a report-wide refusal count cannot distinguish from
+          the first. False on cache replay and search-disabled calls. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
           serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
