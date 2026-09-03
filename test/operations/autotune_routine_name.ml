@@ -140,22 +140,21 @@ let () =
         (if contributed name then "contributed rows" else "NO ROWS"));
   (* WHICH candidates a search timed is host-dependent (gh-ocannl-892): a timing window that is
      mostly host stalls is refused ([Autotune.admitted_timing_ms]), a refused candidate emits no
-     row, and processes sharing one GPU refuse whole searches this small -- the 08-31 and 09-02
-     hip sweeps ran the directory in parallel and this search timed nothing. So the claims below
-     are the RELATIONSHIP between the report and the rows, which load moves on both sides at once:
-     a search contributed rows exactly when it timed a candidate, and a row-less search must show
-     the refusals that emptied it, so a search whose every candidate failed compile or dispatch
+     row, and processes sharing one GPU refuse whole searches this small -- the 08-31 and 09-02 hip
+     sweeps ran the directory in parallel and this search timed nothing. So the claims below are the
+     RELATIONSHIP between the report and the rows, which load moves on both sides at once: a search
+     contributed rows exactly when it timed a candidate, and a row-less search must show the
+     refusals that emptied it, so a search whose every candidate failed compile or dispatch
      ([candidates_failed]) -- nothing timed, nothing refused, nothing contributed -- still fails. *)
   p_all "a search contributed rows exactly when it timed a candidate" searches
     ~f:(fun (name, rep) -> Bool.equal (contributed name) (rep.Autotune.candidates_timed > 0));
   p_all "a search with no rows was refused its timings, not silently lost" searches
     ~f:(fun (name, rep) -> contributed name || rep.Autotune.timings_contended > 0);
-  (* The discriminating claim: re-deriving the column would have named the block comment here.
-     Every row that exists names one of the two searches by the name it was given -- counted rather
-     than quantified, because a run refused all its timings has no rows and the two claims above
-     have already required the evidence for that. *)
-  p "no calibration row names the block comment the search overrode"
-    (not (contributed block_name));
+  (* The discriminating claim: re-deriving the column would have named the block comment here. Every
+     row that exists names one of the two searches by the name it was given -- counted rather than
+     quantified, because a run refused all its timings has no rows and the two claims above have
+     already required the evidence for that. *)
+  p "no calibration row names the block comment the search overrode" (not (contributed block_name));
   p "every calibration row names one of the searches by the name it was given"
     (List.length rows
     = List.sum (module Int) searches ~f:(fun (name, _) -> List.length (named name)))

@@ -131,8 +131,8 @@ let () =
             match d.Autotune.key with
             | Ir.Schedule_outcome.Not_dispatched_key origin -> String.equal origin "baseline"
             | _ -> false)));
-  (* Which candidates a search times is host-dependent (gh-ocannl-892): a window that is mostly
-     host stalls is refused ([Autotune.admitted_timing_ms]) and grows [timings_contended] instead of
+  (* Which candidates a search times is host-dependent (gh-ocannl-892): a window that is mostly host
+     stalls is refused ([Autotune.admitted_timing_ms]) and grows [timings_contended] instead of
      [candidates_timed]; processes sharing one GPU refuse whole searches this small (the 08-31 and
      09-02 hip sweeps ran the directory in parallel). So a search that timed nothing passes only on
      the load's own evidence: a search whose every candidate failed compile or dispatch shows no
@@ -152,9 +152,9 @@ let () =
   (* gh-ocannl-552: [baseline_ms] cannot answer "did tuning beat what the user gets without tuning?"
      on GPU (it is [infinity] there), so the untuned default pipeline's own seed is the reference.
      Attributed by digest: on CPU backends the config thresholds may leave the code unparallelized,
-     in which case the seed dedups against the timed serial baseline and inherits its
-     measurement. The default seed's own window can be the refused one, which leaves no
-     measurement to be the reference -- admitted only against the refusal count. *)
+     in which case the seed dedups against the timed serial baseline and inherits its measurement.
+     The default seed's own window can be the refused one, which leaves no measurement to be the
+     reference -- admitted only against the refusal count. *)
   p "the untuned default pipeline is measured as the reference, or refused by contention (gh-552)"
     (match r.Autotune.default_ms with
     | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)

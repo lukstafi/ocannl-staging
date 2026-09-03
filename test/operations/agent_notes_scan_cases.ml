@@ -208,12 +208,12 @@ let structure_cases =
     ( "a heading written without a space after the hashes",
       "# Title\n\n##ident_blacklist\n\n- A fact.\n",
       [ "bullet-integrity @ f.md:3" ] );
-    (* A hash on a wrapped line is an issue or a pull request far more often than a botched
-       heading, and the notes cite those constantly. Reading one as a heading closed the list under
-       it too, so the line below the citation was reported as an orphan continuation as well -- two
-       findings on prose that renders exactly as written (lukstafi/ocannl-staging#598). The control
-       beside it keeps the exception to the digit: a hash against a WORD is still the shape that
-       carries a dead anchor. *)
+    (* A hash on a wrapped line is an issue or a pull request far more often than a botched heading,
+       and the notes cite those constantly. Reading one as a heading closed the list under it too,
+       so the line below the citation was reported as an orphan continuation as well -- two findings
+       on prose that renders exactly as written (lukstafi/ocannl-staging#598). The control beside it
+       keeps the exception to the digit: a hash against a WORD is still the shape that carries a
+       dead anchor. *)
     ( "a pull request cited at a continuation's first column",
       "# Title\n\n\
        - A fact about the review loop that\n\
