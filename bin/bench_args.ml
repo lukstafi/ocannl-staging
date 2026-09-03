@@ -78,6 +78,11 @@ let bad t fmt = Printf.ksprintf (fun msg -> invalid_arg (t.tool ^ ": " ^ msg)) f
     mode, a subcommand). *)
 let positional t = t.positional
 
+(** [flag t ~name] is whether the bare option [--name] was passed — a tool's own switch, alongside
+    [int]'s [--name=value] spelling. Exact match, so [--name=1] is not it: a switch that also
+    accepted a value would silently ignore the value. *)
+let flag t ~name = List.mem t.options ("--" ^ name) ~equal:String.equal
+
 (** The post-[--] positionals that are also a spelling of a known configuration key, warned about at
     {!create}: the escape holds for this tool's slots, and the library has read them anyway. *)
 let shadowing_config t = t.shadowing

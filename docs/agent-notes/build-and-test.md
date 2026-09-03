@@ -1668,6 +1668,13 @@ that they earn a lookup rather than always-loaded space.
   one refused window takes `candidates_timed` to zero. Its stderr accounting line names the numbers;
   a sweep log that has it is diagnosable, and before 09-03 no tuner test but `serial_baseline`
   printed one.
+- The family reaches CI through `@bin-smoke`, not only through the sweep: `projection_shape_bench`'s
+  `smoke_2x2` canary is a 2x2 cell, and a shared GitHub runner refused every one of its timing
+  windows on 2026-09-03, exiting 1 and reddening a PR whose diff could not have caused it. A refused
+  window is now counted apart from a failed cell there — the canary passes `--allow-unmeasured`,
+  since it asks whether the pipeline runs end to end, while an ordinary bench run that was asked for
+  numbers and got none still exits 1. Both still print the `!!` line. If a `bin/` bench ever reads
+  green with `n/a` in the column you asked for, that flag is the first thing to check.
 - A sweep log line reading `autotune: partial-report callback failed:
   ("Report_callback_failed(\"Exit\", _, _)")` is NOT a fault to chase: it is
   `autotune_arm_containment`'s designed scenario (a report callback raising the same nullary
