@@ -65,10 +65,13 @@ let approx a b = Float.(abs (a - b) < 1e-2)
    re-derived. *)
 let accounting stage (r : Autotune.report) =
   Stdio.eprintf
-    "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
-     failed, default %s\n"
-    stage r.Autotune.candidates_timed r.Autotune.timings_contended r.Autotune.candidates_failed
-    (match r.Autotune.default_ms with Some _ -> "measured" | None -> "not measured")
+    "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused over %d distinct \
+     candidate(s), %d candidate(s) failed, default %s\n"
+    stage r.Autotune.candidates_timed r.Autotune.timings_contended r.Autotune.candidates_contended
+    r.Autotune.candidates_failed
+    (match r.Autotune.default_ms with
+    | Some _ -> "measured"
+    | None -> if r.Autotune.default_refused then "refused" else "not measured")
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -234,13 +237,16 @@ let () =
   p_all2 "tuned fissionable chain values correct" got_t1 expected_e ~f:approx;
   let chain_first_cacheable = r1.Autotune.timings_contended = 0 in
   (* The load's own evidence, for the claims below that a refused search cannot satisfy — scoped to
-     the report whose absence it explains, never a union over the two (Codex P2 on PR #608): a
-     refusal in one call says nothing about what the other could measure, and taking the union would
-     let a contended first search excuse a second one that was free to measure and did not. *)
+     the report whose absence it explains, and within it to the candidate whose refusal explains it
+     (Codex P2 on PR #608, twice). A refusal in one call says nothing about what the other could
+     measure; and a report-wide refusal count says nothing about WHICH digest went unmeasured, so it
+     cannot separate a contention-refused reference from the gh-ocannl-552 regression of never
+     proposing or attributing the default seed. [default_refused] is that fact, recorded where the
+     refusal happens. *)
   let reference_measured (r : Autotune.report) =
     match r.Autotune.default_ms with
     | Some d -> Float.is_finite d
-    | None -> r.Autotune.timings_contended > 0
+    | None -> r.Autotune.default_refused
   in
   p "chain tune replays exactly after a contention-free search"
     (completed r1 && Bool.equal (replayed r2) chain_first_cacheable);
@@ -292,11 +298,13 @@ let () =
      refuses the rest under gh-ocannl-532, where cc times all of them at full single-core speed. The
      portable statement is over the population the census now covers: at least one candidate reached
      a timing window, and the search reached several, whether measured or refused as unparallelized.
-     A contention refusal is the load's evidence for waiving the second of those, not a term in it
-     (Codex P2 on PR #608): [timings_contended] counts WINDOWS, and a refused digest is dropped from
-     [seen] so an equivalent seed can retry it, so adding it in would let one candidate refused
-     twice stand for two distinct candidates — exactly the candidate-generation regression the claim
-     guards. Reaching a window is a per-window fact and does take the sum. *)
+     A refused candidate is a candidate the search reached, so it belongs in that second count — but
+     as a DISTINCT candidate, which [timings_contended] is not: it counts windows, and a refused
+     digest is dropped from [seen] so an equivalent seed can retry it, so one candidate refused
+     twice would stand for two (Codex P2 on PR #608). [candidates_contended] is the distinct-digest
+     count, over refusals no later seed managed to time, so the three terms below partition the
+     candidates this search reached and no waiver is needed. Reaching a window at all is a
+     per-window fact and does take the raw sum. *)
   let not_dispatched (r : Autotune.report) =
     List.sum
       (module Int)
@@ -308,10 +316,8 @@ let () =
   in
   p "chain tune dispatched a candidate to a timing window (timed, or refused by contention)"
     (r1.Autotune.candidates_timed + r1.Autotune.timings_contended >= 1);
-  p
-    "chain tune reached multiple candidates (timed, or refused as unparallelized), or the load \
-     refused it every timing"
-    (r1.Autotune.candidates_timed + not_dispatched r1 >= 2 || r1.Autotune.timings_contended > 0);
+  p "chain tune reached multiple candidates (timed, refused by contention, or unparallelized)"
+    (r1.Autotune.candidates_timed + r1.Autotune.candidates_contended + not_dispatched r1 >= 2);
   p "chain tune: candidates refused as unparallelized exactly on GPU"
     (if is_gpu then not_dispatched r1 > 0 else not_dispatched r1 = 0);
   p_all2 "chain cache-hit values correct" got_t2 expected_e ~f:approx;

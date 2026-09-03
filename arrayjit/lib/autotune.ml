@@ -80,6 +80,8 @@ type report = {
   outcome : outcome;
   candidates_timed : int;
   timings_contended : int;
+  candidates_contended : int;
+  default_refused : bool;
   candidates_failed : int;
   baseline_declined : bool;
   declines : decline_summary list;
@@ -143,6 +145,8 @@ let no_search_report ~timing =
     outcome = Search_disabled;
     candidates_timed = 0;
     timings_contended = 0;
+    candidates_contended = 0;
+    default_refused = false;
     candidates_failed = 0;
     baseline_declined = false;
     declines = [];
@@ -2984,6 +2988,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     timing;
                     candidates_timed = 0;
                     timings_contended = 0;
+                    candidates_contended = 0;
+                    default_refused = false;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
                     baseline_declined = Option.is_some baseline_decline;
@@ -3209,6 +3215,16 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
           Option.iter baseline ~f:(fun b ->
               !on_candidate_timed b.routine.Context.name ~timed_so_far:!n_timed);
         let n_timings_contended = ref (if !baseline_contended then 1 else 0) in
+        (* [n_timings_contended] counts WINDOWS, which is the right shape for "was this search's
+           measurement set complete?" but the wrong one for any claim about WHICH candidate went
+           unmeasured (Codex P2 on PR #608): a refused digest is dropped from [seen] so an
+           equivalent seed can retry it, so one candidate refused twice is two windows. The digests
+           are therefore kept alongside, and the report derives from them a distinct-candidate count
+           and the one per-candidate fact a caller cannot reconstruct — whether the untuned-default
+           seed was the refused one, which is what separates a contention-refused reference from the
+           gh-ocannl-552 regression of never proposing or attributing it. *)
+        let contended_digests = Hash_set.create (module String) in
+        if !baseline_contended then Hash_set.add contended_digests base_digest;
         (* Live search state for an honest partial report. Each counter starts at the amount of work
            completed so far and is updated at its ordinary accounting site below. [best_so_far] is
            updated after every successful timing, including midway through seed enumeration. *)
@@ -3352,6 +3368,14 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
         if baseline_timed then Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
         let default_seed_digest = ref (if auto_sched then None else Some base_digest) in
         let default_ms () = Option.bind !default_seed_digest ~f:(Hashtbl.find timed_ms_by_digest) in
+        (* A digest that was refused and later timed by an equivalent seed is not an unmeasured
+           candidate, so the count is over the refusals that stuck. *)
+        let candidates_contended () =
+          Hash_set.count contended_digests ~f:(fun d -> not (Hashtbl.mem timed_ms_by_digest d))
+        in
+        let default_refused () =
+          Option.value_map !default_seed_digest ~default:false ~f:(Hash_set.mem contended_digests)
+        in
         let partial_emitted = ref false in
         let emit_partial_and_raise (fatal : Outcome.fatal) =
           let summaries = decline_summaries declines in
@@ -3367,6 +3391,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               timing;
               candidates_timed = !n_timed;
               timings_contended = !n_timings_contended;
+              candidates_contended = candidates_contended ();
+              default_refused = default_refused ();
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
               declines = summaries;
@@ -3543,6 +3569,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                         | _ -> ());
                         if spec_expects_mma spec then Int.incr n_mma_timed;
                         Int.incr n_timings_contended;
+                        Hash_set.add contended_digests c.digest_after;
                         (* Unlike a launch/compile decline, contention is not a property of this
                            schedule. An equivalent later seed is a useful retry, not a dedup. *)
                         Hash_set.remove seen c.digest_after;
@@ -4101,6 +4128,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               timing;
               candidates_timed = !n_timed;
               timings_contended = !n_timings_contended;
+              candidates_contended = candidates_contended ();
+              default_refused = default_refused ();
               candidates_failed = failed_count declines;
               baseline_declined = Option.is_some baseline_decline;
               declines = decline_summaries declines;

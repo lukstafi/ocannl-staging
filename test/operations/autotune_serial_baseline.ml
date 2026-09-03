@@ -158,7 +158,10 @@ let () =
   p "the untuned default pipeline is measured as the reference, or refused by contention (gh-552)"
     (match r.Autotune.default_ms with
     | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)
-    | None -> r.Autotune.timings_contended > 0);
+    (* The default seed's OWN refusal, not the search's refusal count: report-wide, the count
+       cannot separate this from the gh-552 regression of never proposing or attributing the seed
+       (Codex P2 on PR #608). *)
+    | None -> r.Autotune.default_refused);
   p_all2 "tuned routine values correct" got mm_expected ~f:approx;
 
   (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
@@ -221,7 +224,7 @@ let () =
     (if is_gpu then r.Autotune.candidates_timed >= 1 || r.Autotune.timings_contended > 0
      else r.Autotune.candidates_timed = 0 && r.Autotune.timings_contended = 0);
   p "a pre-gh-552 entry reports no default measurement; a re-search measures one or is refused"
-    (if is_gpu then Option.is_some r.Autotune.default_ms || r.Autotune.timings_contended > 0
+    (if is_gpu then Option.is_some r.Autotune.default_ms || r.Autotune.default_refused
      else Option.is_none r.Autotune.default_ms);
   p_all2 "the routine from the poisoned-cache path computes correct values" got mm_expected
     ~f:approx

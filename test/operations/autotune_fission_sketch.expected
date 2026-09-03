@@ -8,7 +8,7 @@ chain tune replays exactly after a contention-free search: true
 the default reference is measured and survives the cache round-trip, or is contention-refused (gh-ocannl-552): true
 a stored stale default fingerprint drops the reference but not the hit (gh-ocannl-552): true
 chain tune dispatched a candidate to a timing window (timed, or refused by contention): true
-chain tune reached multiple candidates (timed, or refused as unparallelized), or the load refused it every timing: true
+chain tune reached multiple candidates (timed, refused by contention, or unparallelized): true
 chain tune: candidates refused as unparallelized exactly on GPU: true
 chain cache-hit values correct: true
 matmul sketch instantiations seeded: true

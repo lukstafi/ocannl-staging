@@ -1648,6 +1648,20 @@ that they earn a lookup rather than always-loaded space.
   and `bandwidth_calibration`'s remaining claims are about rows existing AT ALL, which needs every
   one of the four stream kernels emptied at once. `autotune_timing_modes` fails the control because
   it pins the contention policy itself, which is the control working.
+- Waive on the evidence that explains THAT absence, never on a report-wide count (Codex, PR #608).
+  `report.timings_contended` counts WINDOWS and answers exactly one question — was this search's
+  measurement set complete — because a refused digest is dropped from `seen` so an equivalent seed
+  can retry it: on an idle cuda box `autotune_fission_sketch`'s chain search refuses 4 windows over
+  0 distinct candidates, so a claim that added the counter into a candidate population credited four
+  candidates that were the same one, four times. Two report fields carry the narrower facts
+  (gh-ocannl-892 follow-up): `candidates_contended`, the distinct digests refused that no later seed
+  timed — the term that composes with `candidates_timed` and the `Not_dispatched_key` declines into
+  "how many distinct candidates did this search reach" — and `default_refused`, which separates a
+  contention-refused untuned-default reference from the gh-ocannl-552 regression of never proposing
+  or attributing that seed. A per-arm or per-report scoping is the same rule one level up: a union
+  over two arms lets partial contention in one excuse the other, and `autotune_arm_containment`'s
+  injected-failure scenario is waived only by arm B stopping short of the injection threshold
+  (`candidates_timed < 2` for `~after_arm_timed:2`), never by arm A's refusals.
 - `autotune_fission_sketch`'s chain search has NO margin on a GPU backend by construction: the
   whole-routine presets dedup to the unscheduled base and the beam's moves off it bind no hardware
   dimension (gh-ocannl-543), so exactly one candidate — the fissioned preset — is dispatchable, and
