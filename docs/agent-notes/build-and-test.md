@@ -1633,3 +1633,30 @@ that they earn a lookup rather than always-loaded space.
   claims take the biconditional shape above. The admission gate itself is not the bug: refusing to
   rank a stalled window is the gh-855 design, and a search that refused everything ships untuned
   and uncached so a later cold call retries it.
+- Applying that rule test-by-test as each sweep day names one is what kept the family red for a
+  week (`autotune_serial_baseline` and `bandwidth_calibration` 08-31/09-01, `autotune_routine_name`
+  09-02, `autotune_fission_sketch` 09-03). The way to finish it in one pass is a **negative
+  control**: set `Autotune.contention_ratio` (a constant in `arrayjit/lib/autotune.ml`, not a
+  config key) to `0.`, which refuses every window by construction, and run the tuner tests — what
+  fails is exactly what a load-emptied search would fail. Under it `autotune_fission_sketch`'s
+  chain search and `autotune_arm_containment`'s run 1 lose their claims about what was timed, and
+  `autotune_smoke` additionally loses "second report names its winner", which no sweep day had
+  reached yet. Revert the constant afterwards. Read the control as a model, not a verdict: it is
+  stronger than any real load, so a test it breaks whose claims a real sweep has never broken is
+  not thereby a defect to weaken — the cc-pinned bound-pruning tests (`autotune_bound_pruning`,
+  `flip_bound_pruning`, `cost_model_selection`) time on a backend with no round trip to disperse,
+  and `bandwidth_calibration`'s remaining claims are about rows existing AT ALL, which needs every
+  one of the four stream kernels emptied at once. `autotune_timing_modes` fails the control because
+  it pins the contention policy itself, which is the control working.
+- `autotune_fission_sketch`'s chain search has NO margin on a GPU backend by construction: the
+  whole-routine presets dedup to the unscheduled base and the beam's moves off it bind no hardware
+  dimension (gh-ocannl-543), so exactly one candidate — the fissioned preset — is dispatchable, and
+  one refused window takes `candidates_timed` to zero. Its stderr accounting line names the numbers;
+  a sweep log that has it is diagnosable, and before 09-03 no tuner test but `serial_baseline`
+  printed one.
+- A sweep log line reading `autotune: partial-report callback failed:
+  ("Report_callback_failed(\"Exit\", _, _)")` is NOT a fault to chase: it is
+  `autotune_arm_containment`'s designed scenario (a report callback raising the same nullary
+  exception the injected arm failure raises, which is why the tuner wraps it) reaching stderr, and
+  dune interleaves it with whatever else runs in parallel — in the 09-03 sweep it landed directly
+  above an unrelated test's failure and read as its cause.

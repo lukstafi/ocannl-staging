@@ -249,7 +249,18 @@ let () =
   p_all2 "tuned elementwise values correct" got1 expected_c ~f:approx;
   p_all2 "tuned matmul values correct" got_mm1 mm_expected ~f:approx;
   p "first tune call searches (cache miss)" (completed r1);
-  p "first tune call timed at least the baseline" (r1.Autotune.candidates_timed >= 1);
+  (* Which candidates a search times is host-dependent (gh-ocannl-892): a timing window that is
+     mostly host stalls is refused ([Autotune.admitted_timing_ms]) and grows [timings_contended]
+     instead of [candidates_timed], and processes sharing one GPU refuse whole searches this small
+     (the 08-31 cuda sweep ran test/operations in parallel). So a search that timed nothing passes
+     only on the load's own evidence: one whose every candidate failed compile or dispatch shows no
+     refusals and still fails here. The accounting goes to stderr so a red run names the numbers. *)
+  Stdio.eprintf
+    "search (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
+     failed\n"
+    r1.Autotune.candidates_timed r1.Autotune.timings_contended r1.Autotune.candidates_failed;
+  p "first tune call timed at least the baseline, or was refused its timings by contention"
+    (r1.Autotune.candidates_timed >= 1 || r1.Autotune.timings_contended > 0);
   p "a completed search carries no terminal failure" (Option.is_none (Autotune.terminal_failure r1));
   p "decline census sums to candidates_failed"
     (r1.Autotune.candidates_failed
@@ -350,7 +361,11 @@ let () =
   in
   winner_contract ~which:"searched report" r1;
   winner_contract ~which:"second report" r2;
-  p "second report names its winner" (not (String.is_empty r2.Autotune.best_label));
+  (* A winner is named exactly when one was timed (the conjunct above), so the second call names one
+     unless its own windows were refused: a replay carries the cached label, and a re-search that
+     the load emptied has none to carry (gh-ocannl-892). *)
+  p "second report names its winner, or the load refused it every timing"
+    ((not (String.is_empty r2.Autotune.best_label)) || r2.Autotune.timings_contended > 0);
   p_all2 "cached schedule replays to correct elementwise values" got2 expected_c ~f:approx;
   p_all2 "cached schedule replays to correct matmul values" got_mm2 mm_expected ~f:approx;
 

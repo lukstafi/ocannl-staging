@@ -53,6 +53,23 @@ let nonzero name (a : float array) =
 
 let approx a b = Float.(abs (a - b) < 1e-2)
 
+(* Which candidates a search times is host-dependent (gh-ocannl-892): a timing window that is mostly
+   host stalls is refused ([Autotune.admitted_timing_ms]) and grows [timings_contended] instead of
+   [candidates_timed]. The cross-machine sweep runs test/operations in parallel, and processes
+   sharing one GPU refuse whole searches this small: the 09-03 cuda run emptied the chain search
+   below, whose only dispatchable candidate on a GPU backend is the fissioned preset
+   (gh-ocannl-543), so [candidates_timed] was 0 with nothing wrong in the tuner. Every claim here
+   about what a search timed or measured therefore admits the load's own evidence as its one
+   alternative -- a search that refused nothing still has to satisfy all of them -- and the
+   accounting goes to stderr so a red run names the numbers instead of leaving them to be
+   re-derived. *)
+let accounting stage (r : Autotune.report) =
+  Stdio.eprintf
+    "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
+     failed, default %s\n"
+    stage r.Autotune.candidates_timed r.Autotune.timings_contended r.Autotune.candidates_failed
+    (match r.Autotune.default_ms with Some _ -> "measured" | None -> "not measured")
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -212,8 +229,14 @@ let () =
   let r2, r1 =
     match !reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two reports"
   in
+  accounting "chain search" r1;
+  accounting "chain second call" r2;
   p_all2 "tuned fissionable chain values correct" got_t1 expected_e ~f:approx;
   let chain_first_cacheable = r1.Autotune.timings_contended = 0 in
+  (* The load's own evidence, for the claims below that a refused search cannot satisfy. Both
+     reports, since a first search whose windows were refused is left uncached and the second call
+     searches again rather than replaying. *)
+  let chain_refused = r1.Autotune.timings_contended > 0 || r2.Autotune.timings_contended > 0 in
   p "chain tune replays exactly after a contention-free search"
     (completed r1 && Bool.equal (replayed r2) chain_first_cacheable);
   let chain_cache_committed =
@@ -222,12 +245,16 @@ let () =
   (* gh-ocannl-552: the untuned-default reference is measured by the search — the config-thresholds
      fissioned seed is the first candidate that binds a hardware dimension on GPU, and on CPU it is
      timed or dedups against a timed twin — and persists through the cache entry, so a cache-hit
-     report still answers "did tuning beat the default?". *)
-  p "the default reference is measured and survives the cache round-trip (gh-ocannl-552)"
+     report still answers "did tuning beat the default?". The default seed's own window can be the
+     refused one, which leaves no measurement to be the reference — admitted only against the
+     refusal count (gh-ocannl-892). *)
+  p
+    "the default reference is measured and survives the cache round-trip, or is contention-refused \
+     (gh-ocannl-552)"
     (match (r1.Autotune.default_ms, r2.Autotune.default_ms) with
     | Some d1, Some d2 ->
         Float.is_finite d1 && Float.is_finite d2 && Float.(r1.Autotune.best_ms <= d1)
-    | _ -> false);
+    | _ -> chain_refused);
   (* Codex P2 on PR #279: the cache key covers neither the scheduling gates nor the preset
      thresholds, so a config change can redefine the default pipeline without missing the cache.
      Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner replay
@@ -257,8 +284,10 @@ let () =
      to the unscheduled base, and the beam's Split/Swap/Vectorize moves off that base cannot bind a
      hardware dimension — so a GPU backend times exactly one candidate (the fissioned preset) and
      refuses the rest under gh-ocannl-532, where cc times all of them at full single-core speed. The
-     portable statement is over the population the census now covers: at least one candidate was
-     measured, and the search reached several, whether measured or refused. *)
+     portable statement is over the population the census now covers: at least one candidate reached
+     a timing window, and the search reached several — counting, alongside the measured ones, both
+     kinds of refusal the census records: unparallelized, and the contention refusals a loaded host
+     imposes (gh-ocannl-892). *)
   let not_dispatched (r : Autotune.report) =
     List.sum
       (module Int)
@@ -268,9 +297,10 @@ let () =
         | Ir.Schedule_outcome.Not_dispatched_key _ -> d.Autotune.count
         | _ -> 0)
   in
-  p "chain tune timed a dispatchable candidate" (r1.Autotune.candidates_timed >= 1);
-  p "chain tune reached multiple candidates (timed, or refused as unparallelized)"
-    (r1.Autotune.candidates_timed + not_dispatched r1 >= 2);
+  p "chain tune dispatched a candidate to a timing window (timed, or refused by contention)"
+    (r1.Autotune.candidates_timed + r1.Autotune.timings_contended >= 1);
+  p "chain tune reached multiple candidates (timed, refused by contention, or unparallelized)"
+    (r1.Autotune.candidates_timed + r1.Autotune.timings_contended + not_dispatched r1 >= 2);
   p "chain tune: candidates refused as unparallelized exactly on GPU"
     (if is_gpu then not_dispatched r1 > 0 else not_dispatched r1 = 0);
   p_all2 "chain cache-hit values correct" got_t2 expected_e ~f:approx;
