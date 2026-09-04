@@ -357,8 +357,10 @@ module Impl = struct
               no practical cap to enforce here. *)
            max_grid_yz = None;
            (* [simdgroup_matrix] (docs/proposals/tensorize-mma.md): 8×8×8 tiles cooperatively held
-              by the 32-thread simdgroup, available on Apple7+ (M1 and later). Supported operand
-              precisions are decided per call by [mma_syntax] (f32/f16/bf16, uniform). *)
+              by the 32-thread simdgroup, available on Apple7+ (M1 and later). Supported storage
+              precisions are decided per call by [mma_syntax] (f32/f16/bf16, uniform); under
+              [Fp16_wide], the uniform-f16 storage arm uses an f32 accumulator fragment and converts
+              only at the destination boundary (gh-ocannl-837). *)
            mma =
              (if
                 (* [for_all] is vacuously true on no devices, which would advertise simdgroup
@@ -373,9 +375,8 @@ module Impl = struct
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (8, 8, 8);
-                    (* [simdgroup_matrix] has no mixed-precision multiply-accumulate, so every entry
-                       is uniform: the accumulator format equals the operand format
-                       (gh-ocannl-545). *)
+                    (* These triples describe storage formats. The wide-f16 exception below uses the
+                       same f16 storage triple with an f32 accumulator fragment internally. *)
                     mma_format_tiles =
                       [
                         ( (Backend_intf.Mma_f32, Backend_intf.Mma_f32, Backend_intf.Mma_f32),
@@ -385,9 +386,11 @@ module Impl = struct
                         ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (8, 8, 8) );
                       ];
-                    (* No mixed-precision [simdgroup_multiply_accumulate] exists, so the wide-f16
-                       policy unseeds the uniform-f16 tiles instead (gh-ocannl-680). *)
-                    mma_f16_wide_acc = false;
+                    (* MSL's generic [simdgroup_multiply_accumulate] accepts half A/B fragments and
+                       an f32 accumulator. [mma_syntax]/[mma_fragment_syntax] bridge that
+                       accumulator to f16 destination storage elementwise at the outer boundary
+                       (gh-ocannl-837). *)
+                    mma_f16_wide_acc = true;
                     (* Metal banks too, but [simdgroup_load] takes a plain pointer and leading
                        dimension — no [ldmatrix] analogue (gh-ocannl-481 item 3, D3). *)
                     mma_staged_layouts = [];
@@ -641,6 +644,64 @@ module Impl = struct
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Metal_backend.vec_typ_of_prec: invalid combination"
 
+    let mma_fragment_types ~d_prec ~a_prec ~b_prec =
+      if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
+      else
+        match d_prec with
+        | Ops.Single_prec _ ->
+            Some
+              ( "simdgroup_float8x8",
+                "simdgroup_float8x8",
+                "simdgroup_float8x8",
+                "simdgroup_float8x8" )
+        | Ops.Half_prec _ when Numerics.fp16_accum_wide () ->
+            Some
+              ("simdgroup_float8x8", "simdgroup_half8x8", "simdgroup_half8x8", "simdgroup_half8x8")
+        | Ops.Half_prec _ ->
+            Some ("simdgroup_half8x8", "simdgroup_half8x8", "simdgroup_half8x8", "simdgroup_half8x8")
+        | Ops.Bfloat16_prec _ ->
+            Some
+              ( "simdgroup_bfloat8x8",
+                "simdgroup_bfloat8x8",
+                "simdgroup_bfloat8x8",
+                "simdgroup_bfloat8x8" )
+        | _ -> None
+
+    (* MSL exposes the distributed fragment elements through [thread_elements()]. On a 32-thread
+       simdgroup each lane owns two elements of an 8x8 matrix, and the mapping depends only on the
+       matrix dimensions, not its element type. A standalone runtime-compiler probe on an Apple M4
+       Max established the half/f32 mixed multiply surface and this elementwise boundary
+       (gh-ocannl-837). The assertion keeps the logical element-count premise adjacent to the copy;
+       unlike a whole-[storage_type] conversion, the scalar spelling is accepted by current MSL. *)
+    let mma_d_boundary_lines ~dir ~acc_frag ~d_frag ~acc ~ptr ~ldd =
+      if String.equal acc_frag d_frag then
+        [
+          (match dir with
+          | `Load -> Printf.sprintf "simdgroup_load(%s, %s, (ulong)%d);" acc ptr ldd
+          | `Store -> Printf.sprintf "simdgroup_store(%s, %s, (ulong)%d);" acc ptr ldd);
+        ]
+      else
+        let copy dst src cast =
+          [
+            Printf.sprintf "%s.thread_elements()[0] = (%s)%s.thread_elements()[0];" dst cast src;
+            Printf.sprintf "%s.thread_elements()[1] = (%s)%s.thread_elements()[1];" dst cast src;
+          ]
+        in
+        let assertion =
+          "static_assert(sizeof(simdgroup_float8x8::storage_type) / sizeof(float) == "
+          ^ "sizeof(simdgroup_half8x8::storage_type) / sizeof(half), "
+          ^ "\"wide-f16 d boundary requires equal fragment element counts\");"
+        in
+        match dir with
+        | `Load ->
+            [ Printf.sprintf "%s __mma_dstage;" d_frag; assertion ]
+            @ [ Printf.sprintf "simdgroup_load(__mma_dstage, %s, (ulong)%d);" ptr ldd ]
+            @ copy acc "__mma_dstage" "float"
+        | `Store ->
+            [ Printf.sprintf "%s __mma_dstage;" d_frag; assertion ]
+            @ copy "__mma_dstage" acc "half"
+            @ [ Printf.sprintf "simdgroup_store(__mma_dstage, %s, (ulong)%d);" ptr ldd ]
+
     (* Cooperative tile-MMA emission for [Low_level.Tile_mma] via MSL [simdgroup_matrix]
        (docs/proposals/tensorize-mma.md §4): fragment blocks of 8×8 tiles held jointly by the
        32-thread simdgroup, loaded with [simdgroup_load] straight from [device] memory or
@@ -670,21 +731,10 @@ module Impl = struct
              fallback (gh-ocannl-481 item 3, D2). *)
           let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 8 in
-          (* [simdgroup_matrix] has no mixed-precision multiply-accumulate: uniform only. *)
-          let frag_typ =
-            if not (plain d_layout && plain a_layout && plain b_layout) then None
-            else if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
-            else
-              match d_prec with
-              | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments accumulate
-                 at f16 while every serial rendering holds f32 residency (gh-ocannl-680). Seeding
-                 already withholds such candidates ([mma_f16_wide_acc]); this decline covers
-                 hand-built [Tile_mma] IR, falling back to the lane-0 scalar rendering whose
-                 accumulator follows [accum_prec]. *)
-              | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
-              | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
-              | _ -> None
+          let frag_types =
+            if plain d_layout && plain a_layout && plain b_layout then
+              mma_fragment_types ~d_prec ~a_prec ~b_prec
+            else None
           in
           let addr_space = function
             | `Device -> Some "device"
@@ -703,27 +753,26 @@ module Impl = struct
               Printf.sprintf "    simdgroup_load(%s, %s + %s * %d * %d + %s * %d, (ulong)%d);" frag
                 ptr row_i tile ld col_i tile ld
           in
-          match (frag_typ, d_space, addr_space a_space, addr_space b_space) with
-          | Some frag, `Fragment fragment, Some a_as, Some b_as
+          match (frag_types, d_space, addr_space a_space, addr_space b_space) with
+          | Some (_acc_frag, a_frag, b_frag, _d_frag), `Fragment fragment, Some a_as, Some b_as
             when m % tile = 0
                  && n % tile = 0
                  && k % tile = 0
                  && Option.is_some (hardware_limits ()).Backend_intf.mma ->
               let mt = m / tile and nt = n / tile and kt = k / tile in
-              let elem = typ_of_prec d_prec in
-              let ptr_decl name aspace ptr =
+              let ptr_decl name aspace elem ptr =
                 string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
               in
               let body_lines =
                 [
                   Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                  Printf.sprintf "  %s __mma_bf[%d];" frag nt;
+                  Printf.sprintf "  %s __mma_bf[%d];" b_frag nt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   load_line "__mma_bf[__ni]" "__mma_bp" ~row_i:"__ki" ~col_i:"__ni" ldb
                     ~transpose:tb;
                   "  }";
                   Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "    %s __mma_af;" frag;
+                  Printf.sprintf "    %s __mma_af;" a_frag;
                   load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda ~transpose:ta;
                   Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   Printf.sprintf
@@ -736,9 +785,9 @@ module Impl = struct
                 ]
               in
               let body ~a_ptr ~b_ptr =
-                ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
+                ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) (typ_of_prec a_prec) a_ptr
                 ^^ hardline
-                ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
+                ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) (typ_of_prec b_prec) b_ptr
                 ^^ hardline
                 ^^ separate_map hardline string body_lines
               in
@@ -751,15 +800,14 @@ module Impl = struct
                     ^^ string "threadgroup_barrier(mem_flags::mem_threadgroup);"
                     ^^ hardline ^^ rbrace))
           | _ -> (
-              match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
-              | Some frag, Some d_as, Some a_as, Some b_as
+              match (frag_types, addr_space d_space, addr_space a_space, addr_space b_space) with
+              | Some (acc_frag, a_frag, b_frag, d_frag), Some d_as, Some a_as, Some b_as
                 when m % tile = 0
                      && n % tile = 0
                      && k % tile = 0
                      && Option.is_some (hardware_limits ()).Backend_intf.mma ->
                   let mt = m / tile and nt = n / tile and kt = k / tile in
-                  let elem = typ_of_prec d_prec in
-                  let ptr_decl name aspace ptr =
+                  let ptr_decl name aspace elem ptr =
                     string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
                   in
                   (* Bracketing barriers: sibling statements (zeroing of [d], cooperative staging)
@@ -772,46 +820,58 @@ module Impl = struct
                   let body_lines =
                     [
                       barrier;
-                      Printf.sprintf "%s __mma_acc[%d][%d];" frag mt nt;
+                      Printf.sprintf "%s __mma_acc[%d][%d];" acc_frag mt nt;
                       Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                       Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      Printf.sprintf
-                        "    simdgroup_load(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + \
-                         __ni * %d, (ulong)%d);"
-                        tile ldd tile ldd;
-                      "  }";
-                      "}";
-                      Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                      Printf.sprintf "  %s __mma_bf[%d];" frag nt;
-                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      load_line "__mma_bf[__ni]" "__mma_bp" ~row_i:"__ki" ~col_i:"__ni" ldb
-                        ~transpose:tb;
-                      "  }";
-                      Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "    %s __mma_af;" frag;
-                      load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda ~transpose:ta;
-                      Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
-                       __mma_bf[__ni], __mma_acc[__mi][__ni]);";
-                      "    }";
-                      "  }";
-                      "}";
-                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                      Printf.sprintf
-                        "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + \
-                         __ni * %d, (ulong)%d);"
-                        tile ldd tile ldd;
-                      "  }";
-                      "}";
-                      barrier;
                     ]
+                    @ List.map
+                        (mma_d_boundary_lines ~dir:`Load ~acc_frag ~d_frag
+                           ~acc:"__mma_acc[__mi][__ni]"
+                           ~ptr:
+                             (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile)
+                           ~ldd)
+                        ~f:(fun line -> "    " ^ line)
+                    @ [
+                        "  }";
+                        "}";
+                        Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                        Printf.sprintf "  %s __mma_bf[%d];" b_frag nt;
+                        Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                        load_line "__mma_bf[__ni]" "__mma_bp" ~row_i:"__ki" ~col_i:"__ni" ldb
+                          ~transpose:tb;
+                        "  }";
+                        Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                        Printf.sprintf "    %s __mma_af;" a_frag;
+                        load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda
+                          ~transpose:ta;
+                        Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                        "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
+                         __mma_bf[__ni], __mma_acc[__mi][__ni]);";
+                        "    }";
+                        "  }";
+                        "}";
+                      ]
+                    @ [
+                        Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                        Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      ]
+                    @ List.map
+                        (mma_d_boundary_lines ~dir:`Store ~acc_frag ~d_frag
+                           ~acc:"__mma_acc[__mi][__ni]"
+                           ~ptr:
+                             (Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile)
+                           ~ldd)
+                        ~f:(fun line -> "    " ^ line)
+                    @ [ "  }"; "}"; barrier ]
                   in
                   let body ~a_ptr ~b_ptr =
-                    ptr_decl "__mma_dp" d_as d_ptr ^^ hardline
-                    ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
+                    ptr_decl "__mma_dp" d_as (typ_of_prec d_prec) d_ptr
                     ^^ hardline
-                    ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
+                    ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) (typ_of_prec a_prec)
+                         a_ptr
+                    ^^ hardline
+                    ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) (typ_of_prec b_prec)
+                         b_ptr
                     ^^ hardline
                     ^^ separate_map hardline string body_lines
                   in
@@ -845,31 +905,20 @@ module Impl = struct
              fallback (gh-ocannl-481 item 3, D2). *)
           let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 8 in
-          let frag_typ =
-            if not (plain d_layout && plain a_layout && plain b_layout) then None
-            else if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
-            else
-              match d_prec with
-              | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-              (* Under [Fp16_wide] the uniform-f16 tiles must not render: their fragments accumulate
-                 at f16 while every serial rendering holds f32 residency (gh-ocannl-680). Seeding
-                 already withholds such candidates ([mma_f16_wide_acc]); this decline covers
-                 hand-built [Tile_mma] IR, falling back to the lane-0 scalar rendering whose
-                 accumulator follows [accum_prec]. *)
-              | Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) -> Some "simdgroup_half8x8"
-              | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
-              | _ -> None
+          let frag_types =
+            if plain d_layout && plain a_layout && plain b_layout then
+              mma_fragment_types ~d_prec ~a_prec ~b_prec
+            else None
           in
           let loadable = function `Device | `Shared -> true | `Thread | `Fragment _ -> false in
-          match frag_typ with
-          | Some frag
+          match frag_types with
+          | Some (acc_frag, _a_frag, _b_frag, d_frag)
             when m % tile = 0
                  && n % tile = 0
                  && k % tile = 0
                  && loadable d_space && loadable a_space && loadable b_space
                  && Option.is_some (hardware_limits ()).Backend_intf.mma ->
               let mt = m / tile and nt = n / tile in
-              let elem = typ_of_prec d_prec in
               let d_as =
                 match d_space with
                 | `Device -> "device"
@@ -879,37 +928,37 @@ module Impl = struct
               let barrier =
                 "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
               in
+              let d_addr = Printf.sprintf "__mma_dp + __mi * %d * %d + __ni * %d" tile ldd tile in
               let lines_before =
                 [
                   barrier;
-                  Printf.sprintf "%s %s[%d][%d];" frag fragment mt nt;
+                  Printf.sprintf "%s %s[%d][%d];" acc_frag fragment mt nt;
                   Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    simdgroup_load(%s[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * %d, \
-                     (ulong)%d);"
-                    fragment tile ldd tile ldd;
-                  "  }";
-                  "}";
-                  "/* simdgroup fragment reduction body begins */";
                 ]
+                @ List.map
+                    (mma_d_boundary_lines ~dir:`Load ~acc_frag ~d_frag
+                       ~acc:(Printf.sprintf "%s[__mi][__ni]" fragment)
+                       ~ptr:d_addr ~ldd)
+                    ~f:(fun line -> "    " ^ line)
+                @ [ "  }"; "}"; "/* simdgroup fragment reduction body begins */" ]
               in
               let lines_after =
-                [
-                  "/* simdgroup fragment reduction body ends */";
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    simdgroup_store(%s[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * %d, \
-                     (ulong)%d);"
-                    fragment tile ldd tile ldd;
-                  "  }";
-                  "}";
-                  barrier;
-                ]
+                [ "/* simdgroup fragment reduction body ends */" ]
+                @ [
+                    Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  ]
+                @ List.map
+                    (mma_d_boundary_lines ~dir:`Store ~acc_frag ~d_frag
+                       ~acc:(Printf.sprintf "%s[__mi][__ni]" fragment)
+                       ~ptr:d_addr ~ldd)
+                    ~f:(fun line -> "    " ^ line)
+                @ [ "  }"; "}"; barrier ]
               in
               let d_decl =
-                string (Printf.sprintf "%s %s *__mma_dp = " d_as elem) ^^ d_ptr ^^ semi
+                string (Printf.sprintf "%s %s *__mma_dp = " d_as (typ_of_prec d_prec))
+                ^^ d_ptr ^^ semi
               in
               Some
                 (group
@@ -1132,17 +1181,14 @@ module Impl = struct
        precision alone, as the signature requires. *)
     let compute_prec = function Ops.Fp8_prec _ -> Ops.single | prec -> prec
 
-    (* gh-ocannl-663: [simdgroup_matrix] is uniform-precision only, so the seeded f16/bf16 tiles
-       accumulate in fragments of the storage precision — the serial legs keep the same residency,
-       and only fp8 (no accumulator format anywhere, and computed in f32 above regardless of policy)
-       widens, which the compute resolution already covers. Restated next to the [compute_prec]
-       override because the pair binds at [include] time (signature coupling note).
+    (* gh-ocannl-663: the ordinary seeded f16/bf16 tiles accumulate in fragments of the storage
+       precision, so serial and tensorized residency agree; fp8 has no accumulator format and
+       computes in f32 above regardless of policy. Restated next to the [compute_prec] override
+       because the pair binds at [include] time (signature coupling note).
 
-       Under [Numerics.Fp16_wide] (gh-ocannl-680) f16 accumulators reside in f32 here too — and
-       because no mixed-precision [simdgroup_multiply_accumulate] exists, the uniform-f16 mma legs
-       are withheld under that policy (the seeding gate via [mma_f16_wide_acc = false], and the
-       [frag_typ] declines below for hand-built IR), so serial and tensorized renderings stay
-       width-uniform rather than the mma legs keeping a narrow accumulate the serial legs lost. *)
+       Under [Numerics.Fp16_wide], f16 accumulators reside in f32 here and in the tensorized path:
+       MSL accepts half operand fragments with an f32 accumulator, while the two MMA lowering hooks
+       convert the f16 destination only at their outer load/store boundary (gh-ocannl-837). *)
     let accum_prec prec =
       match prec with
       | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single

@@ -87,11 +87,11 @@ type mma_capability = {
           inline-PTX [mma.sync.m16n8k16] arm can (sm_80+, the architecturally-defined fragment
           layouts are shared by .f16 and .bf16); HIP can since gh-ocannl-789 (rocWMMA's
           [(f16, f16, f32)] fragments, the boundary converted elementwise through a
-          destination-typed accumulator fragment); Metal cannot ([simdgroup_matrix] is
-          uniform-precision only, structurally). Where false, the seeding gate in
-          [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds under the wide
-          policy — the serial legs then carry the f32 residency via [accum_prec], keeping the width
-          schedule-uniform per the gh-ocannl-545/663 discipline. *)
+          destination-typed accumulator fragment); Metal can since gh-ocannl-837 (mixed-type
+          [simdgroup_multiply_accumulate] plus a [thread_elements()] boundary copy). Where false,
+          the seeding gate in [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds
+          under the wide policy — the serial legs then carry the f32 residency via [accum_prec],
+          keeping the width schedule-uniform per the gh-ocannl-545/663 discipline. *)
   mma_staged_layouts :
     ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
       (** Format triples whose cooperatively staged operand tiles the backend can read in a

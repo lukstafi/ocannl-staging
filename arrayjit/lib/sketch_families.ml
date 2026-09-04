@@ -210,13 +210,14 @@ let mma_format_triples ~a_prec ~b_prec ~d_prec =
               (a_format, b_format, d_format)))
 
 (* gh-ocannl-680: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only where the
-   backend's uniform-f16 arm accumulates f32 ([mma_f16_wide_acc] — CUDA's inline-PTX m16n8k16 arm on
-   sm_80+, HIP's converted rocWMMA d boundary since gh-ocannl-789); elsewhere (Metal's
-   uniform-precision [simdgroup_matrix]) the seeds are withheld and the serial legs carry the f32
-   residency via [accum_prec], keeping the accumulation width schedule-uniform per backend
-   (gh-ocannl-545/663). Consulting [Numerics.fp16_accum_wide] here — the same predicate the emission
-   hooks consult — is what keeps seeding and emission from drifting apart on which f16 sites
-   tensorize. Applied in the tile AND staged-layout lookups, so no seed escapes the gate. *)
+   backend's uniform-f16 storage arm accumulates f32 ([mma_f16_wide_acc] — CUDA's inline-PTX
+   m16n8k16 arm on sm_80+, HIP's converted rocWMMA d boundary since gh-ocannl-789, and Metal's
+   converted [thread_elements()] boundary since gh-ocannl-837); elsewhere the seeds are withheld and
+   the serial legs carry the f32 residency via [accum_prec], keeping the accumulation width
+   schedule-uniform per backend (gh-ocannl-545/663). Consulting [Numerics.fp16_accum_wide] here —
+   the same predicate the emission hooks consult — is what keeps seeding and emission from drifting
+   apart on which f16 sites tensorize. Applied in the tile AND staged-layout lookups, so no seed
+   escapes the gate. *)
 let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~d_prec =
   (match d_prec with Ir.Ops.Half_prec _ -> true | _ -> false)
   && Ir.Numerics.fp16_accum_wide ()
