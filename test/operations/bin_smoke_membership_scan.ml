@@ -5,7 +5,10 @@
     executable therefore compiles under [@check] even when its runtime canary is accidentally
     omitted. This scan relates those two lists from the parsed dune structure. It accepts either the
     executable's local [%{exe:...}] identity or its [%{bin:...}] public identity, and requires exact
-    membership so a stale or duplicated smoke command is visible too.
+    membership so a stale or duplicated smoke command is visible too. Conditional executable or
+    smoke stanzas and unexpanded [(include ...)] forms are refused: without evaluating Dune's
+    condition language or loading the included dependency, either would make a syntactic member look
+    like a command CI necessarily executes.
 
     [--negative-control] applies the production scan to a synthetic dune file with two public
     executables and only one smoke command. Its dune rule accepts exit 1 and no other status, so a
@@ -40,19 +43,35 @@ let aliases_of stanza =
       | Some args -> List.filter_map args ~f:(function Sexp.Atom name -> Some name | _ -> None))
 
 let is_bin_smoke_stanza stanza = List.mem (aliases_of stanza) "bin-smoke" ~equal:String.equal
+let has_enabled_if stanza = Option.is_some (Dune_scan.field stanza "enabled_if")
+
+let public_condition_error names =
+  Printf.sprintf
+    "public executable `%s` uses enabled_if, so its active membership cannot be derived statically"
+    (String.concat ~sep:", " names)
+
+let smoke_condition_error =
+  "@bin-smoke uses enabled_if, so its commands are not unconditional runtime coverage"
+
+let include_error =
+  "bin/dune uses an unexpanded include stanza, so public and smoke membership may be incomplete"
 
 let declarations_of_stanza ~subdir stanza =
   match Dune_scan.head stanza with
   | Some ("executable" | "executables") ->
       let names = Dune_scan.names_of stanza in
       let public_names = Dune_scan.public_names stanza in
+      let condition_errors =
+        if has_enabled_if stanza then [ public_condition_error names ] else []
+      in
       if List.is_empty public_names then ([], [])
       else if List.length names <> List.length public_names then
         ( [],
-          [
-            Printf.sprintf "public executable stanza has %d local name(s) but %d public name(s)"
-              (List.length names) (List.length public_names);
-          ] )
+          condition_errors
+          @ [
+              Printf.sprintf "public executable stanza has %d local name(s) but %d public name(s)"
+                (List.length names) (List.length public_names);
+            ] )
       else
         ( List.zip_exn names public_names
           |> List.filter_map ~f:(fun (name, public) ->
@@ -63,13 +82,13 @@ let declarations_of_stanza ~subdir stanza =
                     local = Dune_scan.normalize_path (Dune_scan.in_subdir subdir (name ^ ".exe"));
                     public;
                   }),
-          [] )
+          condition_errors )
   | _ -> ([], [])
 
 let smoke_targets_of_stanza ~subdir stanza =
   if not (is_bin_smoke_stanza stanza) then []
   else
-    Dune_scan.runs_of ~subdir stanza
+    Dune_scan.runs_of_with_multiplicity ~subdir stanza
     |> List.map ~f:(fun (identity, _pins) ->
         match identity with `File path -> Local path | `Public name -> Public name)
 
@@ -94,7 +113,19 @@ let scan content =
         List.concat_map smoke_stanzas ~f:(fun (subdir, stanza) ->
             smoke_targets_of_stanza ~subdir stanza)
       in
-      Ok (declarations, List.rev declaration_errors, smoke_stanzas, targets)
+      let smoke_condition_errors =
+        List.filter_map smoke_stanzas ~f:(fun (_subdir, stanza) ->
+            if has_enabled_if stanza then Some smoke_condition_error else None)
+      in
+      let include_errors =
+        Dune_scan.walk "" stanzas ~f:(fun _subdir stanza ->
+            match Dune_scan.head stanza with Some "include" -> [ include_error ] | _ -> [])
+      in
+      Ok
+        ( declarations,
+          List.rev declaration_errors @ smoke_condition_errors @ include_errors,
+          smoke_stanzas,
+          targets )
     with exn -> Error (Exn.to_string exn)
   in
   match parsed with
@@ -176,13 +207,54 @@ let missing_fixture =
  (alias bin-smoke)
  (action (run %{exe:alpha.exe})))|dune}
 
+let duplicate_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(executable (name beta) (public_name beta-tool))
+(rule
+ (alias bin-smoke)
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
+let conditional_smoke_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (enabled_if false)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let conditional_public_fixture =
+  {dune|(executable
+ (name alpha)
+ (public_name alpha-tool)
+ (enabled_if false))
+(rule
+ (alias bin-smoke)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let included_fixture = complete_fixture ^ "\n(include extra-stanzas.inc)\n"
+
 let controls_hold () =
   let accepted = scan complete_fixture in
   let refused = scan missing_fixture in
+  let duplicated = scan duplicate_fixture in
+  let conditional_smoke = scan conditional_smoke_fixture in
+  let conditional_public = scan conditional_public_fixture in
+  let included = scan included_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "beta.exe" ]
   && List.is_empty refused.unexpected && List.is_empty refused.errors
+  && (not (complete duplicated))
+  && List.mem duplicated.errors "@bin-smoke runs more than once: alpha.exe" ~equal:String.equal
+  && (not (complete conditional_smoke))
+  && List.mem conditional_smoke.errors smoke_condition_error ~equal:String.equal
+  && (not (complete conditional_public))
+  && List.mem conditional_public.errors (public_condition_error [ "alpha" ]) ~equal:String.equal
+  && (not (complete included))
+  && List.mem included.errors include_error ~equal:String.equal
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)

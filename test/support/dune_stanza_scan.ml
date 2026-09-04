@@ -666,8 +666,9 @@ let unclassified_action_heads stanza =
       List.concat_map args ~f:(walk_action ~cwd:"") |> List.dedup_and_sort ~compare:Poly.compare
 
 (** What a stanza runs: the directory each process runs in, the environment variables pinned around
-    it by an enclosing [(setenv …)], and what it is. *)
-let rec executables_run_with_pins stanza =
+    it by an enclosing [(setenv …)], and what it is. This form preserves one entry per command site;
+    consumers enforcing execution multiplicity must use it rather than the deduplicated census. *)
+let executables_run_with_pins_preserving_multiplicity stanza =
   let named_deps = named_deps_of stanza in
   let rec classify command =
     match command with
@@ -706,11 +707,16 @@ let rec executables_run_with_pins stanza =
   in
   List.filter_map (commands_in stanza) ~f:(fun (cwd, pinned, command) ->
       match classify command with External -> None | classified -> Some (cwd, pinned, classified))
+
+(** The set-like reading used by directory and dependency checks, where two identical command sites
+    ask the same question. *)
+let executables_run_with_pins stanza =
+  executables_run_with_pins_preserving_multiplicity stanza
   |> List.dedup_and_sort ~compare:Poly.compare
 
 (** What a stanza runs, each with the directory it runs in — the shape every caller but the runner
     machinery wants. *)
-and executables_run stanza =
+let executables_run stanza =
   List.map (executables_run_with_pins stanza) ~f:(fun (cwd, _pinned, command) -> (cwd, command))
   |> List.dedup_and_sort ~compare:Poly.compare
 
@@ -1892,8 +1898,9 @@ let normalize_path path =
     the real program as unrun and credit a same-named local one with this rule's declarations (Codex
     P2, round 4 of PR #484). [commands_in] already tracked the directory for the configuration
     search; this is the same fact answering a second question. *)
-let runs_of ~subdir stanza =
-  List.filter_map (executables_run_with_pins stanza) ~f:(fun (cwd, pinned, command) ->
+let runs_of_with_multiplicity ~subdir stanza =
+  List.filter_map (executables_run_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (cwd, pinned, command) ->
       match command with
       (* A FILE is resolved to a workspace-relative path -- the working directory is part of its
          identity, since `(chdir ../a (run probe.exe))` in a rule under `b` runs `a`'s program. A
@@ -1904,6 +1911,10 @@ let runs_of ~subdir stanza =
       | Runs path -> Some (`File (normalize_path (in_subdir subdir (in_subdir cwd path))), pinned)
       | Runs_public name -> Some (`Public name, pinned)
       | _ -> None)
+
+(** The set-like counterpart to {!runs_of_with_multiplicity}. *)
+let runs_of ~subdir stanza =
+  runs_of_with_multiplicity ~subdir stanza |> List.dedup_and_sort ~compare:Poly.compare
 
 (** The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
     POSITIONALLY with [(names a b)], which is what lets one name of an [(executables …)] be asked
