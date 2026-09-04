@@ -1175,24 +1175,18 @@ module Impl = struct
           ^^ rparen ^^ semi)
   end
 
-  let split_math_options_available =
-    (* These instance methods were added in macOS 15. Query the runtime class rather than the host
-       OS version: this is the capability whose absence matters, and keeps macOS 14 on the legacy
-       safe spelling without ever sending an unavailable selector. *)
-    let compile_options_class = Runtime.Objc.get_class "MTLCompileOptions" in
-    let has_instance_method selector =
-      Runtime.Objc.msg_send ~self:compile_options_class
-        ~cmd:(Runtime.selector "instancesRespondToSelector:")
-        ~typ:Runtime.Objc.(_SEL @-> returning bool)
-        (Runtime.selector selector)
-    in
-    lazy (has_instance_method "setMathMode:" && has_instance_method "setMathFloatingPointFunctions:")
+  let runtime_math_api =
+    (* These instance methods were added in macOS 15. Query the runtime capability rather than the
+       host OS version: this is the capability whose absence matters, and keeps macOS 14 on the
+       legacy safe spelling without ever sending an unavailable selector. The selector vocabulary
+       and all-or-nothing decision live in [Compiler_options.metal_math_api], injectable in its
+       GPU-free test; [Metal_math_api_runtime] owns the one real query shared with the standalone
+       probe. *)
+    lazy (Metal_math_api_runtime.get ())
 
   let%diagn_sexp compile_metal_source ~name ~source ~device =
     let options = Me.CompileOptions.init () in
-    let math_api =
-      if Lazy.force split_math_options_available then Compiler_options.Modern_split else Legacy
-    in
+    let math_api = Lazy.force runtime_math_api in
     let option_state =
       Compiler_options.metal ~routine_logging:(Utils.debug_log_from_routines ()) ~math_api
     in

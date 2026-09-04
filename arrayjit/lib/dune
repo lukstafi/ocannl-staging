@@ -139,13 +139,20 @@
    ppx_minidebug)))
 
 (library
+ (name metal_math_api_runtime)
+ (public_name arrayjit.metal_math_api_runtime)
+ (optional)
+ (modules metal_math_api_runtime)
+ (libraries metal.runtime ir))
+
+(library
  (name metal_backend)
  (public_name arrayjit.metal_backend)
  (optional)
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL_METAL_BACKEND))
  (modules metal_backend builtins_metal)
- (libraries base metal metal.runtime utils ir)
+ (libraries base metal metal_math_api_runtime utils ir)
  (preprocess
   (pps
    ppx_compare
