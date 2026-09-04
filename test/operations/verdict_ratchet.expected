@@ -74,10 +74,15 @@ refuses a helper that returns a fully applied quantified local binding: true
 refuses a helper that returns a match-bound quantified value: true
 refuses a bound quantifier returned through an if condition: true
 accepts an inverted bound quantifier returned through an if condition: true
+refuses a bound quantifier returned through a match guard: true
+accepts an inverted bound quantifier returned through a match guard: true
 refuses a bound quantifier returned from a protected try body: true
 refuses a quantified helper reached through a mutually recursive sibling: true
 does not resolve an outer quantified binding shadowed by a function parameter: true
+does not resolve an outer binding shadowed by a match pattern: true
 still resolves a non-shadowed quantified binding returned by a function: true
+resolves an outer quantified binding used by an optional default: true
+preserves polarity through an optional default: true
 accepts a helper that negates a quantified local binding: true
 refuses a double negation around a quantified local binding: true
 refuses a quantifier written in pipeline style: true

@@ -838,7 +838,10 @@ that they earn a lookup rather than always-loaded space.
   returned-name references. `Fn.id`/`Fun.id` are transparent to returned-quantifier analysis.
   Dependencies that choose a returned value through an `if` condition or match scrutinee, and a
   dependency returned from a protected `try` body, remain visible; complementary Boolean `if`
-  branches retain their polarity.
+  branches retain their polarity. Match-case patterns shadow outer helper names in their guards and
+  right-hand sides, while a case guard that selects a Boolean result is itself a signed dependency.
+  Optional-parameter defaults are resolved in the environment before that parameter shadows its
+  name, and only when the returned body uses the parameter.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

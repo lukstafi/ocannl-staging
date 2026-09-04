@@ -174,16 +174,6 @@ let rec binding_parts pattern expression =
       |> Option.value_map ~default:(conservative_binding_parts pattern expression) ~f:List.concat
   | _ -> conservative_binding_parts pattern expression
 
-let rec function_parameter_names expr =
-  match expr.pexp_desc with
-  | Pexp_function (parameters, _, Pfunction_body body) ->
-      List.concat_map parameters ~f:(fun parameter ->
-          match parameter.pparam_desc with
-          | Pparam_val (_, _, pattern) -> List.map (pattern_names pattern) ~f:fst
-          | Pparam_newtype _ -> [])
-      @ function_parameter_names body
-  | _ -> []
-
 let rec population_name expr =
   match Sources.longident_of expr with
   | Some [ name ] -> Some name
@@ -541,15 +531,8 @@ let rec make_bindings environment value =
             || Set.is_empty (Set.inter guards quantifier.populations))
       in
       let negated_unguarded = returned_quantifiers ~positive:false part.expression in
-      let shadowed_parameters =
-        function_parameter_names part.expression |> Set.of_list (module String)
-      in
-      let dependency_environment =
-        List.filter environment ~f:(fun (binding : helper_binding) ->
-            not (Set.mem shadowed_parameters binding.name))
-      in
       let dependencies =
-        binding_dependencies dependency_environment (function_body part.expression)
+        function_dependencies environment part.expression
         |> List.filter ~f:(fun dependency ->
             (* A returned local quantifier is already attributed to this binding by
                [returned_quantifiers]. Keep outer dependencies beside it, but not the local
@@ -596,7 +579,37 @@ and make_binding_group environment recursive values =
       in
       close iterations []
 
-and binding_dependencies environment expr =
+and function_dependencies environment expr =
+  match expr.pexp_desc with
+  | Pexp_function (parameters, _, Pfunction_body body) ->
+      let returned = returned_binding_polarities true (function_body expr) in
+      let defaults, body_environment =
+        List.fold parameters ~init:([], environment)
+          ~f:(fun (dependencies, parameter_environment) parameter ->
+            match parameter.pparam_desc with
+            | Pparam_val (_, default, pattern) ->
+                let names = pattern_names pattern |> List.map ~f:fst in
+                let default_dependencies =
+                  Option.value_map default ~default:[] ~f:(fun default ->
+                      List.concat_map names ~f:(fun name ->
+                          List.filter_map returned ~f:(fun (returned_name, positive) ->
+                              if String.equal name returned_name then
+                                Some (binding_dependencies ~positive parameter_environment default)
+                              else None)
+                          |> List.concat))
+                in
+                let shadowed = Set.of_list (module String) names in
+                let parameter_environment =
+                  List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
+                      not (Set.mem shadowed binding.name))
+                in
+                (dependencies @ default_dependencies, parameter_environment)
+            | Pparam_newtype _ -> (dependencies, parameter_environment))
+      in
+      defaults @ function_dependencies body_environment body
+  | _ -> binding_dependencies environment expr
+
+and binding_dependencies ?(positive = true) environment expr =
   let bindings = ref [] in
   let rec visit environment positive forwards_guards expr =
     let visit_arguments environment positive forwards_guards arguments =
@@ -619,10 +632,32 @@ and binding_dependencies environment expr =
         Option.iter no ~f:(visit environment positive forwards_guards)
     | Pexp_match (scrutinee, cases) ->
         visit environment positive false scrutinee;
-        List.iter cases ~f:(fun case -> visit environment positive forwards_guards case.pc_rhs)
+        List.iter cases ~f:(fun case ->
+            let shadowed =
+              pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+            in
+            let case_environment =
+              List.filter environment ~f:(fun (binding : helper_binding) ->
+                  not (Set.mem shadowed binding.name))
+            in
+            Option.iter case.pc_guard ~f:(fun guard ->
+                let guard_positive =
+                  if bool_literal case.pc_rhs false then not positive else positive
+                in
+                visit case_environment guard_positive false guard);
+            visit case_environment positive forwards_guards case.pc_rhs)
     | Pexp_try (body, cases) ->
         visit environment positive forwards_guards body;
-        List.iter cases ~f:(fun case -> visit environment positive forwards_guards case.pc_rhs)
+        List.iter cases ~f:(fun case ->
+            let shadowed =
+              pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+            in
+            let case_environment =
+              List.filter environment ~f:(fun (binding : helper_binding) ->
+                  not (Set.mem shadowed binding.name))
+            in
+            Option.iter case.pc_guard ~f:(visit case_environment positive false);
+            visit case_environment positive forwards_guards case.pc_rhs)
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
         visit environment (not positive) forwards_guards argument
     | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
@@ -673,7 +708,7 @@ and binding_dependencies environment expr =
         in
         iterator#children expr
   in
-  visit environment true true expr;
+  visit environment positive true expr;
   !bindings
 
 let quantified_claims structure =
@@ -1135,6 +1170,16 @@ let () = Verdict.p "all rows pass" close|ocaml},
 let differs = if all then false else true
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "refuses a bound quantifier returned through a match guard",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let result = match () with () when all -> true | () -> false
+let () = Verdict.p "all rows pass" result|ocaml},
+      [ "all" ] );
+    ( "accepts an inverted bound quantifier returned through a match guard",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let result = match () with () when all -> false | () -> true
+let () = Verdict.p "some row fails" result|ocaml},
+      [] );
     ( "refuses a bound quantifier returned from a protected try body",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let close = try all with _ -> false
@@ -1150,11 +1195,26 @@ let () = Verdict.p "every sample agrees" (close samples)|ocaml},
 let identity ok = ok
 let () = Verdict.p "constant identity passes" (identity true)|ocaml},
       [] );
+    ( "does not resolve an outer binding shadowed by a match pattern",
+      {ocaml|let ok = List.for_all rows ~f:Fn.id
+let identity x = match x with ok -> ok
+let () = Verdict.p "constant identity passes" (identity true)|ocaml},
+      [] );
     ( "still resolves a non-shadowed quantified binding returned by a function",
       {ocaml|let ok = List.for_all rows ~f:Fn.id
 let return_ok value = ok
 let () = Verdict.p "all rows pass" (return_ok true)|ocaml},
       [ "ok" ] );
+    ( "resolves an outer quantified binding used by an optional default",
+      {ocaml|let ok = List.for_all rows ~f:Fn.id
+let use ?(ok = ok) () = ok
+let () = Verdict.p "all rows pass" (use ())|ocaml},
+      [ "ok" ] );
+    ( "preserves polarity through an optional default",
+      {ocaml|let ok = List.for_all rows ~f:Fn.id
+let use ?(ok = not ok) () = ok
+let () = Verdict.p "some row fails" (use ())|ocaml},
+      [] );
     ( "accepts a helper that negates a quantified local binding",
       {ocaml|let differs xs =
   let close = List.for_all xs ~f:Fn.id in
