@@ -1635,32 +1635,35 @@ class CellTimeoutTest(unittest.TestCase):
         # Code after a contextmanager's finally is skipped when the body raises.  The old
         # deferral put delivery there, so a SIGTERM held while spawn/cleanup also raised stayed
         # pending until a later child -- or forever when this was the last one.
-        self.assertEqual(orchestrate._defer_depth, 0)
-        self.assertIsNone(orchestrate._deferred_signal)
+        cancellation = orchestrate._cancellation
+        self.assertEqual(cancellation.depth, 0)
+        self.assertIsNone(cancellation.held_signal)
         try:
             with self.assertRaises(SystemExit) as raised:
-                with orchestrate._deferring_cancellation():
-                    orchestrate._deferred_signal = signal.SIGTERM
+                with cancellation.deferring():
+                    cancellation.held_signal = signal.SIGTERM
                     raise RuntimeError("the concurrent child failure")
             self.assertIn("terminated by signal", str(raised.exception))
+            self.assertIn("subprocess it was running", str(raised.exception))
             self.assertIsInstance(raised.exception.__context__, RuntimeError)
         finally:
-            orchestrate._defer_depth = 0
-            orchestrate._deferred_signal = None
+            cancellation.depth = 0
+            cancellation.held_signal = None
 
     def test_a_held_termination_does_not_replace_an_orchestrator_cleanup_failure(self):
-        self.assertEqual(orchestrate._defer_depth, 0)
-        self.assertIsNone(orchestrate._deferred_signal)
+        cancellation = orchestrate._cancellation
+        self.assertEqual(cancellation.depth, 0)
+        self.assertIsNone(cancellation.held_signal)
         try:
             with self.assertRaises(cell_group.CleanupFailed) as raised:
-                with orchestrate._deferring_cancellation():
-                    orchestrate._deferred_signal = signal.SIGTERM
+                with cancellation.deferring():
+                    cancellation.held_signal = signal.SIGTERM
                     raise cell_group.CleanupFailed("SURVIVORS still hold the device")
             self.assertIn("SURVIVORS", str(raised.exception))
             self.assertNotIn("killed first", str(raised.exception))
         finally:
-            orchestrate._defer_depth = 0
-            orchestrate._deferred_signal = None
+            cancellation.depth = 0
+            cancellation.held_signal = None
 
     def test_the_tinygrad_cache_probe_collects_helpers_it_spawned(self):
         # This probe was the final raw subprocess.run site in the matrix sweep.  Importing a
@@ -2472,7 +2475,7 @@ class CellTimeoutTest(unittest.TestCase):
         depth_at_probe = []
 
         def probe(_proc):
-            depth_at_probe.append(orchestrate._defer_depth)
+            depth_at_probe.append(orchestrate._cancellation.depth)
             return cell_group.GONE
 
         cell = self.python(

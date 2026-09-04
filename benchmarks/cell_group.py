@@ -42,11 +42,18 @@ class CancellationDeferral:
 
     ``deferring`` covers spawn and cleanup; ``cancellable`` opens the one intentional hole around
     the blocking wait.  Signal masking is deliberately not used because a forked child would
-    inherit the mask and ignore the supervisor's graceful termination phase.
+    inherit the mask and ignore the supervisor's graceful termination phase. ``cleanup_message``
+    is the driver-specific fact appended when a deferred SIGTERM is delivered after cleanup.
     """
 
-    def __init__(self, label):
+    def __init__(
+        self,
+        label,
+        *,
+        cleanup_message="the child process group was cleaned first",
+    ):
         self.label = label
+        self.cleanup_message = cleanup_message
         self.depth = 0
         self.held_signal = None
 
@@ -75,10 +82,7 @@ class CancellationDeferral:
         signum, self.held_signal = self.held_signal, None
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
-        raise SystemExit(
-            f"{self.label}: terminated by signal {signum}; the child process group was cleaned "
-            "first"
-        )
+        raise SystemExit(f"{self.label}: terminated by signal {signum}; {self.cleanup_message}")
 
     def _deliver_or_annotate(self):
         if self.held_signal is None:
@@ -487,22 +491,33 @@ def terminate(group, grace, poll_interval=0.05, final_reap=1.0, observe=None):
     stderr = ""
     reaped = False
 
+    def output_bytes(value):
+        if isinstance(value, str):
+            return value.encode(group.encoding or "utf-8", group.errors or "strict")
+        return value
+
+    def preserve_output(current, candidate):
+        # `communicate` and `TimeoutExpired` return cumulative snapshots, but a later reap can
+        # still report an empty or shorter snapshot on a platform-specific pipe-close path. A
+        # child killed mid-write has no second chance to produce those bytes, so never replace a
+        # longer observation with a shorter one. TimeoutExpired.output remains bytes under
+        # text=True, so compare encoded byte counts rather than bytes against Unicode code points.
+        if candidate is None or len(output_bytes(candidate)) < len(output_bytes(current)):
+            return current
+        return candidate
+
     def reap(timeout):
         nonlocal stdout, stderr, reaped
         if reaped:
             return
         try:
             got_out, got_err = group.communicate(timeout=max(0, timeout))
-            if got_out is not None:
-                stdout = got_out
-            if got_err is not None:
-                stderr = got_err
+            stdout = preserve_output(stdout, got_out)
+            stderr = preserve_output(stderr, got_err)
             reaped = True
         except subprocess.TimeoutExpired as expired:
-            if expired.output is not None:
-                stdout = expired.output
-            if expired.stderr is not None:
-                stderr = expired.stderr
+            stdout = preserve_output(stdout, expired.output)
+            stderr = preserve_output(stderr, expired.stderr)
         except ValueError:
             # An earlier communicate already closed the pipes; poll still reaps the leader.
             group.poll()

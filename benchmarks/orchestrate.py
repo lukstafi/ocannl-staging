@@ -299,6 +299,12 @@ def kill_cell_group(proc):
     return out or "", result.observation
 
 
+_cancellation = cell_group.CancellationDeferral(
+    "orchestrate",
+    cleanup_message="the subprocess it was running, and its process group, were killed first",
+)
+
+
 def install_termination_handler():
     """Make a SIGTERM to the sweep reach the cell the sweep is running (gh-ocannl-760 review).
 
@@ -313,33 +319,7 @@ def install_termination_handler():
     (the unit tests, a notebook) has its own idea of what SIGTERM should mean.
     """
 
-    def handler(signum, _frame):
-        global _deferred_signal
-        if _defer_depth:
-            # Inside a `_deferring_cancellation` block: raising here would unwind past a cell that
-            # has no name yet, or out of the `except` clause that is killing one. Hand it over;
-            # that block raises it once the cell is bound and its group is dead.
-            _deferred_signal = signum
-            return
-        # No cell is running here — a deferred one is delivered by `_raise_deferred`, which says
-        # so — but a supporting subprocess may be, and `run_supporting` kills its group on the way
-        # out. Hence the plainer sentence: this path has no cell to claim it killed.
-        raise SystemExit(f"orchestrate: terminated by signal {signum}")
-
-    def interrupt(signum, _frame):
-        global _deferred_signal
-        if _defer_depth:
-            _deferred_signal = signum
-            return
-        raise KeyboardInterrupt
-
-    for signum, action in ((signal.SIGTERM, handler), (signal.SIGINT, interrupt)):
-        try:
-            signal.signal(signum, action)
-        except (ValueError, OSError):
-            # Not the main thread, or a platform without it: the cap still works, only the sweep's
-            # own cancellation goes back to being the caller's problem.
-            pass
+    _cancellation.install()
 
 
 # Where a cancellation must not land, and the signal that tried to. Two such stretches, and they
@@ -357,78 +337,8 @@ def install_termination_handler():
 # `pthread_sigmask`: the mask is inherited across fork/exec, so every cell would start with
 # SIGTERM blocked — the graceful phase of its own kill would do nothing, every cap would cost the
 # full grace before SIGKILL (measured: 1.0 s to 11.5 s per killed cell), and no runner would ever
-# get to flush.
-_defer_depth = 0
-_deferred_signal = None
-
-
-def _raise_deferred():
-    """Deliver a cancellation that was held, as the exception it would have been."""
-    global _deferred_signal
-    if _deferred_signal is None:
-        return
-    signum, _deferred_signal = _deferred_signal, None
-    if signum == signal.SIGINT:
-        raise KeyboardInterrupt
-    raise SystemExit(
-        f"orchestrate: terminated by signal {signum}; the subprocess it was running, and its "
-        "process group, were killed first"
-    )
-
-
-def _deliver_or_annotate_deferred():
-    """Keep a cleanup failure authoritative; otherwise deliver the held cancellation."""
-    global _deferred_signal
-    if _deferred_signal is None:
-        return
-    active = sys.exc_info()[1]
-    if isinstance(active, cell_group.CleanupFailed):
-        signum, _deferred_signal = _deferred_signal, None
-        if hasattr(active, "add_note"):
-            active.add_note(f"signal {signum} was also received while cleanup was failing")
-        return
-    _raise_deferred()
-
-
-@contextlib.contextmanager
-def _deferring_cancellation():
-    """Hold SIGINT/SIGTERM until this block (and any enclosing one) is done, then re-raise."""
-    global _defer_depth
-    _defer_depth += 1
-    try:
-        yield
-    finally:
-        _defer_depth -= 1
-        # This belongs in the finally itself.  Code after it is skipped when the protected body
-        # is already unwinding with another exception, which used to strand the held cancellation
-        # until some later child (or forever, if this was the last one).
-        if _defer_depth == 0:
-            _deliver_or_annotate_deferred()
-
-
-@contextlib.contextmanager
-def _cancellable():
-    """The one hole in the deferral: the wait that a cancellation is actually FOR.
-
-    Chasing the gaps one at a time is how four rounds of this review went — the spawn, then the
-    kill, then the probe, then the assignments between them, then the same list again for the
-    sweep's own subprocesses. The genre is simpler than its instances: from the moment a child
-    exists until its group is dead, a cancellation must not unwind anything, and the ONLY point
-    where raising immediately is right is while the sweep sits in `communicate` waiting for it. So
-    `run_cell` and `run_supporting` each defer across their whole body and open this one hole,
-    rather than protecting each stretch that someone notices (gh-ocannl-760 review).
-    """
-    global _defer_depth
-    held, _defer_depth = _defer_depth, 0
-    try:
-        # A cancellation held during the spawn is delivered HERE rather than after the cell
-        # finishes: this is the first moment at which raising is both safe and what the operator
-        # asked for. Without it the sweep would sit out the whole cell (its cap, if it wedged)
-        # before noticing it had been cancelled — 60 s in the spawn-window test that caught it.
-        _raise_deferred()
-        yield
-    finally:
-        _defer_depth = held
+# get to flush. `CancellationDeferral` owns this state machine for both benchmark drivers; the
+# constructor argument above keeps the orchestrator's more specific successful-cleanup message.
 
 
 def run_supporting(cmd, cwd=None, env=None, capture_output=False, check=False, timeout=None):
@@ -441,7 +351,7 @@ def run_supporting(cmd, cwd=None, env=None, capture_output=False, check=False, t
 
     Returns the `CompletedProcess` that `subprocess.run` would have.
     """
-    with _deferring_cancellation():
+    with _cancellation.deferring():
         return _run_supporting(cmd, cwd, env, capture_output, check, timeout)
 
 
@@ -459,7 +369,7 @@ def _run_supporting(cmd, cwd, env, capture_output, check, timeout):
             stderr=subprocess.PIPE if capture_output else None,
             text=capture_output,
         )
-        with _cancellable():
+        with _cancellation.cancellable():
             out, err = proc.communicate(timeout=timeout)
     except BaseException:
         if proc is not None:
@@ -511,14 +421,14 @@ def run_cell(label, cmd, env=None, cwd=None, timeout=None, on_incomplete=None):
     the cache it was writing; its sentence is appended to the failure note. `killed` separates the
     two cases, because what is safe to DO about them differs: see `quarantine_tinygrad_cache`.
 
-    The whole body runs inside one `_deferring_cancellation` window whose only hole is the
+    The whole body runs inside one cancellation-deferral window whose only hole is the
     `communicate` wait. Chasing that protection stretch by stretch is how several review rounds
     went — the spawn, then the kill, then the leftover probe, then the assignments between them —
     and the invariant behind all of them is single: from the moment a cell exists until its group
     is dead, a cancellation must not unwind anything, because what it unwinds is left running on
     the GPU with the sweep gone.
     """
-    with _deferring_cancellation():
+    with _cancellation.deferring():
         return _run_cell(label, cmd, env, cwd, timeout, on_incomplete)
 
 
@@ -537,7 +447,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
             stderr=subprocess.STDOUT,
             text=True,
         )
-        with _cancellable():
+        with _cancellation.cancellable():
             # The wait a cancellation is FOR: here, and only here, a signal should raise at once.
             stdout, _ = proc.communicate(timeout=timeout or None)
     except subprocess.TimeoutExpired:
@@ -628,7 +538,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         if cache_note:
             note += f"; {cache_note}"
         print(f"!!! {label} {note}", flush=True)
-        if remaining is not cell_group.GONE and _deferred_signal is not None:
+        if remaining is not cell_group.GONE and _cancellation.held_signal is not None:
             raise cell_group.CleanupFailed(note)
         return None, note
     if stuck is not cell_group.GONE:
@@ -651,7 +561,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
         if stuck_cache_note:
             note += f"; {stuck_cache_note}"
         print(f"!!! {label} {note}", flush=True)
-        if _deferred_signal is not None:
+        if _cancellation.held_signal is not None:
             raise cell_group.CleanupFailed(note)
         return None, note
     if proc.returncode != 0 or line is None:
