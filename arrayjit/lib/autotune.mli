@@ -116,10 +116,12 @@
       Initialize inputs before tuning, and tune before meaningful state exists, or re-initialize
       afterwards.
     - Timing uses wall clock around a device sync, so it includes queue overhead; times are
-      min-of-N, where fast routines get extra runs beyond [repeats] until ~25 ms of total measured
-      time — on sub-millisecond kernels a min-of-3 is launch-jitter roulette and can crown the wrong
-      candidate. Static indices are bound to the midpoint of their declared ranges during timing and
-      restored afterwards.
+      min-of-N, where fast routines get extra runs beyond [repeats] until ~25 ms of accumulated
+      per-launch samples — not queued-batch wall. Queued timing can consequently spend hundreds of
+      milliseconds on its timed batches and calibration; {!time_routine} documents the exact
+      dispatch bounds. On sub-millisecond kernels a min-of-3 is launch-jitter roulette and can crown
+      the wrong candidate. Static indices are bound to the midpoint of their declared ranges during
+      timing and restored afterwards.
 
     Implementation note: the {e structured} half of the candidate space — matmul/conv site
     detection, the composed schedule pipelines those sites parameterize, and the refinement trees

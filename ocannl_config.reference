@@ -410,11 +410,12 @@
 # candidate to candidate with the block count and the per-launch queue work, which is what lets two
 # candidates 10% apart in steady state swap places. A best_ms measured under "isolated" is
 # therefore not a throughput number and must not be compared against a batched per-kernel figure.
-# Both modes sit under the same wall-time ceiling -- the ~25 ms top-up below accumulates wall time
-# in both -- but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
-# finishes isolated timing in a few milliseconds and queued timing at the budget, so a search over
-# sub-millisecond kernels spends a few extra milliseconds per candidate, which is immaterial beside
-# the compile each candidate already costs.
+# The ~25 ms top-up budget accumulates PER-LAUNCH samples in both modes, not queued-batch wall. A
+# fast queued candidate can therefore take all 64 timed batches (about 640 ms when calibration hits
+# the 10 ms target). Before those, one provisional and up to four validating batch probes each take
+# at least 16 samples; a probe near the target costs about 160 ms, so calibration can approach
+# another 800 ms per candidate. These are workload-dependent costs, not a shared wall-time ceiling;
+# the exact worst-case dispatch-count bounds are documented on Autotune.time_routine.
 # The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
 # transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry
 # crowned under one objective is not the answer to a search asking the other, and the times it
