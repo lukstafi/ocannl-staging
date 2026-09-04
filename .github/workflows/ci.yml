@@ -190,6 +190,18 @@ jobs:
     - name: Test pin-revisions action
       if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main'
       run: tools/test-pin-revisions.sh
+    # These harnesses deliberately sit outside dune: they create, stop and kill
+    # process groups, and the zombie-only-group fact they guard is decided by
+    # the kernel. Run the family on Linux, where the bare killpg probe counts a
+    # zombie and the shared state-reading ladder must narrow it. Run both even
+    # when one fails so one regression cannot mask the other's diagnostics.
+    - name: Test process-group shell harnesses (Ubuntu)
+      if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main'
+      run: |
+        failures=0
+        tools/test-test-run.sh || failures=$((failures + 1))
+        scripts/test-setup-ocaml-env.sh || failures=$((failures + 1))
+        exit $((failures > 0 ? 1 : 0))
     - uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ matrix.ocaml-compiler }}

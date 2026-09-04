@@ -43,6 +43,14 @@ fixed(){ printf '  fixed %s\n' "$*"; }
 todo() { printf '  todo  %s\n' "$*"; status=1; }
 fail() { printf '  FAIL  %s\n' "$*" >&2; status=1; }
 
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+if [ -z "$script_dir" ] || [ ! -r "$script_dir/process-group.sh" ]; then
+  echo "setup-ocaml-env.sh: cannot read scripts/process-group.sh" >&2
+  exit 2
+fi
+# shellcheck source=process-group.sh
+. "$script_dir/process-group.sh"
+
 echo "=== OCANNL environment ==="
 
 # --- worktree dune root --------------------------------------------------
@@ -124,43 +132,6 @@ fi
 # newer than the parent checkout's `master` when the latter is the thing that
 # lagged. The warning changes nothing and does not mark the environment
 # incomplete; it names the recovery instead.
-group_alive() {
-  # group_alive PGID: is any member of that process group still RUNNING?
-  #
-  # Not the same question as `kill -0 -- -PGID`, which a zombie answers as
-  # readily as a live process — see `bounded` below for why that distinction is
-  # the whole point. Process states are not signal-visible, so they are read
-  # where the system publishes them: /proc on Linux (with the shell's own `read`
-  # rather than a fork per process), `ps` on the BSDs and macOS. Where neither
-  # answers — a cygwin `ps` takes no `-o` — it degrades to the signal, which
-  # over-reports; cygwin reaps its own children, so the zombie case that
-  # motivates this does not arise on that path.
-  local pgid="$1" f line states
-  if [ -r /proc/self/stat ]; then
-    for f in /proc/[0-9]*/stat; do
-      # Grouped, not `read ... 2>/dev/null`: a redirection that fails is
-      # reported by the SHELL, before the command's own stderr redirection
-      # applies, so the plain spelling prints `/proc/NNN/stat: No such file or
-      # directory` every time an entry vanishes mid-scan -- which for a glob of
-      # every process on the box is routine, not exceptional.
-      { read -r line <"$f"; } 2>/dev/null || continue
-      # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
-      line="${line##*) }"
-      # shellcheck disable=SC2086
-      set -- $line
-      [ "${3:-}" = "$pgid" ] || continue
-      [ "$1" = Z ] || return 0
-    done
-    return 1
-  fi
-  if states="$(ps -A -o pgid=,stat= 2>/dev/null)" && [ -n "$states" ]; then
-    printf '%s\n' "$states" \
-      | awk -v g="$pgid" '$1 == g && $2 !~ /^[Zz]/ { alive = 1 } END { exit !alive }'
-    return $?
-  fi
-  kill -0 -- -"$pgid" 2>/dev/null
-}
-
 bounded() {
   # bounded SECS CMD...: run CMD, killing it if still running after SECS.
   # What GNU timeout does, done here so that it holds whatever `timeout` is on
@@ -181,9 +152,9 @@ bounded() {
   # milliseconds — 30s added to every session start whose ssh remote is
   # unreachable — and where the reaper is a PID 1 that does not reap (the
   # common container case) the zombie is permanent, so no amount of waiting for
-  # it to clear would help. `group_alive` therefore reads process STATES, from
-  # /proc where there is one and from `ps` otherwise, and only a member that is
-  # not a zombie counts as work.
+  # it to clear would help. The shared `group_alive` predicate therefore reads
+  # process STATES, from /proc where there is one and from `ps` otherwise, and
+  # only a member that is not a zombie counts as work.
   local secs="$1"; shift
   local pid watchdog rc
   set -m

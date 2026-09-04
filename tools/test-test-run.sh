@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Hand-run tests for `group_alive` in tools/test-run.sh -- the predicate the
-# two callers there ask "is anything in this process group still running?" --
+# Tests for the shared `group_alive` used by tools/test-run.sh -- the predicate
+# its two callers ask "is anything in this process group still running?" --
 # and for the two sentences `stop` prints about a surviving
 # process group, which are what that predicate is for (gh-ocannl-742).
 #
@@ -8,18 +8,16 @@
 #   tools/test-test-run.sh --keep   # keep the temp dir for inspection
 #
 # It is the sibling of scripts/test-setup-ocaml-env.sh, whose leg 1 (f) tests
-# the same predicate in the SessionStart hook, and it is deliberately NOT wired
-# into any dune alias for the same reason: it spawns, STOPs and kills processes,
-# which is a poor fit for `dune runtest`. (What dune does check about this file
-# is that it parses -- test/operations/shell_scripts_parse globs tools/.) So it
-# runs on no machine in the loop; gh-ocannl-795 tracks giving it one.
+# the same predicate in the SessionStart hook. Neither is a dune test: they
+# spawn, STOP and kill process groups, which is a poor fit for `dune runtest`.
+# The Ubuntu CI leg runs both directly so Linux decides the kernel-dependent
+# zombie-group control (gh-ocannl-795).
 #
-# It tests the WORKING-TREE copy: `group_alive` and `ps_token` are extracted
-# from the tools/test-run.sh next to this script and sourced, and the `stop`
-# legs drive that same script as a subprocess, so the legs exercise the text
-# that ships rather than a paraphrase of it, and each extraction is asserted
-# structurally before anything uses it -- a sed that matched nothing would
-# otherwise leave every leg passing without testing anything.
+# It tests the WORKING-TREE copy: `group_alive` is extracted from the shared
+# scripts/process-group.sh, `ps_token` from tools/test-run.sh, and the `stop`
+# legs drive that same tool as a subprocess. Each extraction is asserted
+# structurally before use, so a sed that matched nothing cannot leave every leg
+# passing without testing anything.
 #
 # Legs:
 #   1. extraction -- the functions came out of the shipping script.
@@ -55,7 +53,11 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/test-run.sh"
+GROUP_SRC="$HERE/../scripts/process-group.sh"
+HOOK_SRC="$HERE/../scripts/setup-ocaml-env.sh"
 [ -f "$SRC" ] || { echo "no $SRC" >&2; exit 2; }
+[ -f "$GROUP_SRC" ] || { echo "no $GROUP_SRC" >&2; exit 2; }
+[ -f "$HOOK_SRC" ] || { echo "no $HOOK_SRC" >&2; exit 2; }
 
 failures=0
 report() { # report RC LABEL [DETAIL]
@@ -116,8 +118,9 @@ ppgid() { # <pid> -> its process group, empty where this system will not say
 have_state=1; [ -n "$(pstate $$)" ] || have_state=0
 have_pgid=1;  [ -n "$(ppgid $$)" ]  || have_pgid=0
 
-echo "testing $SRC"
+echo "testing $SRC and $GROUP_SRC"
 printf '  digest %s\n' "$( (cksum <"$SRC") 2>/dev/null || echo '?')"
+printf '  group digest %s\n' "$( (cksum <"$GROUP_SRC") 2>/dev/null || echo '?')"
 printf '  state reader: %s; pgid reader: %s\n' \
   "$([ "$have_state" = 1 ] && echo present || echo ABSENT)" \
   "$([ "$have_pgid" = 1 ] && echo present || echo ABSENT)"
@@ -203,19 +206,41 @@ trap 'exit 143' TERM
 # falling through to "nothing left to signal" -- passing no leg, but testing
 # neither sentence either.
 for fn in group_alive ps_token; do
-  sed -n "/^$fn() {/,/^}/p" "$SRC" >"$TMP/$fn.sh"
+  if [ "$fn" = group_alive ]; then fn_src="$GROUP_SRC"; else fn_src="$SRC"; fi
+  sed -n "/^$fn() {/,/^}/p" "$fn_src" >"$TMP/$fn.sh"
   g_lines="$(wc -l <"$TMP/$fn.sh" | tr -d ' ')"
   g_head="$(head -n1 "$TMP/$fn.sh")"
   case $g_head in "$fn() {"*) g_ok=1 ;; *) g_ok=0 ;; esac
   if [ "$g_ok" = 0 ] \
      || [ "$(tail -n1 "$TMP/$fn.sh")" != "}" ] || [ "$g_lines" -lt 10 ]; then
-    report 1 "$fn: extracted" "sed did not capture the function body from $SRC"
+    report 1 "$fn: extracted" "sed did not capture the function body from $fn_src"
   else
     report 0 "$fn: extracted ($g_lines lines)"
     # shellcheck disable=SC1090
     . "$TMP/$fn.sh"
   fi
 done
+
+# The decision behind this issue is one definition, not two copies tested in
+# parallel. Count definitions across the shared helper and both production
+# callers so either copy coming back fails the harness that CI runs.
+group_definition_count() { awk '/^group_alive\(\)/ { n++ } END { print n + 0 }' "$@"; }
+one_group_definition() { [ "$(group_definition_count "$@")" = 1 ]; }
+if one_group_definition "$GROUP_SRC" "$SRC" "$HOOK_SRC"; then
+  report 0 "group_alive has one shared production definition"
+else
+  report 1 "group_alive has one shared production definition" \
+    "found $(group_definition_count "$GROUP_SRC" "$SRC" "$HOOK_SRC") definitions across $GROUP_SRC, $SRC and $HOOK_SRC"
+fi
+# Synthetic duplicate: the clean production tree alone cannot distinguish a
+# working uniqueness check from one that always answers yes.
+cp "$GROUP_SRC" "$TMP/duplicate-process-group.sh"
+if one_group_definition "$GROUP_SRC" "$SRC" "$HOOK_SRC" "$TMP/duplicate-process-group.sh"; then
+  report 1 "the shared-definition check rejects a duplicate" \
+    "the production definition plus a copied definition still read as unique"
+else
+  report 0 "the shared-definition check rejects a duplicate"
+fi
 
 # ---------------------------------------------------------------------------
 # Leg 2: a live group reads alive
