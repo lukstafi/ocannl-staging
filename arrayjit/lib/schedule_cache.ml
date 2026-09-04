@@ -578,6 +578,15 @@ let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool"; "timi
 
 let cache_key ?objective ~(limits : Backend_intf.hardware_limits) canonical ~backend =
   let objective = match objective with Some o -> sanitize o | None -> objective_tag () in
+  (* gh-ocannl-892 changes what CUDA/HIP [queued] measures: the old depth-200 winner was ranked on a
+     1--2.5 ms contention window, while generation 2 restores the ~10 ms premise. Keep the public
+     setting and entry self-description as [queued], but version its filename identity on exactly
+     the backends whose policy changed so an old winner cannot bypass the new measurement. *)
+  let objective =
+    match (String.lowercase backend, objective) with
+    | ("cuda" | "hip"), "queued" -> "queued-v2"
+    | _ -> objective
+  in
   let component = function
     | "digest" -> canonical.digest
     | "backend" -> sanitize backend

@@ -256,7 +256,9 @@ val cache_key :
     The objective is a key component because the two objectives crown DIFFERENT candidates
     (gh-ocannl-755, measured): an entry crowned under isolated timing is not the answer to a search
     asking about queued timing, and the times it stores are readings of a different quantity, which
-    a replay would copy into the reading process's report under its own label. [objective] is for
+    a replay would copy into the reading process's report under its own label. CUDA/HIP [queued]
+    keys carry policy generation 2 (gh-ocannl-892), invalidating winners measured under the old
+    depth-200/short-batch regime without invalidating the unchanged cc/Metal regimes. [objective] is for
     the caller that resolved a mode explicitly rather than from configuration ({!Autotune.tune}'s
     [?timing]); everyone else wants the default. The backend-supplied components arrive as the whole
     [limits] record rather than one optional argument each, so a component added there reaches every

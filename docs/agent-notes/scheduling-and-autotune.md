@@ -603,8 +603,10 @@ files.
   under `isolated` it is not a throughput number at all (the gh-ocannl-728 arc compared one to a
   batched harness figure and the agreement was a coincidence of two instrument errors). And the
   batch depth is the thing to check when a queued search behaves like an isolated one:
-  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch, caps at 200 and floors at 1, so a
-  routine slower than 10 ms per launch is measured identically in both modes by construction —
+  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch and floors at 1. CUDA/HIP cap at
+  2048; cc and Metal retain the historical 200 cap (Metal's measured ~59-launch target is below
+  both, while raising cc's cap only multiplied CPU-suite cost). A routine slower than 10 ms per
+  launch is measured identically in both modes by construction —
   `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
   counts its own launches, that the reading is per launch rather than per batch.
   On Metal that 10 ms target is now a measured safety boundary too (gh-ocannl-828). On an M4 Max,
@@ -621,9 +623,45 @@ files.
   depth 1, so the autotuner cannot put a second long kernel in flight. Do not add a per-repeat host
   sync to the timing path on this evidence; rerun the standalone probe after an OS/driver change if
   the superlinear symptom returns.
-  Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall,
-  and every calibration and timed window has a 16-sample floor: a host stall can no longer spend
-  the whole budget and collapse a min-of-N to three samples. `Autotune.timing_result` also marks a
+  On CUDA/HIP a synchronized single dispatch includes the round trip batching removes, so it selects
+  only a provisional depth; a queued probe at that depth separates fixed synchronization cost from
+  marginal launch cost, and that affine wall model selects the final depth. This matters even when
+  the provisional batch is
+  shallow: dividing its wall by depth would charge part of the fixed synchronization to every
+  launch and leave the final batch below the contention scale. The selected depth is validated by
+  up to four further batch probes; each short probe refits the affine model. The first probe that
+  reaches the target is first interpolated back inside a measured below/above bracket when it
+  overshoots, then confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained
+  only when the pair's inferred fixed component is below the target and no more than one
+  quarter-target negative (the noise tolerance matching that confirmation step), so one fixed stall
+  or a physically invalid negative fit cannot select a shallow final depth while ordinary
+  submit/sync overhead remains in the wall model. When a clean pair's fixed component alone fills
+  the wall target, its positive marginal slope selects a depth carrying ~10 ms of launch work: the
+  fixed stall does not select a shallow base, and a genuinely slow kernel does not jump to a
+  many-second cap batch. A confirmation more than 2x its supported target-sized base
+  is itself treated as a contention outlier and retried once before an unresolved pair selects the
+  cap, so one transient stall cannot inflate both the timed batch and its later refusal threshold.
+  An unresolved first pair retries at double depth, and the next fit uses the two batch observations so an
+  inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
+  the target, the interpolated target depth is still sampled and checked against the measured
+  overshoot. A non-monotone confirmation scales from the deeper measured batch instead of returning
+  to the earlier suspect target crossing. After four noisy but resolved misses the latest projected
+  depth wins rather than jumping
+  to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
+  Metal and cc retain the historical single-estimate path and 200 cap, so this repair adds no probe
+  or timed work there; Metal's measured ~59 depth is unchanged. On faster CUDA/HIP kernels
+  calibration grows the batch toward the same wall target. A CUDA/HIP synchronized-single estimate
+  at or above the target is likewise checked at depth 2: a genuinely slow routine retains depth 1,
+  while a transient single-window stall cannot bypass batch validation.
+  CUDA/HIP cache keys spell this changed queued policy as `queued-v2` while entries and user-facing
+  configuration still say `queued`; otherwise a depth-200 winner already on disk would replay
+  without running any of this calibration. cc/Metal keep the unversioned `queued` key because their
+  policy did not change.
+  Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall.
+  The jitter-sensitive synchronized-single calibration and every timed window have a 16-sample
+  floor; the CUDA/HIP-only, already-millisecond batch probes use twelve minima because they choose
+  scale rather than rank a candidate. A host stall can no longer spend the timed budget and collapse
+  a min-of-N to three samples. `Autotune.timing_result` also marks a
   window contended when at least half its raw wall samples exceed their minimum by 2x. Queued mode
   tests that dispersion on BATCH wall before dividing the ranked and budgeted samples by depth, so
   the division cannot hide a fixed host stall. The search neither ranks a contended timing nor
@@ -639,7 +677,7 @@ files.
   was returned as the candidate's timing, so every search over microsecond kernels timed NOTHING on
   both GPU backends while `cc` (no round trip to disperse, and the only backend per-PR CI runs)
   stayed green. So `Autotune.queued_batch_depth` is **total** and never reads `contended`: a depth
-  is a scale estimate whose error is bounded both ways (floor 1, cap 200), and a deeper batch is
+  is a scale estimate whose error is bounded both ways (floor 1, cap 2048), and a deeper batch is
   the REMEDY for dispatch dispersion. Refusal happens once, downstream, on the timed loop's own
   window, which is a batch. Correspondingly `sample_min`'s `contended` is dispersion only: a
   non-positive or non-finite minimum is a clock that resolved nothing, refused by

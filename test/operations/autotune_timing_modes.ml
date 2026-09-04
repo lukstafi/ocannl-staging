@@ -108,11 +108,11 @@ let depth_cases =
     ("a routine at the batch target", 10., 1);
     ("a routine at half the batch target", 5., 2);
     ("a 0.1 ms routine", 0.1, 100);
-    ("a 0.05 ms routine, exactly at the cap", 0.05, 200);
-    ("a 1 us routine, past the cap", 0.001, 200);
+    ("a 0.0048828125 ms routine, exactly at the cap", 0.0048828125, 2048);
+    ("a 1 us routine, past the cap", 0.001, 2048);
     (* Saturates rather than raising: the ratio here is past the integer range, so a cap applied
        after the float-to-int conversion would raise instead of capping. *)
-    ("a subnormal estimate", Float.min_positive_subnormal_value, 200);
+    ("a subnormal estimate", Float.min_positive_subnormal_value, 2048);
   ]
 
 (* The estimates ranking refuses. The depth policy still owes each of them one -- batching is what a
@@ -121,12 +121,60 @@ let depth_cases =
 let degenerate_depth_cases =
   [
     ("an infinitely slow routine", Float.infinity, 1);
-    ("a clock that resolved nothing (zero)", 0., 200);
-    ("a clock that resolved nothing (nan)", Float.nan, 200);
+    ("a clock that resolved nothing (zero)", 0., 2048);
+    ("a clock that resolved nothing (nan)", Float.nan, 2048);
+  ]
+
+let refinement_cases =
+  [
+    (* A 6 ms fixed synchronization around a 1 ms launch. Dividing the depth-2 probe by two would
+       select depth 3; separating the fixed term selects the depth-4, 10 ms batch. *)
+    ("a shallow probe with dominant fixed synchronization", 7., 2, 8., 4, Some 10.);
+    (* An unresolved marginal observation retries deeper rather than relabeling a shallow wall as
+       the cap wall. A second batch point can then separate genuine work from an inflated single. *)
+    ("a probe with unresolved marginal cost", 6., 2, 6., 4, None);
+    ("a clean probe after an inflated single", 6., 2, 0.25, 4, None);
+    ("a probe already at the target", 1., 10, 10., 10, Some 10.);
+  ]
+
+let confirmation_cases =
+  [
+    (* The depth-2 probe used for an initially depth-1 calibration confirms a genuinely slow routine
+       without changing its timed depth. *)
+    ("a genuinely slow depth-one routine", 1, 10., 2, 20., 1, Some 10.);
+    (* Metal-like steady work: the provisional batch is already target-sized, and a 25% deeper batch
+       grows proportionally. Retaining the base preserves the historical Metal depth. *)
+    ("a target-sized batch with confirmed marginal work", 59, 10., 73, 12.5, 59, Some 10.);
+    (* A stalled base followed by a clean deeper batch has negative apparent marginal cost. It must
+       retry deeper, never accept the stalled base solely because its wall crossed the target. *)
+    ("an inflated target-sized batch", 2, 12., 3, 0.4, 6, None);
+    (* Two nearby depths inside one shared stall still have a positive slope, but its marginal work
+       is nowhere near the target. Target a full batch wall of marginal work rather than accepting
+       the shallow stalled base or jumping to the cap. Dyadic inputs keep the expected wall
+       exact. *)
+    ("two target-sized batches dominated by a shared stall", 2, 12.25, 3, 12.5, 40, Some 21.75);
+    (* A clean fit whose real fixed synchronization already exceeds the whole-wall target cannot
+       make a 10 ms batch. Its marginal slope says one launch is sufficient; it must not jump to the
+       cap and turn a slow candidate into seconds of uninterruptible timing. *)
+    ("a batch whose fixed synchronization exceeds the target", 1, 21., 2, 31., 1, Some 21.);
+    (* A deeper stalled window can manufacture a steep positive slope and an impossible negative
+       fixed component. Beyond the bounded noise tolerance, that fit is unresolved too. *)
+    ("a confirmation with impossible negative fixed overhead", 2, 12.2, 3, 20.3, 6, None);
+    (* Legitimate fixed synchronization is part of batch wall. A stable affine pair with a small
+       fixed component retains its already-target-sized base. *)
+    ("a target-sized batch with fixed synchronization", 199, 10.01, 248, 12.46, 199, Some 10.01);
+    (* A resolved overshoot brackets the target. Interpolation should reduce it rather than
+       preserving a batch substantially longer than the contention rule's stated scale. *)
+    ("a batch probe that overshoots the target", 512, 8., 1024, 16., 640, Some 10.);
   ]
 
 let () =
   Stdio.printf "== queued batch depth ==\n";
+  Verdict.p_all "CUDA and HIP use the raised queue-depth cap" [ "cuda"; "hip" ] ~f:(fun backend ->
+      Autotune.queue_depth_cap_for_backend backend = 2048);
+  Verdict.p_all "cc and Metal retain the historical queue-depth cap"
+    [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
+      Autotune.queue_depth_cap_for_backend backend = 200);
   Verdict.p_all "every calibration estimate gets the depth the policy owes it" depth_cases
     ~f:(fun (what, est_ms, want) ->
       let got = Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } in
@@ -150,7 +198,32 @@ let () =
       Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } >= 1);
   Verdict.p_all "no calibration estimate ever yields a depth above the cap" all_depth_cases
     ~f:(fun (_, est_ms, _) ->
-      Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } <= 200)
+      Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } <= 2048);
+  Verdict.p_all "depth refinement removes fixed synchronization cost from launch scaling"
+    refinement_cases ~f:(fun (what, single_ms, probe_depth, probe_ms, want_depth, want_wall) ->
+      let depth, wall = Autotune.refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms in
+      let wall_matches =
+        match want_wall with None -> Float.is_nan wall | Some want -> Float.equal wall want
+      in
+      if depth <> want_depth || not wall_matches then
+        Stdio.eprintf "  %s: depth %d, wall %g ms; expected depth %d, wall %s\n%!" what depth wall
+          want_depth
+          (Option.value_map want_wall ~default:"unresolved" ~f:Float.to_string);
+      depth = want_depth && wall_matches);
+  Verdict.p_all "over-target calibration requires a depth-separated marginal confirmation"
+    confirmation_cases
+    ~f:(fun (what, base_depth, base_ms, probe_depth, probe_ms, want_depth, want_wall) ->
+      let depth, wall =
+        Autotune.refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth ~probe_ms
+      in
+      let wall_matches =
+        match want_wall with None -> Float.is_nan wall | Some want -> Float.equal wall want
+      in
+      if depth <> want_depth || not wall_matches then
+        Stdio.eprintf "  %s: depth %d, wall %g ms; expected depth %d, wall %s\n%!" what depth wall
+          want_depth
+          (Option.value_map want_wall ~default:"unresolved" ~f:Float.to_string);
+      depth = want_depth && wall_matches)
 
 (* {1 The setting's spelling} *)
 
@@ -197,7 +270,7 @@ type reading = {
   wall_ms : float;
   dispatches : int;
   depth : int;
-  calibration_samples : int;
+  calibration_dispatches : int;
 }
 
 (* Held so the cache-key section below asks about the SAME lowering the instrument measured, rather
@@ -213,11 +286,11 @@ let () =
   (* The depth each call settles on, off the instrument's own observation seam: the queued call
      calibrates independently, so nothing derived from a reading taken outside it (gh-ocannl-851,
      Codex round 2 on PR #521) stands in for what it actually used. *)
-  let depth_seen = ref 0 and calibration_samples_seen = ref 0 in
+  let depth_seen = ref 0 and calibration_dispatches_seen = ref 0 in
   (Autotune.on_batch_depth :=
      fun d ~calibration_samples ->
        depth_seen := d;
-       calibration_samples_seen := calibration_samples);
+       calibration_dispatches_seen := calibration_samples);
   let measure timing =
     let before = count () in
     let c0 = Mtime_clock.counter () in
@@ -230,7 +303,7 @@ let () =
       wall_ms;
       dispatches = count () - before;
       depth = !depth_seen;
-      calibration_samples = !calibration_samples_seen;
+      calibration_dispatches = !calibration_dispatches_seen;
     }
   in
   (* The anchor the low side of the per-launch envelope below is written against: one launch plus
@@ -276,15 +349,14 @@ let () =
   p "isolated timing either reports contention or dispatches one launch per timed run"
     (iso.contended || (iso.samples >= 16 && iso.samples <= 64 && iso.dispatches = 1 + iso.samples));
   p "isolated timing reports batch depth 1" (iso.depth = 1);
-  (* The seam's report is not taken on faith: past the warmup (1) and the 16 calibration samples,
+  (* The seam's report is not taken on faith: past the warmup (1) and the calibration dispatches,
      the dispatch counter must decompose into whole batches of the reported depth, between the 16
      guaranteed timed samples and the 64-run top-up cap. A loop batching at some depth other than
      the one it reported fails this on any count the reported depth does not divide. *)
   p "queued timing either refuses contention or dispatches whole batches at the reported depth"
     (que.contended
-    || que.depth >= 1 && que.calibration_samples >= 16 && que.calibration_samples <= 64
-       && que.samples >= 16 && que.samples <= 64
-       && que.dispatches = 1 + que.calibration_samples + (que.samples * que.depth));
+    || que.depth >= 1 && que.calibration_dispatches >= 16 && que.samples >= 16 && que.samples <= 64
+       && que.dispatches = 1 + que.calibration_dispatches + (que.samples * que.depth));
   (* Depth > 1 is what queued mode IS. Gated on the depth the queued call itself reported: on a
      machine where one dispatch already costs a whole batch target the claim is vacuously true, and
      a vacuous [true] must not read like a verified one. *)
@@ -297,7 +369,7 @@ let () =
      different quantities because of it.
 
      The upper side refuses a reading that forgot to divide by the depth: such a reading is about
-     [depth] times the mean cost of a launch in that call -- up to 200x -- which the whole call's
+     [depth] times the mean cost of a launch in that call -- up to 2048x -- which the whole call's
      wall mean bounds with a factor of 3. Contention only inflates that mean, so a busy runner makes
      this side stricter rather than looser, and it stays written against it.
 
@@ -355,9 +427,10 @@ let () =
         que2.ms iso_min iso.ms iso2.ms);
   (* The old wall-budget claim is intentionally gone: accumulating per-launch samples means a fast
      queued routine can run all 64 batches. The pure injected-clock claims above pin the budget;
-     this executed leg pins only the absolute dispatch cap. *)
+     this executed leg pins only the absolute timed-batch dispatch cap, after the separately
+     accounted calibration work. *)
   p "queued timing either reports contention or stays within the 64-batch dispatch cap"
-    (que.contended || que.dispatches <= 1 + 64 + (64 * que.depth))
+    (que.contended || que.dispatches <= 1 + que.calibration_dispatches + (64 * que.depth))
 
 (* {1 The objective is part of the cache identity} *)
 
@@ -377,6 +450,14 @@ let () =
   p "the cache key is stable within one objective" (String.equal (key "queued") (key "queued"));
   p "the cache key separates the two timing objectives"
     (not (String.equal (key "isolated") (key "queued")));
+  Verdict.p_all "CUDA and HIP queued keys carry the new timing-policy generation" [ "cuda"; "hip" ]
+    ~f:(fun backend ->
+      String.is_suffix
+        (SC.cache_key ~objective:"queued" ~limits canon ~backend)
+        ~suffix:"-tqueued-v2");
+  Verdict.p_all "cc and Metal queued keys retain their unchanged timing generation"
+    [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
+      String.is_suffix (SC.cache_key ~objective:"queued" ~limits canon ~backend) ~suffix:"-tqueued");
   (* Derived, not restated: a caller that resolved no mode of its own must key exactly as one that
      resolved the configured mode, or a test's hand-built entry would sit under a key no search
      looks up. *)

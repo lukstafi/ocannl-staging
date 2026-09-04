@@ -398,8 +398,11 @@
 #               inside a stream that already has work in it. That is what a training step
 #               presents: it queues every kernel of a layer and synchronizes at the end, so no
 #               kernel in it pays a round trip of its own. The batch depth is calibrated per
-#               candidate to about 10 ms of wall time, capped at 200 launches and floored at 1 --
-#               a routine slower than that target is measured exactly as "isolated" measures it.
+#               candidate to about 10 ms of wall time, capped at 2048 launches on CUDA/HIP and at
+#               the historical 200 on cc/Metal, and floored at 1 -- a routine slower than that
+#               target is measured exactly as "isolated" measures it. Metal's measured ~59-launch
+#               target stays below either cap; keeping cc at 200 avoids multiplying CPU autotune
+#               suite cost for a GPU dispatch-scale correction.
 #   isolated -- one launch followed by a host synchronization: the latency of a lone dispatch,
 #               kernel plus one round trip. What every schedule crowned before gh-ocannl-755 was
 #               ranked by, and the right objective for a workload that really does dispatch one
@@ -410,11 +413,14 @@
 # candidate to candidate with the block count and the per-launch queue work, which is what lets two
 # candidates 10% apart in steady state swap places. A best_ms measured under "isolated" is
 # therefore not a throughput number and must not be compared against a batched per-kernel figure.
-# Both modes sit under the same wall-time ceiling -- the ~25 ms top-up below accumulates wall time
-# in both -- but not at the same cost: a candidate fast enough to exhaust the 64-run cap early
-# finishes isolated timing in a few milliseconds and queued timing at the budget, so a search over
-# sub-millisecond kernels spends a few extra milliseconds per candidate, which is immaterial beside
-# the compile each candidate already costs.
+# The ~25 ms top-up budget accumulates PER-LAUNCH samples in both modes, not queued-batch wall. A
+# fast queued candidate can therefore take all 64 timed batches (about 640 ms when calibration hits
+# the 10 ms target). On CUDA/HIP, before those, one provisional, up to four validating batch probes,
+# and a final confirmation take twelve samples each; one confirmation outlier over 2x its supported
+# base is retried once, so seven near-target probes can cost about another 840 ms per candidate.
+# cc/Metal retain the historical single-estimate calibration. These are
+# workload-dependent costs, not a shared wall-time ceiling; the exact worst-case dispatch-count
+# bounds are documented on Autotune.time_routine.
 # The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
 # transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry
 # crowned under one objective is not the answer to a search asking the other, and the times it
