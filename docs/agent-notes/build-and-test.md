@@ -1281,13 +1281,14 @@ that they earn a lookup rather than always-loaded space.
   program paths remain relative to the changed working directory. Each construct needs deliberate
   scanner support before it can participate in this static guarantee. Absolute executable paths are
   refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
-  A target-producing rule anywhere in the repository may not run a public bin executable, directly
-  or through an alias dependency: its output could be an implicit build prerequisite of a smoked
-  executable, hiding an extra execution outside the alias dependency edges the census can see. Its
-  shell, interpreter, or otherwise opaque commands, including those in its alias dependency graph,
-  are refused for the same reason. Producer-side executions are errors rather than smoke credit
-  because an unrelated generated target may never be built. Commands under absolute `chdir`
-  destinations are likewise refused before path normalization can turn a host path into an
+  A target-producing rule anywhere in the repository may not run a public bin executable directly:
+  its output could be an implicit build prerequisite of a smoked executable, hiding an extra
+  execution outside the alias dependency edges the census can see. For rules that produce a
+  declared public executable's source, the same check recursively covers alias dependencies and
+  refuses shell, interpreter, private-workspace-generator, or otherwise opaque commands plus
+  unexpandable dependency specifications. Producer-side executions are errors rather than smoke
+  credit because an unrelated generated target may never be built. Commands under absolute
+  `chdir` destinations are likewise refused before path normalization can turn a host path into an
   apparent workspace identity.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not

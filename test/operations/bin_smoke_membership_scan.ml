@@ -341,6 +341,14 @@ let target_producer_dependency_error dune_path target =
   Printf.sprintf "%s: target-producing rule depends on an alias that runs public executable %s"
     dune_path target
 
+let private_producer_run_error dune_path target =
+  let target = match target with Local path -> path | Public name -> "%{bin:" ^ name ^ "}" in
+  Printf.sprintf "%s: target-producing graph runs non-public workspace executable %s" dune_path
+    target
+
+let target_producer_dependency_spec_error dune_path error =
+  Printf.sprintf "%s: target-producing dependency graph is opaque: %s" dune_path error
+
 let absolute_chdir_error dune_path cwd =
   Printf.sprintf "%s: @bin-smoke runs a command beneath absolute chdir %s" dune_path cwd
 
@@ -664,6 +672,14 @@ let scan dune_files =
           | Ok None -> (producers, errors)
           | Error error -> (producers, target_producer_command_error dune_path error :: errors)))
   in
+  let public_source_targets =
+    List.map declarations ~f:(fun declaration ->
+        Option.value_map (String.chop_suffix declaration.local ~suffix:".exe")
+          ~default:(declaration.local ^ ".ml") ~f:(fun stem -> stem ^ ".ml"))
+  in
+  let produces_public_source targets =
+    List.exists targets ~f:(fun target -> List.mem public_source_targets target ~equal:String.equal)
+  in
   let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
   let directory_path_errors node =
     List.filter_map path_rewriting_directories ~f:(fun (directory, dune_path) ->
@@ -706,8 +722,15 @@ let scan dune_files =
           ~subdir:node.subdir node.stanza
         |> List.fold ~init:([], []) ~f:(fun (targets, errors) -> function
           | Ok (Some target) when target_is_public target -> (target :: targets, errors)
-          | Ok (Some _) | Ok None -> (targets, errors)
+          | Ok (Some target) -> (targets, private_producer_run_error node.dune_path target :: errors)
+          | Ok None -> (targets, errors)
           | Error error -> (targets, error :: errors))
+      in
+      let direct_errors =
+        List.rev_append
+          (List.map node.dependency_errors
+             ~f:(target_producer_dependency_spec_error node.dune_path))
+          direct_errors
       in
       let dependencies, _errors = resolve_alias_dependencies node.dune_path node.dependencies in
       List.fold dependencies ~init:(direct_targets, direct_errors)
@@ -716,13 +739,15 @@ let scan dune_files =
           (List.rev_append found_targets targets, List.rev_append found_errors errors))
   in
   let target_producer_dependency_errors =
-    List.concat_map target_producer_sites ~f:(fun (dune_path, subdir, stanza, _targets) ->
-        let dependencies, _dependency_errors = alias_dependencies ~subdir stanza in
-        let found, _resolution_errors = resolve_alias_dependencies dune_path dependencies in
-        List.concat_map found ~f:(fun node ->
-            let targets, errors = producer_alias_effects (Set.empty (module String)) node in
-            List.map targets ~f:(target_producer_dependency_error dune_path)
-            @ List.map errors ~f:(target_producer_command_error dune_path)))
+    List.concat_map target_producer_sites ~f:(fun (dune_path, subdir, stanza, targets) ->
+        if not (produces_public_source targets) then []
+        else
+          let dependencies, dependency_errors = alias_dependencies ~subdir stanza in
+          let found, _resolution_errors = resolve_alias_dependencies dune_path dependencies in
+          List.map dependency_errors ~f:(target_producer_dependency_spec_error dune_path)
+          @ List.concat_map found ~f:(fun node ->
+              let targets, errors = producer_alias_effects (Set.empty (module String)) node in
+              List.map targets ~f:(target_producer_dependency_error dune_path) @ errors))
   in
   let rec visit visited targets errors = function
     | [] -> (targets, errors)
@@ -845,6 +870,8 @@ let scan dune_files =
     List.filter_map target_producers ~f:(fun (dune_path, targets, target) ->
         match canonicalize target with
         | Ok local -> Some (generated_public_run_error dune_path local targets)
+        | Error _ when produces_public_source targets ->
+            Some (private_producer_run_error dune_path target)
         | Error _ -> None)
   in
   let errors =
@@ -1378,6 +1405,38 @@ let opaque_generated_source_alias_fixture =
    (run %{exe:alpha.exe})
    (run %{exe:beta.exe}))))|dune}
 
+let private_generated_source_input_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(executable (name generator))
+(rule
+ (target alpha.ml)
+ (action (run %{exe:generator.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
+let included_generated_source_dependency_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(rule
+ (target alpha.ml)
+ (deps (include source-deps.sexp))
+ (action (touch alpha.ml)))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let library_action_preprocessor_fixture =
   {dune|(library
  (name linked)
@@ -1563,6 +1622,10 @@ let controls_hold () =
   let external_generated_source_input = scan_bin_content external_generated_source_input_fixture in
   let unused_generated_source_alias = scan_bin_content unused_generated_source_alias_fixture in
   let opaque_generated_source_alias = scan_bin_content opaque_generated_source_alias_fixture in
+  let private_generated_source_input = scan_bin_content private_generated_source_input_fixture in
+  let included_generated_source_dependency =
+    scan_bin_content included_generated_source_dependency_fixture
+  in
   let library_action_preprocessor = scan_bin_content library_action_preprocessor_fixture in
   let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
@@ -1727,12 +1790,18 @@ let controls_hold () =
        ~equal:String.equal
   && (not (complete unused_generated_source_alias))
   && List.equal String.equal unused_generated_source_alias.missing [ "bin/beta.exe" ]
-  && List.mem unused_generated_source_alias.errors
-       (target_producer_dependency_error "bin/dune" (Local "bin/beta.exe"))
-       ~equal:String.equal
+  && List.is_empty unused_generated_source_alias.errors
   && (not (complete opaque_generated_source_alias))
-  && List.mem opaque_generated_source_alias.errors
-       (target_producer_command_error "bin/dune" (external_smoke_error "bin/dune"))
+  && List.mem opaque_generated_source_alias.errors (external_smoke_error "bin/dune")
+       ~equal:String.equal
+  && (not (complete private_generated_source_input))
+  && List.mem private_generated_source_input.errors
+       (private_producer_run_error "bin/dune" (Local "bin/generator.exe"))
+       ~equal:String.equal
+  && (not (complete included_generated_source_dependency))
+  && List.mem included_generated_source_dependency.errors
+       (target_producer_dependency_spec_error "bin/dune"
+          "@bin-smoke reaches an included dependency specification that cannot be expanded")
        ~equal:String.equal
   && (not (complete library_action_preprocessor))
   && List.mem library_action_preprocessor.errors
