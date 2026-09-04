@@ -714,8 +714,9 @@ fi
 # ---------------------------------------------------------------------------
 repeat_root=$TMP/repeat-repo
 repeat_bin=$TMP/repeat-bin
-mkdir -p "$repeat_root/tools" "$repeat_bin"
+mkdir -p "$repeat_root/tools" "$repeat_root/scripts" "$repeat_bin"
 cp "$SRC" "$repeat_root/tools/test-run.sh"
+cp "$GROUP_SRC" "$repeat_root/scripts/process-group.sh"
 chmod +x "$repeat_root/tools/test-run.sh"
 cat >"$repeat_bin/dune" <<'EOF'
 #!/usr/bin/env bash
