@@ -13,12 +13,13 @@
 open Base
 open Stdio
 
-(* Every file this scan reads arrives as a `@<path>` response file, because the list is longer than
-   a Windows command line may be; see [Test_utils.Scan_argv]. *)
-let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+(* The live corpus comes from [Test_utils.Source_inventory]: a clean Dune sandbox keeps source paths
+   off the command line and lets this scanner select by file kind rather than by root. *)
+let argv = Stdlib.Sys.argv
 
 module Markdown = Test_utils.Agent_notes_scan
 module Refusal_manifest = Test_utils.Refusal_control_manifest
+module Inventory = Test_utils.Source_inventory
 
 let printf = Refusal_manifest.printf
 
@@ -923,6 +924,29 @@ let file_kind path =
   then `Config
   else `Script
 
+let scanned_source path =
+  (not (String.is_suffix path ~suffix:".pp.ml" || String.is_suffix path ~suffix:".pp.mli"))
+  &&
+  let basename = Stdlib.Filename.basename path in
+  let under roots = List.exists roots ~f:(fun root -> String.is_prefix path ~prefix:root) in
+  let script = String.is_suffix path ~suffix:".sh" || String.is_suffix path ~suffix:".py" in
+  let ocaml = String.is_suffix path ~suffix:".ml" || String.is_suffix path ~suffix:".mli" in
+  let markdown =
+    String.is_suffix path ~suffix:".md"
+    && (String.equal path "AGENTS.md" || String.equal path "README.md"
+       || under [ ".claude/skills/"; "docs/"; "benchmarks/" ])
+  in
+  String.equal path "ocannl_config.reference"
+  || String.equal path "ocannl_config.for_debug"
+  || String.equal basename "dune"
+  || String.equal basename "ocannl_config"
+  || script
+  || ocaml
+     && under [ "tools/"; "benchmarks/"; "bin/"; "test/"; "arrayjit/lib/"; "tensor/"; "lib/" ]
+  || markdown
+  || under [ ".github/workflows/" ]
+     && (String.is_suffix path ~suffix:".yml" || String.is_suffix path ~suffix:".yaml")
+
 let dedup_occurrences occurrences =
   let seen = Hash_set.create (module String) in
   List.filter occurrences ~f:(fun occurrence ->
@@ -976,107 +1000,30 @@ let fixture path config_path multiline_path =
         ~path:(Stdlib.Filename.basename multiline_path)
         (In_channel.read_all multiline_path))
 
-let live workspace_root paths =
-  let base = Test_utils.Dune_stanza_scan.base_dir workspace_root in
+let live workspace_root generated =
+  let inventory = Inventory.of_dune_sandbox ~workspace_root ~generated in
   let files =
-    List.filter paths ~f:(fun path -> not (Stdlib.Sys.is_directory path))
-    |> List.filter_map ~f:(fun path ->
-        let relative = Test_utils.Dune_stanza_scan.repo_relative base path in
-        if
-          (not
-             (String.is_suffix relative ~suffix:".pp.ml"
-             || String.is_suffix relative ~suffix:".pp.mli"))
-          && (String.equal relative "AGENTS.md" || String.equal relative "README.md"
-             || String.equal relative "ocannl_config.reference"
-             || String.equal relative "ocannl_config.for_debug"
-             || String.is_prefix relative ~prefix:".claude/skills/"
-                && String.is_suffix relative ~suffix:".md"
-             || String.is_prefix relative ~prefix:"docs/"
-                && String.is_suffix relative ~suffix:".md"
-             || String.is_prefix relative ~prefix:"benchmarks/"
-                && String.is_suffix relative ~suffix:".md"
-             || String.equal (Stdlib.Filename.basename relative) "dune"
-             || String.equal (Stdlib.Filename.basename relative) "ocannl_config"
-             || (String.is_prefix relative ~prefix:"tools/"
-                || String.is_prefix relative ~prefix:"scripts/"
-                || String.is_prefix relative ~prefix:"benchmarks/"
-                || String.is_prefix relative ~prefix:"bin/"
-                || String.is_prefix relative ~prefix:"test/"
-                || String.is_prefix relative ~prefix:"arrayjit/lib/"
-                || String.is_prefix relative ~prefix:"tensor/"
-                || String.is_prefix relative ~prefix:"lib/")
-                && (String.is_suffix relative ~suffix:".sh"
-                   || String.is_suffix relative ~suffix:".py"
-                   || (String.is_prefix relative ~prefix:"tools/"
-                      || String.is_prefix relative ~prefix:"benchmarks/"
-                      || String.is_prefix relative ~prefix:"bin/"
-                      || String.is_prefix relative ~prefix:"test/"
-                      || String.is_prefix relative ~prefix:"arrayjit/lib/"
-                      || String.is_prefix relative ~prefix:"tensor/"
-                      || String.is_prefix relative ~prefix:"lib/")
-                      && (String.is_suffix relative ~suffix:".ml"
-                         || String.is_suffix relative ~suffix:".mli")))
-          || String.is_prefix relative ~prefix:".github/workflows/"
-             && (String.is_suffix relative ~suffix:".yml"
-                || String.is_suffix relative ~suffix:".yaml")
-        then Some (relative, path)
-        else None)
-    |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+    Inventory.select inventory ~f:scanned_source
+    |> List.map ~f:(fun (file : Inventory.file) -> (file.path, file.on_disk))
   in
   let scripts =
     List.filter files ~f:(fun (path, _) ->
         String.is_suffix path ~suffix:".sh" || String.is_suffix path ~suffix:".py")
   in
-  let scripts_under root =
-    List.filter scripts ~f:(fun (path, _) -> String.is_prefix path ~prefix:root)
-  in
   let markdown = List.filter files ~f:(fun (path, _) -> String.is_suffix path ~suffix:".md") in
-  let roots = [ "tools/"; "scripts/"; "benchmarks/"; "test/" ] in
-  Verdict.p_all "the scan reaches script files under tools, scripts, benchmarks, and test" roots
-    ~f:(fun root -> not (List.is_empty (scripts_under root)));
-  let ocaml_help_roots = [ "tools/"; "benchmarks/"; "bin/" ] in
-  Verdict.p_all "the scan reaches OCaml help text under tools, benchmarks, and bin" ocaml_help_roots
-    ~f:(fun root ->
-      List.exists files ~f:(fun (path, _) ->
-          String.is_prefix path ~prefix:root && String.is_suffix path ~suffix:".ml"));
-  Verdict.p "the scan reaches OCaml tutorial and test help text"
+  Verdict.p_all "the source inventory supplies shell and Python files" [ ".sh"; ".py" ]
+    ~f:(fun suffix -> List.exists scripts ~f:(fun (path, _) -> String.is_suffix path ~suffix));
+  Verdict.p_all "the source inventory supplies OCaml implementation and interface files"
+    [ ".ml"; ".mli" ] ~f:(fun suffix ->
+      List.exists files ~f:(fun (path, _) -> String.is_suffix path ~suffix));
+  Verdict.p "the source inventory supplies Markdown" (not (List.is_empty markdown));
+  Verdict.p "the source inventory supplies workflow YAML"
     (List.exists files ~f:(fun (path, _) ->
-         String.is_prefix path ~prefix:"test/training/" && String.is_suffix path ~suffix:".ml")
-    && List.exists files ~f:(fun (path, _) ->
-        String.is_prefix path ~prefix:"test/operations/" && String.is_suffix path ~suffix:".ml"));
-  let implementation_roots = [ "arrayjit/lib/"; "tensor/"; "lib/" ] in
-  Verdict.p_all "the scan reaches OCaml implementation diagnostics" implementation_roots
-    ~f:(fun root ->
-      List.exists files ~f:(fun (path, _) ->
-          String.is_prefix path ~prefix:root
-          && (String.is_suffix path ~suffix:".ml" || String.is_suffix path ~suffix:".mli")));
-  Verdict.p "the scan reaches GitHub workflow guidance"
-    (List.exists files ~f:(fun (path, _) ->
-         String.is_prefix path ~prefix:".github/workflows/"
-         && (String.is_suffix path ~suffix:".yml" || String.is_suffix path ~suffix:".yaml")));
-  Verdict.p "the scan reaches AGENTS.md, skill docs, root README, docs, and benchmark Markdown"
-    (List.exists markdown ~f:(fun (path, _) -> String.equal path "AGENTS.md")
-    && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:".claude/skills/")
-    && List.exists markdown ~f:(fun (path, _) -> String.equal path "README.md")
-    && List.exists markdown ~f:(fun (path, _) -> String.is_prefix path ~prefix:"docs/")
-    && List.exists markdown ~f:(fun (path, _) ->
-        String.is_prefix path ~prefix:"benchmarks/"
-        && not (String.equal path "benchmarks/README.md")));
+         String.is_suffix path ~suffix:".yml" || String.is_suffix path ~suffix:".yaml"));
   Verdict.p "the scan reaches Dune actions"
     (List.exists files ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "dune"));
-  let config_roots =
-    [
-      "arrayjit/test/";
-      "benchmarks/";
-      "test/config/";
-      "test/operations/profiles/";
-      "test/operations/startup_streams/";
-    ]
-  in
-  Verdict.p_all "the scan reaches every checked-in ocannl_config root" config_roots ~f:(fun root ->
-      List.exists files ~f:(fun (path, _) ->
-          String.is_prefix path ~prefix:root
-          && String.equal (Stdlib.Filename.basename path) "ocannl_config"));
+  Verdict.p_exists "the source inventory supplies checked-in ocannl_config files" files
+    ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "ocannl_config");
   Verdict.p "the scan reaches ocannl_config.reference examples"
     (List.exists files ~f:(fun (path, _) -> String.equal path "ocannl_config.reference"));
   Verdict.p "the scan reaches the checked-in debug config template"
@@ -1103,9 +1050,8 @@ let live workspace_root paths =
     (List.length files) cli_count env_count standalone_env_count markdown_count config_count;
   if not (Verdict.any_failed ()) then (
     printf
-      "OK: qualified OCANNL command-line flags and OCANNL_<KEY> environment mentions in scripts \
-       under tools/, scripts/, benchmarks/, and test/, and in user-facing OCaml help text, name \
-       registered keys.\n";
+      "OK: qualified OCANNL command-line flags and OCANNL_<KEY> environment mentions in source \
+       scripts and OCaml sources name registered keys.\n";
     printf
       "OK: inline key=value assignments in scanned Markdown name registered keys or explicit \
        non-config notation.\n";
@@ -1119,10 +1065,11 @@ let () =
   | _ :: [ "--refusal-control" ] -> refusal_control ()
   | _ :: [ "--fixture"; path; config_path; multiline_path ] ->
       fixture path config_path multiline_path
-  | _ :: workspace_root :: paths when not (List.is_empty paths) -> live workspace_root paths
+  | _ :: workspace_root :: generated when not (List.is_empty generated) ->
+      live workspace_root generated
   | argv ->
       eprintf
-        "Usage: %s <workspace_root> <files...> | %s --fixture <file> <config-file> \
-         <multiline-markdown-file>\n"
+        "Usage: %s <workspace_root> <generated sandbox paths...> | %s --fixture <file> \
+         <config-file> <multiline-markdown-file>\n"
         (List.hd_exn argv) (List.hd_exn argv);
       Stdlib.exit 1

@@ -1,0 +1,3 @@
+the inventory keeps exact boundaries for every declared source path: true
+a generated sandbox occupant is absent from source membership: true
+Git metadata is absent from source membership: true

@@ -249,22 +249,22 @@ let suites = [ "slow"; "train"; "runtest" ]
 let member_of suite alias = String.is_prefix alias ~prefix:(suite ^ "-")
 
 (* The repo-wide scans and the family alias that runs them (gh-ocannl-703). Which rules are in the
-   family is DERIVED rather than listed here: a rule that globs the repository recursively is
-   reading the repository, which is what makes a scan repo-wide -- so a scan lands in the family the
-   day it lands in the file, and this check cannot go stale against the stanza it is checking the
-   way a second copy of the list would. *)
+   family is DERIVED rather than listed here: a rule that recursively globs the repository, or takes
+   its source tree for [Source_inventory], is reading the repository -- so a scan lands in the
+   family the day it lands in the file, and this check cannot go stale against the stanza it is
+   checking the way a second copy of the list would. *)
 let scans_suite = "scans"
 
-let rec globs_repository = function
-  | Sexp.List (Sexp.Atom "glob_files_rec" :: _) -> true
-  | Sexp.List l -> List.exists l ~f:globs_repository
+let rec inventories_repository = function
+  | Sexp.List (Sexp.Atom ("glob_files_rec" | "source_tree") :: _) -> true
+  | Sexp.List l -> List.exists l ~f:inventories_repository
   | Sexp.Atom _ -> false
 
 let is_repo_wide_scan stanza =
   match stanza with
   | Sexp.List (Sexp.Atom "rule" :: _) ->
       Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
-          List.exists args ~f:globs_repository)
+          List.exists args ~f:inventories_repository)
   | _ -> false
 
 (* ... and the glob has to LEAVE the directory to be reading the repository (Codex P2, round 6). A
@@ -272,7 +272,7 @@ let is_repo_wide_scan stanza =
    repo-wide scan; classifying it as one would demand a `scans` family beside it and fail the check
    until an unrelated suite appeared. *)
 let rec escapes_directory = function
-  | Sexp.List (Sexp.Atom "glob_files_rec" :: args) ->
+  | Sexp.List (Sexp.Atom ("glob_files_rec" | "source_tree") :: args) ->
       List.exists args ~f:(function
         | Sexp.Atom pattern -> String.is_prefix pattern ~prefix:"../"
         | _ -> false)
@@ -752,6 +752,13 @@ let per_directory_control () =
   Verdict.p
     "a newly plugged-in check receives the root and every nested directory without adding descent"
     (List.equal String.equal (List.rev !seen) [ ""; "child"; "child/grandchild" ]);
+  let one_stanza source = List.hd_exn (Scan.stanzas source) in
+  Verdict.p "an escaping source_tree dependency identifies a repository-wide scan"
+    (is_repo_wide_scan (one_stanza "(rule (deps (source_tree ../..)) (action (run scan.exe)))"));
+  Verdict.p "a local source_tree fixture does not identify a repository-wide scan"
+    (not
+       (is_repo_wide_scan
+          (one_stanza "(rule (deps (source_tree fixture)) (action (run scan.exe)))")));
   printf "\n"
 
 (* gh-ocannl-800's own negative control. The repository is normally complete, so an empty orphan

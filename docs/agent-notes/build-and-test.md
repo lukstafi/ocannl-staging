@@ -110,16 +110,18 @@ that they earn a lookup rather than always-loaded space.
   contain is the one most in need of a fixture, since nothing in the tree will contradict the
   implementation's guess about it; a survey reporting zero of something is a hole in the fixtures,
   not permission to leave that case undefined.
+- Repository scans derive source membership through `Test_utils.Source_inventory` (gh-ocannl-871):
+  the Dune rule declares `(sandbox always)` plus `(source_tree ../..)`, then calls
+  `of_dune_sandbox ~workspace_root ~generated` with its executable, redirected target, and copied
+  config in `generated`. `files` returns stable `{ path; on_disk }` entries; `select` and `mem` are
+  the corpus API. The clean sandbox excludes VCS metadata and stale build outputs, while
+  the explicit generated set removes action occupants; no source list or path encoding crosses argv.
 - Configuration consumers outside typed config call sites are covered by `config_usage_scan`
-  (gh-ocannl-790). Its
-  script corpus is every `*.sh` and `*.py` recursively under `tools/`, `scripts/`, `benchmarks/`,
-  and `test/` -- test harness scripts select backends through the same keys, so a rename drifts
-  there too; user-facing and tutorial `*.ml` text under `tools/`, `benchmarks/`, `bin/`, and
-  `test/` joins it (generated `*.pp.ml`/`*.pp.mli` renderings are excluded), as do implementation
-  `*.ml`/`*.mli` sources under `arrayjit/lib/`, `tensor/`, and `lib/`. Its prose corpus is `AGENTS.md`,
-  the root README, and every `*.md` under `docs/`
-  and `benchmarks/`, plus checked-in `.claude/skills/**/*.md`; all checked-in `dune` and
-  `ocannl_config` files join too, as do `ocannl_config.for_debug` and both prefixed tokens and
+  (gh-ocannl-790). Its source corpus selects every checked-in `*.sh` and `*.py` from that inventory,
+  so a new script root needs no allowlist edit; the existing user-help and implementation
+  `*.ml`/`*.mli` scope joins it (generated `*.pp.ml`/`*.pp.mli` renderings are excluded). Its prose
+  corpus remains AGENTS, the root README, skill, docs, and benchmark Markdown; all checked-in
+  `dune` and `ocannl_config` files join too, as do `ocannl_config.for_debug` and both prefixed tokens and
   whole-span inline assignments in `ocannl_config.reference`; workflow YAML under
   `.github/workflows/` contributes unambiguous prefixed tokens. A script or Dune-action
   token contributes a key when it has a qualified command-line spelling and
@@ -156,8 +158,8 @@ that they earn a lookup rather than always-loaded space.
   or repetition fails either list, so an unrelated use cannot widen an exemption. The checked-in
   fixture gives every reader form a bogus key and the Dune rule requires the scanner to exit 1 on it,
   so a clean live corpus is not its only evidence that the rule has teeth.
-  The non-vacuity floor names every checked-in config-file root; Dune's generated local
-  `test/operations/ocannl_config` copy therefore cannot mask a lost recursive-glob dependency.
+  File-kind non-vacuity claims keep an empty source class loud; Dune's generated local
+  `test/operations/ocannl_config` copy is excluded from source membership.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to
@@ -617,15 +619,16 @@ that they earn a lookup rather than always-loaded space.
     build tree (`_build/default/test/operations` alone spends ~65), and every open of it fails with
     ENOENT. Gate such a leg with `Verdict.skipped ~aggregation:`Environment``, and make the gate a
     PROBE rather than `Sys.win32`: what is capped is the path this run actually got.
-- Windows caps a whole COMMAND LINE at 32,767 characters, and the repo-wide scans hand every file
+- Windows caps a whole COMMAND LINE at 32,767 characters, and older repo-wide scans hand every file
   they read to their executable as an argument, so they grow toward it with the repository. Past it
   `CreateProcess` fails and dune reports `Error: CreateProcess(): No such file or directory` — an
   error naming neither the length nor the executable, on whichever scan the last few merges pushed
   over (three had crossed it and a fourth was 255 characters short when this was first hit). The
-  scans therefore pass their file lists as `@<path>` RESPONSE FILES: the rule writes the list with
-  dune's own `(echo "%{deps}")`, which runs inside dune and spawns nothing, into a second target of
+  scans with explicit glob lists therefore pass them as `@<path>` RESPONSE FILES: the rule writes
+  the list with dune's own `(echo "%{deps}")`, which runs inside dune and spawns nothing, into a second target of
   the same rule, and `Test_utils.Scan_argv.expand` splices it back in where the `@` argument stood.
-  A new scan should be written that way from the start. `env_var_deps` knows the shape — a target
+  A new whole-tree scan should instead use `Source_inventory`; `env_var_deps` also knows the older
+  response-file shape — a target
   the rule hands back to its own action needs no golden diff — and recognizes it by the `@<target>`
   reference rather than by the name, so a real output cannot be renamed out of the requirement.
   The one thing this transport gives up is a path containing WHITESPACE: `%{deps}` is space-joined
