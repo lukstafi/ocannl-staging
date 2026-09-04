@@ -60,6 +60,9 @@ errexit-negation fixture pipeline set does not affect parent is classified as sp
 errexit-negation fixture pipe-and set does not affect parent is classified as specified: true
 errexit-negation fixture background set does not affect parent is classified as specified: true
 errexit-negation fixture set after pipeline affects parent is classified as specified: true
+errexit-negation fixture set inside brace group is classified as specified: true
+errexit-negation fixture set inside later brace group is classified as specified: true
+errexit-negation fixture set inside parenthesized group is classified as specified: true
 errexit-negation fixture quoted set text is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true

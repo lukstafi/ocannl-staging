@@ -938,9 +938,9 @@ module Errexit_negation = struct
               loop (index + 1) start `Double false nesting pipeline fragments
             else if Char.equal character '`' then
               loop (index + 1) start `Backtick_none false nesting pipeline fragments
-            else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
+            else if List.mem [ '('; '[' ] character ~equal:Char.equal then
               loop (index + 1) start `None false (nesting + 1) pipeline fragments
-            else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
+            else if List.mem [ ')'; ']' ] character ~equal:Char.equal then
               loop (index + 1) start `None false (Int.max 0 (nesting - 1)) pipeline fragments
             else if nesting = 0 && Char.equal character ';' then
               loop (index + 1) (index + 1) `None false nesting false
@@ -1074,6 +1074,7 @@ module Errexit_negation = struct
     in
     let rec drop_assignments = function
       | word :: rest when assignment_prefix word -> drop_assignments rest
+      | word :: rest when String.equal (literal_shell_word word) "{" -> drop_assignments rest
       | words -> words
     in
     match
@@ -1272,6 +1273,9 @@ module Errexit_negation = struct
       ( "set after pipeline affects parent",
         "set -u | cat; set -e\n! grep -q missing output\n",
         [ 2 ] );
+      ("set inside brace group", "{ set -e; }\n! grep -q missing output\n", [ 2 ]);
+      ("set inside later brace group", "prepare; { set -e; }\n! grep -q missing output\n", [ 2 ]);
+      ("set inside parenthesized group", "( set -e; )\n! grep -q missing output\n", []);
       ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
