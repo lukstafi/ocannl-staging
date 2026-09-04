@@ -159,6 +159,34 @@
  (deps ocannl_config)
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
+; gh-ocannl-849: exercise the production HIPRTC wrapper against both invalid and valid source.
+; Like the backend-specific tests below, the select keeps hipjit optional; unlike their fixed
+; backend markers, this test follows OCANNL_BACKEND so non-HIP runs leave explicit skip records.
+
+(test
+ (name test_hip_compile_failure_options)
+ (package arrayjit)
+ (modules test_hip_compile_failure_options)
+ (deps
+  ocannl_config
+  test_hip_compile_failure_options.expected
+  (env_var OCANNL_BACKEND))
+ (libraries
+  base
+  stdio
+  arrayjit.utils
+  arrayjit.verdict
+  (select
+   test_hip_compile_failure_options.ml
+   from
+   (hipjit.hip
+    hipjit.hiprtc
+    arrayjit.hip_backend
+    arrayjit.ir
+    ->
+    test_hip_compile_failure_options.real.ml)
+   (-> test_hip_compile_failure_options.missing.ml))))
+
 (test
  ; ocannl-backend: none -- tests a pure compiler-option helper and selects no runtime backend.
  (name test_cuda_compile_options)

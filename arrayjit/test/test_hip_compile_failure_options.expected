@@ -1,0 +1,2 @@
+a hiprtc compile failure carries the effective option vector: true
+a valid HIP kernel still compiles through the instrumented path: true
