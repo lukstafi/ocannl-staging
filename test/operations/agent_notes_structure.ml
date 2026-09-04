@@ -109,11 +109,10 @@ let () =
   report Notes.rule_table_shape "every table is a table, row by row";
   report Notes.rule_reachability "every notes file is reachable from the index, and links back";
   report Notes.rule_no_repetition "no bullet is repeated across the notes";
-  report Notes.rule_qualified_citations
-    "no numeric GitHub citation uses a bare hash or PR/issue label";
+  report Notes.rule_qualified_citations "no numeric GitHub citation uses an unqualified bare hash";
   (* The relationship the six calls above rest on, and nothing used to state (gh-ocannl-706): a rule
      this file does not report is a rule whose findings the live tree never shows, and the omission
-     is silent -- the scan computes them, [of_rule] is never asked for them, and the golden is five
+     is silent -- the scan computes them, [of_rule] is never asked for them, and the golden is six
      green lines either way. Sorted lists rather than sets, so a rule reported twice (two verdicts
      over one set of findings, one of them dead) is a mismatch as well; a bare boolean, so the
      golden stays fixed as rules come and go and only the stderr line moves. *)

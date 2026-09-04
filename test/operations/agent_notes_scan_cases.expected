@@ -134,40 +134,10 @@ ok: exemption -- a re-wrapped bullet has the same key
 ok: exemption -- two bullets agreeing past the display length keep distinct keys
 ok: exemption -- a finished bullet has no finding to key
 ok: citations -- a bare numeric citation
-ok: citations -- compact PR and issue labels
-ok: citations -- hashless PR and issue labels
-ok: citations -- a hashless PR label across a soft line break
-ok: citations -- a blank line prevents a cross-paragraph match
-ok: citations -- an ordered item is not a soft continuation
-ok: citations -- a heading is not a paragraph continuation
+ok: citations -- compact PR and issue labels are still unqualified
 ok: citations -- the canonical issue and PR forms
-ok: citations -- work references inside a code span
+ok: citations -- a hash inside a code span
 ok: citations -- a hash inside a fenced block
-ok: citations -- a numeric local-link target
-ok: citations -- a numeric URL fragment
-ok: citations -- balanced parentheses in a numeric URL fragment
-ok: citations -- an apostrophe in a numeric URL fragment
-ok: citations -- a quoted link title containing a parenthesis
-ok: citations -- a numeric autolink fragment
-ok: citations -- a bare scheme URL fragment
-ok: citations -- a decimal entity and a separate bare citation
-ok: citations -- an entity that renders citation whitespace
-ok: citations -- ASCII newline and carriage-return entities render whitespace
-ok: citations -- entities that render a hash or work label
-ok: citations -- named entities that render a hash or whitespace
-ok: citations -- a named entity that remains an opaque symbol
-ok: citations -- zero-width named entities remain opaque
-ok: citations -- literal Unicode whitespace
-ok: citations -- an ambiguous visible link label
-ok: citations -- links around only the label or number
-ok: citations -- inline HTML around only the label or number
-ok: citations -- HTML code-bearing elements remain opaque
-ok: citations -- emphasis around a hashless label or number
-ok: citations -- emphasis inside a hashless label
-ok: citations -- emphasis around a soft-wrapped reference
-ok: citations -- visible code remains an opaque barrier
-ok: citations -- an image remains an opaque barrier
-ok: citations -- valid and invalid email autolinks
 ok: citations -- a hash attached to a code identifier
 ok: index -- an index whose rows all resolve
 ok: index -- a hook the file it points at does not carry

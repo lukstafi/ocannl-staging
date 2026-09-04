@@ -912,100 +912,12 @@ let citation_cases =
     ( "a bare numeric citation",
       "A regression first appeared in #12.\n",
       [ "qualified-citations @ f.md:1" ] );
-    ( "compact PR and issue labels",
-      "PR#12 introduced it; issue#13 tracks the remainder.\n",
+    ( "compact PR and issue labels are still unqualified",
+      "Regressions: PR#12 and issue#13.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "hashless PR and issue labels",
-      "PR 12 introduced it; issue 13 tracks the remainder.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "a hashless PR label across a soft line break",
-      "- Found during PR\n  12's review.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "a blank line prevents a cross-paragraph match",
-      "A paragraph ending in PR\n\n12 observations followed.\n",
-      [] );
-    ( "an ordered item is not a soft continuation",
-      "A paragraph ending in PR\n12. A separate list item.\n",
-      [] );
-    ("a heading is not a paragraph continuation", "## Open PR\n12 users reported failures.\n", []);
     ("the canonical issue and PR forms", "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n", []);
-    ( "work references inside a code span",
-      "The literals `#12`, `PR#12`, and `issue 12` are example text.\n",
-      [] );
-    ( "a hash inside a fenced block",
-      "```text\n#12, PR#12, and issue 12 are fixture output\n```\n",
-      [] );
-    ("a numeric local-link target", "See [layout details](#12-byte-layout).\n", []);
-    ("a numeric URL fragment", "See [the review](https://example.test/review#12).\n", []);
-    ( "balanced parentheses in a numeric URL fragment",
-      "See [the review](https://example.test/a_(b)#12).\n",
-      [] );
-    ( "an apostrophe in a numeric URL fragment",
-      "See [the review](https://example.test/O'Brien#12).\n",
-      [] );
-    ( "a quoted link title containing a parenthesis",
-      "See [the review](https://example.test/review#12 \"a ) title\").\n",
-      [] );
-    ( "a numeric autolink fragment",
-      "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "a bare scheme URL fragment",
-      "See https://example.test/review#12; plain #13 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "a decimal entity and a separate bare citation",
-      "It&#39;s encoded; #12 is still ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "an entity that renders citation whitespace",
-      "PR&#32;12 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "ASCII newline and carriage-return entities render whitespace",
-      "PR&#10;12 and issue&#xD;13 remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "entities that render a hash or work label",
-      "&#35;12 and &#80;&#82; 13 remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "named entities that render a hash or whitespace",
-      "&num;12 and PR&nbsp;13 remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "a named entity that remains an opaque symbol",
-      "PR&copy;12 is not a citation; #13 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "zero-width named entities remain opaque",
-      "PR&ZeroWidthSpace;12 and issue&NegativeThinSpace;13 are not citations; #14 is.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "literal Unicode whitespace",
-      "PR 12 and issue 13 remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "an ambiguous visible link label",
-      "See [PR 12](https://example.test/review).\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "links around only the label or number",
-      "[PR](https://example.test/pr) 12 and issue [13](https://example.test/issue).\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "inline HTML around only the label or number",
-      "<strong>PR</strong> 12 and issue <em>13</em> remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "HTML code-bearing elements remain opaque",
-      "<code>PR 12</code> and <kbd>issue 13</kbd> are examples; #14 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "emphasis around a hashless label or number",
-      "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "emphasis inside a hashless label",
-      "P**R** 12 and is*sue* 13 remain ambiguous.\n",
-      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "emphasis around a soft-wrapped reference",
-      "- Found during **PR**\n  **12**'s review.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "visible code remains an opaque barrier",
-      "PR `buffer` 12 is not a citation; PR<!-- invisible --> 13 is ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "an image remains an opaque barrier",
-      "PR ![buffer](image.png) 12 is not a citation; PR 13 remains ambiguous.\n",
-      [ "qualified-citations @ f.md:1" ] );
-    ( "valid and invalid email autolinks",
-      "Valid <PR#12@example.test>; invalid <PR#13@> remains prose.\n",
-      [ "qualified-citations @ f.md:1" ] );
+    ("a hash inside a code span", "The literal `#12` is example text.\n", []);
+    ("a hash inside a fenced block", "```text\n#12 is fixture output\n```\n", []);
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]
 
