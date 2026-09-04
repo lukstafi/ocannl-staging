@@ -603,8 +603,10 @@ files.
   under `isolated` it is not a throughput number at all (the gh-ocannl-728 arc compared one to a
   batched harness figure and the agreement was a coincidence of two instrument errors). And the
   batch depth is the thing to check when a queued search behaves like an isolated one:
-  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch, caps at 2048 and floors at 1, so a
-  routine slower than 10 ms per launch is measured identically in both modes by construction —
+  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch and floors at 1. CUDA/HIP cap at
+  2048; cc and Metal retain the historical 200 cap (Metal's measured ~59-launch target is below
+  both, while raising cc's cap only multiplied CPU-suite cost). A routine slower than 10 ms per
+  launch is measured identically in both modes by construction —
   `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
   counts its own launches, that the reading is per launch rather than per batch.
   On Metal that 10 ms target is now a measured safety boundary too (gh-ocannl-828). On an M4 Max,
@@ -621,10 +623,10 @@ files.
   depth 1, so the autotuner cannot put a second long kernel in flight. Do not add a per-repeat host
   sync to the timing path on this evidence; rerun the standalone probe after an OS/driver change if
   the superlinear symptom returns.
-  A synchronized
-  single dispatch includes the round trip batching removes, so it selects only a provisional depth;
-  a queued probe at that depth separates fixed synchronization cost from marginal launch cost, and
-  that affine wall model selects the final depth. This matters even when the provisional batch is
+  On CUDA/HIP a synchronized single dispatch includes the round trip batching removes, so it selects
+  only a provisional depth; a queued probe at that depth separates fixed synchronization cost from
+  marginal launch cost, and that affine wall model selects the final depth. This matters even when
+  the provisional batch is
   shallow: dividing its wall by depth would charge part of the fixed synchronization to every
   launch and leave the final batch below the contention scale. The selected depth is validated by
   up to four further batch probes; each short probe refits the affine model. The first probe that
@@ -642,16 +644,16 @@ files.
   target remains unresolved and binds at the cap. After four noisy but resolved
   misses the latest projected depth wins rather than jumping
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
-  On Metal's ~0.17 ms kernels the first probe already spans the target; its 25%-deeper confirmation
-  retains the historical ~59 depth when marginal work is present. On faster CUDA/HIP kernels
-  calibration grows the batch toward the same wall target. A synchronized-single estimate at or
-  above the target is likewise checked at depth 2: a genuinely slow routine retains depth 1, while
-  a transient single-window stall cannot bypass batch validation.
+  Metal and cc retain the historical single-estimate path and 200 cap, so this repair adds no probe
+  or timed work there; Metal's measured ~59 depth is unchanged. On faster CUDA/HIP kernels
+  calibration grows the batch toward the same wall target. A CUDA/HIP synchronized-single estimate
+  at or above the target is likewise checked at depth 2: a genuinely slow routine retains depth 1,
+  while a transient single-window stall cannot bypass batch validation.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall.
   The jitter-sensitive synchronized-single calibration and every timed window have a 16-sample
-  floor; the already-millisecond batch probes use twelve minima because they choose scale rather
-  than rank a candidate. A host stall can no longer spend the timed budget and collapse a min-of-N
-  to three samples. `Autotune.timing_result` also marks a
+  floor; the CUDA/HIP-only, already-millisecond batch probes use twelve minima because they choose
+  scale rather than rank a candidate. A host stall can no longer spend the timed budget and collapse
+  a min-of-N to three samples. `Autotune.timing_result` also marks a
   window contended when at least half its raw wall samples exceed their minimum by 2x. Queued mode
   tests that dispersion on BATCH wall before dividing the ranked and budgeted samples by depth, so
   the division cannot hide a fixed host stall. The search neither ranks a contended timing nor

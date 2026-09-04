@@ -12,6 +12,8 @@ a complete measurement set with a winner is cacheable: true
 a contention-refused window prevents caching an incomplete winner: true
 a search with no measured winner remains uncacheable: true
 == queued batch depth ==
+CUDA and HIP use the raised queue-depth cap: true
+cc and Metal retain the historical queue-depth cap: true
 every calibration estimate gets the depth the policy owes it: true
 every degenerate calibration estimate is refused by ranking but still batched: true
 no calibration estimate ever yields a depth below 1: true

@@ -398,8 +398,11 @@
 #               inside a stream that already has work in it. That is what a training step
 #               presents: it queues every kernel of a layer and synchronizes at the end, so no
 #               kernel in it pays a round trip of its own. The batch depth is calibrated per
-#               candidate to about 10 ms of wall time, capped at 2048 launches and floored at 1 --
-#               a routine slower than that target is measured exactly as "isolated" measures it.
+#               candidate to about 10 ms of wall time, capped at 2048 launches on CUDA/HIP and at
+#               the historical 200 on cc/Metal, and floored at 1 -- a routine slower than that
+#               target is measured exactly as "isolated" measures it. Metal's measured ~59-launch
+#               target stays below either cap; keeping cc at 200 avoids multiplying CPU autotune
+#               suite cost for a GPU dispatch-scale correction.
 #   isolated -- one launch followed by a host synchronization: the latency of a lone dispatch,
 #               kernel plus one round trip. What every schedule crowned before gh-ocannl-755 was
 #               ranked by, and the right objective for a workload that really does dispatch one
@@ -412,10 +415,10 @@
 # therefore not a throughput number and must not be compared against a batched per-kernel figure.
 # The ~25 ms top-up budget accumulates PER-LAUNCH samples in both modes, not queued-batch wall. A
 # fast queued candidate can therefore take all 64 timed batches (about 640 ms when calibration hits
-# the 10 ms target). Before those, one provisional, up to four validating batch probes, and a final
-# confirmation take twelve samples each, so six near-target probes cost about another 720 ms per
-# candidate. These are workload-dependent costs, not a shared wall-time ceiling; the exact
-# worst-case dispatch-count
+# the 10 ms target). On CUDA/HIP, before those, one provisional, up to four validating batch probes,
+# and a final confirmation take twelve samples each, so six near-target probes cost about another
+# 720 ms per candidate. cc/Metal retain the historical single-estimate calibration. These are
+# workload-dependent costs, not a shared wall-time ceiling; the exact worst-case dispatch-count
 # bounds are documented on Autotune.time_routine.
 # The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
 # transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry

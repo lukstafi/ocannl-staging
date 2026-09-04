@@ -164,6 +164,11 @@ let confirmation_cases =
 
 let () =
   Stdio.printf "== queued batch depth ==\n";
+  Verdict.p_all "CUDA and HIP use the raised queue-depth cap" [ "cuda"; "hip" ] ~f:(fun backend ->
+      Autotune.queue_depth_cap_for_backend backend = 2048);
+  Verdict.p_all "cc and Metal retain the historical queue-depth cap"
+    [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
+      Autotune.queue_depth_cap_for_backend backend = 200);
   Verdict.p_all "every calibration estimate gets the depth the policy owes it" depth_cases
     ~f:(fun (what, est_ms, want) ->
       let got = Autotune.queued_batch_depth { ms = est_ms; contended = false; samples = 0 } in
