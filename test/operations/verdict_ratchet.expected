@@ -52,6 +52,8 @@ accepts a negated direct quantifier passed through a Verdict wrapper: true
 refuses a direct exists negated by a labeled Verdict wrapper parameter: true
 refuses a bound exists negated by a labeled Verdict wrapper parameter: true
 accepts a positive exists passed through a labeled Verdict wrapper parameter: true
+uses an omitted optional default that feeds a Verdict wrapper claim: true
+does not use a Verdict wrapper default when its argument is supplied: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -77,10 +79,12 @@ accepts a negated binding nested directly inside a claim argument: true
 does not return a quantified binding shadowed by a later local: true
 refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
+refuses a quantified component destructured from an intermediate aggregate: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a helper that returns a match-bound quantified value: true
 refuses a direct quantifier forwarded by a Boolean constructor match: true
 accepts a direct quantifier inverted by a Boolean constructor match: true
+refuses a bound exists inverted by a Boolean constructor match: true
 refuses a bound quantifier returned through an if condition: true
 accepts an inverted bound quantifier returned through an if condition: true
 refuses a direct quantifier returned through an if condition: true
@@ -92,6 +96,7 @@ accepts an inverted direct quantifier returned through a match guard: true
 refuses a bound quantifier returned from a protected try body: true
 refuses a direct quantifier returned through a try-case guard: true
 accepts an inverted direct quantifier returned through a try-case guard: true
+refuses a bound exists inverted through a try-case guard: true
 refuses a quantified helper reached through a mutually recursive sibling: true
 does not resolve an outer quantified binding shadowed by a function parameter: true
 does not resolve an outer binding shadowed by a match pattern: true

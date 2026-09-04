@@ -88,8 +88,7 @@ let test_uniform_at_with_shape () =
         acc +. (diff *. diff /. expected_per_bin))
   in
   let all_in_range =
-    (not (Array.is_empty result))
-    && Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
+    (not (Array.is_empty result)) && Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
   in
   print_check "Mean within 0.49..0.51" Float.(mean >= 0.49 && mean <= 0.51);
   print_check "Std dev within 0.25..0.32" Float.(std_dev >= 0.25 && std_dev <= 0.32);
