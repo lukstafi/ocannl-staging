@@ -246,7 +246,8 @@ let () =
     let seeded limits = List.exists (seeds limits) ~f:(fun q -> Poly.equal (key q) (key seed)) in
     p (what ^ ": at the cap the candidate is still seeded") (seeded at);
     p (what ^ ": at the cap the gate accepts it") (Option.is_none (gate seed ~limits:at));
-    p (what ^ ": over the cap it is not seeded at all") (not (seeded over));
+    p_none (what ^ ": over the cap it is not seeded at all") (seeds over) ~f:(fun q ->
+        Poly.equal (key q) (key seed));
     p
       (what ^ ": over the cap the gate refuses it as its own typed resource")
       (match gate seed ~limits:over with

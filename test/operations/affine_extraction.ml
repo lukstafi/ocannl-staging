@@ -195,8 +195,9 @@ let () =
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe;
     Verdict.claimf "%s %s has a non-empty conflict census" (Idx.symbol_ident sym) name
       (not (List.is_empty verdicts));
-    if parallelizable then Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name safe
-    else Verdict.claimf "%s %s does not parallelize" (Idx.symbol_ident sym) name (not safe)
+    let decision = (not (List.is_empty verdicts)) && if parallelizable then safe else not safe in
+    if parallelizable then Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name decision
+    else Verdict.claimf "%s %s does not parallelize" (Idx.symbol_ident sym) name decision
   in
   check_par "(map axis)" ~parallelizable:true i2;
   check_par "(reduced axis)" ~parallelizable:false k;

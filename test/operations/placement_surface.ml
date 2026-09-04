@@ -149,12 +149,13 @@ let () =
      two the promotion pushes it out of the chain; the profitability term hands the slot back. *)
   let budget = 2 in
   let prefix_has l t = List.exists (List.take l budget) ~f:(fun fc -> mem_tn fc t) in
-  p "the enablement prior pushes the decoy out of a budget-2 chain"
-    (not (prefix_has by_enablement us));
+  p_none "the enablement prior pushes the decoy out of a budget-2 chain"
+    (List.take by_enablement budget) ~f:(fun fc -> mem_tn fc us);
   p "under a measured-losing family the decoy is back in the budget-2 chain"
     (prefix_has (ranked `Profitable losing) us);
-  p "under a measured-paying family the promotion keeps the budget slot"
-    (not (prefix_has (ranked `Profitable paying) us));
+  p_none "under a measured-paying family the promotion keeps the budget slot"
+    (List.take (ranked `Profitable paying) budget)
+    ~f:(fun fc -> mem_tn fc us);
   (* The floor closure, under the rule's pinned envelope: monotone in the commitments, and strictly
      above the empty commitment once the site nodes' traffic is certain. *)
   (* An unconditional ordering reads no evidence at all — including the margin, which a run pinned

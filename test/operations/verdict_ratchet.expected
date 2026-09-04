@@ -29,11 +29,14 @@ each carrying its assertion separately through `Verdict.claim`/`claimf`:
 
 Quantified bindings exempted because emptiness is their passing meaning:
   test/operations/backend_golden_family_scan.ml:complete -- empty incomplete/error lists are the passing evidence; the non-empty synthetic-control population is guarded in the same binding
+  test/operations/autotune_routine_name.ml:contributed -- a contended search may legitimately contribute no rows; its report counters separately prove whether that absence came from refused timings rather than a lost result
   test/operations/env_var_deps.ml:family_floor_met -- a non-repository synthetic run deliberately skips repository-only family floors; the repository path checks every family and reports each shortfall separately
   test/operations/epilogue_fusion_mma_seeds.ml:vacuous -- an empty GPU mma family deliberately selects the environment-gated vacuity path; the non-vacuous path separately requires and executes the epilogue twins
+  test/operations/fission_schedule.ml:annotated -- the merge-back case deliberately requires the consumer segment to have no hardware axes; the same claim also requires the producer segment to be annotated
   test/operations/ocamlformat_ignore_scan.ml:refused -- the message list is an optional strengthening of the child-exit refusal: an empty list deliberately means that the nonzero status alone is the passing evidence
   test/operations/reduction_forms.ml:changed -- an empty schedule deliberately needs no IR change, and an empty per-op result means there were no per-op transformations to validate
   test/operations/reduction_forms.ml:extra_ok -- an empty extra-fragment list deliberately means the member requires no additional emitted assignment fragments
+  test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile -- an absent or empty hardware mma capability list is the environment gate that makes the backend-uniform non-support legs pass without attempting a tensor-core candidate
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
@@ -49,15 +52,22 @@ refuses a direct Bool.equal true around a fully applied quantifier: true
 accepts a direct Bool.equal false around a fully applied quantifier: true
 refuses a positive intermediate binding: true
 accepts a negated intermediate binding: true
+accepts a piped negated intermediate binding: true
+accepts a directly quantified value piped through not: true
+accepts a positive bound exists: true
+refuses a negated bound exists: true
 accepts a guarded intermediate binding: true
 conservatively refuses an outer guard across a helper call: true
 refuses a mismatched actual hidden by equal formal names: true
+refuses a shadowed guard identity across a nested alias: true
 refuses a binding nested directly inside a claim argument: true
 accepts a guarded binding nested directly inside a claim argument: true
 accepts a negated binding nested directly inside a claim argument: true
 refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
 refuses a helper that returns a fully applied quantified local binding: true
+accepts a helper that negates a quantified local binding: true
+refuses a double negation around a quantified local binding: true
 refuses a quantifier written in pipeline style: true
 keeps helper resolution inside its lexical scope: true
 refuses a reversed length upper bound masquerading as a witness: true

@@ -150,7 +150,8 @@ let () =
   in
   Verdict.p "direct and nested qualified paths count outside the defining source"
     (referenced direct "plain" && referenced direct "pair" && referenced direct "!@");
-  Verdict.p "references in the defining source do not count" (not (referenced direct "outer"));
+  Verdict.p_none "references in the defining source do not count" direct
+    ~f:(fun (reference : Scan.reference) -> String.equal reference.value "outer");
   let aliased =
     refs
       [

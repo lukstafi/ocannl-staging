@@ -41,4 +41,7 @@ let () =
   let has substring = List.exists sources ~f:(String.is_substring ~substring) in
   Verdict.p "guarded gather source casts signed guard to float"
     (has "? C[" && has ": (float)(0.0))" && has "(float)(ids[");
-  Verdict.p "guarded gather source contains no double declarations" (not (has "double"))
+  if has "double" then
+    Stdio.eprintf "guarded gather source unexpectedly contains `double` (not part of the golden)\n";
+  Verdict.p_none "guarded gather source contains no double declarations" sources ~f:(fun source ->
+      String.is_substring source ~substring:"double")

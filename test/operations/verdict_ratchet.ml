@@ -80,10 +80,11 @@ type helper_binding = {
   dependencies : helper_dependency list;
   guards : Set.M(String).t;
   unguarded : quantifier list;
+  negated_unguarded : quantifier list;
   claim_kind : claim_kind option;
 }
 
-and helper_dependency = { binding : helper_binding; forwards_guards : bool }
+and helper_dependency = { binding : helper_binding; positive : bool; forwards_guards : bool }
 
 type quantified_claim = {
   helper : string;
@@ -222,9 +223,9 @@ let compared_argument callee left right ~positive =
     | _ -> None
   else None
 
-let quantifiers_in expr =
+let quantifiers_in ?(positive = true) expr =
   let found = ref [] in
-  let positive = ref true in
+  let positive = ref positive in
   let iterator =
     object (self)
       inherit Ast_traverse.iter as super
@@ -243,6 +244,8 @@ let quantifiers_in expr =
         | Pexp_apply (pipe, [ (Asttypes.Nolabel, population); (Asttypes.Nolabel, piped_call) ])
           when is_name pipe "|>" -> (
             match piped_call.pexp_desc with
+            | Pexp_ident _ when is_name piped_call "not" ->
+                visit_with_polarity (not !positive) population
             | Pexp_apply (callee, arguments) -> (
                 match collection_quantifier callee with
                 | Some (kind, count)
@@ -291,59 +294,80 @@ let quantifiers_in expr =
    performs on the way. [nonzero] helpers are the important near miss: they use [not (exists ...)]
    only to decide whether to raise, then return the input array. Treating every expression in their
    body as the helper's boolean made every later parity claim look helper-wrapped. *)
-let rec returned_quantifiers expr =
+let rec returned_quantifiers ?(positive = true) expr =
   match expr.pexp_desc with
-  | Pexp_function (_, _, Pfunction_body body) -> returned_quantifiers body
+  | Pexp_function (_, _, Pfunction_body body) -> returned_quantifiers ~positive body
   | Pexp_let (_, bindings, body) ->
-      let returned_names = returned_value_names body in
-      returned_quantifiers body
+      let returned_bindings = returned_binding_polarities positive body in
+      returned_quantifiers ~positive body
       @ List.concat_map bindings ~f:(fun binding ->
           binding_parts binding.pvb_pat binding.pvb_expr
           |> List.concat_map ~f:(fun part ->
-              if Set.mem returned_names part.name then
-                if part.exact then returned_quantifiers part.expression
-                else quantifiers_in part.expression
-              else []))
-  | Pexp_sequence (_, result) -> returned_quantifiers result
-  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers inner
+              List.filter_map returned_bindings ~f:(fun (name, returned_positive) ->
+                  if String.equal name part.name then
+                    Some
+                      (if part.exact then
+                         returned_quantifiers ~positive:returned_positive part.expression
+                       else quantifiers_in ~positive:returned_positive part.expression)
+                  else None)
+              |> List.concat))
+  | Pexp_sequence (_, result) -> returned_quantifiers ~positive result
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers ~positive inner
   | Pexp_ifthenelse (_, yes, no) ->
-      returned_quantifiers yes @ Option.value_map no ~default:[] ~f:returned_quantifiers
+      returned_quantifiers ~positive yes
+      @ Option.value_map no ~default:[] ~f:(returned_quantifiers ~positive)
   | Pexp_match (_, cases) | Pexp_try (_, cases) ->
-      List.concat_map cases ~f:(fun case -> returned_quantifiers case.pc_rhs)
+      List.concat_map cases ~f:(fun case -> returned_quantifiers ~positive case.pc_rhs)
   | Pexp_apply (callee, _)
     when is_collection_call callee ~member:"for_all"
          || is_collection_call callee ~member:"for_all2_exn"
          || is_collection_call callee ~member:"is_empty"
+         || is_collection_call callee ~member:"exists"
          || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
          || is_name callee "<>" || is_name callee "equal" || is_name callee "|>" ->
-      quantifiers_in expr
+      quantifiers_in ~positive expr
   | _ -> []
 
-and returned_value_names expr =
+and returned_binding_polarities positive expr =
   match expr.pexp_desc with
-  | Pexp_ident { txt = Ppxlib.Longident.Lident name; _ } -> Set.singleton (module String) name
-  | Pexp_function (_, _, Pfunction_body body) -> returned_value_names body
-  | Pexp_let (_, _, body) -> returned_value_names body
-  | Pexp_sequence (_, result) -> returned_value_names result
-  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_value_names inner
+  | Pexp_ident { txt = Ppxlib.Longident.Lident name; _ } -> [ (name, positive) ]
+  | Pexp_function (_, _, Pfunction_body body) -> returned_binding_polarities positive body
+  | Pexp_let (_, _, body) -> returned_binding_polarities positive body
+  | Pexp_sequence (_, result) -> returned_binding_polarities positive result
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
+      returned_binding_polarities positive inner
   | Pexp_ifthenelse (_, yes, no) ->
-      Set.union (returned_value_names yes)
-        (Option.value_map no ~default:(Set.empty (module String)) ~f:returned_value_names)
+      returned_binding_polarities positive yes
+      @ Option.value_map no ~default:[] ~f:(returned_binding_polarities positive)
   | Pexp_match (_, cases) | Pexp_try (_, cases) ->
-      List.fold cases
-        ~init:(Set.empty (module String))
-        ~f:(fun names case -> Set.union names (returned_value_names case.pc_rhs))
-  | Pexp_apply (callee, arguments)
-    when is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
-         || is_name callee "<>" || is_name callee "equal" ->
-      List.fold arguments
-        ~init:(Set.empty (module String))
-        ~f:(fun names (_, argument) -> Set.union names (returned_value_names argument))
+      List.concat_map cases ~f:(fun case -> returned_binding_polarities positive case.pc_rhs)
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+      returned_binding_polarities (not positive) argument
+  | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
+    when is_name pipe "|>" -> (
+      match piped_call.pexp_desc with
+      | Pexp_ident _ when is_name piped_call "not" ->
+          returned_binding_polarities (not positive) value
+      | Pexp_apply (callee, arguments) -> (
+          match unlabelled arguments with
+          | [ literal ] -> (
+              match compared_argument callee literal value ~positive with
+              | Some (argument, polarity) -> returned_binding_polarities polarity argument
+              | None -> returned_binding_polarities positive piped_call)
+          | _ -> returned_binding_polarities positive piped_call)
+      | _ -> returned_binding_polarities positive piped_call)
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    when is_boolean_comparison callee -> (
+      match compared_argument callee left right ~positive with
+      | Some (argument, polarity) -> returned_binding_polarities polarity argument
+      | None ->
+          returned_binding_polarities positive left @ returned_binding_polarities positive right)
+  | Pexp_apply (callee, arguments) when is_name callee "&&" || is_name callee "||" ->
+      List.concat_map arguments ~f:(fun (_, argument) ->
+          returned_binding_polarities positive argument)
   | Pexp_apply (callee, _) -> (
-      match Sources.longident_of callee with
-      | Some [ name ] -> Set.singleton (module String) name
-      | _ -> Set.empty (module String))
-  | _ -> Set.empty (module String)
+      match Sources.longident_of callee with Some [ name ] -> [ (name, positive) ] | _ -> [])
+  | _ -> []
 
 let int_literal expr =
   match expr.pexp_desc with
@@ -436,6 +460,7 @@ let opened_claim_bindings site =
         dependencies = [];
         guards = Set.empty (module String);
         unguarded = [];
+        negated_unguarded = [];
         claim_kind = Some claim_kind;
       })
 
@@ -471,15 +496,16 @@ let rec make_bindings environment value =
             Set.is_empty quantifier.populations
             || Set.is_empty (Set.inter guards quantifier.populations))
       in
+      let negated_unguarded = returned_quantifiers ~positive:false part.expression in
       let dependencies =
-        positive_bindings environment (function_body part.expression)
+        binding_dependencies environment (function_body part.expression)
         |> List.filter ~f:(fun dependency ->
             (* A returned local quantifier is already attributed to this binding by
                [returned_quantifiers]. Keep outer dependencies beside it, but not the local
                definition of the same quantifier: reporting both would make one semantic hole need
                two exemptions. With no direct hole, local dependencies remain the path that carries
                intermediate negation and guards to an outer binding. *)
-            List.is_empty unguarded
+            (List.is_empty unguarded && List.is_empty negated_unguarded)
             || List.exists environment ~f:(fun outer ->
                 outer.site.position = dependency.binding.site.position))
       in
@@ -498,9 +524,9 @@ let rec make_bindings environment value =
           position = start.Stdlib.Lexing.pos_cnum;
         }
       in
-      { name = part.name; site; dependencies; guards; unguarded; claim_kind })
+      { name = part.name; site; dependencies; guards; unguarded; negated_unguarded; claim_kind })
 
-and positive_bindings environment expr =
+and binding_dependencies environment expr =
   let bindings = ref [] in
   let rec visit environment positive forwards_guards expr =
     let visit_arguments environment positive forwards_guards arguments =
@@ -510,12 +536,20 @@ and positive_bindings environment expr =
     match expr.pexp_desc with
     | Pexp_let (_, values, body) ->
         let local = List.concat_map values ~f:(make_bindings environment) in
-        visit (List.rev_append local environment) positive forwards_guards body
+        visit (List.rev_append local environment) positive false body
+    | Pexp_sequence (_, result) -> visit environment positive forwards_guards result
+    | Pexp_ifthenelse (_, yes, no) ->
+        visit environment positive forwards_guards yes;
+        Option.iter no ~f:(visit environment positive forwards_guards)
+    | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+        List.iter cases ~f:(fun case -> visit environment positive forwards_guards case.pc_rhs)
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
         visit environment (not positive) forwards_guards argument
     | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
       when is_name pipe "|>" -> (
         match piped_call.pexp_desc with
+        | Pexp_ident _ when is_name piped_call "not" ->
+            visit environment (not positive) forwards_guards value
         | Pexp_apply (callee, arguments) -> (
             match unlabelled arguments with
             | [ literal ] -> (
@@ -545,9 +579,9 @@ and positive_bindings environment expr =
     | Pexp_function _ -> ()
     | _ ->
         (match Sources.longident_of expr with
-        | Some [ name ] when positive ->
+        | Some [ name ] ->
             Option.iter (lookup environment name) ~f:(fun binding ->
-                bindings := { binding; forwards_guards } :: !bindings)
+                bindings := { binding; positive; forwards_guards } :: !bindings)
         | _ -> ());
         let iterator =
           object
@@ -564,14 +598,19 @@ and positive_bindings environment expr =
 
 let quantified_claims structure =
   let origins (dependencies : helper_dependency list) =
-    let rec visit seen inherited_guards (binding : helper_binding) =
-      let key = binding.name ^ ":" ^ Int.to_string binding.site.position in
+    let rec visit seen inherited_guards positive (binding : helper_binding) =
+      let key =
+        binding.name ^ ":" ^ Int.to_string binding.site.position ^ ":" ^ Bool.to_string positive
+      in
       if Set.mem seen key then []
       else
         let seen = Set.add seen key in
-        let guards = Set.union inherited_guards binding.guards in
+        let guards =
+          if positive then Set.union inherited_guards binding.guards else inherited_guards
+        in
+        let candidates = if positive then binding.unguarded else binding.negated_unguarded in
         let uncovered =
-          List.filter binding.unguarded ~f:(fun quantifier ->
+          List.filter candidates ~f:(fun quantifier ->
               Set.is_empty quantifier.populations
               || Set.is_empty (Set.inter guards quantifier.populations))
         in
@@ -579,12 +618,15 @@ let quantified_claims structure =
         direct
         @ List.concat_map binding.dependencies ~f:(fun dependency ->
             let inherited_guards =
-              if dependency.forwards_guards then guards else Set.empty (module String)
+              if positive && dependency.forwards_guards then guards else Set.empty (module String)
             in
-            visit seen inherited_guards dependency.binding)
+            visit seen inherited_guards (Bool.equal positive dependency.positive) dependency.binding)
     in
     List.concat_map dependencies ~f:(fun dependency ->
-        visit (Set.empty (module String)) (Set.empty (module String)) dependency.binding)
+        visit
+          (Set.empty (module String))
+          (Set.empty (module String))
+          dependency.positive dependency.binding)
     |> List.dedup_and_sort ~compare:(fun (left, _) (right, _) ->
         Int.compare left.site.position right.site.position)
   in
@@ -596,7 +638,7 @@ let quantified_claims structure =
             match List.last (unlabelled arguments) with
             | None -> ()
             | Some boolean ->
-                positive_bindings environment boolean
+                binding_dependencies environment boolean
                 |> origins
                 |> List.iter ~f:(fun ((binding : helper_binding), quantifiers) ->
                     found :=
@@ -796,12 +838,18 @@ let exempt_quantified_helpers =
     ( "test/operations/backend_golden_family_scan.ml:complete",
       "empty incomplete/error lists are the passing evidence; the non-empty synthetic-control \
        population is guarded in the same binding" );
+    ( "test/operations/autotune_routine_name.ml:contributed",
+      "a contended search may legitimately contribute no rows; its report counters separately \
+       prove whether that absence came from refused timings rather than a lost result" );
     ( "test/operations/env_var_deps.ml:family_floor_met",
       "a non-repository synthetic run deliberately skips repository-only family floors; the \
        repository path checks every family and reports each shortfall separately" );
     ( "test/operations/epilogue_fusion_mma_seeds.ml:vacuous",
       "an empty GPU mma family deliberately selects the environment-gated vacuity path; the \
        non-vacuous path separately requires and executes the epilogue twins" );
+    ( "test/operations/fission_schedule.ml:annotated",
+      "the merge-back case deliberately requires the consumer segment to have no hardware axes; \
+       the same claim also requires the producer segment to be annotated" );
     ( "test/operations/ocamlformat_ignore_scan.ml:refused",
       "the message list is an optional strengthening of the child-exit refusal: an empty list \
        deliberately means that the nonzero status alone is the passing evidence" );
@@ -811,6 +859,9 @@ let exempt_quantified_helpers =
     ( "test/operations/reduction_forms.ml:extra_ok",
       "an empty extra-fragment list deliberately means the member requires no additional emitted \
        assignment fragments" );
+    ( "test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile",
+      "an absent or empty hardware mma capability list is the environment gate that makes the \
+       backend-uniform non-support legs pass without attempting a tensor-core candidate" );
   ]
 
 (* Synthetic inputs state the helper rule independently of whatever helpers happen to be in the
@@ -881,6 +932,23 @@ let () = Verdict.p "all rows pass" still_close|ocaml},
 let differs = not close
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "accepts a piped negated intermediate binding",
+      {ocaml|let close = List.for_all rows ~f:Fn.id
+let differs = close |> not
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "accepts a directly quantified value piped through not",
+      {ocaml|let differs = List.for_all rows ~f:Fn.id |> not
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "accepts a positive bound exists",
+      {ocaml|let some_bad = List.exists rows ~f:bad
+let () = Verdict.p "some row is bad" some_bad|ocaml},
+      [] );
+    ( "refuses a negated bound exists",
+      {ocaml|let some_bad = List.exists rows ~f:bad
+let () = Verdict.p "no row is bad" (not some_bad)|ocaml},
+      [ "some_bad" ] );
     ( "accepts a guarded intermediate binding",
       {ocaml|let close = List.for_all rows ~f:Fn.id
 let guarded = (not (List.is_empty rows)) && close
@@ -896,6 +964,13 @@ let () = Verdict.p "all rows pass" (checked rows)|ocaml},
 let checked xs other = (not (List.is_empty xs)) && all other
 let () = Verdict.p "all rows pass" (checked rows other_rows)|ocaml},
       [ "all" ] );
+    ( "refuses a shadowed guard identity across a nested alias",
+      {ocaml|let close = List.for_all rows ~f:Fn.id
+let guarded =
+  let rows = [ true ] in
+  (not (List.is_empty rows)) && close
+let () = Verdict.p "all outer rows pass" guarded|ocaml},
+      [ "close" ] );
     ( "refuses a binding nested directly inside a claim argument",
       {ocaml|let () =
   Verdict.p "all rows pass" (let ok = List.for_all rows ~f:Fn.id in ok)|ocaml},
@@ -927,6 +1002,18 @@ let () = Verdict.p "all rows pass" (checked rows other_rows)|ocaml},
   ok
 let () = Verdict.p "every sample agrees" (close samples)|ocaml},
       [ "close" ] );
+    ( "accepts a helper that negates a quantified local binding",
+      {ocaml|let differs xs =
+  let close = List.for_all xs ~f:Fn.id in
+  not close
+let () = Verdict.p "some sample differs" (differs samples)|ocaml},
+      [] );
+    ( "refuses a double negation around a quantified local binding",
+      {ocaml|let differs xs =
+  let close = List.for_all xs ~f:Fn.id in
+  not close
+let () = Verdict.p "every sample agrees" (not (differs samples))|ocaml},
+      [ "differs" ] );
     ( "refuses a quantifier written in pipeline style",
       {ocaml|let close xs = xs |> List.for_all ~f:Fn.id
 let () = Verdict.p "every sample agrees" (close samples)|ocaml},

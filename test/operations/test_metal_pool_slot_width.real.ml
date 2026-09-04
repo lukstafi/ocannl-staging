@@ -43,5 +43,8 @@ let () =
     (has "ulong* __pool_slots");
   (* Phrased as the fact that holds, so that [true] is the passing reading on both lines: a designed
      negative and a blessed regression are the same line in a golden (gh-ocannl-624). *)
-  Verdict.p "large_models=true: generated slot table is not uint* __pool_slots"
-    (not (has "uint* __pool_slots"))
+  if has "uint* __pool_slots" then
+    Stdio.eprintf
+      "large-model source unexpectedly contains a uint pool table (not part of the golden)\n";
+  Verdict.p_none "large_models=true: generated slot table is not uint* __pool_slots" srcs
+    ~f:(fun source -> String.is_substring source ~substring:"uint* __pool_slots")

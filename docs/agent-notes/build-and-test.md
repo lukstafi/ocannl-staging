@@ -827,9 +827,13 @@ that they earn a lookup rather than always-loaded space.
   explicit true/false comparisons (including pipeline spelling) across intermediate bindings.
   Non-empty guards propagate down positive value-alias edges, but conservatively stop at helper
   calls: without formal-to-actual substitution, matching formal names can incorrectly license a
-  quantifier over a different actual argument. Tuple and record destructuring maps names to their
-  corresponding value expressions, so changing the binding pattern cannot hide a quantifier. The
-  controls pair each accepted negation with a positive form the ratchet must still refuse.
+  quantifier over a different actual argument. They also stop when entering a nested `let`, where a
+  shadowed collection can reuse the same spelling for a different identity. Dependency edges retain
+  their sign, so a bound `exists` later used under `not` is checked as `not exists`; direct and piped
+  `not` have the same polarity, including when a helper returns a negated local binding. Tuple and
+  record destructuring maps names to their corresponding value expressions, so changing the binding
+  pattern cannot hide a quantifier. The controls pair each accepted negation with a positive form
+  the ratchet must still refuse.
   The literal- and computed-label exemption lists carry the same one-key/one-site contract
   (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while
   line and column are report text; `record_definition` aggregates all three exemption families by

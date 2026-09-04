@@ -375,6 +375,9 @@ let () =
   let has_staged_mma seeds =
     List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_bk > 0)
   in
+  let no_mma seeds =
+    (not (List.is_empty seeds)) && List.for_all seeds ~f:(fun p -> not p.Autotune.sk_mma)
+  in
   let f16_default =
     section "half-prec gpu, f16 tiles, default policy" ~is_gpu:true ~is_cpu:false
       ~limits:(gpu_f16_limits ~wide_scopes:[]) opt_h
@@ -481,7 +484,7 @@ let () =
   Verdict.p
     "the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates \
      (accumulator residency diverges from compute)"
-    (not (has_mma f16_cpu_wide_nco));
+    (no_mma f16_cpu_wide_nco);
   (* Transposed B (k on its minor axis): whole-triple and the hoisted-only Grid shape read B in
      place, which the register tiling statically declines; packing shapes normalize the layout. *)
   let tb =
