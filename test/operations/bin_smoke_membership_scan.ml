@@ -75,6 +75,8 @@ let alias_key ~subdir name = Dune_scan.normalize_path (Dune_scan.in_subdir subdi
 let alias_dependencies ~subdir stanza =
   let rec collect = function
     | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom name ] -> ([ alias_key ~subdir name ], [])
+    | Sexp.List (Sexp.Atom "include" :: _) ->
+        ([], [ "@bin-smoke reaches an included dependency specification that cannot be expanded" ])
     | Sexp.List (Sexp.Atom "alias_rec" :: _) ->
         ([], [ "@bin-smoke reaches alias_rec, whose recursive dependency cannot be derived" ])
     | Sexp.List children ->
@@ -89,20 +91,27 @@ let alias_dependencies ~subdir stanza =
 
 let dependency_pforms = [ "dep"; "file"; "path"; "read"; "read-lines"; "read-strings" ]
 
+let dependency_pform_path ~subdir pform =
+  match String.lsplit2 pform ~on:':' with
+  | Some (prefix, path) when List.mem dependency_pforms prefix ~equal:String.equal ->
+      Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+  | _ -> None
+
 let dependency_path ~subdir atom =
   match Dune_scan.pieces atom with
   | [ Dune_scan.Literal path ] -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
-  | [ Dune_scan.Pform pform ] -> (
-      match String.lsplit2 pform ~on:':' with
-      | Some (prefix, path) when List.mem dependency_pforms prefix ~equal:String.equal ->
-          Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
-      | _ -> None)
+  | [ Dune_scan.Pform pform ] -> dependency_pform_path ~subdir pform
   | _ -> None
+
+let literal_dependency_path ~subdir atom =
+  match Dune_scan.pieces atom with
+  | [ Dune_scan.Literal path ] -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+  | [ Dune_scan.Pform _ ] | _ -> None
 
 let target_dependencies ~subdir stanza =
   let rec collect = function
     | Sexp.Atom atom -> Option.to_list (dependency_path ~subdir atom)
-    | Sexp.List (Sexp.Atom ("alias" | "alias_rec" | "env_var" | "universe") :: _) -> []
+    | Sexp.List (Sexp.Atom ("alias" | "alias_rec" | "env_var" | "include" | "universe") :: _) -> []
     | Sexp.List (Sexp.Atom name :: values) when String.is_prefix name ~prefix:":" ->
         List.concat_map values ~f:collect
     | Sexp.List children -> List.concat_map children ~f:collect
@@ -117,38 +126,38 @@ let target_dependencies ~subdir stanza =
     | None -> []
     | Some action ->
         List.concat_map action ~f:Dune_scan.atoms
-        |> List.filter_map ~f:(fun atom ->
-            match Dune_scan.pieces atom with
-            | [ Dune_scan.Pform pform ] -> (
-                match String.lsplit2 pform ~on:':' with
-                | Some (prefix, path) when List.mem dependency_pforms prefix ~equal:String.equal ->
-                    Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
-                | _ -> None)
-            | _ -> None)
+        |> List.concat_map ~f:(fun atom ->
+            List.filter_map (Dune_scan.pieces atom) ~f:(function
+              | Dune_scan.Pform pform -> dependency_pform_path ~subdir pform
+              | Dune_scan.Literal _ -> None))
   in
-  let rec literal_action_dependencies = function
+  let rec literal_action_dependencies ~subdir = function
     | Sexp.Atom _ -> []
     | Sexp.List (Sexp.Atom "no-infer" :: _) -> []
+    | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: nested)
+      when not (String.is_substring dir ~substring:"%{") ->
+        List.concat_map nested
+          ~f:(literal_action_dependencies ~subdir:(Dune_scan.in_subdir subdir dir))
     | Sexp.List (Sexp.Atom "with-stdin-from" :: Sexp.Atom input :: nested) ->
-        Option.to_list (dependency_path ~subdir input)
-        @ List.concat_map nested ~f:literal_action_dependencies
+        Option.to_list (literal_dependency_path ~subdir input)
+        @ List.concat_map nested ~f:(literal_action_dependencies ~subdir)
     | Sexp.List (Sexp.Atom "cat" :: inputs) ->
         List.filter_map inputs ~f:(function
-          | Sexp.Atom input -> dependency_path ~subdir input
+          | Sexp.Atom input -> literal_dependency_path ~subdir input
           | Sexp.List _ -> None)
     | Sexp.List
         (Sexp.Atom ("copy" | "copy#" | "copy-and-add-line-directive" | "format-dune-file")
         :: Sexp.Atom input
         :: _target :: _) ->
-        Option.to_list (dependency_path ~subdir input)
+        Option.to_list (literal_dependency_path ~subdir input)
     | Sexp.List (Sexp.Atom ("diff" | "diff?" | "cmp") :: Sexp.Atom left :: Sexp.Atom right :: _) ->
-        List.filter_map [ left; right ] ~f:(dependency_path ~subdir)
-    | Sexp.List children -> List.concat_map children ~f:literal_action_dependencies
+        List.filter_map [ left; right ] ~f:(literal_dependency_path ~subdir)
+    | Sexp.List children -> List.concat_map children ~f:(literal_action_dependencies ~subdir)
   in
   let literal_action_dependencies =
     match Dune_scan.field stanza "action" with
     | None -> []
-    | Some action -> literal_action_dependencies (Sexp.List action)
+    | Some action -> literal_action_dependencies ~subdir (Sexp.List action)
   in
   List.rev_append field_dependencies
     (List.rev_append action_dependencies literal_action_dependencies)
@@ -159,6 +168,9 @@ let resolve_target ~subdir target = Dune_scan.normalize_path (Dune_scan.in_subdi
 let rec inferred_action_targets ~subdir = function
   | Sexp.Atom _ -> []
   | Sexp.List (Sexp.Atom "no-infer" :: _) -> []
+  | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: nested)
+    when not (String.is_substring dir ~substring:"%{") ->
+      List.concat_map nested ~f:(inferred_action_targets ~subdir:(Dune_scan.in_subdir subdir dir))
   | Sexp.List
       (Sexp.Atom ("with-stdout-to" | "with-stderr-to" | "with-outputs-to")
       :: Sexp.Atom target
@@ -249,7 +261,8 @@ let dynamic_run_error dune_path =
   Printf.sprintf "%s: @bin-smoke reaches dynamic-run, whose execution count is not fixed" dune_path
 
 let directory_path_error dune_path =
-  Printf.sprintf "%s rewrites PATH for a directory containing an @bin-smoke definition" dune_path
+  Printf.sprintf
+    "%s overrides command resolution for a directory containing an @bin-smoke definition" dune_path
 
 let implicit_alias_error dune_path dependency =
   Printf.sprintf "%s: @bin-smoke reaches implicit alias %s, whose contributors are not explicit"
@@ -269,9 +282,9 @@ let cached_alias_error dune_path targets =
   Printf.sprintf "%s: @bin-smoke reaches a target-bearing rule that may be cached: %s" dune_path
     (String.concat ~sep:", " targets)
 
-let cached_helper_alias_error dune_path aliases =
+let cached_command_alias_error dune_path aliases =
   Printf.sprintf
-    "%s: @bin-smoke reaches command-bearing helper alias %s without a direct (universe) dependency"
+    "%s: @bin-smoke reaches command-bearing alias %s without a direct (universe) dependency"
     dune_path (String.concat ~sep:", " aliases)
 
 let depends_on_universe stanza =
@@ -319,9 +332,19 @@ let smoke_targets_of_stanza ~allow_verified_helper ~dune_path ~subdir stanza =
   |> List.map ~f:(fun (cwd, _pins, site, command) ->
       match command with
       | Dune_scan.Runs path ->
-          let local =
-            Dune_scan.normalize_path (Dune_scan.in_subdir subdir (Dune_scan.in_subdir cwd path))
+          let rec anchored_to_stanza = function
+            | Dune_scan.Program (token, _) ->
+                List.exists (Dune_scan.pieces token) ~f:(function
+                  | Dune_scan.Pform _ -> true
+                  | Dune_scan.Literal _ -> false)
+            | Dune_scan.Elsewhere (_, nested) | Dune_scan.Unnameable (_, nested) ->
+                anchored_to_stanza nested
+            | Dune_scan.Shell _ -> false
           in
+          let command_subdir =
+            if anchored_to_stanza site then subdir else Dune_scan.in_subdir subdir cwd
+          in
+          let local = Dune_scan.normalize_path (Dune_scan.in_subdir command_subdir path) in
           if
             allow_verified_helper
             && String.equal local verified_helper_local
@@ -464,14 +487,14 @@ let scan dune_files =
           if contains_head "dynamic-run" node.stanza then [ dynamic_run_error node.dune_path ]
           else []
         in
-        let cached_helper_alias_errors =
+        let cached_command_alias_errors =
           let command_bearing =
             not
               (List.is_empty
                  (Dune_scan.classified_command_sites_with_pins_preserving_multiplicity node.stanza))
           in
-          if command_bearing && not node.is_bin_smoke && not (depends_on_universe node.stanza)
-          then [ cached_helper_alias_error node.dune_path node.aliases ]
+          if command_bearing && not (depends_on_universe node.stanza) then
+            [ cached_command_alias_error node.dune_path node.aliases ]
           else []
         in
         let implicit_runner_errors =
@@ -520,7 +543,7 @@ let scan dune_files =
                (List.rev_append condition_errors
                   (List.rev_append exit_errors
                      (List.rev_append dynamic_run_errors
-                        (List.rev_append cached_helper_alias_errors
+                        (List.rev_append cached_command_alias_errors
                            (List.rev_append implicit_runner_errors
                               (List.rev_append directory_path_errors
                                  (List.rev_append generated_dependency_errors
@@ -594,7 +617,7 @@ let complete_fixture =
  (action (run %{dep:env_spelling_gate.exe})))
 (rule
  (alias bin-smoke)
- (deps (alias bin-smoke-env_spelling_gate))
+ (deps (alias bin-smoke-env_spelling_gate) (universe))
  (action
   (progn
    (run %{exe:alpha.exe})
@@ -605,6 +628,7 @@ let missing_fixture =
 (executable (name beta) (public_name beta-tool))
 (rule
  (alias bin-smoke)
+ (deps (universe))
  (action (run %{exe:alpha.exe})))|dune}
 
 let duplicate_fixture =
@@ -697,6 +721,26 @@ let cached_helper_fixture =
  (alias bin-smoke)
  (deps (alias helper-smoke)))|dune}
 
+let cached_root_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let chdir_pform_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (chdir smoke (run %{exe:alpha.exe}))))|dune}
+
+let chdir_parent_pform_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (chdir smoke (run %{exe:../alpha.exe}))))|dune}
+
 let generated_target_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -719,6 +763,18 @@ let inferred_target_fixture =
 (rule
  (alias bin-smoke)
  (deps smoke.stamp)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let chdir_inferred_target_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (action
+  (chdir generated
+   (with-stdout-to smoke.stamp
+    (run %{exe:alpha.exe})))))
+(rule
+ (alias bin-smoke)
+ (deps (universe) generated/smoke.stamp)
  (action (run %{exe:alpha.exe})))|dune}
 
 let target_bearing_alias_fixture =
@@ -775,6 +831,16 @@ let directory_path_fixture =
  (alias bin-smoke)
  (action (run alpha.exe)))|dune}
 
+let directory_binaries_fixture =
+  {dune|(env
+ (_
+  (binaries helper.exe)))
+(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (run alpha.exe)))|dune}
+
 let nested_unaffected_path_fixture =
   {dune|(subdir tools
  (env
@@ -784,6 +850,7 @@ let nested_unaffected_path_fixture =
 (executable (name alpha) (public_name alpha-tool))
 (rule
  (alias bin-smoke)
+ (deps (universe))
  (action (run %{exe:alpha.exe})))|dune}
 
 let nested_affected_path_fixture =
@@ -831,6 +898,26 @@ let action_dependency_fixture =
 (rule
  (alias bin-smoke)
  (action (run %{exe:alpha.exe} %{dep:smoke.stamp})))|dune}
+
+let embedded_action_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke.stamp)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (echo value=%{read:smoke.stamp}))))|dune}
+
+let included_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe) (include aliases.sexp))
+ (action (run %{exe:alpha.exe})))|dune}
 
 let explicit_read_dependency_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
@@ -886,6 +973,21 @@ let literal_action_dependency_fixture =
    (run %{exe:alpha.exe})
    (diff expected smoke.stamp))))|dune}
 
+let chdir_literal_action_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(subdir generated
+ (rule
+  (target smoke.stamp)
+  (action (run %{exe:../alpha.exe}))))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (chdir generated
+   (progn
+    (run %{exe:alpha.exe})
+    (diff expected smoke.stamp)))))|dune}
+
 let conditional_private_fixture =
   {dune|(executables
  (names helper)
@@ -894,6 +996,7 @@ let conditional_private_fixture =
 (executable (name alpha) (public_name alpha-tool))
 (rule
  (alias bin-smoke)
+ (deps (universe))
  (action (run %{exe:alpha.exe})))|dune}
 
 let implicit_runner_fixture =
@@ -920,21 +1023,28 @@ let controls_hold () =
   let transitive = scan_bin_content transitive_duplicate_fixture in
   let rerunning_helper = scan_bin_content rerunning_helper_fixture in
   let cached_helper = scan_bin_content cached_helper_fixture in
+  let cached_root = scan_bin_content cached_root_fixture in
+  let chdir_pform = scan_bin_content chdir_pform_fixture in
+  let chdir_parent_pform = scan_bin_content chdir_parent_pform_fixture in
   let external_result = scan_bin_content external_smoke_fixture in
   let accepted_exit = scan_bin_content accepted_exit_fixture in
   let generated_target = scan_bin_content generated_target_fixture in
   let inferred_target = scan_bin_content inferred_target_fixture in
+  let chdir_inferred_target = scan_bin_content chdir_inferred_target_fixture in
   let target_bearing_alias = scan_bin_content target_bearing_alias_fixture in
   let directory_target = scan_bin_content directory_target_fixture in
   let directory_target_alias = scan_bin_content directory_target_alias_fixture in
   let rewritten_path = scan_bin_content rewritten_path_fixture in
   let dynamic_run = scan_bin_content dynamic_run_fixture in
   let directory_path = scan_bin_content directory_path_fixture in
+  let directory_binaries = scan_bin_content directory_binaries_fixture in
   let nested_unaffected_path = scan_bin_content nested_unaffected_path_fixture in
   let nested_affected_path = scan_bin_content nested_affected_path_fixture in
   let private_launcher = scan_bin_content private_launcher_fixture in
   let verified_helper_launcher = scan_bin_content verified_helper_launcher_fixture in
   let action_dependency = scan_bin_content action_dependency_fixture in
+  let embedded_action_dependency = scan_bin_content embedded_action_dependency_fixture in
+  let included_dependency = scan_bin_content included_dependency_fixture in
   let explicit_read_dependency = scan_bin_content explicit_read_dependency_fixture in
   let transitive_path =
     scan
@@ -943,6 +1053,7 @@ let controls_hold () =
   let implicit_alias = scan_bin_content implicit_alias_fixture in
   let builtin_alias = scan_bin_content builtin_alias_fixture in
   let literal_action_dependency = scan_bin_content literal_action_dependency_fixture in
+  let chdir_literal_action_dependency = scan_bin_content chdir_literal_action_dependency_fixture in
   let conditional_private = scan_bin_content conditional_private_fixture in
   let implicit_runner = scan_bin_content implicit_runner_fixture in
   complete accepted
@@ -968,8 +1079,15 @@ let controls_hold () =
   && complete rerunning_helper
   && (not (complete cached_helper))
   && List.mem cached_helper.errors
-       (cached_helper_alias_error "bin/dune" [ "bin/helper-smoke" ])
+       (cached_command_alias_error "bin/dune" [ "bin/helper-smoke" ])
        ~equal:String.equal
+  && (not (complete cached_root))
+  && List.mem cached_root.errors
+       (cached_command_alias_error "bin/dune" [ "bin/bin-smoke" ])
+       ~equal:String.equal
+  && complete chdir_pform
+  && (not (complete chdir_parent_pform))
+  && List.mem chdir_parent_pform.unexpected "alpha.exe" ~equal:String.equal
   && (not (complete external_result))
   && List.mem external_result.errors (external_smoke_error "bin/dune") ~equal:String.equal
   && (not (complete accepted_exit))
@@ -981,6 +1099,10 @@ let controls_hold () =
   && (not (complete inferred_target))
   && List.mem inferred_target.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete chdir_inferred_target))
+  && List.mem chdir_inferred_target.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/generated/smoke.stamp"
        ~equal:String.equal
   && (not (complete target_bearing_alias))
   && List.mem target_bearing_alias.errors
@@ -1002,6 +1124,8 @@ let controls_hold () =
   && List.mem dynamic_run.errors (dynamic_run_error "bin/dune") ~equal:String.equal
   && (not (complete directory_path))
   && List.mem directory_path.errors (directory_path_error "bin/dune") ~equal:String.equal
+  && (not (complete directory_binaries))
+  && List.mem directory_binaries.errors (directory_path_error "bin/dune") ~equal:String.equal
   && complete nested_unaffected_path
   && (not (complete nested_affected_path))
   && List.mem nested_affected_path.errors (directory_path_error "bin/dune") ~equal:String.equal
@@ -1012,6 +1136,14 @@ let controls_hold () =
   && (not (complete action_dependency))
   && List.mem action_dependency.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete embedded_action_dependency))
+  && List.mem embedded_action_dependency.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete included_dependency))
+  && List.mem included_dependency.errors
+       "@bin-smoke reaches an included dependency specification that cannot be expanded"
        ~equal:String.equal
   && (not (complete explicit_read_dependency))
   && List.mem explicit_read_dependency.errors
@@ -1028,6 +1160,10 @@ let controls_hold () =
   && (not (complete literal_action_dependency))
   && List.mem literal_action_dependency.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete chdir_literal_action_dependency))
+  && List.mem chdir_literal_action_dependency.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/generated/smoke.stamp"
        ~equal:String.equal
   && complete conditional_private
   && (not (complete implicit_runner))

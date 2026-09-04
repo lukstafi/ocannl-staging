@@ -361,6 +361,7 @@ let path_rewriting_cases =
   [
     ("an env stanza setting PATH", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "env" ]);
     ("an env stanza setting Windows-case Path", {dune|(env (_ (env-vars (Path .))))|dune}, [ "env" ]);
+    ("an env stanza mapping binaries", {dune|(env (_ (binaries helper.exe)))|dune}, [ "env" ]);
     ("one setting something else to PATH", {dune|(env (_ (env-vars (OTHER PATH))))|dune}, []);
     ("an env stanza that touches neither", {dune|(env (_ (flags (:standard))))|dune}, []);
   ]
@@ -370,6 +371,9 @@ let path_rewriting_scope_cases =
     ("a root env stanza", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "" ]);
     ( "an env stanza nested under subdir",
       {dune|(subdir tools (env (_ (env-vars (PATH .)))))|dune},
+      [ "tools" ] );
+    ( "a binaries mapping nested under subdir",
+      {dune|(subdir tools (env (_ (binaries helper.exe))))|dune},
       [ "tools" ] );
     ( "nested subdirs compose",
       {dune|(subdir tools (subdir private (env (_ (env-vars (Path .))))))|dune},
@@ -1651,7 +1655,9 @@ let () =
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
   List.iter path_rewriting_scope_cases ~f:(fun (name, source, expected) ->
-      check ("path-rewriting stanza scope -- " ^ name) expected
+      check
+        ("path-rewriting stanza scope -- " ^ name)
+        expected
         (Scan.path_rewriting_stanza_scopes source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
       let found =

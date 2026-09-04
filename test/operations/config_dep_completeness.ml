@@ -158,8 +158,8 @@ let () =
       List.iter (Scan.path_rewriting_stanzas content) ~f:(fun head ->
           fail
             (Printf.sprintf
-               "%s has a `(%s ...)` stanza that rewrites PATH, which changes what a bare command \
-                name resolves to -- here and in subdirectories. This check does not model \
+               "%s has a `(%s ...)` stanza that changes command resolution through PATH or a \
+                binaries mapping -- here and in subdirectories. This check does not model \
                 environment stanzas: run programs by path, or teach Dune_stanza_scan to carry the \
                 override"
                dune_file head));
