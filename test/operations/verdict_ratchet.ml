@@ -235,20 +235,21 @@ let bool_literal expr value =
 let literal_bool expr =
   if bool_literal expr true then Some true else if bool_literal expr false then Some false else None
 
-let bool_pattern pattern value =
+let rec bool_pattern_matches pattern value =
   match pattern.ppat_desc with
   | Ppat_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
       String.equal found (Bool.to_string value)
+  | Ppat_any | Ppat_var _ -> true
+  | Ppat_alias (inner, _) | Ppat_constraint (inner, _) | Ppat_open (_, inner) ->
+      bool_pattern_matches inner value
+  | Ppat_or (left, right) -> bool_pattern_matches left value || bool_pattern_matches right value
   | _ -> false
 
 let boolean_match_polarity cases =
   let output_for input =
-    List.find_map cases ~f:(fun case ->
-        if Option.is_none case.pc_guard && bool_pattern case.pc_lhs input then
-          if bool_literal case.pc_rhs true then Some true
-          else if bool_literal case.pc_rhs false then Some false
-          else None
-        else None)
+    List.find cases ~f:(fun case -> bool_pattern_matches case.pc_lhs input)
+    |> Option.bind ~f:(fun case ->
+        if Option.is_none case.pc_guard then literal_bool case.pc_rhs else None)
   in
   match (output_for true, output_for false) with
   | Some true, Some false -> Some true
@@ -575,13 +576,20 @@ and returned_binding_polarities positive expr =
           returned_binding_polarities condition_positive condition))
       @ returned_binding_polarities positive yes
       @ Option.value_map no ~default:[] ~f:(returned_binding_polarities positive)
-  | Pexp_match (_, cases) ->
+  | Pexp_match (scrutinee, cases) ->
       List.concat_map cases ~f:(fun case ->
+          let returned = returned_binding_polarities positive case.pc_rhs in
           let shadowed =
             pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
           in
-          returned_binding_polarities positive case.pc_rhs
-          |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
+          (returned |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
+          @ (binding_parts case.pc_lhs scrutinee
+            |> List.concat_map ~f:(fun part ->
+                List.filter_map returned ~f:(fun (name, returned_positive) ->
+                    if String.equal name part.name then
+                      Some (returned_binding_polarities returned_positive part.expression)
+                    else None)
+                |> List.concat)))
   | Pexp_try (body, cases) ->
       returned_binding_polarities positive body
       @ List.concat_map cases ~f:(fun case ->
@@ -636,12 +644,14 @@ let claim_kind_of_path path =
       | _ -> None)
   | _ -> None
 
-let opens_verdict_claims module_expr =
+let module_path module_expr =
   match module_expr.pmod_desc with
-  | Pmod_ident { txt; _ } -> (
-      try List.equal String.equal (Ppxlib.Longident.flatten_exn txt) [ "Verdict"; "Claims" ]
-      with _ -> false)
-  | _ -> false
+  | Pmod_ident { txt; _ } -> ( try Some (Ppxlib.Longident.flatten_exn txt) with _ -> None)
+  | _ -> None
+
+let opens_verdict_claims module_expr =
+  Option.value_map (module_path module_expr) ~default:false
+    ~f:(List.equal String.equal [ "Verdict"; "Claims" ])
 
 (* [open Verdict.Claims] is the migration target of gh-ocannl-815. Model its bindings explicitly so
    helper-following does not lose sight of an unqualified [p]/[claim]/[pass_fail] call when the file
@@ -664,17 +674,29 @@ let opened_claim_bindings site =
       })
 
 let open_claims environment declaration =
-  if opens_verdict_claims declaration.popen_expr then
-    let start = declaration.popen_loc.loc_start in
-    List.rev_append
-      (opened_claim_bindings
-         {
-           line = start.Stdlib.Lexing.pos_lnum;
-           column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
-           position = start.Stdlib.Lexing.pos_cnum;
-         })
-      environment
-  else environment
+  let verdict_environment =
+    if opens_verdict_claims declaration.popen_expr then
+      let start = declaration.popen_loc.loc_start in
+      List.rev_append
+        (opened_claim_bindings
+           {
+             line = start.Stdlib.Lexing.pos_lnum;
+             column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
+             position = start.Stdlib.Lexing.pos_cnum;
+           })
+        environment
+    else environment
+  in
+  match module_path declaration.popen_expr with
+  | None -> verdict_environment
+  | Some path ->
+      let prefix = String.concat ~sep:"." path ^ "." in
+      let opened =
+        List.filter_map environment ~f:(fun (binding : helper_binding) ->
+            String.chop_prefix binding.name ~prefix
+            |> Option.map ~f:(fun name -> { binding with name }))
+      in
+      List.rev_append opened verdict_environment
 
 let lookup (environment : helper_binding list) name =
   List.find environment ~f:(fun binding -> String.equal binding.name name)
@@ -714,10 +736,9 @@ let resolved_compared_argument environment callee left right ~positive =
 
 let resolved_boolean_match_polarity environment cases =
   let output_for input =
-    List.find_map cases ~f:(fun case ->
-        if Option.is_none case.pc_guard && bool_pattern case.pc_lhs input then
-          resolved_bool environment case.pc_rhs
-        else None)
+    List.find cases ~f:(fun case -> bool_pattern_matches case.pc_lhs input)
+    |> Option.bind ~f:(fun case ->
+        if Option.is_none case.pc_guard then resolved_bool environment case.pc_rhs else None)
   in
   match (output_for true, output_for false) with
   | Some true, Some false -> Some true
@@ -1983,12 +2004,23 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check = function ok -> Verdict.p "all rows pass" ok
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified argument forwarded through a match wrapper",
+      {ocaml|let check ok = Verdict.p "all rows pass" (match ok with value -> value)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "refuses a quantified argument passed to a qualified local-module wrapper",
       {ocaml|module Checks = struct
   let check ok = Verdict.p "all rows pass" ok
 end
 let () = Checks.check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "Checks.check" ] );
+    ( "refuses a quantified argument passed through an opened local module",
+      {ocaml|module Checks = struct
+  let check ok = Verdict.p "all rows pass" ok
+end
+open Checks
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -2172,6 +2204,16 @@ let () = Verdict.p "every sample agrees" (close samples)|ocaml},
   match List.for_all rows ~f:Fn.id with true -> true | false -> false
 let () = Verdict.p "all rows pass" close|ocaml},
       [ "close" ] );
+    ( "refuses a direct quantifier forwarded by a wildcard Boolean match",
+      {ocaml|let close =
+  match List.for_all rows ~f:Fn.id with false -> false | _ -> true
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "close" ] );
+    ( "accepts a direct quantifier inverted by a wildcard Boolean match",
+      {ocaml|let differs =
+  match List.for_all rows ~f:Fn.id with false -> true | _ -> false
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
     ( "accepts a direct quantifier inverted by a Boolean constructor match",
       {ocaml|let differs =
   match List.for_all rows ~f:Fn.id with true -> false | false -> true

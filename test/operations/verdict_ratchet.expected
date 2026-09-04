@@ -70,7 +70,9 @@ accepts an inverted quantified condition used as a wrapper claim value: true
 refuses a quantified argument claimed inside an eager wrapper call: true
 refuses a quantified argument claimed under a local Verdict open: true
 refuses a quantified argument claimed by a function-case wrapper: true
+refuses a quantified argument forwarded through a match wrapper: true
 refuses a quantified argument passed to a qualified local-module wrapper: true
+refuses a quantified argument passed through an opened local module: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -108,6 +110,8 @@ refuses a quantified component destructured from an intermediate aggregate: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a helper that returns a match-bound quantified value: true
 refuses a direct quantifier forwarded by a Boolean constructor match: true
+refuses a direct quantifier forwarded by a wildcard Boolean match: true
+accepts a direct quantifier inverted by a wildcard Boolean match: true
 accepts a direct quantifier inverted by a Boolean constructor match: true
 refuses a bound exists inverted by a Boolean constructor match: true
 refuses a bound exists inverted by aliased Boolean match outcomes: true

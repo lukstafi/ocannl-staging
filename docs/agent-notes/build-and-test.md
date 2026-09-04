@@ -834,8 +834,10 @@ that they earn a lookup rather than always-loaded space.
   extend discovery, eager outer calls do not hide a nested claim argument, and `function` cases
   contribute their positional argument slot. Conditions forwarded or inverted inside a claimed
   Boolean retain their polarity. Wrappers exported from file-local modules are available through
-  their qualified name, and a syntactic `?arg:None` keeps the optional default edge when a wrapper is
-  partially applied. Its exact, stale-checked exemption list is only for bindings whose intended
+  their qualified name or through a file-local module `open`. Match aliases connect a wrapper's
+  claimed result back to its scrutinee, and a syntactic `?arg:None` keeps the optional default edge
+  when a wrapper is partially applied. Its exact, stale-checked exemption list is only for bindings
+  whose intended
   passing meaning allows an empty population; synthetic controls include a child process the
   shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
@@ -881,7 +883,10 @@ that they earn a lookup rather than always-loaded space.
   Constant Boolean aliases in an `if` or guarded-case result—including aliases introduced by a
   returned local `let`—carry the same polarity as literal `true` and `false`; unresolved outcomes
   retain the existing conservative dependency traversal, while identical resolved branches prove
-  that the condition does not contribute. Constructor-match outcomes and Boolean-comparison
+  that the condition does not contribute. Boolean match polarity follows the first matching case for
+  each input, including wildcard, variable, alias, constrained, open, and or-patterns, rather than
+  considering only literal constructor patterns. This preserves forwarding and inversion through
+  ordinary exhaustive matches. Constructor-match outcomes and Boolean-comparison
   operands resolve the same aliases. Local opens, local-module declarations, and local exceptions
   are transparent to returned-quantifier analysis, protected `try` expressions remain part of that
   analysis, and `not @@ quantified` retains the same negative polarity as direct and piped `not`.
