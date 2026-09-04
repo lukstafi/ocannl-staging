@@ -58,6 +58,18 @@ type mma_staged_layout =
           [simdgroup]-era entry would reuse this type. *)
 [@@deriving sexp, compare, equal]
 
+(** Where a tensor-unit rendering keeps its accumulator. The distinction is observable whenever a
+    reduction is split into outer [k] blocks: {!Mma_per_statement} crosses only the intrinsic's own
+    [k] extent, while {!Mma_fragment_scope} crosses the enclosing serial reduction. *)
+type mma_emission_scope =
+  | Mma_per_statement
+      (** One {!Low_level.Tile_mma} emitted by the backend's [mma_syntax] hook. In a staged schedule
+          this form reloads and stores [d] at every outer [k] block. *)
+  | Mma_fragment_scope
+      (** A persistent accumulator emitted by [mma_fragment_syntax], loaded before and stored after
+          the enclosing serial reduction. *)
+[@@deriving sexp, compare, equal]
+
 type mma_capability = {
   mma_simd_width : int;
       (** Threads cooperating in one tile-MMA instruction (CUDA warp / Metal simdgroup width). *)
@@ -80,18 +92,19 @@ type mma_capability = {
           [nvcuda::wmma] pairs bf16 operands with a [float] accumulator only, so keying on the
           operands alone made the autotuner seed — and time, and rank — 36 candidates per arm on a
           uniformly-bf16 network that every one of them rendered as the lane-0 scalar fallback. *)
-  mma_f16_wide_acc : bool;
-      (** Whether the backend's uniform-f16 arm — an f16-storage destination with f16 operands — can
-          hold the accumulator in f32 and convert once at the [d] boundary, which is what the
-          {!Numerics.Fp16_wide} policy requires of every rendering (gh-ocannl-680). CUDA's
-          inline-PTX [mma.sync.m16n8k16] arm can (sm_80+, the architecturally-defined fragment
-          layouts are shared by .f16 and .bf16); HIP can since gh-ocannl-789 (rocWMMA's
-          [(f16, f16, f32)] fragments, the boundary converted elementwise through a
-          destination-typed accumulator fragment); Metal can since gh-ocannl-837 (mixed-type
-          [simdgroup_multiply_accumulate] plus a [thread_elements()] boundary copy). Where false,
-          the seeding gate in [Sketch_families.mma_tile_for_precisions] withholds uniform-f16 seeds
-          under the wide policy — the serial legs then carry the f32 residency via [accum_prec],
-          keeping the width schedule-uniform per the gh-ocannl-545/663 discipline. *)
+  mma_f16_wide_acc_scopes : mma_emission_scope list;
+      (** The emission scopes in which the backend's uniform-f16 arm — an f16-storage destination
+          with f16 operands — holds the accumulator in f32 and converts once at that scope's [d]
+          boundary, as {!Numerics.Fp16_wide} requires (gh-ocannl-680, gh-ocannl-836).
+
+          CUDA sm_80+ advertises only {!Mma_per_statement}: its inline-PTX [mma.sync.m16n8k16] arm
+          is wide, but [nvcuda::wmma] has no uniform-f16 wide fragment arm, so staged seeds that
+          would require {!Mma_fragment_scope} are withheld. HIP advertises both scopes since
+          gh-ocannl-789 (rocWMMA's [(f16, f16, f32)] fragments and converted boundary), and Metal
+          advertises both since gh-ocannl-837 (mixed-type [simdgroup_multiply_accumulate] plus a
+          [thread_elements()] boundary copy). Withholding only the unsupported scope preserves
+          legal tensorized schedules without letting an outer [k] split introduce extra f16
+          narrowing boundaries. *)
   mma_staged_layouts :
     ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
       (** Format triples whose cooperatively staged operand tiles the backend can read in a

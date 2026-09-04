@@ -15,6 +15,7 @@ half tensorized matmul matches the serial twin bitwise: true
 half tensorized structure as expected: true
 Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise: true
 Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not the schedule, sets the width): true
+Fp16_wide mma seeds match the backend's advertised emission scopes: true
 Fp16_wide half tensorized structure as expected: true
 Fp16_wide with narrow_compute_f32 off matches the independent wide reference: true
 Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile accumulator): true
