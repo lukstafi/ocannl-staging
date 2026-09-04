@@ -357,8 +357,8 @@ let () =
      [bin-smoke] canary hit on a GitHub runner (PR #608), where the cell is 2x2 and the question
      being asked is whether the pipeline runs end to end, not what it measures. So the canary passes
      [--allow-unmeasured] and a refusal leaves it green, while an ordinary run — which was asked for
-     numbers and got none — still exits 1. Refusals print their [!!] line either way; a silent
-     "n/a" is what neither caller wants. *)
+     numbers and got none — still exits 1. Refusals print their [!!] line either way; a silent "n/a"
+     is what neither caller wants. *)
   let failures = ref 0 in
   let unmeasured = ref 0 in
   let allow_unmeasured = Bench_args.flag args ~name:"allow-unmeasured" in
