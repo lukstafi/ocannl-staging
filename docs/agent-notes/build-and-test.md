@@ -1282,7 +1282,10 @@ that they earn a lookup rather than always-loaded space.
   refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
   A target-producing rule anywhere in the repository may not run a public bin executable: its
   output could be an implicit build prerequisite of a smoked executable, hiding an extra execution
-  outside the alias dependency edges the census can see.
+  outside the alias dependency edges the census can see. The scan follows alias dependencies of
+  target-producing rules through the same recursive visitor, and refuses their opaque commands;
+  otherwise a generated source could run a public executable through a helper or shell without
+  entering the exact-once count.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
