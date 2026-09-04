@@ -239,6 +239,15 @@ val matmul_launch_geometry : matmul_site -> sketch_params -> Ir.Schedule.launch_
     {!Ir.Low_level.launch_dims} — a prediction that drifted from what the builders emit would
     withhold legal candidates. *)
 
+val conv_launch_geometry : conv_site -> sketch_params -> Ir.Schedule.launch_geometry
+(** The launch geometry a GPU convolution seed will have (gh-ocannl-739): the site's outer output
+    loops followed by the blocked flavor's row-block loop in grid nest order, and the tensorization
+    lane as the sole workgroup loop. This lets convolution seeding consult
+    {!Ir.Schedule.launch_geometry_excess} before compiling a candidate. The prediction is a lower
+    bound on the applied schedule's geometry; tests derive a real conv site through
+    {!Ir.Schedule.fission_scheduled} and cross-check every GPU seed against
+    {!Ir.Low_level.launch_dims}. {!Ir.Schedule.unknown_launch_geometry} for CPU parameters. *)
+
 val sketch_seed_params :
   is_gpu:bool ->
   is_cpu:bool ->

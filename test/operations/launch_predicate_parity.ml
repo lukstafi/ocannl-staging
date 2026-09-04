@@ -8,9 +8,9 @@
    search could only learn one wasted compile at a time, and the one that WAS filtered was a second
    encoding of a limit the gate already held: two places to keep in step as backends multiply.
 
-   Now both callers consult [Schedule.launch_geometry_excess]. They differ only in where the
-   geometry comes from — the gate reads it off the lowered code, the seeder predicts it from the
-   parameters it is about to commit to — so this file pins three things:
+   Now all callers consult [Schedule.launch_geometry_excess]. They differ only in where the geometry
+   comes from — the gate reads it off the lowered code, the seeder predicts it from the parameters
+   it is about to commit to — so this file pins three things:
 
    - the predicate's own rows: each of the five dimensions refuses one over its cap as its own typed
    resource, and accepts a candidate exactly AT the cap (without that arm a predicate that refuses
@@ -26,8 +26,11 @@
    Limits are MOCKED throughout: the point is a cap below a candidate's geometry, and the fleet's
    real devices are nowhere near these extents (CUDA's [maxThreadsDim.z] of 64 against a 1024
    product cap is the one genuinely tight per-dimension cap, and no Apple part reproduces it). The
-   lowering is real, and backend-independent: only [Schedule.apply] and the seeding API are
-   exercised, so this runs identically on cc. *)
+   lowering is real. The matmul site is captured directly; the conv sites are derived from the
+   pre-schedule normal segment of [Schedule.fission_scheduled], because their [Zero_out] must be in
+   a separate kernel before a GPU conv schedule applies. Only [Schedule.apply] and the seeding API
+   consume those sites, so the claims remain backend-independent while the CUDA run exercises the
+   real GPU lowering path. *)
 
 open Base
 open Ocannl
@@ -272,4 +275,120 @@ let () =
     ~over:(grid_cap 1);
   parity ~what:"seed .z grid fold" ~resource:SO.Grid_z_extent ~seed:twin_seed
     ~at:(grid_cap (bb * hh))
-    ~over:(grid_cap ((bb * hh) - 1))
+    ~over:(grid_cap ((bb * hh) - 1));
+
+  (* === Real convolution sites behind the fission seam (gh-ocannl-739) === *)
+  let capture_conv_segment name y =
+    let captured = ref None in
+    let ctx = Context.auto () in
+    let limits = Context.hardware_limits ctx in
+    let _ctx, _routine =
+      Context.compile
+        ~lowered_transform:(fun opt ->
+          let preset seg = Sched.default_gpu ~min_parallel:1 ~limits seg in
+          let zero_sched tns = Sched.zero_expansion ~limits tns in
+          let segments = Sched.fission_scheduled ~preset ~zero_sched ~static_indices:[] opt in
+          List.iter segments ~f:(fun (_, pre, _, _) ->
+              match Autotune.detect_conv pre.LL.llc with
+              | Some _ -> captured := Some pre
+              | None -> ());
+          List.map segments ~f:(fun (_, _, _, post) -> post))
+        ctx
+        (named name (Train.forward y))
+        Ir.Indexing.Empty
+    in
+    Option.value_exn ~here:[%here] !captured
+  in
+  let make_conv2 tag =
+    let x =
+      NTDSL.init ~l:(tag ^ "_x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 18; 18; 8 ]
+        ~f:(fun idcs -> Float.of_int (Int.rem (Array.fold idcs ~init:0 ~f:( + )) 7))
+        ()
+    in
+    let kernel =
+      NTDSL.init ~l:(tag ^ "_k") ~prec:Ir.Ops.single ~i:[ 3; 3; 8 ] ~o:[ 16 ]
+        ~f:(fun idcs -> Float.of_int (Int.rem (Array.fold idcs ~init:0 ~f:( + )) 5))
+        ()
+    in
+    let%op y =
+      x
+      +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kernel
+    in
+    y
+  in
+  let conv_opt = capture_conv_segment "lpp_conv" (make_conv2 "lpp_c") in
+  let conv_site = Option.value_exn ~here:[%here] (Autotune.detect_conv conv_opt.LL.llc) in
+  let conv_gpu =
+    Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:mma_limits conv_opt
+    |> List.filter ~f:(fun q -> q.Autotune.sk_gpu && q.Autotune.sk_conv)
+  in
+  p_exists "conv prediction: the fission segment seeds a whole-extent GPU flavor" conv_gpu
+    ~f:(fun q -> q.Autotune.sk_bm = 0);
+  p_exists "conv prediction: the fission segment seeds a row-blocked GPU flavor" conv_gpu
+    ~f:(fun q -> q.Autotune.sk_bm > 0);
+  let lower_bound (predicted : Sched.launch_geometry) (actual : Sched.launch_geometry) =
+    let le p a =
+      match (p, a) with None, _ -> true | Some p, Some a -> p <= a | Some _, None -> false
+    in
+    le predicted.Sched.lg_grid_y actual.Sched.lg_grid_y
+    && le predicted.Sched.lg_grid_z actual.Sched.lg_grid_z
+    && le predicted.Sched.lg_block_x actual.Sched.lg_block_x
+    && le predicted.Sched.lg_block_y actual.Sched.lg_block_y
+    && le predicted.Sched.lg_block_z actual.Sched.lg_block_z
+  in
+  p_none "conv prediction: no GPU seed predicts a dimension above its applied launch geometry"
+    conv_gpu ~f:(fun q ->
+      match Sched.apply (Autotune.sketch_schedule ~p:q conv_opt) conv_opt with
+      | applied ->
+          let actual = Sched.launch_geometry_of_dims (LL.launch_dims applied.LL.llc) in
+          not (lower_bound (Autotune.conv_launch_geometry conv_site q) actual)
+      | exception exn ->
+          Stdio.eprintf "conv prediction: schedule FAILED: %s\n" (Exn.to_string exn);
+          true);
+
+  (* Negative control: the blocked flavor adds a row-block [.x] coordinate, leaves the non-row
+     spatial axis on [.y], and folds a deliberately large batch of 65536 onto [.z]. This is the
+     batch x spatial outer geometry whose product can cross the 16-bit cap; a unit non-row spatial
+     extent keeps the fixture small. The graph is compiled but never dispatched. *)
+  let make_large_conv2 tag =
+    let x =
+      NTDSL.init ~l:(tag ^ "_x") ~prec:Ir.Ops.single ~b:[ 65_536 ] ~o:[ 3; 17; 2 ]
+        ~f:(fun _ -> 1.)
+        ()
+    in
+    let kernel =
+      NTDSL.init ~l:(tag ^ "_k") ~prec:Ir.Ops.single ~i:[ 2; 2; 2 ] ~o:[ 2 ] ~f:(fun _ -> 1.) ()
+    in
+    let%op y =
+      x
+      +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kernel
+    in
+    y
+  in
+  let large_opt = capture_conv_segment "lpp_conv_overcap" (make_large_conv2 "lpp_co") in
+  let large_site = Option.value_exn ~here:[%here] (Autotune.detect_conv large_opt.LL.llc) in
+  let permissive_limits = { mma_limits with BI.max_grid_yz = Some 1_000_000 } in
+  let capped_limits = { mma_limits with BI.max_grid_yz = Some 65_535 } in
+  let gpu_seeds limits =
+    Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits large_opt
+    |> List.filter ~f:(fun q -> q.Autotune.sk_gpu && q.Autotune.sk_conv)
+  in
+  let permissive = gpu_seeds permissive_limits in
+  let over_cap q =
+    match
+      Sched.launch_geometry_excess ~limits:capped_limits
+        (Autotune.conv_launch_geometry large_site q)
+    with
+    | Some x -> SO.equal_resource x.Sched.lx_resource SO.Grid_z_extent
+    | None -> false
+  in
+  p_exists
+    "conv control: a permissive cap proposes a blocked seed folding batch x spatial past 65535"
+    permissive ~f:over_cap;
+  let rejected_keys = List.filter permissive ~f:over_cap |> List.map ~f:key in
+  let leaked =
+    List.filter (gpu_seeds capped_limits) ~f:(fun q ->
+        List.mem rejected_keys (key q) ~equal:Poly.equal)
+  in
+  p_empty "conv seeding: the 65535 grid.z cap omits every deliberately over-cap seed"
+    ~over:rejected_keys leaked

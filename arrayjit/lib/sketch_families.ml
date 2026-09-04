@@ -1439,6 +1439,19 @@ let matmul_launch_geometry (site : matmul_site) (p : sketch_params) : Sched.laun
     in
     predicted_launch_geometry ~grid ~block
 
+(* The launch geometry a GPU convolution sketch will have. The outer output loops are [Grid] in nest
+   order; the blocked flavor appends its row-block loop, making those blocks the innermost grid
+   coordinate ([.x]) and folding any excess outer coordinates onto [.z]. The tensorization lane is
+   the pipeline's only [Workgroup] loop. As for the matmul prediction above, CPU parameters name no
+   device launch and therefore predict nothing. *)
+let conv_launch_geometry (site : conv_site) (p : sketch_params) : Sched.launch_geometry =
+  if not p.sk_gpu then Sched.unknown_launch_geometry
+  else
+    let grid =
+      List.map site.c_outer ~f:snd @ if p.sk_bm > 0 then [ blocks_of site.c_nrow p.sk_bm ] else []
+    in
+    predicted_launch_geometry ~grid ~block:[ p.sk_simd ]
+
 (* The site nest's own batch geometry under [sk_batch_grid]: whole-loop [Grid] retypes of the batch
    loops ([batch_hoist_swaps] has already made them the outermost loops of the nest). *)
 let site_batch_ops ~(batch_grid : bool) (site : matmul_site) : Sched.schedule =
@@ -2415,13 +2428,15 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                   whole @ blocked @ depth_twins)
         | _ -> []
       in
-      (* The conv family does not predict its launch geometry yet, so its GPU seeds are not
-         pre-filtered against the caps [Schedule.launch_geometry_excess] holds (gh-ocannl-709): a
-         conv's outer [Grid] loops fold batch x spatial onto [.z], which large inputs can push over
-         a 16-bit cap, and today that costs one compile the gate then declines. What is missing is a
-         [conv_launch_geometry] beside [matmul_launch_geometry] and its cross-check against an
-         applied schedule's [Ir.Low_level.launch_dims] — the caps themselves need no second
-         encoding. *)
+      (* Refuse launch geometries the device gate would reject before paying for a candidate compile
+         (gh-ocannl-739). The shared predicate is the one authority for the caps; this family
+         contributes only its lower-bound prediction. *)
+      let gpu_seeds =
+        List.filter gpu_seeds ~f:(fun p ->
+            Option.is_none
+              (Sched.launch_geometry_excess ~limits:(seeding_limits limits)
+                 (conv_launch_geometry site p)))
+      in
       let seeds = cpu_seeds @ gpu_seeds in
       if List.is_empty seeds then None
       else

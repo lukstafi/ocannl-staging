@@ -173,10 +173,13 @@ files.
   Seeding saturates an unadvertised `max_grid_yz` to the conservative `max_grid_fold_extent`
   (65535) so the seed set does not swing with the machine; the GATE does not — there, an
   unadvertised cap is genuinely no cap.
-  Not yet wired: the CONV family predicts no geometry, so its GPU seeds are still filtered by the
-  gate alone (a 2-D conv folds batch x spatial onto `.z`, which large inputs can push over a 16-bit
-  cap). What is missing is a `conv_launch_geometry` beside `matmul_launch_geometry` and its
-  cross-check against an applied schedule — the caps themselves need no second encoding.
+  The CONV family is wired too (gh-ocannl-739): `conv_launch_geometry` describes the outer output
+  `Grid` loops followed by the blocked flavor's row-block loop (the innermost grid coordinate), plus
+  the tensorization lane as the sole `Workgroup` loop. `conv_seed_params` filters that lower-bound
+  prediction through the same predicate. `launch_predicate_parity` derives a real conv site behind
+  `fission_scheduled`, applies every GPU seed, and proves no predicted dimension exceeds
+  `launch_dims`; its negative control makes a blocked conv fold batch x spatial past 65535
+  and proves the seed exists under a permissive cap but is absent at the device cap.
 
   The GPU backends' `static_properties` dumps list the queried launch-dimension limits next to
   `max_threads_per_block` — HIP `max_grid_size` and `max_threads_dim`, CUDA `max_block_dim` and
