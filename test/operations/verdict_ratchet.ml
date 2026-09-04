@@ -147,6 +147,31 @@ let collection_quantifier callee =
   else if is_collection_call callee ~member:"exists" then Some (Not_exists, 1)
   else None
 
+let bool_literal expr value =
+  match expr.pexp_desc with
+  | Pexp_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
+      String.equal found (Bool.to_string value)
+  | _ -> false
+
+let is_boolean_comparison callee =
+  is_name callee "=" || is_name callee "<>" || is_name callee "equal"
+
+let compared_argument callee left right ~positive =
+  if is_boolean_comparison callee then
+    let equal = not (is_name callee "<>") in
+    match
+      ( bool_literal left true,
+        bool_literal left false,
+        bool_literal right true,
+        bool_literal right false )
+    with
+    | true, _, _, _ -> Some (right, Bool.equal positive equal)
+    | _, true, _, _ -> Some (right, Bool.equal positive (not equal))
+    | _, _, true, _ -> Some (left, Bool.equal positive equal)
+    | _, _, _, true -> Some (left, Bool.equal positive (not equal))
+    | _ -> None
+  else None
+
 let quantifiers_in expr =
   let found = ref [] in
   let positive = ref true in
@@ -156,12 +181,15 @@ let quantifiers_in expr =
       method! attribute _ = ()
 
       method! expression expr =
+        let visit_with_polarity polarity argument =
+          let previous = !positive in
+          positive := polarity;
+          self#expression argument;
+          positive := previous
+        in
         match expr.pexp_desc with
         | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
-            let previous = !positive in
-            positive := not previous;
-            self#expression argument;
-            positive := previous
+            visit_with_polarity (not !positive) argument
         | Pexp_apply (pipe, [ (Asttypes.Nolabel, population); (Asttypes.Nolabel, piped_call) ])
           when is_name pipe "|>" -> (
             match piped_call.pexp_desc with
@@ -179,8 +207,19 @@ let quantifiers_in expr =
                       :: !found;
                     self#expression population;
                     List.iter arguments ~f:(fun (_, argument) -> self#expression argument)
-                | _ -> super#expression expr)
+                | _ -> (
+                    match unlabelled arguments with
+                    | [ literal ] -> (
+                        match compared_argument callee literal population ~positive:!positive with
+                        | Some (argument, polarity) -> visit_with_polarity polarity argument
+                        | None -> super#expression expr)
+                    | _ -> super#expression expr))
             | _ -> super#expression expr)
+        | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+          when is_boolean_comparison callee -> (
+            match compared_argument callee left right ~positive:!positive with
+            | Some (argument, polarity) -> visit_with_polarity polarity argument
+            | None -> super#expression expr)
         | Pexp_apply (callee, arguments) ->
             let add kind count =
               found := { kind; populations = populations arguments count } :: !found
@@ -263,12 +302,6 @@ let length_population expr =
   | Pexp_apply (callee, arguments) when is_collection_call callee ~member:"length" ->
       List.hd (unlabelled arguments) |> Option.bind ~f:population_name
   | _ -> None
-
-let bool_literal expr value =
-  match expr.pexp_desc with
-  | Pexp_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
-      String.equal found (Bool.to_string value)
-  | _ -> false
 
 (* Populations that HAVE to be non-empty for this expression to be true. This is intentionally a
    small boolean grammar: conjunction composes requirements, [not (X.is_empty xs)] is the spelling
@@ -380,47 +413,6 @@ let open_claims environment declaration =
 let lookup environment name =
   List.find environment ~f:(fun binding -> String.equal binding.name name)
 
-let positive_names expr =
-  let names = ref (Set.empty (module String)) in
-  let rec visit positive expr =
-    let visit_arguments positive arguments =
-      List.iter arguments ~f:(fun (_, argument) -> visit positive argument)
-    in
-    match expr.pexp_desc with
-    | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
-        visit (not positive) argument
-    | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
-      when is_name callee "=" || is_name callee "<>" || is_name callee "equal" -> (
-        let equal = not (is_name callee "<>") in
-        match
-          ( bool_literal left true,
-            bool_literal left false,
-            bool_literal right true,
-            bool_literal right false )
-        with
-        | true, _, _, _ -> visit (Bool.equal positive equal) right
-        | _, true, _, _ -> visit (Bool.equal positive (not equal)) right
-        | _, _, true, _ -> visit (Bool.equal positive equal) left
-        | _, _, _, true -> visit (Bool.equal positive (not equal)) left
-        | _ -> visit_arguments positive [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
-    | Pexp_function _ -> ()
-    | _ ->
-        (match Sources.longident_of expr with
-        | Some [ name ] when positive -> names := Set.add !names name
-        | _ -> ());
-        let iterator =
-          object
-            inherit Ast_traverse.iter as super
-            method! attribute _ = ()
-            method! expression child = visit positive child
-            method children child = super#expression child
-          end
-        in
-        iterator#children expr
-  in
-  visit true expr;
-  !names
-
 let claim_kind environment callee =
   match Sources.longident_of callee with
   | Some [ alias ] -> lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
@@ -458,6 +450,62 @@ let make_binding environment value =
       in
       { name; site; dependencies; unguarded; claim_kind })
 
+let positive_bindings environment expr =
+  let bindings = ref [] in
+  let rec visit environment positive expr =
+    let visit_arguments environment positive arguments =
+      List.iter arguments ~f:(fun (_, argument) -> visit environment positive argument)
+    in
+    match expr.pexp_desc with
+    | Pexp_let (_, values, body) ->
+        let local = List.filter_map values ~f:(make_binding environment) in
+        visit (List.rev_append local environment) positive body
+    | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+        visit environment (not positive) argument
+    | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
+      when is_name pipe "|>" -> (
+        match piped_call.pexp_desc with
+        | Pexp_apply (callee, arguments) -> (
+            match unlabelled arguments with
+            | [ literal ] -> (
+                match compared_argument callee literal value ~positive with
+                | Some (argument, polarity) -> visit environment polarity argument
+                | None ->
+                    visit_arguments environment positive
+                      [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
+            | _ ->
+                visit_arguments environment positive
+                  [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
+        | _ ->
+            visit_arguments environment positive
+              [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
+    | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+      when is_boolean_comparison callee -> (
+        match compared_argument callee left right ~positive with
+        | Some (argument, polarity) -> visit environment polarity argument
+        | None ->
+            visit_arguments environment positive
+              [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    | Pexp_function _ -> ()
+    | _ ->
+        (match Sources.longident_of expr with
+        | Some [ name ] when positive ->
+            Option.iter (lookup environment name) ~f:(fun binding ->
+                bindings := binding :: !bindings)
+        | _ -> ());
+        let iterator =
+          object
+            inherit Ast_traverse.iter as super
+            method! attribute _ = ()
+            method! expression child = visit environment positive child
+            method children child = super#expression child
+          end
+        in
+        iterator#children expr
+  in
+  visit environment true expr;
+  !bindings
+
 let quantified_claims structure =
   let origins bindings =
     let rec visit seen binding =
@@ -479,8 +527,7 @@ let quantified_claims structure =
             match List.last (unlabelled arguments) with
             | None -> ()
             | Some boolean ->
-                positive_names boolean |> Set.to_list
-                |> List.filter_map ~f:(lookup environment)
+                positive_bindings environment boolean
                 |> origins
                 |> List.iter ~f:(fun binding ->
                     found :=
@@ -742,6 +789,27 @@ let () = Verdict.p "the values agree" close|ocaml},
     ( "accepts a negated fully applied quantified binding",
       {ocaml|let differs = not (Array.for_all2_exn got want ~f:Float.equal)
 let () = Verdict.p "some value differs" differs|ocaml},
+      [] );
+    ( "refuses a fully applied quantifier compared with true",
+      {ocaml|let close = Array.for_all2_exn got want ~f:Float.equal |> Bool.equal true
+let () = Verdict.p "the values agree" close|ocaml},
+      [ "close" ] );
+    ( "accepts a fully applied quantifier compared with false",
+      {ocaml|let differs = Array.for_all2_exn got want ~f:Float.equal |> Bool.equal false
+let () = Verdict.p "some value differs" differs|ocaml},
+      [] );
+    ( "refuses a binding nested directly inside a claim argument",
+      {ocaml|let () =
+  Verdict.p "all rows pass" (let ok = List.for_all rows ~f:Fn.id in ok)|ocaml},
+      [ "ok" ] );
+    ( "accepts a guarded binding nested directly inside a claim argument",
+      {ocaml|let () =
+  Verdict.p "all rows pass"
+    (let ok = (not (List.is_empty rows)) && List.for_all rows ~f:Fn.id in ok)|ocaml},
+      [] );
+    ( "accepts a negated binding nested directly inside a claim argument",
+      {ocaml|let () =
+  Verdict.p "some row fails" (let ok = List.for_all rows ~f:Fn.id in not ok)|ocaml},
       [] );
     ( "refuses a helper that returns a fully applied quantified local binding",
       {ocaml|let close xs =

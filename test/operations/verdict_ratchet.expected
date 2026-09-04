@@ -44,6 +44,11 @@ refuses a sibling for_all helper through an intermediate result binding: true
 refuses a fully applied quantifier bound before the claim: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
+refuses a fully applied quantifier compared with true: true
+accepts a fully applied quantifier compared with false: true
+refuses a binding nested directly inside a claim argument: true
+accepts a guarded binding nested directly inside a claim argument: true
+accepts a negated binding nested directly inside a claim argument: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a quantifier written in pipeline style: true
 keeps helper resolution inside its lexical scope: true

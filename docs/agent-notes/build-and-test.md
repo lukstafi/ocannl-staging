@@ -822,6 +822,10 @@ that they earn a lookup rather than always-loaded space.
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
+  Claim-argument resolution installs a `let` nested inside the argument before following the value
+  it returns, and both helper analysis and claim resolution preserve polarity through `not` and
+  explicit true/false comparisons (including pipeline spelling). The controls pair each accepted
+  negation with a positive form the ratchet must still refuse.
   The literal- and computed-label exemption lists carry the same one-key/one-site contract
   (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while
   line and column are report text; `record_definition` aggregates all three exemption families by
