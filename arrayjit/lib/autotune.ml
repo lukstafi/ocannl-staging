@@ -411,23 +411,27 @@ let queued_batch_depth { ms = est_ms; contended = _; samples = _ } =
    When the marginal term is unresolved, the memory cap is the only honest depth bound. Return the
    predicted whole-batch wall too, so a cap-bound shortfall is logged from this affine model rather
    than from an overhead-polluted per-launch average. *)
-let refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms =
-  if probe_depth <= 1 then (1, probe_ms)
+let refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth ~probe_ms =
+  let retry_depth =
+    if probe_depth >= max_queue_depth / 2 then max_queue_depth
+    else Int.min max_queue_depth (Int.max (probe_depth + 1) (2 * probe_depth))
+  in
+  if probe_depth <= base_depth then (retry_depth, Float.nan)
   else if
     Float.is_finite probe_ms && Float.is_positive probe_ms && Float.(probe_ms >= queued_batch_ms)
   then (probe_depth, probe_ms)
   else if
-    (not (Float.is_finite single_ms))
-    || (not (Float.is_positive single_ms))
+    (not (Float.is_finite base_ms))
+    || (not (Float.is_positive base_ms))
     || (not (Float.is_finite probe_ms))
     || not (Float.is_positive probe_ms)
-  then (max_queue_depth, Float.nan)
+  then (retry_depth, Float.nan)
   else
-    let marginal_ms = (probe_ms -. single_ms) /. Float.of_int (probe_depth - 1) in
+    let marginal_ms = (probe_ms -. base_ms) /. Float.of_int (probe_depth - base_depth) in
     if (not (Float.is_finite marginal_ms)) || not (Float.is_positive marginal_ms) then
-      (max_queue_depth, Float.nan)
+      (retry_depth, Float.nan)
     else
-      let fixed_ms = single_ms -. marginal_ms in
+      let fixed_ms = base_ms -. (marginal_ms *. Float.of_int base_depth) in
       let wanted = (queued_batch_ms -. fixed_ms) /. marginal_ms in
       let depth =
         if (not (Float.is_finite wanted)) || Float.(wanted >= of_int max_queue_depth) then
@@ -435,6 +439,10 @@ let refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms =
         else Int.max probe_depth (Int.max 1 (Float.iround_up_exn wanted))
       in
       (depth, fixed_ms +. (marginal_ms *. Float.of_int depth))
+
+let refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms =
+  if probe_depth <= 1 then (1, probe_ms)
+  else refine_queued_batch_depth_between ~base_depth:1 ~base_ms:single_ms ~probe_depth ~probe_ms
 
 (* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
    rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
@@ -541,7 +549,8 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                 refine_queued_batch_depth ~single_ms:single_estimate.ms ~probe_depth
                   ~probe_ms:probe.ms
               in
-              let rec validate_depth probes_left calibration_dispatches depth estimated_wall_ms =
+              let rec validate_depth probes_left calibration_dispatches base_depth base_ms depth
+                  estimated_wall_ms =
                 if depth = probe_depth && Float.(probe.ms >= queued_batch_ms) then
                   (calibration_dispatches, depth, probe.ms)
                 else if depth = max_queue_depth then
@@ -555,11 +564,15 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                     (calibration_dispatches, depth, validation.ms)
                   else
                     let next_depth, next_wall_ms =
-                      refine_queued_batch_depth ~single_ms:single_estimate.ms ~probe_depth:depth
+                      refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth:depth
                         ~probe_ms:validation.ms
                     in
                     if next_depth = max_queue_depth then
                       (calibration_dispatches, next_depth, next_wall_ms)
+                    else if probes_left <= 1 && Float.is_nan next_wall_ms then
+                      (* Several depth-separated probes still resolve no marginal work. The cap is
+                         now a retried conclusion rather than a jump from one noisy pair. *)
+                      (calibration_dispatches, max_queue_depth, Float.nan)
                     else if probes_left <= 1 then
                       (* Keep the latest supported affine projection after the bounded validation
                          loop. Jumping to the cap here would turn a noisy near-target probe into a
@@ -567,15 +580,15 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                          host stall this policy exists to detect. *)
                       (calibration_dispatches, next_depth, next_wall_ms)
                     else
-                      validate_depth (probes_left - 1) calibration_dispatches next_depth
-                        next_wall_ms
+                      validate_depth (probes_left - 1) calibration_dispatches depth validation.ms
+                        next_depth next_wall_ms
               in
               let calibration_dispatches =
                 single_estimate.samples + (probe.samples * probe_depth)
               in
               let calibration_dispatches, depth, estimated_batch_wall_ms =
-                validate_depth max_depth_validation_probes calibration_dispatches depth
-                  estimated_batch_wall_ms
+                validate_depth max_depth_validation_probes calibration_dispatches probe_depth
+                  probe.ms depth estimated_batch_wall_ms
               in
               (calibration_dispatches, depth, Some estimated_batch_wall_ms)
       in

@@ -1152,10 +1152,11 @@ val refine_queued_batch_depth : single_ms:float -> probe_depth:int -> probe_ms:f
     minimum of a batch at [probe_depth]. Returns the final depth and its estimated whole-batch wall.
     The two observations separate fixed synchronization cost from marginal launch cost, so even a
     shallow provisional batch reaches the ~10 ms contention scale rather than counting a fraction of
-    the fixed cost against every launch. A probe already at the target keeps its depth; an
-    unresolved marginal cost grows to the 2048-launch memory cap and returns [nan] for the wall,
-    rather than labeling the shallow probe as a cap-wall estimate. Exposed as the deterministic
-    policy seam for tests. *)
+    the fixed cost against every launch. A probe already at the target keeps its depth. An
+    unresolved pair requests a doubled retry and returns [nan] for the wall rather than jumping to
+    the cap or labeling the shallow probe as a cap-wall estimate; repeated unresolved batch pairs
+    eventually reach the 2048-launch memory cap. Exposed as the deterministic policy seam for tests.
+*)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
@@ -1197,16 +1198,18 @@ val time_routine :
     floored at 1. A synchronized single-launch estimate seeds a provisional depth; when that is
     above 1, a provisional queued probe separates fixed synchronization from marginal launch cost
     and selects the depth whose affine wall estimate reaches the target. The batch probes take the
-    minimum of twelve runs: unlike ranked timing, they only choose scale and are already milliseconds
-    long. Up to four further probes validate the depth; after four noisy underestimates, calibration
-    keeps the latest affine projection rather than jumping to a 20--30 ms cap batch that would blunt
-    the 2x contention threshold. A routine slower than the target stays at depth 1 and is measured
-    identically in both modes. The
-    calibration always yields a depth; the result of the timed loop reports when most of ITS samples
-    were stalled, and the tuner refuses such a candidate measurement rather than ranking and caching
-    it (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can
-    spend up to [max 64 repeats] batches on a fast candidate; [max_timing_runs] bounds the top-up
-    beyond the caller's requested floor.
+    minimum of twelve runs: unlike ranked timing, they only choose scale and are already
+    milliseconds long. Up to four further probes validate the depth. An unresolved single/probe pair
+    retries at double depth, and the next affine fit uses the two batch observations so an inflated
+    single window cannot force the cap; only repeated unresolved batch pairs bind there. After four
+    noisy but resolved underestimates, calibration keeps the latest affine projection rather than
+    jumping to a 20--30 ms cap batch that would blunt the 2x contention threshold. A routine slower
+    than the target stays at depth 1 and is measured identically in both modes. The calibration
+    always yields a depth; the result of the timed loop reports when most of ITS samples were
+    stalled, and the tuner refuses such a candidate measurement rather than ranking and caching it
+    (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can spend
+    up to [max 64 repeats] batches on a fast candidate; [max_timing_runs] bounds the top-up beyond
+    the caller's requested floor.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's

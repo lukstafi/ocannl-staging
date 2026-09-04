@@ -130,9 +130,10 @@ let refinement_cases =
     (* A 6 ms fixed synchronization around a 1 ms launch. Dividing the depth-2 probe by two would
        select depth 3; separating the fixed term selects the depth-4, 10 ms batch. *)
     ("a shallow probe with dominant fixed synchronization", 7., 2, 8., 4, Some 10.);
-    (* No resolved marginal work means no finite depth can be inferred. Grow to the memory cap and
-       preserve the observed shortfall for the diagnostic. *)
-    ("a probe with unresolved marginal cost", 6., 2, 6., 2048, None);
+    (* An unresolved marginal observation retries deeper rather than relabeling a shallow wall as
+       the cap wall. A second batch point can then separate genuine work from an inflated single. *)
+    ("a probe with unresolved marginal cost", 6., 2, 6., 4, None);
+    ("a clean probe after an inflated single", 6., 2, 0.25, 4, None);
     ("a probe already at the target", 1., 10, 10., 10, Some 10.);
   ]
 
