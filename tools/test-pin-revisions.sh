@@ -168,10 +168,49 @@ case " $* " in
       && has_arg alpha.1.0 "$@" && has_arg beta.2.0 "$@" \
       && has_arg ocannl.dev "$@" \
       || { echo "unexpected opam show contract: $*" >&2; exit 64; }
-    printf '%s\n' \
-      'opam-version: "2.0"' 'name: "alpha"' 'version: "1.0"' \
-      'opam-version: "2.0"' 'name: "beta"' 'version: "2.0"' \
-      'opam-version: "2.0"' 'name: "ocannl"' 'version: "dev"' | emit "$@"
+    {
+      printf '%s\n' \
+        'opam-version: "2.0"' \
+        'synopsis: "Alpha fixture"' \
+        'version: "1.0"' \
+        'description: """' \
+        'The alpha definition has a multi-line description.' \
+        'Its fields are deliberately out of order.' \
+        '"""' \
+        'name: "alpha"' \
+        'url {' \
+        '  src: "https://example.invalid/alpha-1.0.tbz"' \
+        '  checksum: "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+        '}' \
+        'opam-version: "2.0"' \
+        'url {' \
+        '  src: "https://example.invalid/beta-2.0.tbz"' \
+        '  checksum: "sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+        '}' \
+        'description: """' \
+        'The beta definition puts its URL before its identity.' \
+        'This text keeps the definition realistically multi-line.' \
+        '"""' \
+        'name: "beta"' \
+        'maintainer: "beta@example.invalid"' \
+        'version: "2.0"'
+      # A short opam answer is the count guard's fault-injected input. The
+      # complete fixture's last definition also omits identity fields so the
+      # parser's deliberately uninformative ?.? fallback remains exercised.
+      if [ "${FAKE_SHOW_FIXTURE:-complete}" != drop-one ]; then
+        printf '%s\n' \
+          'opam-version: "2.0"' \
+          'description: """' \
+          'This definition deliberately has no name or version.' \
+          'It pins the fallback label for malformed opam output.' \
+          '"""' \
+          'url {' \
+          '  src: "https://example.invalid/ocannl-dev.tbz"' \
+          '  checksum: "sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"' \
+          '}' \
+          'synopsis: "Missing identity fixture"'
+      fi
+    } | emit "$@"
     ;;
   *)
     echo "unsupported opam 2.5.2 fixture call: $*" >&2
@@ -207,7 +246,7 @@ FAKE_GIT
 chmod +x "$TMP/bin/opam" "$TMP/bin/git"
 
 printf '%s\n' \
-  'solution-digest=62b0fa2f1d12' \
+  'solution-digest=34956fded534' \
   'digest=623c3bf9bb0e' >"$TMP/expected-output"
 printf '%s\n' \
   'ls-remote https://example.invalid/alpha.git HEAD' \
@@ -226,6 +265,7 @@ run_subject() { # run_subject SUBJECT LABEL PIN_FIXTURE RESOLUTION
       OPAMCOLOR=always \
       FAKE_PIN_FIXTURE="$pins" \
       FAKE_LIST_FIXTURE="${FAKE_LIST_FIXTURE:-mixed}" \
+      FAKE_SHOW_FIXTURE="${FAKE_SHOW_FIXTURE:-complete}" \
       FAKE_RESOLUTION="$resolution" \
       FAKE_OPAM_ROOT="$TMP/opam-root" \
       FAKE_OPAM_CALLS="$dir/opam.calls" \
@@ -242,21 +282,29 @@ has_escape() { # has_escape FILE...
   LC_ALL=C grep -q "$(printf '\033')" "$@"
 }
 
+lacks_match() { # lacks_match PATTERN FILE
+  if grep -q -- "$1" "$2"; then
+    return 1
+  fi
+  return 0
+}
+
 # The per-definition listing is what names the package whose definition moved
 # when two runs digest differently -- the listings above are identical in that
 # case, which is what forced gh-ocannl-889 to be diagnosed locally. Each line
-# must carry its own digest: three definitions differing only in `name:` and
-# `version:` must produce three DIFFERENT hashes, or the listing is a per-run
-# constant that names nothing.
+# must carry its own digest. The three realistically shaped definitions must
+# produce three DIFFERENT hashes, or the listing is a per-run constant that
+# names nothing. The ?.? entry additionally pins the parser's fallback when a
+# definition supplies neither identity field.
 oracle_definition_digests() { # oracle_definition_digests DIR
   local dir=$1
   grep -q '^Definition digests:$' "$dir/stdout" \
     && grep -qE '^  alpha\.1\.0 [0-9a-f]{12}$' "$dir/stdout" \
     && grep -qE '^  beta\.2\.0 [0-9a-f]{12}$' "$dir/stdout" \
-    && grep -qE '^  ocannl\.dev [0-9a-f]{12}$' "$dir/stdout" \
-    && [ "$(grep -cE '^  (alpha\.1\.0|beta\.2\.0|ocannl\.dev) [0-9a-f]{12}$' \
+    && grep -qE '^  \?\.\? [0-9a-f]{12}$' "$dir/stdout" \
+    && [ "$(grep -cE '^  (alpha\.1\.0|beta\.2\.0|\?\.\?) [0-9a-f]{12}$' \
       "$dir/stdout")" -eq 3 ] \
-    && [ "$(grep -oE '^  (alpha\.1\.0|beta\.2\.0|ocannl\.dev) [0-9a-f]{12}$' \
+    && [ "$(grep -oE '^  (alpha\.1\.0|beta\.2\.0|\?\.\?) [0-9a-f]{12}$' \
       "$dir/stdout" | awk '{ print $2 }' | LC_ALL=C sort -u | wc -l)" -eq 3 ]
 }
 
@@ -309,6 +357,14 @@ oracle_project_only_loud() { # oracle_project_only_loud SUBJECT LABEL
     && ! grep -q '^solution-digest=' "$dir/github-output"
 }
 
+oracle_partial_definitions_loud() { # oracle_partial_definitions_loud SUBJECT LABEL
+  local subject=$1 label=$2 dir="$TMP/runs/$2"
+  FAKE_SHOW_FIXTURE=drop-one run_subject "$subject" "$label" mixed-a ok
+  [ "$(cat "$dir/status")" -ne 0 ] \
+    && grep -q '^opam show returned 2 definitions for 3 requested packages$' "$dir/stderr" \
+    && lacks_match '^solution-digest=' "$dir/github-output"
+}
+
 if oracle_happy "$SRC" shipping-happy mixed-a; then
   report 0 "opam 2.5.2 output: exact solution and pin digests"
   report 0 "local git+file pins: excluded from resolution and digest"
@@ -322,6 +378,11 @@ if oracle_project_only_loud "$SRC" shipping-project-only; then
   report 0 "all-project solution: fails loudly without a solution digest"
 else
   report 1 "all-project solution" "see $TMP/runs/shipping-project-only"
+fi
+if oracle_partial_definitions_loud "$SRC" shipping-partial-definitions; then
+  report 0 "partial opam show answer: fails loudly without a solution digest"
+else
+  report 1 "partial opam show answer" "see $TMP/runs/shipping-partial-definitions"
 fi
 if oracle_deterministic "$SRC" shipping-order; then
   report 0 "pin ordering and duplicates: one stable resolution order and digest"
@@ -379,11 +440,19 @@ else
 fi
 
 project_guard_mutant=$(mutant project-only-guard \
-  'index($0, "#definition_packages[@]") { print "true \\"; changed++; next } { print } END { if (changed != 1) exit 9 }')
+  'index($0, "#definition_packages[@]") && index($0, "-gt 0") { print "true \\"; changed++; next } { print } END { if (changed != 1) exit 9 }')
 if [ -n "$project_guard_mutant" ]; then
   expect_rejected "silent all-project digest is detected" "$project_guard_mutant" oracle_project_only_loud
 else
   report 1 "negative control: project-only guard mutant constructed"
+fi
+
+definition_count_mutant=$(mutant definition-count-guard \
+  '/^\[/ && index($0, "wc -l <\"$work_dir/labels\"") { print "true \\"; changed++; next } { print } END { if (changed != 1) exit 9 }')
+if [ -n "$definition_count_mutant" ]; then
+  expect_rejected "silent partial definition listing is detected" "$definition_count_mutant" oracle_partial_definitions_loud
+else
+  report 1 "negative control: definition-count guard mutant constructed"
 fi
 
 empty_mutant=$(mutant empty-registry-guard \

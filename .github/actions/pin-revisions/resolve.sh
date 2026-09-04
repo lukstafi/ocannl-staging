@@ -121,6 +121,12 @@ awk -v dir="$blocks_dir" '
 # exactly the silent key freeze the guards in this script exist to prevent.
 [ -s "$work_dir/labels" ] \
   || { echo "no package definitions parsed from opam show output" >&2; exit 1; }
+# A partial answer still changes the aggregate digest, but it makes the
+# diagnostic listing silently stop naming packages. Relate the blocks parsed
+# from opam's answer to the package set that asked for them.
+[ "$(wc -l <"$work_dir/labels")" -eq "${#definition_packages[@]}" ] \
+  || { printf 'opam show returned %d definitions for %d requested packages\n' \
+    "$(wc -l <"$work_dir/labels")" "${#definition_packages[@]}" >&2; exit 1; }
 hash12_files "$blocks_dir"/* >"$work_dir/hashes"
 echo "Definition digests:"
 paste -d' ' "$work_dir/labels" "$work_dir/hashes" | sed 's/^/  /'
