@@ -258,11 +258,13 @@ def main(argv=None, here=None):
     if others:
         # The trap gh-ocannl-759 was filed about: their entries survive (so their fixtures still
         # pass the gate), but their bytes are now a different workload from this box's. Only
-        # origins actually on different BYTES are named -- a coordinated regeneration that landed
-        # the same bytes on both boxes is the goal, not something to warn about.
-        print(f"  origins still on DIFFERENT bytes for these fixtures: {', '.join(others)} — "
-              "regeneration is a cross-box event, so until they regenerate too, their published "
-              "numbers and this box's are on different workloads.")
+        # A declared origin with no entry is named too: the declaration is what distinguishes
+        # "this measuring box has unrecorded bytes" from "this box never measures this workload".
+        # A coordinated regeneration that recorded the same bytes on both boxes remains quiet.
+        print(f"  measurement boxes missing an entry or still on DIFFERENT bytes for these "
+              f"fixtures: {', '.join(others)} — regeneration is a cross-box event, so until "
+              "they regenerate and record too, their published numbers and this box's may be on "
+              "different workloads.")
 
 
 if __name__ == "__main__":

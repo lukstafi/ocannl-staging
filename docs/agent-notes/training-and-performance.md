@@ -146,7 +146,10 @@ files.
   measuring boxes. If your copies are merely unrecorded, `python3 benchmarks/fixture_digest.py
   --record` pins them as they are (stdlib-only, no venv, and it leaves other origins alone);
   `--check` reports disk against record. Regeneration is a cross-box event to be coordinated
-  across every origin in `DIGESTS.txt` at once (gh-ocannl-759).
+  across every origin in `DIGESTS.txt`'s `# measurement-boxes:` header field at once
+  (gh-ocannl-759, gh-ocannl-850). That list is independent of the entry rows, so
+  `divergent_origins` and generated reports name a declared box even when its fixture entry is
+  absent; deriving the box set from rows would recreate the silence the field exists to remove.
 - The boxes are **not** on the same fixture bytes, and the digest file says so per origin
   (`<sha256>  <bytes>  <name>  <origin>`, gh-ocannl-759). `mlp_small` and `gpt2_mini` hash
   differently on minix and rog-nv at identical sizes — two venvs, two numpy `Generator` streams,

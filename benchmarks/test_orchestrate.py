@@ -1089,6 +1089,46 @@ class FixtureDigestTest(unittest.TestCase):
             for e in recorded:
                 self.assertTrue(e.origin and e.origin.strip(), name)
 
+    def test_the_checked_in_header_declares_the_measurement_boxes(self):
+        digests = HERE / "fixtures" / fixture_digest.DIGEST_FILE
+
+        self.assertEqual(
+            fixture_digest.declared_measurement_boxes(digests),
+            ["m4-max", "minix", "rog-nv"],
+        )
+
+    def test_the_unrecorded_metal_box_is_reported_for_checked_in_fixtures(self):
+        digests = HERE / "fixtures" / fixture_digest.DIGEST_FILE
+        entries = fixture_digest.read_digests(digests)
+
+        for name, recorded in entries.items():
+            self.assertTrue(recorded, name)
+            self.assertIn(
+                "m4-max",
+                fixture_digest.divergent_origins(digests, [name], recorded[0].origin),
+                name,
+            )
+
+    def test_a_duplicate_box_declaration_is_refused(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.header(["minix", "rog-nv"])
+            + f"{fixture_digest.MEASUREMENT_BOXES_FIELD} third-box\n"
+        )
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+    def test_an_entry_for_an_undeclared_box_is_refused(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.header(["minix"])
+            + "deadbeef  17  lenet.safetensors  rog-nv\n"
+        )
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
     def test_a_regenerating_box_is_told_which_others_it_has_left_behind(self):
         # What gen_fixtures.py prints after regenerating: the other boxes' entries survive, so
         # nothing fails, and that silence is exactly what would let the boxes drift apart again.
@@ -1107,6 +1147,68 @@ class FixtureDigestTest(unittest.TestCase):
         fixture_digest.record(digests, [fx], "rog-nv")
 
         self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "rog-nv"), [])
+
+    def test_a_declared_box_with_no_fixture_entry_is_reported_as_left_behind(self):
+        # gh-ocannl-850's missing fact: without an independent box declaration, an absent minix
+        # row is indistinguishable from minix never measuring this workload and stays silent.
+        fx = self.fixture("lenet.safetensors", b"rog-nv regenerates")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.header(["minix", "rog-nv"]))
+
+        fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertEqual(fixture_digest.measurement_boxes(digests), ["minix", "rog-nv"])
+        self.assertEqual(fixture_digest.divergent_origins(digests, [fx.name], "rog-nv"), ["minix"])
+
+    def test_a_report_names_a_declared_box_with_no_fixture_entry(self):
+        fx = self.fixture("mlp_wide.safetensors", b"rog-nv bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.header(["minix", "rog-nv"]))
+        fixture_digest.record(digests, [fx], "rog-nv")
+        row = cell("ocannl", "cuda", "default", [2.0, 1.9])
+        row.update(
+            fixture=fx.name,
+            fixture_sha256=fixture_digest.sha256_file(fx),
+            fixture_origin="rog-nv",
+            parity="PASS",
+            parity_loss_moved=True,
+        )
+        out = self.dir / "report"
+
+        orchestrate.report([row], out, digests_path=digests)
+        text = (out / "report.md").read_text()
+
+        self.assertIn("measurement boxes declared by `fixtures/DIGESTS.txt`: minix, rog-nv", text)
+        self.assertIn("declared measurement box(es) with no entry", text)
+        self.assertIn("minix", text)
+
+    def test_raw_result_rows_preserve_the_box_set_and_missing_entries(self):
+        # The JSONL outlives its DIGESTS.txt checkout (and partial.jsonl can outlive the run), so
+        # the fleet and missing-entry reading belong in the row, not only in report prose.
+        fx = self.fixture("mlp_wide.safetensors", b"rog-nv bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.header(["m4-max", "minix", "rog-nv"]))
+        fixture_digest.record(digests, [fx], "rog-nv")
+        entries = fixture_digest.read_digests(digests)
+        boxes = fixture_digest.measurement_boxes(digests)
+        stamp = orchestrate.fixture_result_stamp(
+            fx, fixture_digest.sha256_file(fx), "rog-nv", entries, boxes
+        )
+        # This is the stamp main applies before collect writes partial.jsonl. Asserting it before
+        # report() matters: report enriches legacy in-memory rows for final JSONL compatibility,
+        # but it cannot repair a partial checkpoint left by an interrupted run.
+        self.assertEqual(stamp["measurement_boxes"], ["m4-max", "minix", "rog-nv"])
+        self.assertEqual(stamp["fixture_missing_origins"], ["m4-max", "minix"])
+        row = cell("ocannl", "cuda", "default", [2.0, 1.9])
+        row.update(stamp)
+        row.update(parity="PASS", parity_loss_moved=True)
+        out = self.dir / "report-with-raw-provenance"
+
+        orchestrate.report([row], out, digests_path=digests)
+        raw = json.loads((out / "results.jsonl").read_text())
+
+        self.assertEqual(raw["measurement_boxes"], ["m4-max", "minix", "rog-nv"])
+        self.assertEqual(raw["fixture_missing_origins"], ["m4-max", "minix"])
 
     def test_a_coordinated_regeneration_is_not_reported_as_divergence(self):
         # The success case of the cross-box event: both boxes land the SAME bytes. Naming the

@@ -1000,6 +1000,24 @@ def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
     return measured
 
 
+def fixture_result_stamp(fixture, sha, origin, entries, measurement_boxes):
+    """Fixture provenance that survives in every raw result row, partial or final.
+
+    The declaration and its missing-entry reading are facts at measurement time. Re-reading a
+    later DIGESTS.txt cannot recover them after the fleet or its records change, so both travel
+    with the same stamp as the fixture digest and origin.
+    """
+    return {
+        "fixture": fixture.name,
+        "fixture_sha256": sha,
+        "fixture_origin": origin,
+        "measurement_boxes": list(measurement_boxes),
+        "fixture_missing_origins": fixture_digest.missing_origins(
+            fixture.name, entries, measurement_boxes
+        ),
+    }
+
+
 def search_provenance(result):
     """What one OCANNL process did about searching: SEARCHED, REPLAY, NO-SEARCH or UNKNOWN.
 
@@ -1221,8 +1239,30 @@ def cell_timeout_arg(text):
     return seconds
 
 
-def report(results, out_dir, unavailable=(), failures=()):
+def report(results, out_dir, unavailable=(), failures=(), digests_path=None):
     out_dir.mkdir(parents=True, exist_ok=True)
+    digests_path = digests_path or HERE / "fixtures" / fixture_digest.DIGEST_FILE
+    digest_entries = fixture_digest.read_digests(digests_path)
+    current_measurement_boxes = fixture_digest.measurement_boxes(digests_path)
+    # Old/in-memory callers may not have gone through main's measurement-time stamp. Enrich them
+    # before serialization; rows that already carry the fact remain authoritative if the checked-
+    # in declaration changed between measurement and this later report rendering.
+    for r in results:
+        if "measurement_boxes" not in r:
+            r["measurement_boxes"] = list(current_measurement_boxes)
+        if "fixture_missing_origins" not in r and r.get("fixture"):
+            r["fixture_missing_origins"] = fixture_digest.missing_origins(
+                r["fixture"], digest_entries, r["measurement_boxes"]
+            )
+    recorded_box_sets = {tuple(r["measurement_boxes"]) for r in results}
+    if len(recorded_box_sets) > 1:
+        raise ValueError(
+            "cannot combine result rows recorded under different measurement-box declarations: "
+            + ", ".join(repr(boxes) for boxes in sorted(recorded_box_sets))
+        )
+    measurement_boxes = (
+        list(next(iter(recorded_box_sets))) if recorded_box_sets else current_measurement_boxes
+    )
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
             # allow_nan=False so a non-finite value this sweep computed itself cannot slip out as
@@ -1241,6 +1281,11 @@ def report(results, out_dir, unavailable=(), failures=()):
         + ", ".join(f"{p} {t:g}" for p, t in sorted(PARITY_TOL_PRECISION.items()))
         + ")\n"
     )
+    lines.append(
+        "measurement boxes declared by `fixtures/DIGESTS.txt`: "
+        + ", ".join(measurement_boxes)
+        + "\n"
+    )
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
@@ -1250,17 +1295,27 @@ def report(results, out_dir, unavailable=(), failures=()):
         # not. More than one line here means the section mixes fixtures.
         measured_on = sorted(
             {
-                (r.get("fixture"), r.get("fixture_sha256"), r.get("fixture_origin"))
+                (
+                    r.get("fixture"),
+                    r.get("fixture_sha256"),
+                    r.get("fixture_origin"),
+                    tuple(r.get("fixture_missing_origins", ())),
+                )
                 for r in rows
                 if r.get("fixture_sha256")
             }
         )
-        for fixture, sha, origin in measured_on:
+        for fixture, sha, origin, missing in measured_on:
             # Named, not implied by the report's own platform line: the recorded origin is the box
             # whose GENERATOR drew these bytes, which is not necessarily the box now measuring them
             # (fixtures get copied between boxes, and that is fine as long as the report says so).
             whose = f", {origin}'s bytes" if origin else ", bytes no origin records"
             lines.append(f"measured on `{fixture}`, sha256 `{sha}`{whose}\n")
+            if missing:
+                lines.append(
+                    "**MISSING DIGEST RECORD:** declared measurement box(es) with no entry for "
+                    f"`{fixture}`: {', '.join(missing)}\n"
+                )
         # Precision-major, p50-ascending within a precision: scheduling variants are ranked
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
@@ -1501,7 +1556,12 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
-    fixture_ids = check_fixture_digests(fixtures, allow_unpinned=args.no_fixture_digest_check)
+    digests_path = HERE / "fixtures" / fixture_digest.DIGEST_FILE
+    digest_entries = fixture_digest.read_digests(digests_path)
+    measurement_boxes = fixture_digest.measurement_boxes(digests_path)
+    fixture_ids = check_fixture_digests(
+        fixtures, digests_path=digests_path, allow_unpinned=args.no_fixture_digest_check
+    )
 
     metas = {fx: read_st_metadata(fx) for fx in fixtures}
     models = {fx: metas[fx].get("model", "mlp") for fx in fixtures}
@@ -1563,7 +1623,9 @@ def main():
         model = models[fx]
         stamp.clear()
         sha, origin = fixture_ids[fx]
-        stamp.update(fixture=fx.name, fixture_sha256=sha, fixture_origin=origin)
+        stamp.update(
+            fixture_result_stamp(fx, sha, origin, digest_entries, measurement_boxes)
+        )
         if "ocannl" in args.only:
             variants = ["default"]
             if args.materialized:
