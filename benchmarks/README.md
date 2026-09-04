@@ -277,8 +277,16 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `--beam-parallel 0` is the value that disables the pool outright and compiles the candidates
   in-process, which is the configuration a pool deadlock cannot occur in; `1` still means a
   one-worker pool, not no pool. It costs search wall time — `mlp_small` beam 2 on the RTX
-  5070 Ti searches in 15.6 s at the default and 56.4 s at `--beam-parallel 0` — so nothing makes
-  it the default: the root cause is upstream and unchased, and the cap already bounds the damage.
+  5070 Ti searches in 15.6 s at the upstream default and 56.4 s at `--beam-parallel 0`.
+
+  The benchmark fleet nevertheless pins **`PARALLEL` to `0` by default** (gh-ocannl-843): `minix`,
+  `rog-nv`, and `m4-max` all take the reliable in-process search unless the invocation explicitly
+  passes `--beam-parallel N` with `N>0`. The identical per-box choice is one global orchestrator
+  default on purpose, so a hostname alias or a newly provisioned measurement box cannot silently
+  fall back to the failure-prone pool. The cell timeout remains the backstop when an operator opts
+  into a pool. This is not only a tinygrad 0.13.0 workaround: on minix (WSL2, gfx1151), tinygrad
+  0.14.0 cold-cache `gpt2_mini` BEAM=2 still wedged in 1 of 5 repeats, timing out at 300 s against
+  three healthy 37–51 s searches; a fifth search completed only after 157 s.
 
   Two facts about that default worth knowing before picking an `N`. It applies to the **GPU
   column only**: tinygrad sizes the pool as `cpu_count()` for its CUDA/AMD/NV/METAL/HIP devices
@@ -286,7 +294,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   cannot meet this deadlock at all. And `cpu_count()` ignores the **affinity mask**, so a sweep
   pinned with `taskset -c 0-15` on a 32-thread box still spawns 32 candidate-compile workers onto
   16 cores — the oversubscribed shape, on the machine class where the wedges were seen. If you
-  pin, pass `--beam-parallel <mask size>`; a wedge is bounded by the cap either way.
+  opt into parallel search, pass `--beam-parallel <mask size>`; a wedge is bounded by the cap
+  either way.
 
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures

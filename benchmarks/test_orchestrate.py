@@ -1943,16 +1943,26 @@ class CellTimeoutTest(unittest.TestCase):
         )
         self.assertNotEqual(first, second)
 
-    def test_an_exported_parallel_does_not_become_the_default_beam_cell(self):
-        # "Unset" must mean tinygrad's default, not the invoking shell's opinion: an inherited
-        # PARALLEL would measure a different candidate-pool configuration under the default's
-        # name, with nothing in the row or its label to show which one ran.
-        ambient = {"PATH": "/usr/bin", "PARALLEL": "0"}
+    def test_the_fleet_default_disables_the_spawn_pool(self):
+        # The deadlock exists in tinygrad 0.13.0 and 0.14.0, on both GPU boxes. Zero is the only
+        # value that removes that pool; an ambient positive value must not override the pin.
+        ambient = {"PATH": "/usr/bin", "PARALLEL": "32"}
 
-        self.assertNotIn("PARALLEL", orchestrate.beam_cell_env(ambient, None))
+        self.assertEqual(orchestrate.DEFAULT_BEAM_PARALLEL, 0)
+        self.assertEqual(
+            orchestrate.beam_cell_env(ambient, orchestrate.DEFAULT_BEAM_PARALLEL)["PARALLEL"],
+            "0",
+        )
         self.assertEqual(orchestrate.beam_cell_env(ambient, 4)["PARALLEL"], "4")
         # Zero is a value, not an absence: it is what disables tinygrad's pool outright.
         self.assertEqual(orchestrate.beam_cell_env(ambient, 0)["PARALLEL"], "0")
+
+    def test_an_explicit_upstream_default_drops_ambient_parallel(self):
+        # None remains the programmatic spelling of tinygrad's own default. It must not inherit
+        # a shell experiment under a result whose absent beam_parallel field says "upstream".
+        ambient = {"PATH": "/usr/bin", "PARALLEL": "0"}
+
+        self.assertNotIn("PARALLEL", orchestrate.beam_cell_env(ambient, None))
 
     @unittest.skipUnless(os.name == "posix", "the deferral is about POSIX signal delivery")
     def test_a_cancellation_inside_the_spawn_window_still_kills_the_cell(self):
