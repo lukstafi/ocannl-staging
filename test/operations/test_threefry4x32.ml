@@ -32,8 +32,8 @@ let%expect_test "threefry4x32 basic test" =
   done;
 
   (* Check all values are in [0, 1) range *)
-  let all_in_range = Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
-  Verdict.p "All values in [0, 1) range" all_in_range;
+  Verdict.p_all "All values in [0, 1) range" (Array.to_list result) ~f:(fun x ->
+      Float.(x >= 0.0 && x < 1.0));
 
   [%expect
     {|

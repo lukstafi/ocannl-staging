@@ -1678,7 +1678,7 @@ let () =
         if not ok then
           Stdio.eprintf "  %s %s over %s: got [%s] want [%s] (policy says %s)\n" prec_name what
             terms_desc (show values) (show want) (residency_name residency);
-        p claim ok;
+        p_all2 claim values want ~f:Float.equal;
         Some residency
       in
       let residency =

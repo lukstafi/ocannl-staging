@@ -369,15 +369,12 @@ let () =
   show_bound "1 GFLOP/s, 2 GB/s" (bound ~peak_flops:1e9 ~peak_memory_bandwidth:2e9 ());
   show_bound "2 GFLOP/s, 2 GB/s" (bound ~peak_flops:2e9 ~peak_memory_bandwidth:2e9 ());
   let peaks = [ 1e9; 2e9; 4e9 ] in
-  let monotone =
-    List.for_all peaks ~f:(fun pf ->
-        List.for_all peaks ~f:(fun bw ->
-            let t0 = Option.value_exn (bound ~peak_flops:pf ~peak_memory_bandwidth:bw ()) in
-            List.for_all
-              [
-                bound ~peak_flops:(2. *. pf) ~peak_memory_bandwidth:bw ();
-                bound ~peak_flops:pf ~peak_memory_bandwidth:(2. *. bw) ();
-              ]
-              ~f:(fun t -> Float.(Option.value_exn t <= t0))))
-  in
-  Verdict.p "  monotone in the envelope constants" monotone
+  Verdict.p_all "  monotone in the envelope constants" peaks ~f:(fun pf ->
+      List.for_all peaks ~f:(fun bw ->
+          let t0 = Option.value_exn (bound ~peak_flops:pf ~peak_memory_bandwidth:bw ()) in
+          List.for_all
+            [
+              bound ~peak_flops:(2. *. pf) ~peak_memory_bandwidth:bw ();
+              bound ~peak_flops:pf ~peak_memory_bandwidth:(2. *. bw) ();
+            ]
+            ~f:(fun t -> Float.(Option.value_exn t <= t0))))

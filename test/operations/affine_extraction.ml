@@ -182,7 +182,10 @@ let () =
                      ~left:x.Aff.a_map ~right:y.Aff.a_map)
               else None))
     in
-    let safe = List.for_all verdicts ~f:(function Aff.Cross_thread _ -> false | _ -> true) in
+    let safe =
+      (not (List.is_empty verdicts))
+      && List.for_all verdicts ~f:(function Aff.Cross_thread _ -> false | _ -> true)
+    in
     (* The row is the reading; this is the decision. The table shows both answers because both are
        facts about the nest -- a map axis parallelizes, a reduced axis must not -- so the row cannot
        be phrased so that `true` always passes, and the claim beside it is what carries the verdict
@@ -190,6 +193,8 @@ let () =
        cross-thread dependence would flip `false` to `true` here, exit zero, and be promotable.
        Stated in the direction that holds, on the same bound boolean the row prints. *)
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe;
+    Verdict.claimf "%s %s has a non-empty conflict census" (Idx.symbol_ident sym) name
+      (not (List.is_empty verdicts));
     if parallelizable then Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name safe
     else Verdict.claimf "%s %s does not parallelize" (Idx.symbol_ident sym) name (not safe)
   in

@@ -209,6 +209,10 @@ type site = {
           source is not a list of claims, which is what lets the check that consumes them hold
           itself to its own rule instead of exempting its own file. *)
   line : int;  (** 1-based, as the parser located the literal. *)
+  column : int;  (** 0-based, retained with {!line} for an actionable report. *)
+  position : int;
+      (** Absolute character offset. Unlike a line number, this uniquely identifies two literals
+          written on the same physical line. *)
   printer : string option;
       (** The function the literal is an argument of, where it is one: ["Stdio.printf"],
           ["Printf.eprintf"]. [None] for a literal bound to a name, handed to a wrapper or built
@@ -256,14 +260,17 @@ let scan content =
             Int.incr literals;
             match claim_site value with
             | Some (label, kind, head) ->
+                let start = expr.pexp_loc.loc_start in
                 sites :=
                   {
                     label;
                     kind;
                     head;
                     format = value;
-                    line = expr.pexp_loc.loc_start.pos_lnum;
-                    printer = Hashtbl.find printers expr.pexp_loc.loc_start.pos_cnum;
+                    line = start.pos_lnum;
+                    column = start.pos_cnum - start.pos_bol;
+                    position = start.pos_cnum;
+                    printer = Hashtbl.find printers start.pos_cnum;
                   }
                   :: !sites
             | None -> ())

@@ -631,7 +631,9 @@ let () =
       List.iter errors ~f:(fun error -> printf "  %s -- %s\n" name error));
   printf "\n";
   let complete =
-    List.is_empty result.incomplete && List.is_empty result.errors && List.for_all controls ~f:snd
+    (not (List.is_empty controls))
+    && List.is_empty result.incomplete && List.is_empty result.errors
+    && List.for_all controls ~f:snd
   in
   Verdict.p
     "backend golden families are complete, self-certifying, and provenance markers are valid"

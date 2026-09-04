@@ -427,16 +427,15 @@ let () =
   (* The arithmetic the weights' exactness argument rests on: a residue is a residue (non-negative,
      below its modulus), so a weight is in [1, 251] and products of the benches' exact-in-binary
      operands stay exact in the double accumulator. *)
-  let residues_in_range =
-    List.for_all [ 3; 5; 13; 17; Bc.weight_cap ] ~f:(fun modulus ->
-        List.for_all (List.range 1 40) ~f:(fun row_stride ->
-            List.for_all
-              (List.range 0 (7 * row_stride))
-              ~f:(fun t ->
-                let r = Bc.residue ~salt:0x7E51 ~row_stride ~modulus t in
-                r >= 0 && r < modulus)))
-  in
-  Verdict.p "every residue lands in [0, modulus)" residues_in_range;
+  let moduli = [ 3; 5; 13; 17; Bc.weight_cap ] in
+  let row_strides = List.range 1 40 in
+  Verdict.p_all "every residue lands in [0, modulus)" moduli ~f:(fun modulus ->
+      List.for_all row_strides ~f:(fun row_stride ->
+          let indices = List.range 0 (7 * row_stride) in
+          (not (List.is_empty indices))
+          && List.for_all indices ~f:(fun t ->
+              let r = Bc.residue ~salt:0x7E51 ~row_stride ~modulus t in
+              r >= 0 && r < modulus)));
   let refuses f = match f () with exception Invalid_argument _ -> true | _ -> false in
   Verdict.p "residue refuses a non-positive row stride"
     (refuses (fun () -> Bc.residue ~salt:0 ~row_stride:0 ~modulus:13 1));

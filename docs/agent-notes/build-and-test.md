@@ -813,14 +813,21 @@ that they earn a lookup rather than always-loaded space.
   emptiness — "no candidate declines", "no key is undocumented", a scan over a tree that is usually
   clean — and those want a companion claim that the population was there at all, which is what the
   `p_empty ~over` form is.
-  `verdict_ratchet` also follows file-local boolean helpers into `Verdict.p`/`claim`/`pass_fail`
+  `verdict_ratchet` also follows file-local boolean bindings into `Verdict.p`/`claim`/`pass_fail`
   (and their format-taking forms): a helper returning `for_all`, `for_all2_exn`, `is_empty`, or a
-  negated `exists` must make non-emptiness part of its passing result. Its exact, stale-checked
-  exemption list is only for helpers whose intended passing meaning allows an empty population;
-  synthetic controls include a child process the shipping ratchet demonstrably refuses
-  (gh-ocannl-801). An entry there names ONE helper, and that is checked rather than assumed: a
-  helper name shadowed by a second definition would hand both bodies to one key, so an exempted key
-  resolving to two definition lines refuses the run instead of covering the body nobody read.
+  negated `exists`, and a fully applied quantified value bound before the claim, must make
+  non-emptiness part of its passing result. Its exact, stale-checked exemption list is only for
+  bindings whose intended passing meaning allows an empty population; synthetic controls include a
+  child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
+  there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
+  definition would hand both bodies to one key, so an exempted key resolving to two definition
+  offsets refuses the run instead of covering the body nobody read.
+  The literal- and computed-label exemption lists carry the same one-key/one-site contract
+  (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while
+  line and column are report text; `record_definition` aggregates all three exemption families by
+  offset, and each refuses a key that resolves to more than one site. Multiline and same-line
+  duplicate controls exist for both literal and computed labels, because a line number merges the
+  exact same-line shape the check must distinguish.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
   `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or

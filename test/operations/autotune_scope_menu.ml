@@ -166,7 +166,9 @@ let () =
   let parity_leg ~claim ~saved_prefix menu_ops =
     cc_only claim (fun () ->
         let all_ok =
-          List.for_all menu_ops ~f:(fun op ->
+          (not (List.is_empty menu_ops))
+          && (not (Array.is_empty reference))
+          && List.for_all menu_ops ~f:(fun op ->
               let saved = saved_prefix @ [ op ] in
               let cctx = Context.auto () in
               let cctx, croutine =
@@ -187,7 +189,7 @@ let () =
                   (Sexp.to_string_hum (SC.sexp_of_saved_optop op));
               ok)
         in
-        p claim (all_ok && not (List.is_empty menu_ops)))
+        p claim all_ok)
   in
   parity_leg
     ~claim:"every menu proposal on the minted form compiles and matches the serial result"

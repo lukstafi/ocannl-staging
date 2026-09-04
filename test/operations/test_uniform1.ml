@@ -34,8 +34,8 @@ let uniform1_basic_test () =
   done;
 
   (* Check all values are in [0, 1) range *)
-  let all_in_range = Array.for_all result1 ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
-  Verdict.p "All values in [0, 1) range" all_in_range;
+  Verdict.p_all "All values in [0, 1) range" (Array.to_list result1) ~f:(fun x ->
+      Float.(x >= 0.0 && x < 1.0));
 
   (* Now test the vectorized version for comparison *)
   let uniform_floats =
@@ -84,8 +84,8 @@ let uniform_at1_test () =
   done;
 
   (* Check all values are in [0, 1) range *)
-  let all_in_range = Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
-  Verdict.p "All values in [0, 1) range" all_in_range;
+  Verdict.p_all "All values in [0, 1) range" (Array.to_list result) ~f:(fun x ->
+      Float.(x >= 0.0 && x < 1.0));
   ()
 
 let uniform1_shape_preservation_test () =

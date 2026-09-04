@@ -33,9 +33,12 @@ let () =
         let total_v = (Context.get_values ctx total.value).(0) in
         let ys = Context.get_values ctx y.value in
         let prefix = Array.sub ys ~pos:0 ~len:extent in
-        let prefix_ok = Array.for_all prefix ~f:(fun v -> Float.(abs (v -. 1.0) < 1e-6)) in
-        Verdict.pf "extent=%d: total=%.1f (expected %.1f), y valid prefix all 1.0" extent total_v
-          (Float.of_int extent) prefix_ok;
+        let claim =
+          Printf.sprintf "extent=%d: total=%.1f (expected %.1f), y valid prefix all 1.0" extent
+            total_v (Float.of_int extent)
+        in
+        if extent = 0 then Verdict.p claim Float.(abs total_v < 1e-6)
+        else Verdict.p_all claim (Array.to_list prefix) ~f:(fun v -> Float.(abs (v -. 1.0) < 1e-6));
         ctx)
   in
   (* Out-of-range extents are rejected at bind validation. *)

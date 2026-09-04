@@ -27,14 +27,23 @@ each carrying its assertion separately through `Verdict.claim`/`claimf`:
   test/operations/test_execution_deps.ml:%s refused, names the routine: %b, names the cause:  -- a two-property row about one refusal; both properties are claimed beside it
   test/operations/observable_grads.ml:%s placement: %s; in context: %b; observable intent:  -- `in context` is legitimately false for a virtualized leg, so the row describes; the assertion is `observable intent`, claimed beside it
 
-Helper-wrapped quantified claims exempted because emptiness is their passing meaning:
+Quantified bindings exempted because emptiness is their passing meaning:
+  test/operations/backend_golden_family_scan.ml:complete -- empty incomplete/error lists are the passing evidence; the non-empty synthetic-control population is guarded in the same binding
+  test/operations/env_var_deps.ml:family_floor_met -- a non-repository synthetic run deliberately skips repository-only family floors; the repository path checks every family and reports each shortfall separately
+  test/operations/env_var_deps.ml:repository_census -- an empty floor-violation list is the positive evidence that the run received the repository; downstream claims use that mode bit to decide whether repository-only floors apply
+  test/operations/epilogue_fusion_mma_seeds.ml:vacuous -- an empty GPU mma family deliberately selects the environment-gated vacuity path; the non-vacuous path separately requires and executes the epilogue twins
   test/operations/ocamlformat_ignore_scan.ml:refused -- the message list is an optional strengthening of the child-exit refusal: an empty list deliberately means that the nonzero status alone is the passing evidence
+  test/operations/reduction_forms.ml:changed -- an empty schedule deliberately needs no IR change, and an empty per-op result means there were no per-op transformations to validate
+  test/operations/reduction_forms.ml:extra_ok -- an empty extra-fragment list deliberately means the member requires no additional emitted assignment fragments
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
 refuses an unguarded helper behind an open of Verdict.Claims: true
 keeps an open of Verdict.Claims inside its local scope: true
 refuses a sibling for_all helper through an intermediate result binding: true
+refuses a fully applied quantifier bound before the claim: true
+accepts a fully applied quantified binding with a non-empty witness: true
+accepts a negated fully applied quantified binding: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a quantifier written in pipeline style: true
 keeps helper resolution inside its lexical scope: true
@@ -54,26 +63,37 @@ a shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both shadowed definitions: true
 a same-line shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both same-line shadowed definitions: true
+a repeated literal-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both repeated literal-label source sites: true
+a same-line repeated literal-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both same-line repeated literal-label source sites: true
+a repeated computed-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both repeated computed-label source sites: true
+a same-line repeated computed-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both same-line repeated computed-label source sites: true
 
 every test source decides its claims through Verdict: true
-every helper-wrapped quantified claim witnesses a non-empty population: true
+every quantified binding used by a claim witnesses a non-empty population: true
 the scan found every literal planted for it: true
 every exemption on this check's lists is still earned: true
-every exempted quantified helper is one definition, not a shared name: true
+every exempted claim-shaped literal is one source site, not a shared key: true
+every exempted quantified binding is one definition, not a shared name: true
 the walk read string literals out of these sources: true
 and placed some of them as arguments of a named function: true
 over more than one test directory: true
 
-OK: test claims route through `Verdict`, and helper-wrapped quantifiers cannot pass on nothing.
+OK: test claims route through `Verdict`, and quantified bindings cannot pass on nothing.
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:21c46bd80cd0c37bcebde7eb2d04dcd8] exempted quantified helpers
-  [scanner-refusal:a762c69e145dd278ddd9810ecfe2f65e] shadowing definitions separate
+  [scanner-refusal:977473ba169d481e2b57377845e9a8b8] exempted quantified bindings
+  [scanner-refusal:52b0c212a9f1ba97a1400cd478d7cfda] shadowing definitions separate
+  [scanner-refusal:28926aa707bb0e8c7e5a087d40f0bf13] exempted claim-shaped literal
   [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict
-  [scanner-refusal:a340b965171aa5b79a43e8b92ef3307e] every helper-wrapped quantified
+  [scanner-refusal:63d9475f3df44af6baac8bdc03a3310b] every quantified binding
   [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted
   [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on
-  [scanner-refusal:021b016668a04863104372940f003669] exempted quantified helper
+  [scanner-refusal:bd1c6476261fa5d1b680ca8c0959f3f9] exempted claim-shaped literal
+  [scanner-refusal:e29d881451dd7fd465b12ea6911fc165] exempted quantified binding
   [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals
   [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments
   [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory

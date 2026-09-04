@@ -353,8 +353,9 @@ test_config_consistency.ml: [scanner-refusal:e583c416783b3632963a66636f20f65e] s
 test_config_consistency.ml: [scanner-refusal:b4c59d5ad7a9c4e591998fccf8f039aa] exempted functions that (direct failure) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
 test_config_consistency.ml: [scanner-refusal:55743888dd2a4a2234ee1d3f031ea47e] meets its source-count (claim) is catalogued beside config_scan_lexing.expected, test_config_consistency.expected: true
 verdict_ratchet.ml has exactly the explicitly assigned refusal controls: true
-verdict_ratchet.ml: [scanner-refusal:21c46bd80cd0c37bcebde7eb2d04dcd8] exempted quantified helpers (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
-verdict_ratchet.ml: [scanner-refusal:a762c69e145dd278ddd9810ecfe2f65e] shadowing definitions separate (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:977473ba169d481e2b57377845e9a8b8] exempted quantified bindings (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:52b0c212a9f1ba97a1400cd478d7cfda] shadowing definitions separate (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:28926aa707bb0e8c7e5a087d40f0bf13] exempted claim-shaped literal (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:0f307832357ee7ca58b9798a86530dac] arguments the rule's (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:f3e306858423827e6575d13a17d57af6] check cannot vouch (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:53b71ea33a69d24c941985f4eb35406b] prints the claim (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
@@ -362,10 +363,11 @@ verdict_ratchet.ml: [scanner-refusal:7d1962ff34bbe1ed7b89a535dc0cfd7e] exempted 
 verdict_ratchet.ml: [scanner-refusal:ad023891a3bd7827b3905292c487055b] claim-shaped literal any (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:e1354d390a356f0c79420c25232b0b42] planted canaries the (direct failure) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
-verdict_ratchet.ml: [scanner-refusal:a340b965171aa5b79a43e8b92ef3307e] every helper-wrapped quantified (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:63d9475f3df44af6baac8bdc03a3310b] every quantified binding (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
-verdict_ratchet.ml: [scanner-refusal:021b016668a04863104372940f003669] exempted quantified helper (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:bd1c6476261fa5d1b680ca8c0959f3f9] exempted claim-shaped literal (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
+verdict_ratchet.ml: [scanner-refusal:e29d881451dd7fd465b12ea6911fc165] exempted quantified binding (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true
 verdict_ratchet.ml: [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory (claim) is catalogued beside verdict_scan_cases.expected, verdict_ratchet.expected: true

@@ -407,8 +407,9 @@ let () =
      distribution the sampler consumes. *)
   let names = Array.init 3 ~f:(fun _ -> gen_name ()) in
   Array.iter names ~f:(fun name -> eprintf "sampled name (not part of the golden): %s\n%!" name);
-  let in_alphabet = Array.for_all names ~f:(String.for_all ~f:Char.is_alpha) in
-  Verdict.pf "Generated %d names, all chars in alphabet" (Array.length names) in_alphabet;
+  Verdict.p_all
+    (Printf.sprintf "Generated %d names, all chars in alphabet" (Array.length names))
+    (Array.to_list names) ~f:(String.for_all ~f:Char.is_alpha);
 
   (* Head of the learned next-character distribution at the start context. The probabilities
      themselves drift by ~3e-4 between builds that disagree on the sampled text, and a fixed print
