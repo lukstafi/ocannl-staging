@@ -131,16 +131,25 @@ that they earn a lookup rather than always-loaded space.
   The explicit token name normally wins over a shorter registered-key prefix. Inherently ambiguous
   alternate-value spellings such as `--ocannl_backend_cuda=true` are file/token/key/count-pinned
   judgments (that example means key `backend` with value cuda=true); any other such ambiguity,
-  including a no-equals separator, fails as the longer explicit name.
+  including a no-equals separator, fails as the longer explicit name. A counted judgment also
+  recovers runtime-valid spellings whose key and alternate value separator use different styles,
+  such as `--ocannl_print_decimals_precision-7`.
   Supported prefix-free
   config flags occupy the host application's namespace, so their current documentation sites are
   separately file/key/count-pinned and disappear when the runtime's per-key qualified-only policy
   says so. Prose contributes a key
   when an inline code span (including each physical segment of a multiline span) or fenced line
   contains either unambiguous prefixed form; a bare
-  assignment contributes only when it occupies the whole inline span outside benchmark reports
-  (case is normalized like a config file, and whitespace around `=`, within the value, or an empty
-  example value does not hide the key). An outer bare assignment and prefixed tokens embedded in its
+  assignment contributes only when it occupies the whole inline span outside benchmark reports and
+  its unqualified name has lowercase snake-case shape with an underscore; this registry-independent
+  grammar comes from `Utils.parse_config_token`, shared with the command-line and environment forms.
+  Current one-word config assignments such as `profile=reproducible|performance` and `backend=cc`
+  are file/key/count-pinned judgments because their spelling alone cannot distinguish them from an
+  arbitrary API or mathematical assignment.
+  Whitespace around `=`, within the value, or an empty example value does not hide the key. The
+  permanent negative controls are Metal's `fastMathEnabled=false`, Apple's `mathMode=Safe`, and the
+  mathematical `d=1`; `debug_log_from_routines=true` pins a real documented positive. An outer bare
+  assignment and prefixed tokens embedded in its
   value are both consumers. Config files contribute each uncommented assignment with a nonempty
   value after applying
   `Utils.parse_config_lines`' key normalization: case folding, leading-dash stripping, and the

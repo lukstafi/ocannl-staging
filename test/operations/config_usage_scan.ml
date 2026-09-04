@@ -1,12 +1,14 @@
 (* Configuration names used outside OCaml stay tied to [Utils.known_config_keys].
 
    The source forms are deliberately narrow and syntactic. Shell and Python scripts contribute every
-   qualified command-line token accepted through [Utils.cmdline_var_prefixes], and every
-   identifier-delimited [OCANNL_<KEY>] token, including tokens in comments and quoted command
-   strings -- those are still instructions or commands a reader can reuse. Markdown contributes an
-   inline code span whose whole rendered content is one assignment in a bare or prefixed form.
-   Fenced code and longer snippets describe arbitrary APIs and expression languages, so treating
-   every equals sign in them as configuration would make the scan unusable.
+   qualified command-line token and environment assignment classified by [Utils.parse_config_token],
+   and every identifier-delimited [OCANNL_<KEY>] token, including tokens in comments and quoted
+   command strings -- those are still instructions or commands a reader can reuse. Markdown
+   contributes an inline code span whose whole rendered content is one assignment in a prefixed form
+   or the parser's narrowed lowercase snake-case bare form; counted site judgments retain ambiguous
+   one-word config assignments. Fenced code and longer snippets describe arbitrary APIs and
+   expression languages, so treating every equals sign in them as configuration would make the scan
+   unusable.
 
    gh-ocannl-790. *)
 
@@ -37,12 +39,11 @@ type occurrence = {
   key : string;
   spelling : string;
   kind : kind;
-  spaced_bare : bool;
+  ambiguous_bare : bool;
 }
 
 let lowercase_key_char c = Char.is_lowercase c || Char.is_digit c || Char.equal c '_'
 let uppercase_key_char c = Char.is_uppercase c || Char.is_digit c || Char.equal c '_'
-let normalize_key key = Option.value (String.chop_prefix key ~prefix:"ocannl_") ~default:key
 
 (* [OCANNL_TOOL_*] is the repository's explicit tool-private namespace, and
    [OCANNL_LOG_LEVEL_<MODULE>] is ppx_minidebug's compile-time tracing-gate namespace. Neither is
@@ -50,59 +51,24 @@ let normalize_key key = Option.value (String.chop_prefix key ~prefix:"ocannl_") 
 let non_config_env_key key =
   String.is_prefix key ~prefix:"TOOL_" || String.is_prefix key ~prefix:"LOG_LEVEL_"
 
-(* The command-line spelling grammar belongs to the runtime reader. Derive its qualified prefixes
-   with a sentinel key, then ask the same function whether each observed name is one it accepts.
-   This still finds a REMOVED key: only the grammar comes from the registry owner, never the key
-   population. *)
-let cli_name_prefixes =
-  let sentinel = "configusagescankey" in
-  Utils.cmdline_var_names ~qualified_only:true sentinel
-  |> List.filter_map ~f:(fun name ->
-      let suffix =
-        if String.equal name (String.uppercase name) then String.uppercase sentinel else sentinel
-      in
-      String.chop_suffix name ~suffix)
-  |> List.dedup_and_sort ~compare:String.compare
-
+(* Discovery and classification both come from the registry-independent grammar in [Utils]. This
+   still finds a REMOVED key: the parser recognizes shape, never registry membership. *)
+let cli_name_prefixes = Utils.config_token_command_line_prefixes
 let cli_key_char c = Char.is_alpha c || Char.is_digit c || Char.equal c '_' || Char.equal c '-'
 
 let cli_token_char c =
   cli_key_char c || List.mem [ '='; '.'; '/'; ':'; '+'; '$'; '{'; '}' ] c ~equal:Char.equal
 
-let syntactic_cli_key_of_name name =
-  List.find_map cli_name_prefixes ~f:(fun name_prefix ->
-      Option.bind (String.chop_prefix name ~prefix:name_prefix) ~f:(fun raw_key ->
-          if String.is_empty raw_key || not (String.for_all raw_key ~f:cli_key_char) then None
-          else
-            let key = String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_' in
-            Option.some_if
-              (List.mem (Utils.cmdline_var_names ~qualified_only:true key) name ~equal:String.equal)
-              key))
-
-let known_cli_key token =
-  Set.to_list Utils.known_config_keys
-  |> List.filter ~f:(fun key ->
-      List.exists (Utils.cmdline_var_prefixes ~qualified_only:true key) ~f:(fun prefix ->
-          String.is_prefix token ~prefix))
-  (* The runtime accepts prefix-overlapping keys too. Attribute the token to the most specific one;
-     existence is the property this scan needs, and a removed token with no surviving parse still
-     reaches the unknown branch below. *)
-  |> List.max_elt ~compare:(fun a b -> Int.compare (String.length a) (String.length b))
-
-let unknown_cli_key ~name_prefix token =
-  let rest = String.drop_prefix token (String.length name_prefix) in
-  let stop = ref 0 in
-  while !stop < String.length rest && cli_key_char rest.[!stop] do
-    Int.incr stop
-  done;
-  String.prefix rest !stop |> String.lowercase |> String.tr ~target:'-' ~replacement:'_'
-
 (* A qualified spelling can be ambiguous when a runtime value separator is also a legal key
    character: [backend_cuda=true] can mean key [backend] with value [cuda=true], or a key named
    [backend_cuda]. The no-equals separators have the same problem. Prefer the explicit syntactic
    name so a removed longer key cannot be absorbed by a surviving prefix. Exceptional runtime-value
-   readings are counted site judgments. Store suffixes separately so these declarations do not scan
-   themselves as more command-line occurrences. *)
+   readings and deliberately invalid mixed-key examples are counted site judgments: the judgment
+   records which registry key the site discusses, not that the runtime accepts its spelling. For
+   example, the runtime-valid [--ocannl_print_decimals_precision-7] mixes separators only across the
+   key/value boundary, so it needs that judgment before the parser can know where the key ends.
+   Store suffixes separately so these declarations do not scan themselves as more command-line
+   occurrences. *)
 let ambiguous_cli_value_mentions =
   [
     ("arrayjit/lib/utils.ml", "--ocannl_", "log_level_1", "log_level", 1);
@@ -114,30 +80,65 @@ let ambiguous_cli_value_mentions =
       "print-decimals-precision-7",
       "print_decimals_precision",
       1 );
+    ( "test/operations/config_usage_scan.ml",
+      "--ocannl_",
+      "print_decimals_precision-7",
+      "print_decimals_precision",
+      1 );
+    ( "docs/agent-notes/build-and-test.md",
+      "--ocannl_",
+      "print_decimals_precision-7",
+      "print_decimals_precision",
+      1 );
+    ( "docs/agent-notes/conventions.md",
+      "--ocannl-",
+      "print_decimals-precision=1",
+      "print_decimals_precision",
+      1 );
+    ( "test/operations/dune",
+      "--ocannl-",
+      "print_decimals-precision=7",
+      "print_decimals_precision",
+      1 );
   ]
 
 let declared_ambiguous_cli_value_key ~path token =
   List.find_map ambiguous_cli_value_mentions ~f:(fun (tracked_path, prefix, suffix, key, _) ->
       Option.some_if (String.equal path tracked_path && String.equal token (prefix ^ suffix)) key)
 
+let registry_ambiguous_cli_value_key token =
+  Set.to_list Utils.known_config_keys
+  |> List.concat_map ~f:(fun key ->
+      Utils.cmdline_var_prefixes ~qualified_only:true key
+      |> List.filter_map ~f:(fun prefix ->
+          Option.some_if
+            (String.is_prefix token ~prefix && String.length token > String.length prefix)
+            (key, String.length prefix)))
+  |> List.max_elt ~compare:(fun (_, left) (_, right) -> Int.compare left right)
+  |> Option.map ~f:fst
+
+let registry_independent_unknown_cli_key token =
+  let name = Option.value_map (String.lsplit2 token ~on:'=') ~default:token ~f:fst in
+  List.find_map cli_name_prefixes ~f:(fun prefix ->
+      Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
+          Option.some_if
+            (not (String.is_empty raw_key))
+            (String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_')))
+
 let cli_key_of_token ~path token =
-  List.find_map cli_name_prefixes ~f:(fun name_prefix ->
-      Option.bind (String.chop_prefix token ~prefix:name_prefix) ~f:(fun rest ->
-          if String.is_empty rest || not (String.for_all rest ~f:cli_token_char) then None
-          else
-            match String.lsplit2 token ~on:'=' with
-            | Some (name, _) -> (
-                match syntactic_cli_key_of_name name with
-                | Some key when Set.mem Utils.known_config_keys key -> Some key
-                | Some key ->
-                    Option.first_some (declared_ambiguous_cli_value_key ~path token) (Some key)
-                | None -> known_cli_key token)
-            | None -> (
-                match syntactic_cli_key_of_name token with
-                | Some key when Set.mem Utils.known_config_keys key -> Some key
-                | Some key ->
-                    Option.first_some (declared_ambiguous_cli_value_key ~path token) (Some key)
-                | None -> Some (unknown_cli_key ~name_prefix token))))
+  match Utils.parse_config_token token with
+  | Some { token_shape = Utils.Command_line_token; token_key } ->
+      Some (Option.value (declared_ambiguous_cli_value_key ~path token) ~default:token_key)
+  | Some
+      { token_shape = Utils.Environment_assignment_token | Utils.Documentation_assignment_token; _ }
+    ->
+      None
+  | None ->
+      Option.first_some
+        (declared_ambiguous_cli_value_key ~path token)
+        (Option.first_some
+           (registry_ambiguous_cli_value_key token)
+           (registry_independent_unknown_cli_key token))
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -189,7 +190,7 @@ let prefix_free_occurrences_for ~path ~keys content =
                          key;
                          spelling;
                          kind = Prefix_free_cli_flag;
-                         spaced_bare = false;
+                         ambiguous_bare = false;
                        }
                       :: found)
               in
@@ -201,8 +202,7 @@ let tracked_prefix_free_keys path =
       Option.some_if (String.equal path tracked_path) key)
   |> List.dedup_and_sort ~compare:String.compare
 
-let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~normalize ~kind
-    content =
+let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~kind content =
   String.split_lines content
   |> List.mapi ~f:(fun index line ->
       let rec from pos found =
@@ -221,13 +221,20 @@ let prefixed_occurrences ?(start_ok = fun _ _ -> true) ~path ~prefix ~key_char ~
               && !key_stop < String.length line
               && Char.equal line.[!key_stop] '='
             then
-              let raw_key = String.sub line ~pos:key_start ~len:(!key_stop - key_start) in
               let spelling = String.sub line ~pos:start ~len:(!key_stop - start + 1) in
-              match normalize raw_key with
+              match Utils.parse_config_token spelling with
               | None -> from next found
-              | Some key ->
+              | Some parsed ->
                   from next
-                    ({ path; line = index + 1; key; spelling; kind; spaced_bare = false } :: found)
+                    ({
+                       path;
+                       line = index + 1;
+                       key = parsed.token_key;
+                       spelling;
+                       kind;
+                       ambiguous_bare = false;
+                     }
+                    :: found)
             else from next found
       in
       from 0 [])
@@ -276,12 +283,7 @@ let script_occurrences ~path content =
                   if !stop = start + String.length name_prefix then from next found
                   else
                     let spelling = String.sub line ~pos:start ~len:(!stop - start) in
-                    let historical_key =
-                      Option.bind (String.lsplit2 spelling ~on:'=') ~f:(fun (name, _) ->
-                          Option.bind (syntactic_cli_key_of_name name) ~f:(fun key ->
-                              Option.some_if (tracked_historical_config path key) key))
-                    in
-                    match Option.first_some historical_key (cli_key_of_token ~path spelling) with
+                    match cli_key_of_token ~path spelling with
                     | None -> from next found
                     | Some key ->
                         from next
@@ -291,7 +293,7 @@ let script_occurrences ~path content =
                              key;
                              spelling;
                              kind = Cli_flag;
-                             spaced_bare = false;
+                             ambiguous_bare = false;
                            }
                           :: found))
             in
@@ -302,9 +304,8 @@ let script_occurrences ~path content =
     prefixed_occurrences
       ~start_ok:(fun line start ->
         start = 0 || not (Char.is_alphanum line.[start - 1] || Char.equal line.[start - 1] '_'))
-      ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char
-      ~normalize:(fun key -> if non_config_env_key key then None else Some (String.lowercase key))
-      ~kind:Environment_assignment content
+      ~path ~prefix:"OCANNL_" ~key_char:uppercase_key_char ~kind:Environment_assignment content
+    |> List.filter ~f:(fun occurrence -> not (non_config_env_key (String.uppercase occurrence.key)))
   in
   let standalone_environment_mentions =
     String.split_lines content
@@ -341,7 +342,7 @@ let script_occurrences ~path content =
                        key = String.lowercase raw_key;
                        spelling = String.sub line ~pos:start ~len:(!key_stop - start);
                        kind = Standalone_environment_mention;
-                       spaced_bare = false;
+                       ambiguous_bare = false;
                      }
                     :: found)
         in
@@ -351,23 +352,34 @@ let script_occurrences ~path content =
   cli_occurrences @ environment_assignments @ standalone_environment_mentions
 
 let same_range (a, b) (x, y) = Int.equal a x && Int.equal b y
-let documentation_key_char c = Char.is_alpha c || Char.is_digit c || Char.equal c '_'
 
-let assignment_key ~key_char ~normalize rendered =
-  match String.lsplit2 rendered ~on:'=' with
-  | Some (raw_key, _value)
-    when (not (String.is_empty raw_key))
-         && key_char raw_key.[0]
-         && String.for_all raw_key ~f:key_char ->
-      normalize raw_key
-  | _ -> None
+let complete_inline_code_candidates content =
+  let scan = Markdown.inert_by_line content in
+  let comments line = Markdown.spans_at scan.comment_ranges line in
+  let fences line = Markdown.spans_at scan.fence_ranges line in
+  Markdown.lines content
+  |> List.concat_map ~f:(fun (lineno, line) ->
+      Markdown.spans_at scan.ranges lineno
+      |> List.filter ~f:(fun range ->
+          (not (List.mem (comments lineno) range ~equal:same_range))
+          && not (List.mem (fences lineno) range ~equal:same_range))
+      |> List.filter_map ~f:(fun (start, stop) ->
+          Option.some_if
+            (stop > start && Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
+            (String.sub line ~pos:start ~len:(stop - start) |> Markdown.code_span_content)))
 
-(* Whitespace makes bare assignments common in non-config prose. Pin every CURRENT config use of
-   that form by file/key/count: a later key removal still scans the old site, while a newly added
-   registered use must declare itself here. Prefixed CLI and environment forms are unambiguous and
-   do not need this judgment list. *)
-let spaced_config_mentions =
+(* Whitespace and one-word names make bare assignments indistinguishable from non-config prose. Pin
+   every current config use of either form by file/key/count: a later key removal still scans the
+   old site, while a newly added ambiguous use must declare itself here. Prefixed CLI and
+   environment forms are unambiguous and do not need this judgment list. *)
+let ambiguous_bare_config_mentions =
   [
+    ("AGENTS.md", "profile", 1);
+    ("docs/agent-notes/backend-dialects-and-idents.md", "backend", 1);
+    ("docs/agent-notes/build-and-test.md", "backend", 3);
+    ("docs/agent-notes/build-and-test.md", "profile", 1);
+    ("docs/proposals/gh-ocannl-409.md", "backend", 1);
+    ("ocannl_config.reference", "profile", 1);
     ( "docs/proposals/fix-inline-complex-computations-default-doc.md",
       "inline_complex_computations",
       1 );
@@ -377,8 +389,8 @@ let spaced_config_mentions =
     ("docs/proposals/task-73617488.md", "virtualize_max_visits", 3);
   ]
 
-let tracked_spaced_config path key =
-  List.exists spaced_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
+let tracked_ambiguous_bare_config path key =
+  List.exists ambiguous_bare_config_mentions ~f:(fun (tracked_path, tracked_key, _) ->
       String.equal path tracked_path && String.equal key tracked_key)
 
 let control_fixture path = String.equal path "config_usage_scan_bogus.fixture"
@@ -396,28 +408,44 @@ let one_assignment ~path rendered =
         || Option.is_some (cli_key_of_token ~path (name ^ "=" ^ value))
       then None
       else
-        Option.bind
-          (assignment_key ~key_char:documentation_key_char
-             ~normalize:(fun key -> Some (normalize_key (String.lowercase key)))
-             (name ^ "=" ^ value))
-          ~f:(fun key ->
+        let parsed_key =
+          match Utils.parse_config_token ~documentation:true (name ^ "=" ^ value) with
+          | Some parsed -> Some parsed.token_key
+          | None ->
+              let registered_one_word =
+                (not (String.contains name '_'))
+                && (not (String.is_empty name))
+                && Char.is_lowercase name.[0]
+                && String.for_all name ~f:(fun c -> Char.is_lowercase c || Char.is_digit c)
+                && Set.mem Utils.known_config_keys name
+              in
+              Option.some_if
+                (registered_one_word
+                || tracked_ambiguous_bare_config path name
+                || tracked_historical_config path name)
+                name
+        in
+        Option.bind parsed_key ~f:(fun key ->
             if
               value_has_whitespace
               && not
                    (Set.mem Utils.known_config_keys key
-                   || tracked_spaced_config path key || control_fixture path
+                   || tracked_ambiguous_bare_config path key
+                   || control_fixture path
                    || tracked_historical_config path key)
             then None
             else if
               (not spaced)
               || Set.mem Utils.known_config_keys key
-              || tracked_spaced_config path key || control_fixture path
+              || tracked_ambiguous_bare_config path key
+              || control_fixture path
               || tracked_historical_config path key
             then
               Some
                 ( key,
-                  spaced && (not (control_fixture path)) && not (tracked_historical_config path key)
-                )
+                  (spaced || not (String.contains name '_'))
+                  && (not (control_fixture path))
+                  && not (tracked_historical_config path key) )
             else None)
   | None -> None
 
@@ -426,7 +454,7 @@ let markdown_occurrences ~allow_bare ~path content =
   let comments line = Markdown.spans_at scan.comment_ranges line in
   let fences line = Markdown.spans_at scan.fence_ranges line in
   let as_markdown lineno occurrence =
-    { occurrence with line = lineno; kind = Markdown_assignment; spaced_bare = false }
+    { occurrence with line = lineno; kind = Markdown_assignment; ambiguous_bare = false }
   in
   let lines = Markdown.lines content in
   let inline =
@@ -456,14 +484,14 @@ let markdown_occurrences ~allow_bare ~path content =
               let bare =
                 if complete && allow_bare then
                   Option.to_list
-                  @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, spaced_bare) ->
+                  @@ Option.map (one_assignment ~path rendered) ~f:(fun (key, ambiguous_bare) ->
                       {
                         path;
                         line = lineno;
                         key;
                         spelling = rendered;
                         kind = Markdown_assignment;
-                        spaced_bare;
+                        ambiguous_bare;
                       })
                 else []
               in
@@ -517,7 +545,7 @@ let config_file_occurrences ?(include_commented = false) ~path content =
                 key;
                 spelling = String.strip raw_key ^ "=";
                 kind = Config_file_assignment;
-                spaced_bare = false;
+                ambiguous_bare = false;
               }))
 
 (* Standalone environment names are unambiguous enough to scan throughout command-like text, but
@@ -589,80 +617,22 @@ let non_config_environment_mentions =
     ("arrayjit/lib/utils.ml", "print", 1);
   ]
 
-(* These are assignments in other languages or report formats, not configuration. This is a judgment
-   list rather than a restatement of a vocabulary owned elsewhere, and it is scoped by FILE as well
-   as key: exempting [state] everywhere would let a future stale config mention called [state] pass
-   in silence. Each entry pins its occurrence count: becoming real, disappearing, or gaining a
-   second same-file use all fail. *)
+(* These lowercase snake-case assignments are still ambiguous with other languages or report formats
+   after the token grammar has excluded camelCase, uppercase environment-style names, and one-word
+   mathematical notation. This is a judgment list rather than a restatement of a vocabulary owned
+   elsewhere, and it is scoped by FILE as well as key. Each entry pins its occurrence count:
+   becoming real, disappearing, or gaining a second same-file use all fail. *)
 let non_config_assignment_mentions =
   [
-    (".claude/skills/slipshow/SKILL.md", "title", 1);
-    ("benchmarks/README.md", "lr", 1);
-    ("benchmarks/README.md", "bench_tune", 3);
-    ("benchmarks/README.md", "bench_materialize", 2);
-    ("benchmarks/README.md", "bench_precision", 2);
-    ("benchmarks/README.md", "bench_static_scale", 2);
-    ("benchmarks/README.md", "bench_gate_interval", 2);
-    ("benchmarks/README.md", "bench_loss_scale", 1);
-    ("benchmarks/README.md", "bench_debug", 2);
-    ("benchmarks/README.md", "bench_no_sgd", 2);
-    ("benchmarks/README.md", "bench_no_slice", 2);
-    ("benchmarks/README.md", "bench_twin_placement", 1);
-    ("benchmarks/README.md", "bench_preseed_twins", 1);
-    ("benchmarks/README.md", "bench_tune_report", 1);
-    ("benchmarks/README.md", "bench_flip_dump", 1);
-    ("benchmarks/README.md", "cachedb", 1);
-    ("benchmarks/README.md", "bench_cell_log_dir", 1);
-    ("benchmarks/README.md", "bench_steps", 1);
-    ("benchmarks/README.md", "bench_probe", 1);
-    ("benchmarks/README.md", "bench_dump", 1);
-    ("benchmarks/README.md", "bench_fwd", 1);
-    ("benchmarks/README.md", "bench_promote", 1);
-    ("benchmarks/README.md", "bench_seg_times", 2);
-    ("benchmarks/README.md", "bench_sr_sites", 1);
-    ("benchmarks/README.md", "beam", 1);
-    ("docs/agent-notes/backend-dialects-and-idents.md", "mtl_shader_validation", 1);
-    ("docs/agent-notes/build-and-test.md", "execution", 3);
-    ("docs/agent-notes/build-and-test.md", "ostype", 1);
-    ("docs/agent-notes/scheduling-and-autotune.md", "n", 1);
     ("docs/agent-notes/scheduling-and-autotune.md", "max_chain", 1);
-    ("docs/agent-notes/shape-inference.md", "concat", 1);
-    ("docs/agent-notes/training-and-performance.md", "bench_tune_report", 1);
-    ("docs/agent-notes/training-and-performance.md", "declines", 1);
-    ("docs/agent-notes/training-and-performance.md", "state", 1);
-    ("docs/agent-notes/training-and-performance.md", "timed", 1);
     ("docs/precision_inference.md", "top_down_prec", 6);
-    ("docs/blog/a-range-is-not-its-shape.md", "viz", 1);
-    ("docs/proposals/axis-labels.md", "hidden", 1);
-    ("docs/proposals/axis-labels.md", "name", 4);
-    ("docs/proposals/axis-labels.md", "rgb", 1);
-    ("docs/proposals/concat-forward-component-data-propagation.md", "a", 2);
     ("docs/proposals/concat-forward-component-data-propagation.md", "a_mc", 1);
-    ("docs/proposals/concat-forward-component-data-propagation.md", "b", 2);
     ("docs/proposals/concat-forward-component-data-propagation.md", "b_mc", 1);
-    ("docs/proposals/concat-forward-component-data-propagation.md", "c", 2);
     ("docs/proposals/concat-forward-component-data-propagation.md", "c_mc", 1);
-    ("docs/proposals/cuda-einsum-conv-codegen-investigation.md", "path", 1);
-    ("docs/proposals/fix-centered-init-test-fallout.md", "epsilon", 1);
-    ("docs/proposals/gh-ocannl-255.md", "d", 2);
-    ("docs/proposals/gh-ocannl-166.md", "default", 2);
-    ("docs/proposals/gh-ocannl-166.md", "prohibited", 2);
-    ("docs/proposals/gh-ocannl-166.md", "exclusive_process", 2);
     ("docs/proposals/gh-ocannl-263.md", "seq_q", 1);
-    ("docs/proposals/gh-ocannl-308-comment.md", "n", 1);
-    ("docs/proposals/gh-ocannl-313.md", "has_native_float16", 1);
-    ("docs/proposals/gh-ocannl-411.md", "hip_platform", 1);
-    ("docs/proposals/gh-ocannl-420.md", "i", 1);
     ("docs/proposals/gh-ocannl-536.md", "private_seg_size", 1);
-    ("docs/proposals/total-basis-bcast-if-1.md", "d", 1);
-    ("docs/proposals/tensorize-mma.md", "bench_tune_report", 1);
-    ("docs/proposals/watch-ocannl-README-md-369aadb4.md", "batch", 2);
-    ("docs/research/llmc-lessons.md", "accumulate", 1);
-    ("docs/research/llmc-lessons.md", "beta", 1);
     ("docs/research/lean-attention-feasibility.md", "seq_q", 1);
-    ("docs/syntax_extensions.md", "dilation", 2);
     ("docs/syntax_extensions.md", "kernel_size", 2);
-    ("docs/syntax_extensions.md", "stride", 2);
   ]
 
 let mention_site path key = path ^ "\000" ^ key
@@ -676,11 +646,24 @@ let kind_name = function
   | Markdown_assignment -> "documentation assignment"
   | Config_file_assignment -> "configuration-file assignment"
 
+let has_ambiguous_cli_value occurrence =
+  let qualified_cli =
+    Poly.equal occurrence.kind Cli_flag
+    || List.exists cli_name_prefixes ~f:(fun prefix -> String.is_prefix occurrence.spelling ~prefix)
+  in
+  if qualified_cli then
+    match Utils.parse_config_token occurrence.spelling with
+    | Some { token_shape = Utils.Command_line_token; token_key } ->
+        not (String.equal token_key occurrence.key)
+    | Some _ -> false
+    | None -> true
+  else false
+
 let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
     ?(control_non_config_environment_mentions = non_config_environment_mentions)
     ?(control_non_config_assignment_mentions = non_config_assignment_mentions)
     ?(control_historical_invalid_config_mentions = historical_invalid_config_mentions)
-    ?(control_spaced_config_mentions = spaced_config_mentions)
+    ?(control_ambiguous_bare_config_mentions = ambiguous_bare_config_mentions)
     ?(control_prefix_free_config_mentions = prefix_free_config_mentions)
     ?(control_ambiguous_cli_value_mentions = ambiguous_cli_value_mentions) ~repository_census
     occurrences =
@@ -691,7 +674,7 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
   let non_config_environment_sites = sites control_non_config_environment_mentions in
   let non_config_assignment_sites = sites control_non_config_assignment_mentions in
   let historical_invalid_config_sites = sites control_historical_invalid_config_mentions in
-  let spaced_config_sites = sites control_spaced_config_mentions in
+  let ambiguous_bare_config_sites = sites control_ambiguous_bare_config_mentions in
   let prefix_free_config_sites = sites control_prefix_free_config_mentions in
   let ambiguous_cli_value_sites =
     Set.of_list (module String)
@@ -701,23 +684,31 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
   let seen_non_config = Hashtbl.create (module String) in
   let seen_non_config_environment = Hashtbl.create (module String) in
   let seen_historical = Hashtbl.create (module String) in
-  let seen_spaced_config = Hashtbl.create (module String) in
+  let seen_ambiguous_bare_config = Hashtbl.create (module String) in
   let seen_prefix_free = Hashtbl.create (module String) in
   let seen_ambiguous_cli_value = Hashtbl.create (module String) in
   List.iter occurrences ~f:(fun occurrence ->
       let ambiguous_site =
         ambiguous_cli_value_site occurrence.path occurrence.spelling occurrence.key
       in
-      if Set.mem ambiguous_cli_value_sites ambiguous_site then
-        Hashtbl.incr seen_ambiguous_cli_value ambiguous_site;
-      (if occurrence.spaced_bare then
+      if has_ambiguous_cli_value occurrence then
+        if Set.mem ambiguous_cli_value_sites ambiguous_site then
+          Hashtbl.incr seen_ambiguous_cli_value ambiguous_site
+        else
+          fail
+            (Printf.sprintf
+               "%s:%d: ambiguous command-line value `%s` for `%s` lacks a file/token/key/count \
+                entry in ambiguous_cli_value_mentions"
+               occurrence.path occurrence.line occurrence.spelling occurrence.key);
+      (if occurrence.ambiguous_bare then
          let site = mention_site occurrence.path occurrence.key in
-         if Set.mem spaced_config_sites site then Hashtbl.incr seen_spaced_config site
+         if Set.mem ambiguous_bare_config_sites site then
+           Hashtbl.incr seen_ambiguous_bare_config site
          else
            fail
              (Printf.sprintf
-                "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in \
-                 spaced_config_mentions"
+                "%s:%d: ambiguous bare config mention `%s` lacks a file/key/count entry in \
+                 ambiguous_bare_config_mentions"
                 occurrence.path occurrence.line occurrence.spelling));
       (match occurrence.kind with
       | Prefix_free_cli_flag ->
@@ -808,17 +799,18 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
-    let drifted_spaced =
-      List.filter_map control_spaced_config_mentions ~f:(fun (path, key, expected) ->
+    let drifted_ambiguous_bare =
+      List.filter_map control_ambiguous_bare_config_mentions ~f:(fun (path, key, expected) ->
           let actual =
-            Hashtbl.find seen_spaced_config (mention_site path key) |> Option.value ~default:0
+            Hashtbl.find seen_ambiguous_bare_config (mention_site path key)
+            |> Option.value ~default:0
           in
           Option.some_if (not (Int.equal actual expected)) (path, key, expected, actual))
     in
-    if not (List.is_empty drifted_spaced) then
+    if not (List.is_empty drifted_ambiguous_bare) then
       fail
-        (Printf.sprintf "spaced config-mention occurrence counts drifted: %s"
-           (drifted_spaced
+        (Printf.sprintf "ambiguous bare config-mention occurrence counts drifted: %s"
+           (drifted_ambiguous_bare
            |> List.map ~f:(fun (path, key, expected, actual) ->
                Printf.sprintf "%s:%s expected %d, saw %d" path key expected actual)
            |> String.concat ~sep:", "));
@@ -856,21 +848,24 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
 
 let direct_refusal_formats =
   [
-    "%s:%d: spaced bare config mention `%s` lacks a file/key/count entry in spaced_config_mentions";
+    "%s:%d: ambiguous bare config mention `%s` lacks a file/key/count entry in \
+     ambiguous_bare_config_mentions";
     "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
      prefix_free_config_mentions";
     "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys";
+    "%s:%d: ambiguous command-line value `%s` for `%s` lacks a file/token/key/count entry in \
+     ambiguous_cli_value_mentions";
     "non-config environment exemptions now name registered config keys -- remove: %s";
     "non-config environment-mention occurrence counts drifted: %s";
     "non-config assignment exemptions now name registered config keys -- remove: %s";
     "non-config assignment exemption occurrence counts drifted: %s";
     "historical invalid-config exemption occurrence counts drifted: %s";
-    "spaced config-mention occurrence counts drifted: %s";
+    "ambiguous bare config-mention occurrence counts drifted: %s";
     "prefix-free config-mention occurrence counts drifted: %s";
     "ambiguous command-line value occurrence counts drifted: %s";
   ]
 
-let refusal_control () =
+let refusal_control grammar_fixture =
   let source = "test/operations/config_usage_scan.ml" in
   let observed = Hash_set.create (module String) in
   let unexpected = ref [] in
@@ -892,22 +887,98 @@ let refusal_control () =
     |> add_first_key non_config_environment_mentions
     |> add_first_key non_config_assignment_mentions
   in
-  let occurrence ?(spaced_bare = false) ~path ~key ~spelling ~kind () =
-    { path; line = 1; key; spelling; kind; spaced_bare }
+  let occurrence ?(ambiguous_bare = false) ~path ~key ~spelling ~kind () =
+    { path; line = 1; key; spelling; kind; ambiguous_bare }
   in
   Verdict.p "a runtime value separator is resolved before equals inside its value"
     (Option.equal String.equal
        (cli_key_of_token ~path:"docs/agent-notes/build-and-test.md"
           ("--ocannl_" ^ "backend_cuda=true"))
        (Some "backend"));
+  Verdict.p_all ~min:1 "every scanner command-line prefix belongs to the runtime grammar"
+    cli_name_prefixes ~f:(fun prefix ->
+      let sentinel = "configtokengrammarkey" in
+      let sentinel =
+        if String.equal prefix (String.uppercase prefix) then String.uppercase sentinel
+        else sentinel
+      in
+      List.mem (Utils.cmdline_var_prefixes sentinel) (prefix ^ sentinel ^ "=") ~equal:String.equal);
+  Verdict.p_all ~min:4 "runtime-generated command-line spellings remain config tokens"
+    [
+      "--ocannl_print_decimals_precision=7";
+      "--ocannl-print-decimals-precision=7";
+      "--OCANNL_PRINT_DECIMALS_PRECISION=7";
+      "--OCANNL-PRINT-DECIMALS-PRECISION=7";
+    ] ~f:(fun spelling -> Option.is_some (Utils.parse_config_token spelling));
+  Verdict.p_none "runtime-rejected mixed command-line spellings are not config tokens"
+    [
+      ("--ocannl-", "print_decimals-precision=7");
+      ("--ocannl_", "Print_Decimals_Precision=7");
+      ("--OCANNL_", "print_decimals_precision=7");
+    ]
+    ~f:(fun (prefix, suffix) -> Option.is_some (Utils.parse_config_token (prefix ^ suffix)));
+  Verdict.p "a counted alternate separator recovers the runtime key/value boundary"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"test/operations/config_usage_scan.ml"
+          ("--ocannl_" ^ "print_decimals_precision-7"))
+       (Some "print_decimals_precision"));
+  Verdict.p "an undeclared alternate separator is classified so the scan can refuse it"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"undeclared-alternate.md"
+          ("--ocannl_" ^ "print_decimals_precision-8"))
+       (Some "print_decimals_precision"));
+  Verdict.p "an unknown cross-style command-line token remains classifiable for refusal"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"unknown-cross-style.sh" ("--ocannl_" ^ "typo_key-7"))
+       (Some "typo_key_7"));
+  Verdict.p_all ~min:2 "counted one-word documentation assignments remain config tokens"
+    [
+      ("AGENTS.md", "profile=reproducible|performance", "profile");
+      ("docs/agent-notes/backend-dialects-and-idents.md", "backend=cc", "backend");
+    ]
+    ~f:(fun (path, spelling, expected_key) ->
+      match one_assignment ~path spelling with
+      | Some (key, ambiguous_bare) -> String.equal key expected_key && ambiguous_bare
+      | None -> false);
+  Verdict.p "a new registered one-word assignment remains classifiable for a required judgment"
+    (match one_assignment ~path:"new-one-word.md" "backend=metal" with
+    | Some (key, ambiguous_bare) -> String.equal key "backend" && ambiguous_bare
+    | None -> false);
+  Verdict.p "a tracked historical one-word typo remains classifiable after registry removal"
+    (match one_assignment ~path:"docs/proposals/gh-ocannl-409.md" "bacend=multicore_cc" with
+    | Some (key, ambiguous_bare) -> String.equal key "bacend" && not ambiguous_bare
+    | None -> false);
+  let grammar_text = In_channel.read_all grammar_fixture in
+  let grammar_candidates = complete_inline_code_candidates grammar_text in
+  let grammar_occurrences =
+    markdown_occurrences ~allow_bare:true
+      ~path:(Stdlib.Filename.basename grammar_fixture)
+      grammar_text
+  in
+  Verdict.p_all ~min:3
+    "each promised non-OCANNL assignment is present in the fixture and rejected as a config token"
+    [ "fastMathEnabled=false"; "mathMode=Safe"; "d=1" ] ~f:(fun spelling ->
+      List.mem grammar_candidates spelling ~equal:String.equal
+      && not
+           (List.exists grammar_occurrences ~f:(fun occurrence ->
+                String.equal occurrence.spelling spelling)));
+  Verdict.p_exists "a real documented OCANNL assignment remains a config token" grammar_occurrences
+    ~f:(fun occurrence ->
+      String.equal occurrence.key "debug_log_from_routines"
+      && String.equal occurrence.spelling "debug_log_from_routines=true");
   check ~fail ~known_keys ~repository_census:true
     [
-      occurrence ~spaced_bare:true ~path:"missing-spaced.md" ~key:"backend" ~spelling:"backend = cc"
-        ~kind:Markdown_assignment ();
+      occurrence ~ambiguous_bare:true ~path:"missing-spaced.md" ~key:"backend"
+        ~spelling:"backend = cc" ~kind:Markdown_assignment ();
       occurrence ~path:"missing-prefix-free.ml" ~key:"backend" ~spelling:"--backend=cc"
         ~kind:Prefix_free_cli_flag ();
       occurrence ~path:"unknown.sh" ~key:"definitely_missing"
         ~spelling:("--ocannl_" ^ "missing=true") ~kind:Cli_flag ();
+      occurrence ~path:"undeclared-alternate.md" ~key:"print_decimals_precision"
+        ~spelling:("--ocannl_" ^ "print_decimals_precision-8")
+        ~kind:Cli_flag ();
+      occurrence ~ambiguous_bare:true ~path:"new-one-word.md" ~key:"backend"
+        ~spelling:"backend=metal" ~kind:Markdown_assignment ();
     ];
   Verdict.p_all ~min:11 "every config-usage direct refusal format is observed"
     direct_refusal_formats ~f:(Hash_set.mem observed);
@@ -1062,7 +1133,7 @@ let live workspace_root generated =
 
 let () =
   match Array.to_list argv with
-  | _ :: [ "--refusal-control" ] -> refusal_control ()
+  | _ :: [ "--refusal-control"; grammar_fixture ] -> refusal_control grammar_fixture
   | _ :: [ "--fixture"; path; config_path; multiline_path ] ->
       fixture path config_path multiline_path
   | _ :: workspace_root :: generated when not (List.is_empty generated) ->
