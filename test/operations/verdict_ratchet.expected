@@ -76,6 +76,10 @@ refuses a quantified argument claimed inside an eager wrapper call: true
 refuses a quantified argument claimed under a local Verdict open: true
 refuses a quantified argument claimed by a function-case wrapper: true
 refuses a quantified argument forwarded through a match wrapper: true
+refuses a quantified argument forwarded by a Boolean match wrapper: true
+accepts a quantified argument inverted by a Boolean match wrapper: true
+refuses a quantified argument claimed inside a callback: true
+does not connect a callback-shadowed parameter to its wrapper: true
 refuses a quantified argument passed to a qualified local-module wrapper: true
 refuses a quantified argument passed through an opened local module: true
 refuses a quantified helper called through a local module: true

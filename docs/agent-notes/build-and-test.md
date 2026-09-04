@@ -858,7 +858,8 @@ that they earn a lookup rather than always-loaded space.
   shadow same-named outer helpers while their body is analyzed, and later local bindings shadow
   returned-name references. `Fn.id`/`Fun.id` are transparent to returned-quantifier analysis.
   Immediately invoked function bodies remain visible, and aliases of the recognized collection
-  quantifier functions retain the underlying quantifier kind and population arity.
+  quantifier functions retain the underlying quantifier kind and population arity. Nested callback
+  bodies contribute their claims with callback parameters shadowing outer wrapper aliases.
   Dependencies that choose a returned value through an `if` condition or match scrutinee, and a
   dependency returned from a protected `try` body, remain visible; complementary Boolean `if`
   branches retain their polarity. Match-case patterns shadow outer helper names in their guards and
@@ -888,7 +889,8 @@ that they earn a lookup rather than always-loaded space.
   that the condition does not contribute. Boolean match polarity follows the first matching case for
   each input, including wildcard, variable, alias, constrained, open, and or-patterns, rather than
   considering only literal constructor patterns. This preserves forwarding and inversion through
-  ordinary exhaustive matches. Constructor-match outcomes and Boolean-comparison
+  ordinary exhaustive matches, including when the match maps a wrapper parameter into a claim.
+  Constructor-match outcomes and Boolean-comparison
   operands resolve the same aliases. Local opens, local-module declarations, and local exceptions
   are transparent to returned-quantifier analysis, protected `try` expressions remain part of that
   analysis, and `not @@ quantified` retains the same negative polarity as direct and piped `not`.

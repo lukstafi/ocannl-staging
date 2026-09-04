@@ -578,7 +578,9 @@ and returned_binding_polarities positive expr =
       @ returned_binding_polarities positive yes
       @ Option.value_map no ~default:[] ~f:(returned_binding_polarities positive)
   | Pexp_match (scrutinee, cases) ->
-      List.concat_map cases ~f:(fun case ->
+      Option.value_map (boolean_match_polarity cases) ~default:[] ~f:(fun same_polarity ->
+          returned_binding_polarities (Bool.equal positive same_polarity) scrutinee)
+      @ List.concat_map cases ~f:(fun case ->
           let returned = returned_binding_polarities positive case.pc_rhs in
           let shadowed =
             pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
@@ -1068,7 +1070,8 @@ and wrapper_signature environment expression =
   in
   let shadow_aliases aliases pattern =
     let shadowed = pattern_names pattern |> List.map ~f:fst |> Set.of_list (module String) in
-    List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name))
+    let outer = List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name)) in
+    Set.to_list shadowed |> List.map ~f:(fun name -> (name, [])) |> Fn.flip List.rev_append outer
   in
   let rec claim_calls claim_environment aliases expression =
     match expression.pexp_desc with
@@ -1098,6 +1101,23 @@ and wrapper_signature environment expression =
     | Pexp_try (body, cases) ->
         claim_calls claim_environment aliases body
         @ List.concat_map cases ~f:(fun case ->
+            claim_calls claim_environment (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
+    | Pexp_function (parameters, _, Pfunction_body body) ->
+        let aliases =
+          List.fold parameters ~init:aliases ~f:(fun aliases parameter ->
+              match parameter.pparam_desc with
+              | Pparam_val (_, _, pattern) -> shadow_aliases aliases pattern
+              | Pparam_newtype _ -> aliases)
+        in
+        claim_calls claim_environment aliases body
+    | Pexp_function (parameters, _, Pfunction_cases (cases, _, _)) ->
+        let aliases =
+          List.fold parameters ~init:aliases ~f:(fun aliases parameter ->
+              match parameter.pparam_desc with
+              | Pparam_val (_, _, pattern) -> shadow_aliases aliases pattern
+              | Pparam_newtype _ -> aliases)
+        in
+        List.concat_map cases ~f:(fun case ->
             claim_calls claim_environment (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
     | Pexp_apply (callee, arguments) -> (
         match claim_target claim_environment callee with
@@ -2074,6 +2094,26 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check ok = Verdict.p "all rows pass" (match ok with value -> value)
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified argument forwarded by a Boolean match wrapper",
+      {ocaml|let check ok =
+  Verdict.p "all rows pass" (match ok with true -> true | false -> false)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "accepts a quantified argument inverted by a Boolean match wrapper",
+      {ocaml|let check ok =
+  Verdict.p "some row fails" (match ok with true -> false | false -> true)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [] );
+    ( "refuses a quantified argument claimed inside a callback",
+      {ocaml|let check ok =
+  List.iter [ () ] ~f:(fun () -> Verdict.p "all rows pass" ok)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "does not connect a callback-shadowed parameter to its wrapper",
+      {ocaml|let check ok =
+  List.iter [ true ] ~f:(fun ok -> Verdict.p "the constant passes" ok)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [] );
     ( "refuses a quantified argument passed to a qualified local-module wrapper",
       {ocaml|module Checks = struct
   let check ok = Verdict.p "all rows pass" ok
