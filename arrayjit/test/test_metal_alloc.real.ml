@@ -71,11 +71,8 @@ let () =
   let b_dst = Nd.create_array ~debug:"b_dst" prec ~dims ~padding:None in
   B.to_host ~src:ctx ~src_loc:loc_b b_dst;
   B.await device;
-  let b_roundtrip_ok =
-    Array.for_all [| 0; 1; 2; 3 |] ~f:(fun i ->
-        Float.equal (Nd.get_as_float b_dst [| i |]) (Float.of_int (10 + i)))
-  in
-  Verdict.p "from_host/to_host at offset>0 preserves values" b_roundtrip_ok;
+  Verdict.p_all "from_host/to_host at offset>0 preserves values" [ 0; 1; 2; 3 ] ~f:(fun i ->
+      Float.equal (Nd.get_as_float b_dst [| i |]) (Float.of_int (10 + i)));
 
   (* memset_zero region B at offset>0, then confirm B reads back zeros AND A is untouched. *)
   B.memset_zero device ~pool_id:pool ~offset:region_bytes ~size_in_bytes:region_bytes;
@@ -87,12 +84,7 @@ let () =
   let a_check = Nd.create_array ~debug:"a_check" prec ~dims ~padding:None in
   B.to_host ~src:ctx ~src_loc:loc_a a_check;
   B.await device;
-  let b_zeros_ok =
-    Array.for_all [| 0; 1; 2; 3 |] ~f:(fun i -> Float.equal (Nd.get_as_float b_after [| i |]) 0.0)
-  in
-  let a_intact =
-    Array.for_all [| 0; 1; 2; 3 |] ~f:(fun i ->
-        Float.equal (Nd.get_as_float a_check [| i |]) (Float.of_int (i + 1)))
-  in
-  Verdict.p "memset_zero at offset>0 reads back zeros" b_zeros_ok;
-  Verdict.p "offset>0 ops leave region A (offset 0) intact" a_intact
+  Verdict.p_all "memset_zero at offset>0 reads back zeros" [ 0; 1; 2; 3 ] ~f:(fun i ->
+      Float.equal (Nd.get_as_float b_after [| i |]) 0.0);
+  Verdict.p_all "offset>0 ops leave region A (offset 0) intact" [ 0; 1; 2; 3 ] ~f:(fun i ->
+      Float.equal (Nd.get_as_float a_check [| i |]) (Float.of_int (i + 1)))

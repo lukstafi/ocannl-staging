@@ -27,15 +27,142 @@ each carrying its assertion separately through `Verdict.claim`/`claimf`:
   test/operations/test_execution_deps.ml:%s refused, names the routine: %b, names the cause:  -- a two-property row about one refusal; both properties are claimed beside it
   test/operations/observable_grads.ml:%s placement: %s; in context: %b; observable intent:  -- `in context` is legitimately false for a virtualized leg, so the row describes; the assertion is `observable intent`, claimed beside it
 
-Helper-wrapped quantified claims exempted because emptiness is their passing meaning:
+Quantified bindings exempted because emptiness is their passing meaning:
+  test/operations/backend_golden_family_scan.ml:complete -- empty incomplete/error lists are the passing evidence; the non-empty synthetic-control population is guarded in the same binding
+  test/operations/autotune_routine_name.ml:contributed -- a contended search may legitimately contribute no rows; its report counters separately prove whether that absence came from refused timings rather than a lost result
+  test/operations/env_var_deps.ml:family_floor_met -- a non-repository synthetic run deliberately skips repository-only family floors; the repository path checks every family and reports each shortfall separately
+  test/operations/epilogue_fusion_mma_seeds.ml:vacuous -- an empty GPU mma family deliberately selects the environment-gated vacuity path; the non-vacuous path separately requires and executes the epilogue twins
+  test/operations/fission_schedule.ml:annotated -- the merge-back case deliberately requires the consumer segment to have no hardware axes; the same claim also requires the producer segment to be annotated
   test/operations/ocamlformat_ignore_scan.ml:refused -- the message list is an optional strengthening of the child-exit refusal: an empty list deliberately means that the nonzero status alone is the passing evidence
+  test/operations/reduction_forms.ml:changed -- an empty schedule deliberately needs no IR change, and an empty per-op result means there were no per-op transformations to validate
+  test/operations/reduction_forms.ml:extra_ok -- an empty extra-fragment list deliberately means the member requires no additional emitted assignment fragments
+  test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile -- an absent or empty hardware mma capability list is the environment gate that makes the backend-uniform non-support legs pass without attempting a tensor-core candidate
+  test/operations/shell_scripts_parse.ml:line_enables_errexit -- a line may legitimately parse to no parent-affecting command fragment; this exists result is an internal classification input, while the fixed non-empty case table is the test population
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
 refuses an unguarded helper behind an open of Verdict.Claims: true
 keeps an open of Verdict.Claims inside its local scope: true
 refuses a sibling for_all helper through an intermediate result binding: true
+refuses a fully applied quantifier bound before the claim: true
+refuses a quantified binding passed through a Verdict wrapper: true
+refuses a direct quantifier passed through a Verdict wrapper: true
+refuses a direct quantifier returned by an immediately invoked function: true
+accepts a negated quantifier returned by an immediately invoked function: true
+refuses a quantified binding returned by an immediately invoked function: true
+refuses a direct quantifier called through a function alias: true
+accepts a negated quantifier called through a function alias: true
+accepts a guarded direct quantifier passed through a Verdict wrapper: true
+accepts a negated direct quantifier passed through a Verdict wrapper: true
+refuses a direct exists negated by a labeled Verdict wrapper parameter: true
+refuses a bound exists negated by a labeled Verdict wrapper parameter: true
+accepts a positive exists passed through a labeled Verdict wrapper parameter: true
+uses an omitted optional default that feeds a Verdict wrapper claim: true
+does not use a Verdict wrapper default when its argument is supplied: true
+uses a Verdict wrapper default preserved through partial optional None: true
+inspects the possible payload of an unknown forwarded wrapper option: true
+refuses a direct quantifier passed to a partially applied Verdict claim: true
+refuses a direct quantifier passed to a curried partial Verdict wrapper: true
+refuses a direct quantifier passed to a formatted partial Verdict wrapper: true
+refuses a direct quantifier passed to a partially applied local wrapper: true
+refuses a direct quantifier passed through a wrapper with tail setup: true
+refuses a direct quantifier passed through a wrapper setup alias: true
+does not connect a wrapper parameter hidden by a setup constant: true
+refuses every quantified argument passed through a sequential wrapper: true
+refuses a quantified argument claimed inside wrapper control flow: true
+refuses a quantified condition used as a wrapper claim value: true
+accepts an inverted quantified condition used as a wrapper claim value: true
+refuses a quantified argument claimed inside an eager wrapper call: true
+refuses a quantified argument claimed under a local Verdict open: true
+refuses a quantified argument claimed by a function-case wrapper: true
+refuses a quantified argument forwarded through a match wrapper: true
+refuses a quantified argument forwarded by a Boolean match wrapper: true
+accepts a quantified argument inverted by a Boolean match wrapper: true
+refuses a quantified argument claimed inside a callback: true
+does not connect a callback-shadowed parameter to its wrapper: true
+refuses a quantified argument passed to a qualified local-module wrapper: true
+refuses a quantified argument passed through an opened local module: true
+refuses a quantified helper called through a local module: true
+refuses a quantified helper called through an opened local module: true
+accepts a fully applied quantified binding with a non-empty witness: true
+accepts a negated fully applied quantified binding: true
+refuses a fully applied quantifier compared with true: true
+accepts a fully applied quantifier compared with false: true
+refuses a direct Bool.equal true around a fully applied quantifier: true
+accepts a direct Bool.equal false around a fully applied quantifier: true
+refuses a bound exists compared with a false Boolean alias: true
+refuses a direct exists compared with a false Boolean alias: true
+refuses a fully applied quantifier through a transparent Boolean wrapper: true
+refuses a returned quantifier behind a local open: true
+refuses a returned quantifier behind local module setup: true
+refuses a positive intermediate binding: true
+accepts a negated intermediate binding: true
+accepts a piped negated intermediate binding: true
+accepts a directly quantified value piped through not: true
+refuses a negated exists written with the application operator: true
+accepts a positive bound exists: true
+refuses a negated bound exists: true
+accepts a guarded intermediate binding: true
+accepts a quantifier guarded by the same filtered population: true
+refuses a guard on a differently filtered population: true
+conservatively refuses an outer guard across a helper call: true
+refuses a mismatched actual hidden by equal formal names: true
+refuses a shadowed guard identity across a nested alias: true
+refuses a binding nested directly inside a claim argument: true
+accepts a guarded binding nested directly inside a claim argument: true
+keeps an outer witness from guarding a shadowed nested population: true
+accepts a nested quantified population with its own witness: true
+accepts a negated binding nested directly inside a claim argument: true
+does not return a quantified binding shadowed by a later local: true
+does not let an outer guard witness a match-bound population: true
+refuses a quantified component of a destructured tuple binding: true
+conservatively refuses a quantified component of a record binding: true
+refuses a quantified component destructured from an intermediate aggregate: true
 refuses a helper that returns a fully applied quantified local binding: true
+refuses a helper that returns a match-bound quantified value: true
+refuses a direct quantifier forwarded by a Boolean constructor match: true
+refuses a direct quantifier forwarded by a wildcard Boolean match: true
+accepts a direct quantifier inverted by a wildcard Boolean match: true
+accepts a direct quantifier inverted by a Boolean constructor match: true
+refuses a bound exists inverted by a Boolean constructor match: true
+refuses a bound exists inverted by aliased Boolean match outcomes: true
+refuses a direct exists inverted by aliased Boolean match outcomes: true
+refuses a bound quantifier returned through an if condition: true
+accepts an inverted bound quantifier returned through an if condition: true
+refuses a direct quantifier returned through an if condition: true
+accepts an inverted direct quantifier returned through an if condition: true
+refuses a direct if condition whose false outcome is a Boolean alias: true
+refuses a bound if condition whose false outcome is a Boolean alias: true
+refuses a direct if condition whose local false outcome is a Boolean alias: true
+refuses an aliased quantified condition in a protected try body: true
+does not attribute a condition whose branches return the same literal: true
+refuses a bound quantifier returned through a match guard: true
+accepts an inverted bound quantifier returned through a match guard: true
+refuses a direct quantifier returned through a match guard: true
+accepts an inverted direct quantifier returned through a match guard: true
+refuses a direct match guard whose false result is a Boolean alias: true
+refuses a bound match guard whose false result is a Boolean alias: true
+refuses a bound quantifier returned from a protected try body: true
+refuses a direct quantifier returned through a try-case guard: true
+accepts an inverted direct quantifier returned through a try-case guard: true
+refuses a bound exists inverted through a try-case guard: true
+refuses a quantified helper reached through a mutually recursive sibling: true
+does not resolve an outer quantified binding shadowed by a function parameter: true
+does not resolve an outer binding shadowed by a match pattern: true
+does not return an outer quantified local shadowed by a match pattern: true
+still resolves a non-shadowed quantified binding returned by a function: true
+resolves an outer quantified binding used by an optional default: true
+does not use an optional default dependency when the caller supplies the argument: true
+uses an optional default when a forwarded argument is None: true
+does not use an optional default when a forwarded argument is definitely Some: true
+resolves a quantified binding through chained optional defaults: true
+suppresses an earlier default inside a later default when the caller supplies it: true
+preserves polarity through an optional default: true
+refuses a quantified helper written with function-case syntax: true
+accepts a guarded quantified helper written with function-case syntax: true
+does not share a function-case guard with another case: true
+accepts a helper that negates a quantified local binding: true
+refuses a double negation around a quantified local binding: true
 refuses a quantifier written in pipeline style: true
 keeps helper resolution inside its lexical scope: true
 refuses a reversed length upper bound masquerading as a witness: true
@@ -54,26 +181,41 @@ a shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both shadowed definitions: true
 a same-line shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both same-line shadowed definitions: true
+a reused wrapper call helper name resolves to two call sites, not one: true
+refuses an exemption key that names both reused wrapper call call sites: true
+a multi-slot wrapper call helper name resolves to two call slots, not one: true
+refuses an exemption key that names both multi-slot wrapper call call slots: true
+a repeated literal-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both repeated literal-label source sites: true
+a same-line repeated literal-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both same-line repeated literal-label source sites: true
+a repeated computed-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both repeated computed-label source sites: true
+a same-line repeated computed-label exemption key resolves to two source sites, not one: true
+refuses an exemption key that names both same-line repeated computed-label source sites: true
 
 every test source decides its claims through Verdict: true
-every helper-wrapped quantified claim witnesses a non-empty population: true
+every quantified binding used by a claim witnesses a non-empty population: true
 the scan found every literal planted for it: true
 every exemption on this check's lists is still earned: true
-every exempted quantified helper is one definition, not a shared name: true
+every exempted claim-shaped literal is one source site, not a shared key: true
+every exempted quantified binding is one definition, not a shared name: true
 the walk read string literals out of these sources: true
 and placed some of them as arguments of a named function: true
 over more than one test directory: true
 
-OK: test claims route through `Verdict`, and helper-wrapped quantifiers cannot pass on nothing.
+OK: test claims route through `Verdict`, and quantified bindings cannot pass on nothing.
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:21c46bd80cd0c37bcebde7eb2d04dcd8] exempted quantified helpers
-  [scanner-refusal:a762c69e145dd278ddd9810ecfe2f65e] shadowing definitions separate
+  [scanner-refusal:977473ba169d481e2b57377845e9a8b8] exempted quantified bindings
+  [scanner-refusal:52b0c212a9f1ba97a1400cd478d7cfda] shadowing definitions separate
+  [scanner-refusal:28926aa707bb0e8c7e5a087d40f0bf13] exempted claim-shaped literal
   [scanner-refusal:b3bbed986e758647a2db67f9428972c6] claims through Verdict
-  [scanner-refusal:a340b965171aa5b79a43e8b92ef3307e] every helper-wrapped quantified
+  [scanner-refusal:63d9475f3df44af6baac8bdc03a3310b] every quantified binding
   [scanner-refusal:be24b406399ca10a3226fec87a6d2b7f] every literal planted
   [scanner-refusal:7b69f1ae79d020bf8ce24352f17dec6d] every exemption on
-  [scanner-refusal:021b016668a04863104372940f003669] exempted quantified helper
+  [scanner-refusal:bd1c6476261fa5d1b680ca8c0959f3f9] exempted claim-shaped literal
+  [scanner-refusal:e29d881451dd7fd465b12ea6911fc165] exempted quantified binding
   [scanner-refusal:0c4e9524d3ca5b65bcbff10057237e01] read string literals
   [scanner-refusal:52611c0a0d560ef9a05c306005ef3e2a] them as arguments
   [scanner-refusal:d50daada9fe28bdf45d8d12250595a40] one test directory

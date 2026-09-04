@@ -36,9 +36,10 @@ let test_prec ?(check_range = true) ~name prec ns =
   List.iter ns ~f:(fun n ->
       let vs = run_uniform ~prec [ n ] in
       let count_ok = Array.length vs = n in
-      let in_range =
-        (not check_range) || Array.for_all vs ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
+      let range_holds =
+        (not (Array.is_empty vs)) && Array.for_all vs ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
       in
+      let in_range = (not check_range) || range_holds in
       let prefix_stable =
         count_ok && Array.for_alli vs ~f:(fun i x -> Float.equal x reference.(i))
       in
@@ -49,7 +50,7 @@ let test_prec ?(check_range = true) ~name prec ns =
       Verdict.claimf "%s n=%d: exactly n values" name n count_ok;
       (* Claimed only where it was evaluated: with [check_range = false] (fp8) the printed [true] is
          the vacuous one, and a claim of it would report a check that never ran. *)
-      if check_range then Verdict.claimf "%s n=%d: all values in [0,1)" name n in_range;
+      if check_range then Verdict.claimf "%s n=%d: all values in [0,1)" name n range_holds;
       Verdict.claimf "%s n=%d: prefix bitwise-stable against the reference" name n prefix_stable)
 
 (* A multi-axis shape with a non-divisible total: the value stream depends only on the flat element
@@ -60,7 +61,9 @@ let test_multi_axis () =
   let vs = run_uniform ~prec:Ir.Ops.single ~input_dims:[ 5 ] [ 3 ] in
   Stdio.printf "got %d elements\n" (Array.length vs);
   let count_ok = Array.length vs = 15 in
-  let in_range = Array.for_all vs ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
+  let in_range =
+    (not (Array.is_empty vs)) && Array.for_all vs ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
+  in
   let prefix_stable = count_ok && Array.for_alli vs ~f:(fun i x -> Float.equal x reference.(i)) in
   Stdio.printf "count %b, in [0,1) %b, prefix-stable %b\n" count_ok in_range prefix_stable;
   Verdict.claim "multi-axis 5->3: exactly 15 values" count_ok;

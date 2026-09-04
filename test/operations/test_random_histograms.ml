@@ -87,7 +87,9 @@ let test_uniform_at_with_shape () =
         let diff = Float.of_int observed -. expected_per_bin in
         acc +. (diff *. diff /. expected_per_bin))
   in
-  let all_in_range = Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
+  let all_in_range =
+    (not (Array.is_empty result)) && Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
+  in
   print_check "Mean within 0.49..0.51" Float.(mean >= 0.49 && mean <= 0.51);
   print_check "Std dev within 0.25..0.32" Float.(std_dev >= 0.25 && std_dev <= 0.32);
   print_check "Min below 0.05" Float.(min_val >= 0.0 && min_val < 0.05);
@@ -283,7 +285,8 @@ let test_kaiming_at_with_proper_shape () =
 
   printf "Summary checks:\n";
   print_check "Shape has expected element count" (Int.equal n (fan_in * fan_out));
-  print_check "All values finite" (Array.for_all result ~f:Float.is_finite);
+  print_check "All values finite"
+    ((not (Array.is_empty result)) && Array.for_all result ~f:Float.is_finite);
   print_check "Mean is positive" Float.(mean > 0.0);
   print_check "Distribution has spread" Float.(std_dev > 0.0);
   print_check "Min <= max" Float.(min_val <= max_val)
@@ -327,7 +330,8 @@ let test_xavier_at_with_proper_shape () =
 
   printf "Summary checks:\n";
   print_check "Shape has expected element count" (Int.equal n (fan_in * fan_out));
-  print_check "All values finite" (Array.for_all result ~f:Float.is_finite);
+  print_check "All values finite"
+    ((not (Array.is_empty result)) && Array.for_all result ~f:Float.is_finite);
   print_check "Mean is positive" Float.(mean > 0.0);
   print_check "Distribution has spread" Float.(std_dev > 0.0);
   print_check "Min <= max" Float.(min_val <= max_val)

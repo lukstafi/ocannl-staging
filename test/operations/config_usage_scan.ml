@@ -1081,13 +1081,13 @@ let live workspace_root generated =
     List.filter files ~f:(fun (path, _) ->
         String.is_suffix path ~suffix:".sh" || String.is_suffix path ~suffix:".py")
   in
-  let markdown = List.filter files ~f:(fun (path, _) -> String.is_suffix path ~suffix:".md") in
   Verdict.p_all "the source inventory supplies shell and Python files" [ ".sh"; ".py" ]
     ~f:(fun suffix -> List.exists scripts ~f:(fun (path, _) -> String.is_suffix path ~suffix));
   Verdict.p_all "the source inventory supplies OCaml implementation and interface files"
     [ ".ml"; ".mli" ] ~f:(fun suffix ->
       List.exists files ~f:(fun (path, _) -> String.is_suffix path ~suffix));
-  Verdict.p "the source inventory supplies Markdown" (not (List.is_empty markdown));
+  Verdict.p_exists "the source inventory supplies Markdown" files ~f:(fun (path, _) ->
+      String.is_suffix path ~suffix:".md");
   Verdict.p "the source inventory supplies workflow YAML"
     (List.exists files ~f:(fun (path, _) ->
          String.is_suffix path ~suffix:".yml" || String.is_suffix path ~suffix:".yaml"));

@@ -35,27 +35,18 @@ let stubs : (string * (int array -> unit)) list =
 let short_arities = [ 0; 1; 2; 3 ]
 
 let () =
-  let rejects_short =
-    List.for_all
-      (fun (_, call) ->
-        List.for_all
-          (fun n ->
-            Gc.minor ();
-            let a = Array.make n 0 in
-            match call a with exception Invalid_argument _ -> true | () -> false)
-          short_arities)
-      stubs
-  in
-  Verdict.p "every uint4x32 stub rejects an under-length array" rejects_short;
-  let accepts_four =
-    List.for_all
-      (fun (_, call) ->
-        Gc.minor ();
-        let a = [| 1; 2; 3; 4 |] in
-        match call a with exception Invalid_argument _ -> false | () -> true)
-      stubs
-  in
-  Verdict.p "every uint4x32 stub accepts a four-lane array" accepts_four;
+  Verdict.p_all "every uint4x32 stub rejects an under-length array" stubs ~f:(fun (_, call) ->
+      (not (List.is_empty short_arities))
+      && List.for_all
+           (fun n ->
+             Gc.minor ();
+             let a = Array.make n 0 in
+             match call a with exception Invalid_argument _ -> true | () -> false)
+           short_arities);
+  Verdict.p_all "every uint4x32 stub accepts a four-lane array" stubs ~f:(fun (_, call) ->
+      Gc.minor ();
+      let a = [| 1; 2; 3; 4 |] in
+      match call a with exception Invalid_argument _ -> false | () -> true);
   (* The linking-check block at the end of Ops runs at module-initialization time and calls every
      one of these stubs; reaching this line at all means it passed four-lane arrays. *)
   Verdict.p "Ops module initialization completed" true

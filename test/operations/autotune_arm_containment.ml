@@ -408,8 +408,9 @@ let () =
         (Context.auto ()) t2 comp Ir.Indexing.Empty
     in
     let ctx_n = Context.run ctx_n routine_n in
+    let values = Context.get_values ctx_n t2.Tensor.value in
     ( List.rev !reports,
-      Array.for_all2_exn (Context.get_values ctx_n t2.Tensor.value) expected ~f:approx )
+      (not (Array.is_empty values)) && Array.for_all2_exn values expected ~f:approx )
   in
   let control_reports, control_ships = negative_control () in
   p_all "control: an uninjected search declines nothing at pre-dispatch validation" control_reports

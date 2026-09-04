@@ -40,7 +40,8 @@ let () =
   let kept, dropped = Autotune.share_cap ~cap categories in
   p "the overflowing menu is capped to exactly the budget" (List.length kept = cap);
   p_all "every non-empty category is represented under the cap" non_empty ~f:(represented kept);
-  p "an empty category is not conjured into the menu" (not (represented kept "swap"));
+  p_none "an empty category is not conjured into the menu" kept ~f:(fun (category, _) ->
+      String.equal category "swap");
   (* Remainder spill: with 4 non-empty categories an equal share is 12, so the two categories
      smaller than that keep everything and their unused share goes to the larger ones. *)
   let kept_of name = List.count kept ~f:(fun (c, _) -> String.equal c name) in

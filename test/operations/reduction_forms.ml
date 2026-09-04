@@ -1652,8 +1652,13 @@ let () =
       let g_wide, g_stepped = refs guarded_terms in
       let differ_guarded = not (Array.for_all2_exn g_wide g_stepped ~f:Float.equal) in
       if String.equal prec_name "f32" then
+        let coincide =
+          (not (Array.is_empty wide))
+          && (not (Array.is_empty g_wide))
+          && (not differ) && not differ_guarded
+        in
         p "at f32 the whole-nest and per-step references coincide (the identity-precision leg)"
-          ((not differ) && not differ_guarded)
+          coincide
       else
         (* At BOTH term counts: the guarded baseline is asserted against a selected reference too,
            and that assertion is only worth something where the two references are distinguishable
@@ -1678,7 +1683,7 @@ let () =
         if not ok then
           Stdio.eprintf "  %s %s over %s: got [%s] want [%s] (policy says %s)\n" prec_name what
             terms_desc (show values) (show want) (residency_name residency);
-        p claim ok;
+        p_all2 claim values want ~f:Float.equal;
         Some residency
       in
       let residency =
