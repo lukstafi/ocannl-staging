@@ -1,3 +1,4 @@
+a publication that truncates the target fails the gated-read claim (negative control): true
 the completeness test accepts a whole payload: true
 the completeness test rejects a truncated payload: true
 the completeness test rejects a truncation aligned to the length lattice: true
