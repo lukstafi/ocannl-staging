@@ -2052,6 +2052,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ^^ rparen ^^ semi)
   end
 
+  let codegen_capabilities () =
+    let module Config = Cuda_syntax_config (struct
+      let procs = [||]
+    end) in
+    C_syntax.codegen_capabilities (module Config)
+
   let%diagn2_sexp compile ~name bindings lowered =
     (* TODO: The following link seems to claim it's better to expand into loops than use memset.
        https://stackoverflow.com/questions/23712558/how-do-i-best-initialize-a-local-memory-array-to-0 *)

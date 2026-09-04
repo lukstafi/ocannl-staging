@@ -1157,6 +1157,12 @@ struct
             group (string op_prefix ^^ v ^^ string op_suffix))
 end
 
+let codegen_capabilities () =
+  let module Config = CC_syntax_config (struct
+    let procs = [||]
+  end) in
+  C_syntax.codegen_capabilities (module Config)
+
 (* Under [output_debug_files_in_build_directory] the generated source lives at the predictable
    shared path [build_files/<name>.c], which a concurrently running process compiling a same-named
    kernel can rewrite while our C compiler reads it — macOS CI hit this as an "extraneous closing

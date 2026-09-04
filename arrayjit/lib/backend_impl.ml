@@ -255,6 +255,7 @@ end
 *)
 module type For_add_scheduler = sig
   val name : string
+  val codegen_capabilities : unit -> codegen_capabilities
 
   include No_device_buffer_and_copying
 end
@@ -264,6 +265,7 @@ module type Lowered_no_device_backend = sig
   include Buffer
 
   val name : string
+  val codegen_capabilities : unit -> codegen_capabilities
 
   type procedure [@@deriving sexp_of]
 

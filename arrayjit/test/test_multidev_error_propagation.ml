@@ -12,6 +12,7 @@ open Base
 
 module Mock_raw = struct
   let name = "mockdev"
+  let codegen_capabilities () = Ir.Backend_intf.no_codegen_capabilities
 
   type buffer_ptr = int
 

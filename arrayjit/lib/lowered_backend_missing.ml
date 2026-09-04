@@ -84,6 +84,7 @@ struct
       ]
 
   let hardware_limits () = Backend_intf.no_hardware_limits
+  let codegen_capabilities () = Backend_intf.no_codegen_capabilities
   let classify_failure _phase _exn = None
 
   let get_debug_info _device =

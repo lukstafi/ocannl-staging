@@ -150,7 +150,8 @@ let binds_hardware q opt =
 (* Execute every seed against the serial reference, each under its own armed artifact; [outs] and
    [wants] pair the compared tensors with their reference values, [close] is the per-cell agreement.
    Returns how many ran and how many matched on every compared tensor. *)
-let execute_seeds ~tag ~routine ~fwd ~outs ~wants ~close seeds =
+let execute_seeds ?(on_routine = fun (_ : Context.routine) -> ()) ~tag ~routine ~fwd ~outs ~wants
+    ~close seeds =
   let n_ran = ref 0 and n_match = ref 0 in
   List.iter seeds ~f:(fun q ->
       Generated.arm routine;
@@ -161,6 +162,7 @@ let execute_seeds ~tag ~routine ~fwd ~outs ~wants ~close seeds =
             (Context.auto ()) fwd Ir.Indexing.Empty
         in
         let ctx = Context.run ctx r in
+        on_routine r;
         List.map outs ~f:(values ctx)
       with
       | gots ->
@@ -265,6 +267,8 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
   if on_gpu then begin
     execute ~what:"GPU blocktile" gpu_seeds;
     (* The seed that shipped untiled before: its kernel now carries a workgroup-shared tile. *)
+    (* This is intentionally dialect identity: [assert_emits] below searches for the language's
+       literal shared-address-space qualifier; tensorization itself is read from the routine. *)
     let shared =
       if String.is_substring backend_name ~substring:"metal" then "threadgroup " else "__shared__"
     in
@@ -337,14 +341,6 @@ let bf16_leg ~tag ~build =
     List.iter shapes ~f:(fun (what, _) -> skip_shape what)
   end
   else begin
-    let renders_intrinsic src =
-      let has s = String.is_substring src ~substring:s in
-      if String.is_substring backend_name ~substring:"metal" then has "simdgroup_bfloat8x8"
-      else if String.is_substring backend_name ~substring:"hip" then has "rocwmma::mma_sync"
-      else if String.is_substring backend_name ~substring:"cuda" then
-        has "mma.sync.aligned.m16n8k16"
-      else false
-    in
     let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
     let ref_t = build () in
     let want =
@@ -368,14 +364,20 @@ let bf16_leg ~tag ~build =
             Stdio.eprintf "%s: no %s tensorized seed for this site on %s\n" tag what backend_name;
             skip_shape what
         | Some q ->
+            let tensorized = ref false in
             let n_ran, n_match =
-              execute_seeds ~tag ~routine ~fwd ~outs:[ cand ] ~wants:[ want ] ~close [ q ]
+              execute_seeds
+                ~on_routine:(fun r ->
+                  tensorized :=
+                    Ir.C_syntax.equal_tensorization r.mma.Ir.C_syntax.tensorization
+                      Ir.C_syntax.Tensorized)
+                ~tag ~routine ~fwd ~outs:[ cand ] ~wants:[ want ] ~close [ q ]
             in
             p (tag ^ " bf16: the " ^ what ^ " candidate compiles and runs") (n_ran = 1);
             p (tag ^ " bf16: the " ^ what ^ " candidate agrees with the serial twin") (n_match = 1);
             p
               (tag ^ " bf16: the " ^ what ^ " candidate renders the tensor-core intrinsic")
-              (n_ran = 1 && renders_intrinsic (Generated.read routine)))
+              (n_ran = 1 && !tensorized))
   end
 
 (* What a tile-geometry refutation calls the extent it judged (gh-ocannl-683). The divisibility

@@ -243,6 +243,25 @@ type hardware_limits = {
 }
 [@@deriving sexp, compare, equal]
 
+type codegen_capabilities = {
+  supports_f64 : bool;
+      (** Whether the backend dialect can represent f64 tensor storage. This is explicit rather than
+          an exception probe against [typ_of_prec]. *)
+  accum_prec : Ops.prec -> Ops.prec;
+      (** The resolved accumulator precision for a storage precision, from the same
+          [C_syntax_config.accum_prec] function code generation uses. *)
+  asynchronous_staging_copy : bool;
+      (** Whether eligible pipelined staging copies use a dialect-specific asynchronous copy arm. A
+          portable synchronous depth-2 pipeline is not this capability. *)
+}
+(** Stable code-generation facts callers need before compiling. Actual rendering decisions stay on
+    the compiled routine's censuses. *)
+
+(** Conservative implementation-facing defaults for missing and mock backends. A real C-family
+    backend derives this record from its {!Ir.C_syntax.C_syntax_config}. *)
+let no_codegen_capabilities =
+  { supports_f64 = false; accum_prec = Fn.id; asynchronous_staging_copy = false }
+
 let no_hardware_limits =
   {
     max_threads_per_workgroup = None;
@@ -626,6 +645,10 @@ module type Backend_device_common = sig
       All-[None] for backends that do not bind hardware axes. A function for the same reason as
       {!static_properties}: computing it (device enumeration) must not run at backend-module
       initialization. *)
+
+  val codegen_capabilities : unit -> codegen_capabilities
+  (** Facts from the backend's C-syntax configuration. A function, like {!hardware_limits}, so
+      policy-dependent fields reflect the current process configuration. *)
 
   val classify_failure : Schedule_outcome.phase -> exn -> Schedule_outcome.classified_cause option
   (** Recognizes backend-owned failures at a tagged boundary. Returning [None] leaves the common

@@ -363,16 +363,13 @@ let () =
     match !mm_reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two mm reports"
   in
   p "matmul sketch instantiations seeded" (mr1.Autotune.sketch_candidates > 0);
-  (* Tensorized (tile-MMA) sketch families ride along the blocktiling/packing ones: for the 32x32x32
-     f32 site, cc seeds 2 packing + 2 hoisted-packing + 2 whole-triple/Grid-split [Tensorize]
-     pipelines + 1 cache-blocked packed [Tile_mma] composition, its hoisted, Grid-parallel
-     hoisted-only, and Grid-parallel in-kernel variants (gh-ocannl-469/470); Metal seeds 4
-     blocktiling + 5 simdgroup pipelines (2 unstaged full-K + 3 cooperatively staged); other GPU
-     backends seed at least the 4 blocktiling ones (plus 5 wmma pipelines when the device reports an
-     mma capability). *)
-  p "tensorized (mma) sketch instantiations seeded"
-    (mr1.Autotune.sketch_candidates
-    >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
+  (* [mma_candidates] records the decision after the seeded candidates reached candidate compile; it
+     is stronger than reconstructing a per-dialect minimum from the aggregate sketch count. *)
+  p "tensorized (mma) sketch instantiations seeded" (mr1.Autotune.mma_candidates > 0);
+  Stdio.eprintf "matmul MMA accounting (not part of the golden): %d total, %d fission-scoped\n"
+    mr1.Autotune.mma_candidates mr1.Autotune.fiss_mma_candidates;
+  p "whole-routine MMA candidates stay out of the fission-scoped counter"
+    (mr1.Autotune.fiss_mma_candidates < mr1.Autotune.mma_candidates);
   p_all2 "tuned matmul matches the serial twin" got_mm1 got_serial ~f:approx;
   p "matmul tune replays exactly after a contention-free search"
     (completed mr1 && Bool.equal (replayed mr2) (mr1.Autotune.timings_contended = 0));
@@ -420,15 +417,11 @@ let () =
   let got_fs = Context.get_values fsctx qe1.Tensor.value in
   (match !fs_report with
   | Some r ->
-      (* For the 32x32x32 f32 segment site (unzeroed), cc seeds 2 packing + 2 hoisted-packing (qc is
-         a hoistable constant) + 2 whole-triple tensorized pipelines + 1 packed [Tile_mma]
-         composition, its hoisted, Grid-parallel hoisted-only (qd in place x hoisted-packed qc — the
-         inference-GEMM shape), and Grid-parallel in-kernel variants; Metal seeds 4 blocktiling + 5
-         simdgroup pipelines; other GPU backends at least the 4 blocktiling ones. *)
+      (* The per-segment counter says that fission seeding happened; [mma_candidates] says a
+         tensorized member actually reached candidate compile. The MMA counter is fission-scoped: a
+         whole-routine MMA candidate cannot satisfy this assertion. *)
       p "per-segment sketch candidates seeded"
-        (r.Autotune.fiss_sketch_candidates
-        >=
-        if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
+        (r.Autotune.fiss_sketch_candidates > 0 && r.Autotune.fiss_mma_candidates > 0);
       p "per-segment sketch candidates timed" (r.Autotune.fiss_sketch_timed > 0)
   | None ->
       p "per-segment sketch candidates seeded" false;

@@ -627,6 +627,8 @@ module Impl = struct
       | Ops.Uint64_prec _ -> "ulong"
       | Ops.Void_prec -> "void"
 
+    let supports_f64 = false
+
     let vec_typ_of_prec ~length prec =
       match (prec, length) with
       | Ops.Single_prec _, 4 -> "float4_t"
@@ -1221,6 +1223,12 @@ module Impl = struct
           ^^ nest 4 (break 1 ^^ separate (comma ^^ break 1) args_docs)
           ^^ rparen ^^ semi)
   end
+
+  let codegen_capabilities () =
+    let module Config = C_syntax_config (struct
+      let procs = [||]
+    end) in
+    C_syntax.codegen_capabilities (module Config)
 
   let runtime_math_api =
     (* These instance methods were added in macOS 15. Query the runtime capability rather than the

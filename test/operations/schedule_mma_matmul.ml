@@ -49,6 +49,10 @@ let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
+
+(* Intentional dialect identity: after the tf32 capability gate, the remaining name branches pin
+   literal MSL simdgroup, CUDA WMMA/PTX, and HIP rocWMMA forms or the hardware-specific numerical
+   tolerances documented at their sites. Rendering outcomes themselves use the MMA census. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu = Sched.backend_is_gpu backend_name
 
@@ -256,7 +260,16 @@ let () =
     List.exists (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:tf32_limits opt)
       ~f:(fun p -> p.Autotune.sk_mma)
   in
-  if String.is_substring backend_name ~substring:"cuda" then (
+  let advertises_tf32 =
+    match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+    | None -> false
+    | Some mma ->
+        List.exists mma.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
+            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_tf32
+            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_tf32
+            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_f32)
+  in
+  if advertises_tf32 then (
     let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
     let%op c_off_serial = a_off * b_off in
     let%op c_off_mma = a_off * b_off in

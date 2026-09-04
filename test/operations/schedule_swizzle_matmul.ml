@@ -57,6 +57,10 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
+
+(* Intentional dialect identity: these branches pin literal MSL versus CUDA/HIP shared-memory,
+   barrier, and intrinsic spellings around swizzled tiles; schedule availability uses family and
+   hardware-limit queries. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu = Sched.backend_is_gpu backend_name
 

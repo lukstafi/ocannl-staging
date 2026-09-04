@@ -153,6 +153,8 @@ let () =
     let count_sub sub =
       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
     in
+    (* This is intentionally dialect identity: [shared_ok] pins each language's shared-memory
+       declaration and barrier spellings in emitted source. *)
     let shared_ok =
       if String.is_substring backend_name ~substring:"metal" then
         count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
@@ -242,6 +244,8 @@ let () =
     p "broadcast load is thread-0 guarded under the workgroup axis"
       (count_sub "if (" = 1
       &&
+      (* This is intentionally dialect identity: the assertion counts the literal shared-memory
+         declaration token emitted by each language. *)
       if String.is_substring backend_name ~substring:"metal" then
         count_sub "threadgroup float tile_" = 1
       else count_sub "__shared__ float tile_" = 1))

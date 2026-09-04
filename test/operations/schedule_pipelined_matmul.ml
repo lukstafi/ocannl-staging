@@ -65,6 +65,9 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
+
+(* Intentional dialect identity: these branches count the exact MSL versus CUDA/HIP array and
+   barrier tokens. Async-copy availability is queried separately through codegen capabilities. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu = Sched.backend_is_gpu backend_name
 
@@ -299,15 +302,15 @@ let () =
         not leak, not a skip. *)
      (let src1 = Generated.read "pipe_mm_d1" in
       let src2 = Generated.read "pipe_mm_d2" in
-      let cuda_async =
-        String.is_substring backend_name ~substring:"cuda"
+      let asynchronous_staging =
+        (Context.codegen_capabilities (Context.auto ())).asynchronous_staging_copy
         &&
         match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
         | Some m -> not (List.is_empty m.Ir.Backend_intf.mma_pipeline_depths)
         | None -> false
       in
       p "async copies appear exactly on the depth-2 async arm"
-        (if cuda_async then
+        (if asynchronous_staging then
            count_sub src2 "ocannl_cp_async4(&" = 4
            && count_sub src2 "ocannl_cp_async_wait_all();" = 1
            && count_sub src1 "ocannl_cp_async" = 0

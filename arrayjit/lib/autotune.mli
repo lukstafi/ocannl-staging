@@ -705,6 +705,11 @@ type report = {
           search put through candidate compile: whole-routine and per-fission-segment sketch seeds,
           the cross-segment recombination composite, and beam-expansion candidates. Counted at the
           same point as [mma_timed], so the two always describe the same population. *)
+  fiss_mma_candidates : int;
+      (** Of [mma_candidates], candidates built from per-fission-segment MMA sketches (including
+          their recombination composites). This is counted at candidate compile, not enumeration, so
+          it detects a fission MMA family that disappeared or never reached compilation without
+          borrowing evidence from a whole-routine candidate. *)
   mma_timed : int;
       (** Of [mma_candidates], those that compiled and were actually timed (dedup'd duplicates
           excluded — an identical candidate was already timed). Includes completed timing windows

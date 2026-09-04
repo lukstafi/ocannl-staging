@@ -43,6 +43,7 @@ open Verdict.Claims
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
+let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 
 type rival_values = { once_narrowed : float; per_step : float }
 type rival_fixture = { initial : float; increment : float; terms : int; narrow : float -> float }
@@ -55,9 +56,13 @@ let render_rivals { initial; increment; terms; narrow } =
   let per_step = List.fold increments ~init:initial ~f:(fun acc x -> narrow (acc +. x)) in
   { once_narrowed; per_step }
 
-(* Where the serial legs widen bf16 accumulators (see the header): CPU policy or CUDA's mma
-   mirror. *)
-let widens_bf16 = on_cpu || String.equal backend_name "cuda"
+(* Read the same per-backend policy code generation applies, rather than reconstructing it from the
+   backend name (gh-ocannl-822). *)
+let widens_bf16 =
+  not
+    (Ir.Ops.equal_prec
+       (codegen_capabilities.Ir.Backend_intf.accum_prec Ir.Ops.bfloat16)
+       Ir.Ops.bfloat16)
 
 (* Runs the leg only on cc; elsewhere prints the golden line as skipped (the leg exercises a
    CPU-only rendering or greps cc's generated C). *)

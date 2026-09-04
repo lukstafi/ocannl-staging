@@ -46,6 +46,7 @@ module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 
 module Generated = Test_utils.Generated
 
@@ -154,7 +155,8 @@ let report ~claim (stored, got, want) =
    only one that sees the full 17 digits. Metal has no [double] and rejects an f64 node outright, so
    it is gated rather than run there. *)
 let () =
-  if String.equal backend_name "metal" then skipped "f64 constants reach the kernel bit-exactly"
+  if not codegen_capabilities.Ir.Backend_intf.supports_f64 then
+    skipped "f64 constants reach the kernel bit-exactly"
   else
     report ~claim:"f64 constants reach the kernel bit-exactly"
       (leg ~prec:Ops.double ~name:"flit_f64" ~oracle:Fn.id ~stored:(fun _ -> true))
