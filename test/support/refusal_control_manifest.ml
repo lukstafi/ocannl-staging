@@ -158,7 +158,7 @@ let raw_entries =
         "[scanner-refusal:0e70daaacc716dc0bae79f3c55148dff] alternate separator recovers";
         "[scanner-refusal:ebb0dca085588641133d48ef9f80a504] undeclared alternate separator";
         "[scanner-refusal:1eca4460778f143859eea42da85bbd72] one-word documentation assignments";
-        "[scanner-refusal:7371fdf36816a0013ba82ee26c16beea] documentation config tokens";
+        "[scanner-refusal:6bb17d62436571b3e716c4bba5c0f746] promised non-OCANNL assignment";
         "[scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment";
         "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";
         "[scanner-refusal:ed12f66c93e310aaa2996f755dd93a06] config-usage refusal control";

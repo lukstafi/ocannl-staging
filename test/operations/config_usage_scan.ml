@@ -882,15 +882,19 @@ let refusal_control grammar_fixture =
       match one_assignment ~path spelling with
       | Some (key, ambiguous_bare) -> String.equal key expected_key && ambiguous_bare
       | None -> false);
+  let grammar_text = In_channel.read_all grammar_fixture in
   let grammar_occurrences =
     markdown_occurrences ~allow_bare:true
       ~path:(Stdlib.Filename.basename grammar_fixture)
-      (In_channel.read_all grammar_fixture)
+      grammar_text
   in
-  Verdict.p_none "non-OCANNL API and math assignments are not documentation config tokens"
+  Verdict.p_all ~min:3
+    "each promised non-OCANNL assignment is present in the fixture and rejected as a config token"
     [ "fastMathEnabled=false"; "mathMode=Safe"; "d=1" ] ~f:(fun spelling ->
-      List.exists grammar_occurrences ~f:(fun occurrence ->
-          String.equal occurrence.spelling spelling));
+      String.is_substring grammar_text ~substring:spelling
+      && not
+           (List.exists grammar_occurrences ~f:(fun occurrence ->
+                String.equal occurrence.spelling spelling)));
   Verdict.p_exists "a real documented OCANNL assignment remains a config token" grammar_occurrences
     ~f:(fun occurrence ->
       String.equal occurrence.key "debug_log_from_routines"
