@@ -4,7 +4,8 @@ arm A completed: true
 arm A crowned a timed winner, or the load refused it every timing: true
 arm B is reported as a search that died mid-way, or the load left it short of the injection: true
 arm B's report carries the terminal failure, or the load left it short of the injection: true
-arm B had timed candidates before failing, or the load left it short of the injection: true
+arm B reached the injection's timing threshold, or the load left it short of the injection: true
+arm B crowned a finite best whenever it reached that threshold: true
 the surviving arm's routine ships and computes the right values: true
 arm A replays exactly when its first search had no contention refusals: true
 a replay is the very schedule run 1 crowned: true

@@ -232,3 +232,29 @@ configuration.
   overriding one member of a paired default (`compute_prec` without `accum_prec`) silently keeps the
   other's default pairing. Define overrides before the code that reads them, and restate both halves
   of a pair.
+
+- **`dispatch_apply` traps at high fork/join rates on macOS, and the defect is the platform's**
+  (gh-ocannl-870). The cc backend renders pool-backed `Grid` loops with `dispatch_apply` wherever
+  `cc_parallel_grid` probes to `dispatch`, which is every Apple box. Past a few million calls the
+  process dies with `SIGTRAP` / `EXC_BREAKPOINT` and
+  `BUG IN CLIENT OF LIBMALLOC: memory corruption of free block`, faulting inside
+  `_xzm_xzone_malloc_freelist_outlined` under `_dispatch_calloc_typed` under `dispatch_apply` --
+  with a generated kernel in the frame below, which is what makes it read as a codegen or buffer
+  lifetime bug. It is not: `benchmarks/runners/ocannl/dispatch_apply_stress.c` reproduces the
+  identical signature from a plain C loop containing no OCANNL code, 10 of 40 runs at five million
+  applies of extent 6 (M4 Max, macOS 26.6.2 build 25G83, 2026-09-05).
+- The exposure is the CALL RATE, not any one kernel: a `Grid` loop nested under a serial loop is one
+  fork/join per outer iteration, so an autotune candidate whose parallel loop has extent 6 under a
+  serial 128 pays 128 of them per launch, and the queued objective launches each candidate
+  thousands of times. `test/operations/autotune_split_reduce`'s bias-gradient arm is pinned to
+  `Autotune.Isolated` for exactly this reason, and `--ocannl_cc_parallel_grid=none` is the control
+  that separates the platform trap from anything of OCANNL's: 5 of 10 runs trapped with `dispatch`
+  rendering against 0 of 10 interleaved runs with `none`.
+- Two plausible OCANNL-side causes were refuted before the platform was, and re-refuting them costs
+  a suite run each. Unloading kernels is not it: with the `Gc.finalise` `Dl.dlclose` in
+  `cc_backend.ml`'s `c_compile_and_load` disabled, 5 of 8 runs still trapped. Nor is the trapping
+  kernel's indexing: the cc backend leaves its compiled `.so` in `TMPDIR` under the name the crash
+  report prints, so `objdump -d --disassemble-symbols=_<routine>` on that exact file shows what ran
+  -- here a guarded `p[chunk] += 1.0f` over six cells of a six-cell buffer. Reach for that
+  disassembly rather than for `build_files/`, whose same-named artifacts are overwritten by the next
+  candidate.
