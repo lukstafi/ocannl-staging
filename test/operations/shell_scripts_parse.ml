@@ -654,9 +654,6 @@ let first_line_of path =
 module Errexit_negation = struct
   type finding = { line : int }
 
-  let words line =
-    String.split_on_chars line ~on:[ ' '; '\t' ] |> List.filter ~f:(Fn.non String.is_empty)
-
   let starts_at text ~pos token =
     let token_length = String.length token in
     pos + token_length <= String.length text
@@ -664,6 +661,62 @@ module Errexit_negation = struct
 
   let literal_shell_word word =
     let decoded = Buffer.create (String.length word) in
+    let digit_value character =
+      if Char.between character ~low:'0' ~high:'9' then
+        Some (Char.to_int character - Char.to_int '0')
+      else if Char.between character ~low:'a' ~high:'f' then
+        Some (Char.to_int character - Char.to_int 'a' + 10)
+      else if Char.between character ~low:'A' ~high:'F' then
+        Some (Char.to_int character - Char.to_int 'A' + 10)
+      else None
+    in
+    let add_ansi_escape index =
+      let length = String.length word in
+      if index + 1 >= length then (
+        Buffer.add_char decoded '\\';
+        index + 1)
+      else
+        let escaped = word.[index + 1] in
+        let add character =
+          Buffer.add_char decoded character;
+          index + 2
+        in
+        match escaped with
+        | 'a' -> add '\007'
+        | 'b' -> add '\b'
+        | 'e' | 'E' -> add '\027'
+        | 'f' -> add '\012'
+        | 'n' -> add '\n'
+        | 'r' -> add '\r'
+        | 't' -> add '\t'
+        | 'v' -> add '\011'
+        | '\\' | '\'' | '"' | '?' -> add escaped
+        | 'x' ->
+            let rec hexadecimal position count value =
+              if position >= length || count = 2 then (position, value)
+              else
+                match digit_value word.[position] with
+                | Some digit -> hexadecimal (position + 1) (count + 1) ((value * 16) + digit)
+                | None -> (position, value)
+            in
+            let finish, value = hexadecimal (index + 2) 0 0 in
+            if finish = index + 2 then add 'x'
+            else (
+              Buffer.add_char decoded (Char.of_int_exn value);
+              finish)
+        | '0' .. '7' ->
+            let rec octal position count value =
+              if position >= length || count = 3 then (position, value)
+              else
+                match digit_value word.[position] with
+                | Some digit when digit < 8 -> octal (position + 1) (count + 1) ((value * 8) + digit)
+                | _ -> (position, value)
+            in
+            let finish, value = octal (index + 1) 0 0 in
+            Buffer.add_char decoded (Char.of_int_exn (value land 0xff));
+            finish
+        | _ -> add escaped
+    in
     let rec loop index quote escaped =
       if index >= String.length word then Buffer.contents decoded
       else
@@ -674,19 +727,21 @@ module Errexit_negation = struct
             else (
               Buffer.add_char decoded character;
               loop (index + 1) `Single false)
-        | (`Double | `Ansi_c) as quote ->
+        | `Double ->
             if escaped then (
               Buffer.add_char decoded character;
-              loop (index + 1) quote false)
-            else if Char.equal character '\\' then loop (index + 1) quote true
-            else if
-              match quote with
-              | `Double -> Char.equal character '"'
-              | `Ansi_c -> Char.equal character '\''
-            then loop (index + 1) `None false
+              loop (index + 1) `Double false)
+            else if Char.equal character '\\' then loop (index + 1) `Double true
+            else if Char.equal character '"' then loop (index + 1) `None false
             else (
               Buffer.add_char decoded character;
-              loop (index + 1) quote false)
+              loop (index + 1) `Double false)
+        | `Ansi_c ->
+            if Char.equal character '\\' then loop (add_ansi_escape index) `Ansi_c false
+            else if Char.equal character '\'' then loop (index + 1) `None false
+            else (
+              Buffer.add_char decoded character;
+              loop (index + 1) `Ansi_c false)
         | `None ->
             if escaped then (
               Buffer.add_char decoded character;
@@ -824,92 +879,215 @@ module Errexit_negation = struct
 
   let command_fragments line =
     let length = String.length line in
-    let add_fragment fragments start finish =
-      String.sub line ~pos:start ~len:(finish - start) :: fragments
+    let add_fragment fragments start finish affects_parent =
+      (String.sub line ~pos:start ~len:(finish - start), affects_parent) :: fragments
     in
-    let rec loop index start quote escaped nesting fragments =
-      if index >= length then List.rev (add_fragment fragments start length)
+    let rec loop index start quote escaped nesting pipeline fragments =
+      if index >= length then List.rev (add_fragment fragments start length (not pipeline))
       else
         let character = line.[index] in
         match quote with
         | `Single ->
-            if Char.equal character '\'' then loop (index + 1) start `None false nesting fragments
-            else loop (index + 1) start `Single false nesting fragments
+            if Char.equal character '\'' then
+              loop (index + 1) start `None false nesting pipeline fragments
+            else loop (index + 1) start `Single false nesting pipeline fragments
         | `Ansi_c ->
-            if escaped then loop (index + 1) start `Ansi_c false nesting fragments
+            if escaped then loop (index + 1) start `Ansi_c false nesting pipeline fragments
             else if Char.equal character '\\' then
-              loop (index + 1) start `Ansi_c true nesting fragments
+              loop (index + 1) start `Ansi_c true nesting pipeline fragments
             else if Char.equal character '\'' then
-              loop (index + 1) start `None false nesting fragments
-            else loop (index + 1) start `Ansi_c false nesting fragments
+              loop (index + 1) start `None false nesting pipeline fragments
+            else loop (index + 1) start `Ansi_c false nesting pipeline fragments
         | `Double ->
-            if escaped then loop (index + 1) start `Double false nesting fragments
+            if escaped then loop (index + 1) start `Double false nesting pipeline fragments
             else if Char.equal character '\\' then
-              loop (index + 1) start `Double true nesting fragments
+              loop (index + 1) start `Double true nesting pipeline fragments
             else if starts_at line ~pos:index "$(" then
               loop
                 (skip_command_substitution line (index + 2))
-                start `Double false nesting fragments
+                start `Double false nesting pipeline fragments
             else if starts_at line ~pos:index "${" then
-              loop (skip_parameter_expansion line (index + 2)) start `Double false nesting fragments
+              loop
+                (skip_parameter_expansion line (index + 2))
+                start `Double false nesting pipeline fragments
             else if Char.equal character '`' then
-              loop (index + 1) start `Backtick_double false nesting fragments
+              loop (index + 1) start `Backtick_double false nesting pipeline fragments
             else if Char.equal character '"' then
-              loop (index + 1) start `None false nesting fragments
-            else loop (index + 1) start `Double false nesting fragments
+              loop (index + 1) start `None false nesting pipeline fragments
+            else loop (index + 1) start `Double false nesting pipeline fragments
         | (`Backtick_none | `Backtick_double) as backtick ->
-            if escaped then loop (index + 1) start backtick false nesting fragments
+            if escaped then loop (index + 1) start backtick false nesting pipeline fragments
             else if Char.equal character '\\' then
-              loop (index + 1) start backtick true nesting fragments
+              loop (index + 1) start backtick true nesting pipeline fragments
             else if Char.equal character '`' then
               loop (index + 1) start
                 (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
-                false nesting fragments
-            else loop (index + 1) start backtick false nesting fragments
+                false nesting pipeline fragments
+            else loop (index + 1) start backtick false nesting pipeline fragments
         | `None ->
-            if escaped then loop (index + 1) start `None false nesting fragments
+            if escaped then loop (index + 1) start `None false nesting pipeline fragments
             else if Char.equal character '\\' then
-              loop (index + 1) start `None true nesting fragments
-            else if Char.equal character '#' then List.rev (add_fragment fragments start index)
+              loop (index + 1) start `None true nesting pipeline fragments
+            else if Char.equal character '#' then
+              List.rev (add_fragment fragments start index (not pipeline))
             else if starts_at line ~pos:index "$'" then
-              loop (index + 2) start `Ansi_c false nesting fragments
+              loop (index + 2) start `Ansi_c false nesting pipeline fragments
             else if Char.equal character '\'' then
-              loop (index + 1) start `Single false nesting fragments
+              loop (index + 1) start `Single false nesting pipeline fragments
             else if Char.equal character '"' then
-              loop (index + 1) start `Double false nesting fragments
+              loop (index + 1) start `Double false nesting pipeline fragments
             else if Char.equal character '`' then
-              loop (index + 1) start `Backtick_none false nesting fragments
+              loop (index + 1) start `Backtick_none false nesting pipeline fragments
             else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
-              loop (index + 1) start `None false (nesting + 1) fragments
+              loop (index + 1) start `None false (nesting + 1) pipeline fragments
             else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
-              loop (index + 1) start `None false (Int.max 0 (nesting - 1)) fragments
+              loop (index + 1) start `None false (Int.max 0 (nesting - 1)) pipeline fragments
             else if nesting = 0 && Char.equal character ';' then
-              loop (index + 1) (index + 1) `None false nesting (add_fragment fragments start index)
+              loop (index + 1) (index + 1) `None false nesting false
+                (add_fragment fragments start index (not pipeline))
             else if
               nesting = 0
               && index + 1 < length
               && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
                  || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
             then
-              loop (index + 2) (index + 2) `None false nesting (add_fragment fragments start index)
+              loop (index + 2) (index + 2) `None false nesting false
+                (add_fragment fragments start index (not pipeline))
+            else if nesting = 0 && Char.equal character '|' then
+              let next =
+                if index + 1 < length && Char.equal line.[index + 1] '&' then index + 2
+                else index + 1
+              in
+              loop next next `None false nesting true (add_fragment fragments start index false)
             else if
               nesting = 0 && Char.equal character '&'
               && (index = 0 || not (List.mem [ '>'; '<'; '|' ] line.[index - 1] ~equal:Char.equal))
               && (index + 1 >= length || not (Char.equal line.[index + 1] '>'))
             then
-              loop (index + 1) (index + 1) `None false nesting (add_fragment fragments start index)
-            else loop (index + 1) start `None false nesting fragments
+              loop (index + 1) (index + 1) `None false nesting false
+                (add_fragment fragments start index false)
+            else loop (index + 1) start `None false nesting pipeline fragments
     in
-    loop 0 0 `None false 0 []
+    loop 0 0 `None false 0 false []
+
+  let shell_words command =
+    let current = Buffer.create (String.length command) in
+    let finish words =
+      if Buffer.length current = 0 then words
+      else
+        let word = Buffer.contents current in
+        Buffer.clear current;
+        word :: words
+    in
+    let rec loop index quote escaped words =
+      if index >= String.length command then List.rev (finish words)
+      else
+        let character = command.[index] in
+        match quote with
+        | `Single ->
+            Buffer.add_char current character;
+            if Char.equal character '\'' then loop (index + 1) `None false words
+            else loop (index + 1) `Single false words
+        | `Ansi_c ->
+            Buffer.add_char current character;
+            if escaped then loop (index + 1) `Ansi_c false words
+            else if Char.equal character '\\' then loop (index + 1) `Ansi_c true words
+            else if Char.equal character '\'' then loop (index + 1) `None false words
+            else loop (index + 1) `Ansi_c false words
+        | `Double ->
+            Buffer.add_char current character;
+            if escaped then loop (index + 1) `Double false words
+            else if Char.equal character '\\' then loop (index + 1) `Double true words
+            else if Char.equal character '`' then loop (index + 1) `Backtick_double false words
+            else if Char.equal character '"' then loop (index + 1) `None false words
+            else loop (index + 1) `Double false words
+        | (`Backtick_none | `Backtick_double) as backtick ->
+            Buffer.add_char current character;
+            if escaped then loop (index + 1) backtick false words
+            else if Char.equal character '\\' then loop (index + 1) backtick true words
+            else if Char.equal character '`' then
+              loop (index + 1)
+                (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
+                false words
+            else loop (index + 1) backtick false words
+        | `None ->
+            if escaped then (
+              Buffer.add_char current character;
+              loop (index + 1) `None false words)
+            else if Char.equal character '\\' then (
+              Buffer.add_char current character;
+              loop (index + 1) `None true words)
+            else if Char.is_whitespace character then loop (index + 1) `None false (finish words)
+            else if starts_at command ~pos:index "$'" then (
+              Buffer.add_string current "$'";
+              loop (index + 2) `Ansi_c false words)
+            else if Char.equal character '\'' then (
+              Buffer.add_char current character;
+              loop (index + 1) `Single false words)
+            else if Char.equal character '"' then (
+              Buffer.add_char current character;
+              loop (index + 1) `Double false words)
+            else if Char.equal character '`' then (
+              Buffer.add_char current character;
+              loop (index + 1) `Backtick_none false words)
+            else (
+              Buffer.add_char current character;
+              loop (index + 1) `None false words)
+    in
+    loop 0 `None false []
+
+  let assignment_prefix word =
+    let word = literal_shell_word word in
+    match String.lsplit2 word ~on:'=' with
+    | Some (name, _) when not (String.is_empty name) ->
+        (Char.is_alpha name.[0] || Char.equal name.[0] '_')
+        && String.for_all (String.drop_prefix name 1) ~f:(fun character ->
+            Char.is_alphanum character || Char.equal character '_')
+    | _ -> false
+
+  let redirection_prefix word =
+    let rec skip_descriptor index =
+      if index < String.length word && Char.is_digit word.[index] then skip_descriptor (index + 1)
+      else index
+    in
+    let operator = skip_descriptor 0 in
+    if
+      operator >= String.length word
+      || not (List.mem [ '<'; '>' ] word.[operator] ~equal:Char.equal)
+    then None
+    else
+      let rec skip_operator index =
+        if index < String.length word && List.mem [ '<'; '>'; '&' ] word.[index] ~equal:Char.equal
+        then skip_operator (index + 1)
+        else index
+      in
+      Some (skip_operator operator < String.length word)
 
   let command_enables_errexit command =
-    match words (String.strip command) with
+    let rec strip_redirections = function
+      | [] -> []
+      | word :: rest -> (
+          match redirection_prefix word with
+          | Some true -> strip_redirections rest
+          | Some false -> strip_redirections (List.drop rest 1)
+          | None -> word :: strip_redirections rest)
+    in
+    let rec drop_assignments = function
+      | word :: rest when assignment_prefix word -> drop_assignments rest
+      | words -> words
+    in
+    match
+      shell_words (String.strip command)
+      |> strip_redirections |> drop_assignments |> List.map ~f:literal_shell_word
+    with
     | "set" :: options -> options_enable_errexit options
     | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
     | ("builtin" | "command") :: "--" :: "set" :: options -> options_enable_errexit options
     | _ -> false
 
-  let line_enables_errexit line = List.exists (command_fragments line) ~f:command_enables_errexit
+  let line_enables_errexit line =
+    List.exists (command_fragments line) ~f:(fun (command, affects_parent) ->
+        affects_parent && command_enables_errexit command)
 
   (* A TOP-LEVEL [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes
      and nested shell constructs: in [! printf '%s\n' 'x || y'] the operator is data, and in [!
@@ -1076,11 +1254,24 @@ module Errexit_negation = struct
       ("builtin -- set", "builtin -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("plus bundle before errexit", "set +u -e\n! grep -q missing output\n", [ 2 ]);
       ("named plus option before errexit", "set +o nounset -e\n! grep -q missing output\n", [ 2 ]);
+      ("assignment-prefixed set", "X=y set -e\n! grep -q missing output\n", [ 2 ]);
+      ("quoted assignment-prefixed set", "X='a b' set -e\n! grep -q missing output\n", [ 2 ]);
+      ("redirection-prefixed set", ">/dev/null set -e\n! grep -q missing output\n", [ 2 ]);
+      ("separate redirection-prefixed set", "> /dev/null set -e\n! grep -q missing output\n", [ 2 ]);
+      ("quoted set command", "s'et' -e\n! grep -q missing output\n", [ 2 ]);
+      ("ANSI-C octal errexit option", "set -$'\\145'\n! grep -q missing output\n", [ 2 ]);
+      ("ANSI-C hexadecimal errexit option", "set $'-\\x65'\n! grep -q missing output\n", [ 2 ]);
       ("later set after set", "set -u; set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after command", "prepare; set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after AND", "prepare && set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after OR", "prepare || set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after async command", "prepare & set -e\n! grep -q missing output\n", [ 2 ]);
+      ("pipeline set does not affect parent", "set -e | cat\n! grep -q missing output\n", []);
+      ("pipe-and set does not affect parent", "set -e |& cat\n! grep -q missing output\n", []);
+      ("background set does not affect parent", "set -e &\n! grep -q missing output\n", []);
+      ( "set after pipeline affects parent",
+        "set -u | cat; set -e\n! grep -q missing output\n",
+        [ 2 ] );
       ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);

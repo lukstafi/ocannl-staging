@@ -44,11 +44,22 @@ errexit-negation fixture command -- set is classified as specified: true
 errexit-negation fixture builtin -- set is classified as specified: true
 errexit-negation fixture plus bundle before errexit is classified as specified: true
 errexit-negation fixture named plus option before errexit is classified as specified: true
+errexit-negation fixture assignment-prefixed set is classified as specified: true
+errexit-negation fixture quoted assignment-prefixed set is classified as specified: true
+errexit-negation fixture redirection-prefixed set is classified as specified: true
+errexit-negation fixture separate redirection-prefixed set is classified as specified: true
+errexit-negation fixture quoted set command is classified as specified: true
+errexit-negation fixture ANSI-C octal errexit option is classified as specified: true
+errexit-negation fixture ANSI-C hexadecimal errexit option is classified as specified: true
 errexit-negation fixture later set after set is classified as specified: true
 errexit-negation fixture later set after command is classified as specified: true
 errexit-negation fixture later set after AND is classified as specified: true
 errexit-negation fixture later set after OR is classified as specified: true
 errexit-negation fixture later set after async command is classified as specified: true
+errexit-negation fixture pipeline set does not affect parent is classified as specified: true
+errexit-negation fixture pipe-and set does not affect parent is classified as specified: true
+errexit-negation fixture background set does not affect parent is classified as specified: true
+errexit-negation fixture set after pipeline affects parent is classified as specified: true
 errexit-negation fixture quoted set text is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true
