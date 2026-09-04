@@ -23,7 +23,7 @@ on_error() {
   # indirectly rather than by a per-capture dump, so a capture added later is
   # covered by adding its name here and nothing else.
   for name in incremental forced slow_forced coverage hostile complete_fail \
-    environment_executed partial_matrix matrix_error; do
+    environment_executed partial_matrix singleton_fail local_identity_error matrix_error; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -54,7 +54,7 @@ absent() {
 # where its environment is built.
 unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
   SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
-  SWEEP_TEST_OPAM_OUT_METAL
+  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX
 
 sweep=$1
 aggregate=$2
@@ -145,6 +145,7 @@ run_sweep_args() {
   # ARGUMENTS now, so the multi-line fixture logs would otherwise be split into
   # words and `env` would try to run one of them as the command.
   env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP \
+    -u OCANNL_TOOL_SWEEP_LOCAL_BOX \
     "HOME=$tmp/home" \
     "PATH=$fake_bin:$PATH" \
     "SWEEP_TEST_CALLS=$calls" \
@@ -154,6 +155,7 @@ run_sweep_args() {
     "SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-}" \
     "SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" \
     "SWEEP_TEST_OPAM_OUT_METAL=${SWEEP_TEST_OPAM_OUT_METAL:-}" \
+    "OCANNL_TOOL_SWEEP_LOCAL_BOX=${SWEEP_TEST_LOCAL_BOX-m4-max}" \
     "OCANNL_TOOL_SWEEP_REPO=$main" \
     "OCANNL_TOOL_SWEEP_STATE=$state" \
     "$sweep" "$@"
@@ -218,7 +220,7 @@ absent 'multidev-only unevaluated claim' "$coverage_report"
 absent 'environment-gated claim' "$coverage_report"
 grep -q '^completed boxes: m4-max$' "$coverage_report"
 grep -q '^missing boxes: minix, rog-nv$' "$coverage_report"
-grep -q '^environment status: insufficient (1 of 3 declared boxes completed; need at least 2)$' \
+grep -q '^environment status: insufficient (1 of 3 declared boxes completed; need at least 2 unless the matrix is complete)$' \
   "$coverage_report"
 grep -q '^environment result: NOT AGGREGATED$' "$coverage_report"
 
@@ -336,6 +338,27 @@ grep -q '^environment result: POTENTIAL -- 1 claim(s) skipped on every completed
   <<<"$partial_matrix"
 grep -q '^POTENTIAL: skipped on every completed box: verdict_skip_probe.exe: common environment-gated claim$' \
   <<<"$partial_matrix"
+
+# Completeness outranks the partial-matrix observation floor. A valid singleton
+# declaration must still turn its one box's skip into FAIL, and execution in
+# that same one log must turn it into PASS.
+"$verdict_probe" cc >"$tmp/cc.log" 2>&1
+set +e
+singleton_fail=$("$aggregate" \
+  --known cc --known metal --known-box m4-max \
+  --run cc m4-max "$tmp/cc.log" 2>&1)
+singleton_fail_rc=$?
+set -e
+[ "$singleton_fail_rc" -eq 1 ]
+grep -q '^environment status: complete (1 of 1 declared boxes completed)$' <<<"$singleton_fail"
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$singleton_fail"
+"$verdict_probe" cc execute-environment >"$tmp/cc.log" 2>&1
+singleton_pass=$("$aggregate" \
+  --known cc --known metal --known-box m4-max \
+  --run cc m4-max "$tmp/cc.log")
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$singleton_pass"
 
 # Equal human labels in two DIFFERENT executables are different test legs. Copy
 # the real probe under another basename so this control reaches the production
@@ -582,6 +605,17 @@ blank_fail_fp=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tai
 blank_fail_fp=${blank_fail_fp%.log}.fingerprint
 [ -s "$blank_fail_fp" ]
 grep -q '^(no fingerprintable diagnostics -- read the log)$' "$blank_fail_fp"
+
+# The launcher must bind the physical local host to its stable fleet ID. With
+# that identity absent the sweep refuses before it can write a mislabeled row;
+# a hard-coded m4-max local unit would make this control pass incorrectly.
+set +e
+local_identity_error=$(SWEEP_TEST_LOCAL_BOX= run_sweep 2>&1)
+local_identity_error_rc=$?
+set -e
+[ "$local_identity_error_rc" -eq 2 ]
+grep -q "^sweep: set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's single-word measurement-box ID$" \
+  <<<"$local_identity_error"
 
 # Negative control for the one-list contract: changing only the declaration to
 # add a box with no execution unit makes the sweep refuse before claiming any

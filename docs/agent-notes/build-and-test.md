@@ -1511,7 +1511,10 @@ that they earn a lookup rather than always-loaded space.
   The same report intersects environment-scoped records across the successful unit logs and judges
   completeness by BOX, not backend: the canonical box set comes from the exact swept commit's
   `# measurement-boxes:` declaration in `benchmarks/fixtures/DIGESTS.txt`, read through
-  `fixture_digest.py`'s parser, while each sweep unit supplies its stable box key. One successful
+  `fixture_digest.py`'s parser, while each sweep unit supplies its stable box key. The launcher must
+  set `OCANNL_TOOL_SWEEP_LOCAL_BOX` to the local host's declared ID (`m4-max` on the scheduled
+  machine); hostnames and CPU models are not stable fleet identities, so an unset or undeclared
+  value is refused before any unit can write a mislabeled row. One successful
   forced unit is enough to represent a box because an environment-scoped gate is, by contract,
   independent of backend; when a box contributes several units, absence from any one proves the leg
   executed there. A claim present in every completed log becomes `FAIL` only when every declared box

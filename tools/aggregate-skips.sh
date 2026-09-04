@@ -230,35 +230,35 @@ else
     report_line "missing boxes: $(join_by_comma "${missing_boxes[@]}")"
   fi
 
-  if [ ${#completed_boxes[@]} -lt 2 ]; then
-    report_line "environment status: insufficient (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed; need at least 2)"
+  if [ ${#missing_boxes[@]} -eq 0 ]; then
+    environment_count=$(wc -l <"$tmp/common-environment" | tr -d ' ') ||
+      die "cannot count common environment skip records"
+    report_line "environment status: complete (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
+    if [ "$environment_count" -eq 0 ]; then
+      report_line "environment result: PASS -- no claim was skipped on every declared box"
+    else
+      report_line "environment result: FAIL -- $environment_count claim(s) skipped on every declared box"
+      while IFS=$'\t' read -r test_id claim; do
+        printf 'FAIL: skipped on every declared box: %s: %s\n' "$test_id" "$claim" ||
+          die "cannot write report"
+      done <"$tmp/common-environment"
+      failed=1
+    fi
+  elif [ ${#completed_boxes[@]} -lt 2 ]; then
+    report_line "environment status: insufficient (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed; need at least 2 unless the matrix is complete)"
     report_line "environment result: NOT AGGREGATED"
   else
     environment_count=$(wc -l <"$tmp/common-environment" | tr -d ' ') ||
       die "cannot count common environment skip records"
-    if [ ${#missing_boxes[@]} -eq 0 ]; then
-      report_line "environment status: complete (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
-      if [ "$environment_count" -eq 0 ]; then
-        report_line "environment result: PASS -- no claim was skipped on every declared box"
-      else
-        report_line "environment result: FAIL -- $environment_count claim(s) skipped on every declared box"
-        while IFS=$'\t' read -r test_id claim; do
-          printf 'FAIL: skipped on every declared box: %s: %s\n' "$test_id" "$claim" ||
-            die "cannot write report"
-        done <"$tmp/common-environment"
-        failed=1
-      fi
+    report_line "environment status: partial (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
+    if [ "$environment_count" -eq 0 ]; then
+      report_line "environment result: CLEAR across completed boxes -- absent boxes remain unknown"
     else
-      report_line "environment status: partial (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
-      if [ "$environment_count" -eq 0 ]; then
-        report_line "environment result: CLEAR across completed boxes -- absent boxes remain unknown"
-      else
-        report_line "environment result: POTENTIAL -- $environment_count claim(s) skipped on every completed box; absent boxes remain unknown"
-        while IFS=$'\t' read -r test_id claim; do
-          printf 'POTENTIAL: skipped on every completed box: %s: %s\n' "$test_id" "$claim" ||
-            die "cannot write report"
-        done <"$tmp/common-environment"
-      fi
+      report_line "environment result: POTENTIAL -- $environment_count claim(s) skipped on every completed box; absent boxes remain unknown"
+      while IFS=$'\t' read -r test_id claim; do
+        printf 'POTENTIAL: skipped on every completed box: %s: %s\n' "$test_id" "$claim" ||
+          die "cannot write report"
+      done <"$tmp/common-environment"
     fi
   fi
 fi

@@ -27,6 +27,7 @@
 #   tools/sweep.sh --only metal        # one backend (repeatable)
 #   tools/sweep.sh --target test/einsum  # narrower dune target, for smoke-testing
 #   tools/sweep.sh --ref origin/master   # what to test (default: origin/master)
+#   OCANNL_TOOL_SWEEP_LOCAL_BOX=m4-max tools/sweep.sh  # required stable local box ID
 
 set -uo pipefail
 
@@ -54,6 +55,7 @@ CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
 # CAP: see collect_rtc_context for why sharing the unit's deadline would let a
 # diagnostic overwrite the verdict it is explaining.
 CONTEXT_CAP=${OCANNL_TOOL_SWEEP_CONTEXT_CAP:-300}
+LOCAL_BOX=${OCANNL_TOOL_SWEEP_LOCAL_BOX:-}
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -66,6 +68,23 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# Errexit is off so that a FAILING TEST does not abort the remaining units --
+# that is the whole point. It must not extend to the harness: anything that
+# would make an outcome unrecordable, or make a recorded outcome describe a tree
+# that was not the one under test, has to be loud. A sweep that silently reports
+# coverage it did not perform is worse than one that does not run.
+die() { echo "sweep: $*" >&2; exit 2; }
+
+# The local path cannot infer a stable fleet identity from a hostname or CPU
+# model: either can name a different machine the same way, and the DIGESTS names
+# are operator-owned aliases. Require the launcher to bind this physical host to
+# its declared ID before any log or history row can be attributed to it.
+case $LOCAL_BOX in
+  "" | *:* | *,* | *[[:space:]]*)
+    die "set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's single-word measurement-box ID"
+    ;;
+esac
 
 # (measurement-box, backend, ssh-host) -- ssh-host empty means run locally. The
 # box identifiers are the stable names declared by benchmarks/fixtures/DIGESTS.txt;
@@ -85,9 +104,9 @@ done
 # notice. A backend with its own goldens and no leg here is a silent regression
 # channel whether or not it needs hardware.
 UNITS=(
-  "m4-max:cc:"
-  "m4-max:multidev_cc:"
-  "m4-max:metal:"
+  "$LOCAL_BOX:cc:"
+  "$LOCAL_BOX:multidev_cc:"
+  "$LOCAL_BOX:metal:"
   "rog-nv:cuda:rog-nv-wsl"
   "minix:hip:minix-amd-wsl"
 )
@@ -101,13 +120,6 @@ UNITS=(
 SKIP_RUN_BACKENDS=()
 SKIP_RUN_BOXES=()
 SKIP_RUN_LOGS=()
-
-# Errexit is off so that a FAILING TEST does not abort the remaining units --
-# that is the whole point. It must not extend to the harness: anything that
-# would make an outcome unrecordable, or make a recorded outcome describe a tree
-# that was not the one under test, has to be loud. A sweep that silently reports
-# coverage it did not perform is worse than one that does not run.
-die() { echo "sweep: $*" >&2; exit 2; }
 
 contains() {
   local wanted=$1 item
