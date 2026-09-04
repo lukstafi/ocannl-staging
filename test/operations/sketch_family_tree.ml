@@ -368,7 +368,6 @@ let () =
           };
     }
   in
-  let has_mma seeds = List.exists seeds ~f:(fun p -> p.Autotune.sk_mma) in
   let has_unstaged_mma seeds =
     List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_bk = 0)
   in
@@ -377,6 +376,10 @@ let () =
   in
   let no_mma seeds =
     (not (List.is_empty seeds)) && List.for_all seeds ~f:(fun p -> not p.Autotune.sk_mma)
+  in
+  let no_staged_mma seeds =
+    (not (List.is_empty seeds))
+    && List.for_all seeds ~f:(fun p -> (not p.Autotune.sk_mma) || p.Autotune.sk_bk = 0)
   in
   let f16_default =
     section "half-prec gpu, f16 tiles, default policy" ~is_gpu:true ~is_cpu:false
@@ -457,8 +460,8 @@ let () =
     Verdict.p
       "a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no \
        explicit k-block"
-      ((not (has_mma wide_outer_statement))
-      && has_unstaged_mma wide_outer_both && has_staged_mma wide_outer_both)
+      (no_mma wide_outer_statement && has_unstaged_mma wide_outer_both
+     && has_staged_mma wide_outer_both)
   in
   (* The CPU register tiling has the same wide-policy divergence case: under [Fp16_wide] with
      [narrow_compute_f32 = false] on a native-fp16 target, compute resolves half while the
@@ -474,11 +477,10 @@ let () =
   Numerics.set_policy saved_policy;
   Verdict.p
     "the wide-f16 policy withholds uniform-f16 mma seeds exactly in unsupported emission scopes"
-    (has_unstaged_mma f16_default && has_staged_mma f16_default
-    && (not (has_mma f16_wide_no_arm))
+    (has_unstaged_mma f16_default && has_staged_mma f16_default && no_mma f16_wide_no_arm
     && has_unstaged_mma f16_wide_statement
-    && (not (has_staged_mma f16_wide_statement))
-    && has_unstaged_mma f16_wide_both && has_staged_mma f16_wide_both);
+    && no_staged_mma f16_wide_statement && has_unstaged_mma f16_wide_both
+    && has_staged_mma f16_wide_both);
   Verdict.p "placement eligibility omits a wide-f16 site with no applicable MMA scope"
     (Set.is_empty f16_wide_no_arm_enablement && Set.is_empty f16_wide_no_arm_disablement);
   Verdict.p
