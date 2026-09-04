@@ -6,9 +6,14 @@
    [Backends.all_of_backend] and [Backends.backend_name], so adding a backend makes an incomplete
    family fail here before dune reports a raw missing-rule error on that backend.
 
-   A member copied from a golden recorded on another backend is deliberately not a failure: the
-   daily backend sweep is what can replace it. It must, however, be visible in-tree. Put this rigid
-   comment INSIDE the dune rule that references the family:
+   Every unmarked member must contain exactly one [OCANNL backend: <backend>] line naming the
+   backend encoded by its filename. That makes a sibling copied into its place fail even when the
+   two backends' remaining output is legitimately byte-identical, and refuses a stale source line
+   retained beside an appended destination line.
+
+   A member copied from a golden recorded on another backend remains an explicit exception until the
+   daily backend sweep can replace it: its sole certification must name the recorded-on backend, and
+   this rigid comment must sit INSIDE the dune rule that references the family:
 
    ; ocannl-golden-recorded-on: <member>.expected <- <backend> -- <reason>
 
@@ -41,6 +46,8 @@ type result = {
 
 let marker = "ocannl-golden-recorded-on:"
 let backend_placeholder = "<backend>"
+let certification_prefix = "OCANNL backend:"
+let certification_line backend = "OCANNL backend: " ^ backend
 let sorted = List.sort ~compare:String.compare
 let dedup_sorted strings = List.dedup_and_sort strings ~compare:String.compare
 let path_components path = String.split_on_chars path ~on:[ '/'; '\\' ]
@@ -186,7 +193,8 @@ let marker_issue_errors ~dune_path = function
   | Dune_scan.Marker_in_wrong_stanza { issue_why; _ } -> [ issue_why ]
   | Dune_scan.Marker_outside_stanza _ | Dune_scan.Marker_outside_comment _ -> []
 
-let scan ~backends ~expected_paths ~dune_files =
+let scan ~backends ~expected_files ~dune_files =
+  let expected_paths = List.map expected_files ~f:fst in
   let members, member_errors =
     List.fold expected_paths ~init:([], []) ~f:(fun (members, errors) path ->
         match member_of_path ~backends path with
@@ -296,8 +304,31 @@ let scan ~backends ~expected_paths ~dune_files =
             :: duplicate
         | Some _ -> duplicate)
   in
+  let expected_contents = Map.of_alist_exn (module String) expected_files in
+  let certification_errors =
+    List.filter_map members ~f:(fun member ->
+        let certified_backend =
+          match Map.find marker_targets member.path with
+          | Some [ provenance ] -> provenance.recorded_on
+          | None | Some _ -> member.backend
+        in
+        let expected_line = certification_line certified_backend in
+        let actual_lines =
+          Map.find_exn expected_contents member.path |> String.split_lines |> fun lines ->
+          List.filter lines ~f:(String.is_prefix ~prefix:certification_prefix)
+        in
+        if List.equal String.equal actual_lines [ expected_line ] then None
+        else
+          Some
+            (Printf.sprintf
+               "%s: backend golden member must contain exactly certification line `%s`; found [%s]"
+               member.path expected_line
+               (String.concat ~sep:"; " actual_lines)))
+  in
   let errors =
-    List.rev_append member_errors (List.rev_append dune_errors provenance_errors) |> List.rev
+    List.rev_append member_errors
+      (List.rev_append dune_errors (List.rev_append provenance_errors certification_errors))
+    |> List.rev
   in
   let errors =
     if List.is_empty families then "no backend golden family was found in rules or files" :: errors
@@ -309,6 +340,14 @@ let control_results () =
   let backends = [ "cc"; "metal" ] in
   let complete_files =
     [ "test/synthetic/probe-cc.expected"; "test/synthetic/probe-metal.expected" ]
+  in
+  let native_expected_files =
+    List.map complete_files ~f:(fun path ->
+        let backend = if String.is_substring path ~substring:"-metal." then "metal" else "cc" in
+        (path, certification_line backend ^ "\n"))
+  in
+  let marked_expected_files =
+    List.map complete_files ~f:(fun path -> (path, certification_line "cc" ^ "\n"))
   in
   let family_rule ?marker () =
     Printf.sprintf
@@ -322,19 +361,44 @@ let control_results () =
     "; ocannl-golden-recorded-on: probe-metal.expected <- cc -- copied from shared golden"
   in
   let complete =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:marked_expected_files
       ~dune_files:[ ("test/synthetic/dune", family_rule ~marker:valid_marker ()) ]
   in
   let incomplete =
     scan ~backends
-      ~expected_paths:[ "test/synthetic/probe-cc.expected" ]
+      ~expected_files:[ ("test/synthetic/probe-cc.expected", certification_line "cc" ^ "\n") ]
       ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
   in
   let empty =
-    scan ~backends ~expected_paths:[] ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
+    scan ~backends ~expected_files:[] ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
+  in
+  let copied_sibling =
+    scan ~backends ~expected_files:marked_expected_files
+      ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
+  in
+  let conflicting_certifications =
+    scan ~backends
+      ~expected_files:
+        [
+          ("test/synthetic/probe-cc.expected", certification_line "cc" ^ "\n");
+          ( "test/synthetic/probe-metal.expected",
+            String.concat ~sep:"\n" [ certification_line "cc"; certification_line "metal"; "" ] );
+        ]
+      ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
+  in
+  let duplicate_certifications =
+    scan ~backends
+      ~expected_files:
+        [
+          ("test/synthetic/probe-cc.expected", certification_line "cc" ^ "\n");
+          ( "test/synthetic/probe-metal.expected",
+            String.concat ~sep:"\n" [ certification_line "metal"; certification_line "metal"; "" ]
+          );
+        ]
+      ~dune_files:[ ("test/synthetic/dune", family_rule ()) ]
   in
   let misplaced =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:[ ("test/synthetic/dune", valid_marker ^ "\n" ^ family_rule ()) ]
   in
   let wrong_rule =
@@ -350,13 +414,16 @@ let control_results () =
         ]
     in
     scan ~backends
-      ~expected_paths:
-        (complete_files
-        @ [ "test/synthetic/other-cc.expected"; "test/synthetic/other-metal.expected" ])
+      ~expected_files:
+        (native_expected_files
+        @ [
+            ("test/synthetic/other-cc.expected", certification_line "cc" ^ "\n");
+            ("test/synthetic/other-metal.expected", certification_line "metal" ^ "\n");
+          ])
       ~dune_files:[ ("test/synthetic/dune", content) ]
   in
   let malformed =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -367,7 +434,7 @@ let control_results () =
         ]
   in
   let missing_separator =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -378,7 +445,7 @@ let control_results () =
         ]
   in
   let short_reason =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -387,7 +454,7 @@ let control_results () =
         ]
   in
   let duplicated =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -399,7 +466,7 @@ let control_results () =
         ]
   in
   let invalid_target =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -411,7 +478,7 @@ let control_results () =
         ]
   in
   let invalid_backend =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -423,7 +490,7 @@ let control_results () =
         ]
   in
   let outside_comment =
-    scan ~backends ~expected_paths:complete_files
+    scan ~backends ~expected_files:native_expected_files
       ~dune_files:
         [
           ( "test/synthetic/dune",
@@ -450,6 +517,20 @@ let control_results () =
         match empty.incomplete with
         | [ (family, actual) ] -> String.equal family expected_family && List.is_empty actual
         | _ -> false );
+      ( "a copied sibling without its member's backend certification is refused",
+        has_exact_error copied_sibling
+          "test/synthetic/probe-metal.expected: backend golden member must contain exactly \
+           certification line `OCANNL backend: metal`; found [OCANNL backend: cc]" );
+      ( "conflicting backend certifications are refused",
+        has_exact_error conflicting_certifications
+          "test/synthetic/probe-metal.expected: backend golden member must contain exactly \
+           certification line `OCANNL backend: metal`; found [OCANNL backend: cc; OCANNL backend: \
+           metal]" );
+      ( "duplicate backend certifications are refused",
+        has_exact_error duplicate_certifications
+          "test/synthetic/probe-metal.expected: backend golden member must contain exactly \
+           certification line `OCANNL backend: metal`; found [OCANNL backend: metal; OCANNL \
+           backend: metal]" );
       ( "repository-relative family paths stay slash-normalized",
         String.equal
           (join_path "test\\synthetic" ("probe-" ^ backend_placeholder ^ ".expected"))
@@ -491,6 +572,9 @@ let control_results () =
   let refusal_diagnostics =
     [
       ("outside every stanza", misplaced.errors);
+      ("copied sibling", copied_sibling.errors);
+      ("conflicting certifications", conflicting_certifications.errors);
+      ("duplicate certifications", duplicate_certifications.errors);
       ("inside the wrong family rule", wrong_rule.errors);
       ("malformed relationship", malformed.errors);
       ("missing reason separator", missing_separator.errors);
@@ -514,8 +598,10 @@ let () =
   in
   let backends = List.map Backends.all_of_backend ~f:Backends.backend_name |> sorted in
   let expected_paths =
-    List.filter_map arguments ~f:(fun (relative, _) ->
-        if String.is_suffix relative ~suffix:".expected" then Some relative else None)
+    List.filter_map arguments ~f:(fun (relative, path) ->
+        if String.is_suffix relative ~suffix:".expected" then
+          Some (relative, In_channel.read_all path)
+        else None)
   in
   let dune_files =
     List.filter_map arguments ~f:(fun (relative, path) ->
@@ -523,7 +609,7 @@ let () =
           Some (relative, In_channel.read_all path)
         else None)
   in
-  let result = scan ~backends ~expected_paths ~dune_files in
+  let result = scan ~backends ~expected_files:expected_paths ~dune_files in
   List.iter result.incomplete ~f:(fun (family, actual) ->
       eprintf "%s: backend golden family is incomplete\n" family;
       eprintf "  expected backends: [%s]\n" (String.concat ~sep:"; " backends);
@@ -547,5 +633,7 @@ let () =
   let complete =
     List.is_empty result.incomplete && List.is_empty result.errors && List.for_all controls ~f:snd
   in
-  Verdict.p "backend golden families are complete and provenance markers are valid" complete;
+  Verdict.p
+    "backend golden families are complete, self-certifying, and provenance markers are valid"
+    complete;
   Test_utils.Refusal_control_manifest.print "backend_golden_family_scan.ml"

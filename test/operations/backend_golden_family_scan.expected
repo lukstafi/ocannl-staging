@@ -7,6 +7,9 @@ Synthetic controls:
   a complete synthesized family and valid contained marker are accepted
   a synthesized family missing one backend is refused
   a rule whose whole family is absent is refused
+  a copied sibling without its member's backend certification is refused
+  conflicting backend certifications are refused
+  duplicate backend certifications are refused
   repository-relative family paths stay slash-normalized
   a marker outside every stanza is refused
   a marker inside the wrong family rule is refused
@@ -20,6 +23,9 @@ Synthetic controls:
 
 Provenance-marker refusal diagnostics exercised by those controls:
   outside every stanza -- test/synthetic/dune: found 1 `ocannl-golden-recorded-on:` occurrence(s) in the file but only 0 inside dune stanzas
+  copied sibling -- test/synthetic/probe-metal.expected: backend golden member must contain exactly certification line `OCANNL backend: metal`; found [OCANNL backend: cc]
+  conflicting certifications -- test/synthetic/probe-metal.expected: backend golden member must contain exactly certification line `OCANNL backend: metal`; found [OCANNL backend: cc; OCANNL backend: metal]
+  duplicate certifications -- test/synthetic/probe-metal.expected: backend golden member must contain exactly certification line `OCANNL backend: metal`; found [OCANNL backend: metal; OCANNL backend: metal]
   inside the wrong family rule -- test/synthetic/probe-metal.expected: provenance marker is not inside the dune rule that references family test/synthetic/probe-<backend>.expected
   malformed relationship -- test/synthetic/dune:2: provenance marker has no ` <member>.expected <- <backend>`
   missing reason separator -- test/synthetic/dune:2: provenance marker has no ` -- <reason>`
@@ -29,7 +35,7 @@ Provenance-marker refusal diagnostics exercised by those controls:
   unknown backend -- test/synthetic/dune:2: recorded-on backend `cuda` is not one OCANNL has
   outside a comment -- test/synthetic/dune: found 1 `ocannl-golden-recorded-on:` occurrence(s) in the file but only 0 inside dune stanzas
 
-backend golden families are complete and provenance markers are valid: true
+backend golden families are complete, self-certifying, and provenance markers are valid: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
-  [scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families
+  [scanner-refusal:2fcd4d491da746e829dc7cec63905091] self-certifying and provenance

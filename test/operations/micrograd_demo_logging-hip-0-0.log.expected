@@ -1,3 +1,4 @@
+OCANNL backend: hip
 float *__restrict__ a &[1] = 0xNNNN
 float *__restrict__ b &[1] = 0xNNNN
 COMMENT: init params for g
