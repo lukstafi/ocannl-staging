@@ -310,7 +310,7 @@ let contention_ratio = 2.
 (* The policy seam shared by calibration and the timed loop. The budget accumulates [per_launch_ms],
    the quantity being ranked; contention is detected independently on [contention_ms], the raw batch
    wall before queued mode divides it by depth. A deep queue therefore neither spends the budget on
-   200 launches at once nor divides a fixed host stall out of the refusal signal. The sample floor
+   a whole batch at once nor divides a fixed host stall out of the refusal signal. The sample floor
    keeps a burst from ending the min-of-N after the caller's usual three repeats. *)
 let sample_min ~repeats ~sample =
   let samples = ref [] in

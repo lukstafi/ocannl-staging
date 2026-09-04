@@ -644,7 +644,7 @@ files.
   was returned as the candidate's timing, so every search over microsecond kernels timed NOTHING on
   both GPU backends while `cc` (no round trip to disperse, and the only backend per-PR CI runs)
   stayed green. So `Autotune.queued_batch_depth` is **total** and never reads `contended`: a depth
-  is a scale estimate whose error is bounded both ways (floor 1, cap 200), and a deeper batch is
+  is a scale estimate whose error is bounded both ways (floor 1, cap 2048), and a deeper batch is
   the REMEDY for dispatch dispersion. Refusal happens once, downstream, on the timed loop's own
   window, which is a batch. Correspondingly `sample_min`'s `contended` is dispersion only: a
   non-positive or non-finite minimum is a clock that resolved nothing, refused by

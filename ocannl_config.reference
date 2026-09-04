@@ -398,7 +398,7 @@
 #               inside a stream that already has work in it. That is what a training step
 #               presents: it queues every kernel of a layer and synchronizes at the end, so no
 #               kernel in it pays a round trip of its own. The batch depth is calibrated per
-#               candidate to about 10 ms of wall time, capped at 200 launches and floored at 1 --
+#               candidate to about 10 ms of wall time, capped at 2048 launches and floored at 1 --
 #               a routine slower than that target is measured exactly as "isolated" measures it.
 #   isolated -- one launch followed by a host synchronization: the latency of a lone dispatch,
 #               kernel plus one round trip. What every schedule crowned before gh-ocannl-755 was
