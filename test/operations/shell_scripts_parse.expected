@@ -42,6 +42,8 @@ errexit-negation fixture builtin set is classified as specified: true
 errexit-negation fixture command set is classified as specified: true
 errexit-negation fixture command -- set is classified as specified: true
 errexit-negation fixture builtin -- set is classified as specified: true
+errexit-negation fixture plus bundle before errexit is classified as specified: true
+errexit-negation fixture named plus option before errexit is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true
 errexit-negation fixture until ! command is classified as specified: true

@@ -713,8 +713,12 @@ module Errexit_negation = struct
           match rest with
           | name :: rest -> is_named_errexit name || options_enable_errexit rest
           | [] -> false
+        else if String.equal option "+o" then
+          match rest with _name :: rest -> options_enable_errexit rest | [] -> false
         else if String.is_prefix option ~prefix:"-" && not (String.is_prefix option ~prefix:"--")
         then String.contains option 'e' || options_enable_errexit rest
+        else if String.is_prefix option ~prefix:"+" && not (String.is_prefix option ~prefix:"++")
+        then options_enable_errexit rest
         else false
 
   let line_enables_errexit line =
@@ -920,6 +924,8 @@ module Errexit_negation = struct
       ("command set", "command set -e\n! grep -q missing output\n", [ 2 ]);
       ("command -- set", "command -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("builtin -- set", "builtin -- set -e\n! grep -q missing output\n", [ 2 ]);
+      ("plus bundle before errexit", "set +u -e\n! grep -q missing output\n", [ 2 ]);
+      ("named plus option before errexit", "set +o nounset -e\n! grep -q missing output\n", [ 2 ]);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
