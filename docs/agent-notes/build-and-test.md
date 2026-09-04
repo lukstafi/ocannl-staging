@@ -1268,7 +1268,8 @@ that they earn a lookup rather than always-loaded space.
   pforms embedded in larger dependency/action atoms, literal file-input action positions, and
   output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
   rules, a pform in an inferred output path, an unresolved `chdir` around inferred output targets,
-  an explicit `install` into section `bin`, or unexpanded top-level `include` stanzas. A bare
+  an action preprocessor on a public executable, an explicit `install` into section `bin`, or
+  unexpanded top-level `include` stanzas. A bare
   executable name is itself refused: its `.exe` suffix does not stop ambient PATH from selecting a
   program outside the workspace. Action-local or directory-level PATH rewrites (under any case
   spelling), and an `env` stanza's `binaries` mapping, are opaque too, including in transitively

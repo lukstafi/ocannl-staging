@@ -288,6 +288,16 @@ let public_condition_error names =
     "public executable `%s` uses enabled_if, so its active membership cannot be derived statically"
     (String.concat ~sep:", " names)
 
+let public_action_preprocess_error names =
+  Printf.sprintf
+    "public executable `%s` uses an action preprocessor, so its build-time executions are opaque"
+    (String.concat ~sep:", " names)
+
+let has_action_preprocessor stanza =
+  match Dune_scan.field stanza "preprocess" with
+  | Some preprocess -> contains_head "action" (Sexp.List preprocess)
+  | None -> false
+
 let smoke_condition_error dune_path =
   Printf.sprintf
     "%s: @bin-smoke uses enabled_if, so its commands are not unconditional runtime coverage"
@@ -441,10 +451,16 @@ let declarations_of_stanza ~subdir stanza =
       let condition_errors =
         if has_public_name && has_enabled_if stanza then [ public_condition_error names ] else []
       in
+      let preprocess_errors =
+        if has_public_name && has_action_preprocessor stanza then
+          [ public_action_preprocess_error names ]
+        else []
+      in
+      let declaration_errors = List.rev_append preprocess_errors condition_errors in
       if List.is_empty public_names then ([], [])
       else if List.length names <> List.length public_names then
         ( [],
-          condition_errors
+          declaration_errors
           @ [
               Printf.sprintf "public executable stanza has %d local name(s) but %d public name(s)"
                 (List.length names) (List.length public_names);
@@ -459,7 +475,7 @@ let declarations_of_stanza ~subdir stanza =
                     local = Dune_scan.normalize_path (Dune_scan.in_subdir subdir (name ^ ".exe"));
                     public;
                   }),
-          condition_errors )
+          declaration_errors )
   | _ -> ([], [])
 
 let smoke_targets_of_stanza ~allow_verified_helper ~dune_path ~subdir stanza =
@@ -1200,6 +1216,21 @@ let generated_source_input_fixture =
    (run %{exe:alpha.exe})
    (run %{exe:beta.exe}))))|dune}
 
+let action_preprocessor_fixture =
+  {dune|(executable
+ (name alpha)
+ (public_name alpha-tool)
+ (preprocess
+  (action (run %{exe:beta.exe} %{input-file}))))
+(executable (name beta) (public_name beta-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let data_only_root_fixture = {dune|(data_only_dirs fixtures)|dune}
 let data_only_bin_fixture = {dune|(executable (name alpha) (public_name alpha-tool))|dune}
 
@@ -1346,6 +1377,7 @@ let controls_hold () =
   let expanded_dependency = scan_bin_content expanded_dependency_fixture in
   let unmodeled_dependency = scan_bin_content unmodeled_dependency_fixture in
   let generated_source_input = scan_bin_content generated_source_input_fixture in
+  let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
     scan
       [
@@ -1490,6 +1522,10 @@ let controls_hold () =
   && (not (complete generated_source_input))
   && List.mem generated_source_input.errors
        (generated_public_run_error "bin/dune" "bin/beta.exe" [ "bin/alpha.ml" ])
+       ~equal:String.equal
+  && (not (complete action_preprocessor))
+  && List.mem action_preprocessor.errors
+       (public_action_preprocess_error [ "alpha" ])
        ~equal:String.equal
   && (not (complete data_only))
   && List.mem data_only.errors (data_only_dirs_error "dune") ~equal:String.equal
