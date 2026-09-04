@@ -90,6 +90,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   regenerated at a different spec revision is otherwise invisible: it is consumed **uniformly**
   by every cell, and the cross-cell parity gate compares cells with each other, not with the
   workload the report names, so it certifies exactly as it certifies the intended one.
+  The current declaration names `m4-max` (the Apple M4 Max/macOS measurement host), `minix`, and
+  `rog-nv`. The Metal reports predate per-origin recording, so `m4-max` deliberately has no rows
+  yet: its absence is now an explicit missing-record warning rather than an omitted host.
   - **Entries are per box, and today the boxes differ.** `mlp_small` and `gpt2_mini` hash
     differently on minix and rog-nv at identical sizes — two venvs, two numpy streams, one
     workload spec — so `report-hip.md` and `report-gh675-cuda.md` are **not cross-box
@@ -608,6 +611,9 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   known to hold different bytes for `mlp_small` and `gpt2_mini` (gh-ocannl-759). It reads the
   `measurement-boxes` header and names any declared box with no entry for the reported fixture,
   so an unrecorded measuring box cannot look like a box outside that workload (gh-ocannl-850).
+  Every raw row, including the incremental `partial.jsonl` checkpoint, carries the declaration
+  and its per-fixture missing origins as `measurement_boxes` and `fixture_missing_origins`; a
+  later edit to `DIGESTS.txt` therefore cannot rewrite what the measurement knew.
   A hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
   hand-written driver pins it (`gh612_cells.sh` refuses to run a cell whose fixture does not
   match a pinned digest, with an env opt-out for deliberate re-generation). Cross-session

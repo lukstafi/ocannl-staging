@@ -23,7 +23,7 @@
 # regeneration is a cross-box event and has to be coordinated across every origin listed here,
 # or the boxes silently diverge again (see benchmarks/README.md).
 #
-# measurement-boxes: minix rog-nv
+# measurement-boxes: m4-max minix rog-nv
 #
 # <sha256>  <bytes>  <name>  <origin>
 c27e59b4163397290685aa1736bf7176f56de5ec5019da89db5ad29f80d855c2  26190952  cifar_conv.safetensors  minix

@@ -481,6 +481,12 @@ def describe(name, entries):
     return ", ".join(f"{e.origin} {e.sha256[:12]}…" for e in recorded) or "nothing"
 
 
+def missing_origins(name, entries, measurement_boxes):
+    """Declared measurement boxes with no digest entry for `name`."""
+    recorded = {e.origin for e in entries.get(name, [])}
+    return sorted(set(measurement_boxes) - recorded)
+
+
 def _main(argv=None):
     here = Path(__file__).parent
     ap = argparse.ArgumentParser(
