@@ -20,12 +20,13 @@
    rather than by hoping the scheduler interleaves them. On one core the readers could otherwise
    finish every read against the seeded file before a writer ran at all, and pass while publication
    truncated the target in place (Codex P2, round 2). Each reader now reads once before any writer
-   proceeds past its first round, and keeps reading until the writers are done; every reader is
-   claimed to have observed the file mid-run.
+   proceeds past its first round, and keeps reading until every writer has recorded that it
+   finished; every reader records that exact exit condition.
 
-   The stress leg was controlled by hand in the other direction too: replacing its writers'
-   [AF.write_all] with a direct [Out_channel.write_all] onto the published path makes "every read
-   under concurrent publication observes a payload some writer published" report false. *)
+   The stress leg is controlled executably in the other direction too: a child deliberately
+   truncates the published path, then runs the SAME gated-read claim. The parent requires that claim
+   to fail, so making the readers fair to the writer scheduler cannot make a broken publication
+   pass. *)
 
 open Base
 module AF = Utils.Atomic_file
@@ -221,6 +222,73 @@ let observe_published () =
 let read_published () =
   match observe_published () with Bytes_read data -> Some data | Absent | Refused _ -> None
 
+let gated_read_claim = "every reader's gated read saw a whole payload while one was half-written"
+
+let observation_is_published published = function
+  | Bytes_read data -> Hash_set.mem published data
+  | Absent | Refused _ -> false
+
+(* The negative control runs in a child because the condition it exists to demonstrate must FAIL a
+   real [Verdict] claim. Capturing its streams keeps that designed [FAIL:] out of this passing run's
+   log, while checking the claim text keeps an unrelated setup failure from satisfying the control.
+
+   The broken writer truncates the target and leaves only half a payload before the read. Closing it
+   first makes the counterexample portable to Windows, where an open writer handle can affect which
+   reader opens are permitted; the defect under test is the published path containing those partial
+   bytes, not a platform sharing rule. *)
+let broken_publication_arg = "--broken-publication-probe"
+
+let () =
+  if Array.exists Stdlib.Sys.argv ~f:(String.equal broken_publication_arg) then (
+    reset_dir ();
+    let seed = payload ~writer:(Char.to_int 'a') ~round:0 in
+    let whole = payload ~writer:(Char.to_int 'b') ~round:1 in
+    AF.write_all ~path:target ~data:seed ();
+    Stdio.Out_channel.write_all target ~data:(String.prefix whole (String.length whole / 2));
+    let published = Hash_set.of_list (module String) [ seed; whole ] in
+    Verdict.p_all gated_read_claim [ observe_published () ] ~f:(observation_is_published published);
+    Stdlib.exit 0)
+
+let describe_status = function
+  | Unix.WEXITED n -> Printf.sprintf "exited %d" n
+  | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
+  | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n
+
+let ignore_unix f x = try f x with Unix.Unix_error _ -> ()
+
+let run_broken_publication_probe () =
+  let exe = Stdlib.Sys.executable_name in
+  let capture suffix = Stdlib.Filename.temp_file "atomic_file_broken" suffix in
+  let out_path = capture ".out" and err_path = capture ".err" in
+  let open_capture path = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let out = open_capture out_path and err = open_capture err_path in
+  let pid = Unix.create_process exe [| exe; broken_publication_arg |] Unix.stdin out err in
+  let _, status = Unix.waitpid [] pid in
+  Unix.close out;
+  Unix.close err;
+  let stdout_text = Stdio.In_channel.read_all out_path in
+  let stderr_text = Stdio.In_channel.read_all err_path in
+  ignore_unix Unix.unlink out_path;
+  ignore_unix Unix.unlink err_path;
+  (status, stdout_text, stderr_text)
+
+let () =
+  let status, stdout_text, stderr_text = run_broken_publication_probe () in
+  let failure_line = gated_read_claim ^ ": false" in
+  let controlled =
+    (match status with
+      | Unix.WEXITED 1 -> true
+      | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> false)
+    && String.is_substring stdout_text ~substring:failure_line
+    && String.is_substring stderr_text ~substring:("FAIL: " ^ failure_line)
+  in
+  if not controlled then
+    Stdio.eprintf
+      "the broken-publication child %s without failing the gated-read claim. Its capture:\n%s%s\n"
+      (describe_status status) stdout_text stderr_text;
+  Verdict.p "a publication that truncates the target fails the gated-read claim (negative control)"
+    controlled
+
 (* Control: the reader's verdict discriminates. Without this, "every read was complete" is a claim
    about a predicate nobody checked. *)
 let () =
@@ -298,6 +366,13 @@ let reads_per_reader = 400
 let reader_ceiling_seconds = 120.0
 let total_publications = writers * rounds
 
+type reader_stop =
+  | Writers_finished of { reads : int; concluded : int; committed : int }
+  | Reader_ceiling of { reads : int; writers_finished : int; concluded : int; committed : int }
+  | Reader_not_started
+
+type reader_report = { during_write : observation; seen : observation list; stop : reader_stop }
+
 let () =
   reset_dir ();
   let seed = payload ~writer:(Char.to_int 'a') ~round:0 in
@@ -312,11 +387,15 @@ let () =
     done
   done;
   let refusals = Array.create ~len:writers 0 in
-  (* Each observation carries the number of publications completed when it was taken, which is how a
-     reader reports where in the run it read. *)
-  (* What a reader domain that never wrote its slot leaves behind. Chosen so it fails every claim
-     it reaches rather than reading as a satisfied one. *)
-  let no_reads = ((Refused "the reader domain recorded nothing", 0), []) in
+  (* What a reader domain that never wrote its slot leaves behind. Chosen so it fails every claim it
+     reaches rather than reading as a satisfied one. *)
+  let no_reads =
+    {
+      during_write = Refused "the reader domain recorded nothing";
+      seen = [];
+      stop = Reader_not_started;
+    }
+  in
   let observations = Array.create ~len:readers no_reads in
   let committed = Atomic.make 0 in
   (* Publications that have ENDED, either way. This, and not [committed], is what a reader records
@@ -385,74 +464,121 @@ let () =
         Domain.spawn (fun () ->
             readers_met.(i) <- await (fun () -> Atomic.get half_written);
             (* Taken with a payload half-written on disk. *)
-            let seen = ref [ (observe_published (), Atomic.get concluded) ] in
+            let seen = ref [ observe_published () ] in
             let during_write = List.hd_exn !seen in
             Atomic.incr readers_read;
             let reading_since = Mtime_clock.counter () in
+            let snapshot reads =
+              (reads, Atomic.get concluded, Atomic.get committed, Atomic.get writers_finished)
+            in
             let rec loop n =
-              if Float.(since reading_since > reader_ceiling_seconds) then ()
-              else if n >= reads_per_reader && Atomic.get writers_finished >= writers then ()
+              let reads, concluded, committed, finished = snapshot n in
+              (* The variant records the SAME [finished] sample this branch tested. The lifetime
+                 claim below asks only which branch each reader took; it never reconstructs that
+                 fact from [concluded] or [committed] after the domains have stopped. *)
+              if n >= reads_per_reader && finished >= writers then
+                Writers_finished { reads; concluded; committed }
+              else if Float.(since reading_since > reader_ceiling_seconds) then
+                Reader_ceiling { reads; writers_finished = finished; concluded; committed }
               else (
-                seen := (observe_published (), Atomic.get concluded) :: !seen;
+                seen := observe_published () :: !seen;
+                (* A zero-gap reopen on Windows can deny every rename attempt for the entire commit
+                   deadline. That measures which domain the host scheduled, not Atomic_file. The
+                   gated half-write above already forces real overlap; this pause merely gives the
+                   writer scheduler a turn between observations, and is one real timer tick
+                   there. *)
+                Unix.sleepf spin_pause;
                 loop (n + 1))
             in
-            loop 1;
-            (* One last read after the loop's exit condition held, so the final observation is taken
-               with every writer finished: that is what makes "kept reading until the writers were
-               done" a fact about this reader rather than about the loop's shape. *)
-            seen := (observe_published (), Atomic.get concluded) :: !seen;
-            observations.(i) <- (during_write, !seen)))
+            let stop = loop 1 in
+            (* One last read after the recorded exit condition, so the bytes claims cover the
+               boundary observation as well as the concurrent body. *)
+            seen := observe_published () :: !seen;
+            observations.(i) <- { during_write; seen = !seen; stop }))
   in
   Array.iter writer_domains ~f:Domain.join;
   Array.iter reader_domains ~f:Domain.join;
   let per_reader = Array.to_list observations in
-  let seen = List.concat_map per_reader ~f:snd in
+  let seen = List.concat_map per_reader ~f:(fun report -> report.seen) in
+  Array.iteri observations ~f:(fun i report ->
+      (match report.stop with
+      | Writers_finished { reads; concluded; committed } ->
+          if concluded <> total_publications then
+            Stdio.eprintf
+              "reader %d recorded every writer finished after %d reads, but publications concluded \
+               %d/%d and committed %d (harness counter mismatch; not part of the golden)\n"
+              i reads concluded total_publications committed
+      | Reader_ceiling { reads; writers_finished; concluded; committed } ->
+          Stdio.eprintf
+            "reader %d hit its %.0fs harness ceiling after %d reads: writers finished %d/%d, \
+             publications concluded %d/%d, committed %d (not part of the golden)\n"
+            i reader_ceiling_seconds reads writers_finished writers concluded total_publications
+            committed
+      | Reader_not_started ->
+          Stdio.eprintf "reader %d recorded no report (harness failure; not part of the golden)\n" i);
+      match List.find report.seen ~f:(Fn.non (observation_is_published published)) with
+      | None -> ()
+      | Some (Bytes_read data) ->
+          Stdio.eprintf
+            "reader %d observed unpublished bytes: length %d, self-describing=%b (Atomic_file \
+             regression; not part of the golden)\n"
+            i (String.length data) (is_well_formed data)
+      | Some Absent ->
+          Stdio.eprintf
+            "reader %d observed the published path missing (Atomic_file regression; not part of \
+             the golden)\n"
+            i
+      | Some (Refused reason) ->
+          Stdio.eprintf
+            "reader %d remained refused after its retry deadline: %s (platform/harness refusal; \
+             not part of the golden)\n"
+            i reason);
   Verdict.p_all ~min:writers "every writer met the readers at the rendezvous"
     (Array.to_list writers_met) ~f:Fn.id;
   Verdict.p_all ~min:readers "every reader saw a payload go half-written"
     (Array.to_list readers_met) ~f:Fn.id;
   (* The overlap claim, and the one that makes this leg independent of how many cores run it: the
      read below was taken while a writer sat inside its payload with half of it already on disk. *)
-  Verdict.p_all ~min:readers
-    "every reader's gated read saw a whole payload while one was half-written" per_reader
-    ~f:(fun ((found, _), _) ->
-      match found with
-      | Bytes_read data -> Hash_set.mem published data
-      | Absent | Refused _ -> false);
+  Verdict.p_all ~min:readers gated_read_claim per_reader ~f:(fun report ->
+      observation_is_published published report.during_write);
   Verdict.p_all ~min:readers "every reader kept reading until the writers were done" per_reader
-    ~f:(fun (_, obs) -> List.exists obs ~f:(fun (_, at) -> at = total_publications));
+    ~f:(fun report -> match report.stop with Writers_finished _ -> true | _ -> false);
   (* The platform's refusals are neither ignored nor folded into the two claims about the BYTES:
      they get one of their own, and the reads they cost are what the count on stderr names. Every
      read is therefore accounted for by exactly one of the three. *)
   Stdio.eprintf "reads refused and retried by the platform: %d (not part of the golden)\n"
     (Atomic.get refusals_retried);
   Verdict.p_all ~min:(readers * reads_per_reader)
-    "every read under concurrent publication resolved rather than staying refused" seen
-    ~f:(fun (found, _) -> match found with Refused _ -> false | Bytes_read _ | Absent -> true);
+    "every read under concurrent publication resolved rather than staying refused" seen ~f:(function
+    | Refused _ -> false
+    | Bytes_read _ | Absent -> true);
   Verdict.p_all ~min:(readers * reads_per_reader)
     "every read under concurrent publication observes a payload some writer published"
-    (List.filter_map seen ~f:(function
-      | Bytes_read data, _ -> Some data
-      | (Absent | Refused _), _ -> None))
+    (List.filter_map seen ~f:(function Bytes_read data -> Some data | Absent | Refused _ -> None))
     ~f:(Hash_set.mem published);
   Verdict.p_none ~min:(readers * reads_per_reader)
-    "no read under concurrent publication finds the path missing" seen ~f:(fun (found, _) ->
-      match found with Absent -> true | Bytes_read _ | Refused _ -> false);
+    "no read under concurrent publication finds the path missing" seen ~f:(function
+    | Absent -> true
+    | Bytes_read _ | Refused _ -> false);
   Array.iteri refusal_notes ~f:(fun i note ->
       if not (String.is_empty note) then
         Stdio.eprintf "writer %d lost %d of %d rounds; first refusal: %s (not part of the golden)\n"
           i refusals.(i) rounds note);
-  (* Liveness, and this is as much of it as the module HAS on Windows. The readers above never
-     release the target for longer than it takes to reopen it, and OCaml's opens carry no
+  (* Liveness, and this is as much of it as the module HAS on Windows. OCaml's opens carry no
      FILE_SHARE_DELETE, so a commit can be refused on every poll for the whole second
-     `publish_staged` waits -- measured here, a couple of rounds in six hundred. Nothing in
-     `atomic_file.ml` can prevent that; the sharing rule belongs to the platform, and the module's
-     contract says a publish may be refused (`atomic_file.mli`, "Windows"). "Every writer committed
-     every round" was therefore a claim about the host rather than about the module, and it is
-     replaced by the three that are true wherever this runs: every publication ends in exactly one
-     of the two outcomes the contract names, none goes missing between them, and refusal stays rare
-     enough to still be called an exception. The claims that carry the module's actual promise --
-     nothing torn, nothing absent, no staging file left behind -- are unchanged and unweakened. *)
+     [publish_staged] waits when readers reopen with no gap. Nothing in [atomic_file.ml] can prevent
+     that; the sharing rule belongs to the platform, and the module's contract says a publish may be
+     refused ([atomic_file.mli], "Windows"). The readers above pause for one scheduler turn after a
+     read rather than manufacturing that denial loop; the gated half-write and its executed broken
+     control retain deterministic overlap and the ability to catch torn publication.
+
+     The only scheduled Windows run carrying this metric before that change (2026-09-02) measured 24
+     refusals in 600 publications. One loaded-host sample is not a basis for moving either the
+     one-second library deadline or this test's 1% line, so both stay unchanged (gh-ocannl-900).
+     "Every writer committed every round" remains a claim about the host rather than about the
+     module: every publication must end in exactly one contract outcome, none may go missing, and
+     refusal must stay rare. The claims that carry the module's actual promise -- nothing torn,
+     nothing absent, no staging file left behind -- are unchanged and unweakened. *)
   Verdict.p "every publication either committed or was refused"
     (Atomic.get committed + Array.fold refusals ~init:0 ~f:( + ) = total_publications);
   (* Which failure it was, not merely that there was one. `publish_staged` propagates `Sys.rename`'s
