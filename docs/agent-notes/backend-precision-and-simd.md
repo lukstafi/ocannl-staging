@@ -728,15 +728,17 @@ files.
   is guarded on the feature macro.)
 - **That three-way check is now a test, not a shell loop** (gh-ocannl-650):
   `test/operations/cc_march_census` compiles the emitted kernel under seven `-march` targets at two
-  optimization levels and three vector widths, and censuses the innermost loop carrying each
-  accumulator update. The generated `.c` includes only libc headers, so the whole matrix needs a
+  optimization levels and three vector widths, and censuses the loop carrying each accumulator
+  update. The generated `.c` includes only libc headers, so the whole matrix needs a
   toolchain and nothing else; the ARM columns need a cross gcc, pointed at by `AARCH64_CROSS_GCC`
   and reported through `Verdict.skipped` when absent, so the golden does not depend on the box
   having one. Two shapes are load-bearing and were each arrived at from their failure. The census
-  picks the SMALLEST-span loop carrying the construct, identified through the `.loc` line numbers
-  `-g` leaves in the assembly rather than guessed from the instruction mix — an outer loop dilutes
-  every ratio, and a surviving serial tail is a smaller loop mentioning the same array, which is why
-  the fixture's extent is a multiple of `chains * lanes` at every width. And it counts vector ops,
+  ordinarily picks the SMALLEST-span loop carrying the construct, identified through the `.loc`
+  line numbers `-g` leaves in the assembly rather than guessed from the instruction mix — an outer
+  loop dilutes every ratio, and a surviving serial tail is a smaller loop mentioning the same array,
+  which is why the fixture's extent is a multiple of `chains * lanes` at every width. fp8 uses the
+  immediate outer carrier because its codec contributes an intentional nested loop. The census
+  counts vector ops,
   scalar FP ops and libm calls SEPARATELY, never consulting them to select: scoring only what the
   good outcome produces made a fully scalarized loop read as "no FMA loop found", a pass arrived at
   from the failure (gh-ocannl-621). Answering "no loop" is therefore a failure — which is what
@@ -764,10 +766,13 @@ files.
   What closes that is reading the EMITTED SOURCE: every `OCANNL_VEC_WIDEN_*`/`OCANNL_VEC_NARROW_*`
   key `Builtins_cc` defines must reach some kernel (derived from the table, so a bridge added for a
   fourth format fails until the fixture grows), and every loop whose storage and compute precisions
-  differ must carry both directions of its `c_convert_precision` pair in its own kernel — which is
-  the only attestation fp8 gets, `vec_bridge` having no vector arm for it and converting per lane.
+  differ must carry both directions of its `c_convert_precision` pair in its own kernel — the
+  source-level attestation fp8 needs because `vec_bridge` has no vector arm for it and converts per lane.
   The emission is its own negative control: the native-fp16 kernel carries the `BFLOAT16` bridge
-  pair and neither `HALF` one, the wide-fp16 kernel exactly the reverse.
+  pair and neither `HALF` one, the wide-fp16 kernel exactly the reverse. fp8 additionally joins the
+  accumulator libm claims: `Asm_census.Smallest_outer_anchor_carrier` selects the smallest loop
+  containing its nested per-lane codec, rather than letting that codec answer for the combine
+  (gh-ocannl-845); a synthetic libm-bearing combine is the negative control.
 - **A census reading is a fact about the emission AND about the compiler, and CI runs two of them**
   (gh-ocannl-752). The extended fixture passed on a gcc 15.2 box and was red on BOTH CI legs, in two
   unrelated ways, neither reachable from a gcc-only host. (a) **Line attribution.** A row is found
@@ -794,9 +799,10 @@ files.
   compiling that one conversion and censusing it rather than by testing a version. Reproduce with
   `apt-get download gcc-13-x86-64-linux-gnu cpp-13-x86-64-linux-gnu libgcc-13-dev` and
   `OCANNL_CC_BACKEND_COMPILER_COMMAND=<prefix>/usr/bin/gcc-13` on the census exe. Neither compiler
-  substitutes for the other here, and a clang x86 host still reports 14 unfound rows (the `dot`
-  reductions on v2/v3/v4): the census is a gcc-hosted measurement plus whatever the `native` column
-  lands on, and a host it cannot read says so loudly rather than passing quietly. (c) **How the
+  substitutes for the other here. The row anchor is now the smallest brace-delimited source range
+  containing its unique patterns, so clang's different attribution no longer makes x86 `dot` rows
+  disappear; the modeled set is stated as GCC/GAS and Clang assembly on x86-64 and aarch64, with an
+  ELF/clang attribution probe alongside the existing dialect probes (gh-ocannl-844). (c) **How the
   assembler SPELLS a packed instruction.** Apple's arm64 assembler carries a NEON instruction's
   arrangement on the MNEMONIC (`fmla.4s v0, v1, v2`) where GAS carries it on the registers (`fmla
   v0.4s, v1.4s, v2.4s`), so `Asm_census`'s operand rules saw three plain `v` names and classified 34
@@ -813,7 +819,10 @@ files.
   found-ness, which is why the blindness shipped. Reproduce without a Mac: the clang prefix above
   plus `-mllvm -aarch64-neon-syntax=apple`, which reproduces CI's row byte for byte (`insns=49
   vector=0 scalar_fp=0`). The lesson generalizes past this census: a fixture for a foreign dialect
-  owes a claim about what was MEASURED, not only about what was found.
+  owes a claim about what was MEASURED, not only about what was found. Every profile also reports a
+  residual count for instructions matched by no vector, scalar-FP, libm, or stack classifier; it is
+  descriptive because loop control belongs there, but an unknown mnemonic can no longer vanish into
+  passing-looking zeroes (gh-ocannl-844).
 - **`Max`/`Min` SIMD reductions were a libm call per lane, on every x86 target** (gh-ocannl-649,
   fixed). The `Vectorized` accumulation loop rendered them as a fixed-trip per-lane loop calling the
   scalar `fmaxf`/`fminf`, on the reasoning that the packed-max builtins have the wrong NaN semantics

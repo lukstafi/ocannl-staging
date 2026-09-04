@@ -1,5 +1,5 @@
 (* The [-march] compile matrix and the kernel-loop census (gh-ocannl-650, gh-ocannl-649,
-   gh-ocannl-752).
+   gh-ocannl-752, gh-ocannl-844, gh-ocannl-845).
 
    Emitted kernels are only ever compiled for the build host, so every [#elif] written for a foreign
    target -- {!C_syntax.vec_fma_builtin}'s AVX-512, AVX512-FP16 and NEON rows -- is preprocessed
@@ -10,11 +10,11 @@
 
    The generated [.c] is self-contained -- it includes only libc headers -- so compiling it under an
    arbitrary [-march] needs no hardware and no runtime, only the toolchain. What that buys over and
-   above "it compiles" is the {b census} ({!Test_utils.Asm_census}) of the innermost loop carrying
-   each accumulator update: also a compile-time property, also needing no hardware, and the thing
-   that separates "gcc accepted the arm" from "gcc kept it in registers as one vector operation".
-   gh-ocannl-621 used it to find the gh-ocannl-614 spill and the scalarization class; gh-ocannl-649
-   used it to find that [Max]/[Min] were worse off than either.
+   above "it compiles" is the {b census} ({!Test_utils.Asm_census}) of the loop carrying each
+   accumulator update: also a compile-time property, also needing no hardware, and the thing that
+   separates "the compiler accepted the arm" from "the compiler kept it in registers as one vector
+   operation". gh-ocannl-621 used it to find the gh-ocannl-614 spill and the scalarization class;
+   gh-ocannl-649 used it to find that [Max]/[Min] were worse off than either.
 
    {1 Why the emission settings come from child processes}
 
@@ -39,9 +39,9 @@
 
    {1 What the claims are, and what they are not}
 
-   Census counts are host-toolchain facts -- they move with the gcc version and the [-march] -- so
-   the table goes to stderr and NOT into the golden. What the golden holds are inequalities that a
-   misclassified move instruction cannot flip:
+   Census counts are host-toolchain facts -- they move with the compiler version and the [-march] --
+   so the table goes to stderr and NOT into the golden. What the golden holds are inequalities that
+   a misclassified move instruction cannot flip:
 
    - every kernel compiles clean under every accepted target at [-O2] and at [-O3]; - every loop is
    FOUND: a census that answers "no loop carried the anchor" is a failure, because scoring only the
@@ -74,25 +74,26 @@
    compiler that rendered it, and CI runs two: gcc on ubuntu-latest and clang on macos-latest
    (arm64, where every named x86 [-march] is skipped and the [native] column is the whole matrix).
    Both of the census's inputs turned out to be compiler-dependent in ways a gcc-only box cannot
-   see, and both made CI red at gh-ocannl-752 with this box green:
+   see, and both made CI red at gh-ocannl-752 with this box green. The reader explicitly models GCC
+   and Clang output on x86-64 and aarch64; synthetic probes carry every assembler dialect below:
 
    - {b which line the loop's instructions are attributed to}, which is how a row is FOUND. clang
-   attributes an inlined function's instructions to the CALLEE's lines, so an anchor on a line whose
-   only content is a call to a same-kernel conversion carries no [.loc] inside the loop at all --
-   see {!kernel_loop.anchors}, where the fix is to list a second pattern per tile that no inliner
-   can move. - {b whether a whole-vector builtin is lowered whole-vector}, which is what the sharp
-   scalarization claim reads -- see {!packed_half_widen}. - {b how the assembler SPELLS a packed
-   instruction}, which is what every count reads. Apple's arm64 dialect carries the arrangement on
-   the mnemonic ([fmla.4s v0, v1, v2]) rather than on the registers, and a census blind to that
-   spelling reports a fully packed k-loop as [vector=0 scalar_fp=0] -- 34 of its 49 instructions
-   invisible -- which is how macos-latest failed the vector-majority claim on [0 > 0] over a tile
-   nothing was wrong with. See {!dialect_probes}.
+   attributes an inlined function's instructions to the CALLEE's lines, so an exact anchor on a line
+   whose only content is a call to a same-kernel conversion carries no [.loc] inside the loop at
+   all. Every row now anchors on the smallest brace-delimited source range containing its unique
+   patterns, after the generated function's [Main logic] marker. - {b whether a whole-vector builtin
+   is lowered whole-vector}, which is what the sharp scalarization claim reads -- see
+   {!packed_half_widen}. - {b how the assembler SPELLS a packed instruction}, which is what every
+   count reads. Apple's arm64 dialect carries the arrangement on the mnemonic ([fmla.4s v0, v1, v2])
+   rather than on the registers, and a census blind to that spelling reports a fully packed k-loop
+   as [vector=0 scalar_fp=0] -- 34 of its 49 instructions invisible -- which is how macos-latest
+   failed the vector-majority claim on [0 > 0] over a tile nothing was wrong with. See
+   {!dialect_probes}.
 
-   The lesson for a new row: anchor it on a line the compiler cannot attribute elsewhere (a macro
-   use or a builtin, not a call and not a bare load an optimizer can fold into its use), and before
-   claiming a count is zero, ask whether the zero is the emission's, the compiler's, or the
-   reader's. The aarch64 columns need a cross gcc, which installs without root -- [apt-get download
-   gcc-<n>-aarch64-linux-gnu cpp-<n>-... binutils- aarch64-linux-gnu libc6-dev-arm64-cross
+   Before claiming a count is zero, ask whether the zero is the emission's, the compiler's, or the
+   reader's: every census profile prints a [residual] count of instructions no classifier
+   understood. The aarch64 columns need a cross gcc, which installs without root -- [apt-get
+   download gcc-<n>-aarch64-linux-gnu cpp-<n>-... binutils- aarch64-linux-gnu libc6-dev-arm64-cross
    linux-libc-dev-arm64-cross libgcc-<n>-dev-arm64-cross] then [dpkg-deb -x] each into one prefix.
    Point [AARCH64_CROSS_GCC] at the resulting [aarch64-linux-gnu-gcc-<n>], or leave it unset and the
    check looks for [aarch64-linux-gnu-gcc] on [PATH]. *)
@@ -1042,6 +1043,21 @@ type emitted = {
   loops : kernel_loop list;
 }
 
+(* A compiler may attribute an inlined conversion to the callee or to another statement in the
+   generated construct. Anchor on the construct's brace-delimited source range, not only the exact
+   lines carrying its tensor-derived name. [Main logic] excludes the same names in the function
+   signature; the smallest enclosing block then distinguishes every reduction/tile from its
+   neighbours. *)
+let loop_anchor (e : emitted) (loop : kernel_loop) =
+  Census.anchor_block_lines ~source:e.source ~after_pattern:"/* Main logic. */"
+    ~patterns:loop.anchors
+
+let loop_selection (loop : kernel_loop) =
+  match loop.kind with
+  | Reduce when String.equal loop.store (Ir.Ops.prec_string Ir.Ops.fp8) ->
+      Census.Smallest_outer_anchor_carrier
+  | Reduce | Tile -> Census.Innermost
+
 type row = {
   toolchain : string;
   caps : caps;  (** this column's ISA facts, read from its own compiler *)
@@ -1215,16 +1231,100 @@ let dialect_probes () =
   in
   let arm64_gnu = arm64_body [ "\tfmax\tv0.4s, v0.4s, v1.4s"; "\tfmla\tv2.4s, v3.4s, v4.4s" ] in
   let arm64_apple = arm64_body [ "\tfmax.4s\tv0, v0, v1"; "\tfmla.4s\tv2, v3, v4" ] in
+  (* Clang may attribute an inlined expression to another line of the generated construct. This
+     synthetic ELF/clang listing points at line 8, while the unique [START] anchor is line 6. The
+     brace-delimited range models that toolchain without admitting a neighbouring construct. *)
+  let clang_source =
+    String.concat ~sep:"\n"
+      [
+        "int f(void) {";
+        "  /* Main logic. */";
+        "  { /* one generated reduction */";
+        "    /* A } in prose is not the end of the construct. */";
+        "    const char *brace = \"{\";";
+        "    START = SOURCE;";
+        "    for (;;) {";
+        "      ACC = MAXOF(ACC, SOURCE);";
+        "    }";
+        "  }";
+        "}";
+      ]
+  in
+  let clang_exact = Census.anchor_lines ~source:clang_source ~patterns:[ "START =" ] in
+  let clang_range =
+    Census.anchor_block_lines ~source:clang_source ~after_pattern:"/* Main logic. */"
+      ~patterns:[ "START =" ]
+  in
+  let clang_x86 =
+    String.concat ~sep:"\n"
+      [
+        "\t.file\t1 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
+        "f:";
+        ".LBB0_1:";
+        "\t.loc\t1 8 12";
+        "\tmaxps\t%xmm1, %xmm0";
+        "\tjne\t.LBB0_1";
+        "\tretq";
+      ]
+  in
+  (* The fp8 codec loop and accumulator loop share source attribution. The ordinary selector below
+     sees the smaller codec loop; [Smallest_outer_anchor_carrier] must see the immediate combine and
+     therefore the deliberately injected libm call after the codec loop. This is the negative
+     control for the production no-libm claims: the same predicate must reject this wrong
+     combine. *)
+  let nested =
+    String.concat ~sep:"\n"
+      [
+        "\t.file 1 \"/build/census_kernel.c\"";
+        "f:";
+        ".Louter:";
+        "\t.loc 1 8 12";
+        "\taddps\t%xmm1, %xmm0";
+        ".Lcodec:";
+        "\t.loc 1 8 12";
+        "\taddps\t%xmm2, %xmm0";
+        "\tjne\t.Lcodec";
+        "\tcallq\tfmaxf";
+        "\tjne\t.Louter";
+        "\tretq";
+      ]
+  in
+  let nested_parsed = Census.parse ~asm:nested ~source_basename:(routine ^ ".c") in
+  let innermost = Census.census_in nested_parsed Census.Max_min ~anchor:clang_range in
+  let combine =
+    Census.census_in ~selection:Census.Smallest_outer_anchor_carrier nested_parsed Census.Max_min
+      ~anchor:clang_range
+  in
+  let has_libm = function Some c -> c.Census.counts.Census.libm_calls > 0 | None -> false in
+  let unknown =
+    String.concat ~sep:"\n"
+      [
+        "\t.file 1 \"/build/census_kernel.c\"";
+        "f:";
+        ".L2:";
+        "\t.loc 1 3 12";
+        "\tocannl_future_dialect\tfoo, bar";
+        "\tjne\t.L2";
+        "\tret";
+      ]
+  in
   let censused asm = Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor in
-  Verdict.p_all "the census reads both assembler dialects, not only this host's"
+  Verdict.p_all "the census models GCC/GAS and Clang assembly on x86-64 and aarch64"
     [
       ("gnu/elf", elf);
       ("apple-clang", darwin_clang);
       ("apple-clang+libm", darwin_with_libm);
       ("arm64/gas", arm64_gnu);
       ("arm64/apple", arm64_apple);
+      ("x86/elf-clang", clang_x86);
     ]
-    ~f:(fun (_, asm) -> Census.loop_edges ~asm > 0 && Option.is_some (censused asm));
+    ~f:(fun (name, asm) ->
+      Census.loop_edges ~asm > 0
+      && Option.is_some
+           (if String.equal name "x86/elf-clang" then
+              Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c")
+                ~anchor:clang_range
+            else censused asm));
   (* Exact counts rather than "the two agree": agreement alone is what the blind reading also
      satisfied, both dialects having answered [vector=0 scalar_fp=0] before the arrangement
      mnemonics were read. Two packed instructions and one scalar one, in a fixture of three, so the
@@ -1239,6 +1339,26 @@ let dialect_probes () =
   Verdict.p "a libm call spelled the Mach-O way is still counted as one"
     (match censused darwin_with_libm with
     | Some c -> c.Census.counts.Census.libm_calls > 0
+    | None -> false);
+  Verdict.p "clang line attribution is found through the construct range, not the exact anchor line"
+    (Option.is_none
+       (Census.census Census.Max_min ~asm:clang_x86 ~source_basename:(routine ^ ".c")
+          ~anchor:clang_exact)
+    && Option.is_some
+         (Census.census Census.Max_min ~asm:clang_x86 ~source_basename:(routine ^ ".c")
+            ~anchor:clang_range));
+  Verdict.p "the fp8 combine selector rejects a deliberate libm regression outside its codec loop"
+    ((not (has_libm innermost))
+    && has_libm combine
+    && Option.value_map innermost ~default:false ~f:(fun inner ->
+        Option.value_map combine ~default:false ~f:(fun outer -> inner.span < outer.span)));
+  Verdict.p "an instruction in an unknown dialect is reported as residual"
+    (match censused unknown with
+    | Some c ->
+        c.Census.counts.Census.instructions = 2
+        && c.Census.counts.Census.residual = 2
+        && c.Census.counts.Census.vector_ops = 0
+        && c.Census.counts.Census.scalar_fp_ops = 0
     | None -> false)
 
 let () =
@@ -1331,14 +1451,11 @@ let () =
          [f16w]) whenever a future setting emits both from the same child. *)
       Verdict.p_all "no two censused loops of a kernel share an anchor line"
         (List.concat_map emitted ~f:(fun e ->
-             List.map e.loops ~f:(fun l ->
-                 (e, l, Census.anchor_lines ~source:e.source ~patterns:l.anchors))))
+             List.map e.loops ~f:(fun l -> (e, l, loop_anchor e l))))
         ~f:(fun (e, l, mine) ->
           (not (Set.is_empty mine))
           && List.for_all e.loops ~f:(fun other ->
-              String.equal other.what l.what
-              || Set.is_empty
-                   (Set.inter mine (Census.anchor_lines ~source:e.source ~patterns:other.anchors))));
+              String.equal other.what l.what || Set.is_empty (Set.inter mine (loop_anchor e other))));
       let all = toolchains () in
       let available = List.filter all ~f:Census.accepts in
       Stdio.eprintf "\n=== cc kernel census (not part of the golden) ===\n";
@@ -1392,9 +1509,8 @@ let () =
                           :: !edges;
                         List.map e.loops ~f:(fun loop ->
                             let c =
-                              Census.census_in parsed loop.op_class
-                                ~anchor:
-                                  (Census.anchor_lines ~source:e.source ~patterns:loop.anchors)
+                              Census.census_in ~selection:(loop_selection loop) parsed loop.op_class
+                                ~anchor:(loop_anchor e loop)
                             in
                             (match c with
                             | Some c ->
@@ -1493,31 +1609,20 @@ let () =
         List.filter rows ~f:(fun r -> isa_has ~caps:r.caps ~loop:r.loop ~width:r.width)
       in
       let served_named = List.filter served ~f:(fun r -> r.caps.named) in
-      (* {b Which rows a claim about the COMBINE can be held over.} An fp8 reduction's censused loop
-         is not its combine: {!C_syntax.vec_bridge} has no vector codec for fp8 and converts lane by
-         lane through a fixed-trip inner loop, which mentions the same source array as the fold
-         around it and is the SMALLER span, so the census -- innermost loop carrying the anchor --
-         selects the codec. That is the right reading for what the fp8 rows are here to pin (does
-         the codec compile under every [-march]), and it is the wrong population for a claim about
-         libm calls in the accumulator update: such a call sits in the fold OUTSIDE the selected
-         span, so the row would pass the claim without being able to fail it. Excluded rather than
-         left in as a member that is true by construction; the [Tile_mma] rows stay, their censused
-         loop being the k-loop itself. Covering an fp8 combine needs a second anchor naming the
-         update rather than the array, which is not a substring any one loop of the group owns. *)
-      let censuses_the_combine r =
-        match r.loop.kind with
-        | Tile -> true
-        | Reduce -> not (String.equal r.loop.store (Ir.Ops.prec_string Ir.Ops.fp8))
-      in
+      (* Every reduction profile now names the accumulator loop. fp8 is the exceptional shape: its
+         per-lane codec is nested inside that loop and carries the same anchor range, so
+         [loop_selection] selects the smallest anchor carrier that contains a nested carrier. The
+         synthetic control in [dialect_probes] proves that a libm call outside the codec but inside
+         the combine makes the predicate below fail. *)
       (* The gh-ocannl-649 claim proper. Unconditional across the matrix, unlike the two below:
          [Max]/[Min] have a whole-vector spelling on every target here at every width -- an emulated
          wide vector still compiles to packed compares and selects, just more of them -- so a libm
          call in one of these loops is a defect wherever it appears. *)
       claim_none "no Max/Min accumulator loop calls libm"
-        (List.filter rows ~f:(fun r -> (not (is_fma_row r)) && censuses_the_combine r))
+        (List.filter rows ~f:(fun r -> not (is_fma_row r)))
         ~f:libm;
       claim_none "no FMA accumulator loop calls libm where the ISA has a fused multiply-add"
-        (List.filter served ~f:(fun r -> is_fma_row r && censuses_the_combine r))
+        (List.filter served ~f:is_fma_row)
         ~f:libm;
       let scalarization_claim =
         "no accumulator loop is scalarized where a named target's ISA has the operation"
@@ -1539,14 +1644,14 @@ let () =
          the census's version of the check. The vector-majority claim below is what the rows say
          positively. - {b fp8 operands}. {!C_syntax.vec_bridge} has no vector codec for fp8 and says
          so: it converts one lane at a time through the scalar path's own [convert_precision], with
-         the arithmetic around it staying vectorized. gcc keeps that fixed-trip loop AS a loop (a
-         GNU vector's lane written through a variable index has to go through memory), so it is the
-         innermost loop carrying an fp8 operand's source line and it is what these rows census: 8 to
-         11 instructions, near zero vector operations, at every column. That is the emitted shape,
-         not a regression -- what the fp8 rows pin is that the codec compiles under every [-march]
-         and calls no libm, not how the arithmetic around it vectorized. *)
+         the arithmetic around it staying vectorized. The census deliberately selects the
+         accumulator loop outside that codec, so its scalar counts include the codec's designed
+         per-lane work. Excluding fp8 from a claim about wholly-vector rendering is therefore still
+         necessary even though its profile now genuinely covers the combine and its libm claim. *)
       let whole_vector_rendering r =
-        match r.loop.kind with Tile -> false | Reduce -> censuses_the_combine r
+        match r.loop.kind with
+        | Tile -> false
+        | Reduce -> not (String.equal r.loop.store (Ir.Ops.prec_string Ir.Ops.fp8))
       in
       (* On a host whose compiler accepts none of the named [-march] targets -- Apple clang on Apple
          Silicon, which is CI's macos-latest -- only the [native] column survives, and this claim's

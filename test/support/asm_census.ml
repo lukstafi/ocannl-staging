@@ -25,8 +25,9 @@
       innermost loop, and counting an enclosing one dilutes every ratio. {!census} therefore selects
       the {e smallest-span} loop whose body carries the construct being censused, and it identifies
       that construct through DWARF line numbers ([-g] puts [.loc] directives in the assembly) rather
-      than by guessing from the instruction mix. The caller names the construct by source substring;
-      a loop is a candidate only if its body's [.loc] set meets the source lines that match.
+      than by guessing from the instruction mix. {!census_in}'s explicit outer-carrier selector is
+      the narrow exception for a construct with its own nested codec loop. The caller supplies the
+      source-line set; a loop is a candidate only if its body's [.loc] set meets it.
     - {b counting only the instructions the good outcome produces.} Scoring vector FMAs alone makes
       a fully scalarized loop read as "no FMA loop found" -- a pass, from the failure. So the counts
       are separated ({!counts.vector_ops} against {!counts.scalar_fp_ops} against
@@ -37,7 +38,7 @@
 
     {1 What the counts mean}
 
-    Classification is by mnemonic, from GAS output for x86-64 and aarch64:
+    Classification is by mnemonic, from GCC/GAS and Clang assembly output for x86-64 and aarch64:
 
     - {b vector_ops}: packed-SIMD instructions -- an x86 mnemonic ending in [ps]/[pd]/[ph], a packed
       integer mnemonic, an operand naming [%ymm]/[%zmm], an aarch64 operand in vector-lane form
@@ -51,6 +52,9 @@
       cannot be vectorized at any optimization level or grid size.
     - {b stack_refs}: instructions addressing through the stack or frame pointer -- the spill signal
       gh-ocannl-614 measured.
+    - {b residual}: instructions matched by none of those classifiers. Loop-control and integer
+      bookkeeping legitimately live there, so it is reported rather than bounded; its purpose is to
+      make a newly encountered dialect visible instead of silently returning zeroes.
 
     Both aarch64 spellings are read, because both are compiled in CI and a dialect must not change
     the reading: a count is a fact about the instruction, and the same loop assembled two ways has
@@ -215,6 +219,10 @@ type counts = {
   scalar_fp_ops : int;
   libm_calls : int;
   stack_refs : int;
+  residual : int;
+      (** Instructions recognized by none of the classifiers above. This is descriptive rather than
+          a failure threshold: ordinary loop-control instructions live here too, but a dialect
+          surprise can no longer disappear into passing-looking zeroes. *)
 }
 
 type t = { loop_label : string; span : int; counts : counts }
@@ -460,6 +468,91 @@ let anchor_lines ~source ~patterns =
       if List.exists patterns ~f:(fun p -> has_substr l ~sub:p) then Some (i + 1) else None)
   |> Set.of_list (module Int)
 
+(** [anchor_block_lines ~source ~after_pattern ~patterns] is the smallest brace-delimited source
+    range containing every occurrence of [patterns] after [after_pattern]. The generated-kernel
+    census uses a range rather than only the exact matching lines because clang may attribute an
+    inlined conversion to another line of the construct. Braces in comments and literals are
+    ignored, so prose or macro strings cannot silently widen the range.
+
+    An absent marker, absent anchor, or unbalanced enclosing block returns the empty set. Callers
+    already treat an empty anchor as a failed census rather than guessing at a wider range. *)
+let anchor_block_lines ~source ~after_pattern ~patterns =
+  let lines = String.split_lines source |> Array.of_list in
+  let after =
+    Array.find_mapi lines ~f:(fun i line ->
+        if has_substr line ~sub:after_pattern then Some i else None)
+  in
+  match after with
+  | None -> Set.empty (module Int)
+  | Some after -> (
+      let matches =
+        Array.filter_mapi lines ~f:(fun i line ->
+            if i > after && List.exists patterns ~f:(fun p -> has_substr line ~sub:p) then Some i
+            else None)
+        |> Array.to_list
+      in
+      match
+        (List.min_elt matches ~compare:Int.compare, List.max_elt matches ~compare:Int.compare)
+      with
+      | Some first, Some last ->
+          let stack = ref [] and intervals = ref [] and in_comment = ref false in
+          Array.iteri lines ~f:(fun line_no line ->
+              let rec scan i quote escaped =
+                if i >= String.length line then ()
+                else if !in_comment then
+                  if
+                    i + 1 < String.length line
+                    && Char.equal line.[i] '*'
+                    && Char.equal line.[i + 1] '/'
+                  then (
+                    in_comment := false;
+                    scan (i + 2) quote false)
+                  else scan (i + 1) quote false
+                else
+                  match quote with
+                  | Some q ->
+                      if escaped then scan (i + 1) quote false
+                      else if Char.equal line.[i] '\\' then scan (i + 1) quote true
+                      else if Char.equal line.[i] q then scan (i + 1) None false
+                      else scan (i + 1) quote false
+                  | None ->
+                      if
+                        i + 1 < String.length line
+                        && Char.equal line.[i] '/'
+                        && Char.equal line.[i + 1] '/'
+                      then ()
+                      else if
+                        i + 1 < String.length line
+                        && Char.equal line.[i] '/'
+                        && Char.equal line.[i + 1] '*'
+                      then (
+                        in_comment := true;
+                        scan (i + 2) None false)
+                      else if Char.equal line.[i] '"' || Char.equal line.[i] '\'' then
+                        scan (i + 1) (Some line.[i]) false
+                      else if Char.equal line.[i] '{' then (
+                        stack := line_no :: !stack;
+                        scan (i + 1) None false)
+                      else if Char.equal line.[i] '}' then (
+                        (match !stack with
+                        | opening :: rest ->
+                            stack := rest;
+                            intervals := (opening, line_no) :: !intervals
+                        | [] -> ());
+                        scan (i + 1) None false)
+                      else scan (i + 1) None false
+              in
+              scan 0 None false);
+          List.filter !intervals ~f:(fun (opening, closing) -> opening <= first && last <= closing)
+          |> List.min_elt ~compare:(fun (o1, c1) (o2, c2) -> Int.compare (c1 - o1) (c2 - o2))
+          |> Option.value_map
+               ~default:(Set.empty (module Int))
+               ~f:(fun (opening, closing) ->
+                 List.range opening (closing + 1)
+                 |> List.map ~f:(fun zero_based -> zero_based + 1)
+                 |> Set.of_list (module Int))
+      | _ -> Set.empty (module Int))
+
 (** {1 The census itself} *)
 
 (* The DWARF file number standing for [basename]: [.file N "path"] entries name every header the
@@ -546,27 +639,37 @@ let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
 let count_range lines op_class ~from_ ~to_ =
   let libm = libm_names op_class in
   let counts =
-    ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 }
+    ref
+      {
+        instructions = 0;
+        vector_ops = 0;
+        scalar_fp_ops = 0;
+        libm_calls = 0;
+        stack_refs = 0;
+        residual = 0;
+      }
   in
   for k = from_ to to_ do
     match lines.(k) with
     | Some (Insn { mnemonic; rest }) ->
         let c = !counts in
-        let c = { c with instructions = c.instructions + 1 } in
-        let c =
-          if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
-        in
-        let c =
-          if is_scalar_fp_insn ~mnemonic ~rest then { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
-          else c
-        in
-        let c =
+        let vector = is_vector_insn ~mnemonic ~rest in
+        let scalar_fp = is_scalar_fp_insn ~mnemonic ~rest in
+        let libm_call =
           match call_target ~mnemonic ~rest with
-          | Some t when List.mem libm t ~equal:String.equal ->
-              { c with libm_calls = c.libm_calls + 1 }
-          | _ -> c
+          | Some t -> List.mem libm t ~equal:String.equal
+          | None -> false
         in
-        let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
+        let stack_ref = is_stack_ref ~rest in
+        let c = { c with instructions = c.instructions + 1 } in
+        let c = if vector then { c with vector_ops = c.vector_ops + 1 } else c in
+        let c = if scalar_fp then { c with scalar_fp_ops = c.scalar_fp_ops + 1 } else c in
+        let c = if libm_call then { c with libm_calls = c.libm_calls + 1 } else c in
+        let c = if stack_ref then { c with stack_refs = c.stack_refs + 1 } else c in
+        let c =
+          if vector || scalar_fp || libm_call || stack_ref then c
+          else { c with residual = c.residual + 1 }
+        in
         counts := c
     | _ -> ()
   done;
@@ -583,12 +686,18 @@ let profile_all op_class ~asm =
   let lines = classify_asm asm in
   count_range lines op_class ~from_:0 ~to_:(Array.length lines - 1)
 
-(** [census_in p op_class ~anchor] is the innermost loop of [p] whose body carries a source line in
-    [anchor], with that loop's instruction profile.
+type selection = Innermost | Smallest_outer_anchor_carrier
+
+(** [census_in p op_class ~anchor] is a loop of [p] whose body carries a source line in [anchor],
+    with that loop's instruction profile. [Innermost], the default, selects the smallest span.
+    [Smallest_outer_anchor_carrier] takes the smallest candidate that contains another
+    anchor-carrying candidate. The latter reads a vector reduction's immediate accumulator loop
+    rather than either its per-lane codec or a more distant compiler loop that happens to share
+    source attribution. If no nested pair exists it falls back to the ordinary candidates.
 
     [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
     emitted. That is a finding, not an absence of one: report it as a failure. *)
-let census_in ({ lines; edges = loops; files } : parsed) op_class ~anchor =
+let census_in ?(selection = Innermost) ({ lines; edges = loops; files } : parsed) op_class ~anchor =
   let carries (_, j, i) =
     let rec go k =
       if k > i then false
@@ -603,6 +712,17 @@ let census_in ({ lines; edges = loops; files } : parsed) op_class ~anchor =
     go j
   in
   let candidates = List.filter loops ~f:carries in
+  let candidates =
+    match selection with
+    | Innermost -> candidates
+    | Smallest_outer_anchor_carrier ->
+        let contains_another =
+          List.filter candidates ~f:(fun (_, outer_j, outer_i) ->
+              List.exists candidates ~f:(fun (_, j, i) ->
+                  (outer_j < j || i < outer_i) && outer_j <= j && i <= outer_i))
+        in
+        if List.is_empty contains_another then candidates else contains_another
+  in
   let best =
     List.min_elt candidates ~compare:(fun (_, j1, i1) (_, j2, i2) ->
         Int.compare (i1 - j1) (i2 - j2))
@@ -620,7 +740,7 @@ let to_line
     {
       loop_label;
       span;
-      counts = { instructions; vector_ops; scalar_fp_ops; libm_calls; stack_refs };
+      counts = { instructions; vector_ops; scalar_fp_ops; libm_calls; stack_refs; residual };
     } =
-  Printf.sprintf "%s span=%d insns=%d vector=%d scalar_fp=%d libm_calls=%d stack=%d" loop_label span
-    instructions vector_ops scalar_fp_ops libm_calls stack_refs
+  Printf.sprintf "%s span=%d insns=%d vector=%d scalar_fp=%d libm_calls=%d stack=%d residual=%d"
+    loop_label span instructions vector_ops scalar_fp_ops libm_calls stack_refs residual
