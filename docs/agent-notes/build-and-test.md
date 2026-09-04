@@ -833,13 +833,13 @@ that they earn a lookup rather than always-loaded space.
   recognised local wrapper carries its remaining slots forward. Local `open Verdict.Claims` scopes
   extend discovery, eager outer calls do not hide a nested claim argument, and `function` cases
   contribute their positional argument slot. Conditions forwarded or inverted inside a claimed
-  Boolean retain their polarity. Wrappers exported from file-local modules are available through
-  their qualified name or through a file-local module `open`. Match aliases connect a wrapper's
-  claimed result back to its scrutinee, and a syntactic `?arg:None` keeps the optional default edge
-  when a wrapper is partially applied. Its exact, stale-checked exemption list is only for bindings
-  whose intended
-  passing meaning allows an empty population; synthetic controls include a child process the
-  shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
+  Boolean retain their polarity. Wrappers and quantified helpers exported from file-local modules
+  are available through their qualified name or through a file-local module `open`. Match aliases
+  connect a wrapper's claimed result back to its scrutinee, and a syntactic `?arg:None` keeps the
+  optional default edge when a wrapper is partially applied. Its exact, stale-checked exemption list
+  is only for bindings whose intended passing meaning allows an empty population; synthetic controls
+  include a child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887).
+  An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
@@ -857,6 +857,8 @@ that they earn a lookup rather than always-loaded space.
   binding groups are closed over their sibling dependencies; function parameters, conversely,
   shadow same-named outer helpers while their body is analyzed, and later local bindings shadow
   returned-name references. `Fn.id`/`Fun.id` are transparent to returned-quantifier analysis.
+  Immediately invoked function bodies remain visible, and aliases of the recognized collection
+  quantifier functions retain the underlying quantifier kind and population arity.
   Dependencies that choose a returned value through an `if` condition or match scrutinee, and a
   dependency returned from a protected `try` body, remain visible; complementary Boolean `if`
   branches retain their polarity. Match-case patterns shadow outer helper names in their guards and

@@ -83,6 +83,7 @@ type helper_binding = {
   unguarded : quantifier list;
   negated_unguarded : quantifier list;
   constant_bool : bool option;
+  quantifier_alias : (quantifier_kind * int) option;
   claim_kind : claim_kind option;
   claim_wrapper : wrapper_slot list option;
 }
@@ -669,6 +670,7 @@ let opened_claim_bindings site =
         unguarded = [];
         negated_unguarded = [];
         constant_bool = None;
+        quantifier_alias = None;
         claim_kind = Some claim_kind;
         claim_wrapper = None;
       })
@@ -719,6 +721,16 @@ let constant_bool_of environment expr =
       | _ -> None)
 
 let resolved_bool = constant_bool_of
+
+let quantifier_alias_of environment expr =
+  match collection_quantifier expr with
+  | Some _ as quantifier -> quantifier
+  | None -> (
+      match Sources.longident_of expr with
+      | Some path ->
+          lookup environment (String.concat ~sep:"." path)
+          |> Option.bind ~f:(fun binding -> binding.quantifier_alias)
+      | None -> None)
 
 let resolved_compared_argument environment callee left right ~positive =
   match compared_argument callee left right ~positive with
@@ -795,6 +807,7 @@ let constant_binding environment part =
     unguarded = [];
     negated_unguarded = [];
     constant_bool = constant_bool_of environment part.expression;
+    quantifier_alias = quantifier_alias_of environment part.expression;
     claim_kind = None;
     claim_wrapper = None;
   }
@@ -901,6 +914,15 @@ let rec alias_quantifiers environment ?(positive = true) expr =
       match resolved_compared_argument environment callee left right ~positive with
       | Some (argument, argument_positive) -> quantifiers_in ~positive:argument_positive argument
       | None -> [])
+  | Pexp_apply (({ pexp_desc = Pexp_function _; _ } as function_), _) ->
+      alias_quantifiers environment ~positive function_
+  | Pexp_apply (callee, arguments) -> (
+      match quantifier_alias_of environment callee with
+      | Some (kind, count)
+        when (positive && not (Poly.equal kind Not_exists))
+             || ((not positive) && Poly.equal kind Not_exists) ->
+          [ { kind; populations = populations arguments count; sealed = false } ]
+      | Some _ | None -> [])
   | _ -> []
 
 let argument_at_slot arguments slot =
@@ -1007,6 +1029,7 @@ and make_binding_part ?optional_label environment part =
     unguarded;
     negated_unguarded;
     constant_bool;
+    quantifier_alias = quantifier_alias_of environment part.expression;
     claim_kind;
     claim_wrapper;
   }
@@ -1420,10 +1443,30 @@ and binding_dependencies ?(positive = true) environment expr =
               [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
     | Pexp_apply (callee, arguments) when is_name callee "&&" || is_name callee "||" ->
         visit_arguments environment positive forwards_guards arguments
+    | Pexp_apply
+        ( ({ pexp_desc = Pexp_function (parameters, _, Pfunction_body body); _ } as _callee),
+          arguments ) ->
+        visit (shadow_parameters environment parameters) positive forwards_guards body;
+        visit_arguments environment positive false arguments
+    | Pexp_apply
+        ( ({ pexp_desc = Pexp_function (parameters, _, Pfunction_cases (cases, _, _)); _ } as _callee),
+          arguments ) ->
+        let function_environment = shadow_parameters environment parameters in
+        List.iter cases ~f:(fun case ->
+            let shadowed =
+              pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+            in
+            let case_environment =
+              List.filter function_environment ~f:(fun (binding : helper_binding) ->
+                  not (Set.mem shadowed binding.name))
+            in
+            Option.iter case.pc_guard ~f:(visit case_environment positive false);
+            visit case_environment positive forwards_guards case.pc_rhs);
+        visit_arguments environment positive false arguments
     | Pexp_apply (callee, arguments) -> (
         match Sources.longident_of callee with
-        | Some [ name ] -> (
-            match lookup environment name with
+        | Some path -> (
+            match lookup environment (String.concat ~sep:"." path) with
             | Some binding ->
                 let supplied_optional =
                   List.filter_map arguments ~f:(fun (label, argument) ->
@@ -1455,8 +1498,10 @@ and binding_dependencies ?(positive = true) environment expr =
     | Pexp_function _ -> ()
     | _ ->
         (match Sources.longident_of expr with
-        | Some [ name ] ->
-            Option.iter (lookup environment name) ~f:(fun binding ->
+        | Some path ->
+            Option.iter
+              (lookup environment (String.concat ~sep:"." path))
+              ~f:(fun binding ->
                 bindings :=
                   { binding; positive; forwards_guards; supplied_optional = None } :: !bindings)
         | _ -> ());
@@ -1539,10 +1584,11 @@ let quantified_claims structure =
   let record_origins ~claim_line ~positive environment boolean =
     binding_dependencies ~positive environment boolean |> record_dependencies ~claim_line
   in
-  let record_direct_quantifiers ~claim_site ~positive (wrapper : helper_binding) boolean =
+  let record_direct_quantifiers ~claim_site ~positive ~environment (wrapper : helper_binding)
+      boolean =
     let guards = required_nonempty boolean in
     let quantifiers =
-      returned_quantifiers ~positive boolean
+      returned_quantifiers ~positive boolean @ alias_quantifiers environment ~positive boolean
       |> List.filter ~f:(fun quantifier ->
           quantifier.sealed
           || Set.is_empty quantifier.populations
@@ -1574,7 +1620,7 @@ let quantified_claims structure =
                 record_origins ~claim_line ~positive environment boolean;
                 Option.iter wrapper ~f:(fun binding ->
                     if Option.is_some binding.claim_wrapper then
-                      record_direct_quantifiers ~claim_site ~positive binding boolean));
+                      record_direct_quantifiers ~claim_site ~positive ~environment binding boolean));
             claim_default_bindings target arguments
             |> List.iter ~f:(fun (binding, positive) ->
                 record_dependencies ~claim_line
@@ -1600,10 +1646,7 @@ let quantified_claims structure =
               match item.pstr_desc with
               | Pstr_value (recursive, bindings) ->
                   let local = make_binding_group environment recursive bindings in
-                  let claims =
-                    List.filter local ~f:(fun binding -> Option.is_some binding.claim_kind)
-                  in
-                  (List.rev_append local environment, List.rev_append claims exports)
+                  (List.rev_append local environment, List.rev_append local exports)
               | Pstr_open declaration -> (open_claims environment declaration, exports)
               | Pstr_module binding -> (
                   match binding.pmb_name.txt with
@@ -1893,6 +1936,29 @@ let () = print_check "all rows pass" all_pass|ocaml},
       {ocaml|let print_check name passed = Verdict.pass_fail ("  " ^ name) passed
 let () = print_check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
       [ "print_check" ] );
+    ( "refuses a direct quantifier returned by an immediately invoked function",
+      {ocaml|let check ok = Verdict.p "all rows pass" ok
+let () = check ((fun () -> List.for_all rows ~f:Fn.id) ())|ocaml},
+      [ "check" ] );
+    ( "accepts a negated quantifier returned by an immediately invoked function",
+      {ocaml|let check ok = Verdict.p "some row fails" ok
+let () = check ((fun () -> not (List.for_all rows ~f:Fn.id)) ())|ocaml},
+      [] );
+    ( "refuses a quantified binding returned by an immediately invoked function",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let check ok = Verdict.p "all rows pass" ok
+let () = check ((fun () -> all) ())|ocaml},
+      [ "all" ] );
+    ( "refuses a direct quantifier called through a function alias",
+      {ocaml|let every = List.for_all
+let check ok = Verdict.p "all rows pass" ok
+let () = check (every rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "accepts a negated quantifier called through a function alias",
+      {ocaml|let every = List.for_all
+let check ok = Verdict.p "some row fails" ok
+let () = check (not (every rows ~f:Fn.id))|ocaml},
+      [] );
     ( "accepts a guarded direct quantifier passed through a Verdict wrapper",
       {ocaml|let print_check name passed = Verdict.pass_fail ("  " ^ name) passed
 let () =
@@ -2021,6 +2087,19 @@ end
 open Checks
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified helper called through a local module",
+      {ocaml|module Checks = struct
+  let all rows = List.for_all rows ~f:Fn.id
+end
+let () = Verdict.p "all rows pass" (Checks.all rows)|ocaml},
+      [ "Checks.all" ] );
+    ( "refuses a quantified helper called through an opened local module",
+      {ocaml|module Checks = struct
+  let all rows = List.for_all rows ~f:Fn.id
+end
+open Checks
+let () = Verdict.p "all rows pass" (all rows)|ocaml},
+      [ "all" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
