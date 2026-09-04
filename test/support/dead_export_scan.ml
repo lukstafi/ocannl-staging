@@ -191,16 +191,19 @@ let opaque_sexp_wrapper core_type =
 let core_type_ignored ~deriver core_type =
   match deriver with
   | "sexp_of" | "of_sexp" ->
-      has_attribute "sexp.opaque" core_type.ptyp_attributes || opaque_sexp_wrapper core_type
+      has_attribute "sexp.opaque" core_type.ptyp_attributes
+      || has_attribute "sexp.ignore" core_type.ptyp_attributes
+      || opaque_sexp_wrapper core_type
   | "compare" -> has_attribute "compare.ignore" core_type.ptyp_attributes
   | "equal" -> has_attribute "equal.ignore" core_type.ptyp_attributes
   | _ -> false
 
 let label_ignored ~deriver label =
   match deriver with
+  | "sexp_of" | "of_sexp" -> has_attribute "sexp.ignore" label.pld_attributes
   | "compare" -> has_attribute "compare.ignore" label.pld_attributes
   | "equal" -> has_attribute "equal.ignore" label.pld_attributes
-  | "sexp_of" | "of_sexp" | _ -> false
+  | _ -> false
 
 (** References to [exports] from [sources]. Sources are [(repository-relative path, contents)]. *)
 let references ~(exports : export list) ~sources =
@@ -229,30 +232,46 @@ let references ~(exports : export list) ~sources =
             if Set.mem names value then
               found := { module_name; value; source; line; spelling } :: !found
           in
-          let add_type_references ~deriver ~line ~spelling core_type =
+          let add_type_references ~deriver ~internal_inherited ~line ~spelling core_type =
             let types =
-              object
+              object (self)
                 inherit Ast_traverse.iter as super
+
+                method private add_path ~internal_of_sexp core_type =
+                  match core_type.ptyp_desc with
+                  | Ptyp_constr ({ txt; _ }, _) -> (
+                      match flattened_longident txt with
+                      | None -> ()
+                      | Some path -> (
+                          let value type_name =
+                            if internal_of_sexp then "__" ^ type_name ^ "_of_sexp__"
+                            else derived_name_for_extension deriver type_name
+                          in
+                          match (path_last path, path_qualifier path) with
+                          | Some type_name, Some receiver when Set.mem receivers receiver ->
+                              add ~value:(value type_name) ~line ~spelling:(spelling path)
+                          | Some type_name, None
+                            when Read.within open_ranges core_type.ptyp_loc.loc_start.pos_cnum ->
+                              add ~value:(value type_name) ~line ~spelling:(spelling [ type_name ])
+                          | _ -> ()))
+                  | _ -> ()
 
                 method! core_type core_type =
                   if core_type_ignored ~deriver core_type then ()
                   else (
-                    (match core_type.ptyp_desc with
-                    | Ptyp_constr ({ txt; _ }, _) -> (
-                        match flattened_longident txt with
-                        | None -> ()
-                        | Some path -> (
-                            match (path_last path, path_qualifier path) with
-                            | Some type_name, Some receiver when Set.mem receivers receiver ->
-                                let value = derived_name_for_extension deriver type_name in
-                                add ~value ~line ~spelling:(spelling path)
-                            | Some type_name, None
-                              when Read.within open_ranges core_type.ptyp_loc.loc_start.pos_cnum ->
-                                let value = derived_name_for_extension deriver type_name in
-                                add ~value ~line ~spelling:(spelling [ type_name ])
-                            | _ -> ()))
-                    | _ -> ());
+                    self#add_path ~internal_of_sexp:false core_type;
                     super#core_type core_type)
+
+                method! row_field row_field =
+                  match (deriver, internal_inherited, row_field.prf_desc) with
+                  | "of_sexp", true, Rinherit inherited ->
+                      if core_type_ignored ~deriver inherited then ()
+                      else (
+                        self#add_path ~internal_of_sexp:true inherited;
+                        match inherited.ptyp_desc with
+                        | Ptyp_constr (_, arguments) -> List.iter arguments ~f:self#core_type
+                        | _ -> self#core_type inherited)
+                  | _ -> super#row_field row_field
 
                 method! label_declaration label =
                   if label_ignored ~deriver label then () else super#label_declaration label
@@ -265,16 +284,19 @@ let references ~(exports : export list) ~sources =
             let spelling path =
               "[@@deriving " ^ deriver ^ "] over " ^ String.concat ~sep:"." path
             in
-            let types =
-              object
-                inherit Ast_traverse.iter as super
-                method! core_type core_type = add_type_references ~deriver ~line ~spelling core_type
-
-                method! label_declaration label =
-                  if label_ignored ~deriver label then () else super#label_declaration label
-              end
+            let add_type = add_type_references ~deriver ~internal_inherited:true ~line ~spelling in
+            let add_label label =
+              if not (label_ignored ~deriver label) then add_type label.pld_type
             in
-            types#type_declaration declaration
+            match declaration.ptype_kind with
+            | Ptype_abstract -> Option.iter declaration.ptype_manifest ~f:add_type
+            | Ptype_variant constructors ->
+                List.iter constructors ~f:(fun constructor ->
+                    match constructor.pcd_args with
+                    | Pcstr_tuple types -> List.iter types ~f:add_type
+                    | Pcstr_record labels -> List.iter labels ~f:add_label)
+            | Ptype_record labels -> List.iter labels ~f:add_label
+            | Ptype_open -> ()
           in
           let iterator =
             object
@@ -302,6 +324,10 @@ let references ~(exports : export list) ~sources =
                 | _ -> ());
                 super#structure_item item
 
+              method! attribute attribute =
+                if String.equal attribute.attr_name.txt "deriving" then ()
+                else super#attribute attribute
+
               method! expression expression =
                 (match Read.longident_of expression with
                 | Some path -> (
@@ -319,7 +345,9 @@ let references ~(exports : export list) ~sources =
                     match extension_deriver txt with
                     | None -> ()
                     | Some deriver ->
-                        add_type_references ~deriver ~line:expression.pexp_loc.loc_start.pos_lnum
+                        add_type_references ~deriver
+                          ~internal_inherited:(String.equal deriver "of_sexp")
+                          ~line:expression.pexp_loc.loc_start.pos_lnum
                           ~spelling:(fun path ->
                             "[%" ^ deriver ^ ": " ^ String.concat ~sep:"." path ^ "]")
                           core_type)

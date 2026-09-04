@@ -1,4 +1,5 @@
 open Base
+open Ppxlib
 module Scan = Test_utils.Dead_export_scan
 
 let export_keys exports = List.map exports ~f:Scan.export_key |> List.sort ~compare:String.compare
@@ -28,6 +29,34 @@ let refs sources = Scan.references ~exports:fixture_exports ~sources
 
 let referenced refs value =
   List.exists refs ~f:(fun (reference : Scan.reference) -> String.equal reference.value value)
+
+let single_type_declaration source =
+  match Test_utils.Config_key_scan.structure_of source with
+  | [ { pstr_desc = Pstr_type (rec_flag, [ declaration ]); _ } ] -> (rec_flag, declaration)
+  | _ -> failwith "expected exactly one type declaration"
+
+let generated_value_names structure =
+  List.concat_map structure ~f:(fun item ->
+      match item.pstr_desc with
+      | Pstr_value (_, bindings) ->
+          List.concat_map bindings ~f:(fun binding -> Scan.pattern_names binding.pvb_pat)
+      | _ -> [])
+  |> List.dedup_and_sort ~compare:String.compare
+
+let expression_paths structure =
+  let paths = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expression =
+        Option.iter (Test_utils.Config_key_scan.longident_of expression) ~f:(fun path ->
+            paths := String.concat ~sep:"." path :: !paths);
+        super#expression expression
+    end
+  in
+  iterator#structure structure;
+  !paths
 
 let () =
   Verdict.p "top-level lets, patterns, extensions, and externals are exports"
@@ -128,6 +157,25 @@ let () =
     && referenced derived "named_of_sexp"
     && referenced derived "compare_named"
     && referenced derived "equal_named");
+  let inherited =
+    refs [ ("inherited.ml", "type t = [ Sample.poly | `Three ] [@@deriving of_sexp]\n") ]
+  in
+  Verdict.p "an inherited row references its internal parser helper"
+    (referenced inherited "__poly_of_sexp__" && not (referenced inherited "poly_of_sexp"));
+  let poly_rec_flag, poly_declaration = single_type_declaration "type poly = [ `One | `Two ]\n" in
+  let poly_expansion =
+    Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc:poly_declaration.ptype_loc ~poly:false
+      ~path:"Sample"
+      (poly_rec_flag, [ poly_declaration ])
+  in
+  Verdict.p "the internal parser helper name matches the ppx_sexp_conv expansion"
+    (List.mem (generated_value_names poly_expansion) "__poly_of_sexp__" ~equal:String.equal);
+  let inherited_extension =
+    refs [ ("extension.ml", "let f = [%of_sexp: [ Sample.poly | `Three ]]\n") ]
+  in
+  Verdict.p "an inherited row in an extension also references its internal parser helper"
+    (referenced inherited_extension "__poly_of_sexp__"
+    && not (referenced inherited_extension "poly_of_sexp"));
   let ignored =
     refs
       [
@@ -135,6 +183,7 @@ let () =
           "type a = (Sample.named[@sexp.opaque]) [@@deriving sexp]\n\
            type b = (Sample.named[@compare.ignore]) [@@deriving compare]\n\
            type c = (Sample.named[@equal.ignore]) [@@deriving equal]\n\
+           type d = (Sample.named[@sexp.ignore]) [@@deriving sexp]\n\
            let a = [%sexp_of: (Sample.named[@sexp.opaque]) list]\n\
            let b = [%sexp_of: Sample.named sexp_opaque]\n" );
       ]
@@ -145,6 +194,25 @@ let () =
        || referenced ignored "named_of_sexp"
        || referenced ignored "compare_named"
        || referenced ignored "equal_named"));
+  let deriving_attribute =
+    refs [ ("attribute.ml", "open Sample\ntype t = T [@@deriving equal]\n") ]
+  in
+  Verdict.p "a deriving attribute is not an ordinary opened value reference"
+    (not (referenced deriving_attribute "equal"));
+  let gadt_index =
+    refs [ ("gadt.ml", "type _ witness = Witness : Sample.named witness [@@deriving sexp_of]\n") ]
+  in
+  Verdict.p "a GADT result index is not a derived converter dependency"
+    (not (referenced gadt_index "sexp_of_named"));
+  let gadt_rec_flag, gadt_declaration =
+    single_type_declaration "type _ witness = Witness : Sample.named witness\n"
+  in
+  let gadt_expansion =
+    Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc:gadt_declaration.ptype_loc ~path:"Fixture"
+      (gadt_rec_flag, [ gadt_declaration ])
+  in
+  Verdict.p "the ppx_sexp_conv GADT expansion does not convert its result index"
+    (not (List.mem (expression_paths gadt_expansion) "Sample.sexp_of_named" ~equal:String.equal));
   let functor_application = refs [ ("functor.ml", "let f = [%sexp_of: F(X).t]\n") ] in
   Verdict.p "a functor-application type path is accepted without guessed credit"
     (List.is_empty functor_application);

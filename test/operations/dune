@@ -2234,7 +2234,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules dead_export_scan_cases)
- (libraries base stdio test_utils arrayjit.verdict))
+ (libraries base stdio ppx_sexp_conv.expander test_utils arrayjit.verdict))
 
 (executable
  (name dead_export_scan)
