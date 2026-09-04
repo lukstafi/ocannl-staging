@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Hand-run tests for the "staleness against origin/master" section of
+# Tests for the "staleness against origin/master" section of
 # scripts/setup-ocaml-env.sh (the SessionStart hook).
 #
 #   scripts/test-setup-ocaml-env.sh          # run every leg
 #   scripts/test-setup-ocaml-env.sh --keep   # keep the temp dir for inspection
 #
 # Run it after editing that section. It takes about 90 seconds, nearly all of it
-# spent sitting out watchdog timeouts, and is deliberately NOT wired into any
-# dune alias: it spawns and kills process groups and would be a poor fit for
-# `dune runtest`.
+# spent sitting out watchdog timeouts. It is deliberately not a dune test
+# because it spawns and kills process groups; the Ubuntu CI leg runs it directly
+# so its Linux-specific zombie-group facts are exercised (gh-ocannl-795).
 #
 # It tests the WORKING-TREE copy of the hook, not the committed one: the script
 # next to this file is copied into every throwaway clone. During the six review
@@ -44,7 +44,9 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOOK_SRC="$HERE/setup-ocaml-env.sh"
+GROUP_SRC="$HERE/process-group.sh"
 [ -f "$HOOK_SRC" ] || { echo "no $HOOK_SRC" >&2; exit 2; }
+[ -f "$GROUP_SRC" ] || { echo "no $GROUP_SRC" >&2; exit 2; }
 BASH_BIN="$(command -v bash)"
 
 failures=0
@@ -58,9 +60,16 @@ report() { # report RC LABEL [DETAIL]
   fi
   return 0
 }
+skipped=0
+skip() { # skip LABEL REASON -- a leg this system cannot decide, not a failure
+  skipped=$((skipped + 1))
+  printf 'SKIP  %s\n      %s\n' "$1" "$2"
+  return 0
+}
 
-echo "testing $HOOK_SRC"
+echo "testing $HOOK_SRC and $GROUP_SRC"
 printf '  digest %s\n' "$( (cksum <"$HOOK_SRC") 2>/dev/null || echo '?')"
+printf '  group digest %s\n' "$( (cksum <"$GROUP_SRC") 2>/dev/null || echo '?')"
 
 # The header and the agent-note both tell people to run this as
 # `scripts/test-setup-ocaml-env.sh`, which needs the bit to survive in git and
@@ -138,18 +147,23 @@ trap 'exit 143' TERM
 # ---------------------------------------------------------------------------
 # Leg 1: bounded
 # ---------------------------------------------------------------------------
-# Extract the function from the working-tree hook and source it, so the legs
-# below exercise the very text that ships rather than a paraphrase of it.
-sed -n '/^group_alive() {/,/^}/p;/^bounded() {/,/^}/p' "$HOOK_SRC" >"$TMP/bounded.sh"
+# Extract the predicate from the working-tree shared helper and the bound from
+# the working-tree hook, then source that exact pair.
+sed -n '/^group_alive() {/,/^}/p' "$GROUP_SRC" >"$TMP/bounded.sh"
+sed -n '/^bounded() {/,/^}/p' "$HOOK_SRC" >>"$TMP/bounded.sh"
 # Checked structurally — opens with the header, closes with the brace, has a
 # body — rather than by grepping for one line of it: this guard exists to catch
 # a sed that matched nothing, and must still hold while a leg under test is
 # being mutated to see the assertion fail.
 b_lines="$(wc -l <"$TMP/bounded.sh" | tr -d ' ')"
-if [ "$(head -n1 "$TMP/bounded.sh")" != "group_alive() {" ] \
-   || ! grep -qx 'bounded() {' "$TMP/bounded.sh" \
+case "$(head -n1 "$TMP/bounded.sh")" in
+  "group_alive() {"*) group_head_ok=1 ;;
+  *) group_head_ok=0 ;;
+esac
+if [ "$group_head_ok" = 0 ] || ! grep -qx 'bounded() {' "$TMP/bounded.sh" \
    || [ "$(tail -n1 "$TMP/bounded.sh")" != "}" ] || [ "$b_lines" -lt 10 ]; then
-  report 1 "bounded: extracted" "sed did not capture the function body from $HOOK_SRC"
+  report 1 "bounded: extracted" \
+    "sed did not capture group_alive from $GROUP_SRC and bounded from $HOOK_SRC"
 else
   report 0 "bounded: extracted ($b_lines lines)"
 fi
@@ -386,8 +400,8 @@ else
       case "$zstate" in
         Z*)
           if ! kill -0 -- -"$zpid" 2>/dev/null; then
-            report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
-              "kill -0 says the group is gone, so this leg would pass without testing anything"
+            skip "bounded (f): a group holding nothing but a zombie reads as empty" \
+              "this kernel's killpg already answers dead, so the leg cannot distinguish the shared state reader from the bare signal probe"
           elif group_alive "$zpid"; then
             report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
               "group_alive counted a zombie as work — bounded would wait out the whole bound"
@@ -514,6 +528,7 @@ new_clone() { # new_clone NAME -> path of a fresh clone carrying the working-tre
   git_q -C "$d" config user.email test@example.invalid
   mkdir -p "$d/scripts"
   cp "$HOOK_SRC" "$d/scripts/setup-ocaml-env.sh"
+  cp "$GROUP_SRC" "$d/scripts/process-group.sh"
   printf '%s\n' "$d"
 }
 
@@ -686,6 +701,7 @@ fi
 
 SSH_BASE="$TMP/ssh-base"
 mkdir -p "$SSH_BASE/scripts"
+cp "$GROUP_SRC" "$SSH_BASE/scripts/process-group.sh"
 git_q -C "$SSH_BASE" init -q
 git_q -C "$SSH_BASE" commit -q --allow-empty -m base
 git_q -C "$SSH_BASE" remote add origin ssh://git@example.invalid/x.git
@@ -892,9 +908,8 @@ fi
 # ---------------------------------------------------------------------------
 echo
 if [ "$failures" -eq 0 ]; then
-  echo "all legs passed"
-  exit 0
+  echo "all legs passed ($skipped skipped)"
 else
-  echo "$failures leg(s) FAILED"
-  exit 1
+  echo "$failures leg(s) failed ($skipped skipped)"
 fi
+exit $(( failures > 0 ? 1 : 0 ))

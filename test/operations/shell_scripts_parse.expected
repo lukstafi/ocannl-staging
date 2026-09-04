@@ -130,6 +130,7 @@ benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
 benchmarks/gh612v_session.sh parses: true
 docs/latex/gen-workshop-tex.sh parses: true
+scripts/process-group.sh parses: true
 scripts/setup-ocaml-env.sh parses: true
 scripts/test-setup-ocaml-env.sh parses: true
 test/operations/sweep_harness.sh parses: true

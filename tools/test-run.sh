@@ -70,6 +70,10 @@ die() { echo "test-run: $*" >&2; exit 2; }
 # through its real path derive the same key, lock file, and recorded wt.
 cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
 
+[ -r scripts/process-group.sh ] || die "cannot read scripts/process-group.sh"
+# shellcheck source=../scripts/process-group.sh
+. scripts/process-group.sh
+
 # perl is load-bearing rather than a convenience: the per-worktree flock, the
 # cap supervisor and the atomic rename behind the `last` pointer are all
 # `perl -e` one-liners, and every subcommand reaches at least one of them.
@@ -469,8 +473,8 @@ group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 # that reaps, the corpse is transient and the bare probe merely lost a race with
 # it; under one that does not -- the ordinary container case -- it is PERMANENT,
 # so waiting it out was never the fix (gh-ocannl-742; the same misreading cost
-# scripts/setup-ocaml-env.sh 30s on every failed ssh fetch, and this is that
-# script's `group_alive` ladder).
+# scripts/setup-ocaml-env.sh 30s on every failed ssh fetch; both callers now
+# source the same `scripts/process-group.sh` ladder).
 #
 # States are not signal-visible, so they are read where the system publishes
 # them: /proc on Linux (with the shell's own `read`, no fork per process), `ps`
@@ -493,45 +497,6 @@ group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 # report but never SKIP one -- the signals go out on reachability alone. A wrong
 # answer then costs a less graceful shutdown, never a survivor left mutating
 # _build behind a released worktree lock (Codex review round 1, P1).
-group_alive() { # <pgid>; exits 0 iff some member is not a zombie
-  local pgid=$1 f line states found
-  # Same rule as proc_alive: 0 and negatives are kill specials (caller's own
-  # group, broadcast), so only a positive decimal integer is a pgid at all.
-  case $pgid in '' | *[!0-9]* | 0) return 1 ;; esac
-  kill -0 -- "-$pgid" 2>/dev/null || return 1
-  if [ -r /proc/self/stat ]; then
-    found=0
-    for f in /proc/[0-9]*/stat; do
-      # Grouped, not `read ... 2>/dev/null`: a redirection that fails is
-      # reported by the SHELL, before the command's own stderr redirection
-      # applies, so the plain spelling prints `/proc/NNN/stat: No such file or
-      # directory` every time an entry vanishes mid-scan -- which for a glob of
-      # every process on the box is routine, not exceptional.
-      { read -r line <"$f"; } 2>/dev/null || continue
-      # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
-      line=${line##*) }
-      # shellcheck disable=SC2086
-      set -- $line
-      [ "${3:-}" = "$pgid" ] || continue
-      found=1
-      [ "$1" = Z ] || return 0
-    done
-    # Every member this procfs published for the group is a zombie: dead. Having
-    # published NONE of it, though, while the signal above said the group is
-    # there, is a procfs that did not ANSWER the question rather than one
-    # answering "empty" -- a Cygwin/MSYS /proc whose stat lays its fields out
-    # differently would land here -- so fall through to `ps` and to the
-    # over-reporting default instead of inventing a death.
-    [ "$found" = 1 ] && return 1
-  fi
-  if states=$(ps -A -o pgid=,stat= 2>/dev/null) && [ -n "$states" ]; then
-    printf '%s\n' "$states" |
-      awk -v g="$pgid" '$1 == g && $2 !~ /^[Zz]/ { alive = 1 } END { exit !alive }'
-    return $?
-  fi
-  return 0
-}
-
 # Make the launched run discoverable (`last` pointer, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
