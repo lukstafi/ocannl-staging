@@ -439,8 +439,18 @@ let refine_queued_batch_depth_between_with_cap ~max_depth ~base_depth ~base_ms ~
       (retry_depth, Float.nan)
     else
       let fixed_ms = base_ms -. (marginal_ms *. Float.of_int base_depth) in
-      if Float.(fixed_ms < -.fixed_fit_noise_tolerance_ms || fixed_ms >= queued_batch_ms) then
-        (retry_depth, Float.nan)
+      if Float.(fixed_ms < -.fixed_fit_noise_tolerance_ms) then (retry_depth, Float.nan)
+      else if Float.(fixed_ms >= queued_batch_ms) then
+        (* The whole-wall target is unattainable, but a positive depth-separated slope still gives a
+           safe scale. Target one batch-wall worth of marginal launch work: accepting the shallow
+           base would let a shared fixed stall mimic a confirmation, while treating the clean fit as
+           unresolved can jump to a many-second cap batch on genuinely slow kernels. *)
+        let wanted = queued_batch_ms /. marginal_ms in
+        let depth =
+          if (not (Float.is_finite wanted)) || Float.(wanted >= of_int max_depth) then max_depth
+          else Int.max 1 (Float.iround_up_exn wanted)
+        in
+        (depth, fixed_ms +. (marginal_ms *. Float.of_int depth))
       else if Float.(base_ms >= queued_batch_ms) then (base_depth, base_ms)
       else
         let wanted = (queued_batch_ms -. fixed_ms) /. marginal_ms in

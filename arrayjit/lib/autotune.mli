@@ -1223,8 +1223,9 @@ val time_routine :
     window cannot force the cap. If the bounded loop first reaches the target on its last probe, the
     interpolated target depth is still sampled and checked against the measured overshoot. A
     non-monotone confirmation scales from the deeper measured batch, never the earlier suspect
-    crossing; a monotone pair whose inferred fixed component fills the target remains unresolved and
-    binds at the cap. After four noisy but resolved underestimates, calibration keeps the latest
+    crossing. When a clean pair's fixed component already fills the target, its marginal slope
+    selects a depth carrying ~10 ms of launch work instead of accepting a shallow stalled window or
+    jumping to the cap. After four noisy but resolved underestimates, calibration keeps the latest
     affine projection rather than jumping to a 20--30 ms cap batch that would blunt the 2x
     contention threshold. A CUDA/HIP routine slower than the target is confirmed by a depth-2 probe,
     stays at depth 1, and is measured identically in both modes. The calibration always yields a

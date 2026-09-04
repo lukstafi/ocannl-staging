@@ -149,8 +149,14 @@ let confirmation_cases =
        retry deeper, never accept the stalled base solely because its wall crossed the target. *)
     ("an inflated target-sized batch", 2, 12., 3, 0.4, 6, None);
     (* Two nearby depths inside one shared stall still have a positive slope, but its marginal work
-       is nowhere near the target. The fixed stall must not masquerade as confirmation. *)
-    ("two target-sized batches dominated by a shared stall", 2, 12.2, 3, 12.3, 6, None);
+       is nowhere near the target. Target a full batch wall of marginal work rather than accepting
+       the shallow stalled base or jumping to the cap. Dyadic inputs keep the expected wall
+       exact. *)
+    ("two target-sized batches dominated by a shared stall", 2, 12.25, 3, 12.5, 40, Some 21.75);
+    (* A clean fit whose real fixed synchronization already exceeds the whole-wall target cannot
+       make a 10 ms batch. Its marginal slope says one launch is sufficient; it must not jump to the
+       cap and turn a slow candidate into seconds of uninterruptible timing. *)
+    ("a batch whose fixed synchronization exceeds the target", 1, 21., 2, 31., 1, Some 21.);
     (* A deeper stalled window can manufacture a steep positive slope and an impossible negative
        fixed component. Beyond the bounded noise tolerance, that fit is unresolved too. *)
     ("a confirmation with impossible negative fixed overhead", 2, 12.2, 3, 20.3, 6, None);

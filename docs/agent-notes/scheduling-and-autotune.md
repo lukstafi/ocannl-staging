@@ -634,17 +634,19 @@ files.
   overshoots, then confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained
   only when the pair's inferred fixed component is below the target and no more than one
   quarter-target negative (the noise tolerance matching that confirmation step), so one fixed stall
-  or a physically invalid fit cannot select a shallow final depth while ordinary submit/sync
-  overhead remains in the wall model. A confirmation more than 2x its supported target-sized base
+  or a physically invalid negative fit cannot select a shallow final depth while ordinary
+  submit/sync overhead remains in the wall model. When a clean pair's fixed component alone fills
+  the wall target, its positive marginal slope selects a depth carrying ~10 ms of launch work: the
+  fixed stall does not select a shallow base, and a genuinely slow kernel does not jump to a
+  many-second cap batch. A confirmation more than 2x its supported target-sized base
   is itself treated as a contention outlier and retried once before an unresolved pair selects the
   cap, so one transient stall cannot inflate both the timed batch and its later refusal threshold.
   An unresolved first pair retries at double depth, and the next fit uses the two batch observations so an
   inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
   the target, the interpolated target depth is still sampled and checked against the measured
   overshoot. A non-monotone confirmation scales from the deeper measured batch instead of returning
-  to the earlier suspect target crossing; a monotone pair whose inferred fixed component fills the
-  target remains unresolved and binds at the cap. After four noisy but resolved
-  misses the latest projected depth wins rather than jumping
+  to the earlier suspect target crossing. After four noisy but resolved misses the latest projected
+  depth wins rather than jumping
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
   Metal and cc retain the historical single-estimate path and 200 cap, so this repair adds no probe
   or timed work there; Metal's measured ~59 depth is unchanged. On faster CUDA/HIP kernels
