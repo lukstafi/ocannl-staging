@@ -1,0 +1,12 @@
+the transition reaches the window before publishing its new stamp: true
+the paused transition has swept the old entry: true
+the paused transition has not published the new stamp: true
+the concurrent writer is ready before it attempts the cache open: true
+the concurrent writer begins its cache-open attempt while stamping is paused: true
+the concurrent writer is blocked before entry commit while stamping is paused: true
+the blocked writer has not published its entry: true
+the released transition finishes publishing the current stamp: true
+the writer reaches entry commit after the transition releases the lock: true
+the released writer finishes its store: true
+both cache-opening processes exit successfully: true
+the writer's subsequent entry survives the completed transition: true

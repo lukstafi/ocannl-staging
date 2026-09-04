@@ -12,10 +12,11 @@ Sources naming a schedule cache directory, all with the `autotune_cache` prefix 
   test/operations/resource_fault_injection.ml
   test/operations/schedule_cache_numerics.ml
   test/operations/schedule_cache_regime.ml
+  test/operations/schedule_cache_regime_race.ml
   test/operations/schedule_conv_gemm.ml
   test/operations/schedule_epilogue_fusion.ml
   test/operations/symbolic_extent_launch.ml
 
-OK: 16 sources name one; the ignore list needs no entry per directory.
+OK: 17 sources name one; the ignore list needs no entry per directory.
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:

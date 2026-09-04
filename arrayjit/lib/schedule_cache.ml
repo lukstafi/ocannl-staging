@@ -645,6 +645,7 @@ let read_regime_stamp dir =
 let write_regime_stamp dir =
   Utils.Atomic_file.write_all ~path:(regime_stamp_file dir)
     ~data:(Int.to_string cache_regime_version ^ "\n")
+    ~before_commit:(fun () -> Resource_fault_injection.hit Schedule_cache_before_regime_commit)
     ()
 
 let open_current_regime dir =
