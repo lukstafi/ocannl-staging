@@ -510,6 +510,11 @@ that they earn a lookup rather than always-loaded space.
   I started another" being the usual start of the spiral. Prefer foreground `run` launched
   through the agent harness's background mode (the harness notifies on exit); `start`/`status`/
   `wait`/`stop` are only for runs that must outlive the launching session.
+  `repeat [--alone] N` is the supported flake diagnostic: it holds that same worktree lock once,
+  gives every Dune invocation a freshly cleaned cache-disabled build context, retains each
+  iteration's separate stdout, stderr and exit status, and writes every pairwise diff. Stdout or status drift is red;
+  stderr-only drift is called out separately and stays diagnostic-green. `--alone` adds `-j 1`,
+  making the no-sibling rerun that distinguishes resource contention from intrinsic instability.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1610,6 +1615,14 @@ that they earn a lookup rather than always-loaded space.
     otherwise filed as "unchanged since the last sweep" and reported to nobody — the one failure
     shape a diffing consumer cannot see. It gets a sentinel line in the file and a line in the
     sweep's own summary, the channel the scheduled routine quotes.
+- The comparison cursor lives under `~/.ocannl-sweep/unit-state`, keyed by machine, backend,
+  target and slow scope. It retains the immediately previous judged verdict (skips, errors and
+  timeouts do not erase it) and the previous failing
+  fingerprint across intervening greens, plus each failing golden's last-touch commit. A new red
+  after green, or after one of those golden commits moves, is labeled `REGRESSION OR FIX DID NOT
+  TAKE`; a changed fingerprint is reported against the previous failure rather than merely the
+  previous run. Standing identical reds stay quiet, which is the signal-to-noise property the
+  cursor exists to preserve.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other

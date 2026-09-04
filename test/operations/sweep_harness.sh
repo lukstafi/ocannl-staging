@@ -25,7 +25,8 @@ on_error() {
   for name in incremental forced slow_forced coverage hostile complete_fail \
     environment_executed partial_matrix singleton_fail repeated_backend_fail \
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
-    local_identity_error unsafe_identity_error matrix_error; do
+    local_identity_error unsafe_identity_error matrix_error state_first state_same \
+    state_green state_unjudged state_regression state_after_fix state_moved; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -90,7 +91,9 @@ git -C "$main" config user.email sweep-test@example.invalid
 mkdir -p "$main/benchmarks/fixtures"
 printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/DIGESTS.txt"
 printf 'fixture\n' >"$main/fixture"
-git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt
+mkdir -p "$main/test"
+printf 'initial golden\n' >"$main/test/unit.expected"
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/unit.expected
 git -C "$main" commit -qm fixture
 git -C "$main" remote add origin "$origin"
 git -C "$main" push -q -u origin master
@@ -195,6 +198,65 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 [ "$(sed -n '4p' "$calls")" = 'exec -- dune clean' ]
 [ "$(sed -n '5p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '6p' "$calls")" = 'exec -- dune build --force @slow' ]
+
+# Per-unit state distinguishes a standing red from two transitions that need an
+# operator's attention: red after green, and red after the failing golden was
+# edited. It also compares against the previous FAILURE across an intervening
+# green, so a moving fingerprint is reported as nondeterminism rather than
+# hidden by yesterday's verdict. Every absent assertion is a negative control:
+# a sweep that shouts on the standing-red cases defeats the signal this state
+# exists to add.
+state_failure='File "test/unit.expected", line 1, characters 0-0:
+FAILED: fixture state failure.'
+state_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_first"
+absent 'fingerprint moved since the previous failure' <<<"$state_first"
+
+state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_same"
+absent 'fingerprint moved since the previous failure' <<<"$state_same"
+
+state_green=$(run_sweep_args --target state-probe)
+grep -q 'local/cc: incremental-pass' <<<"$state_green"
+# A timeout judged nothing and must not erase that green predecessor. This is
+# the non-coverage shape that would otherwise make a real regression disappear.
+state_unjudged=$(SWEEP_TEST_OPAM_RC=142 SWEEP_TEST_OPAM_OUT='fixture timeout' \
+  run_sweep_args --target state-probe)
+grep -q 'local/cc: timeout' <<<"$state_unjudged"
+state_regression=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+grep -q 'local/cc: REGRESSION OR FIX DID NOT TAKE -- previous verdict was incremental-pass' \
+  <<<"$state_regression"
+absent 'fingerprint moved since the previous failure' <<<"$state_regression"
+
+# Land the exact kind of attempted fix #897 was about. The next sweep resolves
+# the new origin/master, finds that the currently failing golden's last-touch
+# commit moved, and prints both that commit and the previous failing copy's.
+printf 'attempted fix\n' >"$main/test/unit.expected"
+git -C "$main" add test/unit.expected
+git -C "$main" commit -qm 'attempted golden fix'
+git -C "$main" push -q origin master
+fix_sha=$(git -C "$main" rev-parse HEAD)
+old_sha=$(git -C "$main" rev-parse HEAD^)
+state_after_fix=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.expected last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$old_sha" | cut -c1-8))" \
+  <<<"$state_after_fix"
+absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
+
+moved_failure='File "test/unit.expected", line 2, characters 0-0:
+FAILED: a different fixture state failure.'
+state_moved=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$moved_failure \
+  run_sweep_args --target state-probe)
+grep -q 'local/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_moved"
+
+unit_state=$(find "$state/unit-state" -type f -name '*state-probe*.state' | head -1)
+[ -n "$unit_state" ] && [ -f "$unit_state" ]
+grep -q '^last_verdict.fail$' "$unit_state"
+grep -q "^golden.$fix_sha.test/unit.expected$" "$unit_state"
 
 # Two complete forced units expose only the INTERSECTION of their skip sets.
 # The three absent backends keep this a potential finding rather than a failure:

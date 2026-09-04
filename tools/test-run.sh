@@ -22,12 +22,24 @@
 # Usage:
 #   tools/test-run.sh run   [--cap N] [DUNE ARGS...]   # foreground; digest; dune's status
 #   tools/test-run.sh start [--cap N] [DUNE ARGS...]   # detached; survives the session
+#   tools/test-run.sh repeat [--cap N] [--alone] N [DUNE ARGS...]
+#                                                      # compare N isolated runs
 #   tools/test-run.sh status [RUN|last]                # one-shot, never blocks
 #   tools/test-run.sh wait   [RUN|last] [--timeout N]  # bounded; exits with the run's status
 #   tools/test-run.sh stop   [RUN|last]                # TERM the run's process group
 #   tools/test-run.sh list                             # recent runs and their states
 #
-# Exit codes: `run` and `wait` exit with dune's status (142 = the cap expired,
+# `repeat` runs each iteration through dune in a freshly cleaned, cache-disabled
+# build context, keeps its separate stdout/stderr and exit status, and compares
+# every pair. `--alone` adds `-j 1`,
+# so no sibling dune action overlaps the selected target. Its cap is per
+# iteration; N must be at least 2. An stdout/status difference is red (exit 1
+# when dune itself stayed green); stderr-only drift is reported distinctly but
+# is not red. Any red dune iteration keeps a nonzero dune status.
+#
+# Exit codes: `run` and `wait` exit with dune's status. `repeat` preserves the
+# first nonzero dune status, or exits 1 when otherwise-green stdout/statuses
+# differ (142 = the cap expired,
 # 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
 # never reaches those on its own). `status` exits 0 finished, 3 still running
 # (or verdict publication in flight), 1 died without a verdict. Usage and lock
@@ -48,7 +60,7 @@
 # outlive the launching session. The cap defaults to $OCANNL_TOOL_TEST_CAP or 3600s;
 # `--cap 0` disables it (then supply your own bound).
 #
-# One run at a time per worktree, enforced with an flock: a second `run`/`start`
+# One run at a time per worktree, enforced with an flock: a second `run`/`start`/`repeat`
 # refuses loudly, pointing at the active run, instead of queueing behind dune's
 # own lock -- "I lost track of a run so I started another" is exactly the spiral
 # this script exists to prevent. `stop` the active run if it is truly stale.
@@ -62,6 +74,32 @@
 set -u
 
 die() { echo "test-run: $*" >&2; exit 2; }
+
+normalize_cap() {
+  # A mistyped cap would reach perl's numeric compare as 0 and silently
+  # disable the alarm -- the one property this script must never lose.
+  case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
+  # Bounded BEFORE arithmetic: an oversized value would wrap in bash's signed
+  # arithmetic, and perl's alarm range is signed too. Nine digits is ~31 years.
+  [ ${#cap} -le 9 ] || die "--cap too large (max 9 digits)"
+  # Leading zeroes are accepted as decimal rather than reaching bash as octal.
+  cap=$(( 10#$cap ))
+}
+
+select_dune() {
+  # On Windows the environment rewrite is required even if dune is already on
+  # PATH: opam's native output otherwise leaves an MSYS shell half-configured.
+  case ${OSTYPE:-} in
+    msys* | cygwin*)
+      . tools/opam-env.sh ||
+        die "tools/opam-env.sh failed; refusing an unrewritten Windows toolchain"
+      ;;
+  esac
+  command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
+  command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
+  # Preserve dune's status while filtering only the known Windows linker noise.
+  case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
+}
 
 # Pin to the repo containing THIS script (promote.sh convention): dune then runs
 # at this worktree's root no matter where the caller's cwd wandered, and the
@@ -694,10 +732,180 @@ finish_run() { # rc -> append sentinel, record verdict
 }
 
 sub=${1:-}
-[ -n "$sub" ] || die "usage: tools/test-run.sh run|start|status|wait|stop|list ... (see header)"
+[ -n "$sub" ] || die "usage: tools/test-run.sh run|start|repeat|status|wait|stop|list ... (see header)"
 shift
 
 case $sub in
+  repeat)
+    cap=${OCANNL_TOOL_TEST_CAP:-3600}
+    alone=0
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
+        --alone) alone=1; shift ;;
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    normalize_cap
+    [ $# -gt 0 ] || die "repeat requires a count of at least 2"
+    repeats=$1
+    shift
+    case $repeats in '' | *[!0-9]*) die "repeat count must be an integer of at least 2" ;; esac
+    [ ${#repeats} -le 6 ] || die "repeat count too large (max 6 digits)"
+    repeats=$(( 10#$repeats ))
+    [ "$repeats" -ge 2 ] || die "repeat count must be at least 2"
+    [ $# -gt 0 ] || set -- runtest
+    select_dune
+    take_lock
+    new_run "$@"
+    { printf '%s\n' repeat >"$run_dir/mode" &&
+      printf '%s\n' "$repeats" >"$run_dir/repeats" &&
+      printf '%s\n' "$alone" >"$run_dir/alone" &&
+      printf '%s\n' "$$" >"$run_dir/wpid" &&
+      ps_token "$$" >"$run_dir/wtoken" &&
+      printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner"; } ||
+      die "cannot record repeat metadata in $run_dir"
+
+    repeat_sup=
+    repeat_cancelled=
+    repeat_signal() {
+      repeat_cancelled=$1
+      [ -n "$repeat_sup" ] && kill "-$1" "$repeat_sup" 2>/dev/null
+    }
+    trap 'repeat_signal INT' INT
+    trap 'repeat_signal TERM' TERM
+    trap 'repeat_signal TERM' HUP
+
+    first_nonzero=0
+    completed=0
+    repeat_build=$run_dir/build
+    i=1
+    while [ "$i" -le "$repeats" ]; do
+      iter=$run_dir/iteration-$i
+      mkdir "$iter" || die "cannot create $iter"
+      repeat_cmd=("$DUNE" "$@" --force --cache=disabled --build-dir="$repeat_build")
+      [ "$alone" = 0 ] || repeat_cmd+=(-j 1)
+      {
+        printf '%q clean --build-dir=%q && ' "$DUNE" "$repeat_build"
+        printf '%q ' "${repeat_cmd[@]}"
+        echo
+      } >"$iter/cmd" ||
+        die "cannot record iteration $i command"
+      printf 'repeat: iteration %s/%s -- dune%s\n' "$i" "$repeats" \
+        "$([ "$alone" = 1 ] && printf ' (alone, -j 1)' || :)"
+      OCANNL_TOOL_TESTRUN_BG=0 OCANNL_TOOL_TESTRUN_RD=$iter \
+        perl -e "$capped_perl" -- "$cap" /bin/bash -c \
+        'dune=$1; build=$2; shift 2; "$dune" clean --build-dir="$build" || exit 126; exec "$dune" "$@"' \
+        -- "$DUNE" "$repeat_build" "${repeat_cmd[@]:1}" \
+        >"$iter/stdout" 2>"$iter/stderr" &
+      repeat_sup=$!
+      { printf '%s\n' "$repeat_sup" >"$iter/pid" &&
+        ps_token "$repeat_sup" >"$iter/ptoken" &&
+        printf '%s\n' "$repeat_sup" >"$run_dir/pid" &&
+        ps_token "$repeat_sup" >"$run_dir/ptoken"; } ||
+        kill -TERM "$repeat_sup" 2>/dev/null
+      while :; do
+        wait "$repeat_sup"
+        iter_rc=$?
+        proc_alive "$iter/pid" "$iter/ptoken" || break
+      done
+      repeat_sup=
+      printf '%s\n' "$iter_rc" >"$iter/exit" || die "cannot record iteration $i verdict"
+      [ "$first_nonzero" != 0 ] || [ "$iter_rc" = 0 ] || first_nonzero=$iter_rc
+      {
+        printf '=== repeat iteration %s/%s stdout ===\n' "$i" "$repeats"
+        cat "$iter/stdout"
+        printf '=== repeat iteration %s/%s stderr ===\n' "$i" "$repeats"
+        cat "$iter/stderr"
+        printf '=== repeat iteration %s/%s exit %s ===\n' "$i" "$repeats" "$iter_rc"
+      } >>"$run_dir/log" || die "cannot append iteration $i to $run_dir/log"
+      printf 'repeat: iteration %s/%s exit %s; stdout=%s stderr=%s\n' \
+        "$i" "$repeats" "$iter_rc" "$iter/stdout" "$iter/stderr"
+      completed=$i
+      [ -z "$repeat_cancelled" ] || break
+      i=$(( i + 1 ))
+    done
+    trap - INT TERM HUP
+
+    # The isolated build tree can be very large (a training target pulls most
+    # of the library graph). Only the diagnostic streams and pairwise diffs are
+    # promised artifacts, so remove this exact generated child before keeping
+    # the run directory for seven days.
+    [ "$repeat_build" = "$run_dir/build" ] || die "refusing an unexpected repeat build path"
+    perl -MFile::Path=remove_tree -e 'remove_tree($ARGV[0])' "$repeat_build" ||
+      die "cannot remove repeat build context $repeat_build"
+    [ ! -e "$repeat_build" ] || die "repeat build context survived cleanup: $repeat_build"
+
+    mkdir "$run_dir/diffs" || die "cannot create $run_dir/diffs"
+    differing=0
+    stderr_only=0
+    identical=0
+    i=1
+    while [ "$i" -lt "$completed" ]; do
+      j=$(( i + 1 ))
+      while [ "$j" -le "$completed" ]; do
+        left=$run_dir/iteration-$i
+        right=$run_dir/iteration-$j
+        pair=$i-$j
+        stdout_same=0; stderr_same=0; exit_same=0
+        cmp -s "$left/stdout" "$right/stdout" && stdout_same=1
+        cmp -s "$left/stderr" "$right/stderr" && stderr_same=1
+        cmp -s "$left/exit" "$right/exit" && exit_same=1
+        if [ "$stdout_same" = 1 ] && [ "$stderr_same" = 1 ] && [ "$exit_same" = 1 ]; then
+          pair_result=identical
+          identical=$(( identical + 1 ))
+        elif [ "$stdout_same" = 1 ] && [ "$exit_same" = 1 ]; then
+          pair_result=stderr-only
+          stderr_only=$(( stderr_only + 1 ))
+          diff -u "$left/stderr" "$right/stderr" >"$run_dir/diffs/$pair.stderr" ||
+            [ $? -eq 1 ] || die "cannot diff stderr for iterations $i and $j"
+        else
+          pair_result=differing
+          differing=$(( differing + 1 ))
+          if [ "$stdout_same" = 0 ]; then
+            diff -u "$left/stdout" "$right/stdout" >"$run_dir/diffs/$pair.stdout" ||
+              [ $? -eq 1 ] || die "cannot diff stdout for iterations $i and $j"
+          fi
+          if [ "$stderr_same" = 0 ]; then
+            diff -u "$left/stderr" "$right/stderr" >"$run_dir/diffs/$pair.stderr" ||
+              [ $? -eq 1 ] || die "cannot diff stderr for iterations $i and $j"
+          fi
+          if [ "$exit_same" = 0 ]; then
+            diff -u "$left/exit" "$right/exit" >"$run_dir/diffs/$pair.exit" ||
+              [ $? -eq 1 ] || die "cannot diff exits for iterations $i and $j"
+          fi
+        fi
+        printf 'repeat: pair %s/%s: %s\n' "$i" "$j" "$pair_result" |
+          tee -a "$run_dir/log"
+        j=$(( j + 1 ))
+      done
+      i=$(( i + 1 ))
+    done
+
+    if [ -n "$repeat_cancelled" ]; then
+      repeat_result="CANCELLED -- completed $completed of $repeats iterations"
+      final_rc=$first_nonzero
+      [ "$final_rc" != 0 ] || final_rc=143
+    elif [ "$differing" -gt 0 ]; then
+      repeat_result="DIFFERING -- stdout or exit status moved across $differing pair(s)"
+      final_rc=$first_nonzero
+      [ "$final_rc" != 0 ] || final_rc=1
+    elif [ "$stderr_only" -gt 0 ]; then
+      repeat_result="STDERR-ONLY -- stdout and exit status were stable; stderr moved across $stderr_only pair(s)"
+      final_rc=$first_nonzero
+    else
+      repeat_result="IDENTICAL -- stdout, stderr and exit status matched across all $identical pair(s)"
+      final_rc=$first_nonzero
+    fi
+    printf 'repeat result: %s\n' "$repeat_result" | tee -a "$run_dir/log"
+    printf 'repeat artifacts: %s (pairwise diffs under %s/diffs)\n' "$run_dir" "$run_dir" |
+      tee -a "$run_dir/log"
+    [ -z "$repeat_cancelled" ] || printf 'repeat cancellation observed: %s\n' "$repeat_cancelled" >>"$run_dir/log"
+    finish_run "$final_rc" || die "repeat finished but its verdict could not be recorded"
+    exec 9>&-
+    exit "$final_rc"
+    ;;
   run | start)
     cap=${OCANNL_TOOL_TEST_CAP:-3600}
     while [ $# -gt 0 ]; do
@@ -707,41 +915,11 @@ case $sub in
         *) break ;;
       esac
     done
-    # A mistyped cap would reach perl's numeric compare as 0 and silently
-    # disable the alarm -- the one property this script must never lose.
-    case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
-    # Bounded BEFORE arithmetic: an oversized value would wrap in bash's
-    # signed arithmetic (2^64 -> 0), and even values that bash keeps exceed
-    # perl's signed alarm range (2^31), which DISABLES the alarm rather than
-    # scheduling it -- both silently produce the unbounded run reserved for
-    # an explicit --cap 0. Nine digits (~31 years) fits every range.
-    [ ${#cap} -le 9 ] || die "--cap too large (max 9 digits)"
-    # Decimal-normalized once here: a leading zero (--cap 08) would pass the
-    # digit check, reach perl as decimal, and then blow up bash arithmetic
-    # downstream as an invalid octal.
-    cap=$(( 10#$cap ))
+    normalize_cap
     [ $# -gt 0 ] || set -- runtest
-    # The toolchain check gates only LAUNCHES: status/wait/stop/list must
-    # keep working from a shell with no opam environment -- not least so a
-    # runaway launched under an earlier environment can still be stopped.
-    # On MSYS/Cygwin the environment helper runs UNCONDITIONALLY: a dune
-    # already on PATH proves nothing there, because `opam env` emits
-    # cygwin-style paths that leave linking broken until opam-env.sh
-    # rewrites them (AGENTS.md).
-    # Fatal on failure: the rewrite is REQUIRED there even when a dune is
-    # already discoverable, so continuing would run a mismatched toolchain.
-    case ${OSTYPE:-} in
-      msys* | cygwin*)
-        . tools/opam-env.sh ||
-          die "tools/opam-env.sh failed; refusing an unrewritten Windows toolchain"
-        ;;
-    esac
-    command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
-    command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
-    # On Windows every link step floods stderr with benign binutils warnings
-    # that would drown the digest's log tail; dune-quiet.sh filters exactly
-    # those while preserving dune's exit status (AGENTS.md).
-    case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
+    # Toolchain checks gate only launches: status/wait/stop/list remain usable
+    # from a shell whose opam environment is no longer active.
+    select_dune
     take_lock
     new_run "$@"
     # Cancellation/deferral is armed BEFORE the wrapper exists, for BOTH
@@ -1268,5 +1446,5 @@ case $sub in
     done
     [ "$found" = 1 ] || echo "no recorded runs in $RUNS"
     ;;
-  *) die "unknown subcommand: $sub (run|start|status|wait|stop|list)" ;;
+  *) die "unknown subcommand: $sub (run|start|repeat|status|wait|stop|list)" ;;
 esac

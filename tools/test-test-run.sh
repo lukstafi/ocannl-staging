@@ -37,6 +37,12 @@
 #   8. `stop` on a reachable group that holds no running member says exactly
 #      that -- the sentence gh-ocannl-742 added, and the one whose absence let
 #      a group of corpses be reported as a runaway dune ignoring TERM.
+#   9. `repeat` forces and preserves three identical dune runs while holding the
+#      worktree lock for every iteration.
+#  10. stdout drift is a distinct red result, with pairwise diff artifacts.
+#  11. stderr-only drift is reported separately and remains a green diagnostic.
+#  12. a red dune iteration keeps its nonzero exit code even when repeatable.
+#  13. `--alone` serializes dune with `-j 1` on every iteration.
 
 set -u
 
@@ -664,6 +670,115 @@ else
     report 1 "$l_took" "$stop_err"
   fi
   end_leader
+fi
+
+# ---------------------------------------------------------------------------
+# Legs 9-13: repeat mode's output and exit-code contract
+# ---------------------------------------------------------------------------
+repeat_root=$TMP/repeat-repo
+repeat_bin=$TMP/repeat-bin
+mkdir -p "$repeat_root/tools" "$repeat_bin"
+cp "$SRC" "$repeat_root/tools/test-run.sh"
+chmod +x "$repeat_root/tools/test-run.sh"
+cat >"$repeat_bin/dune" <<'EOF'
+#!/usr/bin/env bash
+set -u
+# Close the inherited lock descriptor before probing through a fresh open.
+# Acquiring here would prove repeat released its one set-wide lock too early.
+if perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' \
+   9>&- <"$REPEAT_TEST_ROOT/.test-run.lock"; then
+  echo "repeat fixture acquired the supposedly held worktree lock" >&2
+  exit 91
+fi
+# Repeat establishes a fresh context with `dune clean` before each measured
+# invocation. The fixture keeps setup out of the iteration count and streams.
+if [ "${1:-}" = clean ]; then
+  printf 'clean %s\n' "$*" >>"$REPEAT_TEST_CALLS"
+  exit 0
+fi
+n=0
+[ ! -f "$REPEAT_TEST_COUNTER" ] || n=$(cat "$REPEAT_TEST_COUNTER")
+n=$((n + 1))
+printf '%s\n' "$n" >"$REPEAT_TEST_COUNTER"
+printf '%s\n' "$*" >>"$REPEAT_TEST_CALLS"
+case $REPEAT_TEST_MODE in
+  stable) printf 'stable stdout\n'; printf 'stable stderr\n' >&2 ;;
+  stdout) printf 'stdout %s\n' "$n"; printf 'stable stderr\n' >&2 ;;
+  stderr) printf 'stable stdout\n'; printf 'stderr %s\n' "$n" >&2 ;;
+  fail) printf 'stable stdout\n'; printf 'stable failure\n' >&2; exit 7 ;;
+  *) echo "unknown repeat fixture mode: $REPEAT_TEST_MODE" >&2; exit 92 ;;
+esac
+EOF
+chmod +x "$repeat_bin/dune"
+
+repeat_out= repeat_rc= repeat_dir=
+repeat_probe() { # tag mode [repeat options/count/dune argv...]
+  local tag=$1 mode=$2 runs=$TMP/repeat-runs-$1
+  shift 2
+  mkdir -p "$runs"
+  : >"$TMP/$tag.counter"
+  : >"$TMP/$tag.calls"
+  REPEAT_TEST_ROOT=$repeat_root \
+  REPEAT_TEST_MODE=$mode \
+  REPEAT_TEST_COUNTER=$TMP/$tag.counter \
+  REPEAT_TEST_CALLS=$TMP/$tag.calls \
+  OCANNL_TOOL_TEST_RUNS=$runs \
+  PATH=$repeat_bin:$PATH \
+    "$repeat_root/tools/test-run.sh" repeat "$@" >"$TMP/$tag.out" 2>"$TMP/$tag.err"
+  repeat_rc=$?
+  repeat_out=$(cat "$TMP/$tag.out")
+  repeat_dir=$(find "$runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+}
+
+repeat_probe repeat-identical stable 3 build @cheap
+if [ "$repeat_rc" = 0 ] && grep -q '^repeat result: IDENTICAL -- ' <<<"$repeat_out" \
+   && [ "$(cat "$TMP/repeat-identical.counter")" = 3 ] \
+   && [ "$(grep -c '^clean ' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--force' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--cache=disabled' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--build-dir=' "$TMP/repeat-identical.calls")" = 6 ] \
+   && [ -n "$repeat_dir" ] \
+   && [ ! -e "$repeat_dir/build" ] \
+   && [ "$(find "$repeat_dir" \( -name stdout -o -name stderr \) | wc -l | tr -d ' ')" = 6 ]; then
+  report 0 "repeat: identical forced runs retain every stdout/stderr"
+else
+  report 1 "repeat: identical forced runs retain every stdout/stderr" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}; stderr: $(cat "$TMP/repeat-identical.err")"
+fi
+
+repeat_probe repeat-stdout stdout 3 build @cheap
+if [ "$repeat_rc" = 1 ] && grep -q '^repeat result: DIFFERING -- ' <<<"$repeat_out" \
+   && [ -s "$repeat_dir/diffs/1-2.stdout" ]; then
+  report 0 "repeat: stdout drift is red and pairwise-diffed"
+else
+  report 1 "repeat: stdout drift is red and pairwise-diffed" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-stderr stderr 3 build @cheap
+if [ "$repeat_rc" = 0 ] && grep -q '^repeat result: STDERR-ONLY -- ' <<<"$repeat_out" \
+   && [ -s "$repeat_dir/diffs/1-2.stderr" ]; then
+  report 0 "repeat: stderr-only drift is distinct and diagnostic-green"
+else
+  report 1 "repeat: stderr-only drift is distinct and diagnostic-green" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-red fail 2 build @cheap
+if [ "$repeat_rc" = 7 ] && grep -q '^repeat result: IDENTICAL -- ' <<<"$repeat_out"; then
+  report 0 "repeat: a repeatable red dune leg keeps its exit code"
+else
+  report 1 "repeat: a repeatable red dune leg keeps its exit code" \
+    "expected exit 7; got $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-alone stable --alone 2 build @cheap
+if [ "$repeat_rc" = 0 ] && [ "$(grep -c -- '-j 1' "$TMP/repeat-alone.calls")" = 2 ] \
+   && grep -q 'iteration 1/2 -- dune (alone, -j 1)' <<<"$repeat_out"; then
+  report 0 "repeat: --alone serializes every dune iteration"
+else
+  report 1 "repeat: --alone serializes every dune iteration" \
+    "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-alone.calls"); output: ${repeat_out:-<nothing>}"
 fi
 
 echo
