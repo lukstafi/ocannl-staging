@@ -495,7 +495,8 @@ let rec returned_quantifiers ?(positive = true) expr =
                     quantifiers_in ~positive:guard_positive guard))
           in
           guard_quantifiers
-          @ returned_quantifiers ~positive case.pc_rhs
+          @ (returned_quantifiers ~positive case.pc_rhs
+            |> List.map ~f:(fun quantifier -> { quantifier with sealed = true }))
           @ (binding_parts case.pc_lhs scrutinee
             |> List.concat_map ~f:(fun part ->
                 List.filter_map returned_bindings ~f:(fun (name, returned_positive) ->
@@ -568,8 +569,11 @@ and returned_binding_polarities positive expr =
   | Pexp_open (_, body) -> returned_binding_polarities positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
       returned_binding_polarities positive inner
-  | Pexp_ifthenelse (_, yes, no) ->
-      returned_binding_polarities positive yes
+  | Pexp_ifthenelse (condition, yes, no) ->
+      (condition_polarities positive yes no
+      |> List.concat_map ~f:(fun condition_positive ->
+          returned_binding_polarities condition_positive condition))
+      @ returned_binding_polarities positive yes
       @ Option.value_map no ~default:[] ~f:(returned_binding_polarities positive)
   | Pexp_match (_, cases) ->
       List.concat_map cases ~f:(fun case ->
@@ -677,11 +681,10 @@ let lookup (environment : helper_binding list) name =
 
 let claim_target environment callee =
   match Sources.longident_of callee with
-  | Some [ alias ] ->
-      lookup environment alias
-      |> Option.bind ~f:(fun binding ->
-          Option.map binding.claim_kind ~f:(fun kind -> (kind, Some binding)))
-  | Some path -> Option.map (claim_kind_of_path path) ~f:(fun kind -> (kind, None))
+  | Some path -> (
+      match lookup environment (String.concat ~sep:"." path) with
+      | Some binding -> Option.map binding.claim_kind ~f:(fun kind -> (kind, Some binding))
+      | None -> Option.map (claim_kind_of_path path) ~f:(fun kind -> (kind, None)))
   | None -> None
 
 let constant_bool_of environment expr =
@@ -1564,6 +1567,37 @@ let quantified_claims structure =
                   ]))
     | _ -> ()
   in
+  let prefix_bindings prefix bindings =
+    List.map bindings ~f:(fun (binding : helper_binding) ->
+        { binding with name = prefix ^ "." ^ binding.name })
+  in
+  let rec module_claim_bindings environment module_expr =
+    match module_expr.pmod_desc with
+    | Pmod_structure items ->
+        let _, exports =
+          List.fold items ~init:(environment, []) ~f:(fun (environment, exports) item ->
+              match item.pstr_desc with
+              | Pstr_value (recursive, bindings) ->
+                  let local = make_binding_group environment recursive bindings in
+                  let claims =
+                    List.filter local ~f:(fun binding -> Option.is_some binding.claim_kind)
+                  in
+                  (List.rev_append local environment, List.rev_append claims exports)
+              | Pstr_open declaration -> (open_claims environment declaration, exports)
+              | Pstr_module binding -> (
+                  match binding.pmb_name.txt with
+                  | Some name ->
+                      let nested =
+                        module_claim_bindings environment binding.pmb_expr |> prefix_bindings name
+                      in
+                      (List.rev_append nested environment, List.rev_append nested exports)
+                  | None -> (environment, exports))
+              | _ -> (environment, exports))
+        in
+        exports
+    | Pmod_constraint (inner, _) -> module_claim_bindings environment inner
+    | _ -> []
+  in
   let rec scan_expression environment expr =
     record_claim environment expr;
     match expr.pexp_desc with
@@ -1607,9 +1641,14 @@ let quantified_claims structure =
            | Pstr_eval (expr, _) ->
                scan_expression environment expr;
                environment
-           | Pstr_module binding ->
+           | Pstr_module binding -> (
                scan_module environment binding.pmb_expr;
-               environment
+               match binding.pmb_name.txt with
+               | Some name ->
+                   module_claim_bindings environment binding.pmb_expr
+                   |> prefix_bindings name
+                   |> Fn.flip List.rev_append environment
+               | None -> environment)
            | Pstr_recmodule bindings ->
                List.iter bindings ~f:(fun binding -> scan_module environment binding.pmb_expr);
                environment
@@ -1922,6 +1961,14 @@ let () = check (List.for_all first_rows ~f:Fn.id) true|ocaml},
 let check ok = if enabled then Verdict.p "all rows pass" ok else ()
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified condition used as a wrapper claim value",
+      {ocaml|let check ok = Verdict.p "all rows pass" (if ok then true else false)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "accepts an inverted quantified condition used as a wrapper claim value",
+      {ocaml|let check ok = Verdict.p "some row fails" (if ok then false else true)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [] );
     ( "refuses a quantified argument claimed inside an eager wrapper call",
       {ocaml|let check ok = ignore (Verdict.p "all rows pass" ok)
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
@@ -1936,6 +1983,12 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check = function ok -> Verdict.p "all rows pass" ok
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified argument passed to a qualified local-module wrapper",
+      {ocaml|module Checks = struct
+  let check ok = Verdict.p "all rows pass" ok
+end
+let () = Checks.check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "Checks.check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -2080,6 +2133,12 @@ let () = Verdict.p "all rows pass" checked|ocaml},
   ok
 let () = Verdict.p "the constant passes" result|ocaml},
       [] );
+    ( "does not let an outer guard witness a match-bound population",
+      {ocaml|let result =
+  (not (List.is_empty rows))
+  && match [] with rows -> List.for_all rows ~f:Fn.id
+let () = Verdict.p "all inner rows pass" result|ocaml},
+      [ "result" ] );
     ( "refuses a quantified component of a destructured tuple binding",
       {ocaml|let () =
   Verdict.p "all rows pass"

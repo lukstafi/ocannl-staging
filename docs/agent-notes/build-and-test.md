@@ -832,10 +832,12 @@ that they earn a lookup rather than always-loaded space.
   count the literal format's still-owed arguments before that slot. Partially applying an already
   recognised local wrapper carries its remaining slots forward. Local `open Verdict.Claims` scopes
   extend discovery, eager outer calls do not hide a nested claim argument, and `function` cases
-  contribute their positional argument slot. A syntactic `?arg:None` keeps the optional default edge
-  when such a wrapper is partially applied. Its exact, stale-checked exemption list is only for
-  bindings whose intended passing meaning allows an empty population; synthetic controls include a
-  child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
+  contribute their positional argument slot. Conditions forwarded or inverted inside a claimed
+  Boolean retain their polarity. Wrappers exported from file-local modules are available through
+  their qualified name, and a syntactic `?arg:None` keeps the optional default edge when a wrapper is
+  partially applied. Its exact, stale-checked exemption list is only for bindings whose intended
+  passing meaning allows an empty population; synthetic controls include a child process the
+  shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
@@ -874,7 +876,8 @@ that they earn a lookup rather than always-loaded space.
   bound before it is destructured conservatively retains every quantified component; literal tuple
   and record destructuring remains component-exact. A quantifier returned from a nested `let` is
   checked against witnesses inside that scope and then sealed, so an outer witness with the same
-  textual name cannot license a shadowed population.
+  textual name cannot license a shadowed population. Match-case results are sealed for the same
+  reason: a case-bound population cannot borrow a same-spelled witness from outside the match.
   Constant Boolean aliases in an `if` or guarded-case result—including aliases introduced by a
   returned local `let`—carry the same polarity as literal `true` and `false`; unresolved outcomes
   retain the existing conservative dependency traversal, while identical resolved branches prove

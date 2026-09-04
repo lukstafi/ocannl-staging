@@ -65,9 +65,12 @@ refuses a direct quantifier passed through a wrapper setup alias: true
 does not connect a wrapper parameter hidden by a setup constant: true
 refuses every quantified argument passed through a sequential wrapper: true
 refuses a quantified argument claimed inside wrapper control flow: true
+refuses a quantified condition used as a wrapper claim value: true
+accepts an inverted quantified condition used as a wrapper claim value: true
 refuses a quantified argument claimed inside an eager wrapper call: true
 refuses a quantified argument claimed under a local Verdict open: true
 refuses a quantified argument claimed by a function-case wrapper: true
+refuses a quantified argument passed to a qualified local-module wrapper: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -98,6 +101,7 @@ keeps an outer witness from guarding a shadowed nested population: true
 accepts a nested quantified population with its own witness: true
 accepts a negated binding nested directly inside a claim argument: true
 does not return a quantified binding shadowed by a later local: true
+does not let an outer guard witness a match-bound population: true
 refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
 refuses a quantified component destructured from an intermediate aggregate: true
