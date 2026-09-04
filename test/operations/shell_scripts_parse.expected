@@ -30,6 +30,20 @@ shebang "#!/usr/bin/env python3" is outside this check's scope: true
 shebang "#!/usr/bin/perl" is outside this check's scope: true
 shebang "" is outside this check's scope: true
 shebang " #!/bin/bash" is outside this check's scope: true
+errexit-negation fixture statement-position ! grep is classified as specified: true
+errexit-negation fixture combined errexit option is classified as specified: true
+errexit-negation fixture named errexit option is classified as specified: true
+errexit-negation fixture if ! command is classified as specified: true
+errexit-negation fixture while ! command is classified as specified: true
+errexit-negation fixture until ! command is classified as specified: true
+errexit-negation fixture ! command || fallback is classified as specified: true
+errexit-negation fixture ! command && continuation is classified as specified: true
+errexit-negation fixture command substitution is classified as specified: true
+errexit-negation fixture single-bracket test is classified as specified: true
+errexit-negation fixture double-bracket test is classified as specified: true
+errexit-negation fixture negation without errexit is classified as specified: true
+errexit-negation fixture quoted AND/OR text is classified as specified: true
+the statement-position ! grep fixture reaches the absent()-style refusal: true
 .github/actions/pin-revisions/resolve.sh parses: true
 benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
@@ -56,6 +70,9 @@ the scan reached at least the 12 shell scripts this repository is known to have:
 the scan reached the session hook and the suite runner: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:88b12da9841dbf6131676bf4fb0f4686] statement-position ! command
+  [scanner-refusal:003eba7381c87352fb02cd374fa62ea9] errexit-negation fixture
+  [scanner-refusal:b67c631ab7ecd7df55fc002761cf99f6] reaches the absent()-style
   [scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang
   [scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang
   [scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses

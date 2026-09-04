@@ -638,6 +638,137 @@ let rec resolve ~rel ?(ours = false) launch =
 let first_line_of path =
   try In_channel.with_file path ~f:(In_channel.input_line ~fix_win_eol:false) with _ -> None
 
+(** A deliberately textual check for statement-position command negation in scripts that enable
+    errexit (gh-ocannl-895).
+
+    Bash exempts [! command] from errexit because the command's status is being inverted. At the
+    start of a statement, with nothing consuming that inverted status, the spelling therefore looks
+    like a negative assertion but cannot stop a [set -e] harness. Condition positions and AND/OR
+    lists do consume it, and a [!] inside a command substitution or test bracket is not the
+    statement's first token, so those shapes stay valid.
+
+    This is intentionally not a shell parser. The issue's boundary is a line whose first token is
+    [!] in a file containing a [set] option that enables errexit. Quote-aware recognition of [&&]
+    and [||] avoids treating an operator printed by the command as a consumer; shell syntax itself
+    remains the parse check above's responsibility. *)
+module Errexit_negation = struct
+  type finding = { line : int }
+
+  let words line =
+    String.split_on_chars line ~on:[ ' '; '\t' ] |> List.filter ~f:(Fn.non String.is_empty)
+
+  let rec options_enable_errexit = function
+    | [] | "--" :: _ -> false
+    | "-o" :: name :: rest -> String.equal name "errexit" || options_enable_errexit rest
+    | option :: rest
+      when String.is_prefix option ~prefix:"-" && not (String.is_prefix option ~prefix:"--") ->
+        String.contains option 'e' || options_enable_errexit rest
+    | _ -> false
+
+  let line_enables_errexit line =
+    match words (String.strip line) with
+    | "set" :: options -> options_enable_errexit options
+    | _ -> false
+
+  (* [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes: in [!
+     printf '%s\n' 'x || y'] the operator is data, so the negation is still inert. *)
+  let has_unquoted_and_or line =
+    let rec loop index quote escaped =
+      if index >= String.length line then false
+      else
+        let character = line.[index] in
+        match quote with
+        | `Single ->
+            if Char.equal character '\'' then loop (index + 1) `None false
+            else loop (index + 1) `Single false
+        | `Double ->
+            if escaped then loop (index + 1) `Double false
+            else if Char.equal character '\\' then loop (index + 1) `Double true
+            else if Char.equal character '"' then loop (index + 1) `None false
+            else loop (index + 1) `Double false
+        | `None ->
+            if escaped then loop (index + 1) `None false
+            else if Char.equal character '\\' then loop (index + 1) `None true
+            else if Char.equal character '#' then false
+            else if Char.equal character '\'' then loop (index + 1) `Single false
+            else if Char.equal character '"' then loop (index + 1) `Double false
+            else if
+              index + 1 < String.length line
+              && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
+                 || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
+            then true
+            else loop (index + 1) `None false
+    in
+    loop 0 `None false
+
+  let is_statement_negation line =
+    let stripped = String.lstrip line in
+    String.is_prefix stripped ~prefix:"!"
+    && (String.length stripped = 1 || Char.is_whitespace stripped.[1])
+    && not (has_unquoted_and_or stripped)
+
+  let findings text =
+    if not (List.exists (String.split_lines text) ~f:line_enables_errexit) then []
+    else
+      String.split_lines text
+      |> List.mapi ~f:(fun index text ->
+          if is_statement_negation text then Some { line = index + 1 } else None)
+      |> List.filter_opt
+
+  let report ~fail ~rel text =
+    List.iter (findings text) ~f:(fun finding ->
+        fail
+          (Printf.sprintf
+             "%s:%d: statement-position `! command` is inert under errexit; route the assertion \
+              through an `absent()`-style helper whose body uses `if`"
+             rel finding.line))
+
+  let cases =
+    [
+      ("statement-position ! grep", "set -e\n! grep -q missing output\n", [ 2 ]);
+      ("combined errexit option", "set -euo pipefail\n! grep -q missing output\n", [ 2 ]);
+      ("named errexit option", "set -o errexit\n! grep -q missing output\n", [ 2 ]);
+      ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
+      ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
+      ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
+      ("! command || fallback", "set -e\n! grep -q missing output || recover\n", []);
+      ("! command && continuation", "set -e\n! grep -q missing output && continue_run\n", []);
+      ("command substitution", "set -e\nresult=$(! grep -q missing output)\n", []);
+      ("single-bracket test", "set -e\n[ ! -f output ]\n", []);
+      ("double-bracket test", "set -e\n[[ ! -f output ]]\n", []);
+      ("negation without errexit", "set -u\n! grep -q missing output\n", []);
+      ("quoted AND/OR text", "set -e\n! printf '%s\\n' 'not || consumed'\n", [ 2 ]);
+    ]
+
+  let controls () =
+    List.iter cases ~f:(fun (name, text, expected) ->
+        let actual = List.map (findings text) ~f:(fun finding -> finding.line) in
+        if not (List.equal Int.equal actual expected) then
+          eprintf "errexit-negation case %s: expected lines %s, found %s\n" name
+            (String.concat ~sep:"," (List.map expected ~f:Int.to_string))
+            (String.concat ~sep:"," (List.map actual ~f:Int.to_string));
+        Verdict.pf "errexit-negation fixture %s is classified as specified" name
+          (List.equal Int.equal actual expected));
+    let messages = ref [] in
+    report
+      ~fail:(fun message -> messages := message :: !messages)
+      ~rel:"fixture.sh" "set -e\n! grep -q missing output\n";
+    let refused =
+      List.equal String.equal !messages
+        [
+          "fixture.sh:2: statement-position `! command` is inert under errexit; route the \
+           assertion through an `absent()`-style helper whose body uses `if`";
+        ]
+    in
+    if refused then
+      Test_utils.Refusal_control_manifest.observe_failure
+        ~source:"test/operations/shell_scripts_parse.ml"
+        ~format:
+          "%s:%d: statement-position `! command` is inert under errexit; route the assertion \
+           through an `absent()`-style helper whose body uses `if`";
+    Verdict.p "the statement-position ! grep fixture reaches the absent()-style refusal" refused
+end
+
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <ocannl_config and shell scripts...>\n" Stdlib.Sys.argv.(0);
@@ -657,6 +788,7 @@ let () =
       Verdict.pf "shebang %S is %s" line
         (if expected then "a shell script this check reports on" else "outside this check's scope")
         (Bool.equal actual expected));
+  Errexit_negation.controls ();
   let base = base_dir Stdlib.Sys.argv.(1) in
   (* Reported repository-relative, opened as dune handed them over: the working directory is deep in
      the build tree and the paths arrive relative to it. *)
@@ -678,6 +810,7 @@ let () =
   in
   List.iter scripts ~f:(fun (rel, path) ->
       let first_line = Option.value (first_line_of path) ~default:"" in
+      Errexit_negation.report ~fail:Verdict.fail ~rel (In_channel.read_all path);
       match Shebang.parse first_line with
       | Error reason -> Verdict.fail (Printf.sprintf "%s: %s" rel reason)
       | Ok parsed ->

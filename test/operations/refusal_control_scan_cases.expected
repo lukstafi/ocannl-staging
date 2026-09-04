@@ -315,6 +315,9 @@ optional_arg_inventory.ml: [scanner-refusal:52e64fbae740ca90c4066b7840e926ae] so
 optional_arg_inventory.ml: [scanner-refusal:8827ebeb8572d08d2dd427695c19c0f4] lib/ optional arguments (claim) is catalogued beside optional_arg_inventory.expected, optional_arg_inventory_control.expected: true
 optional_arg_inventory.ml: [scanner-refusal:69241f287bacdd3e1e418debbdc13d3d] every unimplemented option (claim) is catalogued beside optional_arg_inventory.expected, optional_arg_inventory_control.expected: true
 shell_scripts_parse.ml has exactly the explicitly assigned refusal controls: true
+shell_scripts_parse.ml: [scanner-refusal:88b12da9841dbf6131676bf4fb0f4686] statement-position ! command (direct failure) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:003eba7381c87352fb02cd374fa62ea9] errexit-negation fixture (claim) is catalogued beside shell_scripts_parse.expected: true
+shell_scripts_parse.ml: [scanner-refusal:b67c631ab7ecd7df55fc002761cf99f6] reaches the absent()-style (claim) is catalogued beside shell_scripts_parse.expected: true
 shell_scripts_parse.ml: [scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang (claim) is catalogued beside shell_scripts_parse.expected: true
 shell_scripts_parse.ml: [scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang (claim) is catalogued beside shell_scripts_parse.expected: true
 shell_scripts_parse.ml: [scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses (claim) is catalogued beside shell_scripts_parse.expected: true
