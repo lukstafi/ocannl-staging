@@ -657,20 +657,51 @@ module Errexit_negation = struct
   let words line =
     String.split_on_chars line ~on:[ ' '; '\t' ] |> List.filter ~f:(Fn.non String.is_empty)
 
+  let starts_at text ~pos token =
+    let token_length = String.length token in
+    pos + token_length <= String.length text
+    && String.equal (String.sub text ~pos ~len:token_length) token
+
   let literal_shell_word word =
-    let rec control_position index =
-      if index >= String.length word then index
-      else if List.mem [ ';'; '&'; '|' ] word.[index] ~equal:Char.equal then index
-      else control_position (index + 1)
+    let decoded = Buffer.create (String.length word) in
+    let rec loop index quote escaped =
+      if index >= String.length word then Buffer.contents decoded
+      else
+        let character = word.[index] in
+        match quote with
+        | `Single ->
+            if Char.equal character '\'' then loop (index + 1) `None false
+            else (
+              Buffer.add_char decoded character;
+              loop (index + 1) `Single false)
+        | (`Double | `Ansi_c) as quote ->
+            if escaped then (
+              Buffer.add_char decoded character;
+              loop (index + 1) quote false)
+            else if Char.equal character '\\' then loop (index + 1) quote true
+            else if
+              match quote with
+              | `Double -> Char.equal character '"'
+              | `Ansi_c -> Char.equal character '\''
+            then loop (index + 1) `None false
+            else (
+              Buffer.add_char decoded character;
+              loop (index + 1) quote false)
+        | `None ->
+            if escaped then (
+              Buffer.add_char decoded character;
+              loop (index + 1) `None false)
+            else if Char.equal character '\\' then loop (index + 1) `None true
+            else if starts_at word ~pos:index "$'" then loop (index + 2) `Ansi_c false
+            else if Char.equal character '\'' then loop (index + 1) `Single false
+            else if Char.equal character '"' then loop (index + 1) `Double false
+            else if List.mem [ ';'; '&'; '|' ] character ~equal:Char.equal then
+              Buffer.contents decoded
+            else (
+              Buffer.add_char decoded character;
+              loop (index + 1) `None false)
     in
-    let word = String.prefix word (control_position 0) in
-    let length = String.length word in
-    if
-      length >= 2
-      && ((Char.equal word.[0] '\'' && Char.equal word.[length - 1] '\'')
-         || (Char.equal word.[0] '"' && Char.equal word.[length - 1] '"'))
-    then String.sub word ~pos:1 ~len:(length - 2)
-    else word
+    loop 0 `None false
 
   let is_named_errexit word = String.equal (literal_shell_word word) "errexit"
 
@@ -689,12 +720,9 @@ module Errexit_negation = struct
   let line_enables_errexit line =
     match words (String.strip line) with
     | "set" :: options -> options_enable_errexit options
+    | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
+    | ("builtin" | "command") :: "--" :: "set" :: options -> options_enable_errexit options
     | _ -> false
-
-  let starts_at text ~pos token =
-    let token_length = String.length token in
-    pos + token_length <= String.length text
-    && String.equal (String.sub text ~pos ~len:token_length) token
 
   (* Skip one [$()] body while preserving its recursive quote scopes. The caller only needs the byte
      after the matching close: every list operator inside the substitution is nested by definition
@@ -718,6 +746,8 @@ module Errexit_negation = struct
             else if Char.equal character '\\' then loop (index + 1) `Double true depth
             else if starts_at line ~pos:index "$(" then
               loop (skip_command_substitution line (index + 2)) `Double false depth
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) `Double false depth
             else if Char.equal character '`' then loop (index + 1) `Backtick_double false depth
             else if Char.equal character '"' then loop (index + 1) `None false depth
             else loop (index + 1) `Double false depth
@@ -733,11 +763,63 @@ module Errexit_negation = struct
             if escaped then loop (index + 1) `None false depth
             else if Char.equal character '\\' then loop (index + 1) `None true depth
             else if starts_at line ~pos:index "$'" then loop (index + 2) `Ansi_c false depth
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) `None false depth
             else if Char.equal character '\'' then loop (index + 1) `Single false depth
             else if Char.equal character '"' then loop (index + 1) `Double false depth
             else if Char.equal character '`' then loop (index + 1) `Backtick_none false depth
             else if Char.equal character '(' then loop (index + 1) `None false (depth + 1)
             else if Char.equal character ')' then
+              if depth = 1 then index + 1 else loop (index + 1) `None false (depth - 1)
+            else loop (index + 1) `None false depth
+    in
+    loop index `None false 1
+
+  and skip_parameter_expansion line index =
+    let rec loop index quote escaped depth =
+      if index >= String.length line then index
+      else
+        let character = line.[index] in
+        match quote with
+        | `Single ->
+            if Char.equal character '\'' then loop (index + 1) `None false depth
+            else loop (index + 1) `Single false depth
+        | `Ansi_c ->
+            if escaped then loop (index + 1) `Ansi_c false depth
+            else if Char.equal character '\\' then loop (index + 1) `Ansi_c true depth
+            else if Char.equal character '\'' then loop (index + 1) `None false depth
+            else loop (index + 1) `Ansi_c false depth
+        | `Double ->
+            if escaped then loop (index + 1) `Double false depth
+            else if Char.equal character '\\' then loop (index + 1) `Double true depth
+            else if starts_at line ~pos:index "$(" then
+              loop (skip_command_substitution line (index + 2)) `Double false depth
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) `Double false depth
+            else if Char.equal character '`' then loop (index + 1) `Backtick_double false depth
+            else if Char.equal character '"' then loop (index + 1) `None false depth
+            else loop (index + 1) `Double false depth
+        | (`Backtick_none | `Backtick_double) as backtick ->
+            if escaped then loop (index + 1) backtick false depth
+            else if Char.equal character '\\' then loop (index + 1) backtick true depth
+            else if Char.equal character '`' then
+              loop (index + 1)
+                (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
+                false depth
+            else loop (index + 1) backtick false depth
+        | `None ->
+            if escaped then loop (index + 1) `None false depth
+            else if Char.equal character '\\' then loop (index + 1) `None true depth
+            else if starts_at line ~pos:index "$(" then
+              loop (skip_command_substitution line (index + 2)) `None false depth
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) `None false depth
+            else if starts_at line ~pos:index "$'" then loop (index + 2) `Ansi_c false depth
+            else if Char.equal character '\'' then loop (index + 1) `Single false depth
+            else if Char.equal character '"' then loop (index + 1) `Double false depth
+            else if Char.equal character '`' then loop (index + 1) `Backtick_none false depth
+            else if Char.equal character '{' then loop (index + 1) `None false (depth + 1)
+            else if Char.equal character '}' then
               if depth = 1 then index + 1 else loop (index + 1) `None false (depth - 1)
             else loop (index + 1) `None false depth
     in
@@ -765,6 +847,8 @@ module Errexit_negation = struct
             else if Char.equal character '\\' then loop (index + 1) `Double true nesting
             else if starts_at line ~pos:index "$(" then
               loop (skip_command_substitution line (index + 2)) `Double false nesting
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) `Double false nesting
             else if Char.equal character '"' then loop (index + 1) `None false nesting
             else loop (index + 1) `Double false nesting
         | `Backtick ->
@@ -790,6 +874,12 @@ module Errexit_negation = struct
               && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
                  || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
             then true
+            else if nesting = 0 && Char.equal character ';' then false
+            else if
+              nesting = 0 && Char.equal character '&'
+              && (index + 1 >= String.length line || not (Char.equal line.[index + 1] '>'))
+              && (index = 0 || not (List.mem [ '>'; '<' ] line.[index - 1] ~equal:Char.equal))
+            then false
             else loop (index + 1) `None false nesting
     in
     loop 0 `None false 0
@@ -824,6 +914,12 @@ module Errexit_negation = struct
       ("punctuated named errexit option", "set -o errexit;\n! grep -q missing output\n", [ 2 ]);
       ("quoted named errexit option", "set -o 'errexit'\n! grep -q missing output\n", [ 2 ]);
       ("quoted short errexit option", "set \"-e\"\n! grep -q missing output\n", [ 2 ]);
+      ("concatenated quoted errexit name", "set -o erre'x'it\n! grep -q missing output\n", [ 2 ]);
+      ("concatenated quoted short option", "set \"-\"e\n! grep -q missing output\n", [ 2 ]);
+      ("builtin set", "builtin set -e\n! grep -q missing output\n", [ 2 ]);
+      ("command set", "command set -e\n! grep -q missing output\n", [ 2 ]);
+      ("command -- set", "command -- set -e\n! grep -q missing output\n", [ 2 ]);
+      ("builtin -- set", "builtin -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
@@ -840,8 +936,13 @@ module Errexit_negation = struct
       ( "nested quotes in double-quoted substitution",
         "set -e\n! true \"$(printf \"%s\" \"x || y\")\"\n",
         [ 2 ] );
+      ("nested quotes in parameter expansion", "set -e\n! true \"${x:-\"a || b\"}\"\n", [ 2 ]);
       ("ANSI-C quoted AND/OR text", "set -e\n! true $'can\\'t || consume'\n", [ 2 ]);
       ("outer AND/OR after nested group", "set -e\n! (probe || recover) || fallback\n", []);
+      ("later OR after semicolon", "set -e\n! probe; cleanup || recover\n", [ 2 ]);
+      ("later OR after async terminator", "set -e\n! probe & cleanup || recover\n", [ 2 ]);
+      ("outer OR after stderr redirect", "set -e\n! probe &>/dev/null || recover\n", []);
+      ("outer OR after descriptor redirect", "set -e\n! probe 2>&1 || recover\n", []);
     ]
 
   let controls () =
