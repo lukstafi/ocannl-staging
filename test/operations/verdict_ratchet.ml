@@ -77,11 +77,13 @@ type definition_site = { line : int; column : int; position : int }
 type helper_binding = {
   name : string;
   site : definition_site;
-  dependencies : helper_binding list;
+  dependencies : helper_dependency list;
   guards : Set.M(String).t;
   unguarded : quantifier list;
   claim_kind : claim_kind option;
 }
+
+and helper_dependency = { binding : helper_binding; forwards_guards : bool }
 
 type quantified_claim = {
   helper : string;
@@ -479,7 +481,7 @@ let rec make_bindings environment value =
                intermediate negation and guards to an outer binding. *)
             List.is_empty unguarded
             || List.exists environment ~f:(fun outer ->
-                outer.site.position = dependency.site.position))
+                outer.site.position = dependency.binding.site.position))
       in
       let claim_kind =
         match Sources.longident_of part.expression with
@@ -500,16 +502,17 @@ let rec make_bindings environment value =
 
 and positive_bindings environment expr =
   let bindings = ref [] in
-  let rec visit environment positive expr =
-    let visit_arguments environment positive arguments =
-      List.iter arguments ~f:(fun (_, argument) -> visit environment positive argument)
+  let rec visit environment positive forwards_guards expr =
+    let visit_arguments environment positive forwards_guards arguments =
+      List.iter arguments ~f:(fun (_, argument) ->
+          visit environment positive forwards_guards argument)
     in
     match expr.pexp_desc with
     | Pexp_let (_, values, body) ->
         let local = List.concat_map values ~f:(make_bindings environment) in
-        visit (List.rev_append local environment) positive body
+        visit (List.rev_append local environment) positive forwards_guards body
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
-        visit environment (not positive) argument
+        visit environment (not positive) forwards_guards argument
     | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
       when is_name pipe "|>" -> (
         match piped_call.pexp_desc with
@@ -517,45 +520,50 @@ and positive_bindings environment expr =
             match unlabelled arguments with
             | [ literal ] -> (
                 match compared_argument callee literal value ~positive with
-                | Some (argument, polarity) -> visit environment polarity argument
+                | Some (argument, polarity) -> visit environment polarity forwards_guards argument
                 | None ->
-                    visit_arguments environment positive
+                    visit_arguments environment positive false
                       [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
             | _ ->
-                visit_arguments environment positive
+                visit_arguments environment positive false
                   [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
         | _ ->
-            visit_arguments environment positive
+            visit_arguments environment positive false
               [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
     | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
       when is_boolean_comparison callee -> (
         match compared_argument callee left right ~positive with
-        | Some (argument, polarity) -> visit environment polarity argument
+        | Some (argument, polarity) -> visit environment polarity forwards_guards argument
         | None ->
-            visit_arguments environment positive
+            visit_arguments environment positive forwards_guards
               [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    | Pexp_apply (callee, arguments) when is_name callee "&&" || is_name callee "||" ->
+        visit_arguments environment positive forwards_guards arguments
+    | Pexp_apply (callee, arguments) ->
+        visit environment positive false callee;
+        visit_arguments environment positive false arguments
     | Pexp_function _ -> ()
     | _ ->
         (match Sources.longident_of expr with
         | Some [ name ] when positive ->
             Option.iter (lookup environment name) ~f:(fun binding ->
-                bindings := binding :: !bindings)
+                bindings := { binding; forwards_guards } :: !bindings)
         | _ -> ());
         let iterator =
           object
             inherit Ast_traverse.iter as super
             method! attribute _ = ()
-            method! expression child = visit environment positive child
+            method! expression child = visit environment positive forwards_guards child
             method children child = super#expression child
           end
         in
         iterator#children expr
   in
-  visit environment true expr;
+  visit environment true true expr;
   !bindings
 
 let quantified_claims structure =
-  let origins (bindings : helper_binding list) =
+  let origins (dependencies : helper_dependency list) =
     let rec visit seen inherited_guards (binding : helper_binding) =
       let key = binding.name ^ ":" ^ Int.to_string binding.site.position in
       if Set.mem seen key then []
@@ -568,9 +576,15 @@ let quantified_claims structure =
               || Set.is_empty (Set.inter guards quantifier.populations))
         in
         let direct = if List.is_empty uncovered then [] else [ (binding, uncovered) ] in
-        direct @ List.concat_map binding.dependencies ~f:(visit seen guards)
+        direct
+        @ List.concat_map binding.dependencies ~f:(fun dependency ->
+            let inherited_guards =
+              if dependency.forwards_guards then guards else Set.empty (module String)
+            in
+            visit seen inherited_guards dependency.binding)
     in
-    List.concat_map bindings ~f:(visit (Set.empty (module String)) (Set.empty (module String)))
+    List.concat_map dependencies ~f:(fun dependency ->
+        visit (Set.empty (module String)) (Set.empty (module String)) dependency.binding)
     |> List.dedup_and_sort ~compare:(fun (left, _) (right, _) ->
         Int.compare left.site.position right.site.position)
   in
@@ -872,6 +886,16 @@ let () = Verdict.p "some row fails" differs|ocaml},
 let guarded = (not (List.is_empty rows)) && close
 let () = Verdict.p "all rows pass" guarded|ocaml},
       [] );
+    ( "conservatively refuses an outer guard across a helper call",
+      {ocaml|let all xs = List.for_all xs ~f:Fn.id
+let checked xs = (not (List.is_empty xs)) && all xs
+let () = Verdict.p "all rows pass" (checked rows)|ocaml},
+      [ "all" ] );
+    ( "refuses a mismatched actual hidden by equal formal names",
+      {ocaml|let all xs = List.for_all xs ~f:Fn.id
+let checked xs other = (not (List.is_empty xs)) && all other
+let () = Verdict.p "all rows pass" (checked rows other_rows)|ocaml},
+      [ "all" ] );
     ( "refuses a binding nested directly inside a claim argument",
       {ocaml|let () =
   Verdict.p "all rows pass" (let ok = List.for_all rows ~f:Fn.id in ok)|ocaml},

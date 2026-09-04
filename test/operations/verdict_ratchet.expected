@@ -50,6 +50,8 @@ accepts a direct Bool.equal false around a fully applied quantifier: true
 refuses a positive intermediate binding: true
 accepts a negated intermediate binding: true
 accepts a guarded intermediate binding: true
+conservatively refuses an outer guard across a helper call: true
+refuses a mismatched actual hidden by equal formal names: true
 refuses a binding nested directly inside a claim argument: true
 accepts a guarded binding nested directly inside a claim argument: true
 accepts a negated binding nested directly inside a claim argument: true

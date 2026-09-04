@@ -825,10 +825,11 @@ that they earn a lookup rather than always-loaded space.
   Claim-argument resolution installs a `let` nested inside the argument before following the value
   it returns, and both helper analysis and claim resolution preserve polarity through `not` and
   explicit true/false comparisons (including pipeline spelling) across intermediate bindings.
-  Non-empty guards propagate down those positive dependency edges. Tuple and record destructuring
-  maps names to their corresponding value expressions, so changing the binding pattern cannot hide
-  a quantifier. The controls pair each accepted negation with a positive form the ratchet must still
-  refuse.
+  Non-empty guards propagate down positive value-alias edges, but conservatively stop at helper
+  calls: without formal-to-actual substitution, matching formal names can incorrectly license a
+  quantifier over a different actual argument. Tuple and record destructuring maps names to their
+  corresponding value expressions, so changing the binding pattern cannot hide a quantifier. The
+  controls pair each accepted negation with a positive form the ratchet must still refuse.
   The literal- and computed-label exemption lists carry the same one-key/one-site contract
   (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while
   line and column are report text; `record_definition` aggregates all three exemption families by
