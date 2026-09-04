@@ -691,6 +691,32 @@ let constant_bool_of environment expr =
 
 let resolved_bool = constant_bool_of
 
+let resolved_compared_argument environment callee left right ~positive =
+  match compared_argument callee left right ~positive with
+  | Some _ as found -> found
+  | None when is_boolean_comparison callee -> (
+      let equal = not (is_name callee "<>") in
+      let with_constant constant argument =
+        Some (argument, Bool.equal positive (Bool.equal constant equal))
+      in
+      match (resolved_bool environment left, resolved_bool environment right) with
+      | Some constant, None -> with_constant constant right
+      | None, Some constant -> with_constant constant left
+      | Some _, Some _ | None, None -> None)
+  | None -> None
+
+let resolved_boolean_match_polarity environment cases =
+  let output_for input =
+    List.find_map cases ~f:(fun case ->
+        if Option.is_none case.pc_guard && bool_pattern case.pc_lhs input then
+          resolved_bool environment case.pc_rhs
+        else None)
+  in
+  match (output_for true, output_for false) with
+  | Some true, Some false -> Some true
+  | Some false, Some true -> Some false
+  | _ -> None
+
 let resolved_result_polarities environment positive result =
   match resolved_bool environment result with
   | Some true -> [ positive ]
@@ -801,7 +827,29 @@ let rec alias_quantifiers environment ?(positive = true) expr =
       from_condition
       @ alias_quantifiers environment ~positive yes
       @ Option.value_map no ~default:[] ~f:(alias_quantifiers environment ~positive)
-  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+  | Pexp_match (scrutinee, cases) ->
+      let scrutinee_quantifiers =
+        Option.value_map (resolved_boolean_match_polarity environment cases) ~default:[]
+          ~f:(fun same_polarity ->
+            quantifiers_in ~positive:(Bool.equal positive same_polarity) scrutinee)
+      in
+      scrutinee_quantifiers
+      @ List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          let case_environment =
+            List.filter environment ~f:(fun (binding : helper_binding) ->
+                not (Set.mem shadowed binding.name))
+          in
+          let guards =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                resolved_result_polarities case_environment positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
+          in
+          guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
+  | Pexp_try (_, cases) ->
       List.concat_map cases ~f:(fun case ->
           let shadowed =
             pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
@@ -817,6 +865,11 @@ let rec alias_quantifiers environment ?(positive = true) expr =
                     quantifiers_in ~positive:guard_positive guard))
           in
           guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    when is_boolean_comparison callee -> (
+      match resolved_compared_argument environment callee left right ~positive with
+      | Some (argument, argument_positive) -> quantifiers_in ~positive:argument_positive argument
+      | None -> [])
   | _ -> []
 
 let argument_at_slot arguments slot =
@@ -940,139 +993,174 @@ and wrapper_signature environment expression =
         List.map targets ~f:(fun (target, target_positive) ->
             (target, Bool.equal positive target_positive))
   in
-  let rec tail_and_aliases aliases expression =
+  let extend_aliases aliases recursive bindings =
+    let parts =
+      List.concat_map bindings ~f:(fun binding -> binding_parts binding.pvb_pat binding.pvb_expr)
+    in
+    let shadowed = List.map parts ~f:(fun part -> part.name) |> Set.of_list (module String) in
+    let outer_aliases = List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name)) in
+    let local_aliases =
+      match recursive with
+      | Asttypes.Nonrecursive ->
+          List.map parts ~f:(fun part ->
+              let targets =
+                returned_binding_polarities true part.expression
+                |> List.concat_map ~f:(resolve_alias aliases)
+              in
+              (part.name, targets))
+      | Recursive -> List.map parts ~f:(fun part -> (part.name, []))
+    in
+    List.rev_append local_aliases outer_aliases
+  in
+  let rec claim_calls aliases expression =
     match expression.pexp_desc with
     | Pexp_let (recursive, bindings, body) ->
-        let parts =
-          List.concat_map bindings ~f:(fun binding ->
-              binding_parts binding.pvb_pat binding.pvb_expr)
-        in
-        let shadowed = List.map parts ~f:(fun part -> part.name) |> Set.of_list (module String) in
-        let outer_aliases = List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name)) in
-        let local_aliases =
+        let binding_aliases =
           match recursive with
-          | Asttypes.Nonrecursive ->
-              List.map parts ~f:(fun part ->
-                  let targets =
-                    returned_binding_polarities true part.expression
-                    |> List.concat_map ~f:(resolve_alias aliases)
-                  in
-                  (part.name, targets))
-          | Recursive -> List.map parts ~f:(fun part -> (part.name, []))
+          | Asttypes.Nonrecursive -> aliases
+          | Recursive -> extend_aliases aliases recursive bindings
         in
-        tail_and_aliases (List.rev_append local_aliases outer_aliases) body
-    | Pexp_sequence (_, body) | Pexp_open (_, body) -> tail_and_aliases aliases body
-    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> tail_and_aliases aliases inner
-    | _ -> (expression, aliases)
+        List.concat_map bindings ~f:(fun binding -> claim_calls binding_aliases binding.pvb_expr)
+        @ claim_calls (extend_aliases aliases recursive bindings) body
+    | Pexp_sequence (left, right) -> claim_calls aliases left @ claim_calls aliases right
+    | Pexp_open (_, body) -> claim_calls aliases body
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> claim_calls aliases inner
+    | Pexp_apply (callee, arguments) ->
+        Option.value_map (claim_target environment callee) ~default:[] ~f:(fun target ->
+            [ (target, arguments, aliases) ])
+    | _ -> []
   in
   let parameters, body = parameters_and_body [] expression in
-  let body, aliases = tail_and_aliases [] body in
+  let calls = claim_calls [] body in
   let unlabelled_parameters =
     List.count parameters ~f:(fun parameter ->
         match parameter.pparam_desc with
         | Pparam_val (Asttypes.Nolabel, _, _) -> true
         | Pparam_val ((Labelled _ | Optional _), _, _) | Pparam_newtype _ -> false)
   in
-  match body.pexp_desc with
-  | Pexp_apply (callee, arguments) -> (
-      match claim_target environment callee with
-      | None -> None
-      | Some ((kind, _) as target) ->
-          let partial_claim_slot =
-            match target with
-            | _, Some { claim_wrapper = Some _; _ } -> None
-            | _ when List.length (unlabelled arguments) = 1 ->
-                Some
-                  {
-                    label = None;
-                    optional = false;
-                    unlabelled_index = Some unlabelled_parameters;
-                    positive = true;
-                    default_binding = None;
-                  }
-            | _ -> None
-          in
-          let claimed_names =
+  let partial_claim_slot ((kind, wrapper), arguments, _) =
+    let unlabelled_arguments = unlabelled arguments in
+    let pending_format_arguments =
+      match (kind, unlabelled_arguments) with
+      | (Pf | Claimf), format :: supplied ->
+          Option.map (Sources.string_literal format) ~f:(fun format ->
+              let expected =
+                Scan.directives format
+                |> List.sum
+                     (module Int)
+                     ~f:(fun (directive : Scan.directive) ->
+                       if Scan.consumes_nothing directive.conversion then 0
+                       else
+                         let modifiers =
+                           String.sub format ~pos:(directive.start + 1)
+                             ~len:(directive.stop - directive.start - 1)
+                         in
+                         1
+                         + String.count modifiers ~f:(Char.equal '*')
+                         + if Char.equal directive.conversion 'a' then 1 else 0)
+              in
+              if List.length supplied <= expected then Some (expected - List.length supplied)
+              else None)
+          |> Option.join
+      | (P | Pass_fail | Claim), [ _ ] -> Some 0
+      | (P | Pass_fail | Claim), _ -> None
+      | (Pf | Claimf), [] -> None
+    in
+    match (wrapper, pending_format_arguments) with
+    | Some { claim_wrapper = Some _; _ }, _ | _, None -> None
+    | _, Some missing ->
+        Some
+          {
+            label = None;
+            optional = false;
+            unlabelled_index = Some (unlabelled_parameters + missing);
+            positive = true;
+            default_binding = None;
+          }
+  in
+  match calls with
+  | [] -> None
+  | ((kind, _), _, _) :: _ as calls ->
+      let partial_claim_slots = List.filter_map calls ~f:partial_claim_slot in
+      let claimed_names =
+        List.concat_map calls ~f:(fun (target, arguments, aliases) ->
             claim_arguments target arguments
             |> List.concat_map ~f:(fun (argument, positive) ->
                 returned_binding_polarities positive argument
-                |> List.concat_map ~f:(resolve_alias aliases))
-          in
-          let _, slots, _ =
-            List.fold parameters ~init:(0, [], environment)
-              ~f:(fun (unlabelled_index, slots, parameter_environment) parameter ->
-                match parameter.pparam_desc with
-                | Pparam_newtype _ -> (unlabelled_index, slots, parameter_environment)
-                | Pparam_val (label, default, pattern) ->
-                    let names = pattern_names pattern |> List.map ~f:fst in
-                    let shadowed = Set.of_list (module String) names in
-                    let outer_environment =
-                      List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
-                          not (Set.mem shadowed binding.name))
-                    in
-                    let optional_label =
-                      match label with
-                      | Asttypes.Optional name | Labelled name -> Some name
-                      | Nolabel -> None
-                    in
-                    let default_bindings =
-                      Option.value_map default ~default:[] ~f:(fun default ->
-                          binding_parts pattern default
-                          |> List.map ~f:(make_binding_part ?optional_label parameter_environment))
-                    in
-                    let matches =
-                      List.filter_map claimed_names ~f:(fun (name, positive) ->
-                          if List.mem names name ~equal:String.equal then Some (name, positive)
-                          else None)
-                    in
-                    let slot =
-                      match label with
-                      | Asttypes.Nolabel ->
-                          {
-                            label = None;
-                            optional = false;
-                            unlabelled_index = Some unlabelled_index;
-                            positive = true;
-                            default_binding = None;
-                          }
-                      | Labelled name ->
-                          {
-                            label = Some name;
-                            optional = false;
-                            unlabelled_index = None;
-                            positive = true;
-                            default_binding = None;
-                          }
-                      | Optional name ->
-                          {
-                            label = Some name;
-                            optional = true;
-                            unlabelled_index = None;
-                            positive = true;
-                            default_binding = None;
-                          }
-                    in
-                    let slots =
-                      List.rev_append
-                        (List.map matches ~f:(fun (name, positive) ->
-                             {
-                               slot with
-                               positive;
-                               default_binding =
-                                 List.find default_bindings ~f:(fun binding ->
-                                     String.equal binding.name name);
-                             }))
-                        slots
-                    in
-                    let unlabelled_index =
-                      match label with Nolabel -> unlabelled_index + 1 | _ -> unlabelled_index
-                    in
-                    (unlabelled_index, slots, List.rev_append default_bindings outer_environment))
-          in
-          Some
-            ( Some kind,
-              Some (Option.value_map partial_claim_slot ~default:(List.rev slots) ~f:List.return) ))
-  | _ -> None
+                |> List.concat_map ~f:(resolve_alias aliases)))
+      in
+      let _, slots, _ =
+        List.fold parameters ~init:(0, [], environment)
+          ~f:(fun (unlabelled_index, slots, parameter_environment) parameter ->
+            match parameter.pparam_desc with
+            | Pparam_newtype _ -> (unlabelled_index, slots, parameter_environment)
+            | Pparam_val (label, default, pattern) ->
+                let names = pattern_names pattern |> List.map ~f:fst in
+                let shadowed = Set.of_list (module String) names in
+                let outer_environment =
+                  List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
+                      not (Set.mem shadowed binding.name))
+                in
+                let optional_label =
+                  match label with
+                  | Asttypes.Optional name | Labelled name -> Some name
+                  | Nolabel -> None
+                in
+                let default_bindings =
+                  Option.value_map default ~default:[] ~f:(fun default ->
+                      binding_parts pattern default
+                      |> List.map ~f:(make_binding_part ?optional_label parameter_environment))
+                in
+                let matches =
+                  List.filter_map claimed_names ~f:(fun (name, positive) ->
+                      if List.mem names name ~equal:String.equal then Some (name, positive)
+                      else None)
+                in
+                let slot =
+                  match label with
+                  | Asttypes.Nolabel ->
+                      {
+                        label = None;
+                        optional = false;
+                        unlabelled_index = Some unlabelled_index;
+                        positive = true;
+                        default_binding = None;
+                      }
+                  | Labelled name ->
+                      {
+                        label = Some name;
+                        optional = false;
+                        unlabelled_index = None;
+                        positive = true;
+                        default_binding = None;
+                      }
+                  | Optional name ->
+                      {
+                        label = Some name;
+                        optional = true;
+                        unlabelled_index = None;
+                        positive = true;
+                        default_binding = None;
+                      }
+                in
+                let slots =
+                  List.rev_append
+                    (List.map matches ~f:(fun (name, positive) ->
+                         {
+                           slot with
+                           positive;
+                           default_binding =
+                             List.find default_bindings ~f:(fun binding ->
+                                 String.equal binding.name name);
+                         }))
+                    slots
+                in
+                let unlabelled_index =
+                  match label with Nolabel -> unlabelled_index + 1 | _ -> unlabelled_index
+                in
+                (unlabelled_index, slots, List.rev_append default_bindings outer_environment))
+      in
+      Some (Some kind, Some (List.rev_append slots partial_claim_slots))
 
 and make_binding_group environment recursive values =
   match recursive with
@@ -1161,8 +1249,8 @@ and binding_dependencies ?(positive = true) environment expr =
         Option.iter no ~f:(visit environment positive forwards_guards)
     | Pexp_match (scrutinee, cases) ->
         let scrutinee_positive =
-          Option.value_map (boolean_match_polarity cases) ~default:positive ~f:(fun same_polarity ->
-              Bool.equal positive same_polarity)
+          Option.value_map (resolved_boolean_match_polarity environment cases) ~default:positive
+            ~f:(fun same_polarity -> Bool.equal positive same_polarity)
         in
         visit environment scrutinee_positive false scrutinee;
         List.iter cases ~f:(fun case ->
@@ -1219,7 +1307,7 @@ and binding_dependencies ?(positive = true) environment expr =
               [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
     | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
       when is_boolean_comparison callee -> (
-        match compared_argument callee left right ~positive with
+        match resolved_compared_argument environment callee left right ~positive with
         | Some (argument, polarity) -> visit environment polarity forwards_guards argument
         | None ->
             visit_arguments environment positive forwards_guards
@@ -1708,6 +1796,10 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check label = Verdict.p label
 let () = check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a direct quantifier passed to a formatted partial Verdict wrapper",
+      {ocaml|let check label = Verdict.pf "%s rows pass" label
+let () = check "all" (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "refuses a direct quantifier passed through a wrapper with tail setup",
       {ocaml|let check ok =
   let label = "all rows pass" in
@@ -1726,6 +1818,12 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
   Verdict.p "the constant passes" result
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [] );
+    ( "refuses every quantified argument passed through a sequential wrapper",
+      {ocaml|let check first second =
+  Verdict.p "first rows pass" first;
+  Verdict.p "second rows pass" second
+let () = check (List.for_all first_rows ~f:Fn.id) true|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1751,6 +1849,17 @@ let () = Verdict.p "all rows pass" close|ocaml},
       {ocaml|let differs = Bool.equal (List.for_all rows ~f:Fn.id) false
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "refuses a bound exists compared with a false Boolean alias",
+      {ocaml|let some = List.exists rows ~f:Fn.id
+let no = false
+let result = Bool.equal some no
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "some" ] );
+    ( "refuses a direct exists compared with a false Boolean alias",
+      {ocaml|let no = false
+let result = Bool.equal (List.exists rows ~f:Fn.id) no
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
     ( "refuses a fully applied quantifier through a transparent Boolean wrapper",
       {ocaml|let ok = Fn.id (List.for_all rows ~f:Fn.id)
 let () = Verdict.p "all rows pass" ok|ocaml},
@@ -1898,6 +2007,19 @@ let () = Verdict.p "some row fails" differs|ocaml},
 let none = match some with true -> false | false -> true
 let () = Verdict.p "no rows match" none|ocaml},
       [ "some" ] );
+    ( "refuses a bound exists inverted by aliased Boolean match outcomes",
+      {ocaml|let some = List.exists rows ~f:Fn.id
+let yes = true
+let no = false
+let result = match some with true -> no | false -> yes
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "some" ] );
+    ( "refuses a direct exists inverted by aliased Boolean match outcomes",
+      {ocaml|let yes = true
+let no = false
+let result = match List.exists rows ~f:Fn.id with true -> no | false -> yes
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
     ( "refuses a bound quantifier returned through an if condition",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let close = if all then true else false

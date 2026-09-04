@@ -57,15 +57,19 @@ does not use a Verdict wrapper default when its argument is supplied: true
 inspects the possible payload of an unknown forwarded wrapper option: true
 refuses a direct quantifier passed to a partially applied Verdict claim: true
 refuses a direct quantifier passed to a curried partial Verdict wrapper: true
+refuses a direct quantifier passed to a formatted partial Verdict wrapper: true
 refuses a direct quantifier passed through a wrapper with tail setup: true
 refuses a direct quantifier passed through a wrapper setup alias: true
 does not connect a wrapper parameter hidden by a setup constant: true
+refuses every quantified argument passed through a sequential wrapper: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
 accepts a fully applied quantifier compared with false: true
 refuses a direct Bool.equal true around a fully applied quantifier: true
 accepts a direct Bool.equal false around a fully applied quantifier: true
+refuses a bound exists compared with a false Boolean alias: true
+refuses a direct exists compared with a false Boolean alias: true
 refuses a fully applied quantifier through a transparent Boolean wrapper: true
 refuses a returned quantifier behind a local open: true
 refuses a positive intermediate binding: true
@@ -95,6 +99,8 @@ refuses a helper that returns a match-bound quantified value: true
 refuses a direct quantifier forwarded by a Boolean constructor match: true
 accepts a direct quantifier inverted by a Boolean constructor match: true
 refuses a bound exists inverted by a Boolean constructor match: true
+refuses a bound exists inverted by aliased Boolean match outcomes: true
+refuses a direct exists inverted by aliased Boolean match outcomes: true
 refuses a bound quantifier returned through an if condition: true
 accepts an inverted bound quantifier returned through an if condition: true
 refuses a direct quantifier returned through an if condition: true
