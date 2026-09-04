@@ -1258,7 +1258,8 @@ that they earn a lookup rather than always-loaded space.
   dependencies transitively, and exempts only the no-argument `env_spelling_gate.exe` invocation on
   the exact infrastructure alias that owns it. It fails closed on other private helpers, external or
   otherwise opaque actions, `dynamic-run`, `with-accepted-exit-codes`, `enabled_if` on a public
-  declaration, `alias_rec`, implicit built-in aliases, explicit (file or directory) or
+  declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
+  explicit (file or directory, including files below a directory target) or
   action-inferred generated-target dependencies (including dependency pforms in fields or actions,
   and literal file-input action positions), target-bearing alias rules, or unexpanded `include`
   stanzas. A bare executable name
