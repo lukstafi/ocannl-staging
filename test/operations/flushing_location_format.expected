@@ -1,0 +1,4 @@
+file flushing beg_pos emits source positions: true
+file flushing no_location omits source positions: true
+stdout flushing beg_pos emits source positions: true
+stdout flushing no_location omits source positions: true

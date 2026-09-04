@@ -1431,12 +1431,13 @@ let get_local_debug_runtime =
   let name = get_global_arg ~default:"debug" ~arg_name:"log_file_stem" in
   match (backend, filename) with
   | `Flushing, None ->
-      Minidebug_runtime.prefixed_runtime_flushing ~time_tagged ~elapsed_times ~print_scope_ids
-        ~verbose_scope_ids ~global_prefix:name ~for_append:false ~log_level:original_log_level ()
+      Minidebug_runtime.prefixed_runtime_flushing ~time_tagged ~elapsed_times ~location_format
+        ~print_scope_ids ~verbose_scope_ids ~global_prefix:name ~for_append:false
+        ~log_level:original_log_level ()
   | `Flushing, Some filename ->
-      Minidebug_runtime.local_runtime_flushing ~time_tagged ~elapsed_times ~print_scope_ids
-        ~verbose_scope_ids ~global_prefix:name ~for_append:false ~log_level:original_log_level
-        filename
+      Minidebug_runtime.local_runtime_flushing ~time_tagged ~elapsed_times ~location_format
+        ~print_scope_ids ~verbose_scope_ids ~global_prefix:name ~for_append:false
+        ~log_level:original_log_level filename
   | `Printbox, None ->
       Minidebug_runtime.prefixed_runtime ~time_tagged ~elapsed_times ~location_format
         ~print_scope_ids ~verbose_scope_ids ~global_prefix:name ~toc_entry
