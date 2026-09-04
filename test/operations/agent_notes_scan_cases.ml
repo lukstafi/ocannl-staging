@@ -949,6 +949,9 @@ let citation_cases =
     ( "a numeric autolink fragment",
       "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "a bare scheme URL fragment",
+      "See https://example.test/review#12; plain #13 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
     ( "a decimal entity and a separate bare citation",
       "It&#39;s encoded; #12 is still ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
@@ -967,6 +970,12 @@ let citation_cases =
     ( "a named entity that remains an opaque symbol",
       "PR&copy;12 is not a citation; #13 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "zero-width named entities remain opaque",
+      "PR&ZeroWidthSpace;12 and issue&NegativeThinSpace;13 are not citations; #14 is.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "literal Unicode whitespace",
+      "PR 12 and issue 13 remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "an ambiguous visible link label",
       "See [PR 12](https://example.test/review).\n",
       [ "qualified-citations @ f.md:1" ] );
@@ -976,6 +985,9 @@ let citation_cases =
     ( "inline HTML around only the label or number",
       "<strong>PR</strong> 12 and issue <em>13</em> remain ambiguous.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "HTML code-bearing elements remain opaque",
+      "<code>PR 12</code> and <kbd>issue 13</kbd> are examples; #14 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
     ( "emphasis around a hashless label or number",
       "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );

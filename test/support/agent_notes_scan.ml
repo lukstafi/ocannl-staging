@@ -685,6 +685,16 @@ let thematic_break stripped =
     Some "a thematic break or a setext heading underline, neither of which the notes use"
   else None
 
+(** Whether [inside] begins with CommonMark's two-to-32-character URI scheme. *)
+let valid_uri_scheme inside =
+  match String.index inside ':' with
+  | Some colon when colon >= 2 && colon <= 32 ->
+      Char.is_alpha inside.[0]
+      && String.for_all
+           (String.sub inside ~pos:1 ~len:(colon - 1))
+           ~f:(fun c -> Char.is_alphanum c || List.mem [ '+'; '-'; '.' ] c ~equal:Char.equal)
+  | _ -> false
+
 (** Whether the bytes between angle brackets form the payload of a CommonMark autolink. URI schemes
     have two to 32 characters and begin with a letter; email addresses carry an at-sign. Whitespace
     disqualifies both forms. *)
@@ -692,15 +702,7 @@ let autolink_contents inside =
   let no_whitespace =
     not (String.exists inside ~f:(fun c -> Char.equal c ' ' || Char.equal c '\t'))
   in
-  let uri =
-    match String.index inside ':' with
-    | Some colon when colon >= 2 && colon <= 32 ->
-        Char.is_alpha inside.[0]
-        && String.for_all
-             (String.sub inside ~pos:1 ~len:(colon - 1))
-             ~f:(fun c -> Char.is_alphanum c || List.mem [ '+'; '-'; '.' ] c ~equal:Char.equal)
-    | _ -> false
-  in
+  let uri = valid_uri_scheme inside in
   let email =
     let local_char c =
       Char.is_alphanum c
@@ -1396,6 +1398,27 @@ let autolink_spans ?spans line =
   in
   go 0 []
 
+(** GitHub-rendered bare scheme URLs. Their fragments are destination syntax just as they are in
+    bracketed links and angle-bracket autolinks. *)
+let bare_url_spans ?spans line =
+  let spans = match spans with Some s -> s | None -> inert_of_line line in
+  let n = String.length line in
+  let boundary i = i = 0 || not (Char.is_alphanum line.[i - 1]) in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if boundary i && Char.is_alpha line.[i] && not (in_any_span spans i) then (
+      let candidate = String.drop_prefix line i in
+      if not (valid_uri_scheme candidate) then go (i + 1) acc
+      else
+        let stop = ref i in
+        while !stop < n && (not (md_space line.[!stop])) && not (in_any_span spans !stop) do
+          Int.incr stop
+        done;
+        go !stop ((i, !stop) :: acc))
+    else go (i + 1) acc
+  in
+  go 0 []
+
 let opaque_prose = '\001'
 
 let entity_whitespace_names =
@@ -1416,16 +1439,12 @@ let entity_whitespace_names =
     "VeryThinSpace";
     "MediumSpace";
     "ThickSpace";
-    "NegativeVeryThinSpace";
-    "NegativeThinSpace";
-    "NegativeMediumSpace";
-    "NegativeThickSpace";
-    "ZeroWidthSpace";
   ]
 
 let unicode_whitespace =
   [
     0x00a0;
+    0x0085;
     0x1680;
     0x2000;
     0x2001;
@@ -1445,10 +1464,13 @@ let unicode_whitespace =
     0x3000;
   ]
 
+let is_unicode_whitespace value =
+  List.mem [ 9; 10; 11; 12; 13; 32 ] value ~equal:Int.equal
+  || List.mem unicode_whitespace value ~equal:Int.equal
+
 let rendered_entity_value value =
-  if List.mem [ 9; 10; 11; 12; 13; 32 ] value ~equal:Int.equal then ' '
+  if is_unicode_whitespace value then ' '
   else if value <= 0x7f then Char.of_int_exn value
-  else if List.mem unicode_whitespace value ~equal:Int.equal then ' '
   else opaque_prose
 
 let rendered_named_entity name =
@@ -1506,10 +1528,12 @@ let markdown_entities ?spans line =
   in
   go 0 []
 
-(** Inline raw-HTML tag syntax. Element text stays prose; only opening/closing tags and attributes
+type inline_html = { span : int * int; name : string; closing : bool; self_closing : bool }
+
+(** Inline raw-HTML tags. Element text stays prose; only opening/closing tags and attributes
     disappear. Autolinks have already been classified separately and do not satisfy the tag-name
-    boundary here. *)
-let inline_html_spans ?spans line =
+    boundary here. The tag identity also lets code-bearing elements become opaque as a whole. *)
+let inline_html_parts ?spans line =
   let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
   let rec close_tag i quote =
@@ -1526,7 +1550,8 @@ let inline_html_spans ?spans line =
   let rec go i acc =
     if i >= n then List.rev acc
     else if Char.equal line.[i] '<' && (not (in_any_span spans i)) && not (escaped_at line i) then (
-      let name_start = if i + 1 < n && Char.equal line.[i + 1] '/' then i + 2 else i + 1 in
+      let closing = i + 1 < n && Char.equal line.[i + 1] '/' in
+      let name_start = if closing then i + 2 else i + 1 in
       if name_start >= n || not (Char.is_alpha line.[name_start]) then go (i + 1) acc
       else
         let name_stop = ref (name_start + 1) in
@@ -1544,11 +1569,37 @@ let inline_html_spans ?spans line =
         if not boundary then go (i + 1) acc
         else
           match close_tag !name_stop None with
-          | Some close when not (in_any_span spans close) -> go (close + 1) ((i, close + 1) :: acc)
+          | Some close when not (in_any_span spans close) ->
+              let before_close = String.rstrip (String.sub line ~pos:i ~len:(close - i)) in
+              let self_closing = String.is_suffix before_close ~suffix:"/" in
+              let name =
+                String.sub line ~pos:name_start ~len:(!name_stop - name_start) |> String.lowercase
+              in
+              go (close + 1) ({ span = (i, close + 1); name; closing; self_closing } :: acc)
           | _ -> go (i + 1) acc)
     else go (i + 1) acc
   in
   go 0 []
+
+let inline_html_spans parts = List.map parts ~f:(fun tag -> tag.span)
+
+let html_code_spans parts =
+  let code_element name = List.mem [ "code"; "pre"; "kbd"; "samp" ] name ~equal:String.equal in
+  let rec go stack acc = function
+    | [] -> List.rev acc
+    | tag :: rest when not (code_element tag.name) -> go stack acc rest
+    | tag :: rest when tag.closing -> (
+        match stack with
+        | (name, start) :: stack_rest when String.equal name tag.name ->
+            let _, stop = tag.span in
+            go stack_rest ((start, stop) :: acc) rest
+        | _ -> go stack acc rest)
+    | tag :: rest when tag.self_closing -> go stack acc rest
+    | tag :: rest ->
+        let start, _ = tag.span in
+        go ((tag.name, start) :: stack) acc rest
+  in
+  go [] [] parts
 
 let inline_delimiter c = Char.equal c '*' || Char.equal c '_' || Char.equal c '~'
 
@@ -1616,6 +1667,25 @@ let inline_format_spans ~spans line =
   in
   collect 0 n []
 
+let utf8_scalar_at line i =
+  let n = String.length line in
+  let byte j = Char.to_int line.[j] in
+  let continuation j = j < n && byte j land 0xc0 = 0x80 in
+  let b0 = byte i in
+  if b0 land 0x80 = 0 then (b0, 1)
+  else if b0 land 0xe0 = 0xc0 && continuation (i + 1) then
+    (((b0 land 0x1f) lsl 6) lor (byte (i + 1) land 0x3f), 2)
+  else if b0 land 0xf0 = 0xe0 && continuation (i + 1) && continuation (i + 2) then
+    (((b0 land 0x0f) lsl 12) lor ((byte (i + 1) land 0x3f) lsl 6) lor (byte (i + 2) land 0x3f), 3)
+  else if b0 land 0xf8 = 0xf0 && continuation (i + 1) && continuation (i + 2) && continuation (i + 3)
+  then
+    ( ((b0 land 0x07) lsl 18)
+      lor ((byte (i + 1) land 0x3f) lsl 12)
+      lor ((byte (i + 2) land 0x3f) lsl 6)
+      lor (byte (i + 3) land 0x3f),
+      4 )
+  else (b0, 1)
+
 (** The prose a reader sees on a line. Link labels and inline-HTML element text remain; markup,
     destinations, autolinks, comments, and fenced content disappear. Formatting delimiters disappear
     around their content. Images and excluded inline code become opaque barriers, and entities
@@ -1625,15 +1695,17 @@ let citation_line ~inert_spans ~invisible_spans line =
   let links = markdown_link_parts ~spans:inert_spans line in
   let autolinks = autolink_spans ~spans:inert_spans line in
   let link_markup = link_markup_spans links in
-  let html = inline_html_spans ~spans:(inert_spans @ link_markup @ autolinks) line in
+  let html_parts = inline_html_parts ~spans:(inert_spans @ link_markup @ autolinks) line in
+  let html = inline_html_spans html_parts in
+  let bare_urls = bare_url_spans ~spans:(inert_spans @ link_markup @ autolinks @ html) line in
   let code_spans =
     List.filter inert_spans ~f:(fun span ->
         not
           (List.mem invisible_spans span ~equal:(fun (a_start, a_stop) (b_start, b_stop) ->
                a_start = b_start && a_stop = b_stop)))
   in
-  let opaque_spans = code_spans @ image_spans links in
-  let hidden_without_format = invisible_spans @ link_markup @ autolinks @ html in
+  let opaque_spans = code_spans @ image_spans links @ html_code_spans html_parts in
+  let hidden_without_format = invisible_spans @ link_markup @ autolinks @ bare_urls @ html in
   let formatting = inline_format_spans ~spans:(hidden_without_format @ opaque_spans) line in
   let hidden = formatting @ hidden_without_format in
   let entities = markdown_entities ~spans:(hidden @ opaque_spans) line in
@@ -1653,8 +1725,10 @@ let citation_line ~inert_spans ~invisible_spans line =
           | None when in_any_span opaque_spans i -> go (i + 1) entities
           | None when in_any_span hidden i -> go (i + 1) entities
           | None ->
-              Buffer.add_char rendered line.[i];
-              go (i + 1) entities)
+              let value, width = utf8_scalar_at line i in
+              if is_unicode_whitespace value then Buffer.add_char rendered ' '
+              else Buffer.add_substring rendered line ~pos:i ~len:width;
+              go (i + width) entities)
   in
   go 0 entities;
   Buffer.contents rendered

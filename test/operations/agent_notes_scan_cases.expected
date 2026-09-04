@@ -149,15 +149,19 @@ ok: citations -- balanced parentheses in a numeric URL fragment
 ok: citations -- an apostrophe in a numeric URL fragment
 ok: citations -- a quoted link title containing a parenthesis
 ok: citations -- a numeric autolink fragment
+ok: citations -- a bare scheme URL fragment
 ok: citations -- a decimal entity and a separate bare citation
 ok: citations -- an entity that renders citation whitespace
 ok: citations -- ASCII newline and carriage-return entities render whitespace
 ok: citations -- entities that render a hash or work label
 ok: citations -- named entities that render a hash or whitespace
 ok: citations -- a named entity that remains an opaque symbol
+ok: citations -- zero-width named entities remain opaque
+ok: citations -- literal Unicode whitespace
 ok: citations -- an ambiguous visible link label
 ok: citations -- links around only the label or number
 ok: citations -- inline HTML around only the label or number
+ok: citations -- HTML code-bearing elements remain opaque
 ok: citations -- emphasis around a hashless label or number
 ok: citations -- emphasis inside a hashless label
 ok: citations -- emphasis around a soft-wrapped reference
