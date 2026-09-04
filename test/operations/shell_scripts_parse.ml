@@ -877,6 +877,22 @@ module Errexit_negation = struct
     in
     loop index `None false 1
 
+  let brace_group_runs_outside_parent line index =
+    let after_group = skip_parameter_expansion line (index + 1) in
+    let rec skip_space index =
+      if index < String.length line && Char.is_whitespace line.[index] then skip_space (index + 1)
+      else index
+    in
+    let operator = skip_space after_group in
+    if
+      operator < String.length line
+      && (Char.equal line.[operator] '|'
+          && (operator + 1 >= String.length line || not (Char.equal line.[operator + 1] '|'))
+         || Char.equal line.[operator] '&'
+            && (operator + 1 >= String.length line || not (Char.equal line.[operator + 1] '&')))
+    then Some after_group
+    else None
+
   let command_fragments line =
     let length = String.length line in
     let add_fragment fragments start finish affects_parent =
@@ -938,6 +954,10 @@ module Errexit_negation = struct
               loop (index + 1) start `Double false nesting pipeline fragments
             else if Char.equal character '`' then
               loop (index + 1) start `Backtick_none false nesting pipeline fragments
+            else if Char.equal character '{' then
+              match brace_group_runs_outside_parent line index with
+              | Some after_group -> loop after_group start `None false nesting pipeline fragments
+              | None -> loop (index + 1) start `None false nesting pipeline fragments
             else if List.mem [ '('; '[' ] character ~equal:Char.equal then
               loop (index + 1) start `None false (nesting + 1) pipeline fragments
             else if List.mem [ ')'; ']' ] character ~equal:Char.equal then
@@ -1072,14 +1092,18 @@ module Errexit_negation = struct
           | Some false -> strip_redirections (List.drop rest 1)
           | None -> word :: strip_redirections rest)
     in
-    let rec drop_assignments = function
-      | word :: rest when assignment_prefix word -> drop_assignments rest
-      | word :: rest when String.equal (literal_shell_word word) "{" -> drop_assignments rest
+    let rec drop_command_prefixes = function
+      | word :: rest when assignment_prefix word -> drop_command_prefixes rest
+      | word :: rest
+        when List.mem
+               [ "{"; "!"; "if"; "while"; "until"; "then"; "else"; "elif"; "do" ]
+               (literal_shell_word word) ~equal:String.equal ->
+          drop_command_prefixes rest
       | words -> words
     in
     match
       shell_words (String.strip command)
-      |> strip_redirections |> drop_assignments |> List.map ~f:literal_shell_word
+      |> strip_redirections |> drop_command_prefixes |> List.map ~f:literal_shell_word
     with
     | "set" :: options -> options_enable_errexit options
     | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
@@ -1276,6 +1300,12 @@ module Errexit_negation = struct
       ("set inside brace group", "{ set -e; }\n! grep -q missing output\n", [ 2 ]);
       ("set inside later brace group", "prepare; { set -e; }\n! grep -q missing output\n", [ 2 ]);
       ("set inside parenthesized group", "( set -e; )\n! grep -q missing output\n", []);
+      ("set inside piped brace group", "{ set -e; } | cat\n! grep -q missing output\n", []);
+      ("set inside pipe-and brace group", "{ set -e; } |& cat\n! grep -q missing output\n", []);
+      ("set inside background brace group", "{ set -e; } &\n! grep -q missing output\n", []);
+      ("set in if condition", "if set -e; then :; fi\n! grep -q missing output\n", [ 2 ]);
+      ("set in while condition", "while set -e; do :; done\n! grep -q missing output\n", [ 2 ]);
+      ("set in then body", "if true; then set -e; fi\n! grep -q missing output\n", [ 2 ]);
       ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
