@@ -1262,15 +1262,17 @@ that they earn a lookup rather than always-loaded space.
   It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
   `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
-  `data_only_dirs`, dependency-list `include`, explicit (file or directory, including files below a
-  directory target) or
+  `data_only_dirs`, dependency-list `include` or `read*` expansion, explicit (file or directory,
+  including files below a directory target) or
   action-inferred generated-target dependencies (including dependency pforms in fields or actions,
   pforms embedded in larger dependency/action atoms, literal file-input action positions, and
   output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
-  rules, an unresolved `chdir` around inferred output targets, an explicit `install` into section
-  `bin`, or unexpanded top-level `include` stanzas. A bare executable name
-  under an action-local PATH rewrite, a directory-level PATH rewrite (under any case spelling), or
-  an `env` stanza's `binaries` mapping is opaque too, including in transitively reached aliases. A
+  rules, a pform in an inferred output path, an unresolved `chdir` around inferred output targets,
+  an explicit `install` into section `bin`, or unexpanded top-level `include` stanzas. A bare
+  executable name is itself refused: its `.exe` suffix does not stop ambient PATH from selecting a
+  program outside the workspace. Action-local or directory-level PATH rewrites (under any case
+  spelling), and an `env` stanza's `binaries` mapping, are opaque too, including in transitively
+  reached aliases. A
   directory-level override follows Dune's scope: it reaches descendants of its own `(subdir …)`
   placement, not the parent or a sibling. Paths expanded from `%{exe:…}`, `%{dep:…}`, and named
   dependency pforms remain anchored to the stanza when the process runs under `chdir`; literal
