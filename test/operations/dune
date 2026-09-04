@@ -4822,7 +4822,7 @@
 (executable
  (name sweep_harness_driver)
  (modules sweep_harness_driver)
- (libraries unix))
+ (libraries unix arrayjit.ir))
 
 (executable
  (name verdict_skip_probe)
