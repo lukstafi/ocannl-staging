@@ -26,7 +26,7 @@ on_error() {
     environment_executed partial_matrix singleton_fail repeated_backend_fail \
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
     local_identity_error unsafe_identity_error matrix_error state_first state_same \
-    state_green state_unjudged state_regression state_after_fix state_moved; do
+    state_other_ref state_green state_unjudged state_regression state_after_fix state_moved; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -230,7 +230,7 @@ absent 'fingerprint moved since the previous failure' <<<"$state_first"
 # experiment. Without REF in the cursor key it becomes origin/master's green
 # predecessor and makes the unchanged standing failure below look regressive.
 state_other_ref=$(run_sweep_args --ref "$fixture_sha" --target state-probe)
-grep -q 'local/cc: incremental-pass' <<<"$state_other_ref"
+grep -q 'm4-max/cc: incremental-pass' <<<"$state_other_ref"
 
 state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
@@ -274,7 +274,7 @@ git -C "$main" push -q origin master
 inline_fix_sha=$(git -C "$main" rev-parse HEAD)
 inline_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$inline_failure \
   run_sweep_args --target inline-expect-probe)
-grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/inline_expect.ml last changed at $(printf '%s' "$inline_fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
+grep -q "m4-max/cc: REGRESSION OR FIX DID NOT TAKE -- test/inline_expect.ml last changed at $(printf '%s' "$inline_fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
   <<<"$inline_second"
 
 # An expected fixture merely listed in the failing stanza's deps is not the
@@ -290,15 +290,15 @@ absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_after_noise"
 absent 'fingerprint moved since the previous failure' <<<"$state_after_noise"
 
 state_green=$(run_sweep_args --target state-probe)
-grep -q 'local/cc: incremental-pass' <<<"$state_green"
+grep -q 'm4-max/cc: incremental-pass' <<<"$state_green"
 # A timeout judged nothing and must not erase that green predecessor. This is
 # the non-coverage shape that would otherwise make a real regression disappear.
 state_unjudged=$(SWEEP_TEST_OPAM_RC=142 SWEEP_TEST_OPAM_OUT='fixture timeout' \
   run_sweep_args --target state-probe)
-grep -q 'local/cc: timeout' <<<"$state_unjudged"
+grep -q 'm4-max/cc: timeout' <<<"$state_unjudged"
 state_regression=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
-grep -q 'local/cc: REGRESSION OR FIX DID NOT TAKE -- previous verdict was incremental-pass' \
+grep -q 'm4-max/cc: REGRESSION OR FIX DID NOT TAKE -- previous verdict was incremental-pass' \
   <<<"$state_regression"
 absent 'fingerprint moved since the previous failure' <<<"$state_regression"
 
@@ -312,7 +312,7 @@ git -C "$main" push -q origin master
 fix_sha=$(git -C "$main" rev-parse HEAD)
 state_after_fix=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
-grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc_expected.ml last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
+grep -q "m4-max/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc_expected.ml last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
   <<<"$state_after_fix"
 absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
 
@@ -320,7 +320,7 @@ moved_failure="$state_failure
 Error: a different fixture state failure."
 state_moved=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$moved_failure \
   run_sweep_args --target state-probe)
-grep -q 'local/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
+grep -q 'm4-max/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_moved"
 
 unit_state=$(grep -l "$(printf '^last_verdict\tfail$')" \
