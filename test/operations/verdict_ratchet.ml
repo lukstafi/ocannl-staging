@@ -849,8 +849,9 @@ let rec alias_quantifiers environment ?(positive = true) expr =
                     quantifiers_in ~positive:guard_positive guard))
           in
           guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
-  | Pexp_try (_, cases) ->
-      List.concat_map cases ~f:(fun case ->
+  | Pexp_try (body, cases) ->
+      alias_quantifiers environment ~positive body
+      @ List.concat_map cases ~f:(fun case ->
           let shadowed =
             pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
           in
@@ -1012,6 +1013,10 @@ and wrapper_signature environment expression =
     in
     List.rev_append local_aliases outer_aliases
   in
+  let shadow_aliases aliases pattern =
+    let shadowed = pattern_names pattern |> List.map ~f:fst |> Set.of_list (module String) in
+    List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name))
+  in
   let rec claim_calls aliases expression =
     match expression.pexp_desc with
     | Pexp_let (recursive, bindings, body) ->
@@ -1025,6 +1030,15 @@ and wrapper_signature environment expression =
     | Pexp_sequence (left, right) -> claim_calls aliases left @ claim_calls aliases right
     | Pexp_open (_, body) -> claim_calls aliases body
     | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> claim_calls aliases inner
+    | Pexp_ifthenelse (_, yes, no) ->
+        claim_calls aliases yes @ Option.value_map no ~default:[] ~f:(claim_calls aliases)
+    | Pexp_match (_, cases) ->
+        List.concat_map cases ~f:(fun case ->
+            claim_calls (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
+    | Pexp_try (body, cases) ->
+        claim_calls aliases body
+        @ List.concat_map cases ~f:(fun case ->
+            claim_calls (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
     | Pexp_apply (callee, arguments) ->
         Option.value_map (claim_target environment callee) ~default:[] ~f:(fun target ->
             [ (target, arguments, aliases) ])
@@ -1078,10 +1092,36 @@ and wrapper_signature environment expression =
             default_binding = None;
           }
   in
+  let forwarded_wrapper_slots ((_, wrapper), arguments, _) =
+    match wrapper with
+    | Some { claim_wrapper = Some slots; _ } ->
+        let supplied_unlabelled = List.length (unlabelled arguments) in
+        List.filter_map slots ~f:(fun slot ->
+            match (slot.label, slot.unlabelled_index) with
+            | None, Some index when index >= supplied_unlabelled ->
+                Some
+                  {
+                    slot with
+                    unlabelled_index = Some (unlabelled_parameters + index - supplied_unlabelled);
+                  }
+            | Some label, _ ->
+                let supplied =
+                  List.exists arguments ~f:(fun (argument_label, _) ->
+                      match argument_label with
+                      | Asttypes.Labelled found | Optional found -> String.equal found label
+                      | Nolabel -> false)
+                in
+                if supplied then None else Some slot
+            | None, Some _ | None, None -> None)
+    | Some { claim_wrapper = None; _ } | None -> []
+  in
   match calls with
   | [] -> None
   | ((kind, _), _, _) :: _ as calls ->
-      let partial_claim_slots = List.filter_map calls ~f:partial_claim_slot in
+      let partial_claim_slots =
+        List.filter_map calls ~f:partial_claim_slot
+        @ List.concat_map calls ~f:forwarded_wrapper_slots
+      in
       let claimed_names =
         List.concat_map calls ~f:(fun (target, arguments, aliases) ->
             claim_arguments target arguments
@@ -1800,6 +1840,11 @@ let () = check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check label = Verdict.pf "%s rows pass" label
 let () = check "all" (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a direct quantifier passed to a partially applied local wrapper",
+      {ocaml|let check label ok = Verdict.p label ok
+let use = check "all rows pass"
+let () = use (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "use" ] );
     ( "refuses a direct quantifier passed through a wrapper with tail setup",
       {ocaml|let check ok =
   let label = "all rows pass" in
@@ -1823,6 +1868,11 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
   Verdict.p "first rows pass" first;
   Verdict.p "second rows pass" second
 let () = check (List.for_all first_rows ~f:Fn.id) true|ocaml},
+      [ "check" ] );
+    ( "refuses a quantified argument claimed inside wrapper control flow",
+      {ocaml|let enabled = true
+let check ok = if enabled then Verdict.p "all rows pass" ok else ()
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
@@ -2053,6 +2103,11 @@ let () = Verdict.p "no rows match" result|ocaml},
       {ocaml|let result =
   let no = false in
   if List.exists rows ~f:Fn.id then no else true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
+    ( "refuses an aliased quantified condition in a protected try body",
+      {ocaml|let no = false
+let result = try if List.exists rows ~f:Fn.id then no else true with _ -> false
 let () = Verdict.p "no rows match" result|ocaml},
       [ "result" ] );
     ( "does not attribute a condition whose branches return the same literal",

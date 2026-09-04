@@ -58,10 +58,12 @@ inspects the possible payload of an unknown forwarded wrapper option: true
 refuses a direct quantifier passed to a partially applied Verdict claim: true
 refuses a direct quantifier passed to a curried partial Verdict wrapper: true
 refuses a direct quantifier passed to a formatted partial Verdict wrapper: true
+refuses a direct quantifier passed to a partially applied local wrapper: true
 refuses a direct quantifier passed through a wrapper with tail setup: true
 refuses a direct quantifier passed through a wrapper setup alias: true
 does not connect a wrapper parameter hidden by a setup constant: true
 refuses every quantified argument passed through a sequential wrapper: true
+refuses a quantified argument claimed inside wrapper control flow: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -108,6 +110,7 @@ accepts an inverted direct quantifier returned through an if condition: true
 refuses a direct if condition whose false outcome is a Boolean alias: true
 refuses a bound if condition whose false outcome is a Boolean alias: true
 refuses a direct if condition whose local false outcome is a Boolean alias: true
+refuses an aliased quantified condition in a protected try body: true
 does not attribute a condition whose branches return the same literal: true
 refuses a bound quantifier returned through a match guard: true
 accepts an inverted bound quantifier returned through a match guard: true

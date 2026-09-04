@@ -828,10 +828,12 @@ that they earn a lookup rather than always-loaded space.
   still owes, after any positional parameters a curried wrapper has already consumed. Tail-position
   setup (`let`, sequence, local open, or constraint) is unwrapped before wrapper recognition, while
   value aliases in that setup retain their connection to the claimed formal. Every claim in a
-  sequential wrapper contributes its Boolean slot, and partial `pf`/`claimf` calls count the literal
-  format's still-owed arguments before that slot. Its exact, stale-checked exemption list is only for
-  bindings whose intended passing meaning allows an empty population; synthetic controls include a
-  child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
+  sequential or control-flow wrapper contributes its Boolean slot, and partial `pf`/`claimf` calls
+  count the literal format's still-owed arguments before that slot. Partially applying an already
+  recognised local wrapper carries its remaining slots forward. Its exact, stale-checked exemption
+  list is only for bindings whose intended passing meaning allows an empty population; synthetic
+  controls include a child process the shipping ratchet demonstrably refuses (gh-ocannl-801,
+  gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
@@ -876,7 +878,8 @@ that they earn a lookup rather than always-loaded space.
   retain the existing conservative dependency traversal, while identical resolved branches prove
   that the condition does not contribute. Constructor-match outcomes and Boolean-comparison
   operands resolve the same aliases. Local opens are transparent to returned-quantifier analysis,
-  and `not @@ quantified` retains the same negative polarity as direct and piped `not`.
+  protected `try` expressions remain part of that analysis, and `not @@ quantified` retains the same
+  negative polarity as direct and piped `not`.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.
