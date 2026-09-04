@@ -839,8 +839,11 @@ case $sub in
       # leader still has the original token and safely identifies its group;
       # a missing leader while the group remains reachable can also mean a
       # live descendant survived TERM, so it is not permission to reuse.
-      group_identity_matches "$iter_dir" ||
-        die "iteration group $pg lost its leader identity but remains reachable; refusing to reuse $repeat_build"
+      if ! group_identity_matches "$iter_dir"; then
+        group_alive "$pg" &&
+          die "leaderless iteration group $pg survived TERM; refusing to reuse $repeat_build"
+        return 0
+      fi
       kill -KILL -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 -- "-$pg" 2>/dev/null || return 0
