@@ -292,6 +292,10 @@ val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind
     hardware axes). Chiefly for schedule transforms and the autotuner. *)
 
+val codegen_capabilities : t -> Ir.Backend_intf.codegen_capabilities
+(** Stable facts from the selected backend's C-syntax configuration. Use the compiled routine's
+    censuses for decisions that depend on a particular lowering or rendering. *)
+
 (** {2 Execution dependency tracking}
 
     Execution dependencies mirror compilation dependencies: they record which routines must execute

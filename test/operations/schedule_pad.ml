@@ -49,7 +49,6 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cpu = Sched.backend_is_cpu backend_name
 let on_gpu = Sched.backend_is_gpu backend_name
 
@@ -80,6 +79,14 @@ let triple paths = List.find_exn paths ~f:(fun p -> List.length p = 3)
 let m_ext, n_ext, k_ext = (33, 65, 70)
 let bm, bk = (16, 16)
 let simd_width = 32
+
+let padded_gpu_shape_accepts_mma =
+  match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+  | None -> false
+  | Some mma ->
+      let _, tile_n, _ = mma.Ir.Backend_intf.mma_tile in
+      let padded_n = (n_ext + 7) / 8 * 8 in
+      padded_n % tile_n = 0
 
 let run_serial ~name (out : Tensor.t) =
   let ctx, routine =
@@ -238,22 +245,16 @@ let () =
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx gc1.Tensor.value in
     p_all2 "padded staged+tensorized matmul parity (GPU)" got want ~f:approx;
-    let src = Generated.read "pad_gpu_mma" in
-    let has s = String.is_substring src ~substring:s in
-    if on_metal then
-      p "padded GPU intrinsics fire against the threadgroup fragment"
-        (has "simdgroup_multiply_accumulate"
-        && has "threadgroup float fragment_"
-        && not (has "Tile_mma renders the lane-0 scalar fallback"))
-    else
-      (* CUDA/HIP: the wmma tile is 16x16x16; the 8-padded n extent (72) declines the intrinsic and
-         the lane-0 fallback must still be correct — parity above is the pin. Pad-to-16 on all axes
-         is the autotune-seeded variant for these backends, so nothing here fires. *)
-      skipped "padded GPU intrinsics fire against the threadgroup fragment")
-  else
+    (* The schedule's tensorization pass pads n to 8 (72 here). Whether that shape reaches a real
+       intrinsic is a tile-capability question; the routine census is the authoritative outcome. *)
+    p "padded GPU intrinsics follow the advertised tile divisibility"
+      (Ir.C_syntax.equal_tensorization routine.mma.Ir.C_syntax.tensorization
+         (if padded_gpu_shape_accepts_mma then Ir.C_syntax.Tensorized
+          else Ir.C_syntax.Scalar_fallback)))
+  else (
     (* Keep the printed transcript identical across backends. *)
     skipped "padded staged+tensorized matmul parity (GPU)";
-  if not on_gpu then skipped "padded GPU intrinsics fire against the threadgroup fragment"
+    skipped "padded GPU intrinsics follow the advertised tile divisibility")
 
 (* === Autotune pad-composition seeding (issue task 3): the divisibility pre-filters are gone for
    fully staged tensorized pipelines — the awkward site seeds staged candidates on both the GPU MMA

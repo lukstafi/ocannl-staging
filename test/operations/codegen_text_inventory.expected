@@ -326,8 +326,6 @@ test/operations/schedule_pad.ml
     "(float)(0.0)"
     "Tile_mma register tiling"
     "Tile_mma renders the lane-0 scalar fallback"
-    "simdgroup_multiply_accumulate"
-    "threadgroup float fragment_"
     "tmma_"
     sprintf "< (int)(%d.0))) {"
 test/operations/schedule_pipelined_matmul.ml [also pins text this scan cannot name]

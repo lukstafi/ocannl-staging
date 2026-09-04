@@ -5,6 +5,7 @@ struct
   type buffer_ptr
 
   let name = Config.name
+  let codegen_capabilities () = Ir.Backend_intf.no_codegen_capabilities
 
   type procedure
 

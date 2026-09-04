@@ -479,6 +479,11 @@ module type C_syntax_config = sig
   val loop_index_type : string
   val extra_args : string list
   val typ_of_prec : Ops.prec -> string
+
+  val supports_f64 : bool
+  (** Whether [typ_of_prec] accepts f64 tensor storage. Explicit so capability queries need not
+      deliberately raise through a rendering function. *)
+
   val vec_typ_of_prec : length:int -> Ops.prec -> string
   val ident_blacklist : string list
 
@@ -792,6 +797,13 @@ module type C_syntax_config = sig
         (printf, fprintf, os_log), and prepending any necessary prefixes (like a log_id or
         captured_log_prefix) to the format string and arguments. *)
 end
+
+let codegen_capabilities (module Config : C_syntax_config) =
+  {
+    Backend_intf.supports_f64 = Config.supports_f64;
+    accum_prec = Config.accum_prec;
+    asynchronous_staging_copy = Option.is_some Config.async_copy;
+  }
 
 (** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32 is
     a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
@@ -1596,6 +1608,7 @@ struct
   let loop_index_type = if Utils.settings.large_models then "int64_t " else "int32_t "
   let extra_args = []
   let typ_of_prec = Ops.c_typ_of_prec
+  let supports_f64 = true
   let vec_typ_of_prec = Ops.c_vec_typ_of_prec
   let ptr_param_style = `Per_param
 

@@ -1606,6 +1606,12 @@ end = struct
         ^^ rparen ^^ semi)
   end
 
+  let codegen_capabilities () =
+    let module Config = Hip_syntax_config (struct
+      let procs = [||]
+    end) in
+    C_syntax.codegen_capabilities (module Config)
+
   (* hiprtc ships built-in HIP headers, and device-side printf needs no declaration on ROCm. *)
   let hip_includes =
     {|#include <hip/hip_fp16.h>

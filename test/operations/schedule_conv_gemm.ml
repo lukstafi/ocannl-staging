@@ -58,7 +58,23 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
-let on_metal = String.is_substring backend_name ~substring:"metal"
+
+let advertises_mma_format a_format b_format d_format =
+  match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+  | None -> false
+  | Some mma ->
+      List.exists mma.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
+          Ir.Backend_intf.equal_mma_input_format a a_format
+          && Ir.Backend_intf.equal_mma_input_format b b_format
+          && Ir.Backend_intf.equal_mma_input_format d d_format)
+
+let has_uniform_f32_mma =
+  advertises_mma_format Ir.Backend_intf.Mma_f32 Ir.Backend_intf.Mma_f32 Ir.Backend_intf.Mma_f32
+
+let has_tf32_mma =
+  advertises_mma_format Ir.Backend_intf.Mma_tf32 Ir.Backend_intf.Mma_tf32 Ir.Backend_intf.Mma_f32
+
+let has_f32_input_mma = has_uniform_f32_mma || has_tf32_mma
 
 module Generated = Test_utils.Generated
 
@@ -617,7 +633,7 @@ let () =
      kernel-window anchor, Tensorize at the backend lane width (the accumulator fragment stays
      resident across the whole kernel window, gh-ocannl-480/501). Tolerance tier: the reorder and
      the fragment arithmetic reassociate each element's reduction. --- *)
-  if on_metal then
+  if has_uniform_f32_mma then
     let x, kern, y = make_conv8 "cvu_g" in
     let conv_sched (site : Autotune.conv_site) _seg =
       let w =
@@ -676,7 +692,7 @@ let () =
   | [ r ] ->
       (* metal: the whole-extent staged flavor plus its pd2 pipelined twin (gh-ocannl-487). *)
       p "cvu: conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
-        (if on_metal then
+        (if has_uniform_f32_mma then
            r.Autotune.sketch_candidates = 0
            && r.Autotune.fiss_sketch_candidates = 2
            && r.Autotune.fiss_sketch_timed = 2
@@ -709,7 +725,7 @@ let () =
     let _, _, y = make_conv8_s2 "cvu2_r" in
     run_plain "cvu2_ref" y
   in
-  if on_metal || String.equal backend_name "cuda" then
+  if has_f32_input_mma then
     let x, kern, y = make_conv8_s2 "cvu2_g" in
     let conv_sched (site : Autotune.conv_site) _seg =
       let w =
@@ -770,7 +786,7 @@ let () =
   | [ r ] ->
       (* metal: the staged flavor plus its pd2 pipelined twin (gh-ocannl-487). *)
       p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
-        (if on_metal then
+        (if has_uniform_f32_mma then
            r.Autotune.sketch_candidates = 0
            && r.Autotune.fiss_sketch_candidates = 2
            && r.Autotune.fiss_sketch_timed = 2
@@ -924,7 +940,7 @@ let () =
       run_fiss_sched "cvb_cpu" y ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
     in
     p_all2 blocked_claim got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
-  else if on_metal then
+  else if has_uniform_f32_mma then
     let w =
       match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
       | Some m -> m.Ir.Backend_intf.mma_simd_width
@@ -960,7 +976,7 @@ let () =
          per-segment: whole-extent staged + one threadgroup-block (bm=8), each with its pd2
          pipelined twin (gh-ocannl-487) = 4. *)
       p "cvb: blocked flavors seeded per fission segment"
-        (if on_metal then r.Autotune.fiss_sketch_candidates = 4
+        (if has_uniform_f32_mma then r.Autotune.fiss_sketch_candidates = 4
          else if on_cpu then r.Autotune.fiss_sketch_candidates = 3
          else true)
   | _ -> p "cvb: blocked flavors seeded per fission segment" false);
@@ -1056,7 +1072,7 @@ let () =
          gated off on multi-companion segments. *)
       p "cvmb: blocked flavor seeded on the merged fission segment"
         (if on_cpu then r.Autotune.fiss_sketch_candidates = 6 && r.Autotune.fiss_sketch_timed = 6
-         else if on_metal then r.Autotune.fiss_sketch_candidates = 0
+         else if has_uniform_f32_mma then r.Autotune.fiss_sketch_candidates = 0
          else true)
   | _ -> p "cvmb: blocked flavor seeded on the merged fission segment" false);
   p_all2 "cvmb: tuned merged-blocked conv matches the untuned twin within tolerance" got_mb want_mb

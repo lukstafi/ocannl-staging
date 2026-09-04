@@ -74,6 +74,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Generated.init ~backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
+let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 
 open Verdict.Claims
 
@@ -198,13 +199,6 @@ let is_loop_rewrite (op : Sched.optop) =
    below, so it is created before the policy is resolved rather than at the first compile. *)
 let base_ctx = lazy (Context.auto ())
 
-(* Whether this target's fp16 arithmetic is genuinely 16-bit. The CC backend's hardware limits carry
-   [Cc_backend.has_native_fp16_arithmetic ()] verbatim (schedulers.ml), which is the same value
-   [Cc_backend.accum_prec] passes to [Numerics.cpu_compute_prec] — so the resolution below is the
-   backend's own, not an approximation of it. *)
-let native_fp16 =
-  lazy (Context.hardware_limits (Lazy.force base_ctx)).Ir.Backend_intf.native_fp16_arithmetic
-
 (* {1 Which reference the backend's policy selects}
 
    A baseline claim of the form "the executed value is ONE OF the two host references" cannot fail
@@ -214,48 +208,23 @@ let native_fp16 =
    be a label on stderr. So the reference is SELECTED here, from a statement of the policy that is
    independent of anything this run compiled or executed.
 
-   The CPU arm calls the library's own resolution — [Numerics.cpu_compute_prec] is verbatim what
-   [Cc_backend.accum_prec] is bound to — and passes it the target's real answer, taken from
-   {!native_fp16}. An earlier draft asked the question both ways and reported [Undecided] where they
-   differed, which left exactly the native-fp16 configuration unverified while every member went on
-   comparing against the same unchecked baseline (Codex P2, round 4). The capability is exposed, so
-   there is nothing to be undecided about.
-
-   The GPU arms restate their backends' [accum_prec], and the restatement is the point rather than
-   duplication to be refactored away: a table derived FROM the backend would agree with it by
-   construction and could not detect a regression in it. - metal_backend.ml: [half] and [bfloat] are
-   native MSL scalars that compute where they store, so 16-bit accumulators keep storage residency;
-   fp8 is not a type there and goes through f32. - cuda_backend.ml: bf16 -> f32, the hardware having
-   no bf16 accumulate; fp8 -> f32 under [narrow_compute_f32]; everything else itself. -
-   hip_backend.ml: RDNA WMMA has genuine bf16 and f16 accumulator variants, so 16-bit keeps its
-   storage residency and only fp8 widens. *)
+   The selected backend exposes the exact [C_syntax_config.accum_prec] resolution through
+   [Context.codegen_capabilities]. The test therefore asks the renderer policy directly instead of
+   maintaining four backend-name branches that could drift when a dialect gains a new lowering. *)
 
 type residency =
   | Wider  (** The accumulator resides above storage: the whole-nest reference. *)
   | At_storage  (** It resides at storage width: the per-step-narrowed reference. *)
-  | Undecided of string  (** This configuration's resolution is not visible from here. *)
 
 let same_prec a b = String.equal (Ops.prec_string a) (Ops.prec_string b)
 
 let expected_residency prec =
-  let narrow = (Numerics.get ()).Numerics.narrow_compute_f32 in
   let of_resolved resolved = if same_prec resolved prec then At_storage else Wider in
-  let has name = String.is_substring backend_name ~substring:name in
-  if on_cpu then
-    of_resolved (Numerics.cpu_compute_prec ~native_fp16_arithmetic:(Lazy.force native_fp16) prec)
-  else if has "metal" then match prec with Ops.Fp8_prec _ -> Wider | _ -> At_storage
-  else if has "cuda" then
-    match prec with
-    | Ops.Bfloat16_prec _ -> Wider
-    | Ops.Fp8_prec _ when narrow -> Wider
-    | _ -> At_storage
-  else if has "hip" then match prec with Ops.Fp8_prec _ when narrow -> Wider | _ -> At_storage
-  else Undecided ("no accumulator policy is recorded here for backend " ^ backend_name)
+  of_resolved (codegen_capabilities.Ir.Backend_intf.accum_prec prec)
 
 let residency_name = function
   | Wider -> "wider than storage (whole-nest)"
   | At_storage -> "storage width (per-step)"
-  | Undecided why -> "undecided: " ^ why
 
 (* Which storage precisions the warp-shuffle rendering of a [Workgroup_reduce] loop accepts on a GPU
    backend (gh-ocannl-682): it stages the value at the accumulator RESIDENCY, so it takes f32 itself
@@ -1660,19 +1629,14 @@ let () =
           Printf.sprintf "the %s %s matches the reference its backend's accumulator policy selects"
             prec_name what
         in
-        match expected_residency prec with
-        | Undecided why ->
-            Stdio.eprintf "  %s %s: %s\n%!" prec_name what why;
-            skipped claim;
-            None
-        | (Wider | At_storage) as residency ->
-            let want = match residency with Wider -> wide | _ -> stepped in
-            let ok = Array.for_all2_exn values want ~f:Float.equal in
-            if not ok then
-              Stdio.eprintf "  %s %s over %s: got [%s] want [%s] (policy says %s)\n" prec_name what
-                terms_desc (show values) (show want) (residency_name residency);
-            p claim ok;
-            Some residency
+        let residency = expected_residency prec in
+        let want = match residency with Wider -> wide | At_storage -> stepped in
+        let ok = Array.for_all2_exn values want ~f:Float.equal in
+        if not ok then
+          Stdio.eprintf "  %s %s over %s: got [%s] want [%s] (policy says %s)\n" prec_name what
+            terms_desc (show values) (show want) (residency_name residency);
+        p claim ok;
+        Some residency
       in
       let residency =
         selected ~terms:full ~terms_desc:"the full axis" got ~what:"serial baseline"
@@ -1916,7 +1880,7 @@ let () =
                     let full (_ : int) = cols in
                     match expected_residency prec with
                     | Wider -> whole_nest_ref ~terms:full ~from prec
-                    | At_storage | Undecided _ -> per_step_ref ~terms:full ~from prec)
+                    | At_storage -> per_step_ref ~terms:full ~from prec)
               in
               let ok = agrees got want in
               if not ok then Stdio.eprintf "  %s: got [%s] want [%s]\n" name (show got) (show want);

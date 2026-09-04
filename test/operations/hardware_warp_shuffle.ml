@@ -43,7 +43,8 @@ open Verdict.Claims
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_gpu = Ir.Schedule.backend_is_gpu backend_name
-let on_cpu = String.is_substring backend_name ~substring:"cc"
+let on_cpu = Ir.Schedule.backend_is_cpu backend_name
+let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 let single = Ir.Ops.single
 let bf16 = Ir.Ops.bfloat16
 let half = Ir.Ops.half
@@ -81,14 +82,13 @@ let render_rivals { n; term; narrow } =
   let storage_tree = reduce_storage_tree ~narrow partials in
   { once_narrowed; storage_tree; per_step }
 
-(* Which backends resolve a bf16 accumulator ABOVE its storage width (gh-ocannl-663), restated here
-   rather than derived from the backend so a regression in it is detectable: the CPU backends
-   compute narrow floats in f32, and CUDA mirrors its bf16 mma legs, whose f32 per-lane registers
-   the hardware gives it no bf16 alternative to. HIP's and Metal's tensor units accumulate in bf16
-   fragments, so their serial AND shuffle renderings keep bf16 residency — which for the shuffle
-   means the loud refusal, since a bf16 [ocannl_shfl_xor] overload is not something this rendering
-   asks backends for. *)
-let widens_bf16 = on_cpu || String.equal backend_name "cuda"
+(* Query the C-syntax accumulator policy itself (gh-ocannl-822). HIP and Metal keep bf16 residency,
+   which for the shuffle means a loud refusal because no bf16 shuffle overload is advertised. *)
+let widens_bf16 =
+  not
+    (Ir.Ops.equal_prec
+       (codegen_capabilities.Ir.Backend_intf.accum_prec Ir.Ops.bfloat16)
+       Ir.Ops.bfloat16)
 
 module Generated = Test_utils.Generated
 

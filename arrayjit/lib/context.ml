@@ -509,6 +509,10 @@ let hardware_limits ctx =
   let (module Backend) = backend_module ctx in
   Backend.hardware_limits ()
 
+let codegen_capabilities ctx =
+  let (module Backend) = backend_module ctx in
+  Backend.codegen_capabilities ()
+
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }

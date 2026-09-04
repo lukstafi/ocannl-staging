@@ -26,7 +26,7 @@ open Ocannl.Operation.DSL_modules
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_metal = String.is_substring backend_name ~substring:"metal"
+let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* Narrow on the DEVICE. [*. 1.] is the exact identity on every value below — signed zeros,
@@ -162,7 +162,7 @@ let () =
      the claim below compares against these same values, so nothing is lost by printing the host
      side. *)
   Array.iteri f64_vals ~f:(fun i v -> Stdio.printf "  f64 %h -> %h\n" v f64_host.(i));
-  (if on_metal then skipped f64_claim
+  (if not codegen_capabilities.Ir.Backend_intf.supports_f64 then skipped f64_claim
    else
      let dev = narrow_on_device ~src_prec:Ir.Ops.double f64_vals in
      p_all2 f64_claim dev f64_host ~f:(fun a b -> Float.equal a b));
