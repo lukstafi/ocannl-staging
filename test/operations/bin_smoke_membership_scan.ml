@@ -39,6 +39,7 @@ type alias_node = {
   aliases : string list;
   is_bin_smoke : bool;
   dependencies : string list;
+  target_dependencies : string list;
   dependency_errors : string list;
 }
 
@@ -79,6 +80,40 @@ let alias_dependencies ~subdir stanza =
   match Dune_scan.field stanza "deps" with
   | None -> ([], [])
   | Some deps -> collect (Sexp.List deps)
+
+let dependency_path ~subdir atom =
+  match Dune_scan.pieces atom with
+  | [ Dune_scan.Literal path ] -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+  | [ Dune_scan.Pform pform ] -> (
+      match String.lsplit2 pform ~on:':' with
+      | Some ("dep", path) -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+      | _ -> None)
+  | _ -> None
+
+let target_dependencies ~subdir stanza =
+  let rec collect = function
+    | Sexp.Atom atom -> Option.to_list (dependency_path ~subdir atom)
+    | Sexp.List (Sexp.Atom ("alias" | "alias_rec" | "env_var" | "universe") :: _) -> []
+    | Sexp.List (Sexp.Atom name :: values) when String.is_prefix name ~prefix:":" ->
+        List.concat_map values ~f:collect
+    | Sexp.List children -> List.concat_map children ~f:collect
+  in
+  match Dune_scan.field stanza "deps" with
+  | None -> []
+  | Some deps -> List.concat_map deps ~f:collect |> List.dedup_and_sort ~compare:String.compare
+
+let produced_targets ~subdir stanza =
+  match Dune_scan.head stanza with
+  | Some "rule" ->
+      List.concat_map [ "target"; "targets" ] ~f:(fun field ->
+          match Dune_scan.field stanza field with
+          | None -> []
+          | Some targets ->
+              List.filter_map targets ~f:(function
+                | Sexp.Atom target ->
+                    Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir target))
+                | Sexp.List _ -> None))
+  | _ -> []
 
 let rec contains_head expected = function
   | Sexp.Atom _ -> false
@@ -163,9 +198,10 @@ let smoke_targets_of_stanza ~dune_path ~subdir stanza =
 let target_name = function Local path -> path | Public name -> "%{bin:" ^ name ^ "}"
 
 let scan dune_files =
-  let declarations, executable_locals, alias_nodes, scan_errors =
-    List.fold dune_files ~init:([], [], [], [])
-      ~f:(fun (all_declarations, all_locals, all_nodes, all_errors) (dune_path, content) ->
+  let declarations, executable_locals, alias_nodes, generated_targets, scan_errors =
+    List.fold dune_files ~init:([], [], [], [], [])
+      ~f:(fun
+          (all_declarations, all_locals, all_nodes, all_targets, all_errors) (dune_path, content) ->
         try
           let stanzas = Dune_scan.stanzas content in
           let directory = path_dirname dune_path in
@@ -207,8 +243,12 @@ let scan dune_files =
                       aliases = List.map names ~f:(alias_key ~subdir);
                       is_bin_smoke = List.mem names "bin-smoke" ~equal:String.equal;
                       dependencies;
+                      target_dependencies = target_dependencies ~subdir stanza;
                       dependency_errors;
                     })
+          in
+          let generated_targets =
+            List.concat_map walked ~f:(fun (subdir, stanza) -> produced_targets ~subdir stanza)
           in
           let include_errors =
             List.concat_map walked ~f:(fun (_subdir, stanza) ->
@@ -219,11 +259,13 @@ let scan dune_files =
           ( List.rev_append declarations all_declarations,
             List.rev_append executable_locals all_locals,
             List.rev_append alias_nodes all_nodes,
+            List.rev_append generated_targets all_targets,
             List.rev_append declaration_errors (List.rev_append include_errors all_errors) )
         with exn ->
           ( all_declarations,
             all_locals,
             all_nodes,
+            all_targets,
             Printf.sprintf "cannot parse %s: %s" dune_path (Exn.to_string exn) :: all_errors ))
   in
   let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
@@ -245,6 +287,13 @@ let scan dune_files =
           if accepts_nonstandard_exit node.stanza then [ accepted_exit_error node.dune_path ]
           else []
         in
+        let generated_dependency_errors =
+          List.filter node.target_dependencies ~f:(fun dependency ->
+              List.mem generated_targets dependency ~equal:String.equal)
+          |> List.map ~f:(fun dependency ->
+              Printf.sprintf "%s: @bin-smoke reaches generated target dependency %s" node.dune_path
+                dependency)
+        in
         let dependencies, missing_dependency_errors =
           List.fold node.dependencies ~init:([], []) ~f:(fun (nodes, errors) dependency ->
               let found =
@@ -262,7 +311,9 @@ let scan dune_files =
           List.rev_append node.dependency_errors
             (List.rev_append command_errors
                (List.rev_append condition_errors
-                  (List.rev_append exit_errors (List.rev_append missing_dependency_errors errors))))
+                  (List.rev_append exit_errors
+                     (List.rev_append generated_dependency_errors
+                        (List.rev_append missing_dependency_errors errors)))))
         in
         visit visited targets errors (List.rev_append dependencies rest)
   in
@@ -422,6 +473,27 @@ let accepted_exit_fixture =
   (with-accepted-exit-codes 1
    (run %{exe:alpha.exe}))))|dune}
 
+let generated_target_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke.stamp)
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (touch %{target}))))
+(rule
+ (alias bin-smoke)
+ (deps smoke.stamp)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let rewritten_path_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (action
+  (setenv PATH elsewhere
+   (run alpha.exe))))|dune}
+
 let controls_hold () =
   let accepted = scan_bin_content complete_fixture in
   let refused = scan_bin_content missing_fixture in
@@ -436,6 +508,8 @@ let controls_hold () =
   let transitive = scan_bin_content transitive_duplicate_fixture in
   let external_result = scan_bin_content external_smoke_fixture in
   let accepted_exit = scan_bin_content accepted_exit_fixture in
+  let generated_target = scan_bin_content generated_target_fixture in
+  let rewritten_path = scan_bin_content rewritten_path_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "bin/beta.exe" ]
@@ -460,6 +534,14 @@ let controls_hold () =
   && List.mem external_result.errors (external_smoke_error "bin/dune") ~equal:String.equal
   && (not (complete accepted_exit))
   && List.mem accepted_exit.errors (accepted_exit_error "bin/dune") ~equal:String.equal
+  && (not (complete generated_target))
+  && List.mem generated_target.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete rewritten_path))
+  && List.mem rewritten_path.errors
+       (opaque_smoke_error "bin/dune" "alpha.exe, under `(setenv PATH elsewhere ...)`")
+       ~equal:String.equal
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)

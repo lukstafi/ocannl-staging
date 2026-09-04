@@ -191,6 +191,7 @@ ok: raw stanzas -- a non-path form in a binding is not its value
 ok: raw stanzas -- and a binding of only a non-path form resolves to nothing
 ok: raw stanzas -- a binding outside the deps field is not a binding
 ok: raw stanzas -- a bare command under setenv PATH is unnameable
+ok: raw stanzas -- a bare executable-looking command under setenv PATH is unnameable
 ok: raw stanzas -- but a named executable under one is still a run
 ok: raw stanzas -- two bare ones are two, and repeats collapse
 ok: raw stanzas -- a shell line alongside one is a different thing

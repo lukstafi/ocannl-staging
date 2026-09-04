@@ -446,6 +446,11 @@ let is_absolute path =
 let is_explicit_path path =
   (not (is_absolute path)) && (String.is_prefix path ~prefix:"./" || String.contains path '/')
 
+let is_path_lookup_token token =
+  match pieces token with
+  | [ Literal _ ] -> (not (is_absolute token)) && not (is_explicit_path token)
+  | _ -> false
+
 let classify_command ~named_deps cmd =
   let explicit = is_explicit_path cmd in
   let cmd = program_path cmd in
@@ -699,9 +704,10 @@ let classified_commands_with_pins_preserving_multiplicity stanza =
        wherever it is (Codex P2, round 13). *)
     | Elsewhere (what, command) -> (
         match classify command with External -> External | _ -> Unknown_directory what)
-    (* Under a rewritten PATH the External verdict is the one that cannot be trusted: it was read
-       off a bare name, and PATH is what gives a bare name its meaning. A path-qualified command
-       still names what it names (Codex P2, round 16). *)
+    (* Under a rewritten PATH no BARE literal can be trusted, including [probe.exe]: the suffix
+       makes it workspace-shaped but does not stop PATH from selecting another file. A path or pform
+       still names what it names (gh-ocannl-874, Codex P2 round 4). *)
+    | Unnameable (what, Program (cmd, _)) when is_path_lookup_token cmd -> Path_rewritten what
     | Unnameable (what, command) -> (
         match classify command with External -> Path_rewritten what | other -> other)
   in
@@ -999,13 +1005,14 @@ let raw_stanza_of =
             | Some _ -> None
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
-  (* A command name PATH decides the meaning of: no pform to resolve, no extension and no explicit
-     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so
-     it places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the
-     opaque one both rest on, so they read one predicate rather than restating it. *)
+  (* A command name PATH decides the meaning of: no pform and no explicit path to read it off. An
+     [.exe] suffix makes the name workspace-shaped but does not stop PATH from selecting another
+     file. Under a rewritten PATH the walk refuses to vouch for such a name, so it places a site for
+     it wherever it runs -- which is what the [raw_unnameable] floor and the opaque one both rest
+     on, so they read one predicate rather than restating it. *)
   let is_bare_name cmd =
     (not (String.is_substring cmd ~substring:"%{"))
-    && (not (is_executable cmd))
+    && (not (is_absolute cmd))
     && not (is_explicit_path cmd)
   in
   (* Whether a command-line word names something this workspace provides, as far as the RAW TEXT can
@@ -1105,8 +1112,9 @@ let raw_stanza_of =
             raw_inline_tests = inline;
             raw_subdir = subdir;
             raw_runs =
-              List.filter_map placed ~f:(fun (cwd, cmd, _) ->
-                  if String.equal (program_path cmd) test_pform then None
+              List.filter_map placed ~f:(fun (cwd, cmd, under_path) ->
+                  if under_path && is_bare_name cmd then None
+                  else if String.equal (program_path cmd) test_pform then None
                   else
                     match program ~bindings cmd with Some path -> Some (cwd, path) | None -> None)
               |> List.dedup_and_sort ~compare:(fun (c1, e1) (c2, e2) ->

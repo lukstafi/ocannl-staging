@@ -751,10 +751,13 @@ let raw_stanza_cases =
       {dune|(rule (action (progn (:pp pp.exe) (run %{pp}))))|dune},
       [ "rule{?%{pp}, itself named out of this workspace}" ] );
     (* `(setenv PATH …)` changes what a bare name resolves to, so the walk stops vouching for the
-       program -- and the floor records that it must have said so. A command the text CAN name stays
-       an ordinary run even there, because the walk still names it. *)
+       program -- including an executable-looking literal -- and the floor records that it must have
+       said so. An explicit path or pform stays an ordinary run because PATH cannot redirect it. *)
     ( "a bare command under setenv PATH is unnameable",
       {dune|(rule (action (setenv PATH . (run probe))))|dune},
+      [ "rule{!}" ] );
+    ( "a bare executable-looking command under setenv PATH is unnameable",
+      {dune|(rule (action (setenv PATH . (run probe.exe))))|dune},
       [ "rule{!}" ] );
     ( "but a named executable under one is still a run",
       {dune|(rule (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
