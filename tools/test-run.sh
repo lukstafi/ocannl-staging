@@ -763,9 +763,12 @@ case $sub in
       printf '%s\n' "$repeats" >"$run_dir/repeats" &&
       printf '%s\n' "$alone" >"$run_dir/alone" &&
       printf '%s\n' "$$" >"$run_dir/wpid" &&
-      ps_token "$$" >"$run_dir/wtoken" &&
-      printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner"; } ||
+      ps_token "$$" >"$run_dir/wtoken"; } ||
       die "cannot record repeat metadata in $run_dir"
+    # A repeat can be long enough to manage from another shell. Publish only
+    # after its coordinator identity exists, so status/wait/stop last all name
+    # this active set rather than an older ordinary run.
+    with_meta_lock publish_run || die "cannot publish repeat run $run_dir"
 
     repeat_sup=
     repeat_cancelled=
@@ -1366,7 +1369,13 @@ case $sub in
       digest "$run_dir"
       exit 0
     fi
-    if sup_alive "$run_dir"; then
+    if [ "$(cat "$run_dir/mode" 2>/dev/null)" = repeat ] && wrapper_alive "$run_dir"; then
+      # The coordinator owns the set-wide cancellation bit. Killing only the
+      # current capped supervisor would produce exit 143 and then let the outer
+      # loop launch every remaining iteration while stop claimed success.
+      kill -TERM "$(cat "$run_dir/wpid")" 2>/dev/null
+      echo "sent TERM to the repeat coordinator; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
+    elif sup_alive "$run_dir"; then
       kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       # Name the run explicitly (%q-quoted): `last` may resolve to a
       # DIFFERENT run when this stop targeted an identifier from another

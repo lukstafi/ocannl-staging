@@ -43,6 +43,8 @@
 #  11. stderr-only drift is reported separately and remains a green diagnostic.
 #  12. a red dune iteration keeps its nonzero exit code even when repeatable.
 #  13. `--alone` serializes dune with `-j 1` on every iteration.
+#  14. an active repeat is `last`, and `stop last` cancels the whole set after
+#      the current iteration rather than launching the remaining ones.
 
 set -u
 
@@ -138,6 +140,7 @@ livepid=""   # leg 2's live group leader
 leader=""    # the stop legs' current group leader
 member=""    # and the second process it put in that group
 member_token=""  # ... and its start token, since it is not this shell's child
+repeat_pid="" # leg 14's active repeat coordinator
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-run-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
@@ -177,6 +180,10 @@ cleanup() {
   # directly as well: a group kill that failed is exactly the case where it
   # would otherwise be left behind. Identity-checked -- see kill_member.
   if [ -n "${member:-}" ]; then kill_member; fi
+  if [ -n "${repeat_pid:-}" ] && kill -0 "$repeat_pid" 2>/dev/null; then
+    kill -TERM "$repeat_pid" 2>/dev/null
+    wait "$repeat_pid" 2>/dev/null
+  fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
   elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
@@ -701,6 +708,10 @@ n=0
 n=$((n + 1))
 printf '%s\n' "$n" >"$REPEAT_TEST_COUNTER"
 printf '%s\n' "$*" >>"$REPEAT_TEST_CALLS"
+if [ -n "${REPEAT_TEST_WAIT_PREFIX:-}" ]; then
+  : >"$REPEAT_TEST_WAIT_PREFIX.ready"
+  while [ ! -e "$REPEAT_TEST_WAIT_PREFIX.release" ]; do sleep 0.05; done
+fi
 case $REPEAT_TEST_MODE in
   stable) printf 'stable stdout\n'; printf 'stable stderr\n' >&2 ;;
   stdout) printf 'stdout %s\n' "$n"; printf 'stable stderr\n' >&2 ;;
@@ -722,6 +733,7 @@ repeat_probe() { # tag mode [repeat options/count/dune argv...]
   REPEAT_TEST_MODE=$mode \
   REPEAT_TEST_COUNTER=$TMP/$tag.counter \
   REPEAT_TEST_CALLS=$TMP/$tag.calls \
+  REPEAT_TEST_WAIT_PREFIX= \
   OCANNL_TOOL_TEST_RUNS=$runs \
   PATH=$repeat_bin:$PATH \
     "$repeat_root/tools/test-run.sh" repeat "$@" >"$TMP/$tag.out" 2>"$TMP/$tag.err"
@@ -779,6 +791,48 @@ if [ "$repeat_rc" = 0 ] && [ "$(grep -c -- '-j 1' "$TMP/repeat-alone.calls")" = 
 else
   report 1 "repeat: --alone serializes every dune iteration" \
     "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-alone.calls"); output: ${repeat_out:-<nothing>}"
+fi
+
+# An active repeat must replace `last`, and stop must signal the OUTER
+# coordinator so it records cancellation and refuses to start iteration two.
+repeat_stop_runs=$TMP/repeat-runs-stop
+repeat_stop_prefix=$TMP/repeat-stop
+mkdir -p "$repeat_stop_runs"
+: >"$TMP/repeat-stop.counter"
+: >"$TMP/repeat-stop.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=stable \
+REPEAT_TEST_COUNTER=$TMP/repeat-stop.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-stop.calls \
+REPEAT_TEST_WAIT_PREFIX=$repeat_stop_prefix \
+OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
+  >"$TMP/repeat-stop.out" 2>"$TMP/repeat-stop.err" &
+repeat_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -e "$repeat_stop_prefix.ready" ] && break
+  sleep 0.1
+done
+status_out=$(OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+  "$repeat_root/tools/test-run.sh" status last 2>"$TMP/repeat-stop-status.err")
+status_rc=$?
+stop_out=$(OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-stop-stop.err")
+stop_rc=$?
+touch "$repeat_stop_prefix.release"
+wait "$repeat_pid"
+repeat_stop_rc=$?
+repeat_pid=
+if [ "$status_rc" = 3 ] && grep -q '^running: ' <<<"$status_out" \
+   && [ "$stop_rc" = 0 ] && grep -q '^sent TERM to the repeat coordinator; ' <<<"$stop_out" \
+   && [ "$repeat_stop_rc" = 143 ] \
+   && [ "$(cat "$TMP/repeat-stop.counter")" = 1 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 1 of 3 iterations$' "$TMP/repeat-stop.out"; then
+  report 0 "repeat: last resolves active state and stop cancels the whole set"
+else
+  report 1 "repeat: last resolves active state and stop cancels the whole set" \
+    "status $status_rc: ${status_out:-<nothing>}; stop $stop_rc: ${stop_out:-<nothing>}; repeat $repeat_stop_rc: $(cat "$TMP/repeat-stop.out")"
 fi
 
 echo

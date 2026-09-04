@@ -808,8 +808,55 @@ state_field() { # state key -> first value
   awk -F '\t' -v key="$2" '$1 == key { print $2; exit }' "$1"
 }
 
-update_unit_state() { # machine backend outcome [fingerprint]
-  local machine=$1 backend=$2 outcome=$3 fp=${4:-}
+goldens_from_log() { # log destination -- source-tree paths at the pinned ref
+  local log=$1 destination=$2 locations source excerpt dune_file beg end dir token candidate
+  locations=$destination.locations.$$
+  source=$destination.source.$$
+  excerpt=$destination.excerpt.$$
+  : >"$destination" || die "cannot stage failing golden paths"
+
+  # Ordinary `(test)` failures name the expected file directly.
+  sed -n 's/^File "\([^"]*\.expected\)".*/\1/p' "$log" >>"$destination" ||
+    die "cannot extract directly named failing goldens"
+
+  # Explicit-rule tests often anchor only to the dune STANZA. Fingerprint
+  # normalization intentionally reduces that span to its alias/target, so read
+  # the exact source span at the pinned commit and derive its .expected inputs
+  # before normalization discards the relationship.
+  {
+    sed -n 's/^File "\([^"]*dune\)", line \([0-9][0-9]*\),.*/\1\t\2\t\2/p' "$log"
+    sed -n 's/^File "\([^"]*dune\)", lines \([0-9][0-9]*\)-\([0-9][0-9]*\),.*/\1\t\2\t\3/p' "$log"
+  } | sort -u >"$locations" || die "cannot extract failing dune spans"
+  while IFS=$'\t' read -r dune_file beg end; do
+    [ -n "$dune_file" ] || continue
+    # A diagnostic can point into an installed dependency or a generated dune
+    # file that is not source-controlled at this ref. It has no golden whose
+    # Git provenance this sweep can establish, so leave it out rather than
+    # turning a test failure into a harness error.
+    git -C "$MAIN" show "$full_sha:$dune_file" >"$source" 2>/dev/null || continue
+    sed -n "${beg},${end}p" "$source" >"$excerpt" ||
+      die "cannot read lines $beg-$end of $dune_file"
+    dir=${dune_file%/dune}
+    [ "$dir" != "$dune_file" ] || dir=.
+    while IFS= read -r token; do
+      [ -n "$token" ] || continue
+      token=${token#./}
+      candidate=$token
+      if ! git -C "$MAIN" cat-file -e "$full_sha:$candidate" 2>/dev/null; then
+        candidate=$dir/$token
+        candidate=${candidate#./}
+        git -C "$MAIN" cat-file -e "$full_sha:$candidate" 2>/dev/null || continue
+      fi
+      printf '%s\n' "$candidate" >>"$destination" ||
+        die "cannot stage failing golden path $candidate"
+    done < <(grep -oE '[A-Za-z0-9_.+/-]+\.expected' "$excerpt" | sort -u)
+  done <"$locations"
+  sort -u "$destination" -o "$destination" || die "cannot normalize failing golden paths"
+  rm -f "$locations" "$source" "$excerpt"
+}
+
+update_unit_state() { # machine backend outcome [fingerprint] [log]
+  local machine=$1 backend=$2 outcome=$3 fp=${4:-} log=${5:-}
   local label state stage previous_verdict previous_failure_ref
   local previous_fp current_goldens golden_paths path commit old_commit short old_short
   label=$machine/$backend
@@ -841,6 +888,7 @@ update_unit_state() { # machine backend outcome [fingerprint]
 
   if [ "$outcome" = fail ]; then
     [ -n "$fp" ] && [ -s "$fp" ] || die "no current failure fingerprint for $label"
+    [ -n "$log" ] && [ -f "$log" ] || die "no current failure log for $label"
     case $previous_verdict in
       pass | incremental-pass | legacy-pass)
         echo "  $label: REGRESSION OR FIX DID NOT TAKE -- previous verdict was $previous_verdict"
@@ -859,8 +907,7 @@ update_unit_state() { # machine backend outcome [fingerprint]
       fi
     fi
 
-    sed -n 's/^File "\([^"]*\.expected\)".*/\1/p' "$fp" | sort -u >"$golden_paths" ||
-      die "cannot extract failing goldens for $label"
+    goldens_from_log "$log" "$golden_paths"
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       commit=$(git -C "$MAIN" log -1 --format=%H "$full_sha" -- "$path" 2>/dev/null) ||
@@ -1061,7 +1108,7 @@ for unit in "${UNITS[@]}"; do
   case $outcome in
     fail | timeout | error) write_fingerprint "$log" "$machine/$backend" ;;
   esac
-  update_unit_state "$machine" "$backend" "$outcome" "${WRITTEN_FINGERPRINT:-}"
+  update_unit_state "$machine" "$backend" "$outcome" "${WRITTEN_FINGERPRINT:-}" "$log"
   WRITTEN_FINGERPRINT=
 done
 

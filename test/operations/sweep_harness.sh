@@ -93,7 +93,9 @@ printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/
 printf 'fixture\n' >"$main/fixture"
 mkdir -p "$main/test"
 printf 'initial golden\n' >"$main/test/unit.expected"
-git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/unit.expected
+printf '(rule\n (alias runtest-state-probe)\n (deps unit.expected)\n (action (diff unit.expected unit.actual)))\n' \
+  >"$main/test/dune"
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune test/unit.expected
 git -C "$main" commit -qm fixture
 git -C "$main" remote add origin "$origin"
 git -C "$main" push -q -u origin master
@@ -206,7 +208,10 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # hidden by yesterday's verdict. Every absent assertion is a negative control:
 # a sweep that shouts on the standing-red cases defeats the signal this state
 # exists to add.
-state_failure='File "test/unit.expected", line 1, characters 0-0:
+state_failure='File "test/dune", lines 1-4, characters 0-0:
+1 | (rule
+2 |  (alias runtest-state-probe)
+......
 FAILED: fixture state failure.'
 state_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
@@ -246,8 +251,8 @@ grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.expected last cha
   <<<"$state_after_fix"
 absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
 
-moved_failure='File "test/unit.expected", line 2, characters 0-0:
-FAILED: a different fixture state failure.'
+moved_failure="$state_failure
+Error: a different fixture state failure."
 state_moved=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$moved_failure \
   run_sweep_args --target state-probe)
 grep -q 'local/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
