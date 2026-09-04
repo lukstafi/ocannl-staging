@@ -770,6 +770,21 @@ EOF
 chmod +x "$repeat_bin/diff"
 
 repeat_out= repeat_rc= repeat_dir=
+await_fixture_ready() { # MARKER [ATTEMPTS] -- never assume the fixture arrived
+  local marker=$1 attempts=${2:-300} attempt=0
+  while [ "$attempt" -lt "$attempts" ]; do
+    [ -e "$marker" ] && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+# Negative control for the timeout half of the helper's contract. The live
+# fixtures below prove its success half; this absent marker must be refused.
+if await_fixture_ready "$TMP/repeat-never-ready" 1; then
+  echo "repeat fixture readiness accepted an absent marker" >&2
+  exit 2
+fi
 repeat_probe() { # tag mode [repeat options/count/dune argv...]
   local tag=$1 mode=$2 runs=$TMP/repeat-runs-$1
   shift 2
@@ -835,10 +850,11 @@ PATH=$repeat_bin:$PATH \
   "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
   >"$TMP/repeat-red-cancel.out" 2>"$TMP/repeat-red-cancel.err" &
 repeat_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -e "$repeat_red_cancel_prefix.ready" ] && break
-  sleep 0.1
-done
+if ! await_fixture_ready "$repeat_red_cancel_prefix.ready"; then
+  report 1 "repeat: earlier failure survives later cancellation" \
+    "setup timeout waiting for iteration two's readiness marker"
+  exit 1
+fi
 red_cancel_stop=$(OCANNL_TOOL_TEST_RUNS=$repeat_red_cancel_runs \
   "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-red-cancel-stop.err")
 red_cancel_stop_rc=$?
@@ -1003,10 +1019,11 @@ PATH=$repeat_bin:$PATH \
   "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
   >"$TMP/repeat-stop.out" 2>"$TMP/repeat-stop.err" &
 repeat_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -e "$repeat_stop_prefix.ready" ] && break
-  sleep 0.1
-done
+if ! await_fixture_ready "$repeat_stop_prefix.ready"; then
+  report 1 "repeat: last resolves active state and stop cancels the whole set" \
+    "setup timeout waiting for iteration one's readiness marker"
+  exit 1
+fi
 status_out=$(OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
   "$repeat_root/tools/test-run.sh" status last 2>"$TMP/repeat-stop-status.err")
 status_rc=$?
@@ -1051,10 +1068,11 @@ PATH=$repeat_bin:$PATH \
   "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
   >"$TMP/repeat-finalize.out" 2>"$TMP/repeat-finalize.err" &
 repeat_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -e "$repeat_finalize_prefix.ready" ] && break
-  sleep 0.1
-done
+if ! await_fixture_ready "$repeat_finalize_prefix.ready"; then
+  report 1 "repeat: cancellation during finalization still publishes a verdict" \
+    "setup timeout waiting for the comparison readiness marker"
+  exit 1
+fi
 kill -TERM -- "-$repeat_pid" 2>"$TMP/repeat-finalize-kill.err"
 finalize_kill_rc=$?
 wait "$repeat_pid"
