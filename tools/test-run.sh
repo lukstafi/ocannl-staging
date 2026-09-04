@@ -829,8 +829,6 @@ case $sub in
       [ -z "$repeat_cancelled" ] || break
       i=$(( i + 1 ))
     done
-    trap - INT TERM HUP
-
     # The isolated build tree can be very large (a training target pulls most
     # of the library graph). Only the diagnostic streams and pairwise diffs are
     # promised artifacts, so remove this exact generated child before keeping
@@ -906,6 +904,11 @@ case $sub in
       tee -a "$run_dir/log"
     [ -z "$repeat_cancelled" ] || printf 'repeat cancellation observed: %s\n' "$repeat_cancelled" >>"$run_dir/log"
     finish_run "$final_rc" || die "repeat finished but its verdict could not be recorded"
+    # Keep cancellation deferred through cleanup, comparison and the atomic
+    # verdict publication. Otherwise `stop last` can recognize this live
+    # coordinator, deliver TERM after the iterations, and leave a published
+    # run directory with no exit file for `wait` to consume.
+    trap - INT TERM HUP
     exec 9>&-
     exit "$final_rc"
     ;;
@@ -1207,12 +1210,20 @@ case $sub in
       [ ${#budget} -le 9 ] || die "--timeout too large (max 9 digits)"
       budget=$(( 10#$budget ))
     fi
-    # Bounded by construction: default budget is the run's own cap plus slack
-    # for cleanup, so a `wait` outlives a hung run only briefly -- never forever.
+    # Bounded by construction: default budget is every capped iteration plus
+    # one cleanup allowance, so a managed repeat does not time out merely
+    # because `cap` is per iteration. Ordinary runs have an implicit count 1.
     cap=$(cat "$run_dir/cap" 2>/dev/null) || cap=3600
     [ -n "$cap" ] || cap=3600
     cap=$(( 10#$cap )) # decimal, whatever an older run recorded
-    [ -n "$budget" ] || budget=$(( cap > 0 ? cap + 120 : 7200 ))
+    wait_repeats=1
+    if [ "$(cat "$run_dir/mode" 2>/dev/null)" = repeat ]; then
+      wait_repeats=$(cat "$run_dir/repeats" 2>/dev/null) || wait_repeats=1
+      case $wait_repeats in '' | *[!0-9]*) wait_repeats=1 ;; esac
+      wait_repeats=$(( 10#$wait_repeats ))
+      [ "$wait_repeats" -gt 0 ] || wait_repeats=1
+    fi
+    [ -n "$budget" ] || budget=$(( cap > 0 ? cap * wait_repeats + 120 : 7200 ))
     waited=0
     while [ ! -f "$run_dir/exit" ]; do
       # Every sleep here -- the poll AND the dead-supervisor grace -- is

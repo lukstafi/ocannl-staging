@@ -92,11 +92,12 @@ mkdir -p "$main/benchmarks/fixtures"
 printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/DIGESTS.txt"
 printf 'fixture\n' >"$main/fixture"
 mkdir -p "$main/test"
-printf 'initial golden\n' >"$main/test/unit.expected"
-printf '(rule\n (alias runtest-state-probe)\n (deps unit.expected)\n (action (diff unit.expected unit.actual)))\n' \
+printf 'initial golden\n' >"$main/test/unit.cc.expected"
+printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}.expected" unit.actual)))\n' \
   >"$main/test/dune"
-git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune test/unit.expected
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune test/unit.cc.expected
 git -C "$main" commit -qm fixture
+fixture_sha=$(git -C "$main" rev-parse HEAD)
 git -C "$main" remote add origin "$origin"
 git -C "$main" push -q -u origin master
 
@@ -218,6 +219,12 @@ state_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_first"
 absent 'fingerprint moved since the previous failure' <<<"$state_first"
 
+# A passing diagnostic run of an explicitly requested ref is a separate
+# experiment. Without REF in the cursor key it becomes origin/master's green
+# predecessor and makes the unchanged standing failure below look regressive.
+state_other_ref=$(run_sweep_args --ref "$fixture_sha" --target state-probe)
+grep -q 'local/cc: incremental-pass' <<<"$state_other_ref"
+
 state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_same"
@@ -239,15 +246,15 @@ absent 'fingerprint moved since the previous failure' <<<"$state_regression"
 # Land the exact kind of attempted fix #897 was about. The next sweep resolves
 # the new origin/master, finds that the currently failing golden's last-touch
 # commit moved, and prints both that commit and the previous failing copy's.
-printf 'attempted fix\n' >"$main/test/unit.expected"
-git -C "$main" add test/unit.expected
+printf 'attempted fix\n' >"$main/test/unit.cc.expected"
+git -C "$main" add test/unit.cc.expected
 git -C "$main" commit -qm 'attempted golden fix'
 git -C "$main" push -q origin master
 fix_sha=$(git -C "$main" rev-parse HEAD)
 old_sha=$(git -C "$main" rev-parse HEAD^)
 state_after_fix=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
-grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.expected last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$old_sha" | cut -c1-8))" \
+grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc.expected last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$old_sha" | cut -c1-8))" \
   <<<"$state_after_fix"
 absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
 
@@ -258,10 +265,11 @@ state_moved=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$moved_failure \
 grep -q 'local/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_moved"
 
-unit_state=$(find "$state/unit-state" -type f -name '*state-probe*.state' | head -1)
+unit_state=$(grep -l "$(printf '^last_verdict\tfail$')" \
+  "$state"/unit-state/*state-probe*.state | head -1)
 [ -n "$unit_state" ] && [ -f "$unit_state" ]
 grep -q '^last_verdict.fail$' "$unit_state"
-grep -q "^golden.$fix_sha.test/unit.expected$" "$unit_state"
+grep -q "^golden.$fix_sha.test/unit.cc.expected$" "$unit_state"
 
 # Two complete forced units expose only the INTERSECTION of their skip sets.
 # The three absent backends keep this a potential finding rather than a failure:

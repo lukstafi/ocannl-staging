@@ -515,8 +515,10 @@ that they earn a lookup rather than always-loaded space.
   iteration's separate stdout, stderr and exit status, and writes every pairwise diff. Stdout or status drift is red;
   stderr-only drift is called out separately and stays diagnostic-green. `--alone` adds `-j 1`,
   making the no-sibling rerun that distinguishes resource contention from intrinsic instability.
-  The set is published as this worktree's `last` run, and `stop last` signals its outer coordinator
-  so cancellation ends the set rather than merely killing one iteration and starting the next.
+  The set is published as this worktree's `last` run, `wait last` scales its default deadline by
+  the iteration count, and `stop last` signals its outer coordinator so cancellation ends the set
+  rather than merely killing one iteration and starting the next. Cancellation remains deferred
+  through comparison and atomic verdict publication, so every managed repeat leaves a verdict.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1624,9 +1626,12 @@ that they earn a lookup rather than always-loaded space.
   after green, or after one of those golden commits moves, is labeled `REGRESSION OR FIX DID NOT
   TAKE`; a changed fingerprint is reported against the previous failure rather than merely the
   previous run. Standing identical reds stay quiet, which is the signal-to-noise property the
-  cursor exists to preserve. Golden paths come from the full log and, where Dune names only an
-  explicit-rule stanza, from that exact source span at the pinned commit; the normalized
-  fingerprint deliberately no longer carries enough source relationship to recover them.
+  cursor exists to preserve. The cursor key includes the requested logical ref, so an exploratory
+  branch or historical run cannot become `origin/master`'s predecessor. Golden paths come from the
+  full log and, where Dune names only an explicit-rule stanza, from that exact source span at the
+  pinned commit; `%{read:...}` substitutions used by per-backend goldens are resolved before the Git
+  lookup. The normalized fingerprint deliberately no longer carries enough source relationship to
+  recover any of this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other

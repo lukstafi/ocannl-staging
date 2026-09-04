@@ -45,6 +45,8 @@
 #  13. `--alone` serializes dune with `-j 1` on every iteration.
 #  14. an active repeat is `last`, and `stop last` cancels the whole set after
 #      the current iteration rather than launching the remaining ones.
+#  15. cancellation during post-loop comparison still publishes a verdict.
+#  16. `wait`'s default bounded deadline covers every repeat iteration.
 
 set -u
 
@@ -721,6 +723,16 @@ case $REPEAT_TEST_MODE in
 esac
 EOF
 chmod +x "$repeat_bin/dune"
+cat >"$repeat_bin/diff" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [ -n "${REPEAT_TEST_DIFF_WAIT_PREFIX:-}" ]; then
+  : >"$REPEAT_TEST_DIFF_WAIT_PREFIX.ready"
+  while [ ! -e "$REPEAT_TEST_DIFF_WAIT_PREFIX.release" ]; do /bin/sleep 0.05; done
+fi
+exec "$REPEAT_TEST_REAL_DIFF" "$@"
+EOF
+chmod +x "$repeat_bin/diff"
 
 repeat_out= repeat_rc= repeat_dir=
 repeat_probe() { # tag mode [repeat options/count/dune argv...]
@@ -734,6 +746,8 @@ repeat_probe() { # tag mode [repeat options/count/dune argv...]
   REPEAT_TEST_COUNTER=$TMP/$tag.counter \
   REPEAT_TEST_CALLS=$TMP/$tag.calls \
   REPEAT_TEST_WAIT_PREFIX= \
+  REPEAT_TEST_DIFF_WAIT_PREFIX= \
+  REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
   OCANNL_TOOL_TEST_RUNS=$runs \
   PATH=$repeat_bin:$PATH \
     "$repeat_root/tools/test-run.sh" repeat "$@" >"$TMP/$tag.out" 2>"$TMP/$tag.err"
@@ -833,6 +847,85 @@ if [ "$status_rc" = 3 ] && grep -q '^running: ' <<<"$status_out" \
 else
   report 1 "repeat: last resolves active state and stop cancels the whole set" \
     "status $status_rc: ${status_out:-<nothing>}; stop $stop_rc: ${stop_out:-<nothing>}; repeat $repeat_stop_rc: $(cat "$TMP/repeat-stop.out")"
+fi
+
+# Keep the signal traps armed after the iteration loop: this fixture blocks
+# inside the first pairwise diff, then asks the separately invoked management
+# command to stop the published repeat. A default TERM during that window
+# kills the coordinator without an exit file; the deferred handler lets it
+# finish atomic verdict publication.
+repeat_finalize_runs=$TMP/repeat-runs-finalize
+repeat_finalize_prefix=$TMP/repeat-finalize
+mkdir -p "$repeat_finalize_runs"
+: >"$TMP/repeat-finalize.counter"
+: >"$TMP/repeat-finalize.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=stdout \
+REPEAT_TEST_COUNTER=$TMP/repeat-finalize.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-finalize.calls \
+REPEAT_TEST_WAIT_PREFIX= \
+REPEAT_TEST_DIFF_WAIT_PREFIX=$repeat_finalize_prefix \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+OCANNL_TOOL_TEST_RUNS=$repeat_finalize_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+  >"$TMP/repeat-finalize.out" 2>"$TMP/repeat-finalize.err" &
+repeat_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -e "$repeat_finalize_prefix.ready" ] && break
+  sleep 0.1
+done
+finalize_stop=$(OCANNL_TOOL_TEST_RUNS=$repeat_finalize_runs \
+  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-finalize-stop.err")
+finalize_stop_rc=$?
+touch "$repeat_finalize_prefix.release"
+wait "$repeat_pid"
+repeat_finalize_rc=$?
+repeat_pid=
+repeat_finalize_dir=$(find "$repeat_finalize_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+if [ "$finalize_stop_rc" = 0 ] \
+   && grep -q '^sent TERM to the repeat coordinator; ' <<<"$finalize_stop" \
+   && [ "$repeat_finalize_rc" = 143 ] \
+   && [ -n "$repeat_finalize_dir" ] \
+   && [ "$(cat "$repeat_finalize_dir/exit" 2>/dev/null)" = 143 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 2 of 2 iterations$' "$TMP/repeat-finalize.out"; then
+  report 0 "repeat: cancellation during finalization still publishes a verdict"
+else
+  report 1 "repeat: cancellation during finalization still publishes a verdict" \
+    "stop $finalize_stop_rc: ${finalize_stop:-<nothing>}; repeat $repeat_finalize_rc: $(cat "$TMP/repeat-finalize.out")"
+fi
+
+# The stored cap belongs to ONE iteration. Drive `wait` against a fabricated
+# live coordinator and a no-op sleep until its default deadline expires: cap 2
+# across 3 iterations must report 126 seconds, not the old single-cap 122.
+wait_runs=$TMP/repeat-runs-wait-budget
+wait_dir=$wait_runs/20000101T000000Z-1
+mkdir -p "$wait_dir" "$TMP/wait-bin"
+wait_dir_real=$(cd "$wait_dir" && pwd -P)
+printf 'build @cheap\n' >"$wait_dir/cmd"
+printf '2\n' >"$wait_dir/cap"
+printf 'repeat\n' >"$wait_dir/mode"
+printf '3\n' >"$wait_dir/repeats"
+printf '%s\n' "$$" >"$wait_dir/wpid"
+ps_token "$$" >"$wait_dir/wtoken"
+: >"$wait_dir/log"
+cat >"$TMP/wait-bin/sleep" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >>"$REPEAT_TEST_SLEEP_CALLS"
+EOF
+chmod +x "$TMP/wait-bin/sleep"
+: >"$TMP/repeat-wait-sleeps"
+wait_out=$(REPEAT_TEST_SLEEP_CALLS=$TMP/repeat-wait-sleeps \
+  OCANNL_TOOL_TEST_RUNS=$wait_runs PATH=$TMP/wait-bin:$PATH \
+  "$repeat_root/tools/test-run.sh" wait "$wait_dir" 2>"$TMP/repeat-wait.err")
+wait_rc=$?
+if [ "$wait_rc" = 124 ] \
+   && grep -q "^wait timed out after 126s: $wait_dir_real$" <<<"$wait_out" \
+   && [ "$(wc -l <"$TMP/repeat-wait-sleeps" | tr -d ' ')" = 26 ]; then
+  report 0 "repeat: wait default covers every per-iteration cap"
+else
+  report 1 "repeat: wait default covers every per-iteration cap" \
+    "exit $wait_rc; sleeps $(tr '\n' ',' <"$TMP/repeat-wait-sleeps"); output: ${wait_out:-<nothing>}"
 fi
 
 echo

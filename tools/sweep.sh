@@ -798,8 +798,11 @@ write_fingerprint() {
 # scope columns participate in the key.
 unit_state_path() { # machine backend -> path
   local raw readable crc
-  raw=$(printf '%s\t%s\t%s\t%s' "$1" "$2" "${TARGET:-<all>}" "$SLOW")
-  readable=$(printf '%s' "$1-$2-${TARGET:-all}-$SLOW" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)
+  # The requested logical ref is part of the experiment scope. A one-off old
+  # or feature ref must not become origin/master's green/red predecessor even
+  # when both happen to resolve to related commits.
+  raw=$(printf '%s\t%s\t%s\t%s\t%s' "$1" "$2" "${TARGET:-<all>}" "$SLOW" "$REF")
+  readable=$(printf '%s' "$1-$2-${TARGET:-all}-$SLOW-$REF" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)
   crc=$(printf '%s' "$raw" | cksum | awk '{print $1}')
   printf '%s/%s-%s.state' "$UNIT_STATES" "$readable" "$crc"
 }
@@ -808,8 +811,9 @@ state_field() { # state key -> first value
   awk -F '\t' -v key="$2" '$1 == key { print $2; exit }' "$1"
 }
 
-goldens_from_log() { # log destination -- source-tree paths at the pinned ref
-  local log=$1 destination=$2 locations source excerpt dune_file beg end dir token candidate
+goldens_from_log() { # log destination backend -- source-tree paths at the pinned ref
+  local log=$1 destination=$2 backend=$3 locations source excerpt dune_file beg end dir token candidate
+  local prefix rest read_path suffix read_source value
   locations=$destination.locations.$$
   source=$destination.source.$$
   excerpt=$destination.excerpt.$$
@@ -840,6 +844,44 @@ goldens_from_log() { # log destination -- source-tree paths at the pinned ref
     [ "$dir" != "$dune_file" ] || dir=.
     while IFS= read -r token; do
       [ -n "$token" ] || continue
+      # Dune expands `%{read:...}` before running diff, but its failure points
+      # back to the unexpanded source stanza. Resolve the two generated config
+      # readings used by this repository from the unit's canonical backend;
+      # for an ordinary checked-in read target, use its contents at full_sha.
+      while [[ $token == *'%{read:'*'}'* ]]; do
+        prefix=${token%%'%{read:'*}
+        rest=${token#*'%{read:'}
+        read_path=${rest%%'}'*}
+        suffix=${rest#*'}'}
+        case ${read_path##*/} in
+          ocannl_backend.txt) value=$backend ;;
+          ocannl_backend_extension.txt)
+            case $backend in
+              cc | multidev_cc) value=c ;;
+              cuda) value=cu ;;
+              hip) value=hip ;;
+              metal) value=metal ;;
+              *) value= ;;
+            esac
+            ;;
+          *)
+            read_source=$(perl -e '
+              my @out;
+              for (split m{/}, $ARGV[0]) {
+                next if $_ eq "" || $_ eq ".";
+                if ($_ eq "..") { @out or exit 1; pop @out }
+                else { push @out, $_ }
+              }
+              print join "/", @out
+            ' "$dir/$read_path") || { value=; break; }
+            value=$(git -C "$MAIN" show "$full_sha:$read_source" 2>/dev/null) || { value=; break; }
+            case $value in *$'\n'*) value=; break ;; esac
+            ;;
+        esac
+        [ -n "$value" ] || break
+        token=$prefix$value$suffix
+      done
+      [[ $token != *'%{read:'* ]] || continue
       token=${token#./}
       candidate=$token
       if ! git -C "$MAIN" cat-file -e "$full_sha:$candidate" 2>/dev/null; then
@@ -849,7 +891,7 @@ goldens_from_log() { # log destination -- source-tree paths at the pinned ref
       fi
       printf '%s\n' "$candidate" >>"$destination" ||
         die "cannot stage failing golden path $candidate"
-    done < <(grep -oE '[A-Za-z0-9_.+/-]+\.expected' "$excerpt" | sort -u)
+    done < <(grep -oE '[A-Za-z0-9_.+/%{}:-]+\.expected' "$excerpt" | sort -u)
   done <"$locations"
   sort -u "$destination" -o "$destination" || die "cannot normalize failing golden paths"
   rm -f "$locations" "$source" "$excerpt"
@@ -907,7 +949,7 @@ update_unit_state() { # machine backend outcome [fingerprint] [log]
       fi
     fi
 
-    goldens_from_log "$log" "$golden_paths"
+    goldens_from_log "$log" "$golden_paths" "$backend"
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       commit=$(git -C "$MAIN" log -1 --format=%H "$full_sha" -- "$path" 2>/dev/null) ||
