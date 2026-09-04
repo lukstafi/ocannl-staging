@@ -412,9 +412,10 @@
 # therefore not a throughput number and must not be compared against a batched per-kernel figure.
 # The ~25 ms top-up budget accumulates PER-LAUNCH samples in both modes, not queued-batch wall. A
 # fast queued candidate can therefore take all 64 timed batches (about 640 ms when calibration hits
-# the 10 ms target). Before those, one provisional and up to four validating batch probes take twelve
-# samples each, so five near-target probes cost about another 600 ms per candidate. These are
-# workload-dependent costs, not a shared wall-time ceiling; the exact worst-case dispatch-count
+# the 10 ms target). Before those, one provisional, up to four validating batch probes, and a final
+# confirmation take twelve samples each, so six near-target probes cost about another 720 ms per
+# candidate. These are workload-dependent costs, not a shared wall-time ceiling; the exact
+# worst-case dispatch-count
 # bounds are documented on Autotune.time_routine.
 # The objective is part of the schedule disk-cache key (the "timing" component), so entries do not
 # transfer between the two modes and entries written before gh-ocannl-755 are not replayed: an entry

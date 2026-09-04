@@ -629,13 +629,15 @@ files.
   launch and leave the final batch below the contention scale. The selected depth is validated by
   up to four further batch probes; each short probe refits the affine model. The first probe that
   reaches the target is first interpolated back inside a measured below/above bracket when it
-  overshoots, then confirmed at a 25% deeper depth and retained only when that batch is slower too,
-  so a single inflated validation window cannot select a shallow final depth. An unresolved
+  overshoots, then confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained
+  only when the inferred marginal work itself fills the target, so one fixed stall spanning both
+  probes cannot select a shallow final depth. An unresolved
   first pair retries at double depth, and the next fit uses the two batch observations so an
   inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
-  the target, one final confirmation is still taken. A non-monotone confirmation scales from that
-  deeper measured batch instead of returning to the earlier suspect target crossing; only an
-  invalid or genuinely cap-short batch remains unresolved there. After four noisy but resolved
+  the target, the interpolated target depth is still sampled and checked against the measured
+  overshoot. A non-monotone confirmation scales from the deeper measured batch instead of returning
+  to the earlier suspect target crossing; only an invalid or genuinely cap-short batch remains
+  unresolved there. After four noisy but resolved
   misses the latest projected depth wins rather than jumping
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
   On Metal's ~0.17 ms kernels the first probe already spans the target; its 25%-deeper confirmation

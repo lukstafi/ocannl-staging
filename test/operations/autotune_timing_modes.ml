@@ -145,6 +145,9 @@ let confirmation_cases =
     (* A stalled base followed by a clean deeper batch has negative apparent marginal cost. It must
        retry deeper, never accept the stalled base solely because its wall crossed the target. *)
     ("an inflated target-sized batch", 2, 12., 3, 0.4, 6, None);
+    (* Two nearby depths inside one shared stall still have a positive slope, but its marginal work
+       is nowhere near the target. The fixed stall must not masquerade as confirmation. *)
+    ("two target-sized batches dominated by a shared stall", 2, 12.2, 3, 12.3, 6, None);
     (* A resolved overshoot brackets the target. Interpolation should reduce it rather than
        preserving a batch substantially longer than the contention rule's stated scale. *)
     ("a batch probe that overshoots the target", 512, 8., 1024, 16., 640, Some 10.);
