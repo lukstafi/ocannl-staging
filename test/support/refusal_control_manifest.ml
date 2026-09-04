@@ -346,6 +346,9 @@ let raw_entries =
       ] );
     ( "shell_scripts_parse.ml",
       [
+        "[scanner-refusal:88b12da9841dbf6131676bf4fb0f4686] statement-position ! command";
+        "[scanner-refusal:003eba7381c87352fb02cd374fa62ea9] errexit-negation fixture";
+        "[scanner-refusal:b67c631ab7ecd7df55fc002761cf99f6] reaches the absent()-style";
         "[scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang";
         "[scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang";
         "[scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses";

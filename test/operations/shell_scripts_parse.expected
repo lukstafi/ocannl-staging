@@ -30,6 +30,101 @@ shebang "#!/usr/bin/env python3" is outside this check's scope: true
 shebang "#!/usr/bin/perl" is outside this check's scope: true
 shebang "" is outside this check's scope: true
 shebang " #!/bin/bash" is outside this check's scope: true
+errexit-negation fixture statement-position ! grep is classified as specified: true
+errexit-negation fixture combined errexit option is classified as specified: true
+errexit-negation fixture named errexit option is classified as specified: true
+errexit-negation fixture punctuated named errexit option is classified as specified: true
+errexit-negation fixture quoted named errexit option is classified as specified: true
+errexit-negation fixture quoted short errexit option is classified as specified: true
+errexit-negation fixture concatenated quoted errexit name is classified as specified: true
+errexit-negation fixture concatenated quoted short option is classified as specified: true
+errexit-negation fixture builtin set is classified as specified: true
+errexit-negation fixture command set is classified as specified: true
+errexit-negation fixture command -- set is classified as specified: true
+errexit-negation fixture command -p set is classified as specified: true
+errexit-negation fixture command -p -- set is classified as specified: true
+errexit-negation fixture builtin -- set is classified as specified: true
+errexit-negation fixture plus bundle before errexit is classified as specified: true
+errexit-negation fixture named plus option before errexit is classified as specified: true
+errexit-negation fixture assignment-prefixed set is classified as specified: true
+errexit-negation fixture append-assignment-prefixed set is classified as specified: true
+errexit-negation fixture quoted assignment-prefixed set is classified as specified: true
+errexit-negation fixture redirection-prefixed set is classified as specified: true
+errexit-negation fixture separate redirection-prefixed set is classified as specified: true
+errexit-negation fixture ampersand-redirection-prefixed set is classified as specified: true
+errexit-negation fixture separate ampersand-redirection-prefixed set is classified as specified: true
+errexit-negation fixture quoted set command is classified as specified: true
+errexit-negation fixture ANSI-C octal errexit option is classified as specified: true
+errexit-negation fixture ANSI-C hexadecimal errexit option is classified as specified: true
+errexit-negation fixture ANSI-C short Unicode errexit option is classified as specified: true
+errexit-negation fixture ANSI-C long Unicode errexit option is classified as specified: true
+errexit-negation fixture command-substitution assignment prefix is classified as specified: true
+errexit-negation fixture double-quoted command-substitution assignment prefix is classified as specified: true
+errexit-negation fixture double-quoted parameter-expansion assignment prefix is classified as specified: true
+errexit-negation fixture parameter-expansion assignment prefix is classified as specified: true
+errexit-negation fixture noclobber redirection-prefixed set is classified as specified: true
+errexit-negation fixture attached noclobber redirection-prefixed set is classified as specified: true
+errexit-negation fixture later set after set is classified as specified: true
+errexit-negation fixture later set after command is classified as specified: true
+errexit-negation fixture later set after AND is classified as specified: true
+errexit-negation fixture later set after OR is classified as specified: true
+errexit-negation fixture later set after async command is classified as specified: true
+errexit-negation fixture timed set is classified as specified: true
+errexit-negation fixture portable timed set is classified as specified: true
+errexit-negation fixture piped timed set does not affect parent is classified as specified: true
+errexit-negation fixture pipeline set does not affect parent is classified as specified: true
+errexit-negation fixture pipe-and set does not affect parent is classified as specified: true
+errexit-negation fixture background set does not affect parent is classified as specified: true
+errexit-negation fixture set after pipeline affects parent is classified as specified: true
+errexit-negation fixture set inside brace group is classified as specified: true
+errexit-negation fixture set inside later brace group is classified as specified: true
+errexit-negation fixture set inside parenthesized group is classified as specified: true
+errexit-negation fixture set inside piped brace group is classified as specified: true
+errexit-negation fixture set inside pipe-and brace group is classified as specified: true
+errexit-negation fixture set inside background brace group is classified as specified: true
+errexit-negation fixture set inside redirected piped brace group is classified as specified: true
+errexit-negation fixture set inside separately redirected piped brace group is classified as specified: true
+errexit-negation fixture set in if condition is classified as specified: true
+errexit-negation fixture set in while condition is classified as specified: true
+errexit-negation fixture set in then body is classified as specified: true
+errexit-negation fixture set in case arm is classified as specified: true
+errexit-negation fixture quoted set text is classified as specified: true
+errexit-negation fixture set text inside unquoted parameter expansion is classified as specified: true
+errexit-negation fixture set text inside unquoted command substitution is classified as specified: true
+errexit-negation fixture if ! command is classified as specified: true
+errexit-negation fixture while ! command is classified as specified: true
+errexit-negation fixture until ! command is classified as specified: true
+errexit-negation fixture ! command || fallback is classified as specified: true
+errexit-negation fixture ! command && continuation is classified as specified: true
+errexit-negation fixture command substitution is classified as specified: true
+errexit-negation fixture single-bracket test is classified as specified: true
+errexit-negation fixture double-bracket test is classified as specified: true
+errexit-negation fixture negation without errexit is classified as specified: true
+errexit-negation fixture quoted AND/OR text is classified as specified: true
+errexit-negation fixture nested AND/OR group is classified as specified: true
+errexit-negation fixture nested AND/OR substitution is classified as specified: true
+errexit-negation fixture nested AND/OR backtick substitution is classified as specified: true
+errexit-negation fixture nested AND/OR double-quoted backtick substitution is classified as specified: true
+errexit-negation fixture nested quotes in double-quoted substitution is classified as specified: true
+errexit-negation fixture nested quotes in parameter expansion is classified as specified: true
+errexit-negation fixture ANSI-C quoted AND/OR text is classified as specified: true
+errexit-negation fixture outer AND/OR after nested group is classified as specified: true
+errexit-negation fixture later OR after semicolon is classified as specified: true
+errexit-negation fixture later OR after async terminator is classified as specified: true
+errexit-negation fixture outer OR after stderr redirect is classified as specified: true
+errexit-negation fixture outer OR after descriptor redirect is classified as specified: true
+errexit-negation fixture outer OR after pipe-and is classified as specified: true
+errexit-negation fixture nested AND/OR in if command is classified as specified: true
+errexit-negation fixture outer OR after if command is classified as specified: true
+errexit-negation fixture if keyword used as an argument is classified as specified: true
+errexit-negation fixture nested if command is classified as specified: true
+errexit-negation fixture ordinary if argument before outer OR is classified as specified: true
+errexit-negation fixture nested AND/OR in while command is classified as specified: true
+errexit-negation fixture nested AND/OR in case command is classified as specified: true
+errexit-negation fixture bang-adjacent output redirect is classified as specified: true
+errexit-negation fixture bang-adjacent input redirect is classified as specified: true
+errexit-negation fixture bang-prefixed command name is classified as specified: true
+the statement-position ! grep fixture reaches the absent()-style refusal: true
 .github/actions/pin-revisions/resolve.sh parses: true
 benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
@@ -56,6 +151,9 @@ the scan reached at least the 12 shell scripts this repository is known to have:
 the scan reached the session hook and the suite runner: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:88b12da9841dbf6131676bf4fb0f4686] statement-position ! command
+  [scanner-refusal:003eba7381c87352fb02cd374fa62ea9] errexit-negation fixture
+  [scanner-refusal:b67c631ab7ecd7df55fc002761cf99f6] reaches the absent()-style
   [scanner-refusal:ac074b168e19f7f99423326fcdea5669] shebang
   [scanner-refusal:8743bc48ff2a3da0c15e40f654ad6ff7] shebang
   [scanner-refusal:15ee2c44c18fee32abb92315075e99ab] parses
