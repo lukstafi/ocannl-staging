@@ -520,7 +520,8 @@ that they earn a lookup rather than always-loaded space.
   rather than merely killing one iteration and starting the next. Cancellation remains deferred
   through comparison, and an exit finalizer publishes the verdict with further group signals
   ignored, so even a finalizer child killed by the original signal cannot strand the managed run.
-  Cancellation state and that finalizer are armed before the run is published as `last`.
+  Cancellation state and that finalizer are armed before the run is published as `last`; each
+  iteration rechecks cancellation immediately before and after supervisor launch.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded

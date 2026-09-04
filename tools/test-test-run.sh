@@ -48,6 +48,7 @@
 #  15. cancellation during post-loop comparison still publishes a verdict.
 #  16. `wait`'s default bounded deadline covers every repeat iteration.
 #  17. repeat cancellation state and traps precede publication as `last`.
+#  18. cancellation is checked on both sides of supervisor launch.
 
 set -u
 
@@ -773,6 +774,21 @@ if [ -n "$completed_line" ] && [ -n "$signal_trap_line" ] \
 else
   report 1 "repeat: cancellation lifecycle is armed before publication" \
     "completed=${completed_line:-missing} signal=${signal_trap_line:-missing} exit=${exit_trap_line:-missing} publish=${publish_line:-missing}"
+fi
+
+pre_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || break$' "$SRC" | head -1 | cut -d: -f1)
+launch_line=$(grep -n '^        perl -e "$capped_perl" -- "$cap" /bin/bash -c \\' "$SRC" | head -1 | cut -d: -f1)
+supervisor_line=$(grep -n '^      repeat_sup=\$!$' "$SRC" | cut -d: -f1)
+post_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || kill "-\$repeat_cancelled" "\$repeat_sup" 2>/dev/null$' "$SRC" | cut -d: -f1)
+if [ -n "$pre_launch_line" ] && [ -n "$launch_line" ] \
+   && [ -n "$supervisor_line" ] && [ -n "$post_launch_line" ] \
+   && [ "$pre_launch_line" -lt "$launch_line" ] \
+   && [ "$launch_line" -lt "$supervisor_line" ] \
+   && [ "$supervisor_line" -lt "$post_launch_line" ]; then
+  report 0 "repeat: cancellation brackets supervisor launch"
+else
+  report 1 "repeat: cancellation brackets supervisor launch" \
+    "pre=${pre_launch_line:-missing} launch=${launch_line:-missing} supervisor=${supervisor_line:-missing} post=${post_launch_line:-missing}"
 fi
 
 repeat_probe repeat-identical stable 3 build @cheap

@@ -828,12 +828,17 @@ case $sub in
         die "cannot record iteration $i command"
       printf 'repeat: iteration %s/%s -- dune%s\n' "$i" "$repeats" \
         "$([ "$alone" = 1 ] && printf ' (alone, -j 1)' || :)"
+      # A stop can land after the loop condition. Refuse a launch already
+      # known to be cancelled, then recheck immediately after starting the
+      # supervisor to close the unavoidable signal-between-commands window.
+      [ -z "$repeat_cancelled" ] || break
       OCANNL_TOOL_TESTRUN_BG=0 OCANNL_TOOL_TESTRUN_RD=$iter \
         perl -e "$capped_perl" -- "$cap" /bin/bash -c \
         'dune=$1; build=$2; shift 2; "$dune" clean --build-dir="$build" || exit 126; exec "$dune" "$@"' \
         -- "$DUNE" "$repeat_build" "${repeat_cmd[@]:1}" \
         >"$iter/stdout" 2>"$iter/stderr" &
       repeat_sup=$!
+      [ -z "$repeat_cancelled" ] || kill "-$repeat_cancelled" "$repeat_sup" 2>/dev/null
       { printf '%s\n' "$repeat_sup" >"$iter/pid" &&
         ps_token "$repeat_sup" >"$iter/ptoken" &&
         printf '%s\n' "$repeat_sup" >"$run_dir/pid" &&
