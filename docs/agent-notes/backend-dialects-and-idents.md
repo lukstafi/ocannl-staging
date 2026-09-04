@@ -189,6 +189,42 @@ files.
   backend whose hardware isn't attached (`.cu.expected` etc.) go stale until that hardware next
   runs the suite — expect re-promotes.
 
+## Choosing a backend-query seam
+
+The gh-ocannl-822 census sorted every production test that inferred a C-syntax capability by reading
+`backend_name` as a string. Use the same three-way question for the next site: a stable backend
+capability belongs on the backend's queryable codegen-capability record (like `hardware_limits`); a
+rendering or scheduling decision belongs in the routine/report census that records what actually
+happened; only a test of the emitted dialect itself should branch on the dialect name. Default an
+unclear site to the decision census, which is stronger than predicting a decision from
+configuration.
+
+| Bin | Production test | Fact being read and chosen seam |
+| --- | --- | --- |
+| capability | `accum_width.ml` | Resolved bf16 accumulator width; query `codegen_capabilities.accum_prec`. |
+| capability | `float_literal_forms.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
+| capability | `hardware_warp_shuffle.ml` | CPU family uses `Schedule.backend_is_cpu`; resolved bf16 accumulator width uses `codegen_capabilities.accum_prec`. |
+| capability | `reduction_forms.ml` | Resolved accumulator residency for each storage precision; query `codegen_capabilities.accum_prec`. |
+| capability | `schedule_conv_gemm.ml` | Which typed MMA formats the device advertises; derive the f32/tf32 legs from `hardware_limits.mma_format_tiles`. |
+| capability | `schedule_mma_matmul.ml` | The tf32-only leg; derive it from the advertised tf32 format rather than the CUDA spelling. Other sites in this file are dialect checks below. |
+| capability | `schedule_pad.ml` | Whether the padded extents fit the advertised MMA tile; compare `hardware_limits.mma_tile` with the extents, then check the routine census. |
+| capability | `schedule_pipelined_matmul.ml` | Whether asynchronous staging can render; query `codegen_capabilities.asynchronous_staging_copy`. Its declaration and barrier tokens remain dialect checks below. |
+| capability | `test_fp8_codec_parity.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
+| decision outcome | `autotune_fission_sketch.ml` | Whether tensorized candidates reached candidate compilation; read `Autotune.report.mma_candidates`, not a backend-specific seed-count floor. |
+| decision outcome | `schedule_batched_mma.ml` | Whether each sampled candidate rendered a tensor-core intrinsic; read `Context.routine.mma`. |
+| decision outcome | `schedule_contraction_nest.ml` | Whether each sampled tensorized contraction rendered an intrinsic; read `Context.routine.mma`. Its shared-memory token stays a dialect check below. |
+| dialect identity | `hardware_axes_parity.ml` | The test pins MSL `gid`/`lid`, CUDA/HIP `blockIdx`/`threadIdx`, and C serial-loop spellings. |
+| dialect identity | `hardware_workgroup_reduce.ml` | The test pins MSL `threadgroup`/`threadgroup_barrier` versus CUDA/HIP `__shared__`/`__syncthreads`. |
+| dialect identity | `schedule_batch_grid.ml` | The test pins the emitted folded batch-axis register, MSL `gid.z` versus CUDA/HIP `blockIdx.z`. |
+| dialect identity | `schedule_contraction_nest.ml` | The source assertion pins MSL `threadgroup` versus CUDA/HIP `__shared__`; the intrinsic decision is censused above. |
+| dialect identity | `schedule_epilogue_fusion.ml` | The test pins per-dialect fragment store and fused-epilogue ordering in emitted source. |
+| dialect identity | `schedule_ldmatrix_matmul.ml` | The test deliberately pins CUDA inline-PTX `ldmatrix` spellings and the non-CUDA decline form, cross-checked with the MMA census. |
+| dialect identity | `schedule_mma_matmul.ml` | The remaining sites pin CUDA WMMA/PTX, HIP rocWMMA, MSL simdgroup, and their documented hardware-specific tolerances. |
+| dialect identity | `schedule_pipelined_matmul.ml` | The test counts MSL versus CUDA/HIP shared-array and barrier tokens; the asynchronous-copy capability is queried above. |
+| dialect identity | `schedule_register_matmul.ml` | The test pins MSL `threadgroup` versus CUDA/HIP `__shared__` declarations. |
+| dialect identity | `schedule_smem_matmul.ml` | The test pins MSL shared declarations/barriers versus CUDA/HIP spellings. |
+| dialect identity | `schedule_swizzle_matmul.ml` | The test pins the MSL and CUDA/HIP shared declarations and intrinsic names around swizzled tiles. |
+
 - A backend's `C_syntax_config` binds what it inherits at `include Pure_C_config` time, and that has
   bitten three ways: emission code defined ABOVE the backend's `typ_of_prec` override captures
   Pure_C's C spelling (half renders as `HALF_T`); a module-level function whose name matches a config
