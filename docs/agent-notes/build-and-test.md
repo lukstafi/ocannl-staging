@@ -825,7 +825,7 @@ that they earn a lookup rather than always-loaded space.
   followed instead; a definitely supplied argument suppresses that edge, while an unknown
   forwarded option conservatively checks both its possible payload and the default. A partial
   application such as `let check = Verdict.p label` records the Boolean slot that its later call
-  still owes. Its exact,
+  still owes, after any positional parameters a curried wrapper has already consumed. Its exact,
   stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
   population; synthetic controls include a child process the shipping ratchet demonstrably refuses
   (gh-ocannl-801, gh-ocannl-887). An entry
@@ -862,7 +862,8 @@ that they earn a lookup rather than always-loaded space.
   `true`/`false` constructor match over a direct quantifier is recognized as either forwarding or
   inverting that Boolean, and the same polarity applies when the scrutinee is a bound quantifier;
   other constructor matches do not guess a polarity. Direct and bound quantifiers in `try`-handler
-  guards are treated like match guards, with polarity derived from the handler result. An aggregate
+  guards are treated like match guards, with polarity derived from the handler result; when that
+  result is not a syntactic Boolean literal, both polarities are retained conservatively. An aggregate
   bound before it is destructured conservatively retains every quantified component; literal tuple
   and record destructuring remains component-exact. A quantifier returned from a nested `let` is
   checked against witnesses inside that scope and then sealed, so an outer witness with the same

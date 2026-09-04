@@ -243,6 +243,11 @@ let boolean_match_polarity cases =
   | Some false, Some true -> Some false
   | _ -> None
 
+let result_polarities positive result =
+  if bool_literal result true then [ positive ]
+  else if bool_literal result false then [ not positive ]
+  else [ positive; not positive ]
+
 let is_boolean_comparison callee =
   is_name callee "=" || is_name callee "<>" || is_name callee "equal"
 
@@ -404,10 +409,9 @@ let rec returned_quantifiers ?(positive = true) expr =
       List.concat_map cases ~f:(fun case ->
           let guard_quantifiers =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
-                let guard_positive =
-                  if bool_literal case.pc_rhs false then not positive else positive
-                in
-                quantifiers_in ~positive:guard_positive guard)
+                result_polarities positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
           in
           guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
   | Pexp_let (_, bindings, body) ->
@@ -459,10 +463,9 @@ let rec returned_quantifiers ?(positive = true) expr =
           let returned_bindings = returned_binding_polarities positive case.pc_rhs in
           let guard_quantifiers =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
-                let guard_positive =
-                  if bool_literal case.pc_rhs false then not positive else positive
-                in
-                quantifiers_in ~positive:guard_positive guard)
+                result_polarities positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
           in
           guard_quantifiers
           @ returned_quantifiers ~positive case.pc_rhs
@@ -481,10 +484,9 @@ let rec returned_quantifiers ?(positive = true) expr =
       @ List.concat_map cases ~f:(fun case ->
           let guard_quantifiers =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
-                let guard_positive =
-                  if bool_literal case.pc_rhs false then not positive else positive
-                in
-                quantifiers_in ~positive:guard_positive guard)
+                result_polarities positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
           in
           guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
   | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
@@ -755,6 +757,12 @@ and wrapper_signature environment expression =
     | _ -> (parameters, expression)
   in
   let parameters, body = parameters_and_body [] expression in
+  let unlabelled_parameters =
+    List.count parameters ~f:(fun parameter ->
+        match parameter.pparam_desc with
+        | Pparam_val (Asttypes.Nolabel, _, _) -> true
+        | Pparam_val ((Labelled _ | Optional _), _, _) | Pparam_newtype _ -> false)
+  in
   match body.pexp_desc with
   | Pexp_apply (callee, arguments) -> (
       match claim_target environment callee with
@@ -763,12 +771,12 @@ and wrapper_signature environment expression =
           let partial_claim_slot =
             match target with
             | _, Some { claim_wrapper = Some _; _ } -> None
-            | _ when List.is_empty parameters && List.length (unlabelled arguments) = 1 ->
+            | _ when List.length (unlabelled arguments) = 1 ->
                 Some
                   {
                     label = None;
                     optional = false;
-                    unlabelled_index = Some 0;
+                    unlabelled_index = Some unlabelled_parameters;
                     positive = true;
                     default_binding = None;
                   }
@@ -891,8 +899,9 @@ and function_dependencies environment expr =
           in
           let guard_dependencies =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
-                let positive = not (bool_literal case.pc_rhs false) in
-                binding_dependencies ~positive case_environment guard)
+                result_polarities true case.pc_rhs
+                |> List.concat_map ~f:(fun positive ->
+                    binding_dependencies ~positive case_environment guard))
           in
           guard_dependencies @ function_dependencies case_environment case.pc_rhs)
   | _ -> binding_dependencies environment expr
@@ -957,10 +966,9 @@ and binding_dependencies ?(positive = true) environment expr =
                   not (Set.mem shadowed binding.name))
             in
             Option.iter case.pc_guard ~f:(fun guard ->
-                let guard_positive =
-                  if bool_literal case.pc_rhs false then not positive else positive
-                in
-                visit case_environment guard_positive false guard);
+                result_polarities positive case.pc_rhs
+                |> List.iter ~f:(fun guard_positive ->
+                    visit case_environment guard_positive false guard));
             visit case_environment positive forwards_guards case.pc_rhs)
     | Pexp_try (body, cases) ->
         visit environment positive forwards_guards body;
@@ -973,10 +981,9 @@ and binding_dependencies ?(positive = true) environment expr =
                   not (Set.mem shadowed binding.name))
             in
             Option.iter case.pc_guard ~f:(fun guard ->
-                let guard_positive =
-                  if bool_literal case.pc_rhs false then not positive else positive
-                in
-                visit case_environment guard_positive false guard);
+                result_polarities positive case.pc_rhs
+                |> List.iter ~f:(fun guard_positive ->
+                    visit case_environment guard_positive false guard));
             visit case_environment positive forwards_guards case.pc_rhs)
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
         visit environment (not positive) forwards_guards argument
@@ -1485,6 +1492,10 @@ let () = check ?ok:forwarded ()|ocaml},
       {ocaml|let check = Verdict.p "all rows pass"
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a direct quantifier passed to a curried partial Verdict wrapper",
+      {ocaml|let check label = Verdict.p label
+let () = check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1687,6 +1698,17 @@ let () = Verdict.p "all rows pass" result|ocaml},
   match () with () when List.for_all rows ~f:Fn.id -> false | () -> true
 let () = Verdict.p "some row fails" result|ocaml},
       [] );
+    ( "refuses a direct match guard whose false result is a Boolean alias",
+      {ocaml|let no = false
+let result = match () with () when List.exists rows ~f:Fn.id -> no | () -> true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
+    ( "refuses a bound match guard whose false result is a Boolean alias",
+      {ocaml|let some = List.exists rows ~f:Fn.id
+let no = false
+let result = match () with () when some -> no | () -> true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "some" ] );
     ( "refuses a bound quantifier returned from a protected try body",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let close = try all with _ -> false

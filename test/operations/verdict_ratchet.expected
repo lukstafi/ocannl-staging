@@ -56,6 +56,7 @@ uses an omitted optional default that feeds a Verdict wrapper claim: true
 does not use a Verdict wrapper default when its argument is supplied: true
 inspects the possible payload of an unknown forwarded wrapper option: true
 refuses a direct quantifier passed to a partially applied Verdict claim: true
+refuses a direct quantifier passed to a curried partial Verdict wrapper: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -97,6 +98,8 @@ refuses a bound quantifier returned through a match guard: true
 accepts an inverted bound quantifier returned through a match guard: true
 refuses a direct quantifier returned through a match guard: true
 accepts an inverted direct quantifier returned through a match guard: true
+refuses a direct match guard whose false result is a Boolean alias: true
+refuses a bound match guard whose false result is a Boolean alias: true
 refuses a bound quantifier returned from a protected try body: true
 refuses a direct quantifier returned through a try-case guard: true
 accepts an inverted direct quantifier returned through a try-case guard: true
