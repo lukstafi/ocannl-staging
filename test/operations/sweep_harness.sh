@@ -24,8 +24,8 @@ on_error() {
   # covered by adding its name here and nothing else.
   for name in incremental forced slow_forced coverage hostile complete_fail \
     environment_executed partial_matrix singleton_fail repeated_backend_fail \
-    repeated_backend_pass historical_matrix local_identity_error unsafe_identity_error \
-    matrix_error; do
+    repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
+    local_identity_error unsafe_identity_error matrix_error; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -343,6 +343,49 @@ grep -q '^environment result: POTENTIAL -- 1 claim(s) skipped on every completed
   <<<"$partial_matrix"
 grep -q '^POTENTIAL: skipped on every completed box: verdict_skip_probe.exe: common environment-gated claim$' \
   <<<"$partial_matrix"
+
+# One logical leg can have different reasons for being unevaluated: this is the
+# real autotune_mma_companion shape, backend-scoped on cc/multidev_cc and
+# configuration-scoped on default-config CUDA/HIP. With Metal red and therefore
+# absent, every declared box is represented but no successful unit executed the
+# claim. Filtering by scope first falsely reported PASS; claim-and-box evidence
+# must report the complete environment matrix as FAIL.
+"$verdict_probe" cc environment-as-backend >"$tmp/mixed-cc.log" 2>&1
+"$verdict_probe" multidev_cc environment-as-backend >"$tmp/mixed-multidev.log" 2>&1
+"$verdict_probe" cuda >"$tmp/mixed-cuda.log" 2>&1
+"$verdict_probe" hip >"$tmp/mixed-hip.log" 2>&1
+set +e
+mixed_scope_fail=$("$aggregate" \
+  --known cc --known multidev_cc --known metal --known cuda --known hip \
+  --known-box m4-max --known-box minix --known-box rog-nv \
+  --run cc m4-max "$tmp/mixed-cc.log" \
+  --run multidev_cc m4-max "$tmp/mixed-multidev.log" \
+  --run cuda rog-nv "$tmp/mixed-cuda.log" --run hip minix "$tmp/mixed-hip.log" 2>&1)
+mixed_scope_fail_rc=$?
+set -e
+[ "$mixed_scope_fail_rc" -eq 1 ]
+grep -q '^environment result: FAIL -- 1 claim(s) skipped on every declared box$' \
+  <<<"$mixed_scope_fail"
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$mixed_scope_fail"
+
+# The successful Metal leg is the execution that must clear the same mixed-scope
+# claim. Its other backend-scoped fixture claim remains independent.
+"$verdict_probe" metal execute-environment >"$tmp/mixed-metal.log" 2>&1
+set +e
+mixed_scope_cleared=$("$aggregate" \
+  --known cc --known multidev_cc --known metal --known cuda --known hip \
+  --known-box m4-max --known-box minix --known-box rog-nv \
+  --run cc m4-max "$tmp/mixed-cc.log" \
+  --run multidev_cc m4-max "$tmp/mixed-multidev.log" \
+  --run metal m4-max "$tmp/mixed-metal.log" \
+  --run cuda rog-nv "$tmp/mixed-cuda.log" --run hip minix "$tmp/mixed-hip.log" 2>&1)
+mixed_scope_cleared_rc=$?
+set -e
+[ "$mixed_scope_cleared_rc" -eq 1 ]
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$mixed_scope_cleared"
+absent 'FAIL: skipped on every declared box:' <<<"$mixed_scope_cleared"
 
 # A backend may run on more than one declared box. It counts once toward backend
 # completeness, but each box remains independent environment evidence.

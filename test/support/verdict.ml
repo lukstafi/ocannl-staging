@@ -253,7 +253,10 @@ type skip_aggregation = [ `Backend | `Environment | `Outside_sweep ]
     than the selected backend, such as a compiler target, preprocessing flag or filesystem feature;
     its human announcement remains visible, and the forced fleet sweep aggregates it across the
     measurement boxes declared by [benchmarks/fixtures/DIGESTS.txt] instead of mistaking it for
-    unsupported backend coverage. Pass [~aggregation:`Outside_sweep] only when a separate checked
+    unsupported backend coverage. Scope describes this observation, not the claim identity: if any
+    declared-box log marks a claim [Environment], a [Backend] skip carrying the same executable and
+    claim key on another box is also evidence that box did not execute it. Pass
+    [~aggregation:`Outside_sweep] only when a separate checked
     matrix owns execution of the claim (for example the compiler-trace CI leg); the record remains
     validated and human-visible but neither sweep dimension treats its absence as evidence.
 

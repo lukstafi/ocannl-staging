@@ -1521,9 +1521,14 @@ that they earn a lookup rather than always-loaded space.
   backend once, while environment completeness still counts both boxes. A claim present in every
   completed declared-box log becomes `FAIL` only when every declared box contributed; with missing
   boxes it is `POTENTIAL`, and a pre-declaration historical ref is left explicitly unaggregated. A
-  current unit absent from a historical target's declaration contributes backend evidence and is
-  ignored for that target's environment matrix; in the other direction, a
-  declared box with no runnable unit is a harness refusal rather than permanent silent non-coverage.
+  claim may be backend-gated in one run and environment-gated in another (the default-policy
+  `autotune_mma_companion` leg is the exemplar). An environment record in any declared-box log
+  assigns that executable-and-claim key to the environment dimension; backend or environment skip
+  records for the same key then both mean their box did not execute it. This ownership-before-
+  intersection order prevents a different scope from masquerading as execution. A current unit
+  absent from a historical target's declaration contributes backend evidence and is ignored for
+  that target's environment matrix; in the other direction, a declared box with no runnable unit
+  is a harness refusal rather than permanent silent non-coverage.
   A configuration matrix that runs outside the fleet sweep uses
   ``Verdict.skipped ~aggregation:`Outside_sweep``: the announcement and machine-record validation
   remain, but neither sweep intersection claims ownership. This is deliberately narrow: the

@@ -170,7 +170,9 @@ extract_claims() {
       fields = split(record, part, "\t")
       machine++
       if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1
-      else if (part[1] == scope) print part[2] "\t" part[3]
+      else if (part[1] == scope || (scope == "sweep" &&
+               (part[1] == "backend" || part[1] == "environment")))
+        print part[2] "\t" part[3]
       else if (part[1] != "backend" && part[1] != "environment" && part[1] != "outside-sweep") malformed = 1
     }
     END { if (malformed || human != machine) exit 3 }
@@ -192,9 +194,23 @@ intersect_claims() {
   done
 }
 
+# Scope is an observation, not part of a claim's identity. A claim can be
+# backend-gated in one run and configuration-gated in another. Backend findings
+# still require backend-scoped records in every log. Environment ownership,
+# however, is established by an environment record in ANY declared-box log;
+# once owned, either ordinary scope means that log did not execute the claim.
 intersect_claims backend "$tmp/common-backend" "${run_logs[@]}"
 if [ ${#environment_logs[@]} -gt 0 ]; then
-  intersect_claims environment "$tmp/common-environment" "${environment_logs[@]}"
+  : >"$tmp/environment-owned-unsorted"
+  for log in "${environment_logs[@]}"; do
+    extract_claims environment "$log" >>"$tmp/environment-owned-unsorted" ||
+      die "cannot extract compatible skip records from $log"
+  done
+  LC_ALL=C sort -u "$tmp/environment-owned-unsorted" >"$tmp/environment-owned" ||
+    die "cannot collect environment-owned claims"
+  intersect_claims sweep "$tmp/common-sweep" "${environment_logs[@]}"
+  LC_ALL=C comm -12 "$tmp/environment-owned" "$tmp/common-sweep" \
+    >"$tmp/common-environment" || die "cannot select environment-owned skip records"
 else
   : >"$tmp/common-environment"
 fi
