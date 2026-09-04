@@ -617,7 +617,12 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                   refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth:depth
                     ~probe_ms:validation.ms
                 in
-                if Float.(base_ms < queued_batch_ms && validation.ms >= queued_batch_ms) then
+                if next_depth = base_depth then
+                  (* A valid pair can confirm its earlier, already-target-sized observation. Stop
+                     there: probing that shallower depth again would reverse the refinement order
+                     and can oscillate until unrelated noise forces the cap. *)
+                  (calibration_dispatches, base_depth, base_ms)
+                else if Float.(base_ms < queued_batch_ms && validation.ms >= queued_batch_ms) then
                   if next_depth < depth then
                     (* The measured pair brackets the target. Interpolate inside that bracket before
                        confirming: retaining an overshooting validation would turn a well-resolved
