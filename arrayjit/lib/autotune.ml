@@ -368,10 +368,13 @@ let max_queue_depth = 2048
 
 (* The depth is calibrated from timed single launches, not from the warmup: the warmup absorbs lazy
    initialization and module loading, so on a fast kernel it can overestimate by enough to collapse
-   the depth to 1 and silently turn a queued search into an isolated one. The shared sampling policy
-   supplies the 16-sample floor; [queue_calibration_runs] remains the caller's ordinary repeat floor
-   and documents that calibration asks the same min-of-N question as the measurement. *)
+   the depth to 1 and silently turn a queued search into an isolated one. The synchronized-single
+   estimate uses the shared 16-sample floor because it is dominated by round-trip jitter. A batch
+   probe is already milliseconds long and only chooses scale rather than ranking a candidate, so
+   twelve minima are enough; imposing the timed window's 16-sample floor on up to five probes added
+   nearly 800 ms per candidate and exhausted CI's 45-minute suite ceiling. *)
 let queue_calibration_runs = 3
+let queue_batch_probe_runs = 12
 let max_depth_validation_probes = 4
 
 (* The calibration policy itself, as a function of the estimate, so a test can pin it without a
@@ -505,6 +508,13 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
         sync !ctx;
         Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6
       in
+      let probe_batch depth =
+        let best_ms = ref Float.infinity in
+        for _ = 1 to queue_batch_probe_runs do
+          best_ms := Float.min !best_ms (batch depth)
+        done;
+        { ms = !best_ms; contended = false; samples = queue_batch_probe_runs }
+      in
       let calibration_dispatches, depth, estimated_batch_wall_ms =
         match timing with
         | Isolated -> (0, 1, None)
@@ -526,11 +536,7 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                  shallow. Budget the probe on batch wall rather than per-launch time: it is
                  calibration, not a candidate measurement, and need not spend 64 whole batches to
                  learn the scale. *)
-              let probe =
-                sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
-                    let wall = batch probe_depth in
-                    { per_launch_ms = wall; contention_ms = wall })
-              in
+              let probe = probe_batch probe_depth in
               let depth, estimated_batch_wall_ms =
                 refine_queued_batch_depth ~single_ms:single_estimate.ms ~probe_depth
                   ~probe_ms:probe.ms
@@ -541,11 +547,7 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                 else if depth = max_queue_depth then
                   (calibration_dispatches, depth, estimated_wall_ms)
                 else
-                  let validation =
-                    sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
-                        let wall = batch depth in
-                        { per_launch_ms = wall; contention_ms = wall })
-                  in
+                  let validation = probe_batch depth in
                   let calibration_dispatches =
                     calibration_dispatches + (validation.samples * depth)
                   in
@@ -559,10 +561,11 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                     if next_depth = max_queue_depth then
                       (calibration_dispatches, next_depth, next_wall_ms)
                     else if probes_left <= 1 then
-                      (* The affine estimate has repeatedly missed the target. Bind memory, rather
-                         than letting another underestimated non-cap depth reach the contention
-                         test. *)
-                      (calibration_dispatches, max_queue_depth, Float.nan)
+                      (* Keep the latest supported affine projection after the bounded validation
+                         loop. Jumping to the cap here would turn a noisy near-target probe into a
+                         20--30 ms batch whose 2x contention threshold no longer catches the fixed
+                         host stall this policy exists to detect. *)
+                      (calibration_dispatches, next_depth, next_wall_ms)
                     else
                       validate_depth (probes_left - 1) calibration_dispatches next_depth
                         next_wall_ms
