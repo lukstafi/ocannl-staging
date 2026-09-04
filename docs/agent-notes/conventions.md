@@ -165,7 +165,8 @@ files.
 - Cross-repository work references always name their home: `staging#NNN` for PRs in
   `lukstafi/ocannl-staging`, `gh-ocannl-NNN` for upstream issues cited as facts about the codebase,
   and `ahrefs/ocannl#NNN` for other upstream issue mentions. A bare `#NNN` silently resolves against
-  whichever repository renders the note, so the agent-notes scan refuses it outside code examples.
+  whichever repository renders the note; hashless or compact `PR NNN`/`issue NNN` forms name no
+  repository either, so the agent-notes scan refuses all of them outside code examples.
 - For a measurement or report PR, substance stabilizes early: two full review rounds plus one
   verdict-stability check, after which findings are answered rather than actioned unless they touch
   validity, consequence, or arithmetic (validated on the gh-ocannl-530 campaign, where rounds 5–7 were

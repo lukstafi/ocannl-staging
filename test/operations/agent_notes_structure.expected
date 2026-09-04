@@ -7,7 +7,7 @@ every index row names a file that carries what it claims: true
 every table is a table, row by row: true
 every notes file is reachable from the index, and links back: true
 no bullet is repeated across the notes: true
-every GitHub citation names its repository: true
+no numeric GitHub citation uses a bare hash or PR/issue label: true
 every rule the scan names is reported over the live tree: true
 every finding carries one of the rules the scan names: true
 each flagged bullet has an exemption key of its own: true

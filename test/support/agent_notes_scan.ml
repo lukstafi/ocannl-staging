@@ -52,10 +52,10 @@
     - {b no-repetition}: no two bullets in the notes share their whitespace-normalized text, and no
       two share their first {!near_duplicate_prefix} characters case-insensitively. A fact promoted
       twice is a fact that will be updated once.
-    - {b qualified-citations}: every numeric GitHub reference names its repository. A bare [#NNN]
-      silently resolves against whichever repository renders the note; [staging#NNN],
-      [gh-ocannl-NNN] and [ahrefs/ocannl#NNN] do not. Inline code, fenced blocks, comments and
-      identifier-attached hashes are inert to this rule.
+    - {b qualified-citations}: numeric GitHub references do not use a bare [#NNN] or an unqualified
+      [PR]/[issue] label. Those forms are ambiguous between the two repositories; [staging#NNN],
+      [gh-ocannl-NNN] and [ahrefs/ocannl#NNN] are not. Inline code, fenced blocks, comments and
+      code identifiers carrying a hash are inert to this rule.
 
     {1 What it deliberately does not read}
 
@@ -1557,43 +1557,91 @@ let check_repetition (bullets : bullet list) =
 (* Rule 6: numeric citations name their repository *)
 (* ------------------------------------------------------------------ *)
 
-(** Whether [#] at [i] opens a bare numeric citation. An identifier immediately before the hash
-    makes it qualified ([staging#12], [ahrefs/ocannl#12]) or code ([C#12]); a second hash makes it
-    a heading marker. The digit run must end at an identifier boundary, so [#12abc] is not mistaken
-    for a citation. *)
-let bare_citation_at line i =
+(** Identifier characters on either side of the work-reference forms. Hyphens and slashes remain
+    separators: the canonical forms are recognized by their whole spelling, while a code identifier
+    such as [node#12] is kept by its ordinary identifier characters. *)
+let identifier_char c = Char.is_alphanum c || Char.equal c '_'
+
+let digit_run line start =
   let n = String.length line in
-  let unqualified =
-    i = 0
-    ||
-    let c = line.[i - 1] in
-    not (Char.is_alphanum c || Char.equal c '_' || Char.equal c '-' || Char.equal c '#')
-  in
-  if (not unqualified) || i + 1 >= n || not (Char.is_digit line.[i + 1]) then None
+  if start >= n || not (Char.is_digit line.[start]) then None
   else
-    let stop = ref (i + 1) in
+    let stop = ref start in
     while !stop < n && Char.is_digit line.[!stop] do
       Int.incr stop
     done;
-    if
-      !stop < n
-      && (Char.is_alphanum line.[!stop] || Char.equal line.[!stop] '_')
-    then None
-    else Some !stop
+    if !stop < n && identifier_char line.[!stop] then None else Some !stop
 
-(** Bare [#NNN] citations outside the inert regions of the notes. The same paragraph-aware lexer
-    used by the structural rules owns code spans, fenced blocks and comments, so this rule cannot
-    acquire a second, drifting interpretation of Markdown. *)
+let preceding_identifier line i =
+  let start = ref i in
+  while !start > 0 && identifier_char line.[!start - 1] do
+    Int.decr start
+  done;
+  String.sub line ~pos:!start ~len:(i - !start), !start
+
+let is_work_label s =
+  let s = String.lowercase s in
+  String.equal s "pr" || String.equal s "issue"
+
+(** Whether [#] at [i] opens an unqualified numeric citation. [staging#12] and
+    [ahrefs/ocannl#12] are qualified; [node#12] is a code identifier. The compact work labels
+    [PR#12] and [issue#12] are still ambiguous, so they are returned with the label included. A
+    second hash makes the occurrence a heading marker. *)
+let unqualified_hash_reference_at line i =
+  let n = String.length line in
+  if i + 1 >= n || (i > 0 && Char.equal line.[i - 1] '#') then None
+  else
+    match digit_run line (i + 1) with
+    | None -> None
+    | Some stop ->
+        if i = 0 || not (identifier_char line.[i - 1]) then Some (i, stop)
+        else
+          let label, start = preceding_identifier line i in
+          if is_work_label label then Some (start, stop) else None
+
+(** Hashless [PR 12] and [issue 12], with at least one space and complete word/digit boundaries. *)
+let unqualified_label_reference_at line i =
+  let n = String.length line in
+  if i > 0 && identifier_char line.[i - 1] then None
+  else
+    List.find_map [ "pr"; "issue" ] ~f:(fun label ->
+        let label_len = String.length label in
+        if i + label_len >= n then None
+        else
+          let candidate = String.sub line ~pos:i ~len:label_len |> String.lowercase in
+          if not (String.equal candidate label) then None
+          else
+            let after_label = i + label_len in
+            if identifier_char line.[after_label] then None
+            else
+              let digits = ref after_label in
+              while
+                !digits < n
+                && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t')
+              do
+                Int.incr digits
+              done;
+              if !digits = after_label then None
+              else Option.map (digit_run line !digits) ~f:(fun stop -> (i, stop)))
+
+(** Unqualified numeric work references outside the inert regions of the notes. The same
+    paragraph-aware lexer used by the structural rules owns code spans, fenced blocks and comments,
+    so this rule cannot acquire a second, drifting interpretation of Markdown. *)
 let check_citations ~file contents =
   let inert = (inert_by_line contents).ranges in
   List.concat_map (lines contents) ~f:(fun (lineno, line) ->
       let spans = spans_at inert lineno in
       let rec find i acc =
         if i >= String.length line then List.rev acc
-        else if Char.equal line.[i] '#' && not (in_any_span spans i) then
-          match bare_citation_at line i with
-          | Some stop ->
-              let citation = String.sub line ~pos:i ~len:(stop - i) in
+        else if in_any_span spans i then find (i + 1) acc
+        else
+          let reference =
+            if Char.equal line.[i] '#' then unqualified_hash_reference_at line i
+            else unqualified_label_reference_at line i
+          in
+          match reference with
+          | Some (start, stop) ->
+              let citation = String.sub line ~pos:start ~len:(stop - start) in
               let f =
                 finding ~file ~line:lineno ~rule:rule_qualified_citations
                   (Printf.sprintf
@@ -1604,7 +1652,6 @@ let check_citations ~file contents =
               in
               find stop (f :: acc)
           | None -> find (i + 1) acc
-        else find (i + 1) acc
       in
       find 0 [])
 

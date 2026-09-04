@@ -912,12 +912,20 @@ let citation_cases =
     ( "a bare numeric citation",
       "A regression first appeared in #12.\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "compact PR and issue labels",
+      "PR#12 introduced it; issue#13 tracks the remainder.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "hashless PR and issue labels",
+      "PR 12 introduced it; issue 13 tracks the remainder.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "the canonical issue and PR forms",
       "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n",
       [] );
-    ("a hash inside a code span", "The literal `#12` is example text.\n", []);
+    ( "work references inside a code span",
+      "The literals `#12`, `PR#12`, and `issue 12` are example text.\n",
+      [] );
     ( "a hash inside a fenced block",
-      "```text\n#12 is fixture output\n```\n",
+      "```text\n#12, PR#12, and issue 12 are fixture output\n```\n",
       [] );
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]

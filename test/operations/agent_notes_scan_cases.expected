@@ -134,8 +134,10 @@ ok: exemption -- a re-wrapped bullet has the same key
 ok: exemption -- two bullets agreeing past the display length keep distinct keys
 ok: exemption -- a finished bullet has no finding to key
 ok: citations -- a bare numeric citation
+ok: citations -- compact PR and issue labels
+ok: citations -- hashless PR and issue labels
 ok: citations -- the canonical issue and PR forms
-ok: citations -- a hash inside a code span
+ok: citations -- work references inside a code span
 ok: citations -- a hash inside a fenced block
 ok: citations -- a hash attached to a code identifier
 ok: index -- an index whose rows all resolve
