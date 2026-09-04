@@ -840,9 +840,11 @@ case $sub in
       # a missing leader while the group remains reachable can also mean a
       # live descendant survived TERM, so it is not permission to reuse.
       if ! group_identity_matches "$iter_dir"; then
-        group_alive "$pg" &&
-          die "leaderless iteration group $pg survived TERM; refusing to reuse $repeat_build"
-        return 0
+        # Do not ask the fallible process census to authorize reuse here. A
+        # descendant can fork and exit while /proc is being enumerated, making
+        # a still-live chain momentarily look zombie-only. Without the recorded
+        # leader we can neither safely aim KILL nor prove the build tree inert.
+        die "leaderless iteration group $pg survived TERM; refusing to reuse $repeat_build"
       fi
       kill -KILL -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10; do

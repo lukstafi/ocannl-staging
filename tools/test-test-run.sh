@@ -940,14 +940,17 @@ else
 fi
 
 sed -n '/^    reap_repeat_group() {/,/^    }/p' "$SRC" >"$TMP/reap-repeat-group.sh"
+sed -n '/^      if ! group_identity_matches "$iter_dir"; then$/,/^      kill -KILL/p' \
+  "$TMP/reap-repeat-group.sh" >"$TMP/reap-before-kill.sh"
 if grep -q 'kill -0 -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
    && grep -q 'group_alive "$pg" || return 0' "$TMP/reap-repeat-group.sh" \
+   && ! grep -q 'group_alive' "$TMP/reap-before-kill.sh" \
    && grep -B6 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
         | grep -q 'leaderless iteration group \$pg survived TERM' \
    && grep -q 'leaderless iteration group \$pg survived KILL' "$TMP/reap-repeat-group.sh"; then
-  report 0 "repeat: orphan reap revalidates identity and accepts post-KILL zombies"
+  report 0 "repeat: orphan reap fails closed after TERM and accepts post-KILL zombies"
 else
-  report 1 "repeat: orphan reap revalidates identity and accepts post-KILL zombies" \
+  report 1 "repeat: orphan reap fails closed after TERM and accepts post-KILL zombies" \
     "$(tr '\n' ';' <"$TMP/reap-repeat-group.sh")"
 fi
 
