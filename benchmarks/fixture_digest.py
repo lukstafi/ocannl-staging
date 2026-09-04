@@ -45,6 +45,7 @@ from collections import namedtuple
 from pathlib import Path
 
 DIGEST_FILE = "DIGESTS.txt"
+MEASUREMENT_BOXES_FIELD = "# measurement-boxes:"
 
 #: One recorded identity: `sha256` and `size` are the bytes, `origin` is the box that has them.
 Entry = namedtuple("Entry", "sha256 size origin")
@@ -63,6 +64,11 @@ HEADER = """\
 # streams (numpy does not promise Generator stream stability across releases), so a mismatch
 # names a real difference even when the spec is untouched.
 #
+# The measurement-boxes header field declares every box that publishes benchmark measurements.
+# It is independent of the entry rows: that is how a missing entry can mean "this measuring box
+# has unrecorded bytes" instead of being indistinguishable from "this box never measures here".
+# Writers preserve the declared set and add a newly recording origin to it.
+#
 # The <origin> field names the box whose fixtures these bytes are, because the same workload
 # has different bytes on different boxes and the reports have to say which. Two entries under
 # one name are two boxes' bytes, NOT a history: numbers measured on one are not comparable
@@ -72,6 +78,14 @@ HEADER = """\
 #
 # <sha256>  <bytes>  <name>  <origin>
 """
+
+
+def header(measurement_boxes):
+    """The explanatory header plus its one machine-readable measurement-box declaration."""
+    boxes = sorted(check_measurement_boxes(measurement_boxes))
+    marker = "# <sha256>  <bytes>  <name>  <origin>\n"
+    declaration = f"{MEASUREMENT_BOXES_FIELD} {' '.join(boxes)}\n#\n"
+    return HEADER.replace(marker, declaration + marker)
 
 
 def sha256_file(path):
@@ -139,6 +153,22 @@ def check_origin(origin):
     return origin
 
 
+def check_measurement_boxes(boxes):
+    """A non-empty, duplicate-free list of origins, suitable for the header field."""
+    boxes = [check_origin(box) for box in boxes]
+    if not boxes:
+        raise ValueError(
+            f"{MEASUREMENT_BOXES_FIELD} must name at least one box; an empty declaration cannot "
+            "distinguish a missing fixture entry from a workload no box measures"
+        )
+    if len(set(boxes)) != len(boxes):
+        repeated = next(box for box in boxes if boxes.count(box) > 1)
+        raise ValueError(
+            f"{MEASUREMENT_BOXES_FIELD} names {repeated!r} more than once; it declares a set"
+        )
+    return boxes
+
+
 def check_fixture_name(name):
     """Fixture names are single whitespace-free words, for the same reason origins are.
 
@@ -195,10 +225,14 @@ def resolve_origin(origin, adopting=None):
     return check_origin(origin)
 
 
-def read_digests(path, legacy_origin=None):
-    """`{name: [Entry, ...]}` recorded in `path`; an absent file records nothing.
+def _read_document(path, legacy_origin=None):
+    """`(entries, declared_boxes)` from `path`; an absent file records neither.
 
     Entries under one name are origin-sorted, and one origin appears at most once per name.
+
+    `declared_boxes` is None for a pre-gh-ocannl-850 file. That compatibility is needed so
+    `--record --adopt-legacy` can migrate an old local file; the checked-in file is separately
+    required by the tests to carry exactly one declaration.
 
     `legacy_origin` attributes pre-gh-ocannl-759 three-field lines to that box instead of
     refusing them. It exists only for the one-shot migration behind `--record --adopt-legacy`,
@@ -207,7 +241,9 @@ def read_digests(path, legacy_origin=None):
     path = Path(path)
     entries = {}
     if not path.exists():
-        return entries
+        return entries, None
+
+    declared_boxes = None
 
     def add(lineno, sha, size, name, origin):
         """The ONE insertion point, so every parse path pays the duplicate check.
@@ -235,6 +271,19 @@ def read_digests(path, legacy_origin=None):
 
     for lineno, line in enumerate(path.read_text().splitlines(), start=1):
         line = line.strip()
+        if line.startswith(MEASUREMENT_BOXES_FIELD):
+            if declared_boxes is not None:
+                raise ValueError(
+                    f"{path}:{lineno}: {MEASUREMENT_BOXES_FIELD} appears more than once; "
+                    "there must be one authoritative box set"
+                )
+            try:
+                declared_boxes = check_measurement_boxes(
+                    line[len(MEASUREMENT_BOXES_FIELD) :].split()
+                )
+            except ValueError as e:
+                raise ValueError(f"{path}:{lineno}: {e}") from None
+            continue
         if not line or line.startswith("#"):
             continue
         fields = line.split()
@@ -259,17 +308,52 @@ def read_digests(path, legacy_origin=None):
                 f"{path}:{lineno}: expected '<sha256>  <bytes>  <name>  <origin>', got {line!r}"
             )
         add(lineno, *fields)
-    return {name: [by_origin[o] for o in sorted(by_origin)] for name, by_origin in entries.items()}
+    entries = {
+        name: [by_origin[o] for o in sorted(by_origin)] for name, by_origin in entries.items()
+    }
+    if declared_boxes is not None:
+        undeclared = sorted(
+            {e.origin for recorded in entries.values() for e in recorded} - set(declared_boxes)
+        )
+        if undeclared:
+            raise ValueError(
+                f"{path}: digest entries name origin(s) absent from {MEASUREMENT_BOXES_FIELD} "
+                f"{', '.join(undeclared)}; add every measuring box to the one declaration"
+            )
+    return entries, declared_boxes
 
 
-def write_digests(path, entries):
-    """Rewrite `path` with `entries` ({name: [Entry]}), sorted by name then origin."""
+def read_digests(path, legacy_origin=None):
+    """`{name: [Entry, ...]}` recorded in `path`; an absent file records nothing."""
+    return _read_document(path, legacy_origin=legacy_origin)[0]
+
+
+def measurement_boxes(path):
+    """The declared measurement boxes, or recorded origins for a legacy undeclared file."""
+    entries, declared = _read_document(path)
+    if declared is not None:
+        return sorted(declared)
+    return sorted({e.origin for recorded in entries.values() for e in recorded})
+
+
+def declared_measurement_boxes(path):
+    """The explicit header declaration, or None for a legacy undeclared file."""
+    return _read_document(path)[1]
+
+
+def write_digests(path, entries, measurement_boxes=None):
+    """Rewrite `path` with its box declaration and entries, all sorted."""
+    if measurement_boxes is None:
+        measurement_boxes = {
+            e.origin for recorded in entries.values() for e in recorded
+        }
     body = "".join(
         f"{e.sha256}  {e.size}  {name}  {e.origin}\n"
         for name in sorted(entries)
         for e in sorted(entries[name], key=lambda e: e.origin)
     )
-    Path(path).write_text(HEADER + body)
+    rendered_header = header(measurement_boxes) if measurement_boxes else HEADER
+    Path(path).write_text(rendered_header + body)
 
 
 def one_path_per_name(fixtures):
@@ -317,7 +401,7 @@ def record(path, fixtures, origin=None, legacy_origin=None):
     """
     origin = resolve_origin(origin, adopting=legacy_origin)
     fixtures = one_path_per_name(fixtures)
-    entries = read_digests(path, legacy_origin=legacy_origin)
+    entries, declared_boxes = _read_document(path, legacy_origin=legacy_origin)
     changes = []
     for fixture in fixtures:
         fixture = Path(fixture)
@@ -327,7 +411,10 @@ def record(path, fixtures, origin=None, legacy_origin=None):
         if was != now:
             changes.append((fixture.name, origin, was, now))
         entries[fixture.name] = others + [now]
-    write_digests(path, entries)
+    boxes = set(declared_boxes or ())
+    boxes.update(e.origin for recorded in entries.values() for e in recorded)
+    boxes.add(origin)
+    write_digests(path, entries, boxes)
     return changes
 
 
@@ -353,7 +440,7 @@ def status(fixture, entries):
 
 
 def divergent_origins(path, names, origin):
-    """Origins recorded in `path` that are on DIFFERENT bytes from `origin` for some of `names`.
+    """Declared boxes absent or on DIFFERENT bytes for some of `names`, versus `origin`.
 
     What a regenerating box has to be told: their entries survive (so their fixtures still pass
     the gate), but their bytes are now a different workload from the one just generated, and
@@ -364,17 +451,24 @@ def divergent_origins(path, names, origin):
     steering towards, and reporting it as "the other box is still on a different workload" would
     tell the operator to redo the thing they just succeeded at.
     """
-    entries = read_digests(path)
+    entries, declared_boxes = _read_document(path)
+    boxes = set(declared_boxes or ())
+    boxes.update(e.origin for recorded in entries.values() for e in recorded)
     divergent = set()
     for name in names:
         recorded = entries.get(name, [])
         mine = next((e for e in recorded if e.origin == origin), None)
         if mine is None:
             continue
+        by_origin = {e.origin: e for e in recorded}
         divergent |= {
-            e.origin
-            for e in recorded
-            if e.origin != origin and (e.sha256, e.size) != (mine.sha256, mine.size)
+            box
+            for box in boxes
+            if box != origin
+            and (
+                box not in by_origin
+                or (by_origin[box].sha256, by_origin[box].size) != (mine.sha256, mine.size)
+            )
         }
     return sorted(divergent)
 

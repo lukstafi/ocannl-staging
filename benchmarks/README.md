@@ -75,8 +75,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   fixtures are self-describing and runners need only the fixture path.
 - `fixtures/DIGESTS.txt` + `fixture_digest.py` — **which bytes a published number is on, and
   whose** (gh-ocannl-645, gh-ocannl-759). The fixtures are gitignored regenerable artifacts, so
-  this file is the only checked-in statement of what one contains: `gen_fixtures.py` records
-  `<sha256>  <bytes>  <name>  <origin>` as it generates (announcing a *changed* digest loudly,
+  this file is the only checked-in statement of what one contains. Its header's
+  `# measurement-boxes: <origin>...` field declares the complete set of boxes that publish
+  measurements (gh-ocannl-850), independently of the entry rows; that is what lets regeneration
+  and reports identify a declared box whose entry is missing instead of mistaking the silence for
+  a box that never measures there. `gen_fixtures.py` records
+  `<sha256>  <bytes>  <name>  <origin>` as it generates (announcing a *changed* or missing digest loudly,
   and leaving a reviewable git diff), `orchestrate.py` refuses to measure a fixture whose bytes
   match no recorded entry (`--no-fixture-digest-check` opts out, for a deliberate regeneration
   you are about to re-record), and every result row and report section states the digest *and
@@ -103,9 +107,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
     placeholder would let the next such box overwrite this one's entry under it.
   - **Regeneration is a cross-box event.** `gen_fixtures.py` draws from *this* box's numpy, so
     regenerating here does not give the other measuring boxes the same workload — it gives this
-    box a new one and leaves theirs behind. Coordinate it across every origin listed in
-    `DIGESTS.txt` in one go, or the boxes diverge again and the next report silently compares
-    two workloads. Recording is not the same act: `--record` pins what exists and changes no
+    box a new one and leaves theirs behind. Coordinate it across every origin in the header's
+    `measurement-boxes` field in one go, or the boxes diverge again; the generator names boxes
+    with a different entry and boxes with no entry, and generated reports carry the same missing-record
+    warning. Recording is not the same act: `--record` pins what exists and changes no
     number's meaning. `gen_fixtures.py` reads `DIGESTS.txt` *before* it builds anything, so a
     file it could not record into (a pre-gh-ocannl-759 unattributed line, a malformed row) stops
     the run while the bytes your published numbers are on are still on disk.
@@ -441,8 +446,8 @@ are simply not recorded yet, pin them with `python3 benchmarks/fixture_digest.py
 the bytes are and changes no number's meaning. Regenerating instead draws a *new* workload from
 this box's numpy, silently retires every published number on the old bytes, and, because it is
 per-box, leaves the other measuring boxes on a workload that is now different from yours.
-Regeneration is a cross-box event: coordinate it across every origin in `DIGESTS.txt` at once
-(gh-ocannl-759).
+Regeneration is a cross-box event: coordinate it across every origin in `DIGESTS.txt`'s
+`measurement-boxes` header field at once (gh-ocannl-759, gh-ocannl-850).
 
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
@@ -594,12 +599,15 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   framework internals (tinygrad's beam disk cache, torch's FX-graph cache counters) and answer
   `null` — reported as `?` — when they cannot tell, rather than guessing a `false` that would be
   exactly the silent claim this field exists to prevent.
-- **A report states the fixture digest its numbers are on, and whose bytes those are.**
+- **A report states the fixture digest its numbers are on, whose bytes those are, and the declared
+  measurement-box set.**
   `orchestrate.py` puts both in each workload section of `results/report.md` and in every
   `results.jsonl` row (`fixture`, `fixture_sha256`, `fixture_origin`). The origin is not implied
   by the report's own platform line — fixtures get copied between boxes, which is fine as long as
   the report says so — and it is what keeps a cross-box comparison honest now that the boxes are
-  known to hold different bytes for `mlp_small` and `gpt2_mini` (gh-ocannl-759).
+  known to hold different bytes for `mlp_small` and `gpt2_mini` (gh-ocannl-759). It reads the
+  `measurement-boxes` header and names any declared box with no entry for the reported fixture,
+  so an unrecorded measuring box cannot look like a box outside that workload (gh-ocannl-850).
   A hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
   hand-written driver pins it (`gh612_cells.sh` refuses to run a cell whose fixture does not
   match a pinned digest, with an env opt-out for deliberate re-generation). Cross-session

@@ -1221,8 +1221,11 @@ def cell_timeout_arg(text):
     return seconds
 
 
-def report(results, out_dir, unavailable=(), failures=()):
+def report(results, out_dir, unavailable=(), failures=(), digests_path=None):
     out_dir.mkdir(parents=True, exist_ok=True)
+    digests_path = digests_path or HERE / "fixtures" / fixture_digest.DIGEST_FILE
+    digest_entries = fixture_digest.read_digests(digests_path)
+    measurement_boxes = fixture_digest.measurement_boxes(digests_path)
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
             # allow_nan=False so a non-finite value this sweep computed itself cannot slip out as
@@ -1240,6 +1243,11 @@ def report(results, out_dir, unavailable=(), failures=()):
         f"first parity steps vs pytorch/cpu/eager; reduced precisions get their own envelope: "
         + ", ".join(f"{p} {t:g}" for p, t in sorted(PARITY_TOL_PRECISION.items()))
         + ")\n"
+    )
+    lines.append(
+        "measurement boxes declared by `fixtures/DIGESTS.txt`: "
+        + ", ".join(measurement_boxes)
+        + "\n"
     )
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
@@ -1261,6 +1269,13 @@ def report(results, out_dir, unavailable=(), failures=()):
             # (fixtures get copied between boxes, and that is fine as long as the report says so).
             whose = f", {origin}'s bytes" if origin else ", bytes no origin records"
             lines.append(f"measured on `{fixture}`, sha256 `{sha}`{whose}\n")
+            recorded = {e.origin for e in digest_entries.get(fixture, [])}
+            missing = [box for box in measurement_boxes if box not in recorded]
+            if missing:
+                lines.append(
+                    "**MISSING DIGEST RECORD:** declared measurement box(es) with no entry for "
+                    f"`{fixture}`: {', '.join(missing)}\n"
+                )
         # Precision-major, p50-ascending within a precision: scheduling variants are ranked
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
