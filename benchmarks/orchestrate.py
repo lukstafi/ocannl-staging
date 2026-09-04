@@ -64,6 +64,13 @@ PARITY_TOL = 2e-3
 # --cell-timeout raises it (0 disables), so a legitimately slower box is a flag away rather than
 # a silently truncated measurement.
 DEFAULT_CELL_TIMEOUT_S = 1800
+# tinygrad 0.13.0's GPU beam-search spawn pool wedged intermittently on both fleet GPU boxes,
+# and 0.14.0 still reproduced it on minix (1/5 cold gpt2_mini searches exceeded a 300 s cap,
+# against 37-51 s for three healthy repeats).  Zero is the only value that removes the pool
+# rather than merely making the same failure less likely.  Every declared measurement box uses
+# this pin; keeping one value here rather than dispatching on hostname also protects a renamed or
+# newly provisioned box until its operator deliberately opts into a pool with --beam-parallel.
+DEFAULT_BEAM_PARALLEL = 0
 # Grace between the process group's SIGTERM and its SIGKILL. A wedged tinygrad parent is blocked
 # in a futex and its pool workers in a socket read, so the handler usually never runs; the grace
 # is for the cells that CAN unwind (a Python runner's atexit, a backend's device teardown).
@@ -188,12 +195,11 @@ def rendered_variant(result):
     """The variant as the report names it — with the search's pool size when one was chosen.
 
     A beam row's compile cost is a search cost, and the search's candidate pool changes it by a
-    factor of three or four, so `beam` alone gives a row measured with tinygrad's default, one
-    measured with `PARALLEL=0` and one measured with an explicit N the same identity in the table
-    that people read numbers out of (gh-ocannl-760 review). The default stays the bare name — it
-    is what every report so far recorded, and re-labelling it would make old and new reports
-    disagree about rows that are in fact the same — and a chosen pool is spelled out: `beam P=0`
-    is the no-pool serial search, `beam P=4` a four-worker one.
+    factor of three or four, so `beam` alone gives a historical row measured with tinygrad's
+    upstream default, while `beam P=0` is the fleet default's no-pool serial search and `beam P=4`
+    a four-worker one.  Keeping the pool in the row distinguishes old results whose
+    `beam_parallel` is absent from results produced under the pinned default (gh-ocannl-760,
+    gh-ocannl-843).
     """
     variant = result["variant"]
     parallel = result.get("beam_parallel")
@@ -716,12 +722,10 @@ def quarantine_tinygrad_cache(env=None, enabled=True, killed=True):
 def beam_cell_env(base_env, beam_parallel):
     """The environment a tinygrad beam cell runs in: `PARALLEL` is the orchestrator's to say.
 
-    `--beam-parallel N` sets it; unset means tinygrad's own default, and that has to mean the
-    DEFAULT and not the invoking shell's opinion. An exported `PARALLEL` — left over from a
-    hand-run `PARALLEL=0 …` experiment, say — would otherwise reach the cell through the inherited
-    environment and measure a different candidate-pool configuration under the default's name,
-    with nothing in the row, its label or the report to show which one was measured
-    (gh-ocannl-760 review). So the unset case removes it rather than passing it through.
+    `--beam-parallel N` sets it, and the CLI's pinned default passes zero.  The ``None`` case is
+    retained for programmatic callers and historical-result tests; it means tinygrad's own
+    default, and removes an exported `PARALLEL` rather than letting the invoking shell silently
+    choose a pool size that the label and result do not name (gh-ocannl-760 review).
     """
     env = dict(base_env)
     if beam_parallel is None:
@@ -1387,13 +1391,13 @@ def main():
     ap.add_argument(
         "--beam-parallel",
         type=beam_parallel_arg,
-        default=None,
+        default=DEFAULT_BEAM_PARALLEL,
         metavar="N",
         help="run the tinygrad beam cells with PARALLEL=N — tinygrad's own knob for the "
-        "candidate-compile pool. Unset leaves its default, one worker per logical core on a GPU "
-        "device (24 on the box the gh-ocannl-760 deadlocks were seen on); N=0 is what disables "
-        "the pool outright and compiles the candidates in-process, which is the configuration a "
-        "pool deadlock cannot occur in, at the cost of a serial search",
+        f"candidate-compile pool (default {DEFAULT_BEAM_PARALLEL} on the benchmark fleet). N=0 "
+        "disables the pool outright and compiles candidates in-process, which is the only "
+        "configuration the spawn-pool deadlock cannot occur in; pass N>0 to opt into a parallel "
+        "search, with the per-cell cap remaining as its backstop",
     )
     ap.add_argument(
         "--cell-timeout",
@@ -1622,9 +1626,9 @@ def main():
                     )
                 if args.beam:
                     # PARALLEL sizes tinygrad's candidate-compile pool (its own knob, read where
-                    # the pool is created); left unset, it is one worker per logical core on a GPU
-                    # device, which is the shape the gh-ocannl-760 deadlocks were seen in. 0 means
-                    # no pool at all, so it is passed through rather than read as "unset".
+                    # the pool is created). The fleet default is 0 because that means no pool at
+                    # all; a positive --beam-parallel explicitly opts back into the failure-prone
+                    # spawn path, with the cell cap as its backstop (gh-ocannl-843).
                     beam_env = beam_cell_env(os.environ, args.beam_parallel)
                     collect(
                         # The pool is in the LABEL as well as in the row, because a failure has

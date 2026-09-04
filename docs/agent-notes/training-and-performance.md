@@ -182,7 +182,12 @@ files.
   pool is `spawn`-based with `maxtasksperchild`, and a worker lost between `imap_unordered` chunks
   leaves the parent in `futex_do_wait` forever, at ~1% CPU with the GPU idle, on searches that take
   under two minutes in their other repeats. Seen on both the CUDA and the HIP box; the root cause is
-  upstream and unchased. `cell_group.py` now gives every child spawned by `orchestrate.py` and
+  upstream and unchased. It remains in tinygrad 0.14.0: on minix, one of five cold-cache
+  `gpt2_mini` BEAM=2 repeats exceeded a 300 s cap against three healthy 37–51 s searches (the
+  fifth completed after 157 s). Therefore `orchestrate.py` defaults `--beam-parallel` to `0` on
+  every measurement box — the only setting that removes the spawn pool — while an explicit
+  positive value opts back into the pool with the cap as backstop (gh-ocannl-843).
+  `cell_group.py` now gives every child spawned by `orchestrate.py` and
   `gh675_cells.py` one shared group/job, TERM-to-KILL, output-preserving reap discipline;
   `orchestrate.py` puts cells under `--cell-timeout` (default 1800 s) and kills the GROUP on expiry:
   the pool workers hold the cell's
