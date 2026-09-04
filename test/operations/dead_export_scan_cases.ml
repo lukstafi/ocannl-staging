@@ -13,6 +13,7 @@ let%trace extended = 4
 external primitive : int -> int = "fixture_primitive"
 type t = Root [@@deriving sexp_of, compare, equal]
 type named = Named [@@deriving sexp, compare, equal]
+type poly = [ `One | `Two ] [@@deriving sexp]
 type group_a = Group_a and group_b = Group_b [@@deriving equal]
 let outer =
   let nested = 5 in
@@ -33,6 +34,7 @@ let () =
     (List.equal String.equal (export_keys fixture_exports)
        [
          "Sample.!@";
+         "Sample.__poly_of_sexp__";
          "Sample.alias";
          "Sample.compare";
          "Sample.compare_named";
@@ -45,8 +47,10 @@ let () =
          "Sample.outer";
          "Sample.pair";
          "Sample.plain";
+         "Sample.poly_of_sexp";
          "Sample.primitive";
          "Sample.sexp_of_named";
+         "Sample.sexp_of_poly";
          "Sample.sexp_of_t";
        ]);
   Verdict.p "nested lets and nested-module derived values are not exports"
@@ -58,6 +62,8 @@ let () =
   Verdict.p "a deriving on the last declaration covers its whole recursive type group"
     (List.mem (export_keys fixture_exports) "Sample.equal_group_a" ~equal:String.equal
     && List.mem (export_keys fixture_exports) "Sample.equal_group_b" ~equal:String.equal);
+  Verdict.p "sexp derives the polymorphic-variant parser helper"
+    (List.mem (export_keys fixture_exports) "Sample.__poly_of_sexp__" ~equal:String.equal);
   Verdict.p "dune select alternatives are not mistaken for module sources"
     (Option.is_none (Scan.module_name_of_source "arrayjit/lib/sample.missing.ml"));
   let direct =
@@ -114,6 +120,34 @@ let () =
     && referenced extensions "named_of_sexp");
   Verdict.p "an extension does not credit a different derivation from the same type"
     (not (referenced extensions "compare_named"));
+  let derived =
+    refs [ ("derived.ml", "type t = Sample.named [@@deriving sexp, compare, equal]\n") ]
+  in
+  Verdict.p "a deriving references converters of its component types"
+    (referenced derived "sexp_of_named"
+    && referenced derived "named_of_sexp"
+    && referenced derived "compare_named"
+    && referenced derived "equal_named");
+  let ignored =
+    refs
+      [
+        ( "ignored.ml",
+          "type a = (Sample.named[@sexp.opaque]) [@@deriving sexp]\n\
+           type b = (Sample.named[@compare.ignore]) [@@deriving compare]\n\
+           type c = (Sample.named[@equal.ignore]) [@@deriving equal]\n\
+           let a = [%sexp_of: (Sample.named[@sexp.opaque]) list]\n\
+           let b = [%sexp_of: Sample.named sexp_opaque]\n" );
+      ]
+  in
+  Verdict.p "opaque and ignored types do not credit unused derived values"
+    (not
+       (referenced ignored "sexp_of_named"
+       || referenced ignored "named_of_sexp"
+       || referenced ignored "compare_named"
+       || referenced ignored "equal_named"));
+  let functor_application = refs [ ("functor.ml", "let f = [%sexp_of: F(X).t]\n") ] in
+  Verdict.p "a functor-application type path is accepted without guessed credit"
+    (List.is_empty functor_application);
   let included = refs [ ("included.ml", "include Sample\n") ] in
   Verdict.p "include counts as a reference to every re-exported value"
     (List.length included = List.length fixture_exports);

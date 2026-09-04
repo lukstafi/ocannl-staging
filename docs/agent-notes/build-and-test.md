@@ -453,7 +453,9 @@ that they earn a lookup rather than always-loaded space.
   derivings, then counts qualified references from other sources. `[%sexp_of: M.ty]`,
   `[%of_sexp: M.ty]`, `[%compare: M.ty]`, and `[%equal: M.ty]` count as references to the
   corresponding generated value; the walk also reaches type constructors nested inside the
-  extension's type. Module aliases are
+  extension's type and those consumed by another deriving. `sexp.opaque`, `compare.ignore`, and
+  `equal.ignore` suppress the corresponding implicit reference, and a polymorphic-variant `sexp`
+  deriving contributes its additional `__<type>_of_sexp__` parser helper. Module aliases are
   followed conservatively; an unqualified identifier in the lexical scope of `open M` counts even
   when shadowing could make it local, and `include M` counts every value because it re-exports the
   interface. Those choices admit false positives rather than refusing valid code. Values created

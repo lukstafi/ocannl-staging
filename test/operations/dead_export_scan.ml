@@ -34,8 +34,6 @@ let exempt_zero_reference_exports =
   [
     "Backend_impl._get_local_debug_runtime";
     "Backend_impl.next_global_device_id";
-    "Backend_intf.buffer_loc_of_sexp";
-    "Backend_intf.compare_buffer_loc";
     "Backend_intf.compare_hardware_limits";
     "Backend_intf.compare_mma_capability";
     "Backend_intf.compare_mma_input_format";
@@ -47,17 +45,12 @@ let exempt_zero_reference_exports =
     "Backend_intf.mma_capability_of_sexp";
     "Backend_intf.mma_input_format_of_sexp";
     "Backend_intf.mma_staged_layout_of_sexp";
-    "Backend_intf.sexp_of_buffer_loc";
-    "Backend_intf.sexp_of_context";
     "Backend_intf.sexp_of_ctx_buffers";
-    "Backend_intf.sexp_of_device";
     "Backend_intf.sexp_of_device_dump";
-    "Backend_intf.sexp_of_kparam_source";
     "Backend_intf.sexp_of_merge_buffer_use";
     "Backend_intf.sexp_of_mma_capability";
     "Backend_intf.sexp_of_mma_input_format";
     "Backend_intf.sexp_of_mma_staged_layout";
-    "Backend_intf.sexp_of_routine";
     "Builtins_cc.source";
     "C_syntax._all_precs_is_complete";
     "C_syntax._get_local_debug_runtime";
@@ -116,7 +109,6 @@ let exempt_zero_reference_exports =
     "Ndarray.create_bigarray_of_prec";
     "Ndarray.decoded_count";
     "Ndarray.default_kind";
-    "Ndarray.equal";
     "Ndarray.fill_from_float";
     "Ndarray.float_to_uint32";
     "Ndarray.float_to_uint64";
@@ -141,7 +133,6 @@ let exempt_zero_reference_exports =
     "Ndarray.sexp_of_int32_nd";
     "Ndarray.sexp_of_int64_nd";
     "Ndarray.sexp_of_single_nd";
-    "Ndarray.sexp_of_t";
     "Ndarray.sexp_of_uint16_nd";
     "Ndarray.sexp_of_uint32_nd";
     "Ndarray.sexp_of_uint4x32_nd";
@@ -224,26 +215,19 @@ let exempt_zero_reference_exports =
     "Operation.uniform_at1";
     "Operation.wrap";
     "Ops.bfloat16_to_uint4x32";
-    "Ops.axis_padding_of_sexp";
     "Ops.binop_conditionality_of_sexp";
     "Ops.binop_of_sexp";
     "Ops.byte_to_uint4x32";
     "Ops.c_ptr_to_string";
-    "Ops.compare_prec";
-    "Ops.compare_binop";
     "Ops.compare_binop_conditionality";
     "Ops.compare_op";
-    "Ops.compare_ternop";
     "Ops.compare_ternop_conditionality";
-    "Ops.compare_unop";
-    "Ops.compare_vec_unop";
     "Ops.compare_voidptr";
     "Ops.double_to_uint4x32";
     "Ops.equal_voidptr";
     "Ops.equal_binop_conditionality";
     "Ops.equal_op";
     "Ops.equal_ternop_conditionality";
-    "Ops.equal_vec_unop";
     "Ops.fp8_to_uint4x32";
     "Ops.half_to_uint4x32";
     "Ops.hum_typ_of_prec";
@@ -257,7 +241,6 @@ let exempt_zero_reference_exports =
     "Ops.precision_to_string";
     "Ops.ptr_to_string_hum";
     "Ops.single_to_uint4x32";
-    "Ops.sexp_of_axis_padding";
     "Ops.sexp_of_op";
     "Ops.sexp_of_precision";
     "Ops.ternop_conditionality_of_sexp";
@@ -317,7 +300,6 @@ let exempt_zero_reference_exports =
     "Schedulers._get_local_debug_runtime";
     "Schedulers.cpu_mma_limits";
     "Task._get_local_debug_runtime";
-    "Task.sexp_of_t";
     "Tnode._get_local_debug_runtime";
     "Tnode.bounds_state_of_sexp";
     "Tnode.bounds_scan_worthwhile";
@@ -347,7 +329,6 @@ let exempt_zero_reference_exports =
     "Tnode.sexp_of_t_set";
     "Tnode.sexp_of_bounds_state";
     "Tnode.sexp_of_delayed_prec";
-    "Tnode.sexp_of_t";
     "Tnode.transition_memory_mode";
     "Tnode.validate_padded_numel_contract";
     "Utils._get_local_debug_runtime";
@@ -394,7 +375,6 @@ let exempt_zero_reference_exports =
     "Utils.settings_of_sexp";
     "Utils.sexp_of_requirement";
     "Utils.sexp_of_settings";
-    "Utils.sexp_of_atomic_bool";
     "Utils.sexp_of_atomic_int";
     "Utils.split_with_seps";
     "Utils.str_nonempty";
