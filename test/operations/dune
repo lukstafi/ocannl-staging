@@ -4867,6 +4867,7 @@
  (deps
   (alias runtest-env_spelling_gate)
   ocannl_config
+  ../../benchmarks/fixture_digest.py
   ../../tools/aggregate-skips.sh
   ../../tools/sweep.sh
   sweep_harness.sh)

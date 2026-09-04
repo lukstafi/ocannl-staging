@@ -35,11 +35,14 @@ ones whose fixtures predate any venv you could reconstruct.
 
     python3 benchmarks/fixture_digest.py --record   # pin fixtures/*.safetensors as this box's
     python3 benchmarks/fixture_digest.py --check    # what is on disk, against what is recorded
+    python3 benchmarks/fixture_digest.py --list-declared-measurement-boxes
+                                                    # the fleet matrix, one box per line
 """
 
 import argparse
 import hashlib
 import platform
+import re
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -136,19 +139,17 @@ def cli_command():
 
 
 def check_origin(origin):
-    """Origins are non-empty, whitespace-free and comma-free.
+    """Origins are portable filename-safe identifiers.
 
-    Whitespace because the digest file is whitespace-split, so a spaced origin writes a line that
-    reads back as a different (or malformed) entry. Commas because AGREEING origins serialize as
-    `a,b` into the single `fixture_origin` field every result row and report section carries
-    (`status`): an origin literally named `minix,rocm` produces a field byte-identical to the one
-    two boxes named `minix` and `rocm` recording the same bytes produce, so no consumer of a
-    published row can tell one box from two. An origin has to name exactly one box.
+    Whitespace is structural in DIGESTS, commas join agreeing origins in reports, and the same IDs
+    key cross-box sweep log filenames. Restricting the alphabet keeps one origin unambiguous in all
+    three places and portable across the Windows and Unix measurement hosts.
     """
-    if not origin or origin.split() != [origin] or "," in origin:
+    if not origin or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", origin) is None:
         raise ValueError(
-            "origin must be a single non-empty word without whitespace or commas (a comma is how "
-            f"the origins of agreeing boxes are joined, so it cannot be inside one), got {origin!r}"
+            "origin must start with an ASCII letter or digit and contain only ASCII letters, "
+            "digits, dot, underscore, or hyphen; it is used in filenames and comma-joined report "
+            f"fields, got {origin!r}"
         )
     return origin
 
@@ -505,6 +506,12 @@ def _main(argv=None):
     mode.add_argument(
         "--check", action="store_true", help="report each fixture's status against the record"
     )
+    mode.add_argument(
+        "--list-declared-measurement-boxes",
+        action="store_true",
+        help="print the explicit measurement-boxes header, one box per line; print nothing for "
+        "a legacy file with no declaration",
+    )
     ap.add_argument("fixtures", nargs="*", type=Path, help="fixture paths (default: all of them)")
     ap.add_argument(
         "--origin",
@@ -525,6 +532,16 @@ def _main(argv=None):
     ap.add_argument("--digests", type=Path, default=None, help=f"path to {DIGEST_FILE}")
     ap.add_argument("--fixture-dir", type=Path, default=here / "fixtures")
     args = ap.parse_args(argv)
+    if args.list_declared_measurement_boxes:
+        if args.fixtures:
+            ap.error("--list-declared-measurement-boxes reads only --digests; give no fixtures")
+        if args.origin is not None or args.adopt_legacy is not None:
+            ap.error("--list-declared-measurement-boxes does not record an origin")
+        digests = args.digests or args.fixture_dir / DIGEST_FILE
+        boxes = declared_measurement_boxes(digests) or []
+        for box in sorted(boxes):
+            print(box)
+        return 0
     if args.adopt_legacy is not None:
         if args.check:
             ap.error("--adopt-legacy rewrites the file, so it belongs with --record, not --check")

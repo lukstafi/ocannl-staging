@@ -90,6 +90,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   regenerated at a different spec revision is otherwise invisible: it is consumed **uniformly**
   by every cell, and the cross-cell parity gate compares cells with each other, not with the
   workload the report names, so it certifies exactly as it certifies the intended one.
+  Origins are portable IDs: they start with an ASCII letter or digit and contain only ASCII
+  letters, digits, dots, underscores, and hyphens. The same IDs key cross-box sweep log paths, so
+  path separators and platform-specific filename punctuation are refused before a file is written.
   The current declaration names `m4-max` (the Apple M4 Max/macOS measurement host), `minix`, and
   `rog-nv`. The Metal reports predate per-origin recording, so `m4-max` deliberately has no rows
   yet: its absence is now an explicit missing-record warning rather than an omitted host.

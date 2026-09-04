@@ -1519,6 +1519,32 @@ that they earn a lookup rather than always-loaded space.
   scheduled routine's report and notification foremost — see zero-coverage findings without
   opening the report file; the routine diffs the latest report's finding set against the previous
   `*-skip-coverage.txt` and treats `FAIL`, or a changed finding set, as notify-worthy.
+  The same report intersects environment-scoped records across the successful unit logs and judges
+  completeness by BOX, not backend: the canonical box set comes from the exact swept commit's
+  `# measurement-boxes:` declaration in `benchmarks/fixtures/DIGESTS.txt`, read through
+  `fixture_digest.py`'s parser, while each sweep unit supplies its stable box key. The launcher must
+  set `OCANNL_TOOL_SWEEP_LOCAL_BOX` to the local host's declared ID (`m4-max` on the scheduled
+  machine); hostnames and CPU models are not stable fleet identities, so an unset or undeclared
+  value is refused before any unit can write a mislabeled row. One successful
+  forced unit is enough to represent a box because an environment-scoped gate is, by contract,
+  independent of backend; when a box contributes several units, absence from any one proves the leg
+  executed there. Several boxes may contribute the same backend; backend completeness counts that
+  backend once, while environment completeness still counts both boxes. A claim present in every
+  completed declared-box log becomes `FAIL` only when every declared box contributed; with missing
+  boxes it is `POTENTIAL`, and a pre-declaration historical ref is left explicitly unaggregated. A
+  claim may be backend-gated in one run and environment-gated in another (the default-policy
+  `autotune_mma_companion` leg is the exemplar). An environment record in any declared-box log
+  assigns that executable-and-claim key to the environment dimension; backend or environment skip
+  records for the same key then both mean their box did not execute it. This ownership-before-
+  intersection order prevents a different scope from masquerading as execution. A current unit
+  absent from a historical target's declaration contributes backend evidence and is ignored for
+  that target's environment matrix; in the other direction, a declared box with no runnable unit
+  is a harness refusal rather than permanent silent non-coverage.
+  A configuration matrix that runs outside the fleet sweep uses
+  ``Verdict.skipped ~aggregation:`Outside_sweep``: the announcement and machine-record validation
+  remain, but neither sweep intersection claims ownership. This is deliberately narrow: the
+  `cc_backend_trace_name` claim is executed by the Ubuntu compiler-trace CI leg at trace level 3,
+  while the ordinary sweep's default configuration cannot execute it (gh-ocannl-885).
 - Every test action a sweep unit runs inherits `OCANNL_BACKEND=<that unit's backend>`. The unit is
   spelled `OCANNL_BACKEND=<backend> opam exec -- dune build @runtest @train`, and Dune hands its own
   environment to the actions it runs whether or not a stanza declares the variable — `(env_var …)`

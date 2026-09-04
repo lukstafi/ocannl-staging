@@ -22,7 +22,10 @@ on_error() {
   # learn what the sweep printed (gh-ocannl-893 was diagnosed that way). Named
   # indirectly rather than by a per-capture dump, so a capture added later is
   # covered by adding its name here and nothing else.
-  for name in incremental forced slow_forced coverage hostile; do
+  for name in incremental forced slow_forced coverage hostile complete_fail \
+    environment_executed partial_matrix singleton_fail repeated_backend_fail \
+    repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
+    local_identity_error unsafe_identity_error matrix_error; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -53,7 +56,7 @@ absent() {
 # where its environment is built.
 unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
   SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
-  SWEEP_TEST_OPAM_OUT_METAL
+  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX
 
 sweep=$1
 aggregate=$2
@@ -84,8 +87,10 @@ git init -q --bare "$origin"
 git init -q -b master "$main"
 git -C "$main" config user.name sweep-test
 git -C "$main" config user.email sweep-test@example.invalid
+mkdir -p "$main/benchmarks/fixtures"
+printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/DIGESTS.txt"
 printf 'fixture\n' >"$main/fixture"
-git -C "$main" add fixture
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt
 git -C "$main" commit -qm fixture
 git -C "$main" remote add origin "$origin"
 git -C "$main" push -q -u origin master
@@ -143,6 +148,7 @@ run_sweep_args() {
   # ARGUMENTS now, so the multi-line fixture logs would otherwise be split into
   # words and `env` would try to run one of them as the command.
   env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP \
+    -u OCANNL_TOOL_SWEEP_LOCAL_BOX \
     "HOME=$tmp/home" \
     "PATH=$fake_bin:$PATH" \
     "SWEEP_TEST_CALLS=$calls" \
@@ -152,6 +158,7 @@ run_sweep_args() {
     "SWEEP_TEST_OPAM_OUT_CC=${SWEEP_TEST_OPAM_OUT_CC:-}" \
     "SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" \
     "SWEEP_TEST_OPAM_OUT_METAL=${SWEEP_TEST_OPAM_OUT_METAL:-}" \
+    "OCANNL_TOOL_SWEEP_LOCAL_BOX=${SWEEP_TEST_LOCAL_BOX-m4-max}" \
     "OCANNL_TOOL_SWEEP_REPO=$main" \
     "OCANNL_TOOL_SWEEP_STATE=$state" \
     "$sweep" "$@"
@@ -169,8 +176,8 @@ incremental=$(run_sweep)
 forced=$(run_sweep --force)
 slow_forced=$(run_sweep --slow --force)
 
-grep -q 'local/cc: incremental-pass .*execution=incremental' <<<"$incremental"
-grep -q 'local/cc: pass .*execution=forced' <<<"$forced"
+grep -q 'm4-max/cc: incremental-pass .*execution=incremental' <<<"$incremental"
+grep -q 'm4-max/cc: pass .*execution=forced' <<<"$forced"
 
 expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execution'
 [ "$(head -1 "$state/history.tsv")" = "$expected_header" ]
@@ -193,14 +200,16 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 # The three absent backends keep this a potential finding rather than a failure:
 # one of them may have evaluated the common claim. A per-backend-only marker
 # must not leak into the report merely because it occurred somewhere. A skip
-# whose gate belongs to the environment occurs in both logs too, but its
-# explicit scope keeps it out of this backend-coverage question.
+# whose gate belongs to the environment occurs in both logs too. These two
+# backends share one box, so they prove no cross-box fact and environment
+# aggregation stays explicitly insufficient.
 common=$'SKIPPED on fixture (vacuous): common unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcommon unevaluated claim'
 cc_only=$'SKIPPED on fixture (vacuous): cc-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tcc-only unevaluated claim'
 multidev_only=$'SKIPPED on fixture (vacuous): multidev-only unevaluated claim\nOCANNL_TOOL_VERDICT_SKIP\tbackend\tfixture.exe\tmultidev-only unevaluated claim'
 environment=$'SKIPPED on fixture gate (vacuous): environment-gated claim\nOCANNL_TOOL_VERDICT_SKIP\tenvironment\tfixture.exe\tenvironment-gated claim'
-cc_unit_log=$common$'\n'$cc_only$'\n'$environment
-multidev_unit_log=$common$'\n'$multidev_only$'\n'$environment
+outside=$'SKIPPED on external matrix (vacuous): independently-covered claim\nOCANNL_TOOL_VERDICT_SKIP\toutside-sweep\tfixture.exe\tindependently-covered claim'
+cc_unit_log=$common$'\n'$cc_only$'\n'$environment$'\n'$outside
+multidev_unit_log=$common$'\n'$multidev_only$'\n'$environment$'\n'$outside
 coverage=$(SWEEP_TEST_OPAM_OUT_CC=$cc_unit_log \
   SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=$multidev_unit_log \
   run_sweep_args --force --only cc --only multidev_cc)
@@ -213,6 +222,12 @@ grep -q '^POTENTIAL: skipped on every completed backend: fixture.exe: common une
 absent 'cc-only unevaluated claim' "$coverage_report"
 absent 'multidev-only unevaluated claim' "$coverage_report"
 absent 'environment-gated claim' "$coverage_report"
+absent 'independently-covered claim' "$coverage_report"
+grep -q '^completed boxes: m4-max$' "$coverage_report"
+grep -q '^missing boxes: minix, rog-nv$' "$coverage_report"
+grep -q '^environment status: insufficient (1 of 3 declared boxes completed; need at least 2 unless the matrix is complete)$' \
+  "$coverage_report"
+grep -q '^environment result: NOT AGGREGATED$' "$coverage_report"
 
 # The verdict and each finding must reach the sweep's OWN summary, not only the
 # report file: the scheduled routine's notification path quotes sweep output,
@@ -228,6 +243,7 @@ grep -q '^  POTENTIAL: skipped on every completed backend: fixture.exe: common u
 absent 'cc-only unevaluated claim' <<<"$coverage"
 absent 'multidev-only unevaluated claim' <<<"$coverage"
 absent 'environment-gated claim' <<<"$coverage"
+absent 'independently-covered claim' <<<"$coverage"
 
 # The same fixture with a hostile backend in the AMBIENT environment. This is
 # the harness's own running condition: the sweep runs a unit's tests as
@@ -259,17 +275,23 @@ hostile=$(OCANNL_BACKEND=metal \
 # the same channel rather than staying silent about the report it wrote.
 grep -q '^  result: NOT AGGREGATED$' <<<"$forced"
 
-# The pure aggregator's complete-backend control is the escalation seam the
-# real sweep reaches only when both remote GPU boxes and all local units pass.
-# All five logs sharing a claim is exit 1 and a FAIL line; removing it from one
-# log proves the same complete census passes rather than treating a union as an
-# intersection.
+# The pure aggregator's complete-matrix control is the escalation seam the real
+# sweep reaches only when both remote GPU boxes and all local units pass. All
+# five logs sharing both claims is exit 1 with backend and environment FAIL
+# lines. The environment matrix comes from DIGESTS in the nested sweep above;
+# these arguments pin the aggregator's independent contract.
 aggregate_args=()
+for box in m4-max minix rog-nv; do aggregate_args+=(--known-box "$box"); done
 for backend in cc multidev_cc metal cuda hip; do
   log=$tmp/$backend.log
   "$verdict_probe" "$backend" >"$log" 2>&1
   aggregate_args+=(--known "$backend")
-  aggregate_args+=(--run "$backend" "$log")
+  case $backend in
+    cc | multidev_cc | metal) box=m4-max ;;
+    cuda) box=rog-nv ;;
+    hip) box=minix ;;
+  esac
+  aggregate_args+=(--run "$backend" "$box" "$log")
 done
 set +e
 complete_fail=$("$aggregate" "${aggregate_args[@]}" 2>&1)
@@ -279,11 +301,138 @@ set -e
 grep -q '^status: complete (5 of 5 known backends completed)$' <<<"$complete_fail"
 grep -q '^FAIL: skipped on every known backend: verdict_skip_probe.exe: common unevaluated claim$' \
   <<<"$complete_fail"
-absent 'common environment-gated claim' <<<"$complete_fail"
+grep -q '^environment status: complete (3 of 3 declared boxes completed)$' <<<"$complete_fail"
+grep -q '^environment result: FAIL -- 1 claim(s) skipped on every declared box$' \
+  <<<"$complete_fail"
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$complete_fail"
+
+# Executing the environment-gated leg in ONE complete log removes it from the
+# intersection even though the same box/backend claim remains skipped. The
+# aggregator still exits 1 for that independent backend failure; its environment
+# result must pass and must not carry the all-box finding.
+"$verdict_probe" hip execute-environment >"$tmp/hip.log" 2>&1
+set +e
+environment_executed=$("$aggregate" "${aggregate_args[@]}" 2>&1)
+environment_executed_rc=$?
+set -e
+[ "$environment_executed_rc" -eq 1 ]
+grep -q '^result: FAIL -- 1 claim(s) skipped on every known backend$' \
+  <<<"$environment_executed"
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$environment_executed"
+absent 'FAIL: skipped on every declared box:' <<<"$environment_executed"
 
 printf 'this backend evaluated the common claim\n' >"$tmp/hip.log"
 complete_pass=$("$aggregate" "${aggregate_args[@]}")
 grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$complete_pass"
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$complete_pass"
+
+# Two of three boxes make an all-observed environment skip POTENTIAL, never a
+# FAIL: the absent box may execute it. This also proves completeness is counted
+# by distinct box rather than by the number of logs (m4-max contributes three
+# in the complete case above).
+"$verdict_probe" cc >"$tmp/cc.log" 2>&1
+"$verdict_probe" hip >"$tmp/hip.log" 2>&1
+partial_matrix=$("$aggregate" \
+  --known cc --known multidev_cc --known metal --known cuda --known hip \
+  --known-box m4-max --known-box minix --known-box rog-nv \
+  --run cc m4-max "$tmp/cc.log" --run hip minix "$tmp/hip.log")
+grep -q '^environment status: partial (2 of 3 declared boxes completed)$' <<<"$partial_matrix"
+grep -q '^environment result: POTENTIAL -- 1 claim(s) skipped on every completed box; absent boxes remain unknown$' \
+  <<<"$partial_matrix"
+grep -q '^POTENTIAL: skipped on every completed box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$partial_matrix"
+
+# One logical leg can have different reasons for being unevaluated: this is the
+# real autotune_mma_companion shape, backend-scoped on cc/multidev_cc and
+# configuration-scoped on default-config CUDA/HIP. With Metal red and therefore
+# absent, every declared box is represented but no successful unit executed the
+# claim. Filtering by scope first falsely reported PASS; claim-and-box evidence
+# must report the complete environment matrix as FAIL.
+"$verdict_probe" cc environment-as-backend >"$tmp/mixed-cc.log" 2>&1
+"$verdict_probe" multidev_cc environment-as-backend >"$tmp/mixed-multidev.log" 2>&1
+"$verdict_probe" cuda >"$tmp/mixed-cuda.log" 2>&1
+"$verdict_probe" hip >"$tmp/mixed-hip.log" 2>&1
+set +e
+mixed_scope_fail=$("$aggregate" \
+  --known cc --known multidev_cc --known metal --known cuda --known hip \
+  --known-box m4-max --known-box minix --known-box rog-nv \
+  --run cc m4-max "$tmp/mixed-cc.log" \
+  --run multidev_cc m4-max "$tmp/mixed-multidev.log" \
+  --run cuda rog-nv "$tmp/mixed-cuda.log" --run hip minix "$tmp/mixed-hip.log" 2>&1)
+mixed_scope_fail_rc=$?
+set -e
+[ "$mixed_scope_fail_rc" -eq 1 ]
+grep -q '^environment result: FAIL -- 1 claim(s) skipped on every declared box$' \
+  <<<"$mixed_scope_fail"
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$mixed_scope_fail"
+
+# The successful Metal leg is the execution that must clear the same mixed-scope
+# claim. Its other backend-scoped fixture claim remains independent.
+"$verdict_probe" metal execute-environment >"$tmp/mixed-metal.log" 2>&1
+set +e
+mixed_scope_cleared=$("$aggregate" \
+  --known cc --known multidev_cc --known metal --known cuda --known hip \
+  --known-box m4-max --known-box minix --known-box rog-nv \
+  --run cc m4-max "$tmp/mixed-cc.log" \
+  --run multidev_cc m4-max "$tmp/mixed-multidev.log" \
+  --run metal m4-max "$tmp/mixed-metal.log" \
+  --run cuda rog-nv "$tmp/mixed-cuda.log" --run hip minix "$tmp/mixed-hip.log" 2>&1)
+mixed_scope_cleared_rc=$?
+set -e
+[ "$mixed_scope_cleared_rc" -eq 1 ]
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$mixed_scope_cleared"
+absent 'FAIL: skipped on every declared box:' <<<"$mixed_scope_cleared"
+
+# A backend may run on more than one declared box. It counts once toward backend
+# completeness, but each box remains independent environment evidence.
+"$verdict_probe" cc >"$tmp/repeated-m4.log" 2>&1
+"$verdict_probe" cc >"$tmp/repeated-minix.log" 2>&1
+set +e
+repeated_backend_fail=$("$aggregate" \
+  --known cc --known metal --known-box m4-max --known-box minix \
+  --run cc m4-max "$tmp/repeated-m4.log" --run cc minix "$tmp/repeated-minix.log" 2>&1)
+repeated_backend_fail_rc=$?
+set -e
+[ "$repeated_backend_fail_rc" -eq 1 ]
+grep -q '^completed backends: cc$' <<<"$repeated_backend_fail"
+grep -q '^status: insufficient (1 of 2 known backends completed; need at least 2)$' \
+  <<<"$repeated_backend_fail"
+grep -q '^environment status: complete (2 of 2 declared boxes completed)$' \
+  <<<"$repeated_backend_fail"
+grep -q '^environment result: FAIL -- 1 claim(s) skipped on every declared box$' \
+  <<<"$repeated_backend_fail"
+"$verdict_probe" cc execute-environment >"$tmp/repeated-minix.log" 2>&1
+repeated_backend_pass=$("$aggregate" \
+  --known cc --known metal --known-box m4-max --known-box minix \
+  --run cc m4-max "$tmp/repeated-m4.log" --run cc minix "$tmp/repeated-minix.log")
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$repeated_backend_pass"
+
+# Completeness outranks the partial-matrix observation floor. A valid singleton
+# declaration must still turn its one box's skip into FAIL, and execution in
+# that same one log must turn it into PASS.
+"$verdict_probe" cc >"$tmp/cc.log" 2>&1
+set +e
+singleton_fail=$("$aggregate" \
+  --known cc --known metal --known-box m4-max \
+  --run cc m4-max "$tmp/cc.log" 2>&1)
+singleton_fail_rc=$?
+set -e
+[ "$singleton_fail_rc" -eq 1 ]
+grep -q '^environment status: complete (1 of 1 declared boxes completed)$' <<<"$singleton_fail"
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$singleton_fail"
+"$verdict_probe" cc execute-environment >"$tmp/cc.log" 2>&1
+singleton_pass=$("$aggregate" \
+  --known cc --known metal --known-box m4-max \
+  --run cc m4-max "$tmp/cc.log")
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$singleton_pass"
 
 # Equal human labels in two DIFFERENT executables are different test legs. Copy
 # the real probe under another basename so this control reaches the production
@@ -294,8 +443,20 @@ cp "$verdict_probe" "$other_probe"
 "$other_probe" metal >"$tmp/identity-metal.log" 2>&1
 identity_clear=$("$aggregate" \
   --known cc --known metal \
-  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log")
+  --known-box m4-max \
+  --run cc m4-max "$tmp/identity-cc.log" --run metal m4-max "$tmp/identity-metal.log")
 grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$identity_clear"
+
+# A historical target from before the declaration keeps its backend answer and
+# says that environment aggregation is unavailable. Treating observed row/log
+# origins as a declared matrix would turn this into invented completeness.
+legacy_matrix=$("$aggregate" \
+  --known cc --known metal \
+  --run cc m4-max "$tmp/identity-cc.log" --run metal m4-max "$tmp/identity-metal.log")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$legacy_matrix"
+grep -q '^environment status: unavailable (target declares no measurement-box matrix)$' \
+  <<<"$legacy_matrix"
+grep -q '^environment result: NOT AGGREGATED$' <<<"$legacy_matrix"
 
 # Zero successful units is routine when every selected backend is unavailable
 # or red. This runs under macOS's stock Bash 3.2 in the local suite and pins the
@@ -317,7 +478,8 @@ chmod +x "$fail_bin/sort"
 set +e
 extract_error=$(PATH=$fail_bin:$PATH "$aggregate" \
   --known cc --known metal \
-  --run cc "$tmp/identity-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+  --known-box m4-max \
+  --run cc m4-max "$tmp/identity-cc.log" --run metal m4-max "$tmp/identity-metal.log" 2>&1)
 extract_error_rc=$?
 set -e
 [ "$extract_error_rc" -eq 2 ]
@@ -330,7 +492,8 @@ printf 'SKIPPED on cc (vacuous): common unevaluated claim\n' >"$tmp/legacy-cc.lo
 set +e
 legacy_error=$("$aggregate" \
   --known cc --known metal \
-  --run cc "$tmp/legacy-cc.log" --run metal "$tmp/identity-metal.log" 2>&1)
+  --known-box m4-max \
+  --run cc m4-max "$tmp/legacy-cc.log" --run metal m4-max "$tmp/identity-metal.log" 2>&1)
 legacy_error_rc=$?
 set -e
 [ "$legacy_error_rc" -eq 2 ]
@@ -398,7 +561,7 @@ rtc_failure=$rtc_failure$'\nhiprtc options: '"$rendered_hip_options"
 rtc_failure=$rtc_failure$'\nmetal options: '"$rendered_metal_options"
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$rtc_failure \
   run_sweep_backend metal >"$tmp/metal.out" 2>&1
-grep -q 'local/metal: fail' "$tmp/metal.out"
+grep -q 'm4-max/metal: fail' "$tmp/metal.out"
 # The recorded outcome is the column the collection must not be able to corrupt.
 # Folded into the unit, the diagnostic shares the unit's CAP, and a red suite that
 # ran the cap down would be filed as `timeout` -- coverage lost -- instead of as
@@ -428,7 +591,7 @@ grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast
 # and may well be the one above, rewritten: that is fine and is itself part of the
 # check, since the assertions on the failing run have already read it.
 run_sweep_backend metal >"$tmp/metal_pass.out" 2>&1
-grep -q 'local/metal: incremental-pass' "$tmp/metal_pass.out"
+grep -q 'm4-max/metal: incremental-pass' "$tmp/metal_pass.out"
 metal_pass_log=$(awk -F '\t' '$3 == "metal" { print $9 }' "$state/history.tsv" | tail -1)
 [ -f "$metal_pass_log" ]
 absent 'rtc-context' "$metal_pass_log"
@@ -476,7 +639,7 @@ File "test/operations/fixture.expected", line 1, characters 0-0:
 FAILED: 1 check did not hold.'
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$dune_failure \
   run_sweep >"$tmp/dune_fail.out" 2>&1
-grep -q 'local/cc: fail' "$tmp/dune_fail.out"
+grep -q 'm4-max/cc: fail' "$tmp/dune_fail.out"
 dune_fail_fp=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
 dune_fail_fp=${dune_fail_fp%.log}.fingerprint
 # The stanza name, not the span: line numbers in a dune file shift under any
@@ -509,12 +672,64 @@ grep -q '^File "test/operations/fixture.expected", line 1$' "$dune_fail_fp"
 # carries it to the human, the channel the scheduled routine actually quotes.
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT='a red suite that named no error site' \
   run_sweep >"$tmp/blank_fail.out" 2>&1
-grep -q 'local/cc: fail' "$tmp/blank_fail.out"
-grep -q '^  local/cc: (no fingerprintable diagnostics -- read the log) -- ' \
+grep -q 'm4-max/cc: fail' "$tmp/blank_fail.out"
+grep -q '^  m4-max/cc: (no fingerprintable diagnostics -- read the log) -- ' \
   "$tmp/blank_fail.out"
 blank_fail_fp=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
 blank_fail_fp=${blank_fail_fp%.log}.fingerprint
 [ -s "$blank_fail_fp" ]
 grep -q '^(no fingerprintable diagnostics -- read the log)$' "$blank_fail_fp"
+
+# The launcher must bind the physical local host to its stable fleet ID. With
+# that identity absent the sweep refuses before it can write a mislabeled row;
+# a hard-coded m4-max local unit would make this control pass incorrectly.
+set +e
+local_identity_error=$(SWEEP_TEST_LOCAL_BOX= run_sweep 2>&1)
+local_identity_error_rc=$?
+set -e
+[ "$local_identity_error_rc" -eq 2 ]
+grep -q "^sweep: set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's portable measurement-box ID$" \
+  <<<"$local_identity_error"
+
+# A path separator in the local ID must be rejected before it becomes part of a
+# per-unit log path. The DIGESTS parser applies the same portable-ID grammar to
+# declared and recorded origins.
+set +e
+unsafe_identity_error=$(SWEEP_TEST_LOCAL_BOX='m4/max' run_sweep 2>&1)
+unsafe_identity_error_rc=$?
+set -e
+[ "$unsafe_identity_error_rc" -eq 2 ]
+grep -q "^sweep: set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's portable measurement-box ID$" \
+  <<<"$unsafe_identity_error"
+
+# A historical target may declare fewer boxes than today's execution map. The
+# extra local unit still proves backend facts, but cannot be counted as a member
+# of that target's environment matrix.
+printf '# measurement-boxes: minix rog-nv\n' >"$main/benchmarks/fixtures/DIGESTS.txt"
+git -C "$main" add benchmarks/fixtures/DIGESTS.txt
+git -C "$main" commit -qm 'historical two-box matrix'
+git -C "$main" push -q origin master
+historical_matrix=$(run_sweep --force)
+historical_report=$(sed -n 's/^skip coverage: .* -- //p' <<<"$historical_matrix" | tail -1)
+grep -q '^completed boxes: <none>$' "$historical_report"
+grep -q '^missing boxes: minix, rog-nv$' "$historical_report"
+grep -q '^environment status: insufficient (0 of 2 declared boxes completed; need at least 2 unless the matrix is complete)$' \
+  "$historical_report"
+grep -q '^environment result: NOT AGGREGATED$' "$historical_report"
+
+# Negative control for the one-list contract: changing only the declaration to
+# add a box with no execution unit makes the sweep refuse before claiming any
+# matrix result. A second hard-coded box census in sweep.sh would stay green.
+printf '# measurement-boxes: m4-max minix rog-nv spare\n' \
+  >"$main/benchmarks/fixtures/DIGESTS.txt"
+git -C "$main" add benchmarks/fixtures/DIGESTS.txt
+git -C "$main" commit -qm 'add unscheduled declared box'
+git -C "$main" push -q origin master
+set +e
+matrix_error=$(run_sweep 2>&1)
+matrix_error_rc=$?
+set -e
+[ "$matrix_error_rc" -eq 2 ]
+grep -q "^sweep: declared measurement box 'spare' has no sweep unit$" <<<"$matrix_error"
 
 printf 'sweep execution accounting, RTC context, fingerprinting and skip aggregation: PASS\n'

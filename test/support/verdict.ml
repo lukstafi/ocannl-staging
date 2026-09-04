@@ -240,7 +240,7 @@ let p_pairwise_distinct name xs ~equal ~to_string =
   | Some (x, y) -> short_fail name (Printf.sprintf "collision: %s = %s" (to_string x) (to_string y))
   | None -> quantified ~min:2 name xs (fun () -> true)
 
-type skip_aggregation = [ `Backend | `Environment ]
+type skip_aggregation = [ `Backend | `Environment | `Outside_sweep ]
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
     [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is
@@ -251,8 +251,14 @@ type skip_aggregation = [ `Backend | `Environment ]
     distinct when sweep logs are intersected across backends. [scope] is [backend] by default. Pass
     [~aggregation:`Environment] when the leg is gated by a host or configuration capability rather
     than the selected backend, such as a compiler target, preprocessing flag or filesystem feature;
-    its human announcement remains visible, but a backend sweep cannot mistake that environment gate
-    for unsupported backend coverage.
+    its human announcement remains visible, and the forced fleet sweep aggregates it across the
+    measurement boxes declared by [benchmarks/fixtures/DIGESTS.txt] instead of mistaking it for
+    unsupported backend coverage. Scope describes this observation, not the claim identity: if any
+    declared-box log marks a claim [Environment], a [Backend] skip carrying the same executable and
+    claim key on another box is also evidence that box did not execute it. Pass
+    [~aggregation:`Outside_sweep] only when a separate checked
+    matrix owns execution of the claim (for example the compiler-trace CI leg); the record remains
+    validated and human-visible but neither sweep dimension treats its absence as evidence.
 
     Use it in place of a bare [p name true]: that line is byte-identical to a verified run's, so
     neither the transcript nor a reviewer can tell the claim was never evaluated — which is how a
@@ -274,7 +280,10 @@ let skipped ?(aggregation = (`Backend : skip_aggregation)) ~backend name =
      labels in different tests from being conflated. [String.escaped] keeps each field on one TSV
      line even if a computed label contains a control character. *)
   Stdio.eprintf "OCANNL_TOOL_VERDICT_SKIP\t%s\t%s\t%s\n%!"
-    (match aggregation with `Backend -> "backend" | `Environment -> "environment")
+    (match aggregation with
+    | `Backend -> "backend"
+    | `Environment -> "environment"
+    | `Outside_sweep -> "outside-sweep")
     (Stdlib.String.escaped (Stdlib.Filename.basename Stdlib.Sys.executable_name))
     (Stdlib.String.escaped name);
   p name true

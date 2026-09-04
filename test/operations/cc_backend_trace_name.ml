@@ -37,4 +37,8 @@ let run_trace_smoke () =
 
 let () =
   if compiled_trace_level () >= 3 then run_trace_smoke ()
-  else Verdict.skipped ~aggregation:`Environment ~backend:(trace_gate ^ "<3") claim
+  else
+    (* The Ubuntu compiler-trace CI job executes this exact claim at level 3. The ordinary fleet
+       sweep cannot infer that configuration-only execution from its default-config box logs, so
+       keep the skip visible without presenting it as missing sweep coverage. *)
+    Verdict.skipped ~aggregation:`Outside_sweep ~backend:(trace_gate ^ "<3") claim
