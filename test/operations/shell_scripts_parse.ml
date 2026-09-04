@@ -1089,6 +1089,14 @@ module Errexit_negation = struct
             Buffer.add_char current character;
             if escaped then loop (index + 1) `Double false words
             else if Char.equal character '\\' then loop (index + 1) `Double true words
+            else if starts_at command ~pos:index "$(" then (
+              let finish = skip_command_substitution command (index + 2) in
+              Buffer.add_substring current command ~pos:(index + 1) ~len:(finish - index - 1);
+              loop finish `Double false words)
+            else if starts_at command ~pos:index "${" then (
+              let finish = skip_parameter_expansion command (index + 2) in
+              Buffer.add_substring current command ~pos:(index + 1) ~len:(finish - index - 1);
+              loop finish `Double false words)
             else if Char.equal character '`' then loop (index + 1) `Backtick_double false words
             else if Char.equal character '"' then loop (index + 1) `None false words
             else loop (index + 1) `Double false words
@@ -1139,7 +1147,9 @@ module Errexit_negation = struct
     let word = literal_shell_word word in
     match String.lsplit2 word ~on:'=' with
     | Some (name, _) when not (String.is_empty name) ->
-        (Char.is_alpha name.[0] || Char.equal name.[0] '_')
+        let name = if String.is_suffix name ~suffix:"+" then String.drop_suffix name 1 else name in
+        (not (String.is_empty name))
+        && (Char.is_alpha name.[0] || Char.equal name.[0] '_')
         && String.for_all (String.drop_prefix name 1) ~f:(fun character ->
             Char.is_alphanum character || Char.equal character '_')
     | _ -> false
@@ -1179,9 +1189,13 @@ module Errexit_negation = struct
     in
     let rec drop_command_prefixes = function
       | word :: rest when assignment_prefix word -> drop_command_prefixes rest
+      | time :: option :: rest
+        when String.equal (literal_shell_word time) "time"
+             && String.equal (literal_shell_word option) "-p" ->
+          drop_command_prefixes rest
       | word :: rest
         when List.mem
-               [ "{"; "!"; "if"; "while"; "until"; "then"; "else"; "elif"; "do" ]
+               [ "{"; "!"; "time"; "if"; "while"; "until"; "then"; "else"; "elif"; "do" ]
                (literal_shell_word word) ~equal:String.equal ->
           drop_command_prefixes rest
       | words -> words
@@ -1382,6 +1396,7 @@ module Errexit_negation = struct
       ("plus bundle before errexit", "set +u -e\n! grep -q missing output\n", [ 2 ]);
       ("named plus option before errexit", "set +o nounset -e\n! grep -q missing output\n", [ 2 ]);
       ("assignment-prefixed set", "X=y set -e\n! grep -q missing output\n", [ 2 ]);
+      ("append-assignment-prefixed set", "X+=y set -e\n! grep -q missing output\n", [ 2 ]);
       ("quoted assignment-prefixed set", "X='a b' set -e\n! grep -q missing output\n", [ 2 ]);
       ("redirection-prefixed set", ">/dev/null set -e\n! grep -q missing output\n", [ 2 ]);
       ("separate redirection-prefixed set", "> /dev/null set -e\n! grep -q missing output\n", [ 2 ]);
@@ -1399,6 +1414,12 @@ module Errexit_negation = struct
       ( "command-substitution assignment prefix",
         "X=$(printf value) set -e\n! grep -q missing output\n",
         [ 2 ] );
+      ( "double-quoted command-substitution assignment prefix",
+        "X=\"$(printf \"%s\" \"some value\")\" set -e\n! grep -q missing output\n",
+        [ 2 ] );
+      ( "double-quoted parameter-expansion assignment prefix",
+        "X=\"${x:-\"some value\"}\" set -e\n! grep -q missing output\n",
+        [ 2 ] );
       ( "parameter-expansion assignment prefix",
         "X=${x:-some value} set -e\n! grep -q missing output\n",
         [ 2 ] );
@@ -1411,6 +1432,9 @@ module Errexit_negation = struct
       ("later set after AND", "prepare && set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after OR", "prepare || set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after async command", "prepare & set -e\n! grep -q missing output\n", [ 2 ]);
+      ("timed set", "time set -e\n! grep -q missing output\n", [ 2 ]);
+      ("portable timed set", "time -p set -e\n! grep -q missing output\n", [ 2 ]);
+      ("piped timed set does not affect parent", "time set -e | cat\n! grep -q missing output\n", []);
       ("pipeline set does not affect parent", "set -e | cat\n! grep -q missing output\n", []);
       ("pipe-and set does not affect parent", "set -e |& cat\n! grep -q missing output\n", []);
       ("background set does not affect parent", "set -e &\n! grep -q missing output\n", []);
