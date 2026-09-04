@@ -1259,8 +1259,9 @@ that they earn a lookup rather than always-loaded space.
   the exact infrastructure alias that owns it. It fails closed on other private helpers, external or
   otherwise opaque actions, `dynamic-run`, `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, explicit (file or directory) or
-  action-inferred generated-target dependencies (including pforms and literal file-input action
-  positions), target-bearing alias rules, or unexpanded `include` stanzas. A bare executable name
+  action-inferred generated-target dependencies (including dependency pforms in fields or actions,
+  and literal file-input action positions), target-bearing alias rules, or unexpanded `include`
+  stanzas. A bare executable name
   under an action-local or directory-level rewrite of `PATH` (under any case spelling) is opaque
   too, including in transitively reached aliases. Each construct needs deliberate scanner support
   before it can participate in this static guarantee.

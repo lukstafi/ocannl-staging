@@ -87,12 +87,15 @@ let alias_dependencies ~subdir stanza =
   | None -> ([], [])
   | Some deps -> collect (Sexp.List deps)
 
+let dependency_pforms = [ "dep"; "file"; "path"; "read"; "read-lines"; "read-strings" ]
+
 let dependency_path ~subdir atom =
   match Dune_scan.pieces atom with
   | [ Dune_scan.Literal path ] -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
   | [ Dune_scan.Pform pform ] -> (
       match String.lsplit2 pform ~on:':' with
-      | Some ("dep", path) -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+      | Some (prefix, path) when List.mem dependency_pforms prefix ~equal:String.equal ->
+          Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
       | _ -> None)
   | _ -> None
 
@@ -118,7 +121,7 @@ let target_dependencies ~subdir stanza =
             match Dune_scan.pieces atom with
             | [ Dune_scan.Pform pform ] -> (
                 match String.lsplit2 pform ~on:':' with
-                | Some (("dep" | "read" | "read-lines" | "read-strings" | "path" | "file"), path) ->
+                | Some (prefix, path) when List.mem dependency_pforms prefix ~equal:String.equal ->
                     Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
                 | _ -> None)
             | _ -> None)
@@ -721,6 +724,16 @@ let action_dependency_fixture =
  (alias bin-smoke)
  (action (run %{exe:alpha.exe} %{dep:smoke.stamp})))|dune}
 
+let explicit_read_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke.stamp)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps %{read:smoke.stamp})
+ (action (run %{exe:alpha.exe})))|dune}
+
 let transitive_path_bin_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -800,6 +813,7 @@ let controls_hold () =
   let private_launcher = scan_bin_content private_launcher_fixture in
   let verified_helper_launcher = scan_bin_content verified_helper_launcher_fixture in
   let action_dependency = scan_bin_content action_dependency_fixture in
+  let explicit_read_dependency = scan_bin_content explicit_read_dependency_fixture in
   let transitive_path =
     scan
       [ ("bin/dune", transitive_path_bin_fixture); ("test/dune", transitive_path_helper_fixture) ]
@@ -866,6 +880,10 @@ let controls_hold () =
   && List.mem verified_helper_launcher.unexpected "bin/env_spelling_gate.exe" ~equal:String.equal
   && (not (complete action_dependency))
   && List.mem action_dependency.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete explicit_read_dependency))
+  && List.mem explicit_read_dependency.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
        ~equal:String.equal
   && (not (complete transitive_path))
