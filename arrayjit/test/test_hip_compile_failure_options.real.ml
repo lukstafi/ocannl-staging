@@ -27,9 +27,12 @@ let check_hiprtc () =
     | _ -> None
     | exception Hiprtc.Hiprtc_error { message; _ } -> Some message
   in
-  Option.iter failure_message ~f:(Stdio.eprintf "hiprtc failure (not part of the golden): %s\n");
-  p (List.nth_exn claims 0)
-    (Option.exists failure_message ~f:(String.is_suffix ~suffix:expected_suffix));
+  let failure_has_options =
+    Option.exists failure_message ~f:(String.is_suffix ~suffix:expected_suffix)
+  in
+  if not failure_has_options then
+    Option.iter failure_message ~f:(Stdio.eprintf "hiprtc failure: %s\n");
+  p (List.nth_exn claims 0) failure_has_options;
   let valid_source = {|extern "C" __global__ void hiprtc_options_valid() {}|} in
   let valid_error =
     try
