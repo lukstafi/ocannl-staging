@@ -772,22 +772,13 @@ let preprocessing_signature source =
   in
   collect false [] (String.split_lines source) |> String.concat ~sep:"\n"
 
-let contains_text text pattern =
-  let text_len = String.length text in
-  let pattern_len = String.length pattern in
-  let rec matches_at at i =
-    i = pattern_len || (Char.equal text.[at + i] pattern.[i] && matches_at at (i + 1))
-  in
-  let rec search at =
-    pattern_len = 0 || (at + pattern_len <= text_len && (matches_at at 0 || search (at + 1)))
-  in
-  search 0
-
 (* These compiler modes consume mutable code-generation inputs whose CONTENTS are not represented by
    preprocessing or the driver's [-###] expansion. Persisting their assembly would require parsing
    compiler-specific option grammars and recursively fingerprinting profiles, plugins, PCHs or
    module graphs. Bypass instead: this test still compiles and measures exactly as before, only
-   without memoization. Deliberately match option families, including their [=path] forms. *)
+   without memoization. Deliberately match option families, including their [=path] forms. The
+   attribute tells the generated-text inventory that these needles classify a COMPILER PLAN; its
+   scope is this binding, so generated-source assertions elsewhere in this file remain visible. *)
 let plan_has_mutable_codegen_inputs plan =
   List.exists
     [
@@ -811,8 +802,8 @@ let plan_has_mutable_codegen_inputs plan =
       "-fmodule-file";
       "-fmodule-map-file";
       "-load";
-    ]
-    ~f:(contains_text plan)
+    ] ~f:(fun option -> String.is_substring plan ~substring:option)
+[@@ocannl.codegen_text.compiler_plan]
 
 let toolchain_identity (t : Census.toolchain) ~opt_level ~source =
   let signature = Stdlib.Digest.to_hex (Stdlib.Digest.string (preprocessing_signature source)) in

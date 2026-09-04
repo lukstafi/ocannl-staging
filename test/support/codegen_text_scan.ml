@@ -69,6 +69,11 @@
     still listed, so a codegen change is still told to re-run it -- only the fragment cannot be
     named.
 
+    A compiler-plan classifier in a test that also reads generated source is the one deliberately
+    annotated exception, through the [ocannl.codegen_text.compiler_plan] attribute. Its text tests
+    describe compiler flags, not emitted code, and are excluded only within that binding. A
+    generated-text assertion elsewhere in the same file remains a pin.
+
     {1 Reading these sources as OCaml}
 
     The source half parses, for the reasons {!Config_key_scan}'s header sets out at length: an
@@ -621,6 +626,15 @@ let pattern_names pattern =
   iterator#pattern pattern;
   !found
 
+(** A deliberately narrow escape hatch for text classifiers over the compiler invocation rather than
+    over generated code. The attribute belongs to one value binding: suppressing a whole file would
+    let an unrelated real pin disappear with it (gh-ocannl-865). *)
+let compiler_plan_attribute = "ocannl.codegen_text.compiler_plan"
+
+let classifies_compiler_plan (vb : value_binding) =
+  List.exists vb.pvb_attributes ~f:(fun attribute ->
+      String.equal attribute.attr_name.txt compiler_plan_attribute)
+
 (* Positional parameters, in order, stopping at the first one this scan does not follow: a labelled
    or optional parameter, or a pattern that is not a plain name. Stopping keeps the positions honest
    -- a call site is matched by argument POSITION, and a parameter skipped rather than stopped at
@@ -658,9 +672,10 @@ let bindings_of collect =
       inherit Ast_traverse.iter as super
 
       method! value_binding vb =
-        let params, body = peel_params vb.pvb_expr in
-        found := { names = pattern_names vb.pvb_pat; params; body } :: !found;
-        super#value_binding vb
+        if not (classifies_compiler_plan vb) then (
+          let params, body = peel_params vb.pvb_expr in
+          found := { names = pattern_names vb.pvb_pat; params; body } :: !found;
+          super#value_binding vb)
     end
   in
   collect iterator;
@@ -1302,6 +1317,7 @@ let classify_source ~emitters ~path ~contents =
     let iterator =
       object
         inherit Ast_traverse.iter as super
+        method! value_binding vb = if not (classifies_compiler_plan vb) then super#value_binding vb
 
         method! expression e =
           (match text_test ~generated e with
