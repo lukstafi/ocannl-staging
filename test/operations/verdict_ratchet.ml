@@ -78,6 +78,7 @@ type helper_binding = {
   name : string;
   site : definition_site;
   dependencies : helper_binding list;
+  guards : Set.M(String).t;
   unguarded : quantifier list;
   claim_kind : claim_kind option;
 }
@@ -108,13 +109,6 @@ let is_name expr name =
   | Some path -> Option.value_map (List.last path) ~default:false ~f:(String.equal name)
   | None -> false
 
-let rec helper_name pattern =
-  match pattern.ppat_desc with
-  | Ppat_var { txt; _ } -> Some txt
-  | Ppat_alias (_, { txt; _ }) -> Some txt
-  | Ppat_constraint (inner, _) -> helper_name inner
-  | _ -> None
-
 let rec function_body expr =
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> function_body body
@@ -122,6 +116,60 @@ let rec function_body expr =
 
 let unlabelled arguments =
   List.filter_map arguments ~f:(function Asttypes.Nolabel, argument -> Some argument | _ -> None)
+
+type binding_part = {
+  name : string;
+  expression : expression;
+  location : Ppxlib.Location.t;
+  exact : bool;
+}
+
+let pattern_names pattern =
+  let names = ref [] in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! pattern pattern =
+        (match pattern.ppat_desc with
+        | Ppat_var { txt; _ } | Ppat_alias (_, { txt; _ }) ->
+            names := (txt, pattern.ppat_loc) :: !names
+        | _ -> ());
+        super#pattern pattern
+    end
+  in
+  iterator#pattern pattern;
+  List.rev !names
+  |> List.dedup_and_sort ~compare:(fun (left, _) (right, _) -> String.compare left right)
+
+let conservative_binding_parts pattern expression =
+  pattern_names pattern
+  |> List.map ~f:(fun (name, location) -> { name; expression; location; exact = false })
+
+(* A destructuring pattern is not permission to lose the binding. Literal tuples and records give
+   each name its exact producer; for a shape we cannot align, every bound name retains the whole
+   expression as a conservative producer. [returned_quantifiers] uses [exact] to decide whether it
+   may restrict itself to the returned path or must inspect that producer broadly. *)
+let rec binding_parts pattern expression =
+  match (pattern.ppat_desc, expression.pexp_desc) with
+  | Ppat_var { txt; _ }, _ ->
+      [ { name = txt; expression; location = pattern.ppat_loc; exact = true } ]
+  | Ppat_alias (inner, { txt; _ }), _ ->
+      { name = txt; expression; location = pattern.ppat_loc; exact = true }
+      :: binding_parts inner expression
+  | Ppat_constraint (inner, _), _ -> binding_parts inner expression
+  | Ppat_tuple patterns, Pexp_tuple expressions when List.length patterns = List.length expressions
+    ->
+      List.map2_exn patterns expressions ~f:binding_parts |> List.concat
+  | Ppat_record (patterns, _), Pexp_record (expressions, None) ->
+      List.map patterns ~f:(fun (pattern_label, pattern) ->
+          List.find_map expressions ~f:(fun (expression_label, expression) ->
+              if Poly.equal pattern_label.txt expression_label.txt then
+                Some (binding_parts pattern expression)
+              else None))
+      |> Option.all
+      |> Option.value_map ~default:(conservative_binding_parts pattern expression) ~f:List.concat
+  | _ -> conservative_binding_parts pattern expression
 
 let rec population_name expr =
   match Sources.longident_of expr with
@@ -248,9 +296,12 @@ let rec returned_quantifiers expr =
       let returned_names = returned_value_names body in
       returned_quantifiers body
       @ List.concat_map bindings ~f:(fun binding ->
-          match helper_name binding.pvb_pat with
-          | Some name when Set.mem returned_names name -> returned_quantifiers binding.pvb_expr
-          | _ -> [])
+          binding_parts binding.pvb_pat binding.pvb_expr
+          |> List.concat_map ~f:(fun part ->
+              if Set.mem returned_names part.name then
+                if part.exact then returned_quantifiers part.expression
+                else quantifiers_in part.expression
+              else []))
   | Pexp_sequence (_, result) -> returned_quantifiers result
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers inner
   | Pexp_ifthenelse (_, yes, no) ->
@@ -262,7 +313,7 @@ let rec returned_quantifiers expr =
          || is_collection_call callee ~member:"for_all2_exn"
          || is_collection_call callee ~member:"is_empty"
          || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
-         || is_name callee "<>" || is_name callee "|>" ->
+         || is_name callee "<>" || is_name callee "equal" || is_name callee "|>" ->
       quantifiers_in expr
   | _ -> []
 
@@ -282,7 +333,7 @@ and returned_value_names expr =
         ~f:(fun names case -> Set.union names (returned_value_names case.pc_rhs))
   | Pexp_apply (callee, arguments)
     when is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
-         || is_name callee "<>" ->
+         || is_name callee "<>" || is_name callee "equal" ->
       List.fold arguments
         ~init:(Set.empty (module String))
         ~f:(fun names (_, argument) -> Set.union names (returned_value_names argument))
@@ -348,24 +399,6 @@ let rec required_nonempty expr =
       Set.union (required_nonempty condition) (required_nonempty yes)
   | _ -> none ()
 
-let names_in expr =
-  let names = ref (Set.empty (module String)) in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-      method! attribute _ = ()
-      method! value_binding _ = ()
-
-      method! expression expr =
-        (match expr.pexp_desc with Pexp_function _ -> () | _ -> super#expression expr);
-        match Sources.longident_of expr with
-        | Some [ name ] -> names := Set.add !names name
-        | _ -> ()
-    end
-  in
-  iterator#expression expr;
-  !names
-
 (* [Verdict] is the only module a claim is reached through: [Ll_test] re-exported six of these names
    while [Verdict] had no open-able surface, and gh-ocannl-815 retired that copy in favour of [open
    Verdict.Claims], which the environment below models. *)
@@ -395,7 +428,14 @@ let opens_verdict_claims module_expr =
 let opened_claim_bindings site =
   [ ("p", P); ("pf", Pf); ("pass_fail", Pass_fail); ("claim", Claim); ("claimf", Claimf) ]
   |> List.map ~f:(fun (name, claim_kind) ->
-      { name; site; dependencies = []; unguarded = []; claim_kind = Some claim_kind })
+      {
+        name;
+        site;
+        dependencies = [];
+        guards = Set.empty (module String);
+        unguarded = [];
+        claim_kind = Some claim_kind;
+      })
 
 let open_claims environment declaration =
   if opens_verdict_claims declaration.popen_expr then
@@ -410,7 +450,7 @@ let open_claims environment declaration =
       environment
   else environment
 
-let lookup environment name =
+let lookup (environment : helper_binding list) name =
   List.find environment ~f:(fun binding -> String.equal binding.name name)
 
 let claim_kind environment callee =
@@ -419,28 +459,36 @@ let claim_kind environment callee =
   | Some path -> claim_kind_of_path path
   | None -> None
 
-let make_binding environment value =
-  helper_name value.pvb_pat
-  |> Option.map ~f:(fun name ->
-      let guards = required_nonempty value.pvb_expr in
+let rec make_bindings environment value =
+  binding_parts value.pvb_pat value.pvb_expr
+  |> List.map ~f:(fun part ->
+      let guards = required_nonempty part.expression in
+      let returned = returned_quantifiers part.expression in
       let unguarded =
-        List.filter (returned_quantifiers value.pvb_expr) ~f:(fun quantifier ->
+        List.filter returned ~f:(fun quantifier ->
             Set.is_empty quantifier.populations
             || Set.is_empty (Set.inter guards quantifier.populations))
       in
       let dependencies =
-        names_in (function_body value.pvb_expr)
-        |> Set.to_list
-        |> List.filter_map ~f:(lookup environment)
+        positive_bindings environment (function_body part.expression)
+        |> List.filter ~f:(fun dependency ->
+            (* A returned local quantifier is already attributed to this binding by
+               [returned_quantifiers]. Keep outer dependencies beside it, but not the local
+               definition of the same quantifier: reporting both would make one semantic hole need
+               two exemptions. With no direct hole, local dependencies remain the path that carries
+               intermediate negation and guards to an outer binding. *)
+            List.is_empty unguarded
+            || List.exists environment ~f:(fun outer ->
+                outer.site.position = dependency.site.position))
       in
       let claim_kind =
-        match Sources.longident_of value.pvb_expr with
+        match Sources.longident_of part.expression with
         | Some [ alias ] ->
             lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
         | Some path -> claim_kind_of_path path
         | None -> None
       in
-      let start = value.pvb_loc.loc_start in
+      let start = part.location.loc_start in
       let site =
         {
           line = start.Stdlib.Lexing.pos_lnum;
@@ -448,9 +496,9 @@ let make_binding environment value =
           position = start.Stdlib.Lexing.pos_cnum;
         }
       in
-      { name; site; dependencies; unguarded; claim_kind })
+      { name = part.name; site; dependencies; guards; unguarded; claim_kind })
 
-let positive_bindings environment expr =
+and positive_bindings environment expr =
   let bindings = ref [] in
   let rec visit environment positive expr =
     let visit_arguments environment positive arguments =
@@ -458,7 +506,7 @@ let positive_bindings environment expr =
     in
     match expr.pexp_desc with
     | Pexp_let (_, values, body) ->
-        let local = List.filter_map values ~f:(make_binding environment) in
+        let local = List.concat_map values ~f:(make_bindings environment) in
         visit (List.rev_append local environment) positive body
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
         visit environment (not positive) argument
@@ -507,17 +555,24 @@ let positive_bindings environment expr =
   !bindings
 
 let quantified_claims structure =
-  let origins bindings =
-    let rec visit seen binding =
+  let origins (bindings : helper_binding list) =
+    let rec visit seen inherited_guards (binding : helper_binding) =
       let key = binding.name ^ ":" ^ Int.to_string binding.site.position in
       if Set.mem seen key then []
       else
         let seen = Set.add seen key in
-        let direct = if List.is_empty binding.unguarded then [] else [ binding ] in
-        direct @ List.concat_map binding.dependencies ~f:(visit seen)
+        let guards = Set.union inherited_guards binding.guards in
+        let uncovered =
+          List.filter binding.unguarded ~f:(fun quantifier ->
+              Set.is_empty quantifier.populations
+              || Set.is_empty (Set.inter guards quantifier.populations))
+        in
+        let direct = if List.is_empty uncovered then [] else [ (binding, uncovered) ] in
+        direct @ List.concat_map binding.dependencies ~f:(visit seen guards)
     in
-    List.concat_map bindings ~f:(visit (Set.empty (module String)))
-    |> List.dedup_and_sort ~compare:(fun a b -> Int.compare a.site.position b.site.position)
+    List.concat_map bindings ~f:(visit (Set.empty (module String)) (Set.empty (module String)))
+    |> List.dedup_and_sort ~compare:(fun (left, _) (right, _) ->
+        Int.compare left.site.position right.site.position)
   in
   let found = ref [] in
   let record_claim environment expr =
@@ -529,14 +584,14 @@ let quantified_claims structure =
             | Some boolean ->
                 positive_bindings environment boolean
                 |> origins
-                |> List.iter ~f:(fun binding ->
+                |> List.iter ~f:(fun ((binding : helper_binding), quantifiers) ->
                     found :=
                       {
                         helper = binding.name;
                         helper_site = binding.site;
                         claim_line = expr.pexp_loc.loc_start.pos_lnum;
                         quantifiers =
-                          List.map binding.unguarded ~f:(fun quantifier -> quantifier.kind)
+                          List.map quantifiers ~f:(fun quantifier -> quantifier.kind)
                           |> List.dedup_and_sort ~compare:Poly.compare;
                       }
                       :: !found))
@@ -547,7 +602,7 @@ let quantified_claims structure =
     match expr.pexp_desc with
     | Pexp_let (_, bindings, body) ->
         List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
-        let local = List.filter_map bindings ~f:(make_binding environment) in
+        let local = List.concat_map bindings ~f:(make_bindings environment) in
         scan_expression (List.rev_append local environment) body
     | Pexp_open (declaration, body) ->
         scan_module environment declaration.popen_expr;
@@ -569,7 +624,7 @@ let quantified_claims structure =
            match item.pstr_desc with
            | Pstr_value (_, bindings) ->
                List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
-               List.rev_append (List.filter_map bindings ~f:(make_binding environment)) environment
+               List.rev_append (List.concat_map bindings ~f:(make_bindings environment)) environment
            | Pstr_eval (expr, _) ->
                scan_expression environment expr;
                environment
@@ -730,10 +785,6 @@ let exempt_quantified_helpers =
     ( "test/operations/env_var_deps.ml:family_floor_met",
       "a non-repository synthetic run deliberately skips repository-only family floors; the \
        repository path checks every family and reports each shortfall separately" );
-    ( "test/operations/env_var_deps.ml:repository_census",
-      "an empty floor-violation list is the positive evidence that the run received the \
-       repository; downstream claims use that mode bit to decide whether repository-only floors \
-       apply" );
     ( "test/operations/epilogue_fusion_mma_seeds.ml:vacuous",
       "an empty GPU mma family deliberately selects the environment-gated vacuity path; the \
        non-vacuous path separately requires and executes the epilogue twins" );
@@ -798,6 +849,29 @@ let () = Verdict.p "the values agree" close|ocaml},
       {ocaml|let differs = Array.for_all2_exn got want ~f:Float.equal |> Bool.equal false
 let () = Verdict.p "some value differs" differs|ocaml},
       [] );
+    ( "refuses a direct Bool.equal true around a fully applied quantifier",
+      {ocaml|let close = Bool.equal (List.for_all rows ~f:Fn.id) true
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "close" ] );
+    ( "accepts a direct Bool.equal false around a fully applied quantifier",
+      {ocaml|let differs = Bool.equal (List.for_all rows ~f:Fn.id) false
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "refuses a positive intermediate binding",
+      {ocaml|let close = List.for_all rows ~f:Fn.id
+let still_close = close
+let () = Verdict.p "all rows pass" still_close|ocaml},
+      [ "close" ] );
+    ( "accepts a negated intermediate binding",
+      {ocaml|let close = List.for_all rows ~f:Fn.id
+let differs = not close
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "accepts a guarded intermediate binding",
+      {ocaml|let close = List.for_all rows ~f:Fn.id
+let guarded = (not (List.is_empty rows)) && close
+let () = Verdict.p "all rows pass" guarded|ocaml},
+      [] );
     ( "refuses a binding nested directly inside a claim argument",
       {ocaml|let () =
   Verdict.p "all rows pass" (let ok = List.for_all rows ~f:Fn.id in ok)|ocaml},
@@ -811,6 +885,18 @@ let () = Verdict.p "some value differs" differs|ocaml},
       {ocaml|let () =
   Verdict.p "some row fails" (let ok = List.for_all rows ~f:Fn.id in not ok)|ocaml},
       [] );
+    ( "refuses a quantified component of a destructured tuple binding",
+      {ocaml|let () =
+  Verdict.p "all rows pass"
+    (let ok, detail = List.for_all rows ~f:Fn.id, info in
+     ok)|ocaml},
+      [ "ok" ] );
+    ( "conservatively refuses a quantified component of a record binding",
+      {ocaml|let () =
+  Verdict.p "all rows pass"
+    (let { ok; detail } = { ok = List.for_all rows ~f:Fn.id; detail = info } in
+     ok)|ocaml},
+      [ "ok" ] );
     ( "refuses a helper that returns a fully applied quantified local binding",
       {ocaml|let close xs =
   let ok = List.for_all xs ~f:Fn.id in

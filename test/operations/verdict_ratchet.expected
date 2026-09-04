@@ -30,7 +30,6 @@ each carrying its assertion separately through `Verdict.claim`/`claimf`:
 Quantified bindings exempted because emptiness is their passing meaning:
   test/operations/backend_golden_family_scan.ml:complete -- empty incomplete/error lists are the passing evidence; the non-empty synthetic-control population is guarded in the same binding
   test/operations/env_var_deps.ml:family_floor_met -- a non-repository synthetic run deliberately skips repository-only family floors; the repository path checks every family and reports each shortfall separately
-  test/operations/env_var_deps.ml:repository_census -- an empty floor-violation list is the positive evidence that the run received the repository; downstream claims use that mode bit to decide whether repository-only floors apply
   test/operations/epilogue_fusion_mma_seeds.ml:vacuous -- an empty GPU mma family deliberately selects the environment-gated vacuity path; the non-vacuous path separately requires and executes the epilogue twins
   test/operations/ocamlformat_ignore_scan.ml:refused -- the message list is an optional strengthening of the child-exit refusal: an empty list deliberately means that the nonzero status alone is the passing evidence
   test/operations/reduction_forms.ml:changed -- an empty schedule deliberately needs no IR change, and an empty per-op result means there were no per-op transformations to validate
@@ -46,9 +45,16 @@ accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
 accepts a fully applied quantifier compared with false: true
+refuses a direct Bool.equal true around a fully applied quantifier: true
+accepts a direct Bool.equal false around a fully applied quantifier: true
+refuses a positive intermediate binding: true
+accepts a negated intermediate binding: true
+accepts a guarded intermediate binding: true
 refuses a binding nested directly inside a claim argument: true
 accepts a guarded binding nested directly inside a claim argument: true
 accepts a negated binding nested directly inside a claim argument: true
+refuses a quantified component of a destructured tuple binding: true
+conservatively refuses a quantified component of a record binding: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a quantifier written in pipeline style: true
 keeps helper resolution inside its lexical scope: true
