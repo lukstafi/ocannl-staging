@@ -657,9 +657,14 @@ module Errexit_negation = struct
   let words line =
     String.split_on_chars line ~on:[ ' '; '\t' ] |> List.filter ~f:(Fn.non String.is_empty)
 
+  let is_named_errexit word =
+    String.equal word "errexit"
+    || Option.value_map (String.chop_prefix word ~prefix:"errexit") ~default:false ~f:(fun suffix ->
+        (not (String.is_empty suffix)) && List.mem [ ';'; '&'; '|' ] suffix.[0] ~equal:Char.equal)
+
   let rec options_enable_errexit = function
     | [] | "--" :: _ -> false
-    | "-o" :: name :: rest -> String.equal name "errexit" || options_enable_errexit rest
+    | "-o" :: name :: rest -> is_named_errexit name || options_enable_errexit rest
     | option :: rest
       when String.is_prefix option ~prefix:"-" && not (String.is_prefix option ~prefix:"--") ->
         String.contains option 'e' || options_enable_errexit rest
@@ -670,42 +675,48 @@ module Errexit_negation = struct
     | "set" :: options -> options_enable_errexit options
     | _ -> false
 
-  (* [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes: in [!
-     printf '%s\n' 'x || y'] the operator is data, so the negation is still inert. *)
-  let has_unquoted_and_or line =
-    let rec loop index quote escaped =
+  (* A TOP-LEVEL [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes
+     and nested shell constructs: in [! printf '%s\n' 'x || y'] the operator is data, and in [!
+     (probe || recover)] it consumes an inner status, so the outer negation is still inert. *)
+  let has_outer_and_or line =
+    let rec loop index quote escaped nesting =
       if index >= String.length line then false
       else
         let character = line.[index] in
         match quote with
         | `Single ->
-            if Char.equal character '\'' then loop (index + 1) `None false
-            else loop (index + 1) `Single false
+            if Char.equal character '\'' then loop (index + 1) `None false nesting
+            else loop (index + 1) `Single false nesting
         | `Double ->
-            if escaped then loop (index + 1) `Double false
-            else if Char.equal character '\\' then loop (index + 1) `Double true
-            else if Char.equal character '"' then loop (index + 1) `None false
-            else loop (index + 1) `Double false
+            if escaped then loop (index + 1) `Double false nesting
+            else if Char.equal character '\\' then loop (index + 1) `Double true nesting
+            else if Char.equal character '"' then loop (index + 1) `None false nesting
+            else loop (index + 1) `Double false nesting
         | `None ->
-            if escaped then loop (index + 1) `None false
-            else if Char.equal character '\\' then loop (index + 1) `None true
+            if escaped then loop (index + 1) `None false nesting
+            else if Char.equal character '\\' then loop (index + 1) `None true nesting
             else if Char.equal character '#' then false
-            else if Char.equal character '\'' then loop (index + 1) `Single false
-            else if Char.equal character '"' then loop (index + 1) `Double false
+            else if Char.equal character '\'' then loop (index + 1) `Single false nesting
+            else if Char.equal character '"' then loop (index + 1) `Double false nesting
+            else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
+              loop (index + 1) `None false (nesting + 1)
+            else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
+              loop (index + 1) `None false (Int.max 0 (nesting - 1))
             else if
-              index + 1 < String.length line
+              nesting = 0
+              && index + 1 < String.length line
               && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
                  || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
             then true
-            else loop (index + 1) `None false
+            else loop (index + 1) `None false nesting
     in
-    loop 0 `None false
+    loop 0 `None false 0
 
   let is_statement_negation line =
     let stripped = String.lstrip line in
     String.is_prefix stripped ~prefix:"!"
     && (String.length stripped = 1 || Char.is_whitespace stripped.[1])
-    && not (has_unquoted_and_or stripped)
+    && not (has_outer_and_or stripped)
 
   let findings text =
     if not (List.exists (String.split_lines text) ~f:line_enables_errexit) then []
@@ -728,6 +739,7 @@ module Errexit_negation = struct
       ("statement-position ! grep", "set -e\n! grep -q missing output\n", [ 2 ]);
       ("combined errexit option", "set -euo pipefail\n! grep -q missing output\n", [ 2 ]);
       ("named errexit option", "set -o errexit\n! grep -q missing output\n", [ 2 ]);
+      ("punctuated named errexit option", "set -o errexit;\n! grep -q missing output\n", [ 2 ]);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
@@ -738,6 +750,9 @@ module Errexit_negation = struct
       ("double-bracket test", "set -e\n[[ ! -f output ]]\n", []);
       ("negation without errexit", "set -u\n! grep -q missing output\n", []);
       ("quoted AND/OR text", "set -e\n! printf '%s\\n' 'not || consumed'\n", [ 2 ]);
+      ("nested AND/OR group", "set -e\n! (probe || recover)\n", [ 2 ]);
+      ("nested AND/OR substitution", "set -e\n! cmd $(probe || recover)\n", [ 2 ]);
+      ("outer AND/OR after nested group", "set -e\n! (probe || recover) || fallback\n", []);
     ]
 
   let controls () =
