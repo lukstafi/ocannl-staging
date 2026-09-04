@@ -93,7 +93,7 @@ let unmodeled_dependency_pform atom =
         | None -> true)
     | Dune_scan.Literal _ -> false)
 
-let alias_dependencies ~subdir stanza =
+let alias_dependencies_in_field ~field ~subdir stanza =
   let rec collect = function
     | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom name ] -> ([ alias_key ~subdir name ], [])
     | Sexp.List (Sexp.Atom "include" :: _) ->
@@ -111,10 +111,9 @@ let alias_dependencies ~subdir stanza =
           ([], [ "@bin-smoke reaches a dependency path computed by an unmodeled pform" ])
         else ([], [])
   in
-  match Dune_scan.field stanza "deps" with
-  | None -> ([], [])
-  | Some deps -> collect (Sexp.List deps)
+  match Dune_scan.field stanza field with None -> ([], []) | Some deps -> collect (Sexp.List deps)
 
+let alias_dependencies ~subdir stanza = alias_dependencies_in_field ~field:"deps" ~subdir stanza
 let dependency_pforms = [ "dep"; "file"; "path"; "read"; "read-lines"; "read-strings" ]
 
 let dependency_pform_path ~subdir pform =
@@ -348,6 +347,13 @@ let private_producer_run_error dune_path target =
 
 let target_producer_dependency_spec_error dune_path error =
   Printf.sprintf "%s: target-producing dependency graph is opaque: %s" dune_path error
+
+let executable_dependency_error dune_path target =
+  let target = match target with Local path -> path | Public name -> "%{bin:" ^ name ^ "}" in
+  Printf.sprintf "%s: public executable build dependency runs public executable %s" dune_path target
+
+let executable_dependency_spec_error dune_path error =
+  Printf.sprintf "%s: public executable build dependency graph is opaque: %s" dune_path error
 
 let absolute_chdir_error dune_path cwd =
   Printf.sprintf "%s: @bin-smoke runs a command beneath absolute chdir %s" dune_path cwd
@@ -755,6 +761,34 @@ let scan dune_files =
               let targets, errors = producer_alias_effects (Set.empty (module String)) node in
               List.map targets ~f:(target_producer_dependency_error dune_path) @ errors))
   in
+  let executable_dependency_errors =
+    List.concat_map dune_files ~f:(fun (dune_path, content) ->
+        if not (String.equal dune_path "bin/dune" || String.is_prefix dune_path ~prefix:"bin/") then
+          []
+        else
+          try
+            let directory = path_dirname dune_path in
+            Dune_scan.walk "" (Dune_scan.stanzas content) ~f:(fun subdir stanza ->
+                let subdir = Dune_scan.in_subdir directory subdir in
+                let declarations, _errors = declarations_of_stanza ~subdir stanza in
+                if List.is_empty declarations then []
+                else
+                  let dependencies, dependency_errors =
+                    alias_dependencies_in_field ~field:"link_deps" ~subdir stanza
+                  in
+                  let found, resolution_errors =
+                    resolve_alias_dependencies dune_path dependencies
+                  in
+                  List.map
+                    (List.rev_append dependency_errors resolution_errors)
+                    ~f:(executable_dependency_spec_error dune_path)
+                  @ List.concat_map found ~f:(fun node ->
+                      let targets, errors =
+                        producer_alias_effects (Set.empty (module String)) node
+                      in
+                      List.map targets ~f:(executable_dependency_error dune_path) @ errors))
+          with _ -> [])
+  in
   let rec visit visited targets errors = function
     | [] -> (targets, errors)
     | node :: rest when Set.mem visited node.id -> visit visited targets errors rest
@@ -836,7 +870,8 @@ let scan dune_files =
     visit
       (Set.empty (module String))
       []
-      (List.rev_append target_producer_command_errors target_producer_dependency_errors)
+      (List.rev_append executable_dependency_errors
+         (List.rev_append target_producer_command_errors target_producer_dependency_errors))
       smoke_roots
   in
   let smoke_stanza_count = List.length smoke_roots in
@@ -1502,6 +1537,24 @@ let library_action_preprocessor_fixture =
    (run %{exe:alpha.exe})
    (run %{exe:beta.exe}))))|dune}
 
+let executable_link_dependency_fixture =
+  {dune|(executable
+ (name alpha)
+ (public_name alpha-tool)
+ (link_deps (alias build-helper)))
+(executable (name beta) (public_name beta-tool))
+(rule
+ (alias build-helper)
+ (deps (universe))
+ (action (run %{exe:beta.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let action_preprocessor_fixture =
   {dune|(executable
  (name alpha)
@@ -1680,6 +1733,7 @@ let controls_hold () =
       [ ("bin/dune", nested_bin_root_fixture); ("bin/tools/dune", nested_bin_declaration_fixture) ]
   in
   let library_action_preprocessor = scan_bin_content library_action_preprocessor_fixture in
+  let executable_link_dependency = scan_bin_content executable_link_dependency_fixture in
   let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
     scan
@@ -1870,6 +1924,10 @@ let controls_hold () =
   && (not (complete library_action_preprocessor))
   && List.mem library_action_preprocessor.errors
        (library_action_preprocess_error "bin/dune")
+       ~equal:String.equal
+  && (not (complete executable_link_dependency))
+  && List.mem executable_link_dependency.errors
+       (executable_dependency_error "bin/dune" (Local "bin/beta.exe"))
        ~equal:String.equal
   && (not (complete action_preprocessor))
   && List.mem action_preprocessor.errors

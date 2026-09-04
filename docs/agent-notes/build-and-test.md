@@ -1259,6 +1259,9 @@ that they earn a lookup rather than always-loaded space.
   `env_spelling_gate.exe` invocation on the exact infrastructure alias that owns it. Every
   command-bearing alias contribution, root or transitive helper, must depend directly on
   `(universe)`, so Dune cannot cache away runtime coverage after another contribution reruns.
+  Alias edges in a public executable's `link_deps` are also traversed and refused if they run a
+  public executable or contain an opaque dependency/action: they execute while the smoke target is
+  being built, before its credited runtime canary.
   It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
   `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
