@@ -532,12 +532,12 @@ files.
   uniform arm's body parameterized by `mma16_spellings` — the PTX fragment layouts are shared by
   .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its f16-accumulate
   wmma combo is gated off. HIP stays tensorized too since gh-ocannl-789 (see the rocWMMA
-  d-boundary bullet below). Metal (uniform-precision `simdgroup_matrix`, structural) instead
-  UNSEEDS uniform-f16 mma under the wide policy — `Backend_intf.mma_capability.mma_f16_wide_acc` is
-  the per-backend capability bit, and `Sketch_families.fp16_wide_withholds` (keyed on the
-  DESTINATION's storage precision, so `(f16,f16,f32-storage)` sites are untouched) gates both the
-  tile and staged-layout lookups; the emission hooks decline the same combos for hand-built IR. So
-  `false` trades the f16 tensor-unit legs on Metal for cross-backend-uniform wide f16 sums. `auto`
+  d-boundary bullet below), and Metal since gh-ocannl-837 (the following `simdgroup_matrix`
+  bullet). `Backend_intf.mma_capability.mma_f16_wide_acc` is the per-backend capability bit, and
+  `Sketch_families.fp16_wide_withholds` (keyed on the DESTINATION's storage precision, so
+  `(f16,f16,f32-storage)` sites are untouched) gates both the tile and staged-layout lookups on a
+  backend that cannot bridge the destination. The emission hooks consult the same policy for
+  hand-built IR. `auto`
   deliberately RETAINS LATITUDE to later resolve wide on hardware where wide f16 accumulate is
   free (datacenter NVIDIA runs f32-accumulate f16 mma at full rate; GeForce halves it) — do not
   write code or tests assuming `auto ≡ narrow` as a contract; `accum_width.ml`'s default-policy
@@ -567,6 +567,22 @@ files.
   fallback design is not needed. The combination table and fragment-type spelling are now shared
   by `mma_syntax` and `mma_fragment_syntax` (they were duplicated verbatim, and the two hooks are
   required to accept together), so an arm added to one reaches both.
+- **Metal's `simdgroup_matrix` surface also permits a wide-f16 accumulator despite the uniform
+  storage-format table** (gh-ocannl-837, `arrayjit/lib/metal_backend.ml`'s
+  `mma_d_boundary_lines`). A standalone `MTLDevice.makeLibrary(source:)` probe on an Apple M4 Max
+  (40-core GPU, Metal 4, macOS 26.6.2 build 25G83, Swift 6.3.3) compiled and ran half A/B fragments
+  with a `simdgroup_float8x8` accumulator. `thread_elements()` exposes the distributed fragment
+  storage: the half destination stages through `simdgroup_half8x8`, and each lane converts indices
+  0 and 1 to/from the float accumulator. An emitted `static_assert` compares the two
+  `storage_type` element counts (64 logical elements each); with the fixed 32-thread capability,
+  that is two elements per lane. A whole-`storage_type` converting constructor crashed the runtime
+  compiler service on this toolchain, while the scalar element copies compiled and executed, so
+  keep the scalar spelling. The k=144 probe/test makes the first 16-wide block contribute 2048 and
+  each of the remaining eight contribute 1: residency across the reduction returns 2056, whereas
+  narrowing at each block boundary returns 2048. The default policy still uses
+  `simdgroup_half8x8`; only `Fp16_wide` selects the mixed accumulator. As on HIP, one shared
+  combination resolver and boundary helper feed both `mma_syntax` and `mma_fragment_syntax`, so
+  their accepted shapes cannot drift.
 - **The warp-shuffle rendering stages at the residency, and gates on it** (gh-ocannl-682).
   `C_syntax.try_warp_reduce` holds `wred_v_*`, the `__shared__ wred_partials_*` slots and every
   `ocannl_shfl_xor` stage at `accum_prec` of the storage precision, and renders the contribution

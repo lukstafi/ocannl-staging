@@ -722,18 +722,18 @@ module type C_syntax_config = sig
     option
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma] (docs/proposals/tensorize-mma.md §4):
       given the per-operand precisions (the backend decides which combinations its units support —
-      Metal [simdgroup_matrix] is uniform-precision only, CUDA wmma's flagship combination is mixed
-      f16×f16→f32), the transposed-storage flags [ta]/[tb] (the operand's stored layout is the
-      transpose of its role — load tiles with the hardware transpose flag and swapped offset
-      arithmetic), the covered block extents [m]/[n]/[k], and per operand its leading-dimension
-      stride in elements, its address space and its physical layout ({!type-mma_layout}) — plus, for
-      [d], a pointer expression to the tile base (already offset) — emit the intrinsic sequence
-      (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
-      lane loop. Return [None] to decline a particular call (unsupported precision combination,
-      extents not multiples of the intrinsic tile, thread-space operand, a swizzled layout the arm
-      has no load form for) — the caller then renders the scalar [fallback] under an
-      [if (lane == 0)] guard, which is also the path when the whole hook is [None] (cc, and any
-      backend until wired).
+      Metal advertises uniform storage triples but can select an f32 accumulator internally for its
+      wide-f16 arm; CUDA wmma's flagship combination is mixed f16×f16→f32), the transposed-storage
+      flags [ta]/[tb] (the operand's stored layout is the transpose of its role — load tiles with
+      the hardware transpose flag and swapped offset arithmetic), the covered block extents
+      [m]/[n]/[k], and per operand its leading-dimension stride in elements, its address space and
+      its physical layout ({!type-mma_layout}) — plus, for [d], a pointer expression to the tile
+      base (already offset) — emit the intrinsic sequence (fragment declarations / loads / mma steps
+      / stores) executed by every lane of the enclosing lane loop. Return [None] to decline a
+      particular call (unsupported precision combination, extents not multiples of the intrinsic
+      tile, thread-space operand, a swizzled layout the arm has no load form for) — the caller then
+      renders the scalar [fallback] under an [if (lane == 0)] guard, which is also the path when the
+      whole hook is [None] (cc, and any backend until wired).
 
       Acceptance is thus decided without the a/b tile addresses: an accepting arm returns an
       {!type-mma_emission} that the caller applies to them once it stands where they are renderable.

@@ -240,7 +240,8 @@ than rewritten into the sections above.
   transform — the schedule layer is backend-agnostic; `mma_syntax` declines per call and the
   fallback runs, so the op is always semantics-preserving.
 - **The `mma_syntax` hook** receives the three operand precisions (`d_prec`/`a_prec`/`b_prec` —
-  the backend decides which combinations its units support: Metal declines mixed, CUDA wmma's
+  the backend decides which combinations its units support: Metal advertises uniform storage
+  triples but uses a mixed f16×f16→f32 accumulator internally under `Fp16_wide`; CUDA wmma's
   flagship is f16×f16→f32) and, per operand: a pointer expression to the tile base (already
   offset), the leading-dimension stride in elements, and the address space
   (`` `Device | `Shared | `Thread ``); it returns `PPrint.document option`, `None` declining that
@@ -477,9 +478,11 @@ alias the marked local back to the original device target and retain their previ
 intrinsic load/store behavior, avoiding a performance regression. The transform therefore remains
 backend-agnostic and correct throughout the Metal-first rollout.
 
-Metal recognizes only this marked three-part region. For a supported uniform f32/f16/bf16 8×8
-shape it emits one outer `simdgroup_matrix` fragment-array load, renders every `Tile_mma` under the
-serial `k_o` as an update-only operand-load/MMA step, and emits one outer store. Unsupported calls
+Metal recognizes only this marked three-part region. For a supported uniform-storage f32/f16/bf16
+8×8 shape it emits one outer `simdgroup_matrix` fragment-array load, renders every `Tile_mma` under
+the serial `k_o` as an update-only operand-load/MMA step, and emits one outer store. Under
+`Fp16_wide`, the f16 storage arm uses an f32 accumulator fragment and converts through a
+destination-typed fragment at those outer boundaries (gh-ocannl-837). Unsupported calls
 decline before entering the fragment rendering and retain the scalar local-array form. The staged
 leg of `schedule_mma_matmul.ml` pins the source ordering and verifies that no accumulator fragment
 load/store remains inside the marked reduction body, in addition to numerical parity on Metal.

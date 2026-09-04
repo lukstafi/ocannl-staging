@@ -103,17 +103,21 @@ let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
    f16->f32 legs share these. Metal keeps the fragment first in its store; the wmma backends put the
    destination pointer first.
 
-   [converted_d] names HIP's wide-f16 arm (gh-ocannl-789), where the accumulator array's element
-   type is not the destination's: there rocWMMA loads a STAGING fragment and the accumulator array
-   is populated by the elementwise copy, so the "populated once before the body" anchor is that copy
-   rather than a [load_matrix_sync] naming the array. The store anchor is unchanged — the staging
-   fragment is still stored to [__mma_dp] once, after the body. *)
+   [converted_d] names the wide-f16 arms (HIP: gh-ocannl-789; Metal: gh-ocannl-837), where the
+   accumulator array's element type is not the destination's. The intrinsic loads a STAGING fragment
+   and populates the accumulator array by an elementwise copy, so the "populated once before the
+   body" anchor is that copy rather than a fragment load naming the accumulator array. The staging
+   fragment is stored to [__mma_dp] once, after the body. *)
 let staged_half_resident ?(converted_d = false) src =
   if on_metal then
-    residency_holds src ~frag_load:"simdgroup_load(__mma_fragment_"
+    residency_holds src
+      ~frag_load:
+        (if converted_d then "thread_elements()[0] = (float)__mma_dstage"
+         else "simdgroup_load(__mma_fragment_")
       ~body_begin:"/* simdgroup fragment reduction body begins */"
       ~body_end:"/* simdgroup fragment reduction body ends */"
-      ~frag_store:"simdgroup_store(__mma_fragment_"
+      ~frag_store:
+        (if converted_d then "simdgroup_store(__mma_dstage" else "simdgroup_store(__mma_fragment_")
       ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
   else if String.is_substring backend_name ~substring:"hip" then
     residency_holds src
@@ -420,7 +424,7 @@ let () =
   (let src = Generated.read "mm_h_mma" in
    let has s = String.is_substring src ~substring:s in
    let ok =
-     if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
+     if on_metal then has "simdgroup_half8x8" && (not (has "__mma_dstage")) && not (has "== 0)")
      else if String.is_substring backend_name ~substring:"hip" then
        (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. Under the
           DEFAULT policy the accumulator fragment is itself f16, so no [d]-boundary conversion is
@@ -440,9 +444,9 @@ let () =
 
   (* --- Fp16_wide (gh-ocannl-680): the uniform-f16 combination under the wide policy. CUDA sm_80+
      routes it to the f32-accumulate inline-PTX m16n8k16 arm (the bf16 uniform arm's body over the
-     shared fragment layouts); Metal and HIP decline it — their f16-accumulate tiles must not render
-     while the serial legs hold f32 residency — and record the lane-0 scalar fallback; the CPU
-     register tiling renders as under the default policy (its accumulator is f32 either way).
+     shared fragment layouts); HIP and Metal use f32 accumulator fragments over f16 A/B and bridge
+     the f16 destination at the outer boundary; the CPU register tiling renders as under the default
+     policy (its accumulator is f32 either way).
 
      The inputs are WIDTH-SENSITIVE, unlike [mah]/[mbh] above (Codex P1 round 3 on staging PR #477:
      f16-exact inputs cannot tell a wide arm that accidentally accumulates narrow from a correct
@@ -502,7 +506,10 @@ let () =
      && List.for_all census_hw ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
    in
    let ok =
-     if on_metal then fallback && (not (has "simdgroup_half8x8")) && has "== 0)"
+     if on_metal then
+       intrinsics && has "simdgroup_float8x8" && has "simdgroup_half8x8" && has "__mma_dstage"
+       && has "thread_elements()[0]" && has "thread_elements()[1]"
+       && not (has "== 0)")
      else if String.is_substring backend_name ~substring:"hip" then
        (* HIP: the rocWMMA uniform-f16 arm swapped to an f32 accumulator fragment over the same f16
           STORAGE destination, converting elementwise at the [d] boundary (gh-ocannl-789). Both
@@ -1223,9 +1230,9 @@ let () =
 
   (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
      that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
-     backend — including Metal's [simdgroup_half8x8], which the mixed f16->f32 leg above cannot
-     reach ([simdgroup_matrix] is uniform-precision only). Same f16-exact inputs, so parity with the
-     half serial twin stays bitwise. --- *)
+     backend — including Metal's [simdgroup_half8x8], the default-policy complement of the converted
+     wide arm below. Same f16-exact inputs, so parity with the half serial twin stays bitwise.
+     --- *)
   let%op mchu = mah * mbh in
   Tn.update_prec mchu.Tensor.value Ir.Ops.half;
   if on_gpu then (
@@ -1260,29 +1267,40 @@ let () =
     skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
     skipped "staged+tensorized uniform-f16 fragment residency");
 
-  (* --- The same staged uniform-f16 composition under [Numerics.Fp16_wide] (gh-ocannl-789): the leg
-     that EXECUTES HIP's converted [d] boundary in the FRAGMENT scope, which the [mm_h_wide_mma] leg
+  (* --- Staged uniform-f16 under [Numerics.Fp16_wide] (HIP: gh-ocannl-789; Metal: gh-ocannl-837):
+     this EXECUTES the converted [d] boundary in the FRAGMENT scope, which the [mm_h_wide_mma] leg
      above cannot reach — its schedule keeps no accumulator across [k_o], so it takes [mma_syntax]'s
-     own load/store instead of [mma_fragment_syntax]'s. On the width-sensitive inputs against the
-     once-narrowed wide reference, so the parity is not a formality: a boundary that converted per
-     [k_o] instead of once would narrow the partial sums, which is precisely what these inputs
-     separate, and a mis-mapped elementwise copy moves values by O(1).
+     own load/store instead of [mma_fragment_syntax]'s.
 
-     HIP-only, deliberately. Under this policy Metal withholds the uniform-f16 arm outright and
-     CUDA's wide uniform-f16 arm is inline-PTX with no fragment-scope counterpart, so what the other
-     backends render here is a fallback whose own narrowing points are a different question from the
-     one this leg asks; the cross-backend wide contract is [mm_h_wide_mma]'s above. --- *)
+     The k=144 discriminator has nine k_o blocks. The first contributes 2048 and each later block
+     contributes 1, so an f32 fragment resident across all blocks reaches 2056 exactly. Narrowing at
+     every k_o boundary repeatedly rounds 2049 back to the even f16 value 2048. Thus value parity
+     proves the boundary surrounds the whole reduction, while the source pin proves it is the
+     converted fragment path. CUDA's wide uniform-f16 arm is inline PTX with no fragment-scope
+     counterpart, so it remains outside this leg. --- *)
   let claim_fw_value =
     "staged+tensorized Fp16_wide matmul equals the once-narrowed wide reference bitwise"
   in
   let claim_fw_struct = "staged+tensorized Fp16_wide fragment residency converts d once" in
-  if String.is_substring backend_name ~substring:"hip" then (
+  if on_metal || String.is_substring backend_name ~substring:"hip" then (
+    let kw = 144 in
+    let fwsa =
+      NTDSL.init ~l:"fwsa" ~prec:Ir.Ops.half ~i:[ kw ] ~o:[ n ]
+        ~f:(fun idcs -> if idcs.(1) % bm = 0 then 1. else 0.)
+        ()
+    in
+    let fwsb =
+      NTDSL.init ~l:"fwsb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ kw ]
+        ~f:(fun idcs -> if idcs.(0) % bm <> 0 then 0. else if idcs.(0) = 0 then 2048. else 1.)
+        ()
+    in
     Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
-    let%op mchfw = mwa * mwb in
+    let%op mchfw = fwsa * fwsb in
     Tn.update_prec mchfw.Tensor.value Ir.Ops.half;
     let transform_fw opt =
       Sched.apply
-        (staged_schedule ~out:mchfw.Tensor.value ~src_a:mwa.Tensor.value ~src_b:mwb.Tensor.value opt)
+        (staged_schedule ~out:mchfw.Tensor.value ~src_a:fwsa.Tensor.value ~src_b:fwsb.Tensor.value
+           opt)
         opt
     in
     let ctx_fw = Context.auto () in
@@ -1296,12 +1314,14 @@ let () =
     let ctx_fw = Context.run ctx_fw routine_fw in
     let got_fw = Context.get_values ctx_fw mchfw.Tensor.value in
     Numerics.set_policy saved_policy;
-    p_all2 claim_fw_value got_fw wide_ref_hw ~f:Float.equal;
+    p_all claim_fw_value (Array.to_list got_fw) ~f:(Float.equal 2056.);
     let src = Generated.read "mm_huw_staged_mma" in
     let has s = String.is_substring src ~substring:s in
     p claim_fw_struct
       (staged_half_resident ~converted_d:true src
-      && has "rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>"
+      && (if on_metal then
+            has "simdgroup_float8x8" && has "simdgroup_half8x8" && has "thread_elements()"
+          else has "rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>" && has ".x[__ei]")
       && has "__mma_dstage"))
   else (
     skipped claim_fw_value;
