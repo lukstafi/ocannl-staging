@@ -13,7 +13,10 @@ let () =
   Utils.set_log_level 2;
   Utils.settings.output_debug_files_in_build_directory <- true;
   Utils.settings.debug_log_from_routines <- true;
-  let backend = Utils.get_global_arg ~default:"cc" ~arg_name:"backend" in
+  let backend = Context.Backends.(backend_name (get_backend ())) in
+  Utils.log_debug_routine_logs
+    ~log_contents:[ "OCANNL backend: " ^ backend ]
+    ~stream_name:(backend ^ "-0-0");
   (if Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files" then
      match backend with
      | "cuda" ->

@@ -1,3 +1,4 @@
+OCANNL backend: cc
 float *restrict a &[1] = 0xNNNN
 float *restrict b &[1] = 0xNNNN
 COMMENT: init params for g
