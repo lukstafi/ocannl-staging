@@ -352,6 +352,21 @@ let script_occurrences ~path content =
 
 let same_range (a, b) (x, y) = Int.equal a x && Int.equal b y
 
+let complete_inline_code_candidates content =
+  let scan = Markdown.inert_by_line content in
+  let comments line = Markdown.spans_at scan.comment_ranges line in
+  let fences line = Markdown.spans_at scan.fence_ranges line in
+  Markdown.lines content
+  |> List.concat_map ~f:(fun (lineno, line) ->
+      Markdown.spans_at scan.ranges lineno
+      |> List.filter ~f:(fun range ->
+          (not (List.mem (comments lineno) range ~equal:same_range))
+          && not (List.mem (fences lineno) range ~equal:same_range))
+      |> List.filter_map ~f:(fun (start, stop) ->
+          Option.some_if
+            (stop > start && Char.equal line.[start] '`' && Char.equal line.[stop - 1] '`')
+            (String.sub line ~pos:start ~len:(stop - start) |> Markdown.code_span_content)))
+
 (* Whitespace and one-word names make bare assignments indistinguishable from non-config prose. Pin
    every current config use of either form by file/key/count: a later key removal still scans the
    old site, while a newly added ambiguous use must declare itself here. Prefixed CLI and
@@ -925,6 +940,7 @@ let refusal_control grammar_fixture =
     | Some (key, ambiguous_bare) -> String.equal key "backend" && ambiguous_bare
     | None -> false);
   let grammar_text = In_channel.read_all grammar_fixture in
+  let grammar_candidates = complete_inline_code_candidates grammar_text in
   let grammar_occurrences =
     markdown_occurrences ~allow_bare:true
       ~path:(Stdlib.Filename.basename grammar_fixture)
@@ -933,7 +949,7 @@ let refusal_control grammar_fixture =
   Verdict.p_all ~min:3
     "each promised non-OCANNL assignment is present in the fixture and rejected as a config token"
     [ "fastMathEnabled=false"; "mathMode=Safe"; "d=1" ] ~f:(fun spelling ->
-      String.is_substring grammar_text ~substring:spelling
+      List.mem grammar_candidates spelling ~equal:String.equal
       && not
            (List.exists grammar_occurrences ~f:(fun occurrence ->
                 String.equal occurrence.spelling spelling)));
