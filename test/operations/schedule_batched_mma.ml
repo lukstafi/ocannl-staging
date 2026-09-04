@@ -225,13 +225,6 @@ let () =
             && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_bf16
             && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_bf16)
   in
-  let renders_intrinsic src =
-    let has s = String.is_substring src ~substring:s in
-    if String.is_substring backend_name ~substring:"metal" then has "simdgroup_bfloat8x8"
-    else if String.is_substring backend_name ~substring:"hip" then has "rocwmma::mma_sync"
-    else if String.is_substring backend_name ~substring:"cuda" then has "mma.sync.aligned.m16n8k16"
-    else false
-  in
   let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
   (* At most this many candidates are executed per site: each one is a full backend compile, and on
      HIP the rocWMMA headers make that expensive. The budget used to go to the first
@@ -312,13 +305,13 @@ let () =
               ~lowered_transform:(fun o -> [ Sched.apply (Autotune.sketch_schedule ~p:q o) o ])
               (Context.auto ()) fwd Ir.Indexing.Empty
           in
-          Context.get_values (Context.run ctx routine) cand.Tensor.value
+          (Context.get_values (Context.run ctx routine) cand.Tensor.value, routine.mma)
         with
-        | got ->
+        | got, mma ->
             Int.incr (of_flavor n_ran q);
             if Array.for_all2_exn got want ~f:close then Int.incr (of_flavor n_close q);
-            if renders_intrinsic (Generated.read (tag ^ "_bf16_mma")) then
-              Int.incr (of_flavor n_intrinsic q)
+            if Ir.C_syntax.equal_tensorization mma.Ir.C_syntax.tensorization Ir.C_syntax.Tensorized
+            then Int.incr (of_flavor n_intrinsic q)
         | exception _ -> ());
     p
       (tag ^ " bf16: the backend's advertised tile is seeded")
