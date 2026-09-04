@@ -146,7 +146,15 @@ jobs:
     # false green, not a speedup. `disabled` says so rather than leaving the
     # default's silence to be mistaken for a working cache again. A compile-only
     # shared cache that never sees test outputs is a design of its own (two
-    # dune walks over two cache roots) and is gh-ocannl-901.
+    # dune walks over two cache roots). Measured for gh-ocannl-901 on 2026-09-04,
+    # the compile-only @check/trace step took 23-47s (38s median) across the last
+    # eight completed master pushes, against an 18.4min median ubuntu main job:
+    # about 3.6%, and an upper bound because that step also executes the trace
+    # test. Saving well under a minute before restore/trim/save overhead does not
+    # justify making the 12-17min test walk wait for a separate compile phase and
+    # forfeiting its scheduling overlap. Re-measure with tools/ci-durations.sh and
+    # tools/ci-times.sh before revisiting; until compilation is a large share,
+    # keep the cache disabled.
     env:
       DUNE_CACHE: disabled
     steps:
