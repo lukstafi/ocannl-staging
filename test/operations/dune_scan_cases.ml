@@ -360,6 +360,7 @@ let cases =
 let path_rewriting_cases =
   [
     ("an env stanza setting PATH", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "env" ]);
+    ("an env stanza setting Windows-case Path", {dune|(env (_ (env-vars (Path .))))|dune}, [ "env" ]);
     ("one setting something else to PATH", {dune|(env (_ (env-vars (OTHER PATH))))|dune}, []);
     ("an env stanza that touches neither", {dune|(env (_ (flags (:standard))))|dune}, []);
   ]

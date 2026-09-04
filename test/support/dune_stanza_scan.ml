@@ -671,10 +671,10 @@ let unclassified_action_heads stanza =
   | Some args ->
       List.concat_map args ~f:(walk_action ~cwd:"") |> List.dedup_and_sort ~compare:Poly.compare
 
-(** Every command site in a stanza, including commands classified as external tools. The directory,
-    enclosing environment pins, and classification are preserved per site so a consumer making a
-    closed-world claim can refuse what it cannot account for. *)
-let classified_commands_with_pins_preserving_multiplicity stanza =
+(** Every command site in a stanza, including commands classified as external tools. The original
+    site, directory, enclosing environment pins, and classification are preserved so a closed-world
+    consumer can distinguish a verified no-argument helper from an opaque launcher. *)
+let classified_command_sites_with_pins_preserving_multiplicity stanza =
   let named_deps = named_deps_of stanza in
   let rec classify command =
     match command with
@@ -712,7 +712,12 @@ let classified_commands_with_pins_preserving_multiplicity stanza =
     | Unnameable (what, command) -> (
         match classify command with External -> Path_rewritten what | other -> other)
   in
-  List.map (commands_in stanza) ~f:(fun (cwd, pinned, command) -> (cwd, pinned, classify command))
+  List.map (commands_in stanza) ~f:(fun (cwd, pinned, command) ->
+      (cwd, pinned, command, classify command))
+
+let classified_commands_with_pins_preserving_multiplicity stanza =
+  List.map (classified_command_sites_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (cwd, pinned, _site, command) -> (cwd, pinned, command))
 
 (** What a stanza runs from this workspace. This form preserves one entry per command site;
     consumers enforcing execution multiplicity must use it rather than the deduplicated census. *)
@@ -1352,7 +1357,9 @@ let path_rewriting_stanzas content =
   let rec sets_path sexp =
     match sexp with
     | Sexp.List (Sexp.Atom "env-vars" :: bindings) ->
-        List.exists bindings ~f:(function Sexp.List (Sexp.Atom "PATH" :: _) -> true | _ -> false)
+        List.exists bindings ~f:(function
+          | Sexp.List (Sexp.Atom name :: _) -> String.equal (String.uppercase name) "PATH"
+          | _ -> false)
     | Sexp.List l -> List.exists l ~f:sets_path
     | Sexp.Atom _ -> false
   in

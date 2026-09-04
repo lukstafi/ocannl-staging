@@ -204,6 +204,7 @@ ok: raw stanzas -- an executable only depended on
 ok: raw stanzas -- one named in a comment
 ok: raw stanzas -- one inside a string
 ok: path-rewriting stanzas -- an env stanza setting PATH
+ok: path-rewriting stanzas -- an env stanza setting Windows-case Path
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither
 ok: declared config paths -- the local one
