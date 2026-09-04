@@ -1262,11 +1262,12 @@ that they earn a lookup rather than always-loaded space.
   It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
   `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
-  dependency-list `include`, explicit (file or directory, including files below a directory target)
-  or action-inferred generated-target dependencies (including dependency pforms in fields or actions,
-  embedded pforms in larger action atoms, literal file-input action positions, and output actions
-  under `chdir`), target-bearing alias rules, or unexpanded top-level `include`
-  stanzas. A bare executable name
+  `data_only_dirs`, dependency-list `include`, explicit (file or directory, including files below a
+  directory target) or
+  action-inferred generated-target dependencies (including dependency pforms in fields or actions,
+  pforms embedded in larger dependency/action atoms, literal file-input action positions, and
+  output actions under a literal `chdir`), target-bearing alias rules, an unresolved `chdir` around
+  inferred output targets, or unexpanded top-level `include` stanzas. A bare executable name
   under an action-local PATH rewrite, a directory-level PATH rewrite (under any case spelling), or
   an `env` stanza's `binaries` mapping is opaque too, including in transitively reached aliases. A
   directory-level override follows Dune's scope: it reaches descendants of its own `(subdir …)`
