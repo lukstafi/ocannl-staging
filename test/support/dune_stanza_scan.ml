@@ -665,10 +665,10 @@ let unclassified_action_heads stanza =
   | Some args ->
       List.concat_map args ~f:(walk_action ~cwd:"") |> List.dedup_and_sort ~compare:Poly.compare
 
-(** What a stanza runs: the directory each process runs in, the environment variables pinned around
-    it by an enclosing [(setenv …)], and what it is. This form preserves one entry per command site;
-    consumers enforcing execution multiplicity must use it rather than the deduplicated census. *)
-let executables_run_with_pins_preserving_multiplicity stanza =
+(** Every command site in a stanza, including commands classified as external tools. The directory,
+    enclosing environment pins, and classification are preserved per site so a consumer making a
+    closed-world claim can refuse what it cannot account for. *)
+let classified_commands_with_pins_preserving_multiplicity stanza =
   let named_deps = named_deps_of stanza in
   let rec classify command =
     match command with
@@ -705,8 +705,13 @@ let executables_run_with_pins_preserving_multiplicity stanza =
     | Unnameable (what, command) -> (
         match classify command with External -> Path_rewritten what | other -> other)
   in
-  List.filter_map (commands_in stanza) ~f:(fun (cwd, pinned, command) ->
-      match classify command with External -> None | classified -> Some (cwd, pinned, classified))
+  List.map (commands_in stanza) ~f:(fun (cwd, pinned, command) -> (cwd, pinned, classify command))
+
+(** What a stanza runs from this workspace. This form preserves one entry per command site;
+    consumers enforcing execution multiplicity must use it rather than the deduplicated census. *)
+let executables_run_with_pins_preserving_multiplicity stanza =
+  List.filter (classified_commands_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (_, _, command) -> match command with External -> false | _ -> true)
 
 (** The set-like reading used by directory and dependency checks, where two identical command sites
     ask the same question. *)

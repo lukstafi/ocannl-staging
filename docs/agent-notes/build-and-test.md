@@ -1254,9 +1254,11 @@ that they earn a lookup rather than always-loaded space.
   `bin/dune` and every recursive-alias contribution from the repository's dune files, then requires
   exact one-to-one membership; its separate negative-control rule runs the same checker on a
   synthetic omitted member and accepts only the failing exit status. The scan preserves repeated
-  command sites so a duplicated smoke is not collapsed into a set, and fails closed on opaque
-  actions, `enabled_if`, or unexpanded `include` stanzas: each construct needs deliberate scanner
-  support before it can participate in this static guarantee.
+  command sites so a duplicated smoke is not collapsed into a set, follows `(alias ...)`
+  dependencies transitively, and ignores only private `bin/dune` helper executables along that
+  graph. It fails closed on external or otherwise opaque actions, `with-accepted-exit-codes`,
+  `enabled_if`, `alias_rec`, or unexpanded `include` stanzas: each construct needs deliberate
+  scanner support before it can participate in this static guarantee.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.

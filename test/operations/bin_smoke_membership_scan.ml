@@ -31,6 +31,17 @@ type result = {
   errors : string list;
 }
 
+type alias_node = {
+  id : string;
+  dune_path : string;
+  subdir : string;
+  stanza : Sexp.t;
+  aliases : string list;
+  is_bin_smoke : bool;
+  dependencies : string list;
+  dependency_errors : string list;
+}
+
 let sorted = List.sort ~compare:String.compare
 
 let path_dirname path =
@@ -41,13 +52,44 @@ let duplicates strings =
   |> List.filter_map ~f:(function first :: _ :: _ -> Some first | _ -> None)
 
 let aliases_of stanza =
-  List.concat_map [ "alias"; "aliases" ] ~f:(fun field ->
-      match Dune_scan.field stanza field with
-      | None -> []
-      | Some args -> List.filter_map args ~f:(function Sexp.Atom name -> Some name | _ -> None))
+  match Dune_scan.head stanza with
+  | Some "alias" -> (
+      match Dune_scan.field stanza "name" with Some [ Sexp.Atom name ] -> [ name ] | _ -> [])
+  | _ ->
+      List.concat_map [ "alias"; "aliases" ] ~f:(fun field ->
+          match Dune_scan.field stanza field with
+          | None -> []
+          | Some args ->
+              List.filter_map args ~f:(function Sexp.Atom name -> Some name | _ -> None))
 
-let is_bin_smoke_stanza stanza = List.mem (aliases_of stanza) "bin-smoke" ~equal:String.equal
 let has_enabled_if stanza = Option.is_some (Dune_scan.field stanza "enabled_if")
+let alias_key ~subdir name = Dune_scan.normalize_path (Dune_scan.in_subdir subdir name)
+
+let alias_dependencies ~subdir stanza =
+  let rec collect = function
+    | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom name ] -> ([ alias_key ~subdir name ], [])
+    | Sexp.List (Sexp.Atom "alias_rec" :: _) ->
+        ([], [ "@bin-smoke reaches alias_rec, whose recursive dependency cannot be derived" ])
+    | Sexp.List children ->
+        List.fold children ~init:([], []) ~f:(fun (dependencies, errors) child ->
+            let found, found_errors = collect child in
+            (List.rev_append found dependencies, List.rev_append found_errors errors))
+    | Sexp.Atom _ -> ([], [])
+  in
+  match Dune_scan.field stanza "deps" with
+  | None -> ([], [])
+  | Some deps -> collect (Sexp.List deps)
+
+let rec contains_head expected = function
+  | Sexp.Atom _ -> false
+  | Sexp.List (Sexp.Atom head :: children) ->
+      String.equal head expected || List.exists children ~f:(contains_head expected)
+  | Sexp.List children -> List.exists children ~f:(contains_head expected)
+
+let accepts_nonstandard_exit stanza =
+  match Dune_scan.field stanza "action" with
+  | None -> false
+  | Some action -> contains_head "with-accepted-exit-codes" (Sexp.List action)
 
 let public_condition_error names =
   Printf.sprintf
@@ -65,6 +107,13 @@ let include_error dune_path =
 
 let opaque_smoke_error dune_path command =
   Printf.sprintf "%s: @bin-smoke contains an opaque command: %s" dune_path command
+
+let external_smoke_error dune_path =
+  Printf.sprintf "%s: @bin-smoke reaches an external command whose effects are opaque" dune_path
+
+let accepted_exit_error dune_path =
+  Printf.sprintf "%s: @bin-smoke reaches with-accepted-exit-codes, so failure is not a canary"
+    dune_path
 
 let declarations_of_stanza ~subdir stanza =
   match Dune_scan.head stanza with
@@ -96,84 +145,140 @@ let declarations_of_stanza ~subdir stanza =
   | _ -> ([], [])
 
 let smoke_targets_of_stanza ~dune_path ~subdir stanza =
-  if not (is_bin_smoke_stanza stanza) then []
-  else
-    Dune_scan.executables_run_with_pins_preserving_multiplicity stanza
-    |> List.map ~f:(fun (cwd, _pins, command) ->
-        match command with
-        | Dune_scan.Runs path ->
-            Ok
-              (Local
-                 (Dune_scan.normalize_path
-                    (Dune_scan.in_subdir subdir (Dune_scan.in_subdir cwd path))))
-        | Dune_scan.Runs_public name -> Ok (Public name)
-        | Dune_scan.Unrecognized command
-        | Dune_scan.Unknown_directory command
-        | Dune_scan.Path_rewritten command ->
-            Error (opaque_smoke_error dune_path command)
-        | Dune_scan.External -> assert false)
+  Dune_scan.classified_commands_with_pins_preserving_multiplicity stanza
+  |> List.map ~f:(fun (cwd, _pins, command) ->
+      match command with
+      | Dune_scan.Runs path ->
+          Ok
+            (Local
+               (Dune_scan.normalize_path
+                  (Dune_scan.in_subdir subdir (Dune_scan.in_subdir cwd path))))
+      | Dune_scan.Runs_public name -> Ok (Public name)
+      | Dune_scan.Unrecognized command
+      | Dune_scan.Unknown_directory command
+      | Dune_scan.Path_rewritten command ->
+          Error (opaque_smoke_error dune_path command)
+      | Dune_scan.External -> Error (external_smoke_error dune_path))
 
 let target_name = function Local path -> path | Public name -> "%{bin:" ^ name ^ "}"
 
 let scan dune_files =
-  let declarations, targets, smoke_stanza_count, scan_errors =
-    List.fold dune_files ~init:([], [], 0, [])
-      ~f:(fun (all_declarations, all_targets, smoke_count, all_errors) (dune_path, content) ->
+  let declarations, executable_locals, alias_nodes, scan_errors =
+    List.fold dune_files ~init:([], [], [], [])
+      ~f:(fun (all_declarations, all_locals, all_nodes, all_errors) (dune_path, content) ->
         try
           let stanzas = Dune_scan.stanzas content in
           let directory = path_dirname dune_path in
-          let declarations, declaration_errors =
-            if String.equal dune_path "bin/dune" then
-              Dune_scan.walk "" stanzas ~f:(fun subdir stanza ->
-                  let subdir = Dune_scan.in_subdir directory subdir in
-                  let declarations, errors = declarations_of_stanza ~subdir stanza in
-                  [ (declarations, errors) ])
-              |> List.fold ~init:([], []) ~f:(fun (all, errors) (found, found_errors) ->
-                  (List.rev_append found all, List.rev_append found_errors errors))
-            else ([], [])
-          in
-          let smoke_stanzas =
+          let walked =
             Dune_scan.walk "" stanzas ~f:(fun subdir stanza ->
-                if is_bin_smoke_stanza stanza then
-                  [ (Dune_scan.in_subdir directory subdir, stanza) ]
-                else [])
+                [ (Dune_scan.in_subdir directory subdir, stanza) ])
           in
-          let targets, opaque_errors =
-            List.concat_map smoke_stanzas ~f:(fun (subdir, stanza) ->
-                smoke_targets_of_stanza ~dune_path ~subdir stanza)
-            |> List.fold ~init:([], []) ~f:(fun (targets, errors) -> function
-              | Ok target -> (target :: targets, errors)
-              | Error error -> (targets, error :: errors))
+          let declarations, executable_locals, declaration_errors =
+            if String.equal dune_path "bin/dune" then
+              List.fold walked ~init:([], [], [])
+                ~f:(fun (declarations, locals, errors) (subdir, stanza) ->
+                  let found_declarations, found_errors = declarations_of_stanza ~subdir stanza in
+                  let locals =
+                    match Dune_scan.head stanza with
+                    | Some ("executable" | "executables") ->
+                        List.rev_append
+                          (List.map (Dune_scan.names_of stanza) ~f:(fun name ->
+                               Dune_scan.normalize_path (Dune_scan.in_subdir subdir (name ^ ".exe"))))
+                          locals
+                    | _ -> locals
+                  in
+                  ( List.rev_append found_declarations declarations,
+                    locals,
+                    List.rev_append found_errors errors ))
+            else ([], [], [])
           in
-          let smoke_condition_errors =
-            List.filter_map smoke_stanzas ~f:(fun (_subdir, stanza) ->
-                if has_enabled_if stanza then Some (smoke_condition_error dune_path) else None)
+          let alias_nodes =
+            List.filter_mapi walked ~f:(fun index (subdir, stanza) ->
+                let names = aliases_of stanza in
+                if List.is_empty names then None
+                else
+                  let dependencies, dependency_errors = alias_dependencies ~subdir stanza in
+                  Some
+                    {
+                      id = Printf.sprintf "%s:%d" dune_path index;
+                      dune_path;
+                      subdir;
+                      stanza;
+                      aliases = List.map names ~f:(alias_key ~subdir);
+                      is_bin_smoke = List.mem names "bin-smoke" ~equal:String.equal;
+                      dependencies;
+                      dependency_errors;
+                    })
           in
           let include_errors =
-            Dune_scan.walk "" stanzas ~f:(fun _subdir stanza ->
+            List.concat_map walked ~f:(fun (_subdir, stanza) ->
                 match Dune_scan.head stanza with
                 | Some "include" -> [ include_error dune_path ]
                 | _ -> [])
           in
           ( List.rev_append declarations all_declarations,
-            List.rev_append targets all_targets,
-            smoke_count + List.length smoke_stanzas,
-            List.rev_append declaration_errors
-              (List.rev_append opaque_errors
-                 (List.rev_append smoke_condition_errors
-                    (List.rev_append include_errors all_errors))) )
+            List.rev_append executable_locals all_locals,
+            List.rev_append alias_nodes all_nodes,
+            List.rev_append declaration_errors (List.rev_append include_errors all_errors) )
         with exn ->
           ( all_declarations,
-            all_targets,
-            smoke_count,
+            all_locals,
+            all_nodes,
             Printf.sprintf "cannot parse %s: %s" dune_path (Exn.to_string exn) :: all_errors ))
   in
+  let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
+  let rec visit visited targets errors = function
+    | [] -> (targets, errors)
+    | node :: rest when Set.mem visited node.id -> visit visited targets errors rest
+    | node :: rest ->
+        let visited = Set.add visited node.id in
+        let targets, command_errors =
+          smoke_targets_of_stanza ~dune_path:node.dune_path ~subdir:node.subdir node.stanza
+          |> List.fold ~init:(targets, []) ~f:(fun (targets, errors) -> function
+            | Ok target -> (target :: targets, errors)
+            | Error error -> (targets, error :: errors))
+        in
+        let condition_errors =
+          if has_enabled_if node.stanza then [ smoke_condition_error node.dune_path ] else []
+        in
+        let exit_errors =
+          if accepts_nonstandard_exit node.stanza then [ accepted_exit_error node.dune_path ]
+          else []
+        in
+        let dependencies, missing_dependency_errors =
+          List.fold node.dependencies ~init:([], []) ~f:(fun (nodes, errors) dependency ->
+              let found =
+                List.filter alias_nodes ~f:(fun candidate ->
+                    List.mem candidate.aliases dependency ~equal:String.equal)
+              in
+              if List.is_empty found then
+                ( nodes,
+                  Printf.sprintf "%s: @bin-smoke depends on undefined alias %s" node.dune_path
+                    dependency
+                  :: errors )
+              else (List.rev_append found nodes, errors))
+        in
+        let errors =
+          List.rev_append node.dependency_errors
+            (List.rev_append command_errors
+               (List.rev_append condition_errors
+                  (List.rev_append exit_errors (List.rev_append missing_dependency_errors errors))))
+        in
+        visit visited targets errors (List.rev_append dependencies rest)
+  in
+  let targets, smoke_errors = visit (Set.empty (module String)) [] [] smoke_roots in
+  let smoke_stanza_count = List.length smoke_roots in
+  let scan_errors = List.rev_append smoke_errors scan_errors in
   let declarations = List.sort declarations ~compare:(fun a b -> String.compare a.local b.local) in
   let duplicate_locals =
     duplicates (List.map declarations ~f:(fun declaration -> declaration.local))
   in
   let duplicate_public =
     duplicates (List.map declarations ~f:(fun declaration -> declaration.public))
+  in
+  let private_locals =
+    List.filter executable_locals ~f:(fun local ->
+        not (List.exists declarations ~f:(fun declaration -> String.equal declaration.local local)))
   in
   let canonicalize target =
     let matches =
@@ -183,14 +288,18 @@ let scan dune_files =
           | Public name -> String.equal declaration.public name)
     in
     match matches with
-    | [ declaration ] -> Ok declaration.local
-    | [] -> Error (target_name target)
+    | [ declaration ] -> Ok (Some declaration.local)
+    | [] -> (
+        match target with
+        | Local path when List.mem private_locals path ~equal:String.equal -> Ok None
+        | Local _ | Public _ -> Error (target_name target))
     | _ -> Error (target_name target ^ " (ambiguous public executable identity)")
   in
   let smoked, unexpected =
     List.fold targets ~init:([], []) ~f:(fun (smoked, unexpected) target ->
         match canonicalize target with
-        | Ok local -> (local :: smoked, unexpected)
+        | Ok (Some local) -> (local :: smoked, unexpected)
+        | Ok None -> (smoked, unexpected)
         | Error target -> (smoked, target :: unexpected))
   in
   let smoked = sorted smoked in
@@ -225,7 +334,11 @@ let complete_fixture =
 (executable (name beta) (public_name beta-tool))
 (executable (name helper))
 (rule
+ (alias helper-check)
+ (action (run %{exe:helper.exe})))
+(rule
  (alias bin-smoke)
+ (deps (alias helper-check))
  (action
   (progn
    (run %{exe:alpha.exe})
@@ -281,6 +394,34 @@ let competing_alias_fixture =
  (alias bin-smoke)
  (action (run %{bin:alpha-tool})))|dune}
 
+let transitive_duplicate_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias helper-smoke)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (alias helper-smoke))
+ (action (run %{exe:alpha.exe})))|dune}
+
+let external_smoke_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps runner.py)
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run python3 runner.py))))|dune}
+
+let accepted_exit_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (action
+  (with-accepted-exit-codes 1
+   (run %{exe:alpha.exe}))))|dune}
+
 let controls_hold () =
   let accepted = scan_bin_content complete_fixture in
   let refused = scan_bin_content missing_fixture in
@@ -292,6 +433,9 @@ let controls_hold () =
   let competing =
     scan [ ("bin/dune", complete_fixture); ("test/synthetic/dune", competing_alias_fixture) ]
   in
+  let transitive = scan_bin_content transitive_duplicate_fixture in
+  let external_result = scan_bin_content external_smoke_fixture in
+  let accepted_exit = scan_bin_content accepted_exit_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "bin/beta.exe" ]
@@ -310,6 +454,12 @@ let controls_hold () =
        ~equal:String.equal
   && (not (complete competing))
   && List.mem competing.errors "@bin-smoke runs more than once: bin/alpha.exe" ~equal:String.equal
+  && (not (complete transitive))
+  && List.mem transitive.errors "@bin-smoke runs more than once: bin/alpha.exe" ~equal:String.equal
+  && (not (complete external_result))
+  && List.mem external_result.errors (external_smoke_error "bin/dune") ~equal:String.equal
+  && (not (complete accepted_exit))
+  && List.mem accepted_exit.errors (accepted_exit_error "bin/dune") ~equal:String.equal
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)
