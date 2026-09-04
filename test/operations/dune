@@ -265,6 +265,17 @@
    "--ocannl_log_main_domain_to_stdout=false"
    "--ocannl_log_level=3")))
 
+(test
+ ; ocannl-backend: none -- links only the host-side debug runtime and exercises its file and stdout
+ ; flushing destinations without compiling or selecting a compute backend.
+ (name flushing_location_format)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules flushing_location_format)
+ (libraries base stdio unix arrayjit.utils arrayjit.verdict)
+ (preprocess
+  (pps ppx_sexp_conv ppx_minidebug)))
+
 (executable
  (name micrograd_demo_logging)
  (package neural_nets_lib)
