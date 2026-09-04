@@ -123,7 +123,32 @@ let target_dependencies ~subdir stanza =
                 | _ -> None)
             | _ -> None)
   in
-  List.rev_append field_dependencies action_dependencies
+  let rec literal_action_dependencies = function
+    | Sexp.Atom _ -> []
+    | Sexp.List (Sexp.Atom "no-infer" :: _) -> []
+    | Sexp.List (Sexp.Atom "with-stdin-from" :: Sexp.Atom input :: nested) ->
+        Option.to_list (dependency_path ~subdir input)
+        @ List.concat_map nested ~f:literal_action_dependencies
+    | Sexp.List (Sexp.Atom "cat" :: inputs) ->
+        List.filter_map inputs ~f:(function
+          | Sexp.Atom input -> dependency_path ~subdir input
+          | Sexp.List _ -> None)
+    | Sexp.List
+        (Sexp.Atom ("copy" | "copy#" | "copy-and-add-line-directive" | "format-dune-file")
+        :: Sexp.Atom input
+        :: _target :: _) ->
+        Option.to_list (dependency_path ~subdir input)
+    | Sexp.List (Sexp.Atom ("diff" | "diff?" | "cmp") :: Sexp.Atom left :: Sexp.Atom right :: _) ->
+        List.filter_map [ left; right ] ~f:(dependency_path ~subdir)
+    | Sexp.List children -> List.concat_map children ~f:literal_action_dependencies
+  in
+  let literal_action_dependencies =
+    match Dune_scan.field stanza "action" with
+    | None -> []
+    | Some action -> literal_action_dependencies (Sexp.List action)
+  in
+  List.rev_append field_dependencies
+    (List.rev_append action_dependencies literal_action_dependencies)
   |> List.dedup_and_sort ~compare:String.compare
 
 let resolve_target ~subdir target = Dune_scan.normalize_path (Dune_scan.in_subdir subdir target)
@@ -215,7 +240,10 @@ let implicit_alias_error dune_path dependency =
 
 let may_have_implicit_contributors dependency =
   let name = path_basename dependency in
-  String.equal name "runtest" || String.is_prefix name ~prefix:"runtest-"
+  List.mem
+    [ "all"; "check"; "default"; "doc"; "doc-private"; "fmt"; "install"; "lint"; "runtest" ]
+    name ~equal:String.equal
+  || String.is_prefix name ~prefix:"runtest-"
 
 let cached_alias_error dune_path targets =
   Printf.sprintf "%s: @bin-smoke reaches a target-bearing rule that may be cached: %s" dune_path
@@ -226,8 +254,9 @@ let declarations_of_stanza ~subdir stanza =
   | Some ("executable" | "executables") ->
       let names = Dune_scan.names_of stanza in
       let public_names = Dune_scan.public_names stanza in
+      let has_public_name = List.exists public_names ~f:(Fn.non (String.equal "-")) in
       let condition_errors =
-        if has_enabled_if stanza then [ public_condition_error names ] else []
+        if has_public_name && has_enabled_if stanza then [ public_condition_error names ] else []
       in
       if List.is_empty public_names then ([], [])
       else if List.length names <> List.length public_names then
@@ -716,6 +745,36 @@ let implicit_alias_fixture =
  (deps (alias runtest))
  (action (run %{exe:alpha.exe})))|dune}
 
+let builtin_alias_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(alias (name all))
+(rule
+ (alias bin-smoke)
+ (deps (alias all))
+ (action (run %{exe:alpha.exe})))|dune}
+
+let literal_action_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke.stamp)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (diff expected smoke.stamp))))|dune}
+
+let conditional_private_fixture =
+  {dune|(executables
+ (names helper)
+ (public_names -)
+ (enabled_if false))
+(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (action (run %{exe:alpha.exe})))|dune}
+
 let controls_hold () =
   let accepted = scan_bin_content complete_fixture in
   let refused = scan_bin_content missing_fixture in
@@ -746,6 +805,9 @@ let controls_hold () =
       [ ("bin/dune", transitive_path_bin_fixture); ("test/dune", transitive_path_helper_fixture) ]
   in
   let implicit_alias = scan_bin_content implicit_alias_fixture in
+  let builtin_alias = scan_bin_content builtin_alias_fixture in
+  let literal_action_dependency = scan_bin_content literal_action_dependency_fixture in
+  let conditional_private = scan_bin_content conditional_private_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "bin/beta.exe" ]
@@ -812,6 +874,13 @@ let controls_hold () =
   && List.mem implicit_alias.errors
        (implicit_alias_error "bin/dune" "bin/runtest")
        ~equal:String.equal
+  && (not (complete builtin_alias))
+  && List.mem builtin_alias.errors (implicit_alias_error "bin/dune" "bin/all") ~equal:String.equal
+  && (not (complete literal_action_dependency))
+  && List.mem literal_action_dependency.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && complete conditional_private
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)
