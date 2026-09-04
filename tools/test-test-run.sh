@@ -849,11 +849,11 @@ else
     "status $status_rc: ${status_out:-<nothing>}; stop $stop_rc: ${stop_out:-<nothing>}; repeat $repeat_stop_rc: $(cat "$TMP/repeat-stop.out")"
 fi
 
-# Keep the signal traps armed after the iteration loop: this fixture blocks
-# inside the first pairwise diff, then asks the separately invoked management
-# command to stop the published repeat. A default TERM during that window
-# kills the coordinator without an exit file; the deferred handler lets it
-# finish atomic verdict publication.
+# Keep the signal traps armed after the iteration loop: this fixture gives the
+# repeat its own process group, blocks inside the first pairwise diff, then
+# sends TERM to the WHOLE group. The diff dies from that same signal; the exit
+# finalizer must still turn the coordinator's trapped cancellation into an
+# atomic verdict.
 repeat_finalize_runs=$TMP/repeat-runs-finalize
 repeat_finalize_prefix=$TMP/repeat-finalize
 mkdir -p "$repeat_finalize_runs"
@@ -868,6 +868,7 @@ REPEAT_TEST_DIFF_WAIT_PREFIX=$repeat_finalize_prefix \
 REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
 OCANNL_TOOL_TEST_RUNS=$repeat_finalize_runs \
 PATH=$repeat_bin:$PATH \
+  perl -MPOSIX -e 'POSIX::setpgid(0, 0); exec @ARGV' \
   "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
   >"$TMP/repeat-finalize.out" 2>"$TMP/repeat-finalize.err" &
 repeat_pid=$!
@@ -875,16 +876,13 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ -e "$repeat_finalize_prefix.ready" ] && break
   sleep 0.1
 done
-finalize_stop=$(OCANNL_TOOL_TEST_RUNS=$repeat_finalize_runs \
-  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-finalize-stop.err")
-finalize_stop_rc=$?
-touch "$repeat_finalize_prefix.release"
+kill -TERM -- "-$repeat_pid" 2>"$TMP/repeat-finalize-kill.err"
+finalize_kill_rc=$?
 wait "$repeat_pid"
 repeat_finalize_rc=$?
 repeat_pid=
 repeat_finalize_dir=$(find "$repeat_finalize_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
-if [ "$finalize_stop_rc" = 0 ] \
-   && grep -q '^sent TERM to the repeat coordinator; ' <<<"$finalize_stop" \
+if [ "$finalize_kill_rc" = 0 ] \
    && [ "$repeat_finalize_rc" = 143 ] \
    && [ -n "$repeat_finalize_dir" ] \
    && [ "$(cat "$repeat_finalize_dir/exit" 2>/dev/null)" = 143 ] \
@@ -892,7 +890,7 @@ if [ "$finalize_stop_rc" = 0 ] \
   report 0 "repeat: cancellation during finalization still publishes a verdict"
 else
   report 1 "repeat: cancellation during finalization still publishes a verdict" \
-    "stop $finalize_stop_rc: ${finalize_stop:-<nothing>}; repeat $repeat_finalize_rc: $(cat "$TMP/repeat-finalize.out")"
+    "group kill $finalize_kill_rc: $(cat "$TMP/repeat-finalize-kill.err"); repeat $repeat_finalize_rc: $(cat "$TMP/repeat-finalize.out")"
 fi
 
 # The stored cap belongs to ONE iteration. Drive `wait` against a fabricated

@@ -518,7 +518,8 @@ that they earn a lookup rather than always-loaded space.
   The set is published as this worktree's `last` run, `wait last` scales its default deadline by
   the iteration count, and `stop last` signals its outer coordinator so cancellation ends the set
   rather than merely killing one iteration and starting the next. Cancellation remains deferred
-  through comparison and atomic verdict publication, so every managed repeat leaves a verdict.
+  through comparison, and an exit finalizer publishes the verdict with further group signals
+  ignored, so even a finalizer child killed by the original signal cannot strand the managed run.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1630,8 +1631,9 @@ that they earn a lookup rather than always-loaded space.
   branch or historical run cannot become `origin/master`'s predecessor. Golden paths come from the
   full log and, where Dune names only an explicit-rule stanza, from that exact source span at the
   pinned commit; `%{read:...}` substitutions used by per-backend goldens are resolved before the Git
-  lookup. The normalized fingerprint deliberately no longer carries enough source relationship to
-  recover any of this provenance.
+  lookup. Only the expected operand of a `diff` action counts—a self-verdicting test's unrelated
+  `.expected` dependencies are not failing goldens. The normalized fingerprint deliberately no
+  longer carries enough source relationship to recover any of this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other

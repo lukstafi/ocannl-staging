@@ -891,7 +891,14 @@ goldens_from_log() { # log destination backend -- source-tree paths at the pinne
       fi
       printf '%s\n' "$candidate" >>"$destination" ||
         die "cannot stage failing golden path $candidate"
-    done < <(grep -oE '[A-Za-z0-9_.+/%{}:-]+\.expected' "$excerpt" | sort -u)
+    # Only a diff action's EXPECTED operand is provenance for this failure.
+    # A self-verdicting test stanza can carry many .expected fixtures in deps;
+    # recording all tokens would blame an unrelated fixture edit for its red.
+    done < <(perl -0777 -ne '
+      while (/\(\s*diff\??\s+(?:"([^"]+\.expected)"|([^\s()"]+\.expected))\s+/g) {
+        print(($1 // $2), "\n")
+      }
+    ' "$excerpt" | sort -u)
   done <"$locations"
   sort -u "$destination" -o "$destination" || die "cannot normalize failing golden paths"
   rm -f "$locations" "$source" "$excerpt"

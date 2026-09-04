@@ -93,9 +93,11 @@ printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/
 printf 'fixture\n' >"$main/fixture"
 mkdir -p "$main/test"
 printf 'initial golden\n' >"$main/test/unit.cc.expected"
-printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}.expected" unit.actual)))\n' \
+printf 'unrelated fixture\n' >"$main/test/noise.expected"
+printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc.expected noise.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}.expected" unit.actual)))\n' \
   >"$main/test/dune"
-git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune test/unit.cc.expected
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune \
+  test/unit.cc.expected test/noise.expected
 git -C "$main" commit -qm fixture
 fixture_sha=$(git -C "$main" rev-parse HEAD)
 git -C "$main" remote add origin "$origin"
@@ -230,6 +232,18 @@ state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_same"
 absent 'fingerprint moved since the previous failure' <<<"$state_same"
 
+# An expected fixture merely listed in the failing stanza's deps is not the
+# failed diff input. The old all-token extraction records it and makes this
+# unrelated edit look like a failed fix on the next identical red.
+printf 'changed unrelated fixture\n' >"$main/test/noise.expected"
+git -C "$main" add test/noise.expected
+git -C "$main" commit -qm 'change unrelated expected dependency'
+git -C "$main" push -q origin master
+state_after_noise=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_after_noise"
+absent 'fingerprint moved since the previous failure' <<<"$state_after_noise"
+
 state_green=$(run_sweep_args --target state-probe)
 grep -q 'local/cc: incremental-pass' <<<"$state_green"
 # A timeout judged nothing and must not erase that green predecessor. This is
@@ -251,10 +265,9 @@ git -C "$main" add test/unit.cc.expected
 git -C "$main" commit -qm 'attempted golden fix'
 git -C "$main" push -q origin master
 fix_sha=$(git -C "$main" rev-parse HEAD)
-old_sha=$(git -C "$main" rev-parse HEAD^)
 state_after_fix=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
-grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc.expected last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$old_sha" | cut -c1-8))" \
+grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc.expected last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
   <<<"$state_after_fix"
 absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
 

@@ -779,6 +779,36 @@ case $sub in
     trap 'repeat_signal INT' INT
     trap 'repeat_signal TERM' TERM
     trap 'repeat_signal TERM' HUP
+    # Once published, every coordinator exit must publish a verdict too. This
+    # is also the group-cancellation backstop: a foreground finalizer child
+    # (diff/cmp/remove_tree) shares the terminal's process group and can die
+    # from the same signal even though the coordinator traps it. If that makes
+    # a checked finalizer command call die, EXIT still records cancellation.
+    repeat_exit() {
+      local rc=$?
+      trap - EXIT
+      # Verdict publication itself is the final, tiny critical section. Ignore
+      # another terminal/group signal here so finish_run's children inherit
+      # that disposition and the atomic exit file cannot be interrupted.
+      trap '' INT TERM HUP
+      if [ -n "$repeat_cancelled" ]; then
+        case $repeat_cancelled in INT) rc=130 ;; *) rc=143 ;; esac
+        if [ -z "${repeat_reported_cancelled:-}" ]; then
+          printf 'repeat result: CANCELLED -- completed %s of %s iterations\n' \
+            "$completed" "$repeats"
+          printf 'repeat result: CANCELLED -- completed %s of %s iterations\n' \
+            "$completed" "$repeats" >>"$run_dir/log"
+        fi
+        printf 'repeat cancellation observed: %s\n' "$repeat_cancelled" >>"$run_dir/log"
+      fi
+      if [ ! -f "$run_dir/exit" ]; then
+        finish_run "$rc" ||
+          printf 'test-run: repeat exited %s but its verdict could not be recorded\n' "$rc" >&2
+      fi
+      exec 9>&-
+      exit "$rc"
+    }
+    trap repeat_exit EXIT
 
     first_nonzero=0
     completed=0
@@ -886,6 +916,7 @@ case $sub in
 
     if [ -n "$repeat_cancelled" ]; then
       repeat_result="CANCELLED -- completed $completed of $repeats iterations"
+      repeat_reported_cancelled=1
       final_rc=$first_nonzero
       [ "$final_rc" != 0 ] || final_rc=143
     elif [ "$differing" -gt 0 ]; then
@@ -902,14 +933,8 @@ case $sub in
     printf 'repeat result: %s\n' "$repeat_result" | tee -a "$run_dir/log"
     printf 'repeat artifacts: %s (pairwise diffs under %s/diffs)\n' "$run_dir" "$run_dir" |
       tee -a "$run_dir/log"
-    [ -z "$repeat_cancelled" ] || printf 'repeat cancellation observed: %s\n' "$repeat_cancelled" >>"$run_dir/log"
-    finish_run "$final_rc" || die "repeat finished but its verdict could not be recorded"
-    # Keep cancellation deferred through cleanup, comparison and the atomic
-    # verdict publication. Otherwise `stop last` can recognize this live
-    # coordinator, deliver TERM after the iterations, and leave a published
-    # run directory with no exit file for `wait` to consume.
-    trap - INT TERM HUP
-    exec 9>&-
+    # repeat_exit keeps cancellation deferred through cleanup/comparison and
+    # publishes the atomic verdict while signals are ignored.
     exit "$final_rc"
     ;;
   run | start)
