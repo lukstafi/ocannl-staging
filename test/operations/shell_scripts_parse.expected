@@ -44,6 +44,12 @@ errexit-negation fixture command -- set is classified as specified: true
 errexit-negation fixture builtin -- set is classified as specified: true
 errexit-negation fixture plus bundle before errexit is classified as specified: true
 errexit-negation fixture named plus option before errexit is classified as specified: true
+errexit-negation fixture later set after set is classified as specified: true
+errexit-negation fixture later set after command is classified as specified: true
+errexit-negation fixture later set after AND is classified as specified: true
+errexit-negation fixture later set after OR is classified as specified: true
+errexit-negation fixture later set after async command is classified as specified: true
+errexit-negation fixture quoted set text is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true
 errexit-negation fixture until ! command is classified as specified: true
@@ -57,6 +63,7 @@ errexit-negation fixture quoted AND/OR text is classified as specified: true
 errexit-negation fixture nested AND/OR group is classified as specified: true
 errexit-negation fixture nested AND/OR substitution is classified as specified: true
 errexit-negation fixture nested AND/OR backtick substitution is classified as specified: true
+errexit-negation fixture nested AND/OR double-quoted backtick substitution is classified as specified: true
 errexit-negation fixture nested quotes in double-quoted substitution is classified as specified: true
 errexit-negation fixture nested quotes in parameter expansion is classified as specified: true
 errexit-negation fixture ANSI-C quoted AND/OR text is classified as specified: true
@@ -65,6 +72,17 @@ errexit-negation fixture later OR after semicolon is classified as specified: tr
 errexit-negation fixture later OR after async terminator is classified as specified: true
 errexit-negation fixture outer OR after stderr redirect is classified as specified: true
 errexit-negation fixture outer OR after descriptor redirect is classified as specified: true
+errexit-negation fixture outer OR after pipe-and is classified as specified: true
+errexit-negation fixture nested AND/OR in if command is classified as specified: true
+errexit-negation fixture outer OR after if command is classified as specified: true
+errexit-negation fixture if keyword used as an argument is classified as specified: true
+errexit-negation fixture nested if command is classified as specified: true
+errexit-negation fixture ordinary if argument before outer OR is classified as specified: true
+errexit-negation fixture nested AND/OR in while command is classified as specified: true
+errexit-negation fixture nested AND/OR in case command is classified as specified: true
+errexit-negation fixture bang-adjacent output redirect is classified as specified: true
+errexit-negation fixture bang-adjacent input redirect is classified as specified: true
+errexit-negation fixture bang-prefixed command name is classified as specified: true
 the statement-position ! grep fixture reaches the absent()-style refusal: true
 .github/actions/pin-revisions/resolve.sh parses: true
 benchmarks/gh514_cells.sh parses: true

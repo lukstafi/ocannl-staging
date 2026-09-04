@@ -721,13 +721,6 @@ module Errexit_negation = struct
         then options_enable_errexit rest
         else false
 
-  let line_enables_errexit line =
-    match words (String.strip line) with
-    | "set" :: options -> options_enable_errexit options
-    | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
-    | ("builtin" | "command") :: "--" :: "set" :: options -> options_enable_errexit options
-    | _ -> false
-
   (* Skip one [$()] body while preserving its recursive quote scopes. The caller only needs the byte
      after the matching close: every list operator inside the substitution is nested by definition
      and cannot consume the outer negated pipeline. *)
@@ -829,10 +822,130 @@ module Errexit_negation = struct
     in
     loop index `None false 1
 
+  let command_fragments line =
+    let length = String.length line in
+    let add_fragment fragments start finish =
+      String.sub line ~pos:start ~len:(finish - start) :: fragments
+    in
+    let rec loop index start quote escaped nesting fragments =
+      if index >= length then List.rev (add_fragment fragments start length)
+      else
+        let character = line.[index] in
+        match quote with
+        | `Single ->
+            if Char.equal character '\'' then loop (index + 1) start `None false nesting fragments
+            else loop (index + 1) start `Single false nesting fragments
+        | `Ansi_c ->
+            if escaped then loop (index + 1) start `Ansi_c false nesting fragments
+            else if Char.equal character '\\' then
+              loop (index + 1) start `Ansi_c true nesting fragments
+            else if Char.equal character '\'' then
+              loop (index + 1) start `None false nesting fragments
+            else loop (index + 1) start `Ansi_c false nesting fragments
+        | `Double ->
+            if escaped then loop (index + 1) start `Double false nesting fragments
+            else if Char.equal character '\\' then
+              loop (index + 1) start `Double true nesting fragments
+            else if starts_at line ~pos:index "$(" then
+              loop
+                (skip_command_substitution line (index + 2))
+                start `Double false nesting fragments
+            else if starts_at line ~pos:index "${" then
+              loop (skip_parameter_expansion line (index + 2)) start `Double false nesting fragments
+            else if Char.equal character '`' then
+              loop (index + 1) start `Backtick_double false nesting fragments
+            else if Char.equal character '"' then
+              loop (index + 1) start `None false nesting fragments
+            else loop (index + 1) start `Double false nesting fragments
+        | (`Backtick_none | `Backtick_double) as backtick ->
+            if escaped then loop (index + 1) start backtick false nesting fragments
+            else if Char.equal character '\\' then
+              loop (index + 1) start backtick true nesting fragments
+            else if Char.equal character '`' then
+              loop (index + 1) start
+                (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
+                false nesting fragments
+            else loop (index + 1) start backtick false nesting fragments
+        | `None ->
+            if escaped then loop (index + 1) start `None false nesting fragments
+            else if Char.equal character '\\' then
+              loop (index + 1) start `None true nesting fragments
+            else if Char.equal character '#' then List.rev (add_fragment fragments start index)
+            else if starts_at line ~pos:index "$'" then
+              loop (index + 2) start `Ansi_c false nesting fragments
+            else if Char.equal character '\'' then
+              loop (index + 1) start `Single false nesting fragments
+            else if Char.equal character '"' then
+              loop (index + 1) start `Double false nesting fragments
+            else if Char.equal character '`' then
+              loop (index + 1) start `Backtick_none false nesting fragments
+            else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
+              loop (index + 1) start `None false (nesting + 1) fragments
+            else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
+              loop (index + 1) start `None false (Int.max 0 (nesting - 1)) fragments
+            else if nesting = 0 && Char.equal character ';' then
+              loop (index + 1) (index + 1) `None false nesting (add_fragment fragments start index)
+            else if
+              nesting = 0
+              && index + 1 < length
+              && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
+                 || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
+            then
+              loop (index + 2) (index + 2) `None false nesting (add_fragment fragments start index)
+            else if
+              nesting = 0 && Char.equal character '&'
+              && (index = 0 || not (List.mem [ '>'; '<'; '|' ] line.[index - 1] ~equal:Char.equal))
+              && (index + 1 >= length || not (Char.equal line.[index + 1] '>'))
+            then
+              loop (index + 1) (index + 1) `None false nesting (add_fragment fragments start index)
+            else loop (index + 1) start `None false nesting fragments
+    in
+    loop 0 0 `None false 0 []
+
+  let command_enables_errexit command =
+    match words (String.strip command) with
+    | "set" :: options -> options_enable_errexit options
+    | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
+    | ("builtin" | "command") :: "--" :: "set" :: options -> options_enable_errexit options
+    | _ -> false
+
+  let line_enables_errexit line = List.exists (command_fragments line) ~f:command_enables_errexit
+
   (* A TOP-LEVEL [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes
      and nested shell constructs: in [! printf '%s\n' 'x || y'] the operator is data, and in [!
      (probe || recover)] it consumes an inner status, so the outer negation is still inert. *)
   let has_outer_and_or line =
+    let is_word_character character = Char.is_alphanum character || Char.equal character '_' in
+    let word_end index =
+      let rec loop index =
+        if index < String.length line && is_word_character line.[index] then loop (index + 1)
+        else index
+      in
+      loop index
+    in
+    let compound_closer = function
+      | "if" -> Some "fi"
+      | "while" | "until" | "for" | "select" -> Some "done"
+      | "case" -> Some "esac"
+      | _ -> None
+    in
+    let compound_start =
+      let rec skip_space index =
+        if index < String.length line && Char.is_whitespace line.[index] then skip_space (index + 1)
+        else index
+      in
+      let start = skip_space 1 in
+      let finish = word_end start in
+      if finish = start then None
+      else
+        let word = String.sub line ~pos:start ~len:(finish - start) in
+        Option.map (compound_closer word) ~f:(fun closer -> (closer, finish))
+    in
+    let compound_closers =
+      ref (Option.value_map compound_start ~default:[] ~f:(fun (closer, _) -> [ closer ]))
+    in
+    let command_start = ref (Option.is_some compound_start) in
+    let in_compound () = not (List.is_empty !compound_closers) in
     let rec loop index quote escaped nesting =
       if index >= String.length line then false
       else
@@ -853,13 +966,17 @@ module Errexit_negation = struct
               loop (skip_command_substitution line (index + 2)) `Double false nesting
             else if starts_at line ~pos:index "${" then
               loop (skip_parameter_expansion line (index + 2)) `Double false nesting
+            else if Char.equal character '`' then loop (index + 1) `Backtick_double false nesting
             else if Char.equal character '"' then loop (index + 1) `None false nesting
             else loop (index + 1) `Double false nesting
-        | `Backtick ->
-            if escaped then loop (index + 1) `Backtick false nesting
-            else if Char.equal character '\\' then loop (index + 1) `Backtick true nesting
-            else if Char.equal character '`' then loop (index + 1) `None false nesting
-            else loop (index + 1) `Backtick false nesting
+        | (`Backtick_none | `Backtick_double) as backtick ->
+            if escaped then loop (index + 1) backtick false nesting
+            else if Char.equal character '\\' then loop (index + 1) backtick true nesting
+            else if Char.equal character '`' then
+              loop (index + 1)
+                (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
+                false nesting
+            else loop (index + 1) backtick false nesting
         | `None ->
             if escaped then loop (index + 1) `None false nesting
             else if Char.equal character '\\' then loop (index + 1) `None true nesting
@@ -867,7 +984,23 @@ module Errexit_negation = struct
             else if starts_at line ~pos:index "$'" then loop (index + 2) `Ansi_c false nesting
             else if Char.equal character '\'' then loop (index + 1) `Single false nesting
             else if Char.equal character '"' then loop (index + 1) `Double false nesting
-            else if Char.equal character '`' then loop (index + 1) `Backtick false nesting
+            else if Char.equal character '`' then loop (index + 1) `Backtick_none false nesting
+            else if nesting = 0 && in_compound () && is_word_character character then (
+              let finish = word_end index in
+              let word = String.sub line ~pos:index ~len:(finish - index) in
+              (if !command_start then
+                 match !compound_closers with
+                 | closer :: rest when String.equal word closer ->
+                     compound_closers := rest;
+                     command_start := false
+                 | _ -> (
+                     match compound_closer word with
+                     | Some closer -> compound_closers := closer :: !compound_closers
+                     | None when List.mem [ "then"; "do"; "else"; "elif" ] word ~equal:String.equal
+                       ->
+                         command_start := true
+                     | None -> command_start := false));
+              loop finish `None false nesting)
             else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
               loop (index + 1) `None false (nesting + 1)
             else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
@@ -877,21 +1010,38 @@ module Errexit_negation = struct
               && index + 1 < String.length line
               && ((Char.equal character '&' && Char.equal line.[index + 1] '&')
                  || (Char.equal character '|' && Char.equal line.[index + 1] '|'))
-            then true
-            else if nesting = 0 && Char.equal character ';' then false
+            then
+              if in_compound () then (
+                command_start := true;
+                loop (index + 2) `None false nesting)
+              else true
+            else if nesting = 0 && Char.equal character ';' then
+              if in_compound () then (
+                command_start := true;
+                loop (index + 1) `None false nesting)
+              else false
             else if
               nesting = 0 && Char.equal character '&'
               && (index + 1 >= String.length line || not (Char.equal line.[index + 1] '>'))
-              && (index = 0 || not (List.mem [ '>'; '<' ] line.[index - 1] ~equal:Char.equal))
-            then false
+              && (index = 0 || not (List.mem [ '>'; '<'; '|' ] line.[index - 1] ~equal:Char.equal))
+            then
+              if in_compound () then (
+                command_start := true;
+                loop (index + 1) `None false nesting)
+              else false
+            else if nesting = 0 && in_compound () && Char.equal character '|' then (
+              command_start := true;
+              loop (index + 1) `None false nesting)
             else loop (index + 1) `None false nesting
     in
-    loop 0 `None false 0
+    loop (Option.value_map compound_start ~default:0 ~f:snd) `None false 0
 
   let is_statement_negation line =
     let stripped = String.lstrip line in
     String.is_prefix stripped ~prefix:"!"
-    && (String.length stripped = 1 || Char.is_whitespace stripped.[1])
+    && (String.length stripped = 1
+       || Char.is_whitespace stripped.[1]
+       || List.mem [ '<'; '>' ] stripped.[1] ~equal:Char.equal)
     && not (has_outer_and_or stripped)
 
   let findings text =
@@ -926,6 +1076,12 @@ module Errexit_negation = struct
       ("builtin -- set", "builtin -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("plus bundle before errexit", "set +u -e\n! grep -q missing output\n", [ 2 ]);
       ("named plus option before errexit", "set +o nounset -e\n! grep -q missing output\n", [ 2 ]);
+      ("later set after set", "set -u; set -e\n! grep -q missing output\n", [ 2 ]);
+      ("later set after command", "prepare; set -e\n! grep -q missing output\n", [ 2 ]);
+      ("later set after AND", "prepare && set -e\n! grep -q missing output\n", [ 2 ]);
+      ("later set after OR", "prepare || set -e\n! grep -q missing output\n", [ 2 ]);
+      ("later set after async command", "prepare & set -e\n! grep -q missing output\n", [ 2 ]);
+      ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
@@ -939,6 +1095,9 @@ module Errexit_negation = struct
       ("nested AND/OR group", "set -e\n! (probe || recover)\n", [ 2 ]);
       ("nested AND/OR substitution", "set -e\n! cmd $(probe || recover)\n", [ 2 ]);
       ("nested AND/OR backtick substitution", "set -e\n! cmd `probe || recover`\n", [ 2 ]);
+      ( "nested AND/OR double-quoted backtick substitution",
+        "set -e\n! true \"`printf \"%s\" \"x || y\"`\"\n",
+        [ 2 ] );
       ( "nested quotes in double-quoted substitution",
         "set -e\n! true \"$(printf \"%s\" \"x || y\")\"\n",
         [ 2 ] );
@@ -949,6 +1108,19 @@ module Errexit_negation = struct
       ("later OR after async terminator", "set -e\n! probe & cleanup || recover\n", [ 2 ]);
       ("outer OR after stderr redirect", "set -e\n! probe &>/dev/null || recover\n", []);
       ("outer OR after descriptor redirect", "set -e\n! probe 2>&1 || recover\n", []);
+      ("outer OR after pipe-and", "set -e\n! probe |& sink || recover\n", []);
+      ("nested AND/OR in if command", "set -e\n! if probe && ready; then :; fi\n", [ 2 ]);
+      ("outer OR after if command", "set -e\n! if probe && ready; then :; fi || recover\n", []);
+      ( "if keyword used as an argument",
+        "set -e\n! if probe; then echo fi; ready && steady; fi\n",
+        [ 2 ] );
+      ("nested if command", "set -e\n! if if probe || recover; then :; fi; then :; fi\n", [ 2 ]);
+      ("ordinary if argument before outer OR", "set -e\n! echo if || recover\n", []);
+      ("nested AND/OR in while command", "set -e\n! while probe || recover; do :; done\n", [ 2 ]);
+      ("nested AND/OR in case command", "set -e\n! case x in x) probe || recover ;; esac\n", [ 2 ]);
+      ("bang-adjacent output redirect", "set -e\n!>/dev/null probe\n", [ 2 ]);
+      ("bang-adjacent input redirect", "set -e\n!</dev/null probe\n", [ 2 ]);
+      ("bang-prefixed command name", "set -e\n!probe\n", []);
     ]
 
   let controls () =
