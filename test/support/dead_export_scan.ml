@@ -9,8 +9,11 @@
     an unqualified identifier inside the lexical range of [open M]. Alias scopes are deliberately
     over-approximated to the whole source, and an [include M] counts as a reference to every value
     because it re-exports the whole interface. Both choices can hide a dead export through a false
-    positive, but cannot falsely reject an ordinary use. Values introduced only by a PPX expansion
-    or an [include] inside the defining module are outside this source-level first cut. *)
+    positive, but cannot falsely reject an ordinary use. Values generated for top-level types by
+    [sexp_of], [sexp], [compare], and [equal] derivings are included; their expression extensions
+    count as references without needing to spell the generated value. Values introduced by other PPX
+    expansions or by an [include] inside the defining module remain outside this source-level
+    census. *)
 
 open Base
 open Ppxlib.Parsetree
@@ -55,6 +58,41 @@ let pattern_names pattern =
   iterator#pattern pattern;
   List.dedup_and_sort !names ~compare:String.compare
 
+let deriver_of_expression expression =
+  let rec head expression =
+    match expression.pexp_desc with
+    | Pexp_ident { txt; _ } -> Read.flatten_longident txt |> List.last
+    | Pexp_apply (function_, _) | Pexp_constraint (function_, _) -> head function_
+    | _ -> None
+  in
+  match expression.pexp_desc with
+  | Pexp_tuple expressions -> List.filter_map expressions ~f:head
+  | _ -> Option.to_list (head expression)
+
+let derivers_of_type_declaration declaration =
+  List.concat_map declaration.ptype_attributes ~f:(fun attribute ->
+      match (attribute.attr_name.txt, attribute.attr_payload) with
+      | "deriving", PStr items ->
+          List.concat_map items ~f:(fun item ->
+              match item.pstr_desc with
+              | Pstr_eval (expression, _) -> deriver_of_expression expression
+              | _ -> [])
+      | _ -> [])
+
+let comparison_name deriver type_name =
+  if String.equal type_name "t" then deriver else deriver ^ "_" ^ type_name
+
+let derived_names ~derivers declaration =
+  let type_name = declaration.ptype_name.txt in
+  List.concat_map derivers ~f:(function
+    | "sexp_of" -> [ "sexp_of_" ^ type_name ]
+    | "of_sexp" -> [ type_name ^ "_of_sexp" ]
+    | "sexp" -> [ "sexp_of_" ^ type_name; type_name ^ "_of_sexp" ]
+    | "compare" -> [ comparison_name "compare" type_name ]
+    | "equal" -> [ comparison_name "equal" type_name ]
+    | _ -> [])
+  |> List.dedup_and_sort ~compare:String.compare
+
 let exports_of_source ~source contents =
   match module_name_of_source source with
   | None -> []
@@ -74,6 +112,14 @@ let exports_of_source ~source contents =
               line = description.pval_loc.loc_start.pos_lnum;
             }
             :: acc
+        | Pstr_type (_, declarations) ->
+            (* The parser attaches a group's trailing [@@deriving] to its last declaration, while
+               the deriver applies it to every declaration in the mutually recursive group. *)
+            let derivers = List.concat_map declarations ~f:derivers_of_type_declaration in
+            List.fold declarations ~init:acc ~f:(fun acc declaration ->
+                List.fold (derived_names ~derivers declaration) ~init:acc ~f:(fun acc value ->
+                    { module_name; value; source; line = declaration.ptype_loc.loc_start.pos_lnum }
+                    :: acc))
         (* [let%foo] is an extension carrying a structure payload before the PPX rewrites it. It is
            still a source-declared top-level value, so unwrap structure payloads at this level but
            never descend into a nested module. *)
@@ -98,6 +144,20 @@ let module_expr_name module_expr =
   match (unwrap module_expr).pmod_desc with
   | Pmod_ident { txt; _ } -> ( try Read.flatten_longident txt |> List.last with _ -> None)
   | _ -> None
+
+let extension_deriver = function
+  | "equal" -> Some "equal"
+  | "compare" -> Some "compare"
+  | "sexp_of" -> Some "sexp_of"
+  | "of_sexp" -> Some "of_sexp"
+  | _ -> None
+
+let derived_name_for_extension deriver type_name =
+  match deriver with
+  | "equal" | "compare" -> comparison_name deriver type_name
+  | "sexp_of" -> "sexp_of_" ^ type_name
+  | "of_sexp" -> type_name ^ "_of_sexp"
+  | _ -> assert false
 
 (** References to [exports] from [sources]. Sources are [(repository-relative path, contents)]. *)
 let references ~(exports : export list) ~sources =
@@ -156,6 +216,38 @@ let references ~(exports : export list) ~sources =
                         add ~value ~line:expression.pexp_loc.loc_start.pos_lnum ~spelling:value
                     | _ -> ())
                 | None -> ());
+                (match expression.pexp_desc with
+                | Pexp_extension ({ txt; _ }, PTyp core_type) -> (
+                    match extension_deriver txt with
+                    | None -> ()
+                    | Some deriver ->
+                        let types =
+                          object
+                            inherit Ast_traverse.iter as super
+
+                            method! core_type core_type =
+                              (match core_type.ptyp_desc with
+                              | Ptyp_constr ({ txt; _ }, _) -> (
+                                  let path = Read.flatten_longident txt in
+                                  match (path_last path, path_qualifier path) with
+                                  | Some type_name, Some receiver when Set.mem receivers receiver ->
+                                      let value = derived_name_for_extension deriver type_name in
+                                      add ~value ~line:expression.pexp_loc.loc_start.pos_lnum
+                                        ~spelling:
+                                          ("[%" ^ deriver ^ ": " ^ String.concat ~sep:"." path ^ "]")
+                                  | Some type_name, None
+                                    when Read.within open_ranges
+                                           expression.pexp_loc.loc_start.pos_cnum ->
+                                      let value = derived_name_for_extension deriver type_name in
+                                      add ~value ~line:expression.pexp_loc.loc_start.pos_lnum
+                                        ~spelling:("[%" ^ deriver ^ ": " ^ type_name ^ "]")
+                                  | _ -> ())
+                              | _ -> ());
+                              super#core_type core_type
+                          end
+                        in
+                        types#core_type core_type)
+                | _ -> ());
                 super#expression expression
             end
           in

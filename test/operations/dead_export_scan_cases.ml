@@ -11,10 +11,16 @@ let pair, alias = (2, 3)
 let (!@) x = x
 let%trace extended = 4
 external primitive : int -> int = "fixture_primitive"
+type t = Root [@@deriving sexp_of, compare, equal]
+type named = Named [@@deriving sexp, compare, equal]
+type group_a = Group_a and group_b = Group_b [@@deriving equal]
 let outer =
   let nested = 5 in
   nested
-module Nested = struct let hidden = 6 end
+module Nested = struct
+  let hidden = 6
+  type nested = Nested [@@deriving equal]
+end
 |}
 
 let refs sources = Scan.references ~exports:fixture_exports ~sources
@@ -28,16 +34,30 @@ let () =
        [
          "Sample.!@";
          "Sample.alias";
+         "Sample.compare";
+         "Sample.compare_named";
+         "Sample.equal";
+         "Sample.equal_group_a";
+         "Sample.equal_group_b";
+         "Sample.equal_named";
          "Sample.extended";
+         "Sample.named_of_sexp";
          "Sample.outer";
          "Sample.pair";
          "Sample.plain";
          "Sample.primitive";
+         "Sample.sexp_of_named";
+         "Sample.sexp_of_t";
        ]);
-  Verdict.p "nested lets and nested-module values are not exports"
+  Verdict.p "nested lets and nested-module derived values are not exports"
     (not
        (List.exists fixture_exports ~f:(fun (export : Scan.export) ->
-            String.equal export.value "nested" || String.equal export.value "hidden")));
+            String.equal export.value "nested"
+            || String.equal export.value "hidden"
+            || String.equal export.value "equal_nested")));
+  Verdict.p "a deriving on the last declaration covers its whole recursive type group"
+    (List.mem (export_keys fixture_exports) "Sample.equal_group_a" ~equal:String.equal
+    && List.mem (export_keys fixture_exports) "Sample.equal_group_b" ~equal:String.equal);
   Verdict.p "dune select alternatives are not mistaken for module sources"
     (Option.is_none (Scan.module_name_of_source "arrayjit/lib/sample.missing.ml"));
   let direct =
@@ -76,9 +96,32 @@ let () =
     (referenced opened "plain" && referenced opened "pair" && referenced opened "primitive");
   let inert = refs [ ("inert.ml", "let s = \"Sample.outer\" (* Sample.alias *)\n") ] in
   Verdict.p "comments and strings do not count as references" (List.is_empty inert);
+  let extensions =
+    refs
+      [
+        ( "extensions.ml",
+          "module S = Sample\n\
+           let a = [%equal: S.named] Named Named\n\
+           let b = [%compare: Wrapper.Sample.t] Root Root\n\
+           let c = [%sexp_of: Sample.named list]\n\
+           let d = [%of_sexp: Sample.named]\n" );
+      ]
+  in
+  Verdict.p "equal, compare, sexp_of, and of_sexp extensions reference derived values"
+    (referenced extensions "equal_named"
+    && referenced extensions "compare"
+    && referenced extensions "sexp_of_named"
+    && referenced extensions "named_of_sexp");
+  Verdict.p "an extension does not credit a different derivation from the same type"
+    (not (referenced extensions "compare_named"));
   let included = refs [ ("included.ml", "include Sample\n") ] in
   Verdict.p "include counts as a reference to every re-exported value"
     (List.length included = List.length fixture_exports);
   let counts = Scan.counts ~exports:fixture_exports direct in
   Verdict.p "a synthetic zero-reference export is detected"
-    (Hashtbl.find_exn counts "Sample.primitive" = 0)
+    (Hashtbl.find_exn counts "Sample.primitive" = 0);
+  Verdict.p "a synthetic zero-reference derived export is detected"
+    (Hashtbl.find_exn counts "Sample.equal_named" = 0);
+  let extension_counts = Scan.counts ~exports:fixture_exports extensions in
+  Verdict.p "an export referenced only through an extension point is not reported dead"
+    (Hashtbl.find_exn extension_counts "Sample.equal_named" > 0)

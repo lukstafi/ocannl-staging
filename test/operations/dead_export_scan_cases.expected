@@ -1,10 +1,15 @@
 top-level lets, patterns, extensions, and externals are exports: true
-nested lets and nested-module values are not exports: true
+nested lets and nested-module derived values are not exports: true
+a deriving on the last declaration covers its whole recursive type group: true
 dune select alternatives are not mistaken for module sources: true
 direct and nested qualified paths count outside the defining source: true
 references in the defining source do not count: true
 structure, chained, and local module aliases count: true
 unqualified identifiers in an open scope count conservatively: true
 comments and strings do not count as references: true
+equal, compare, sexp_of, and of_sexp extensions reference derived values: true
+an extension does not credit a different derivation from the same type: true
 include counts as a reference to every re-exported value: true
 a synthetic zero-reference export is detected: true
+a synthetic zero-reference derived export is detected: true
+an export referenced only through an extension point is not reported dead: true
