@@ -96,7 +96,7 @@ files.
   post-link validator in `hip_backend.ml` (`validate_scratch_budget`) declines it first, as
   `Resource_exceeded Thread_scratch`. Measured on gfx1151/ROCm 7.14/WSL2: the cutoff is
   `ceil(pss/64)*64 * max_threads_per_multiprocessor * multiprocessor_count <= 4 GiB` — 104832 B
-  accepted, 104848 B rejected; #533's 163856 B is far over. Traps worth remembering: the 4 GiB cap
+  accepted, 104848 B rejected; gh-ocannl-533's 163856 B is far over. Traps worth remembering: the 4 GiB cap
   is NOT queryable (it is enforced by the WSL WDDM thunk, `wsl::thunk::ComputeQueue::UpdateScratch`),
   `hipLimitStackSize` is 1024 and has nothing to do with it, and hipcc separately refuses frames
   over 262136 B. Disable with `ocannl_hip_scratch_validation=false` where the model doesn't hold.

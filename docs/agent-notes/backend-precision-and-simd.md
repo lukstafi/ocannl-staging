@@ -373,7 +373,7 @@ files.
   be what keeps the cell in bounds, so a consumer must ALSO ask `Affine.within_box` of the cell over
   the enclosing symbols' full ranges, judged without the guard. With a one-element `acc`,
   `Workgroup w (0..3) -> Serial k -> If (w + k < 1) (acc[w] += ...)` separates `w` perfectly while
-  lanes 1–3 address cells that do not exist (Codex P1 on PR #443). The confined case needs no such
+  lanes 1–3 address cells that do not exist (Codex P1 on staging#443). The confined case needs no such
   check — there the guard mentions only peeled symbols and symbols no loop binds, while the cell is
   invariant across the peeled levels, so the guard cannot bound anything the cell mentions.
   Uninterpretable components (`Sub_axis`, `Concat`, dynamic indices) contribute no information to
@@ -614,7 +614,7 @@ files.
   path, since a plain hardware binding would race the accumulator; under `Fp16_wide` the f16
   residency is f32 (gh-ocannl-680), so f16 shuffles float exactly as bf16 on CUDA does. **RNG-bearing contributions are refused too**, but
   only where the residency is actually wider than storage — and the reason is worth holding onto,
-  because the first cut of gh-ocannl-682 got it wrong (Codex P1 on staging PR #461). It rendered
+  because the first cut of gh-ocannl-682 got it wrong (Codex P1 on staging#461). It rendered
   such a contribution at storage precision and widened it once, reasoning that this preserved
   gh-ocannl-517's draw. It does preserve the draw — but not the *reduction*: the serial rendering of
   an RNG-bearing update is one `try_localize_serial_reduce` explicitly DECLINES to localize, so it
@@ -895,7 +895,7 @@ files.
   calls at `-O0` even on an FMA-capable target). Where the target does not have it, each
   stays a CALL — unless the arithmetic is relaxed, `cc_backend_fast_math` being the one setting that
   measurably expands them (under clang) — and by the gh-ocannl-649 lesson one bullet up, an
-  opaque call cannot be vectorized, so the loop around it can degrade badly — issue #753's census
+  opaque call cannot be vectorized, so the loop around it can degrade badly — gh-ocannl-753's census
   has it fully scalarized at `-O3` (64-byte width, f32, `-march=x86-64`: 324 instructions, 0 vector
   ops, 256 scalar, 64 libm calls, 128 stack refs). That census is GCC's, and the amplifier is not
   universal: clang measured here keeps the surrounding loop packed at both `-O2` and `-O3` (26

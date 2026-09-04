@@ -750,6 +750,12 @@ let index_cases =
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md", "# A file\n\n- A fact about `Widget`.\n") ],
       [ "reachability @ agent-notes/a.md" ] );
+    (* End-to-end wiring for the sixth rule: exercising [check_citations] directly would stay green
+       if [check_all] silently stopped invoking it. *)
+    ( "a bare citation reaches the whole scan",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md", file "- A fact about `Widget` first established in #12.\n") ],
+      [ "qualified-citations @ agent-notes/a.md:5" ] );
     (* Rule 5. A fact promoted into two files is a fact that will be corrected in one of them. *)
     ( "the same bullet in two files",
       index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Gadget` seam" ],
@@ -897,6 +903,24 @@ let exemption_cases =
       [] );
   ]
 
+(* A bare numeric reference is ambiguous between the staging PR repository and the upstream issue
+   tracker. The citation rule shares the Markdown lexer with the structural rules, so its nearest
+   legitimate cases include both canonical qualifiers and text that only resembles prose inside an
+   inert region. *)
+let citation_cases =
+  [
+    ( "a bare numeric citation",
+      "A regression first appeared in #12.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "compact PR and issue labels are still unqualified",
+      "Regressions: PR#12 and issue#13.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ("the canonical issue and PR forms", "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n", []);
+    ("a hash inside a code span", "The literal `#12` is example text.\n", []);
+    ("a hash inside a fenced block", "```text\n#12 is fixture output\n```\n", []);
+    ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -941,6 +965,9 @@ let () =
       if not message_offers_key then
         fail "exemption -- %s: the finding's message does not print the key that would silence it"
           name);
+  List.iter citation_cases ~f:(fun (name, body, expected) ->
+      check ("citations -- " ^ name) expected
+        (List.map (Notes.check_citations ~file:"f.md" body) ~f:render));
   List.iter index_cases ~f:(fun (name, index_contents, files, expected) ->
       let _, found = Notes.check_all ~index_file:"agent-notes.md" ~index_contents ~files in
       check ("index -- " ^ name) expected (List.map found ~f:render));
@@ -969,6 +996,7 @@ let () =
     List.concat_map structure_cases ~f:(fun (_, _, e) -> e)
     @ List.concat_map table_cases ~f:(fun (_, _, e) -> e)
     @ List.concat_map index_cases ~f:(fun (_, _, _, e) -> e)
+    @ List.concat_map citation_cases ~f:(fun (_, _, e) -> e)
     |> List.map ~f:rule_of_expectation
     |> List.dedup_and_sort ~compare:String.compare
   in

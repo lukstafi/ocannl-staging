@@ -45,7 +45,7 @@ files.
   narrowing axis excludes accumulations whose accumulating expression reads no device memory, which
   are rare and usually constant-folded. The shipped rule is deliberately wider than that axis and
   qualifies a recognized accumulation's controlling guards too (gh-ocannl-820, Codex P1 round 3 on
-  PR 553): one 4x16 shape on one toolchain not reproducing is not a shape proven safe, and
+  staging#553): one 4x16 shape on one toolchain not reproducing is not a shape proven safe, and
   confining the context to the update alone would leave a guard-only accumulation with no
   workaround at all.
   Measured, the tax is 1.06x on a memory-bound per-thread reduction, 2.15x accumulator-bound, 4.1x

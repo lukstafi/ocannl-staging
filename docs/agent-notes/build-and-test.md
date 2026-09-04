@@ -71,7 +71,7 @@ that they earn a lookup rather than always-loaded space.
   when anyone, anywhere, writes something it did not anticipate — and the population it scans keeps
   growing under it for as long as the PR is open. So fetch the STAGING remote — whose name is local
   and need not be `origin` (AGENTS.md, Pull Requests) — rebase onto its `master`, or merge it in
-  where the branch is shared and rewriting is not yours to do (as #413 did), and re-run the scan
+  where the branch is shared and rewriting is not yours to do (as staging#413 did), and re-run the scan
   BEFORE opening such a PR; where neither is welcome, build the merge commit on a scratch branch
   and run it there. What the omission buys is a false failure on a colleague's correct work, which
   is the outcome that gets a check disabled rather than fixed. Merging does NOT repeat the
@@ -97,7 +97,7 @@ that they earn a lookup rather than always-loaded space.
   other, owned by the CI-red triage routine (the CI section below) rather than by the session
   that merged.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
-  about it, and that is the more expensive half of the same story. #413's fixtures came from a
+  about it, and that is the more expensive half of the same story. staging#413's fixtures came from a
   survey of the notes as they stood; the survey found no bullet continued after a blank line, so
   that shape reached no fixture, and the control that came nearest — `- A finished fact.`, a blank
   line, then an indented line — asserted a finding, because a finding is what the scanner gave. In
@@ -608,7 +608,7 @@ that they earn a lookup rather than always-loaded space.
   WORKING TREE; `git commit` during a merge takes the INDEX. So a golden promoted after its `git
   add` is committed with its PRE-promotion content, and nothing local objects — every later `dune
   runtest` reads the working tree and passes — while CI builds the committed tree and fails on the
-  golden diff. It cost ~90 minutes on staging PR #487, and it is invisible by construction: the
+  golden diff. It cost ~90 minutes on staging#487, and it is invisible by construction: the
   usual conflict drill (resolve, `git add`, run the suite, promote what moved) puts the promotion
   on the wrong side of the `add` every time, and `git status` shows the file staged, which is what
   you were checking for. `promote.sh` closes it: mid-merge it takes `dune promotion list` BEFORE
@@ -915,7 +915,7 @@ that they earn a lookup rather than always-loaded space.
   the offline `skip` with the count taken as of the last successful fetch, a branch and a tag both
   named `origin/master` not displacing the tracking ref, `FETCH_HEAD` left byte-identical, and
   which SSH launcher git ends up invoking with or without the appended OpenSSH options. Both
-  harness bugs it exists to prevent were live during PR #430's review rounds: a throwaway clone
+  harness bugs it exists to prevent were live during staging#430's review rounds: a throwaway clone
   that silently tested the COMMITTED script, and a `run` helper that executed its label as a
   command. When adding a leg, add the negative control too — mutate the hook and check that leg,
   and only that leg, goes red. The harness found one bug on its first outing: `bounded` decided
@@ -1009,7 +1009,7 @@ that they earn a lookup rather than always-loaded space.
     PPrint.document`), since an interface records the path a declaration spells rather than what it
     abbreviates. Those are keyed by the module path they are declared in, never by the bare name:
     `t` is declared in every module of every library, and a bare-name table made emitters of 400
-    values returning some `t` or other (Codex round 1 on #487). A named module type is resolved the
+    values returning some `t` or other (Codex round 1 on staging#487). A named module type is resolved the
     same way — `module M : S` exports S's values under `M`, which is the name a call site spells and
     an `open` brings into scope, so the value is attributed to both.
   - The second condition is what keeps generic names out. `Indexing.Doc_helpers.int : int ->
@@ -1067,7 +1067,7 @@ that they earn a lookup rather than always-loaded space.
   from every refusal: `open Ir.Low_level` followed by a local `let to_doc` is valid code calling the
   local function, and refusing it would red the build for everyone, where a refusal not made is one
   more member of the residue the partial marker covers. Judging the file's opens against the file's unqualified uses cross-products the two, and a
-  false refusal on valid code is a red build for everyone (Codex round 3 on #487). Every route is attributed by the
+  false refusal on valid code is a red build for everyone (Codex round 3 on staging#487). Every route is attributed by the
   qualifier at the call site, so `open Test_utils.Generated` followed by a bare `read` reads exactly
   like a local function of that name and drops the file out of the census. `Codegen_text_scan.
   rejections` fails the inventory on that spelling — for the artifact readers and for an emitter's
@@ -1100,7 +1100,7 @@ that they earn a lookup rather than always-loaded space.
     passes its own test, and quietly puts the whole directory behind every per-test alias (measured:
     `@test/operations/runtest-verdict_ratchet` ran the entire `test/operations` suite). What keeps
     those rules in plain `dune runtest` is an `(alias (name runtest) (deps (alias runtest-<name>) …))`
-    stanza per directory — the same shape PR #431 gave `slow`. `env_var_deps` fails on a member the
+    stanza per directory — the same shape staging#431 gave `slow`. `env_var_deps` fails on a member the
     stanza omits, and on a golden diff attached to `runtest` itself.
   - **`runtest-<name>` is dune's own namespace for `(test)`/`(tests)` stanzas and inline-test
     libraries** (dune >= 3.20). Reusing such a name for a rule is a dependency cycle as soon as the
@@ -1330,8 +1330,8 @@ that they earn a lookup rather than always-loaded space.
   box carries exactly one of the two toolchains, so the OTHER backend's absent `.objs` on that same
   build is a free negative control. `@check` also proves compilation and never execution, so pair it
   with a runnable probe wherever one exists. Two PRs in two days paid for this: gh-ocannl-758
-  (PR #490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
-  gh-ocannl-773 (PR #494) touched both again. gh-ocannl-794 is the executable follow-up for CI
+  (staging#490) shipped a HIP arm unparsed beyond syntax and edited the CUDA arm blind the next day, and
+  gh-ocannl-773 (staging#494) touched both again. gh-ocannl-794 is the executable follow-up for CI
   coverage, gh-ocannl-796 for scripting the off-box loop.
 - `tools/remote-verify.sh` is the one-off counterpart to the scheduled sweep for a pushed branch:
   it derives the remote pointing to the staging repository by URL, fetches the named branch,
@@ -1724,7 +1724,7 @@ that they earn a lookup rather than always-loaded space.
   constants and dataset sizes did not justify another exemption list — so it is an audit rule for
   whoever adds the next training golden.
 - Two details of that conversion are what the digits were quietly doing, and both are easy to drop
-  (Codex found all seven instances of them in one round on PR #447). First: a pinned number is a
+  (Codex found all seven instances of them in one round on staging#447). First: a pinned number is a
   TWO-SIDED constraint, and the claim that replaces it usually is not. Every loss bound in the
   makemore and conv tests was an upper bound, so a dropped negation or a backend sign error — a
   finite NEGATIVE cross-entropy — cleared all of them while the trajectory still fell; cross-entropy
@@ -1784,7 +1784,7 @@ that they earn a lookup rather than always-loaded space.
   and `bandwidth_calibration`'s remaining claims are about rows existing AT ALL, which needs every
   one of the four stream kernels emptied at once. `autotune_timing_modes` fails the control because
   it pins the contention policy itself, which is the control working.
-- Waive on the evidence that explains THAT absence, never on a report-wide count (Codex, PR #608).
+- Waive on the evidence that explains THAT absence, never on a report-wide count (Codex, staging#608).
   `report.timings_contended` counts WINDOWS and answers exactly one question — was this search's
   measurement set complete — because a refused digest is dropped from `seen` so an equivalent seed
   can retry it: on an idle cuda box `autotune_fission_sketch`'s chain search refuses 4 windows over

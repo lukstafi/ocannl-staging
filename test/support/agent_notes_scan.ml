@@ -22,7 +22,7 @@
     in [test/operations/agent_notes_scan_cases.ml] exercise the same functions the live-tree scan in
     [test/operations/agent_notes_structure.ml] runs over the repository.
 
-    {1 The five rules}
+    {1 The six rules}
 
     Each is stated as the thing that must be TRUE, and each finding names the rule that failed.
 
@@ -52,6 +52,10 @@
     - {b no-repetition}: no two bullets in the notes share their whitespace-normalized text, and no
       two share their first {!near_duplicate_prefix} characters case-insensitively. A fact promoted
       twice is a fact that will be updated once.
+    - {b qualified-citations}: every numeric GitHub reference names its repository. A bare [#NNN]
+      silently resolves against whichever repository renders the note; [staging#NNN],
+      [gh-ocannl-NNN] and [ahrefs/ocannl#NNN] do not. Inline code, fenced blocks, comments and
+      identifier-attached hashes are inert to this rule.
 
     {1 What it deliberately does not read}
 
@@ -97,8 +101,9 @@ let rule_index_agreement = "index-agreement"
 let rule_table_shape = "table-shape"
 let rule_reachability = "reachability"
 let rule_no_repetition = "no-repetition"
+let rule_qualified_citations = "qualified-citations"
 
-(** All five, in the order the live-tree scan reports them.
+(** All six, in the order the live-tree scan reports them.
 
     This list stands in for a protocol -- "the rules this scan has" -- that nothing else states, so
     the two ways it can part from the rules are both checked rather than assumed (gh-ocannl-706).
@@ -112,6 +117,7 @@ let rules =
     rule_table_shape;
     rule_reachability;
     rule_no_repetition;
+    rule_qualified_citations;
   ]
 
 let names_a_rule r = List.mem rules r ~equal:String.equal
@@ -1212,10 +1218,10 @@ let link_destination inside =
       | Some i -> String.prefix inside i
       | None -> inside)
 
-(** The NAVIGABLE links of a line: [\[text\](target)] outside inline code, outside HTML comments, and
-    not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
-    ["](../agent-notes.md)"] called a file reachable when those same bytes sat in a code span, in a
-    comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot follow. *)
+(** The navigable Markdown links of a line, outside inline code and HTML comments and excluding
+    images. A substring test used to call a file reachable when backlink-like bytes sat in a code
+    span, in a comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot
+    follow. *)
 let markdown_links ?spans line =
   let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
@@ -1548,6 +1554,62 @@ let check_repetition (bullets : bullet list) =
                 []))
 
 (* ------------------------------------------------------------------ *)
+(* Rule 6: numeric citations name their repository *)
+(* ------------------------------------------------------------------ *)
+
+(** Whether [#] at [i] opens an unqualified numeric citation. A preceding identifier is code or a
+    repository qualifier ([node#12], [staging#12], [ahrefs/ocannl#12]), except for the ambiguous
+    work labels [PR#12] and [issue#12]. A second hash makes a heading marker. The digit run must end
+    at an identifier boundary, so [#12abc] is not mistaken for a citation. *)
+let bare_citation_at line i =
+  let n = String.length line in
+  if i + 1 >= n || (not (Char.is_digit line.[i + 1])) || (i > 0 && Char.equal line.[i - 1] '#') then
+    None
+  else
+    let stop = ref (i + 1) in
+    while !stop < n && Char.is_digit line.[!stop] do
+      Int.incr stop
+    done;
+    if !stop < n && (Char.is_alphanum line.[!stop] || Char.equal line.[!stop] '_') then None
+    else
+      let identifier_char c = Char.is_alphanum c || Char.equal c '_' in
+      let start = ref i in
+      while !start > 0 && identifier_char line.[!start - 1] do
+        Int.decr start
+      done;
+      if !start = i then Some !stop
+      else
+        let prefix = String.sub line ~pos:!start ~len:(i - !start) |> String.lowercase in
+        if List.mem [ "pr"; "issue" ] prefix ~equal:String.equal then Some !stop else None
+
+(** Bare [#NNN] citations outside the inert regions of the notes. The same paragraph-aware lexer
+    used by the structural rules owns code spans, fenced blocks and comments, so this rule cannot
+    acquire a second, drifting interpretation of Markdown. *)
+let check_citations ~file contents =
+  let inert = (inert_by_line contents).ranges in
+  List.concat_map (lines contents) ~f:(fun (lineno, line) ->
+      let spans = spans_at inert lineno in
+      let rec find i acc =
+        if i >= String.length line then List.rev acc
+        else if Char.equal line.[i] '#' && not (in_any_span spans i) then
+          match bare_citation_at line i with
+          | Some stop ->
+              let citation = String.sub line ~pos:i ~len:(stop - i) in
+              let f =
+                finding ~file ~line:lineno ~rule:rule_qualified_citations
+                  (Printf.sprintf
+                     "an unqualified GitHub citation %s: write staging#NNN for a staging PR, \
+                      gh-ocannl-NNN for a codebase-fact issue, or ahrefs/ocannl#NNN for another \
+                      upstream issue mention"
+                     citation)
+              in
+              find stop (f :: acc)
+          | None -> find (i + 1) acc
+        else find (i + 1) acc
+      in
+      find 0 [])
+
+(* ------------------------------------------------------------------ *)
 (* The whole scan *)
 (* ------------------------------------------------------------------ *)
 
@@ -1576,5 +1638,6 @@ let check_all ~index_file ~index_contents ~(files : (string * string) list) =
   let index = check_index ~index_file ~index_contents ~files in
   let bullets = List.concat_map all ~f:(fun (file, c) -> bullets ~file c) in
   let repetition = check_repetition bullets in
-  let found = structure @ table @ index @ repetition in
+  let citations = List.concat_map all ~f:(fun (file, c) -> check_citations ~file c) in
+  let found = structure @ table @ index @ repetition @ citations in
   (bullets, in_rule_order found)
