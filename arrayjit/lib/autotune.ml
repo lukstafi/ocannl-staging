@@ -550,130 +550,130 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                   let wall = batch 1 in
                   { per_launch_ms = wall; contention_ms = wall })
             in
-            let probe_depth = queued_batch_depth single_estimate in
-            if probe_depth = 1 then (single_estimate.samples, 1, Some single_estimate.ms)
-            else
-              (* A synchronized single dispatch includes the round trip queueing is meant to
-                 amortize, so its estimate safely seeds a probe but is not the batch's steady-state
-                 per-launch cost. On HIP's STREAM kernels it selected 105--209 launches whose actual
-                 batch wall was only 1.3--2.6 ms. Measure that provisional queue and split its wall
-                 into fixed synchronization and marginal launch costs; their affine model selects
-                 the depth whose whole batch reaches the target even when the provisional depth is
-                 shallow. Budget the probe on batch wall rather than per-launch time: it is
-                 calibration, not a candidate measurement, and need not spend 64 whole batches to
-                 learn the scale. *)
-              let probe = probe_batch probe_depth in
-              let depth, estimated_batch_wall_ms =
-                refine_queued_batch_depth ~single_ms:single_estimate.ms ~probe_depth
-                  ~probe_ms:probe.ms
-              in
-              let confirm_or_scale calibration_dispatches depth wall_ms =
-                let confirmation_depth = Int.min max_queue_depth (depth + Int.max 1 (depth / 4)) in
-                let confirmation = probe_batch confirmation_depth in
-                let calibration_dispatches =
-                  calibration_dispatches + (confirmation.samples * confirmation_depth)
-                in
-                let confirmed_depth, confirmed_wall_ms =
-                  refine_queued_batch_depth_between ~base_depth:depth ~base_ms:wall_ms
-                    ~probe_depth:confirmation_depth ~probe_ms:confirmation.ms
-                in
-                if confirmed_depth = depth then (calibration_dispatches, depth, wall_ms)
-                else if
-                  Float.is_nan confirmed_wall_ms
-                  && Float.(confirmation.ms >= queued_batch_ms && confirmation.ms >= wall_ms)
-                then (calibration_dispatches, max_queue_depth, Float.nan)
-                else
-                  let depth, wall_ms =
-                    depth_from_batch_wall ~depth:confirmation_depth ~wall_ms:confirmation.ms
-                  in
-                  (calibration_dispatches, depth, wall_ms)
-              in
-              let confirm_interpolated calibration_dispatches depth ~upper_depth ~upper_ms =
-                let measured = probe_batch depth in
-                let calibration_dispatches = calibration_dispatches + (measured.samples * depth) in
-                let confirmed_depth, confirmed_wall_ms =
-                  refine_queued_batch_depth_between ~base_depth:depth ~base_ms:measured.ms
-                    ~probe_depth:upper_depth ~probe_ms:upper_ms
-                in
-                if confirmed_depth = depth then (calibration_dispatches, depth, measured.ms)
-                else if Float.is_finite confirmed_wall_ms then
-                  (calibration_dispatches, confirmed_depth, confirmed_wall_ms)
-                else if Float.(upper_ms >= queued_batch_ms && upper_ms >= measured.ms) then
-                  (calibration_dispatches, max_queue_depth, Float.nan)
-                else
-                  let depth, wall_ms = depth_from_batch_wall ~depth:upper_depth ~wall_ms:upper_ms in
-                  (calibration_dispatches, depth, wall_ms)
-              in
-              let rec validate_depth probes_left calibration_dispatches base_depth base_ms depth
-                  estimated_wall_ms =
-                if depth = max_queue_depth then (calibration_dispatches, depth, estimated_wall_ms)
-                else
-                  let validation = probe_batch depth in
-                  let calibration_dispatches =
-                    calibration_dispatches + (validation.samples * depth)
-                  in
-                  let next_depth, next_wall_ms =
-                    refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth:depth
-                      ~probe_ms:validation.ms
-                  in
-                  if Float.(base_ms < queued_batch_ms && validation.ms >= queued_batch_ms) then
-                    if next_depth < depth then
-                      (* The measured pair brackets the target. Interpolate inside that bracket
-                         before confirming: retaining an overshooting validation would turn a
-                         well-resolved 10 ms target into a 20 ms batch and blunt the 2x rule. *)
-                      if probes_left <= 1 then
-                        confirm_interpolated calibration_dispatches next_depth ~upper_depth:depth
-                          ~upper_ms:validation.ms
-                      else
-                        validate_depth (probes_left - 1) calibration_dispatches base_depth base_ms
-                          next_depth next_wall_ms
-                    else confirm_or_scale calibration_dispatches depth validation.ms
-                  else if next_depth = max_queue_depth then
-                    let depth, wall_ms =
-                      if
-                        Float.is_nan next_wall_ms
-                        && Float.(validation.ms >= queued_batch_ms && validation.ms >= base_ms)
-                      then (max_queue_depth, Float.nan)
-                      else if Float.is_nan next_wall_ms then
-                        depth_from_batch_wall ~depth ~wall_ms:validation.ms
-                      else (next_depth, next_wall_ms)
-                    in
-                    (calibration_dispatches, depth, wall_ms)
-                  else if probes_left <= 1 && Float.is_nan next_wall_ms then
-                    (* Do not fall back to the earlier target crossing: it may be the inflated
-                       window this validation was meant to expose. Scale from the deepest measured
-                       batch when it is non-monotone; a monotone, fixed-dominated pair still binds
-                       at the cap. *)
-                    let depth, wall_ms =
-                      if Float.(validation.ms >= queued_batch_ms && validation.ms >= base_ms) then
-                        (max_queue_depth, Float.nan)
-                      else depth_from_batch_wall ~depth ~wall_ms:validation.ms
-                    in
-                    (calibration_dispatches, depth, wall_ms)
-                  else if probes_left <= 1 then
-                    (* Keep the latest supported affine projection after the bounded validation
-                       loop. Jumping to the cap here would turn a noisy near-target probe into a
-                       20--30 ms batch whose 2x contention threshold no longer catches the fixed
-                       host stall this policy exists to detect. *)
-                    (calibration_dispatches, next_depth, next_wall_ms)
-                  else
-                    validate_depth (probes_left - 1) calibration_dispatches depth validation.ms
-                      next_depth next_wall_ms
-              in
+            let provisional_depth = queued_batch_depth single_estimate in
+            (* Depth 1 is probed at depth 2 before it is retained: a genuinely slow routine's affine
+               pair confirms depth 1, while an inflated synchronized-single window enters the same
+               retry path as every other suspect target crossing. *)
+            let probe_depth = Int.max 2 provisional_depth in
+            (* A synchronized single dispatch includes the round trip queueing is meant to amortize,
+               so its estimate safely seeds a probe but is not the batch's steady-state per-launch
+               cost. On HIP's STREAM kernels it selected 105--209 launches whose actual batch wall
+               was only 1.3--2.6 ms. Measure that provisional queue and split its wall into fixed
+               synchronization and marginal launch costs; their affine model selects the depth whose
+               whole batch reaches the target even when the provisional depth is shallow. Budget the
+               probe on batch wall rather than per-launch time: it is calibration, not a candidate
+               measurement, and need not spend 64 whole batches to learn the scale. *)
+            let probe = probe_batch probe_depth in
+            let depth, estimated_batch_wall_ms =
+              refine_queued_batch_depth ~single_ms:single_estimate.ms ~probe_depth
+                ~probe_ms:probe.ms
+            in
+            let confirm_or_scale calibration_dispatches depth wall_ms =
+              let confirmation_depth = Int.min max_queue_depth (depth + Int.max 1 (depth / 4)) in
+              let confirmation = probe_batch confirmation_depth in
               let calibration_dispatches =
-                single_estimate.samples + (probe.samples * probe_depth)
+                calibration_dispatches + (confirmation.samples * confirmation_depth)
               in
-              let calibration_dispatches, depth, estimated_batch_wall_ms =
-                if Float.(probe.ms >= queued_batch_ms) && depth < probe_depth then
-                  validate_depth max_depth_validation_probes calibration_dispatches 1
-                    single_estimate.ms depth estimated_batch_wall_ms
-                else if depth = probe_depth && Float.(probe.ms >= queued_batch_ms) then
-                  confirm_or_scale calibration_dispatches probe_depth probe.ms
+              let confirmed_depth, confirmed_wall_ms =
+                refine_queued_batch_depth_between ~base_depth:depth ~base_ms:wall_ms
+                  ~probe_depth:confirmation_depth ~probe_ms:confirmation.ms
+              in
+              if confirmed_depth = depth then (calibration_dispatches, depth, wall_ms)
+              else if
+                Float.is_nan confirmed_wall_ms
+                && Float.(confirmation.ms >= queued_batch_ms && confirmation.ms >= wall_ms)
+              then (calibration_dispatches, max_queue_depth, Float.nan)
+              else
+                let depth, wall_ms =
+                  depth_from_batch_wall ~depth:confirmation_depth ~wall_ms:confirmation.ms
+                in
+                (calibration_dispatches, depth, wall_ms)
+            in
+            let confirm_interpolated calibration_dispatches depth ~upper_depth ~upper_ms =
+              let measured = probe_batch depth in
+              let calibration_dispatches = calibration_dispatches + (measured.samples * depth) in
+              let confirmed_depth, confirmed_wall_ms =
+                refine_queued_batch_depth_between ~base_depth:depth ~base_ms:measured.ms
+                  ~probe_depth:upper_depth ~probe_ms:upper_ms
+              in
+              if confirmed_depth = depth then (calibration_dispatches, depth, measured.ms)
+              else if Float.is_finite confirmed_wall_ms then
+                (calibration_dispatches, confirmed_depth, confirmed_wall_ms)
+              else if Float.(upper_ms >= queued_batch_ms && upper_ms >= measured.ms) then
+                (calibration_dispatches, max_queue_depth, Float.nan)
+              else
+                let depth, wall_ms = depth_from_batch_wall ~depth:upper_depth ~wall_ms:upper_ms in
+                (calibration_dispatches, depth, wall_ms)
+            in
+            let rec validate_depth probes_left calibration_dispatches base_depth base_ms depth
+                estimated_wall_ms =
+              if depth = max_queue_depth then (calibration_dispatches, depth, estimated_wall_ms)
+              else
+                let validation = probe_batch depth in
+                let calibration_dispatches =
+                  calibration_dispatches + (validation.samples * depth)
+                in
+                let next_depth, next_wall_ms =
+                  refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth:depth
+                    ~probe_ms:validation.ms
+                in
+                if Float.(base_ms < queued_batch_ms && validation.ms >= queued_batch_ms) then
+                  if next_depth < depth then
+                    (* The measured pair brackets the target. Interpolate inside that bracket before
+                       confirming: retaining an overshooting validation would turn a well-resolved
+                       10 ms target into a 20 ms batch and blunt the 2x rule. *)
+                    if probes_left <= 1 then
+                      confirm_interpolated calibration_dispatches next_depth ~upper_depth:depth
+                        ~upper_ms:validation.ms
+                    else
+                      validate_depth (probes_left - 1) calibration_dispatches base_depth base_ms
+                        next_depth next_wall_ms
+                  else confirm_or_scale calibration_dispatches depth validation.ms
+                else if next_depth = max_queue_depth then
+                  let depth, wall_ms =
+                    if
+                      Float.is_nan next_wall_ms
+                      && Float.(validation.ms >= queued_batch_ms && validation.ms >= base_ms)
+                    then (max_queue_depth, Float.nan)
+                    else if Float.is_nan next_wall_ms then
+                      depth_from_batch_wall ~depth ~wall_ms:validation.ms
+                    else (next_depth, next_wall_ms)
+                  in
+                  (calibration_dispatches, depth, wall_ms)
+                else if probes_left <= 1 && Float.is_nan next_wall_ms then
+                  (* Do not fall back to the earlier target crossing: it may be the inflated window
+                     this validation was meant to expose. Scale from the deepest measured batch when
+                     it is non-monotone; a monotone, fixed-dominated pair still binds at the cap. *)
+                  let depth, wall_ms =
+                    if Float.(validation.ms >= queued_batch_ms && validation.ms >= base_ms) then
+                      (max_queue_depth, Float.nan)
+                    else depth_from_batch_wall ~depth ~wall_ms:validation.ms
+                  in
+                  (calibration_dispatches, depth, wall_ms)
+                else if probes_left <= 1 then
+                  (* Keep the latest supported affine projection after the bounded validation loop.
+                     Jumping to the cap here would turn a noisy near-target probe into a 20--30 ms
+                     batch whose 2x contention threshold no longer catches the fixed host stall this
+                     policy exists to detect. *)
+                  (calibration_dispatches, next_depth, next_wall_ms)
                 else
-                  validate_depth max_depth_validation_probes calibration_dispatches probe_depth
-                    probe.ms depth estimated_batch_wall_ms
-              in
-              (calibration_dispatches, depth, Some estimated_batch_wall_ms)
+                  validate_depth (probes_left - 1) calibration_dispatches depth validation.ms
+                    next_depth next_wall_ms
+            in
+            let calibration_dispatches = single_estimate.samples + (probe.samples * probe_depth) in
+            let calibration_dispatches, depth, estimated_batch_wall_ms =
+              if provisional_depth = 1 && depth = 1 then
+                (calibration_dispatches, 1, single_estimate.ms)
+              else if Float.(probe.ms >= queued_batch_ms) && depth < probe_depth then
+                validate_depth max_depth_validation_probes calibration_dispatches 1
+                  single_estimate.ms depth estimated_batch_wall_ms
+              else if depth = probe_depth && Float.(probe.ms >= queued_batch_ms) then
+                confirm_or_scale calibration_dispatches probe_depth probe.ms
+              else
+                validate_depth max_depth_validation_probes calibration_dispatches probe_depth
+                  probe.ms depth estimated_batch_wall_ms
+            in
+            (calibration_dispatches, depth, Some estimated_batch_wall_ms)
       in
       Option.iter estimated_batch_wall_ms ~f:(fun estimated_wall_ms ->
           if depth = max_queue_depth then

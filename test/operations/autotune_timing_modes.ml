@@ -139,6 +139,9 @@ let refinement_cases =
 
 let confirmation_cases =
   [
+    (* The depth-2 probe used for an initially depth-1 calibration confirms a genuinely slow routine
+       without changing its timed depth. *)
+    ("a genuinely slow depth-one routine", 1, 10., 2, 20., 1, Some 10.);
     (* Metal-like steady work: the provisional batch is already target-sized, and a 25% deeper batch
        grows proportionally. Retaining the base preserves the historical Metal depth. *)
     ("a target-sized batch with confirmed marginal work", 59, 10., 73, 12.5, 59, Some 10.);

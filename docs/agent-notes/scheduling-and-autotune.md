@@ -644,7 +644,9 @@ files.
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
   On Metal's ~0.17 ms kernels the first probe already spans the target; its 25%-deeper confirmation
   retains the historical ~59 depth when marginal work is present. On faster CUDA/HIP kernels
-  calibration grows the batch toward the same wall target.
+  calibration grows the batch toward the same wall target. A synchronized-single estimate at or
+  above the target is likewise checked at depth 2: a genuinely slow routine retains depth 1, while
+  a transient single-window stall cannot bypass batch validation.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall.
   The jitter-sensitive synchronized-single calibration and every timed window have a 16-sample
   floor; the already-millisecond batch probes use twelve minima because they choose scale rather
