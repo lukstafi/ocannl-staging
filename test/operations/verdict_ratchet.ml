@@ -77,6 +77,7 @@ type definition_site = { line : int; column : int; position : int }
 type helper_binding = {
   name : string;
   site : definition_site;
+  optional_label : string option;
   dependencies : helper_dependency list;
   guards : Set.M(String).t;
   unguarded : quantifier list;
@@ -84,7 +85,12 @@ type helper_binding = {
   claim_kind : claim_kind option;
 }
 
-and helper_dependency = { binding : helper_binding; positive : bool; forwards_guards : bool }
+and helper_dependency = {
+  binding : helper_binding;
+  positive : bool;
+  forwards_guards : bool;
+  supplied_optional : Set.M(String).t option;
+}
 
 type quantified_claim = {
   helper : string;
@@ -322,8 +328,17 @@ let rec returned_quantifiers ?(positive = true) expr =
               |> List.concat))
   | Pexp_sequence (_, result) -> returned_quantifiers ~positive result
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers ~positive inner
-  | Pexp_ifthenelse (_, yes, no) ->
-      returned_quantifiers ~positive yes
+  | Pexp_ifthenelse (condition, yes, no) ->
+      let condition_quantifiers =
+        match no with
+        | Some no when bool_literal yes true && bool_literal no false ->
+            quantifiers_in ~positive condition
+        | Some no when bool_literal yes false && bool_literal no true ->
+            quantifiers_in ~positive:(not positive) condition
+        | _ -> []
+      in
+      condition_quantifiers
+      @ returned_quantifiers ~positive yes
       @ Option.value_map no ~default:[] ~f:(returned_quantifiers ~positive)
   | Pexp_match (scrutinee, cases) ->
       List.concat_map cases ~f:(fun case ->
@@ -491,6 +506,7 @@ let opened_claim_bindings site =
       {
         name;
         site;
+        optional_label = None;
         dependencies = [];
         guards = Set.empty (module String);
         unguarded = [];
@@ -521,44 +537,54 @@ let claim_kind environment callee =
   | None -> None
 
 let rec make_bindings environment value =
-  binding_parts value.pvb_pat value.pvb_expr
-  |> List.map ~f:(fun part ->
-      let guards = required_nonempty part.expression in
-      let returned = returned_quantifiers part.expression in
-      let unguarded =
-        List.filter returned ~f:(fun quantifier ->
-            Set.is_empty quantifier.populations
-            || Set.is_empty (Set.inter guards quantifier.populations))
-      in
-      let negated_unguarded = returned_quantifiers ~positive:false part.expression in
-      let dependencies =
-        function_dependencies environment part.expression
-        |> List.filter ~f:(fun dependency ->
-            (* A returned local quantifier is already attributed to this binding by
-               [returned_quantifiers]. Keep outer dependencies beside it, but not the local
-               definition of the same quantifier: reporting both would make one semantic hole need
-               two exemptions. With no direct hole, local dependencies remain the path that carries
-               intermediate negation and guards to an outer binding. *)
-            (List.is_empty unguarded && List.is_empty negated_unguarded)
-            || List.exists environment ~f:(fun (outer : helper_binding) ->
-                outer.site.position = dependency.binding.site.position))
-      in
-      let claim_kind =
-        match Sources.longident_of part.expression with
-        | Some [ alias ] ->
-            lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
-        | Some path -> claim_kind_of_path path
-        | None -> None
-      in
-      let start = part.location.loc_start in
-      let site =
-        {
-          line = start.Stdlib.Lexing.pos_lnum;
-          column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
-          position = start.Stdlib.Lexing.pos_cnum;
-        }
-      in
-      { name = part.name; site; dependencies; guards; unguarded; negated_unguarded; claim_kind })
+  binding_parts value.pvb_pat value.pvb_expr |> List.map ~f:(make_binding_part environment)
+
+and make_binding_part ?optional_label environment part =
+  let guards = required_nonempty part.expression in
+  let returned = returned_quantifiers part.expression in
+  let unguarded =
+    List.filter returned ~f:(fun quantifier ->
+        Set.is_empty quantifier.populations
+        || Set.is_empty (Set.inter guards quantifier.populations))
+  in
+  let negated_unguarded = returned_quantifiers ~positive:false part.expression in
+  let dependencies =
+    function_dependencies environment part.expression
+    |> List.filter ~f:(fun dependency ->
+        (* A returned local quantifier is already attributed to this binding by
+           [returned_quantifiers]. Keep outer dependencies beside it, but not the local definition
+           of the same quantifier: reporting both would make one semantic hole need two exemptions.
+           With no direct hole, local dependencies remain the path that carries intermediate
+           negation and guards to an outer binding. *)
+        (List.is_empty unguarded && List.is_empty negated_unguarded)
+        || List.exists environment ~f:(fun (outer : helper_binding) ->
+            outer.site.position = dependency.binding.site.position))
+  in
+  let claim_kind =
+    match Sources.longident_of part.expression with
+    | Some [ alias ] ->
+        lookup environment alias |> Option.bind ~f:(fun binding -> binding.claim_kind)
+    | Some path -> claim_kind_of_path path
+    | None -> None
+  in
+  let start = part.location.loc_start in
+  let site =
+    {
+      line = start.Stdlib.Lexing.pos_lnum;
+      column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
+      position = start.Stdlib.Lexing.pos_cnum;
+    }
+  in
+  {
+    name = part.name;
+    site;
+    optional_label;
+    dependencies;
+    guards;
+    unguarded;
+    negated_unguarded;
+    claim_kind;
+  }
 
 and make_binding_group environment recursive values =
   match recursive with
@@ -582,31 +608,31 @@ and make_binding_group environment recursive values =
 and function_dependencies environment expr =
   match expr.pexp_desc with
   | Pexp_function (parameters, _, Pfunction_body body) ->
-      let returned = returned_binding_polarities true (function_body expr) in
-      let defaults, body_environment =
-        List.fold parameters ~init:([], environment)
-          ~f:(fun (dependencies, parameter_environment) parameter ->
+      let body_environment =
+        List.fold parameters ~init:environment ~f:(fun parameter_environment parameter ->
             match parameter.pparam_desc with
-            | Pparam_val (_, default, pattern) ->
+            | Pparam_val (label, default, pattern) ->
                 let names = pattern_names pattern |> List.map ~f:fst in
-                let default_dependencies =
-                  Option.value_map default ~default:[] ~f:(fun default ->
-                      List.concat_map names ~f:(fun name ->
-                          List.filter_map returned ~f:(fun (returned_name, positive) ->
-                              if String.equal name returned_name then
-                                Some (binding_dependencies ~positive parameter_environment default)
-                              else None)
-                          |> List.concat))
-                in
                 let shadowed = Set.of_list (module String) names in
-                let parameter_environment =
+                let outer_environment =
                   List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
                       not (Set.mem shadowed binding.name))
                 in
-                (dependencies @ default_dependencies, parameter_environment)
-            | Pparam_newtype _ -> (dependencies, parameter_environment))
+                Option.value_map default ~default:outer_environment ~f:(fun default ->
+                    let optional_label =
+                      match label with
+                      | Asttypes.Optional name -> Some name
+                      | Labelled name -> Some name
+                      | Nolabel -> None
+                    in
+                    let defaults =
+                      binding_parts pattern default
+                      |> List.map ~f:(make_binding_part ?optional_label parameter_environment)
+                    in
+                    List.rev_append defaults outer_environment)
+            | Pparam_newtype _ -> parameter_environment)
       in
-      defaults @ function_dependencies body_environment body
+      function_dependencies body_environment body
   | _ -> binding_dependencies environment expr
 
 and binding_dependencies ?(positive = true) environment expr =
@@ -688,15 +714,40 @@ and binding_dependencies ?(positive = true) environment expr =
               [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
     | Pexp_apply (callee, arguments) when is_name callee "&&" || is_name callee "||" ->
         visit_arguments environment positive forwards_guards arguments
-    | Pexp_apply (callee, arguments) ->
-        visit environment positive false callee;
-        visit_arguments environment positive false arguments
+    | Pexp_apply (callee, arguments) -> (
+        match Sources.longident_of callee with
+        | Some [ name ] -> (
+            match lookup environment name with
+            | Some binding ->
+                let supplied_optional =
+                  List.filter_map arguments ~f:(fun (label, _) ->
+                      match label with
+                      | Asttypes.Labelled name | Optional name -> Some name
+                      | Nolabel -> None)
+                  |> Set.of_list (module String)
+                in
+                bindings :=
+                  {
+                    binding;
+                    positive;
+                    forwards_guards = false;
+                    supplied_optional = Some supplied_optional;
+                  }
+                  :: !bindings;
+                visit_arguments environment positive false arguments
+            | None ->
+                visit environment positive false callee;
+                visit_arguments environment positive false arguments)
+        | _ ->
+            visit environment positive false callee;
+            visit_arguments environment positive false arguments)
     | Pexp_function _ -> ()
     | _ ->
         (match Sources.longident_of expr with
         | Some [ name ] ->
             Option.iter (lookup environment name) ~f:(fun binding ->
-                bindings := { binding; positive; forwards_guards } :: !bindings)
+                bindings :=
+                  { binding; positive; forwards_guards; supplied_optional = None } :: !bindings)
         | _ -> ());
         let iterator =
           object
@@ -713,11 +764,16 @@ and binding_dependencies ?(positive = true) environment expr =
 
 let quantified_claims structure =
   let origins (dependencies : helper_dependency list) =
-    let rec visit seen inherited_guards positive (binding : helper_binding) =
+    let rec visit seen inherited_guards positive supplied_optional (binding : helper_binding) =
       let key =
-        binding.name ^ ":" ^ Int.to_string binding.site.position ^ ":" ^ Bool.to_string positive
+        binding.name ^ ":"
+        ^ Int.to_string binding.site.position
+        ^ ":" ^ Bool.to_string positive ^ ":"
+        ^ String.concat ~sep:"," (Set.to_list supplied_optional)
       in
       if Set.mem seen key then []
+      else if Option.value_map binding.optional_label ~default:false ~f:(Set.mem supplied_optional)
+      then []
       else
         let seen = Set.add seen key in
         let guards =
@@ -735,13 +791,21 @@ let quantified_claims structure =
             let inherited_guards =
               if positive && dependency.forwards_guards then guards else Set.empty (module String)
             in
-            visit seen inherited_guards (Bool.equal positive dependency.positive) dependency.binding)
+            let supplied_optional =
+              Option.value dependency.supplied_optional ~default:supplied_optional
+            in
+            visit seen inherited_guards
+              (Bool.equal positive dependency.positive)
+              supplied_optional dependency.binding)
     in
     List.concat_map dependencies ~f:(fun dependency ->
+        let supplied_optional =
+          Option.value dependency.supplied_optional ~default:(Set.empty (module String))
+        in
         visit
           (Set.empty (module String))
           (Set.empty (module String))
-          dependency.positive dependency.binding)
+          dependency.positive supplied_optional dependency.binding)
     |> List.dedup_and_sort ~compare:(fun (left, _) (right, _) ->
         Int.compare left.site.position right.site.position)
   in
@@ -1170,6 +1234,14 @@ let () = Verdict.p "all rows pass" close|ocaml},
 let differs = if all then false else true
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "refuses a direct quantifier returned through an if condition",
+      {ocaml|let close = if List.for_all rows ~f:Fn.id then true else false
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "close" ] );
+    ( "accepts an inverted direct quantifier returned through an if condition",
+      {ocaml|let differs = if List.for_all rows ~f:Fn.id then false else true
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
     ( "refuses a bound quantifier returned through a match guard",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let result = match () with () when all -> true | () -> false
@@ -1210,6 +1282,21 @@ let () = Verdict.p "all rows pass" (return_ok true)|ocaml},
 let use ?(ok = ok) () = ok
 let () = Verdict.p "all rows pass" (use ())|ocaml},
       [ "ok" ] );
+    ( "does not use an optional default dependency when the caller supplies the argument",
+      {ocaml|let outer_ok = List.for_all rows ~f:Fn.id
+let use ?(ok = outer_ok) () = ok
+let () = Verdict.p "the supplied constant passes" (use ~ok:true ())|ocaml},
+      [] );
+    ( "resolves a quantified binding through chained optional defaults",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let use ?(x = all) ?(result = x) () = result
+let () = Verdict.p "all rows pass" (use ())|ocaml},
+      [ "all" ] );
+    ( "suppresses an earlier default inside a later default when the caller supplies it",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let use ?(x = all) ?(result = x) () = result
+let () = Verdict.p "the supplied constant passes" (use ~x:true ())|ocaml},
+      [] );
     ( "preserves polarity through an optional default",
       {ocaml|let ok = List.for_all rows ~f:Fn.id
 let use ?(ok = not ok) () = ok
