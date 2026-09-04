@@ -799,10 +799,12 @@ files.
   compiling that one conversion and censusing it rather than by testing a version. Reproduce with
   `apt-get download gcc-13-x86-64-linux-gnu cpp-13-x86-64-linux-gnu libgcc-13-dev` and
   `OCANNL_CC_BACKEND_COMPILER_COMMAND=<prefix>/usr/bin/gcc-13` on the census exe. Neither compiler
-  substitutes for the other here. The row anchor is now the smallest brace-delimited source range
-  containing its unique patterns, so clang's different attribution no longer makes x86 `dot` rows
-  disappear; the modeled set is stated as GCC/GAS and Clang assembly on x86-64 and aarch64, with an
-  ELF/clang attribution probe alongside the existing dialect probes (gh-ocannl-844). (c) **How the
+  substitutes for the other here. A row first asks for its exact tensor-derived source lines, then
+  falls back to the smallest brace-delimited range containing them only when no loop carries an exact
+  line. That keeps GCC's established narrow selection while clang's different attribution no longer
+  makes x86 `dot` rows disappear; the modeled set is stated as GCC/GAS and Clang assembly on x86-64
+  and aarch64, with an ELF/clang attribution probe alongside the existing dialect probes
+  (gh-ocannl-844). (c) **How the
   assembler SPELLS a packed instruction.** Apple's arm64 assembler carries a NEON instruction's
   arrangement on the MNEMONIC (`fmla.4s v0, v1, v2`) where GAS carries it on the registers (`fmla
   v0.4s, v1.4s, v2.4s`), so `Asm_census`'s operand rules saw three plain `v` names and classified 34

@@ -80,15 +80,15 @@
    - {b which line the loop's instructions are attributed to}, which is how a row is FOUND. clang
    attributes an inlined function's instructions to the CALLEE's lines, so an exact anchor on a line
    whose only content is a call to a same-kernel conversion carries no [.loc] inside the loop at
-   all. Every row now anchors on the smallest brace-delimited source range containing its unique
-   patterns, after the generated function's [Main logic] marker. - {b whether a whole-vector builtin
-   is lowered whole-vector}, which is what the sharp scalarization claim reads -- see
-   {!packed_half_widen}. - {b how the assembler SPELLS a packed instruction}, which is what every
-   count reads. Apple's arm64 dialect carries the arrangement on the mnemonic ([fmla.4s v0, v1, v2])
-   rather than on the registers, and a census blind to that spelling reports a fully packed k-loop
-   as [vector=0 scalar_fp=0] -- 34 of its 49 instructions invisible -- which is how macos-latest
-   failed the vector-majority claim on [0 > 0] over a tile nothing was wrong with. See
-   {!dialect_probes}.
+   all. Every row tries its exact source lines first and, only when none is carried, falls back to
+   the smallest brace-delimited range containing its unique patterns after the generated function's
+   [Main logic] marker. - {b whether a whole-vector builtin is lowered whole-vector}, which is what
+   the sharp scalarization claim reads -- see {!packed_half_widen}. - {b how the assembler SPELLS a
+   packed instruction}, which is what every count reads. Apple's arm64 dialect carries the
+   arrangement on the mnemonic ([fmla.4s v0, v1, v2]) rather than on the registers, and a census
+   blind to that spelling reports a fully packed k-loop as [vector=0 scalar_fp=0] -- 34 of its 49
+   instructions invisible -- which is how macos-latest failed the vector-majority claim on [0 > 0]
+   over a tile nothing was wrong with. See {!dialect_probes}.
 
    Before claiming a count is zero, ask whether the zero is the emission's, the compiler's, or the
    reader's: every census profile prints a [residual] count of instructions no classifier
@@ -1044,11 +1044,12 @@ type emitted = {
 }
 
 (* A compiler may attribute an inlined conversion to the callee or to another statement in the
-   generated construct. Anchor on the construct's brace-delimited source range, not only the exact
-   lines carrying its tensor-derived name. [Main logic] excludes the same names in the function
-   signature; the smallest enclosing block then distinguishes every reduction/tile from its
+   generated construct. The exact tensor-derived lines remain the first choice: widening every GCC
+   row eagerly admits unrelated nested compiler loops. When no loop carries an exact line, fall back
+   to the construct's brace-delimited source range. [Main logic] excludes the same names in the
+   function signature; the smallest enclosing block then distinguishes every reduction/tile from its
    neighbours. *)
-let loop_anchor (e : emitted) (loop : kernel_loop) =
+let loop_anchor_range (e : emitted) (loop : kernel_loop) =
   Census.anchor_block_lines ~source:e.source ~after_pattern:"/* Main logic. */"
     ~patterns:loop.anchors
 
@@ -1057,6 +1058,14 @@ let loop_selection (loop : kernel_loop) =
   | Reduce when String.equal loop.store (Ir.Ops.prec_string Ir.Ops.fp8) ->
       Census.Smallest_outer_anchor_carrier
   | Reduce | Tile -> Census.Innermost
+
+let census_loop parsed (e : emitted) (loop : kernel_loop) =
+  let census anchor =
+    Census.census_in ~selection:(loop_selection loop) parsed loop.op_class ~anchor
+  in
+  match Census.anchor_lines ~source:e.source ~patterns:loop.anchors |> census with
+  | Some _ as profile -> profile
+  | None -> census (loop_anchor_range e loop)
 
 type row = {
   toolchain : string;
@@ -1451,11 +1460,12 @@ let () =
          [f16w]) whenever a future setting emits both from the same child. *)
       Verdict.p_all "no two censused loops of a kernel share an anchor line"
         (List.concat_map emitted ~f:(fun e ->
-             List.map e.loops ~f:(fun l -> (e, l, loop_anchor e l))))
+             List.map e.loops ~f:(fun l -> (e, l, loop_anchor_range e l))))
         ~f:(fun (e, l, mine) ->
           (not (Set.is_empty mine))
           && List.for_all e.loops ~f:(fun other ->
-              String.equal other.what l.what || Set.is_empty (Set.inter mine (loop_anchor e other))));
+              String.equal other.what l.what
+              || Set.is_empty (Set.inter mine (loop_anchor_range e other))));
       let all = toolchains () in
       let available = List.filter all ~f:Census.accepts in
       Stdio.eprintf "\n=== cc kernel census (not part of the golden) ===\n";
@@ -1508,10 +1518,7 @@ let () =
                             Census.edge_count parsed )
                           :: !edges;
                         List.map e.loops ~f:(fun loop ->
-                            let c =
-                              Census.census_in ~selection:(loop_selection loop) parsed loop.op_class
-                                ~anchor:(loop_anchor e loop)
-                            in
+                            let c = census_loop parsed e loop in
                             (match c with
                             | Some c ->
                                 Stdio.eprintf "  %-24s %-11s -O%d %-11s %s\n" t.Census.label kernel
