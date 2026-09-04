@@ -685,6 +685,24 @@ let thematic_break stripped =
     Some "a thematic break or a setext heading underline, neither of which the notes use"
   else None
 
+(** Whether the bytes between angle brackets form the payload of a CommonMark autolink. URI schemes
+    have two to 32 characters and begin with a letter; email addresses carry an at-sign. Whitespace
+    disqualifies both forms. *)
+let autolink_contents inside =
+  let no_whitespace =
+    not (String.exists inside ~f:(fun c -> Char.equal c ' ' || Char.equal c '\t'))
+  in
+  let uri =
+    match String.index inside ':' with
+    | Some colon when colon >= 2 && colon <= 32 ->
+        Char.is_alpha inside.[0]
+        && String.for_all
+             (String.sub inside ~pos:1 ~len:(colon - 1))
+             ~f:(fun c -> Char.is_alphanum c || List.mem [ '+'; '-'; '.' ] c ~equal:Char.equal)
+    | _ -> false
+  in
+  no_whitespace && (uri || String.contains inside '@')
+
 (** Whether a line opens a raw HTML block, as opposed to merely starting with ['<']. Every
     column-zero ['<'] used to count, which failed two kinds of perfectly ordinary prose: an autolink
     ([<https://example.com>]) and a comparison ([<= 8], which these notes write) (Codex P2, round
@@ -698,8 +716,7 @@ let html_block_opener stripped =
        (match String.index stripped '>' with
        | Some close ->
            let inside = String.sub stripped ~pos:1 ~len:(close - 1) in
-           (not (String.exists inside ~f:(fun c -> Char.equal c ' ' || Char.equal c '\t')))
-           && (String.contains inside ':' || String.contains inside '@')
+           autolink_contents inside
        | None -> false)
 
 (** A setext heading underline: a line of nothing but one repeated ['-'] or ['='], directly under a
@@ -1280,6 +1297,24 @@ let markdown_links ?spans line =
 let link_destination_spans ?spans line =
   List.map (markdown_link_parts ?spans line) ~f:(fun link -> link.destination_span)
 
+(** CommonMark autolink destinations, excluding their angle brackets. They are visible links, but
+    their URL fragments are syntax rather than prose citations. *)
+let autolink_destination_spans ?spans line =
+  let spans = match spans with Some s -> s | None -> inert_of_line line in
+  let n = String.length line in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if Char.equal line.[i] '<' && (not (in_any_span spans i)) && not (escaped_at line i) then
+      match String.index_from line (i + 1) '>' with
+      | Some close when not (in_any_span spans close) ->
+          let inside = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
+          if autolink_contents inside then go (close + 1) ((i + 1, close) :: acc)
+          else go (i + 1) acc
+      | _ -> go (i + 1) acc
+    else go (i + 1) acc
+  in
+  go 0 []
+
 (** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
     the middle line of a multiline code span is not one. *)
 let links_of contents =
@@ -1595,6 +1630,91 @@ let is_work_label s =
   let s = String.lowercase s in
   String.equal s "pr" || String.equal s "issue"
 
+let formatting_delimiter c = Char.equal c '*' || Char.equal c '_' || Char.equal c '~'
+
+let visible_range ~spans start stop =
+  List.for_all (List.range start stop) ~f:(fun i -> not (in_any_span spans i))
+
+(** A Markdown emphasis/strong/strikethrough wrapper immediately around the half-open range from
+    [start] to [stop]. This is deliberately a matched pair rather than punctuation skipping:
+    unmatched stars render literally, and stripping them would invent a citation the reader does not
+    see. *)
+let inline_wrapper ~spans line start stop =
+  if start = 0 || not (formatting_delimiter line.[start - 1]) then None
+  else
+    let marker = line.[start - 1] in
+    let opening = ref (start - 1) in
+    while !opening > 0 && Char.equal line.[!opening - 1] marker do
+      Int.decr opening
+    done;
+    let width = start - !opening in
+    let valid_width = (not (Char.equal marker '~')) || width >= 2 in
+    let closes =
+      stop + width <= String.length line
+      && String.for_all (String.sub line ~pos:stop ~len:width) ~f:(Char.equal marker)
+      && (stop + width = String.length line || not (Char.equal line.[stop + width] marker))
+    in
+    let separated_before = !opening = 0 || not (identifier_char line.[!opening - 1]) in
+    let separated_after =
+      stop + width = String.length line || not (identifier_char line.[stop + width])
+    in
+    if
+      valid_width && closes && separated_before && separated_after
+      && (not (escaped_at line !opening))
+      && visible_range ~spans !opening (stop + width)
+    then Some (!opening, stop + width)
+    else None
+
+let label_token_starting_at ~spans line i label =
+  let stop = i + String.length label in
+  if stop > String.length line then None
+  else
+    let candidate = String.sub line ~pos:i ~len:(String.length label) |> String.lowercase in
+    if not (String.equal candidate label) then None
+    else
+      match inline_wrapper ~spans line i stop with
+      | Some bounds -> Some bounds
+      | None ->
+          if
+            (i = 0 || not (identifier_char line.[i - 1]))
+            && (stop = String.length line || not (identifier_char line.[stop]))
+            && visible_range ~spans i stop
+          then Some (i, stop)
+          else None
+
+let formatting_run_at line i =
+  if i >= String.length line || (not (formatting_delimiter line.[i])) || escaped_at line i then None
+  else
+    let marker = line.[i] in
+    let width = run_length line i marker in
+    if Char.equal marker '~' && width < 2 then None else Some (marker, width)
+
+let digit_token ~spans line start =
+  let plain () =
+    Option.bind (digit_run line start) ~f:(fun stop ->
+        if visible_range ~spans start stop then Some (start, stop) else None)
+  in
+  match plain () with
+  | Some bounds -> Some bounds
+  | None -> (
+      match formatting_run_at line start with
+      | None -> None
+      | Some (marker, width) ->
+          let digits = start + width in
+          Option.bind (digit_run line digits) ~f:(fun stop ->
+              let closes =
+                stop + width <= String.length line
+                && String.for_all (String.sub line ~pos:stop ~len:width) ~f:(Char.equal marker)
+                && (stop + width = String.length line || not (Char.equal line.[stop + width] marker))
+              in
+              let outer_stop = stop + width in
+              if
+                closes
+                && (outer_stop = String.length line || not (identifier_char line.[outer_stop]))
+                && visible_range ~spans start outer_stop
+              then Some (start, outer_stop)
+              else None))
+
 (** Whether [#] at [i] opens an unqualified numeric citation. [staging#12] and [ahrefs/ocannl#12]
     are qualified; [node#12] is a code identifier. The compact work labels [PR#12] and [issue#12]
     are still ambiguous, so they are returned with the label included. A second hash makes the
@@ -1612,28 +1732,18 @@ let unqualified_hash_reference_at line i =
           if is_work_label label then Some (start, stop) else None
 
 (** Hashless [PR 12] and [issue 12], with at least one space and complete word/digit boundaries. *)
-let unqualified_label_reference_at line i =
+let unqualified_label_reference_at ~spans line i =
   let n = String.length line in
-  if i > 0 && identifier_char line.[i - 1] then None
-  else
-    List.find_map [ "pr"; "issue" ] ~f:(fun label ->
-        let label_len = String.length label in
-        if i + label_len >= n then None
-        else
-          let candidate = String.sub line ~pos:i ~len:label_len |> String.lowercase in
-          if not (String.equal candidate label) then None
+  List.find_map [ "pr"; "issue" ] ~f:(fun label ->
+      Option.bind (label_token_starting_at ~spans line i label)
+        ~f:(fun (outer_start, after_label) ->
+          let digits = ref after_label in
+          while !digits < n && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t') do
+            Int.incr digits
+          done;
+          if !digits = after_label then None
           else
-            let after_label = i + label_len in
-            if identifier_char line.[after_label] then None
-            else
-              let digits = ref after_label in
-              while
-                !digits < n && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t')
-              do
-                Int.incr digits
-              done;
-              if !digits = after_label then None
-              else Option.map (digit_run line !digits) ~f:(fun stop -> (i, stop)))
+            Option.map (digit_token ~spans line !digits) ~f:(fun (_, stop) -> (outer_start, stop))))
 
 let trailing_work_label ~spans line =
   let stop = ref (String.length line) in
@@ -1641,15 +1751,33 @@ let trailing_work_label ~spans line =
     Int.decr stop
   done;
   List.find_map [ "pr"; "issue" ] ~f:(fun label ->
-      let start = !stop - String.length label in
-      if start < 0 || (start > 0 && identifier_char line.[start - 1]) then None
-      else
-        let candidate = String.sub line ~pos:start ~len:(String.length label) |> String.lowercase in
-        if
-          String.equal candidate label
-          && List.for_all (List.range start !stop) ~f:(fun i -> not (in_any_span spans i))
-        then Some (start, !stop)
-        else None)
+      let plain_start = !stop - String.length label in
+      let plain =
+        if plain_start < 0 then None
+        else
+          Option.filter (label_token_starting_at ~spans line plain_start label)
+            ~f:(fun (_, finish) -> finish = !stop)
+      in
+      match plain with
+      | Some bounds -> Some bounds
+      | None ->
+          let opening_before close_start =
+            if close_start = 0 || not (formatting_delimiter line.[close_start - 1]) then None
+            else
+              let marker = line.[close_start - 1] in
+              let opening = ref (close_start - 1) in
+              while !opening > 0 && Char.equal line.[!opening - 1] marker do
+                Int.decr opening
+              done;
+              Some !opening
+          in
+          Option.bind (opening_before !stop) ~f:(fun close_start ->
+              let content_stop = close_start in
+              let content_start = content_stop - String.length label in
+              if content_start < 0 then None
+              else
+                Option.filter (label_token_starting_at ~spans line content_start label)
+                  ~f:(fun (_, finish) -> finish = !stop)))
 
 let leading_number ~spans line =
   let start = ref 0 in
@@ -1659,23 +1787,24 @@ let leading_number ~spans line =
     Int.incr start
   done;
   let stripped = String.drop_prefix line !start in
-  if Option.is_some (foreign_list_marker stripped) then None
-  else
-    Option.bind (digit_run line !start) ~f:(fun stop ->
-        if List.for_all (List.range !start stop) ~f:(fun i -> not (in_any_span spans i)) then
-          Some (!start, stop)
-        else None)
+  if Option.is_some (foreign_list_marker stripped) then None else digit_token ~spans line !start
 
 (** Unqualified numeric work references outside the inert regions of the notes. The same
     paragraph-aware lexer used by the structural rules owns code spans, fenced blocks and comments,
     and the link parser owns destination ranges, so this rule cannot acquire a second, drifting
     interpretation of Markdown. *)
 let check_citations ~file contents =
-  let inert = (inert_by_line contents).ranges in
+  let scan = inert_by_line contents in
+  let inert = scan.ranges in
+  let paragraphs =
+    paragraph_lines ~inert ~fences_at:scan.fence_ranges ~comments_at:scan.comment_ranges contents
+  in
   let source_lines = lines contents in
   let spans_for lineno line =
     let inert_spans = spans_at inert lineno in
-    inert_spans @ link_destination_spans ~spans:inert_spans line
+    inert_spans
+    @ link_destination_spans ~spans:inert_spans line
+    @ autolink_destination_spans ~spans:inert_spans line
   in
   let report lineno citation =
     finding ~file ~line:lineno ~rule:rule_qualified_citations
@@ -1693,7 +1822,7 @@ let check_citations ~file contents =
           else
             let reference =
               if Char.equal line.[i] '#' then unqualified_hash_reference_at line i
-              else unqualified_label_reference_at line i
+              else unqualified_label_reference_at ~spans line i
             in
             match reference with
             | Some (start, stop) ->
@@ -1707,14 +1836,18 @@ let check_citations ~file contents =
     List.filter_map
       (List.zip_exn (List.drop_last_exn source_lines) (List.drop source_lines 1))
       ~f:(fun ((lineno, line), (next_lineno, next_line)) ->
-        let spans = spans_for lineno line in
-        let next_spans = spans_for next_lineno next_line in
-        match (trailing_work_label ~spans line, leading_number ~spans:next_spans next_line) with
-        | Some (start, stop), Some (number_start, number_stop) ->
-            let label = String.sub line ~pos:start ~len:(stop - start) in
-            let number = String.sub next_line ~pos:number_start ~len:(number_stop - number_start) in
-            Some (report lineno (label ^ " " ^ number))
-        | _ -> None)
+        if not (Set.mem paragraphs lineno && Set.mem paragraphs next_lineno) then None
+        else
+          let spans = spans_for lineno line in
+          let next_spans = spans_for next_lineno next_line in
+          match (trailing_work_label ~spans line, leading_number ~spans:next_spans next_line) with
+          | Some (start, stop), Some (number_start, number_stop) ->
+              let label = String.sub line ~pos:start ~len:(stop - start) in
+              let number =
+                String.sub next_line ~pos:number_start ~len:(number_stop - number_start)
+              in
+              Some (report lineno (label ^ " " ^ number))
+          | _ -> None)
   in
   List.sort (direct @ wrapped) ~compare:(fun a b -> Option.compare Int.compare a.line b.line)
 

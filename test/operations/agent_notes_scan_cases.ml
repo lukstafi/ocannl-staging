@@ -927,6 +927,7 @@ let citation_cases =
     ( "an ordered item is not a soft continuation",
       "A paragraph ending in PR\n12. A separate list item.\n",
       [] );
+    ("a heading is not a paragraph continuation", "## Open PR\n12 users reported failures.\n", []);
     ("the canonical issue and PR forms", "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n", []);
     ( "work references inside a code span",
       "The literals `#12`, `PR#12`, and `issue 12` are example text.\n",
@@ -936,8 +937,17 @@ let citation_cases =
       [] );
     ("a numeric local-link target", "See [layout details](#12-byte-layout).\n", []);
     ("a numeric URL fragment", "See [the review](https://example.test/review#12).\n", []);
+    ( "a numeric autolink fragment",
+      "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
     ( "an ambiguous visible link label",
       "See [PR 12](https://example.test/review).\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "emphasis around a hashless label or number",
+      "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "emphasis around a soft-wrapped reference",
+      "- Found during **PR**\n  **12**'s review.\n",
       [ "qualified-citations @ f.md:1" ] );
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]
