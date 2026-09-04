@@ -1,0 +1,2 @@
+every integer FMA is rejected at the C-family codegen boundary: true
+single-precision FMA renders and executes: true
