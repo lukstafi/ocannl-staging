@@ -233,6 +233,11 @@ capped_perl='
     # without this reset dune would start deaf to the very signals the cap
     # and `stop` rely on, degrading every cancellation to the KILL escalation.
     $SIG{TERM} = "DEFAULT"; $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT";
+    # Perl otherwise reserves the right to close inherited descriptors above
+    # $^F at exec. fd 9 is the worktree lock and repeat additionally supplies
+    # fd 6/8 as its descendant witness; keep that containment state attached
+    # to Dune and to anything Dune launches.
+    $^F = 9;
     eval { setpgrp(0, 0) };
     eval {
       if ($ENV{OCANNL_TOOL_TESTRUN_RD} && getpgrp(0) == $$) {
@@ -892,12 +897,25 @@ case $sub in
       # known to be cancelled, then recheck immediately after starting the
       # supervisor to close the unavoidable signal-between-commands window.
       [ -z "$repeat_cancelled" ] || break
+      # A process-group reap cannot see a Dune action that calls setsid. Give
+      # every descendant an inherited FIFO writer as a second containment
+      # witness: after the supervisor exits, EOF proves no session-escaped
+      # descendant remains able to mutate this iteration's shared build tree.
+      # The read/write anchor makes the two one-way opens nonblocking; it is
+      # closed before launch and never reaches the child.
+      descendant_fifo=$iter/descendants.fifo
+      mkfifo "$descendant_fifo" || die "cannot create descendant witness for iteration $i"
+      exec 7<>"$descendant_fifo" || die "cannot anchor descendant witness for iteration $i"
+      exec 8<"$descendant_fifo" || die "cannot read descendant witness for iteration $i"
+      exec 6>"$descendant_fifo" || die "cannot write descendant witness for iteration $i"
+      exec 7>&-
       OCANNL_TOOL_TESTRUN_BG=0 OCANNL_TOOL_TESTRUN_RD=$iter \
         perl -e "$capped_perl" -- "$cap" /bin/bash -c \
         'dune=$1; build=$2; shift 2; "$dune" clean --build-dir="$build" || exit 126; exec "$dune" "$@"' \
         -- "$DUNE" "$repeat_build" "${repeat_cmd[@]:1}" \
         >"$iter/stdout" 2>"$iter/stderr" &
       repeat_sup=$!
+      exec 6>&-
       [ -z "$repeat_cancelled" ] || kill "-$repeat_cancelled" "$repeat_sup" 2>/dev/null
       { printf '%s\n' "$repeat_sup" >"$iter/pid" &&
         ps_token "$repeat_sup" >"$iter/ptoken" &&
@@ -917,6 +935,21 @@ case $sub in
       # group it owned. Reap that identity-verified group before recording the
       # iteration, starting another one, or deleting their shared build tree.
       reap_repeat_group "$iter"
+      # A zero-byte read is EOF. Bash 3.2 returns status 1 for BOTH EOF and a
+      # `read -t` timeout, so use the Perl already required by this harness to
+      # distinguish them: 0 is EOF, 2 is timeout, 1 is data/error. Anything
+      # but EOF retains the build context and refuses concurrent reuse.
+      perl -e '
+        $SIG{ALRM} = sub { exit 2 };
+        alarm 2;
+        my $n = sysread(STDIN, my $byte, 1);
+        exit(defined($n) && $n == 0 ? 0 : 1);
+      ' <&8
+      descendant_rc=$?
+      exec 8>&-
+      [ "$descendant_rc" = 0 ] ||
+        die "iteration $i left a session-escaped descendant; refusing to reuse $repeat_build"
+      rm -f "$descendant_fifo"
       printf '%s\n' "$iter_rc" >"$iter/exit" || die "cannot record iteration $i verdict"
       [ "$first_nonzero" != 0 ] || [ "$iter_rc" = 0 ] || first_nonzero=$iter_rc
       {

@@ -523,7 +523,9 @@ that they earn a lookup rather than always-loaded space.
   Cancellation state and that finalizer are armed before the run is published as `last`; each
   iteration rechecks cancellation immediately before and after supervisor launch.
   If a supervisor is killed while its identity-verified Dune process group survives, the group is
-  reaped before another iteration can reuse—or final cleanup can remove—the shared build tree. A
+  reaped before another iteration can reuse—or final cleanup can remove—the shared build tree. Each
+  launch also inherits a FIFO writer: EOF after the supervisor exits proves a child did not escape
+  the recorded group with `setsid`; an unclosed witness retains/refuses the build tree. A
   prior nonzero iteration remains the set's exit status when a later iteration is cancelled. The
   dead supervisor pid is cleared before the potentially slower process-group reap. That reap gates
   on group reachability, not the fallible process census, and revalidates the recorded leader token

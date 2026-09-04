@@ -54,6 +54,7 @@
 #  21. the dead supervisor pid is cleared before orphan-group reaping.
 #  22. orphan cleanup gates on reachability and revalidates identity for KILL.
 #  23. a zombie retains its recorded identity while remaining non-live.
+#  24. a setsid descendant cannot escape into the next repeat build context.
 
 set -u
 
@@ -150,6 +151,8 @@ leader=""    # the stop legs' current group leader
 member=""    # and the second process it put in that group
 member_token=""  # ... and its start token, since it is not this shell's child
 repeat_pid="" # leg 14's active repeat coordinator
+escape_pid="" # leg 24's session-escaped descendant
+escape_release=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-run-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
@@ -192,6 +195,10 @@ cleanup() {
   if [ -n "${repeat_pid:-}" ] && kill -0 "$repeat_pid" 2>/dev/null; then
     kill -TERM "$repeat_pid" 2>/dev/null
     wait "$repeat_pid" 2>/dev/null
+  fi
+  [ -z "${escape_release:-}" ] || touch "$escape_release"
+  if [ -n "${escape_pid:-}" ] && kill -0 "$escape_pid" 2>/dev/null; then
+    kill -KILL "$escape_pid" 2>/dev/null
   fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
@@ -754,6 +761,25 @@ case $REPEAT_TEST_MODE in
     [ -e "$REPEAT_TEST_ORPHAN_REAPED" ] || exit 93
     printf 'post-reap stdout\n'; printf 'post-reap stderr\n' >&2
     ;;
+  session_escape)
+    for arg in "$@"; do
+      case $arg in
+        --build-dir=*) mkdir -p "${arg#--build-dir=}" ;;
+      esac
+    done
+    perl -MPOSIX -e '
+      $SIG{HUP} = "IGNORE";
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      open my $pf, ">", $ENV{REPEAT_TEST_ESCAPE_PID} or die;
+      print $pf "$$\n"; close $pf;
+      select undef, undef, undef, 0.05 until -e $ENV{REPEAT_TEST_ESCAPE_RELEASE};
+    ' </dev/null >/dev/null 2>&1 &
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      [ -s "$REPEAT_TEST_ESCAPE_PID" ] && break
+      sleep 0.05
+    done
+    printf 'escaped parent stdout\n'; printf 'escaped parent stderr\n' >&2
+    ;;
   *) echo "unknown repeat fixture mode: $REPEAT_TEST_MODE" >&2; exit 92 ;;
 esac
 EOF
@@ -913,6 +939,62 @@ if [ -n "$orphan_pid" ] && kill -0 "$orphan_pid" 2>/dev/null; then
   kill -KILL -- "-$orphan_pid" 2>/dev/null
   kill -KILL "$orphan_pid" 2>/dev/null
 fi
+
+# A Dune action can leave its recorded process group with setsid. The FIFO
+# writer inherited from the launch must still expose that survivor and refuse
+# the shared build before iteration two, even though the group reap sees no
+# reachable original group. Releasing the fixture afterwards also proves the
+# refusal retained (rather than deleted) its build context while it was live.
+repeat_escape_runs=$TMP/repeat-runs-session-escape
+escape_release=$TMP/repeat-session-escape.release
+escape_pid_file=$TMP/repeat-session-escape.pid
+mkdir -p "$repeat_escape_runs"
+: >"$TMP/repeat-session-escape.counter"
+: >"$TMP/repeat-session-escape.calls"
+if REPEAT_TEST_ROOT=$repeat_root \
+   REPEAT_TEST_MODE=session_escape \
+   REPEAT_TEST_COUNTER=$TMP/repeat-session-escape.counter \
+   REPEAT_TEST_CALLS=$TMP/repeat-session-escape.calls \
+   REPEAT_TEST_WAIT_PREFIX= \
+   REPEAT_TEST_WAIT_AT= \
+   REPEAT_TEST_DIFF_WAIT_PREFIX= \
+   REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+   REPEAT_TEST_ORPHAN_PID= \
+   REPEAT_TEST_ORPHAN_REAPED= \
+   REPEAT_TEST_ESCAPE_PID=$escape_pid_file \
+   REPEAT_TEST_ESCAPE_RELEASE=$escape_release \
+   OCANNL_TOOL_TEST_RUNS=$repeat_escape_runs \
+   PATH=$repeat_bin:$PATH \
+     "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+     >"$TMP/repeat-session-escape.out" 2>"$TMP/repeat-session-escape.err"; then
+  repeat_escape_rc=0
+else
+  repeat_escape_rc=$?
+fi
+repeat_escape_dir=$(find "$repeat_escape_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+escape_pid=$(cat "$escape_pid_file" 2>/dev/null)
+escape_pgid=$(ppgid "$escape_pid")
+recorded_pgid=$(cat "$repeat_escape_dir/iteration-1/pgid" 2>/dev/null)
+if [ "$repeat_escape_rc" = 2 ] \
+   && [ -n "$escape_pid" ] && kill -0 "$escape_pid" 2>/dev/null \
+   && [ -n "$escape_pgid" ] && [ "$escape_pgid" != "$recorded_pgid" ] \
+   && [ -d "$repeat_escape_dir/build" ] \
+   && [ ! -d "$repeat_escape_dir/iteration-2" ] \
+   && grep -q 'left a session-escaped descendant; refusing to reuse' \
+        "$TMP/repeat-session-escape.err"; then
+  report 0 "repeat: a session-escaped descendant blocks build reuse"
+else
+  report 1 "repeat: a session-escaped descendant blocks build reuse" \
+    "exit $repeat_escape_rc; pid=${escape_pid:-missing}; escaped-pgid=${escape_pgid:-missing}; recorded-pgid=${recorded_pgid:-missing}; stderr=$(cat "$TMP/repeat-session-escape.err")"
+fi
+touch "$escape_release"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  kill -0 "$escape_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$escape_pid" 2>/dev/null; then kill -KILL "$escape_pid" 2>/dev/null; fi
+escape_pid=
+escape_release=
 
 pre_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || break$' "$SRC" | head -1 | cut -d: -f1)
 launch_line=$(grep -n '^        perl -e "$capped_perl" -- "$cap" /bin/bash -c \\' "$SRC" | head -1 | cut -d: -f1)
