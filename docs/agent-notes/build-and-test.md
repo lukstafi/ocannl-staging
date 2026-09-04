@@ -846,6 +846,9 @@ that they earn a lookup rather than always-loaded space.
   does so for a syntactic `Some`, since `None` invokes the default. Direct quantifiers in an `if`
   condition or match guard are attributed to the returned binding as well as dependencies named
   there. `function`-case bodies and guards receive the same scoped analysis as ordinary matches.
+  Case-pattern names shadow returned-name references as well as dependency references. A single
+  `function` case can contribute its non-empty witnesses; alternatives never pool witnesses across
+  cases, where equal parameter spellings are distinct runtime branches.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

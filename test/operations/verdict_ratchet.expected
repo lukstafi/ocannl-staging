@@ -84,6 +84,7 @@ refuses a bound quantifier returned from a protected try body: true
 refuses a quantified helper reached through a mutually recursive sibling: true
 does not resolve an outer quantified binding shadowed by a function parameter: true
 does not resolve an outer binding shadowed by a match pattern: true
+does not return an outer quantified local shadowed by a match pattern: true
 still resolves a non-shadowed quantified binding returned by a function: true
 resolves an outer quantified binding used by an optional default: true
 does not use an optional default dependency when the caller supplies the argument: true
@@ -94,6 +95,7 @@ suppresses an earlier default inside a later default when the caller supplies it
 preserves polarity through an optional default: true
 refuses a quantified helper written with function-case syntax: true
 accepts a guarded quantified helper written with function-case syntax: true
+does not share a function-case guard with another case: true
 accepts a helper that negates a quantified local binding: true
 refuses a double negation around a quantified local binding: true
 refuses a quantifier written in pipeline style: true

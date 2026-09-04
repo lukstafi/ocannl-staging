@@ -413,8 +413,21 @@ and returned_binding_polarities positive expr =
   | Pexp_ifthenelse (_, yes, no) ->
       returned_binding_polarities positive yes
       @ Option.value_map no ~default:[] ~f:(returned_binding_polarities positive)
-  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
-      List.concat_map cases ~f:(fun case -> returned_binding_polarities positive case.pc_rhs)
+  | Pexp_match (_, cases) ->
+      List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          returned_binding_polarities positive case.pc_rhs
+          |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
+  | Pexp_try (body, cases) ->
+      returned_binding_polarities positive body
+      @ List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          returned_binding_polarities positive case.pc_rhs
+          |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
       returned_binding_polarities (not positive) argument
   | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
@@ -463,10 +476,8 @@ let rec required_nonempty expr =
   let none () = Set.empty (module String) in
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> required_nonempty body
-  | Pexp_function (_, _, Pfunction_cases (cases, _, _)) ->
-      List.fold cases
-        ~init:(Set.empty (module String))
-        ~f:(fun guards case -> Set.union guards (required_nonempty case.pc_rhs))
+  | Pexp_function (_, _, Pfunction_cases ([ case ], _, _)) -> required_nonempty case.pc_rhs
+  | Pexp_function (_, _, Pfunction_cases (_, _, _)) -> Set.empty (module String)
   | Pexp_let (_, _, body) -> required_nonempty body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> required_nonempty inner
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" -> (
@@ -1333,6 +1344,13 @@ let () = Verdict.p "constant identity passes" (identity true)|ocaml},
 let identity x = match x with ok -> ok
 let () = Verdict.p "constant identity passes" (identity true)|ocaml},
       [] );
+    ( "does not return an outer quantified local shadowed by a match pattern",
+      {ocaml|let result =
+  let ok = List.for_all rows ~f:Fn.id in
+  ignore ok;
+  match true with ok -> ok
+let () = Verdict.p "the matched constant passes" result|ocaml},
+      [] );
     ( "still resolves a non-shadowed quantified binding returned by a function",
       {ocaml|let ok = List.for_all rows ~f:Fn.id
 let return_ok value = ok
@@ -1382,6 +1400,12 @@ let () = Verdict.p "all rows pass" (close rows)|ocaml},
   | xs -> (not (List.is_empty xs)) && List.for_all xs ~f:Fn.id
 let () = Verdict.p "all rows pass" (close rows)|ocaml},
       [] );
+    ( "does not share a function-case guard with another case",
+      {ocaml|let close = function
+  | true, xs -> (not (List.is_empty xs)) && List.for_all xs ~f:Fn.id
+  | false, xs -> List.for_all xs ~f:Fn.id
+let () = Verdict.p "all rows pass" (close (false, rows))|ocaml},
+      [ "close" ] );
     ( "accepts a helper that negates a quantified local binding",
       {ocaml|let differs xs =
   let close = List.for_all xs ~f:Fn.id in
