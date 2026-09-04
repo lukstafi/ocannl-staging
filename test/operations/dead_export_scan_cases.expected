@@ -2,6 +2,7 @@ top-level lets, patterns, extensions, and externals are exports: true
 nested lets and nested-module derived values are not exports: true
 a deriving on the last declaration covers its whole recursive type group: true
 sexp derives the polymorphic-variant parser helper: true
+every derived export-name set matches its complete PPX expansion: true
 dune select alternatives are not mistaken for module sources: true
 direct and nested qualified paths count outside the defining source: true
 references in the defining source do not count: true

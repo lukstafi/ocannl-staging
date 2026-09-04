@@ -58,6 +58,33 @@ let expression_paths structure =
   iterator#structure structure;
   !paths
 
+let deriver_context loc =
+  let base =
+    Expansion_context.Base.top_level ~tool_name:"ocamlc" ~file_path:"fixture.ml"
+      ~input_name:"fixture.ml"
+  in
+  Expansion_context.Deriver.make ~derived_item_loc:loc ~inline:false ~base ()
+
+let expanded_names deriver source =
+  let rec_flag, declaration = single_type_declaration source in
+  let loc = declaration.ptype_loc in
+  let declarations = (rec_flag, [ declaration ]) in
+  let expansion =
+    match deriver with
+    | "sexp_of" -> Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc ~path:"Fixture" declarations
+    | "of_sexp" ->
+        Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc ~poly:false ~path:"Fixture" declarations
+    | "sexp" ->
+        Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc ~path:"Fixture" declarations
+        @ Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc ~poly:false ~path:"Fixture" declarations
+    | "compare" ->
+        Ppx_compare_expander.Compare.str_type_decl ~ctxt:(deriver_context loc) declarations false
+    | "equal" ->
+        Ppx_compare_expander.Equal.str_type_decl ~ctxt:(deriver_context loc) declarations false
+    | _ -> failwith "unsupported fixture deriver"
+  in
+  (declaration, generated_value_names expansion)
+
 let () =
   Verdict.p "top-level lets, patterns, extensions, and externals are exports"
     (List.equal String.equal (export_keys fixture_exports)
@@ -93,6 +120,25 @@ let () =
     && List.mem (export_keys fixture_exports) "Sample.equal_group_b" ~equal:String.equal);
   Verdict.p "sexp derives the polymorphic-variant parser helper"
     (List.mem (export_keys fixture_exports) "Sample.__poly_of_sexp__" ~equal:String.equal);
+  let expansion_cases =
+    [
+      ("sexp_of", "type t = Root\n");
+      ("sexp_of", "type named = Named\n");
+      ("of_sexp", "type t = Root\n");
+      ("of_sexp", "type named = Named\n");
+      ("of_sexp", "type poly = [ `One | `Two ]\n");
+      ("sexp", "type named = Named\n");
+      ("sexp", "type poly = [ `One | `Two ]\n");
+      ("compare", "type t = Root\n");
+      ("compare", "type named = Named\n");
+      ("equal", "type t = Root\n");
+      ("equal", "type named = Named\n");
+    ]
+  in
+  Verdict.p_all "every derived export-name set matches its complete PPX expansion" expansion_cases
+    ~f:(fun (deriver, source) ->
+      let declaration, actual = expanded_names deriver source in
+      List.equal String.equal (Scan.derived_names ~derivers:[ deriver ] declaration) actual);
   Verdict.p "dune select alternatives are not mistaken for module sources"
     (Option.is_none (Scan.module_name_of_source "arrayjit/lib/sample.missing.ml"));
   let direct =
