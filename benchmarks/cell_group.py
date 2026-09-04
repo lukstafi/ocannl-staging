@@ -491,12 +491,18 @@ def terminate(group, grace, poll_interval=0.05, final_reap=1.0, observe=None):
     stderr = ""
     reaped = False
 
+    def output_bytes(value):
+        if isinstance(value, str):
+            return value.encode(group.encoding or "utf-8", group.errors or "strict")
+        return value
+
     def preserve_output(current, candidate):
         # `communicate` and `TimeoutExpired` return cumulative snapshots, but a later reap can
         # still report an empty or shorter snapshot on a platform-specific pipe-close path. A
         # child killed mid-write has no second chance to produce those bytes, so never replace a
-        # longer observation with a shorter one.
-        if candidate is None or len(candidate) <= len(current):
+        # longer observation with a shorter one. TimeoutExpired.output remains bytes under
+        # text=True, so compare encoded byte counts rather than bytes against Unicode code points.
+        if candidate is None or len(output_bytes(candidate)) < len(output_bytes(current)):
             return current
         return candidate
 

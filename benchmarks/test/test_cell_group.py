@@ -112,6 +112,27 @@ class CellGroupTest(unittest.TestCase):
         self.assertTrue(result.reaped)
         self.assertEqual(result.stdout, b"partial child output")
 
+    def test_text_output_snapshots_are_compared_as_encoded_bytes(self):
+        group = unittest.mock.Mock()
+        group.encoding = "utf-8"
+        group.errors = "strict"
+        group.communicate.side_effect = [
+            subprocess.TimeoutExpired(
+                "child",
+                0.1,
+                output="éé".encode(),
+            ),
+            ("ééX", None),
+        ]
+        group.observe.return_value = cell_group.GONE
+
+        result = cell_group.terminate(group, grace=0.1, poll_interval=0)
+
+        # Raw lengths choose the four-byte partial snapshot over this three-code-point complete
+        # one. Comparing both as UTF-8 makes the complete five-byte snapshot authoritative.
+        self.assertEqual(result.stdout, "ééX")
+        self.assertTrue(result.reaped)
+
     def test_an_orphan_spawner_is_observed_and_collected_after_its_leader_exits(self):
         pidfile = self.dir / "orphan.pid"
         child = cell_group.spawn(
