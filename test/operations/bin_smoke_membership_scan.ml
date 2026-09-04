@@ -697,26 +697,32 @@ let scan dune_files =
     | Public name ->
         List.exists declarations ~f:(fun declaration -> String.equal declaration.public name)
   in
-  let rec public_targets_reached visited node =
-    if Set.mem visited node.id then []
+  let rec producer_alias_effects visited node =
+    if Set.mem visited node.id then ([], [])
     else
       let visited = Set.add visited node.id in
-      let direct =
+      let direct_targets, direct_errors =
         smoke_targets_of_stanza ~allow_verified_helper:false ~dune_path:node.dune_path
           ~subdir:node.subdir node.stanza
-        |> List.filter_map ~f:(function
-          | Ok (Some target) when target_is_public target -> Some target
-          | Ok (Some _) | Ok None | Error _ -> None)
+        |> List.fold ~init:([], []) ~f:(fun (targets, errors) -> function
+          | Ok (Some target) when target_is_public target -> (target :: targets, errors)
+          | Ok (Some _) | Ok None -> (targets, errors)
+          | Error error -> (targets, error :: errors))
       in
       let dependencies, _errors = resolve_alias_dependencies node.dune_path node.dependencies in
-      direct @ List.concat_map dependencies ~f:(public_targets_reached visited)
+      List.fold dependencies ~init:(direct_targets, direct_errors)
+        ~f:(fun (targets, errors) dependency ->
+          let found_targets, found_errors = producer_alias_effects visited dependency in
+          (List.rev_append found_targets targets, List.rev_append found_errors errors))
   in
   let target_producer_dependency_errors =
     List.concat_map target_producer_sites ~f:(fun (dune_path, subdir, stanza, _targets) ->
         let dependencies, _dependency_errors = alias_dependencies ~subdir stanza in
         let found, _resolution_errors = resolve_alias_dependencies dune_path dependencies in
-        List.concat_map found ~f:(public_targets_reached (Set.empty (module String)))
-        |> List.map ~f:(target_producer_dependency_error dune_path))
+        List.concat_map found ~f:(fun node ->
+            let targets, errors = producer_alias_effects (Set.empty (module String)) node in
+            List.map targets ~f:(target_producer_dependency_error dune_path)
+            @ List.map errors ~f:(target_producer_command_error dune_path)))
   in
   let rec visit visited targets errors = function
     | [] -> (targets, errors)
@@ -1352,6 +1358,26 @@ let unused_generated_source_alias_fixture =
  (deps (universe))
  (action (run %{exe:alpha.exe})))|dune}
 
+let opaque_generated_source_alias_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(rule
+ (alias source-helper)
+ (deps generator.py (universe))
+ (action (run python3 generator.py)))
+(rule
+ (target alpha.ml)
+ (deps (alias source-helper))
+ (action (touch alpha.ml)))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let library_action_preprocessor_fixture =
   {dune|(library
  (name linked)
@@ -1536,6 +1562,7 @@ let controls_hold () =
   let generated_source_alias = scan_bin_content generated_source_alias_fixture in
   let external_generated_source_input = scan_bin_content external_generated_source_input_fixture in
   let unused_generated_source_alias = scan_bin_content unused_generated_source_alias_fixture in
+  let opaque_generated_source_alias = scan_bin_content opaque_generated_source_alias_fixture in
   let library_action_preprocessor = scan_bin_content library_action_preprocessor_fixture in
   let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
@@ -1702,6 +1729,10 @@ let controls_hold () =
   && List.equal String.equal unused_generated_source_alias.missing [ "bin/beta.exe" ]
   && List.mem unused_generated_source_alias.errors
        (target_producer_dependency_error "bin/dune" (Local "bin/beta.exe"))
+       ~equal:String.equal
+  && (not (complete opaque_generated_source_alias))
+  && List.mem opaque_generated_source_alias.errors
+       (target_producer_command_error "bin/dune" (external_smoke_error "bin/dune"))
        ~equal:String.equal
   && (not (complete library_action_preprocessor))
   && List.mem library_action_preprocessor.errors
