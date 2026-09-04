@@ -32,6 +32,8 @@ agent_notes_structure.ml: [scanner-refusal:348bb1f1fa0be73fb4796a31a76abaad] eac
 agent_notes_structure.ml: [scanner-refusal:ec62d0a7d728c7ab15a2c9b8608c6404] every exemption still (claim) is catalogued beside agent_notes_structure.expected: true
 backend_golden_family_scan.ml has exactly the explicitly assigned refusal controls: true
 backend_golden_family_scan.ml: [scanner-refusal:2fcd4d491da746e829dc7cec63905091] self-certifying and provenance (claim) is catalogued beside backend_golden_family_scan.expected: true
+bin_smoke_membership_scan.ml has exactly the explicitly assigned refusal controls: true
+bin_smoke_membership_scan.ml: [scanner-refusal:9446215c7b3c2270741bbb1cd8300733] executable exactly once (claim) is catalogued beside bin_smoke_membership_scan.expected, bin_smoke_membership_scan_control.expected: true
 changelog_unreleased_scan.ml has exactly the explicitly assigned refusal controls: true
 changelog_unreleased_scan.ml: [scanner-refusal:29e846ac8743ceba34a4cdcd5c90a431] CHANGES.md (claim) is catalogued beside changelog_unreleased_scan.expected: true
 changelog_unreleased_scan.ml: [scanner-refusal:2a02d6286a27aef4f8d7e61e279f8c4e] a two-space continuation (claim) is catalogued beside changelog_unreleased_scan.expected: true

@@ -90,6 +90,8 @@ let raw_entries =
       ] );
     ( "backend_golden_family_scan.ml",
       [ "[scanner-refusal:2fcd4d491da746e829dc7cec63905091] self-certifying and provenance" ] );
+    ( "bin_smoke_membership_scan.ml",
+      [ "[scanner-refusal:9446215c7b3c2270741bbb1cd8300733] executable exactly once" ] );
     ( "cache_dir_ignores.ml",
       [
         "[scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore";
