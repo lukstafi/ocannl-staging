@@ -59,7 +59,6 @@ class CellGroupTest(unittest.TestCase):
                 "kid = subprocess.Popen([sys.executable, '-c', code],\n"
                 "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
                 "open(sys.argv[1], 'w').write(str(kid.pid))\n"
-                "print('partial child output', flush=True)\n"
                 "time.sleep(300)\n",
                 pidfile,
             ),
@@ -74,8 +73,44 @@ class CellGroupTest(unittest.TestCase):
 
         self.assertIs(result.observation, cell_group.GONE)
         self.assertTrue(result.reaped)
-        self.assertIn("partial child output", result.stdout)
         self.assertTrue(self.wait_gone(grandchild), f"pid {grandchild} survived group cleanup")
+
+    def test_a_child_killed_mid_stream_preserves_its_partial_stdout(self):
+        ready = self.dir / "stdout-ready"
+        child = cell_group.spawn(
+            self.python(
+                "import signal, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "sys.stdout.write('partial child output')\n"
+                "sys.stdout.flush()\n"
+                "open(sys.argv[1], 'w').write('ready')\n"
+                "time.sleep(300)\n",
+                ready,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # The readiness marker is published only after stdout was flushed. This ordering makes
+        # the test deterministic: the parent cannot kill the child before the asserted bytes
+        # exist, which was the macOS CI flake in the old combined sleep-chain test.
+        self.wait_file(ready)
+        real_communicate = child.communicate
+
+        def shorter_final_snapshot(*args, **kwargs):
+            # Model the macOS failure mode deterministically: the grace-period communicate raises
+            # TimeoutExpired carrying the partial bytes, then the post-kill reap returns a shorter
+            # snapshot. The termination primitive must retain the longest cumulative observation.
+            out, err = real_communicate(*args, **kwargs)
+            return out[:0] if out is not None else None, err
+
+        child.communicate = shorter_final_snapshot
+
+        result = cell_group.terminate(child, grace=0.2)
+
+        self.assertIs(result.observation, cell_group.GONE)
+        self.assertTrue(result.reaped)
+        self.assertEqual(result.stdout, b"partial child output")
 
     def test_an_orphan_spawner_is_observed_and_collected_after_its_leader_exits(self):
         pidfile = self.dir / "orphan.pid"
