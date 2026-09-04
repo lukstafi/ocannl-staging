@@ -1485,6 +1485,17 @@ class CellTimeoutTest(unittest.TestCase):
     def python(self, source, *argv):
         return [sys.executable, "-c", source, *map(str, argv)]
 
+    def assert_tinygrad_cache_in_scratch(self, cachedb):
+        scratch = self.dir.resolve()
+        resolved = cachedb.resolve()
+        try:
+            resolved.relative_to(scratch)
+        except ValueError:
+            self.fail(
+                f"tinygrad cache probe resolved outside the test scratch directory: "
+                f"{resolved} (scratch: {scratch})"
+            )
+
     def alive(self, pid):
         """Whether `pid` is still a running process — a zombie is not one.
 
@@ -1562,14 +1573,14 @@ class CellTimeoutTest(unittest.TestCase):
             "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],\n"
             "  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             "open(os.environ['PROBE_HELPER_PID'], 'w').write(str(kid.pid))\n"
-            "CACHEDB = os.environ['PROBE_CACHEDB']\n"
+            "CACHEDB = os.environ['CACHEDB']\n"
         )
         env = os.environ.copy()
         env.update(
             {
+                "CACHEDB": str(cachedb),
                 "PYTHONPATH": str(self.dir),
                 "PROBE_HELPER_PID": str(pidfile),
-                "PROBE_CACHEDB": str(cachedb),
             }
         )
         with contextlib.ExitStack() as stack:
@@ -1577,10 +1588,26 @@ class CellTimeoutTest(unittest.TestCase):
             stack.enter_context(unittest.mock.patch.object(orchestrate, "CELL_KILL_GRACE_S", 0.2))
             found = orchestrate.tinygrad_cachedb(env)
 
+        self.assert_tinygrad_cache_in_scratch(found)
         self.assertEqual(found, cachedb)
         self.assertTrue(pidfile.exists(), "the probe fixture did not spawn its helper")
         helper = int(pidfile.read_text())
         self.assertTrue(self.wait_gone(helper), f"pid {helper} outlived the cache probe")
+
+    def test_the_tinygrad_cache_probe_refuses_an_ambient_cache(self):
+        # Negative control for the containment assertion above: the old fallback selected the
+        # user's cache after an import timeout. Reproduce the same resolved-path shape even with
+        # the explicit cache setting present, and prove the test refuses before inspecting it.
+        configured = self.dir / "cache.db"
+        ambient = self.dir.parent / "ambient-tinygrad-cache" / "cache.db"
+        probe = subprocess.CompletedProcess([], 0, f"{ambient}\n", "")
+
+        with unittest.mock.patch.object(orchestrate, "run_supporting", return_value=probe):
+            found = orchestrate.tinygrad_cachedb({"CACHEDB": str(configured)})
+            with self.assertRaisesRegex(
+                self.failureException, "resolved outside the test scratch directory"
+            ):
+                self.assert_tinygrad_cache_in_scratch(found)
 
     def test_a_finished_cell_is_unaffected_by_the_cap(self):
         # The cap must be invisible to every cell that runs: same result line, no note.
