@@ -54,6 +54,7 @@ refuses a bound exists negated by a labeled Verdict wrapper parameter: true
 accepts a positive exists passed through a labeled Verdict wrapper parameter: true
 uses an omitted optional default that feeds a Verdict wrapper claim: true
 does not use a Verdict wrapper default when its argument is supplied: true
+uses a Verdict wrapper default preserved through partial optional None: true
 inspects the possible payload of an unknown forwarded wrapper option: true
 refuses a direct quantifier passed to a partially applied Verdict claim: true
 refuses a direct quantifier passed to a curried partial Verdict wrapper: true
@@ -66,6 +67,7 @@ refuses every quantified argument passed through a sequential wrapper: true
 refuses a quantified argument claimed inside wrapper control flow: true
 refuses a quantified argument claimed inside an eager wrapper call: true
 refuses a quantified argument claimed under a local Verdict open: true
+refuses a quantified argument claimed by a function-case wrapper: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -76,6 +78,7 @@ refuses a bound exists compared with a false Boolean alias: true
 refuses a direct exists compared with a false Boolean alias: true
 refuses a fully applied quantifier through a transparent Boolean wrapper: true
 refuses a returned quantifier behind a local open: true
+refuses a returned quantifier behind local module setup: true
 refuses a positive intermediate binding: true
 accepts a negated intermediate binding: true
 accepts a piped negated intermediate binding: true

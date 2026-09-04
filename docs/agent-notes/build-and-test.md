@@ -831,10 +831,11 @@ that they earn a lookup rather than always-loaded space.
   sequential or control-flow wrapper contributes its Boolean slot, and partial `pf`/`claimf` calls
   count the literal format's still-owed arguments before that slot. Partially applying an already
   recognised local wrapper carries its remaining slots forward. Local `open Verdict.Claims` scopes
-  extend discovery, and eager outer calls do not hide a nested claim argument. Its exact,
-  stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
-  population; synthetic controls include a child process the shipping ratchet demonstrably refuses
-  (gh-ocannl-801, gh-ocannl-887). An entry
+  extend discovery, eager outer calls do not hide a nested claim argument, and `function` cases
+  contribute their positional argument slot. A syntactic `?arg:None` keeps the optional default edge
+  when such a wrapper is partially applied. Its exact, stale-checked exemption list is only for
+  bindings whose intended passing meaning allows an empty population; synthetic controls include a
+  child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
@@ -878,9 +879,9 @@ that they earn a lookup rather than always-loaded space.
   returned local `let`—carry the same polarity as literal `true` and `false`; unresolved outcomes
   retain the existing conservative dependency traversal, while identical resolved branches prove
   that the condition does not contribute. Constructor-match outcomes and Boolean-comparison
-  operands resolve the same aliases. Local opens are transparent to returned-quantifier analysis,
-  protected `try` expressions remain part of that analysis, and `not @@ quantified` retains the same
-  negative polarity as direct and piped `not`.
+  operands resolve the same aliases. Local opens, local-module declarations, and local exceptions
+  are transparent to returned-quantifier analysis, protected `try` expressions remain part of that
+  analysis, and `not @@ quantified` retains the same negative polarity as direct and piped `not`.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

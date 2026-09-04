@@ -389,6 +389,7 @@ let rec required_nonempty expr =
   | Pexp_function (_, _, Pfunction_cases ([ case ], _, _)) -> required_nonempty case.pc_rhs
   | Pexp_function (_, _, Pfunction_cases (_, _, _)) -> Set.empty (module String)
   | Pexp_let (_, _, body) -> required_nonempty body
+  | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) -> required_nonempty body
   | Pexp_open (_, body) -> required_nonempty body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> required_nonempty inner
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" -> (
@@ -463,6 +464,7 @@ let rec returned_quantifiers ?(positive = true) expr =
                   else None)
               |> List.concat))
   | Pexp_sequence (_, result) -> returned_quantifiers ~positive result
+  | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) -> returned_quantifiers ~positive body
   | Pexp_open (_, body) -> returned_quantifiers ~positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers ~positive inner
   | Pexp_tuple expressions -> List.concat_map expressions ~f:(unguarded_component ~positive)
@@ -561,6 +563,8 @@ and returned_binding_polarities positive expr =
       returned_binding_polarities positive body
       |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name))
   | Pexp_sequence (_, result) -> returned_binding_polarities positive result
+  | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) ->
+      returned_binding_polarities positive body
   | Pexp_open (_, body) -> returned_binding_polarities positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
       returned_binding_polarities positive inner
@@ -811,6 +815,8 @@ let rec alias_quantifiers environment ?(positive = true) expr =
               |> List.concat))
   | Pexp_sequence (_, result) | Pexp_open (_, result) ->
       alias_quantifiers environment ~positive result
+  | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) ->
+      alias_quantifiers environment ~positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
       alias_quantifiers environment ~positive inner
   | Pexp_tuple expressions ->
@@ -1030,6 +1036,8 @@ and wrapper_signature environment expression =
         @ claim_calls claim_environment (extend_aliases aliases recursive bindings) body
     | Pexp_sequence (left, right) ->
         claim_calls claim_environment aliases left @ claim_calls claim_environment aliases right
+    | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) ->
+        claim_calls claim_environment aliases body
     | Pexp_open (declaration, body) ->
         claim_calls (open_claims claim_environment declaration) aliases body
     | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
@@ -1054,7 +1062,15 @@ and wrapper_signature environment expression =
     | _ -> []
   in
   let parameters, body = parameters_and_body [] expression in
-  let calls = claim_calls environment [] body in
+  let function_cases =
+    match body.pexp_desc with
+    | Pexp_function (_, _, Pfunction_cases (cases, _, _)) -> cases
+    | _ -> []
+  in
+  let calls =
+    if List.is_empty function_cases then claim_calls environment [] body
+    else List.concat_map function_cases ~f:(fun case -> claim_calls environment [] case.pc_rhs)
+  in
   let unlabelled_parameters =
     List.count parameters ~f:(fun parameter ->
         match parameter.pparam_desc with
@@ -1209,7 +1225,22 @@ and wrapper_signature environment expression =
                 in
                 (unlabelled_index, slots, List.rev_append default_bindings outer_environment))
       in
-      Some (Some kind, Some (List.rev_append slots partial_claim_slots))
+      let case_slots =
+        List.filter_map function_cases ~f:(fun case ->
+            let names = pattern_names case.pc_lhs |> List.map ~f:fst in
+            List.find_map claimed_names ~f:(fun (name, positive) ->
+                if List.mem names name ~equal:String.equal then
+                  Some
+                    {
+                      label = None;
+                      optional = false;
+                      unlabelled_index = Some unlabelled_parameters;
+                      positive;
+                      default_binding = None;
+                    }
+                else None))
+      in
+      Some (Some kind, Some (List.rev_append slots (case_slots @ partial_claim_slots)))
 
 and make_binding_group environment recursive values =
   match recursive with
@@ -1289,6 +1320,8 @@ and binding_dependencies ?(positive = true) environment expr =
     | Pexp_let (recursive, values, body) ->
         let local = make_binding_group environment recursive values in
         visit (List.rev_append local environment) positive false body
+    | Pexp_letmodule (_, _, body) | Pexp_letexception (_, body) ->
+        visit environment positive forwards_guards body
     | Pexp_sequence (_, result) -> visit environment positive forwards_guards result
     | Pexp_ifthenelse (condition, yes, no) ->
         dependency_condition_polarities environment positive yes no
@@ -1833,6 +1866,11 @@ let () = check ()|ocaml},
 let check ?(ok = all) () = Verdict.p "the supplied constant passes" ok
 let () = check ~ok:true ()|ocaml},
       [] );
+    ( "uses a Verdict wrapper default preserved through partial optional None",
+      {ocaml|let check ?(ok = List.for_all rows ~f:Fn.id) () = Verdict.p "all rows pass" ok
+let use = check ?ok:None
+let () = use ()|ocaml},
+      [ "ok" ] );
     ( "inspects the possible payload of an unknown forwarded wrapper option",
       {ocaml|let forwarded = Some (List.for_all rows ~f:Fn.id)
 let check ?(ok = false) () = Verdict.p "all rows pass" ok
@@ -1894,6 +1932,10 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
   p "all rows pass" ok
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a quantified argument claimed by a function-case wrapper",
+      {ocaml|let check = function ok -> Verdict.p "all rows pass" ok
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1936,6 +1978,10 @@ let () = Verdict.p "all rows pass" ok|ocaml},
       [ "ok" ] );
     ( "refuses a returned quantifier behind a local open",
       {ocaml|let result = let open Base in List.for_all rows ~f:Fn.id
+let () = Verdict.p "all rows pass" result|ocaml},
+      [ "result" ] );
+    ( "refuses a returned quantifier behind local module setup",
+      {ocaml|let result = let module M = struct end in List.for_all rows ~f:Fn.id
 let () = Verdict.p "all rows pass" result|ocaml},
       [ "result" ] );
     ( "refuses a positive intermediate binding",
