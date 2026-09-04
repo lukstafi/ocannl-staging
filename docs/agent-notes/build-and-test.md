@@ -836,6 +836,9 @@ that they earn a lookup rather than always-loaded space.
   binding groups are closed over their sibling dependencies; function parameters, conversely,
   shadow same-named outer helpers while their body is analyzed, and later local bindings shadow
   returned-name references. `Fn.id`/`Fun.id` are transparent to returned-quantifier analysis.
+  Dependencies that choose a returned value through an `if` condition or match scrutinee, and a
+  dependency returned from a protected `try` body, remain visible; complementary Boolean `if`
+  branches retain their polarity.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

@@ -608,10 +608,20 @@ and binding_dependencies environment expr =
         let local = make_binding_group environment recursive values in
         visit (List.rev_append local environment) positive false body
     | Pexp_sequence (_, result) -> visit environment positive forwards_guards result
-    | Pexp_ifthenelse (_, yes, no) ->
+    | Pexp_ifthenelse (condition, yes, no) ->
+        let condition_positive =
+          match no with
+          | Some no when bool_literal yes false && bool_literal no true -> not positive
+          | _ -> positive
+        in
+        visit environment condition_positive false condition;
         visit environment positive forwards_guards yes;
         Option.iter no ~f:(visit environment positive forwards_guards)
-    | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+    | Pexp_match (scrutinee, cases) ->
+        visit environment positive false scrutinee;
+        List.iter cases ~f:(fun case -> visit environment positive forwards_guards case.pc_rhs)
+    | Pexp_try (body, cases) ->
+        visit environment positive forwards_guards body;
         List.iter cases ~f:(fun case -> visit environment positive forwards_guards case.pc_rhs)
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
         visit environment (not positive) forwards_guards argument
@@ -944,6 +954,10 @@ let exempt_quantified_helpers =
     ( "test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile",
       "an absent or empty hardware mma capability list is the environment gate that makes the \
        backend-uniform non-support legs pass without attempting a tensor-core candidate" );
+    ( "test/operations/shell_scripts_parse.ml:line_enables_errexit",
+      "a line may legitimately parse to no parent-affecting command fragment; this exists result \
+       is an internal classification input, while the fixed non-empty case table is the test \
+       population" );
   ]
 
 (* Synthetic inputs state the helper rule independently of whatever helpers happen to be in the
@@ -1111,6 +1125,21 @@ let () = Verdict.p "every sample agrees" (close samples)|ocaml},
   match List.for_all xs ~f:Fn.id with ok -> ok
 let () = Verdict.p "every sample agrees" (close samples)|ocaml},
       [ "close" ] );
+    ( "refuses a bound quantifier returned through an if condition",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let close = if all then true else false
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "all" ] );
+    ( "accepts an inverted bound quantifier returned through an if condition",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let differs = if all then false else true
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "refuses a bound quantifier returned from a protected try body",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let close = try all with _ -> false
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "all" ] );
     ( "refuses a quantified helper reached through a mutually recursive sibling",
       {ocaml|let rec close xs = all xs
 and all xs = List.for_all xs ~f:Fn.id

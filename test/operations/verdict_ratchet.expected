@@ -37,6 +37,7 @@ Quantified bindings exempted because emptiness is their passing meaning:
   test/operations/reduction_forms.ml:changed -- an empty schedule deliberately needs no IR change, and an empty per-op result means there were no per-op transformations to validate
   test/operations/reduction_forms.ml:extra_ok -- an empty extra-fragment list deliberately means the member requires no additional emitted assignment fragments
   test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile -- an absent or empty hardware mma capability list is the environment gate that makes the backend-uniform non-support legs pass without attempting a tensor-core candidate
+  test/operations/shell_scripts_parse.ml:line_enables_errexit -- a line may legitimately parse to no parent-affecting command fragment; this exists result is an internal classification input, while the fixed non-empty case table is the test population
 
 Synthetic helper-rule controls:
 refuses an unguarded for_all2_exn helper behind a local Verdict alias: true
@@ -71,6 +72,9 @@ refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a helper that returns a match-bound quantified value: true
+refuses a bound quantifier returned through an if condition: true
+accepts an inverted bound quantifier returned through an if condition: true
+refuses a bound quantifier returned from a protected try body: true
 refuses a quantified helper reached through a mutually recursive sibling: true
 does not resolve an outer quantified binding shadowed by a function parameter: true
 still resolves a non-shadowed quantified binding returned by a function: true
