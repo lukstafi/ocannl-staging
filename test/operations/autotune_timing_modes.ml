@@ -148,6 +148,9 @@ let confirmation_cases =
     (* Two nearby depths inside one shared stall still have a positive slope, but its marginal work
        is nowhere near the target. The fixed stall must not masquerade as confirmation. *)
     ("two target-sized batches dominated by a shared stall", 2, 12.2, 3, 12.3, 6, None);
+    (* Legitimate fixed synchronization is part of batch wall. A stable affine pair with a small
+       fixed component retains its already-target-sized base. *)
+    ("a target-sized batch with fixed synchronization", 199, 10.01, 248, 12.46, 199, Some 10.01);
     (* A resolved overshoot brackets the target. Interpolation should reduce it rather than
        preserving a batch substantially longer than the contention rule's stated scale. *)
     ("a batch probe that overshoots the target", 512, 8., 1024, 16., 640, Some 10.);

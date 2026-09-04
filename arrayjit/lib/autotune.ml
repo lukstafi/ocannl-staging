@@ -429,11 +429,8 @@ let refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth ~probe_m
       (retry_depth, Float.nan)
     else
       let fixed_ms = base_ms -. (marginal_ms *. Float.of_int base_depth) in
-      let base_marginal_ms = marginal_ms *. Float.of_int base_depth in
-      if Float.(base_ms >= queued_batch_ms) then
-        if Float.(base_marginal_ms >= queued_batch_ms) then (base_depth, base_ms)
-        else (retry_depth, Float.nan)
-      else if Float.(fixed_ms >= queued_batch_ms) then (retry_depth, Float.nan)
+      if Float.(fixed_ms >= queued_batch_ms) then (retry_depth, Float.nan)
+      else if Float.(base_ms >= queued_batch_ms) then (base_depth, base_ms)
       else
         let wanted = (queued_batch_ms -. fixed_ms) /. marginal_ms in
         let depth =

@@ -1161,10 +1161,11 @@ val refine_queued_batch_depth : single_ms:float -> probe_depth:int -> probe_ms:f
 val refine_queued_batch_depth_between :
   base_depth:int -> base_ms:float -> probe_depth:int -> probe_ms:float -> int * float
 (** The same affine refinement between two batch observations. An already-target-sized [base_ms] is
-    retained only when a deeper probe establishes enough marginal work to fill the target by itself;
-    this is the depth-separated confirmation that keeps one shared fixed stall from selecting a
-    shallow final depth. Otherwise an unresolved pair requests a deeper retry and reports a [nan]
-    wall. Exposed as the deterministic validation-policy seam for tests. *)
+    retained only when the pair's inferred fixed component is below the target; this is the
+    depth-separated confirmation that keeps one shared fixed stall from selecting a shallow final
+    depth while preserving legitimate submit/sync overhead. Otherwise an unresolved pair requests a
+    deeper retry and reports a [nan] wall. Exposed as the deterministic validation-policy seam for
+    tests. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
@@ -1209,7 +1210,7 @@ val time_routine :
     minimum of twelve runs: unlike ranked timing, they only choose scale and are already
     milliseconds long. Up to four further probes validate the depth. The first target-sized batch is
     confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained only when the
-    inferred marginal work itself fills the target. An unresolved single/probe pair retries at
+    pair's inferred fixed component is below the target. An unresolved single/probe pair retries at
     double depth, and the next affine fit uses the two batch observations so an inflated single
     window cannot force the cap. If the bounded loop first reaches the target on its last probe, the
     interpolated target depth is still sampled and checked against the measured overshoot. A
