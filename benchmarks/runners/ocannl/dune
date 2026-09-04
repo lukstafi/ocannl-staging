@@ -53,12 +53,21 @@
  (modes exe))
 
 ; The standalone (OCANNL-free) Metal compiler probes: the two accumulation-miscompile
-; reproducers, and the math-mode reassociation/infinity measurement (gh-ocannl-848).
+; reproducers, the math-mode reassociation/infinity measurement (gh-ocannl-848), and the
+; long-command-buffer queue discriminator (gh-ocannl-828).
 
 (executables
  (names bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
  (modules bench_metal_bug bench_metal_bug_local metal_reassoc_probe)
  (libraries metal ctypes arrayjit.ir arrayjit.metal_math_api_runtime)
+ (enabled_if
+  (= %{system} macosx))
+ (modes exe))
+
+(executable
+ (name metal_queue_probe)
+ (modules metal_queue_probe)
+ (libraries metal ctypes unix)
  (enabled_if
   (= %{system} macosx))
  (modes exe))
