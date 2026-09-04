@@ -130,13 +130,15 @@ for backend in "${known[@]}"; do
 done
 
 completed_boxes=()
-for box in "${known_boxes[@]}"; do
-  contains "$box" "${run_boxes[@]}" && completed_boxes+=("$box")
-done
 missing_boxes=()
-for box in "${known_boxes[@]}"; do
-  contains "$box" "${completed_boxes[@]}" || missing_boxes+=("$box")
-done
+if [ ${#known_boxes[@]} -gt 0 ]; then
+  for box in "${known_boxes[@]}"; do
+    contains "$box" "${run_boxes[@]}" && completed_boxes+=("$box")
+  done
+  for box in "${known_boxes[@]}"; do
+    contains "$box" "${completed_boxes[@]}" || missing_boxes+=("$box")
+  done
+fi
 
 report_line "completed backends: $(join_by_comma "${run_backends[@]}")"
 if [ ${#missing[@]} -eq 0 ]; then
