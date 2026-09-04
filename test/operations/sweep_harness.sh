@@ -25,7 +25,8 @@ on_error() {
   for name in incremental forced slow_forced coverage hostile complete_fail \
     environment_executed partial_matrix singleton_fail repeated_backend_fail \
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
-    local_identity_error unsafe_identity_error matrix_error; do
+    local_identity_error unsafe_identity_error matrix_error state_first state_same \
+    state_other_ref state_green state_unjudged state_regression state_after_fix state_moved; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -90,8 +91,19 @@ git -C "$main" config user.email sweep-test@example.invalid
 mkdir -p "$main/benchmarks/fixtures"
 printf '# measurement-boxes: m4-max minix rog-nv\n' >"$main/benchmarks/fixtures/DIGESTS.txt"
 printf 'fixture\n' >"$main/fixture"
-git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt
+mkdir -p "$main/test"
+printf 'initial golden\n' >"$main/test/unit.cc_expected.ml"
+printf 'unrelated fixture\n' >"$main/test/noise.expected"
+printf 'pre-diff golden\n' >"$main/test/pre_diff_expected.ml"
+printf 'let%%expect_test _ = print_endline "old" [%%expect {| old |}]\n' \
+  >"$main/test/inline_expect.ml"
+printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc_expected.ml noise.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}_expected.ml" unit.actual)))\n(rule\n (alias runtest-pre-diff-probe)\n (deps pre_diff_expected.ml)\n (action (progn (run crashing.exe) (diff pre_diff_expected.ml pre_diff.actual))))\n' \
+  >"$main/test/dune"
+git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune \
+  test/unit.cc_expected.ml test/noise.expected \
+  test/pre_diff_expected.ml test/inline_expect.ml
 git -C "$main" commit -qm fixture
+fixture_sha=$(git -C "$main" rev-parse HEAD)
 git -C "$main" remote add origin "$origin"
 git -C "$main" push -q -u origin master
 
@@ -195,6 +207,127 @@ expected_header='when	machine	backend	ref	outcome	seconds	target	slow	log	execut
 [ "$(sed -n '4p' "$calls")" = 'exec -- dune clean' ]
 [ "$(sed -n '5p' "$calls")" = 'exec -- dune build --force @runtest @train' ]
 [ "$(sed -n '6p' "$calls")" = 'exec -- dune build --force @slow' ]
+
+# Per-unit state distinguishes a standing red from two transitions that need an
+# operator's attention: red after green, and red after the failing golden was
+# edited. It also compares against the previous FAILURE across an intervening
+# green, so a moving fingerprint is reported as nondeterminism rather than
+# hidden by yesterday's verdict. Every absent assertion is a negative control:
+# a sweep that shouts on the standing-red cases defeats the signal this state
+# exists to add.
+state_failure='File "test/dune", lines 1-4, characters 0-0:
+1 | (rule
+2 |  (alias runtest-state-probe)
+......
+FAILED: fixture state failure.
+diff --git a/_build/default/test/unit.cc_expected.ml b/_build/default/test/unit.actual'
+state_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_first"
+absent 'fingerprint moved since the previous failure' <<<"$state_first"
+
+# A passing diagnostic run of an explicitly requested ref is a separate
+# experiment. Without REF in the cursor key it becomes origin/master's green
+# predecessor and makes the unchanged standing failure below look regressive.
+state_other_ref=$(run_sweep_args --ref "$fixture_sha" --target state-probe)
+grep -q 'm4-max/cc: incremental-pass' <<<"$state_other_ref"
+
+state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_same"
+absent 'fingerprint moved since the previous failure' <<<"$state_same"
+
+# A run-then-diff progn that crashes in its producer never ran the diff. Its
+# stanza contains a source-controlled expected operand, but without a unified
+# diff header that operand is not proven to have failed and must not enter the
+# cursor's golden provenance.
+pre_diff_failure='File "test/dune", lines 5-8, characters 0-0:
+5 | (rule
+6 |  (alias runtest-pre-diff-probe)
+......
+Error: crashing.exe exited 2 before diff'
+pre_diff_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$pre_diff_failure \
+  run_sweep_args --target pre-diff-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$pre_diff_first"
+printf 'changed without reaching diff\n' >"$main/test/pre_diff_expected.ml"
+git -C "$main" add test/pre_diff_expected.ml
+git -C "$main" commit -qm 'change expectation behind crashing producer'
+git -C "$main" push -q origin master
+pre_diff_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$pre_diff_failure \
+  run_sweep_args --target pre-diff-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$pre_diff_second"
+
+# Inline ppx_expect promotion compares the checked-in source directly with an
+# _build .corrected file. That resolved unified-diff header is proof of the
+# failed baseline even though the first operand is neither under _build nor
+# named *.expected.
+inline_failure='File "test/inline_expect.ml", line 1, characters 0-0:
+diff --git a/test/inline_expect.ml b/_build/default/test/inline_expect.ml.corrected'
+inline_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$inline_failure \
+  run_sweep_args --target inline-expect-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$inline_first"
+printf 'let%%expect_test _ = print_endline "new" [%%expect {| stale |}]\n' \
+  >"$main/test/inline_expect.ml"
+git -C "$main" add test/inline_expect.ml
+git -C "$main" commit -qm 'attempt inline expectation fix'
+git -C "$main" push -q origin master
+inline_fix_sha=$(git -C "$main" rev-parse HEAD)
+inline_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$inline_failure \
+  run_sweep_args --target inline-expect-probe)
+grep -q "m4-max/cc: REGRESSION OR FIX DID NOT TAKE -- test/inline_expect.ml last changed at $(printf '%s' "$inline_fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
+  <<<"$inline_second"
+
+# An expected fixture merely listed in the failing stanza's deps is not the
+# failed diff input. The old all-token extraction records it and makes this
+# unrelated edit look like a failed fix on the next identical red.
+printf 'changed unrelated fixture\n' >"$main/test/noise.expected"
+git -C "$main" add test/noise.expected
+git -C "$main" commit -qm 'change unrelated expected dependency'
+git -C "$main" push -q origin master
+state_after_noise=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_after_noise"
+absent 'fingerprint moved since the previous failure' <<<"$state_after_noise"
+
+state_green=$(run_sweep_args --target state-probe)
+grep -q 'm4-max/cc: incremental-pass' <<<"$state_green"
+# A timeout judged nothing and must not erase that green predecessor. This is
+# the non-coverage shape that would otherwise make a real regression disappear.
+state_unjudged=$(SWEEP_TEST_OPAM_RC=142 SWEEP_TEST_OPAM_OUT='fixture timeout' \
+  run_sweep_args --target state-probe)
+grep -q 'm4-max/cc: timeout' <<<"$state_unjudged"
+state_regression=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+grep -q 'm4-max/cc: REGRESSION OR FIX DID NOT TAKE -- previous verdict was incremental-pass' \
+  <<<"$state_regression"
+absent 'fingerprint moved since the previous failure' <<<"$state_regression"
+
+# Land the exact kind of attempted fix #897 was about. The next sweep resolves
+# the new origin/master, finds that the currently failing golden's last-touch
+# commit moved, and prints both that commit and the previous failing copy's.
+printf 'attempted fix\n' >"$main/test/unit.cc_expected.ml"
+git -C "$main" add test/unit.cc_expected.ml
+git -C "$main" commit -qm 'attempted golden fix'
+git -C "$main" push -q origin master
+fix_sha=$(git -C "$main" rev-parse HEAD)
+state_after_fix=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
+  run_sweep_args --target state-probe)
+grep -q "m4-max/cc: REGRESSION OR FIX DID NOT TAKE -- test/unit.cc_expected.ml last changed at $(printf '%s' "$fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
+  <<<"$state_after_fix"
+absent 'fingerprint moved since the previous failure' <<<"$state_after_fix"
+
+moved_failure="$state_failure
+Error: a different fixture state failure."
+state_moved=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$moved_failure \
+  run_sweep_args --target state-probe)
+grep -q 'm4-max/cc: fingerprint moved since the previous failure at ' <<<"$state_moved"
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_moved"
+
+unit_state=$(grep -l "$(printf '^last_verdict\tfail$')" \
+  "$state"/unit-state/*state-probe*.state | head -1)
+[ -n "$unit_state" ] && [ -f "$unit_state" ]
+grep -q '^last_verdict.fail$' "$unit_state"
+grep -q "^golden.$fix_sha.test/unit.cc_expected.ml$" "$unit_state"
 
 # Two complete forced units expose only the INTERSECTION of their skip sets.
 # The three absent backends keep this a potential finding rather than a failure:

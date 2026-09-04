@@ -510,6 +510,31 @@ that they earn a lookup rather than always-loaded space.
   I started another" being the usual start of the spiral. Prefer foreground `run` launched
   through the agent harness's background mode (the harness notifies on exit); `start`/`status`/
   `wait`/`stop` are only for runs that must outlive the launching session.
+  `repeat [--alone] N` is the supported flake diagnostic: it holds that same worktree lock once,
+  gives every Dune invocation a freshly cleaned cache-disabled build context, retains each
+  iteration's separate stdout, stderr and exit status, and writes every pairwise diff. Stdout or status drift is red;
+  stderr-only drift is called out separately and stays diagnostic-green. `--alone` adds `-j 1`,
+  making the no-sibling rerun that distinguishes resource contention from intrinsic instability.
+  The set is published as this worktree's `last` run, `wait last` scales its default deadline by
+  the iteration count, and `stop last` signals its outer coordinator so cancellation ends the set
+  rather than merely killing one iteration and starting the next. Cancellation remains deferred
+  through comparison, and an exit finalizer publishes the verdict with further group signals
+  ignored, so even a finalizer child killed by the original signal cannot strand the managed run.
+  Cancellation state and that finalizer are armed before the run is published as `last`; each
+  iteration rechecks cancellation immediately before and after supervisor launch.
+  If a supervisor is killed while its identity-verified Dune process group survives, the group is
+  reaped before another iteration can reuse—or final cleanup can remove—the shared build tree. Each
+  launch also inherits a FIFO writer: EOF after the supervisor exits proves a child did not escape
+  the recorded group with `setsid`; an unclosed witness retains/refuses the build tree. A
+  prior nonzero iteration remains the set's exit status when a later iteration is cancelled. The
+  dead supervisor pid is cleared before the potentially slower process-group reap. That reap gates
+  on group reachability, not the fallible process census, and revalidates the recorded leader token
+  before escalating from TERM to KILL so a recycled numeric group is never targeted. Identity
+  matching deliberately admits the original zombie leader; after KILL, a verified zombie-only
+  residue is inert and does not replace the iteration's timeout/cancellation verdict with an error.
+  A reachable group that loses leader identity before KILL is refused without consulting the
+  fallible census. After KILL reached a verified group, leaderless residue is accepted only when
+  its census is zombie-only; any live leaderless descendant is a loud refusal to reuse the tree.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1610,6 +1635,21 @@ that they earn a lookup rather than always-loaded space.
     otherwise filed as "unchanged since the last sweep" and reported to nobody — the one failure
     shape a diffing consumer cannot see. It gets a sentinel line in the file and a line in the
     sweep's own summary, the channel the scheduled routine quotes.
+- The comparison cursor lives under `~/.ocannl-sweep/unit-state`, keyed by machine, backend,
+  target and slow scope. It retains the immediately previous judged verdict (skips, errors and
+  timeouts do not erase it) and the previous failing
+  fingerprint across intervening greens, plus each failing golden's last-touch commit. A new red
+  after green, or after one of those golden commits moves, is labeled `REGRESSION OR FIX DID NOT
+  TAKE`; a changed fingerprint is reported against the previous failure rather than merely the
+  previous run. Standing identical reds stay quiet, which is the signal-to-noise property the
+  cursor exists to preserve. The cursor key includes the requested logical ref, so an exploratory
+  branch or historical run cannot become `origin/master`'s predecessor. Golden paths come from the
+  full log: ordinary test diffs name their `.expected` file directly, while an explicit rule's
+  resolved `diff --git` header proves its diff actually ran and supplies the first operand. Thus a
+  producer crash before a later `diff` records no golden, `%{read:...}` substitutions are already
+  expanded, and PPX `*_expected.ml` operands need no naming special case. Inline `ppx_expect`
+  source-to-`.corrected` headers contribute their checked-in source first operand. The normalized
+  fingerprint deliberately no longer carries enough source relationship to recover this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other

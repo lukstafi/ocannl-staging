@@ -14,10 +14,10 @@
 # zombie-group control (gh-ocannl-795).
 #
 # It tests the WORKING-TREE copy: `group_alive` is extracted from the shared
-# scripts/process-group.sh, `ps_token` from tools/test-run.sh, and the `stop`
-# legs drive that same tool as a subprocess. Each extraction is asserted
-# structurally before use, so a sed that matched nothing cannot leave every leg
-# passing without testing anything.
+# scripts/process-group.sh; `ps_token`, `proc_identity_matches`, and `proc_alive`
+# come from tools/test-run.sh. The `stop` legs drive that same tool as a
+# subprocess. Each extraction is asserted structurally before use, so a sed
+# that matched nothing cannot leave every leg passing without testing anything.
 #
 # Legs:
 #   1. extraction -- the functions came out of the shipping script.
@@ -37,6 +37,25 @@
 #   8. `stop` on a reachable group that holds no running member says exactly
 #      that -- the sentence gh-ocannl-742 added, and the one whose absence let
 #      a group of corpses be reported as a runaway dune ignoring TERM.
+#   9. `repeat` forces and preserves three identical dune runs while holding the
+#      worktree lock for every iteration.
+#  10. stdout drift is a distinct red result, with pairwise diff artifacts.
+#  11. stderr-only drift is reported separately and remains a green diagnostic.
+#  12. a red dune iteration keeps its nonzero exit code even when repeatable.
+#  13. `--alone` serializes dune with `-j 1` on every iteration.
+#  14. an active repeat is `last`, and `stop last` cancels the whole set after
+#      the current iteration rather than launching the remaining ones.
+#  15. cancellation during post-loop comparison still publishes a verdict.
+#  16. `wait`'s default bounded deadline covers every repeat iteration.
+#  17. repeat cancellation state and traps precede publication as `last`.
+#  18. cancellation is checked on both sides of supervisor launch.
+#  19. cancelling a later iteration preserves an earlier test failure.
+#  20. a supervisor killed without its Dune group cannot overlap the next run.
+#  21. the dead supervisor pid is cleared before orphan-group reaping.
+#  22. orphan cleanup gates on reachability and revalidates identity for KILL.
+#  23. a zombie retains its recorded identity while remaining non-live.
+#  24. a setsid descendant cannot escape into the next repeat build context.
+#  25. repeat isolation flags precede `dune exec`'s argument separator.
 
 set -u
 
@@ -132,6 +151,9 @@ livepid=""   # leg 2's live group leader
 leader=""    # the stop legs' current group leader
 member=""    # and the second process it put in that group
 member_token=""  # ... and its start token, since it is not this shell's child
+repeat_pid="" # leg 14's active repeat coordinator
+escape_pid="" # leg 24's session-escaped descendant
+escape_release=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-run-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
@@ -171,6 +193,14 @@ cleanup() {
   # directly as well: a group kill that failed is exactly the case where it
   # would otherwise be left behind. Identity-checked -- see kill_member.
   if [ -n "${member:-}" ]; then kill_member; fi
+  if [ -n "${repeat_pid:-}" ] && kill -0 "$repeat_pid" 2>/dev/null; then
+    kill -TERM "$repeat_pid" 2>/dev/null
+    wait "$repeat_pid" 2>/dev/null
+  fi
+  [ -z "${escape_release:-}" ] || touch "$escape_release"
+  if [ -n "${escape_pid:-}" ] && kill -0 "$escape_pid" 2>/dev/null; then
+    kill -KILL "$escape_pid" 2>/dev/null
+  fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
   elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
@@ -205,7 +235,7 @@ trap 'exit 143' TERM
 # from the one the shipping script recomputes would leave every one of them
 # falling through to "nothing left to signal" -- passing no leg, but testing
 # neither sentence either.
-for fn in group_alive ps_token; do
+for fn in group_alive ps_token proc_identity_matches proc_alive; do
   if [ "$fn" = group_alive ]; then fn_src="$GROUP_SRC"; else fn_src="$SRC"; fi
   sed -n "/^$fn() {/,/^}/p" "$fn_src" >"$TMP/$fn.sh"
   g_lines="$(wc -l <"$TMP/$fn.sh" | tr -d ' ')"
@@ -311,10 +341,12 @@ fi
 zlabel="a group holding nothing but a zombie reads as dead"
 clabel="the state reader alone rejects a zombie-only group (signal probe forced to say alive)"
 rlabel="the zombie leg reaps its own zombie, leaving no process-table entry"
+ilabel="a zombie retains identity without being reported alive"
 if [ "$have_state" = 0 ]; then
   skip "$zlabel" "no way to read a process's state on this system"
   skip "$clabel" "no way to read a process's state on this system"
   skip "$rlabel" "the zombie leg did not run, so it left nothing to reap"
+  skip "$ilabel" "the zombie leg did not run, so identity was not testable"
 else
 zpidfile="$TMP/zombie.pid"; rm -f "$zpidfile"
 bash -c 'set -m
@@ -361,6 +393,15 @@ else
       else
         report 0 "$zlabel ($zwhere)"
       fi
+      printf '%s\n' "$zpid" >"$TMP/zombie-identity.pid"
+      ps_token "$zpid" >"$TMP/zombie-identity.token"
+      if proc_identity_matches "$TMP/zombie-identity.pid" "$TMP/zombie-identity.token" \
+         && ! proc_alive "$TMP/zombie-identity.pid" "$TMP/zombie-identity.token"; then
+        report 0 "$ilabel"
+      else
+        report 1 "$ilabel" \
+          "the zombie either lost its recorded identity or was incorrectly reported live"
+      fi
       # The negative control, run everywhere: shadow `kill` so the signal probe
       # inside group_alive succeeds, which is exactly what the bare check did on
       # the kernel where this was reproduced. The state reader must still refuse
@@ -386,6 +427,8 @@ else
         "the child never reached state Z (saw '${zstate:-gone}'), so the leg tested nothing"
       report 1 "$clabel" \
         "the child never reached state Z (saw '${zstate:-gone}'), so the leg tested nothing"
+      report 1 "$ilabel" \
+        "the child never reached state Z (saw '${zstate:-gone}'), so identity was not tested"
       ;;
   esac
 fi
@@ -664,6 +707,520 @@ else
     report 1 "$l_took" "$stop_err"
   fi
   end_leader
+fi
+
+# ---------------------------------------------------------------------------
+# Legs 9-17: repeat mode's output, lifecycle and exit-code contract
+# ---------------------------------------------------------------------------
+repeat_root=$TMP/repeat-repo
+repeat_bin=$TMP/repeat-bin
+mkdir -p "$repeat_root/tools" "$repeat_root/scripts" "$repeat_bin"
+cp "$SRC" "$repeat_root/tools/test-run.sh"
+cp "$GROUP_SRC" "$repeat_root/scripts/process-group.sh"
+chmod +x "$repeat_root/tools/test-run.sh"
+cat >"$repeat_bin/dune" <<'EOF'
+#!/usr/bin/env bash
+set -u
+# Close the inherited lock descriptor before probing through a fresh open.
+# Acquiring here would prove repeat released its one set-wide lock too early.
+if perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' \
+   9>&- <"$REPEAT_TEST_ROOT/.test-run.lock"; then
+  echo "repeat fixture acquired the supposedly held worktree lock" >&2
+  exit 91
+fi
+# Repeat establishes a fresh context with `dune clean` before each measured
+# invocation. The fixture keeps setup out of the iteration count and streams.
+if [ "${1:-}" = clean ]; then
+  printf 'clean %s\n' "$*" >>"$REPEAT_TEST_CALLS"
+  exit 0
+fi
+n=0
+[ ! -f "$REPEAT_TEST_COUNTER" ] || n=$(cat "$REPEAT_TEST_COUNTER")
+n=$((n + 1))
+printf '%s\n' "$n" >"$REPEAT_TEST_COUNTER"
+printf '%s\n' "$*" >>"$REPEAT_TEST_CALLS"
+if [ -n "${REPEAT_TEST_WAIT_PREFIX:-}" ] \
+   && { [ -z "${REPEAT_TEST_WAIT_AT:-}" ] || [ "$REPEAT_TEST_WAIT_AT" = "$n" ]; }; then
+  : >"$REPEAT_TEST_WAIT_PREFIX.ready"
+  while [ ! -e "$REPEAT_TEST_WAIT_PREFIX.release" ]; do sleep 0.05; done
+fi
+case $REPEAT_TEST_MODE in
+  stable) printf 'stable stdout\n'; printf 'stable stderr\n' >&2 ;;
+  stdout) printf 'stdout %s\n' "$n"; printf 'stable stderr\n' >&2 ;;
+  stderr) printf 'stable stdout\n'; printf 'stderr %s\n' "$n" >&2 ;;
+  fail) printf 'stable stdout\n'; printf 'stable failure\n' >&2; exit 7 ;;
+  fail_first)
+    if [ "$n" = 1 ]; then printf 'first failure\n' >&2; exit 7; fi
+    printf 'later stdout\n'; printf 'later stderr\n' >&2
+    ;;
+  orphan_first)
+    if [ "$n" = 1 ]; then
+      printf '%s\n' "$$" >"$REPEAT_TEST_ORPHAN_PID"
+      trap ': >"$REPEAT_TEST_ORPHAN_REAPED"; exit 0' TERM
+      kill -KILL "$PPID"
+      while :; do sleep 1; done
+    fi
+    [ -e "$REPEAT_TEST_ORPHAN_REAPED" ] || exit 93
+    printf 'post-reap stdout\n'; printf 'post-reap stderr\n' >&2
+    ;;
+  session_escape)
+    for arg in "$@"; do
+      case $arg in
+        --build-dir=*) mkdir -p "${arg#--build-dir=}" ;;
+      esac
+    done
+    perl -MPOSIX -e '
+      $SIG{HUP} = "IGNORE";
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      open my $pf, ">", $ENV{REPEAT_TEST_ESCAPE_PID} or die;
+      print $pf "$$\n"; close $pf;
+      select undef, undef, undef, 0.05 until -e $ENV{REPEAT_TEST_ESCAPE_RELEASE};
+    ' </dev/null >/dev/null 2>&1 &
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      [ -s "$REPEAT_TEST_ESCAPE_PID" ] && break
+      sleep 0.05
+    done
+    printf 'escaped parent stdout\n'; printf 'escaped parent stderr\n' >&2
+    ;;
+  *) echo "unknown repeat fixture mode: $REPEAT_TEST_MODE" >&2; exit 92 ;;
+esac
+EOF
+chmod +x "$repeat_bin/dune"
+cat >"$repeat_bin/diff" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [ -n "${REPEAT_TEST_DIFF_WAIT_PREFIX:-}" ]; then
+  : >"$REPEAT_TEST_DIFF_WAIT_PREFIX.ready"
+  while [ ! -e "$REPEAT_TEST_DIFF_WAIT_PREFIX.release" ]; do /bin/sleep 0.05; done
+fi
+exec "$REPEAT_TEST_REAL_DIFF" "$@"
+EOF
+chmod +x "$repeat_bin/diff"
+
+repeat_out= repeat_rc= repeat_dir=
+await_fixture_ready() { # MARKER [ATTEMPTS] -- never assume the fixture arrived
+  local marker=$1 attempts=${2:-300} attempt=0
+  while [ "$attempt" -lt "$attempts" ]; do
+    [ -e "$marker" ] && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+# Negative control for the timeout half of the helper's contract. The live
+# fixtures below prove its success half; this absent marker must be refused.
+if await_fixture_ready "$TMP/repeat-never-ready" 1; then
+  echo "repeat fixture readiness accepted an absent marker" >&2
+  exit 2
+fi
+repeat_probe() { # tag mode [repeat options/count/dune argv...]
+  local tag=$1 mode=$2 runs=$TMP/repeat-runs-$1
+  shift 2
+  mkdir -p "$runs"
+  : >"$TMP/$tag.counter"
+  : >"$TMP/$tag.calls"
+  REPEAT_TEST_ROOT=$repeat_root \
+  REPEAT_TEST_MODE=$mode \
+  REPEAT_TEST_COUNTER=$TMP/$tag.counter \
+  REPEAT_TEST_CALLS=$TMP/$tag.calls \
+  REPEAT_TEST_WAIT_PREFIX= \
+  REPEAT_TEST_WAIT_AT= \
+  REPEAT_TEST_ORPHAN_PID= \
+  REPEAT_TEST_ORPHAN_REAPED= \
+  REPEAT_TEST_DIFF_WAIT_PREFIX= \
+  REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+  OCANNL_TOOL_TEST_RUNS=$runs \
+  PATH=$repeat_bin:$PATH \
+    "$repeat_root/tools/test-run.sh" repeat "$@" >"$TMP/$tag.out" 2>"$TMP/$tag.err"
+  repeat_rc=$?
+  repeat_out=$(cat "$TMP/$tag.out")
+  repeat_dir=$(find "$runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+}
+
+# This is an ordering invariant, not a timing lottery: once publish_run writes
+# `last`, an external stop may arrive on the next instruction. Pin all three
+# prerequisites above that line so a future refactor cannot reopen the gap.
+completed_line=$(grep -n '^    completed=0$' "$SRC" | cut -d: -f1)
+signal_trap_line=$(grep -n "^    trap 'repeat_signal TERM' TERM$" "$SRC" | cut -d: -f1)
+exit_trap_line=$(grep -n '^    trap repeat_exit EXIT$' "$SRC" | cut -d: -f1)
+publish_line=$(grep -n '^    with_meta_lock publish_run || die "cannot publish repeat run ' "$SRC" | cut -d: -f1)
+if [ -n "$completed_line" ] && [ -n "$signal_trap_line" ] \
+   && [ -n "$exit_trap_line" ] && [ -n "$publish_line" ] \
+   && [ "$completed_line" -lt "$publish_line" ] \
+   && [ "$signal_trap_line" -lt "$publish_line" ] \
+   && [ "$exit_trap_line" -lt "$publish_line" ]; then
+  report 0 "repeat: cancellation lifecycle is armed before publication"
+else
+  report 1 "repeat: cancellation lifecycle is armed before publication" \
+    "completed=${completed_line:-missing} signal=${signal_trap_line:-missing} exit=${exit_trap_line:-missing} publish=${publish_line:-missing}"
+fi
+
+# A real red remains the useful verdict when a later iteration is cancelled.
+# Block only iteration two, stop the managed set there, and prove both the
+# retained exit 7 and the cancellation annotation.
+repeat_red_cancel_runs=$TMP/repeat-runs-red-cancel
+repeat_red_cancel_prefix=$TMP/repeat-red-cancel
+mkdir -p "$repeat_red_cancel_runs"
+: >"$TMP/repeat-red-cancel.counter"
+: >"$TMP/repeat-red-cancel.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=fail_first \
+REPEAT_TEST_COUNTER=$TMP/repeat-red-cancel.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-red-cancel.calls \
+REPEAT_TEST_WAIT_PREFIX=$repeat_red_cancel_prefix \
+REPEAT_TEST_WAIT_AT=2 \
+REPEAT_TEST_DIFF_WAIT_PREFIX= \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+REPEAT_TEST_ORPHAN_PID= \
+REPEAT_TEST_ORPHAN_REAPED= \
+OCANNL_TOOL_TEST_RUNS=$repeat_red_cancel_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
+  >"$TMP/repeat-red-cancel.out" 2>"$TMP/repeat-red-cancel.err" &
+repeat_pid=$!
+if ! await_fixture_ready "$repeat_red_cancel_prefix.ready"; then
+  report 1 "repeat: earlier failure survives later cancellation" \
+    "setup timeout waiting for iteration two's readiness marker"
+  exit 1
+fi
+red_cancel_stop=$(OCANNL_TOOL_TEST_RUNS=$repeat_red_cancel_runs \
+  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-red-cancel-stop.err")
+red_cancel_stop_rc=$?
+touch "$repeat_red_cancel_prefix.release"
+wait "$repeat_pid"
+repeat_red_cancel_rc=$?
+repeat_pid=
+repeat_red_cancel_dir=$(find "$repeat_red_cancel_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+if [ "$red_cancel_stop_rc" = 0 ] \
+   && grep -q '^sent TERM to the repeat coordinator; ' <<<"$red_cancel_stop" \
+   && [ "$repeat_red_cancel_rc" = 7 ] \
+   && [ "$(cat "$repeat_red_cancel_dir/exit" 2>/dev/null)" = 7 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 2 of 3 iterations$' "$TMP/repeat-red-cancel.out"; then
+  report 0 "repeat: earlier failure survives later cancellation"
+else
+  report 1 "repeat: earlier failure survives later cancellation" \
+    "stop $red_cancel_stop_rc; repeat $repeat_red_cancel_rc: $(cat "$TMP/repeat-red-cancel.out")"
+fi
+
+# Kill the first capped supervisor from inside its Dune child, leaving that
+# child/group alive. Iteration two refuses to pass unless the coordinator's
+# identity-verified reap completed first.
+repeat_orphan_runs=$TMP/repeat-runs-orphan
+repeat_orphan_marker=$TMP/repeat-orphan-reaped
+repeat_orphan_pid_file=$TMP/repeat-orphan-pid
+mkdir -p "$repeat_orphan_runs"
+: >"$TMP/repeat-orphan.counter"
+: >"$TMP/repeat-orphan.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=orphan_first \
+REPEAT_TEST_COUNTER=$TMP/repeat-orphan.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-orphan.calls \
+REPEAT_TEST_WAIT_PREFIX= \
+REPEAT_TEST_WAIT_AT= \
+REPEAT_TEST_DIFF_WAIT_PREFIX= \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+REPEAT_TEST_ORPHAN_PID=$repeat_orphan_pid_file \
+REPEAT_TEST_ORPHAN_REAPED=$repeat_orphan_marker \
+OCANNL_TOOL_TEST_RUNS=$repeat_orphan_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+  >"$TMP/repeat-orphan.out" 2>"$TMP/repeat-orphan.err"
+repeat_orphan_rc=$?
+repeat_orphan_dir=$(find "$repeat_orphan_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+orphan_pid=$(cat "$repeat_orphan_pid_file" 2>/dev/null)
+if [ "$repeat_orphan_rc" = 137 ] \
+   && [ -e "$repeat_orphan_marker" ] \
+   && [ "$(cat "$repeat_orphan_dir/iteration-2/exit" 2>/dev/null)" = 0 ] \
+   && grep -q '^repeat: iteration group .* survived its supervisor; reaping before reuse$' "$TMP/repeat-orphan.out"; then
+  report 0 "repeat: surviving iteration group is reaped before reuse"
+else
+  report 1 "repeat: surviving iteration group is reaped before reuse" \
+    "exit $repeat_orphan_rc; marker=$([ -e "$repeat_orphan_marker" ] && echo yes || echo no); output: $(cat "$TMP/repeat-orphan.out")"
+fi
+if [ -n "$orphan_pid" ] && kill -0 "$orphan_pid" 2>/dev/null; then
+  kill -KILL -- "-$orphan_pid" 2>/dev/null
+  kill -KILL "$orphan_pid" 2>/dev/null
+fi
+
+# A Dune action can leave its recorded process group with setsid. The FIFO
+# writer inherited from the launch must still expose that survivor and refuse
+# the shared build before iteration two, even though the group reap sees no
+# reachable original group. Releasing the fixture afterwards also proves the
+# refusal retained (rather than deleted) its build context while it was live.
+repeat_escape_runs=$TMP/repeat-runs-session-escape
+escape_release=$TMP/repeat-session-escape.release
+escape_pid_file=$TMP/repeat-session-escape.pid
+mkdir -p "$repeat_escape_runs"
+: >"$TMP/repeat-session-escape.counter"
+: >"$TMP/repeat-session-escape.calls"
+if REPEAT_TEST_ROOT=$repeat_root \
+   REPEAT_TEST_MODE=session_escape \
+   REPEAT_TEST_COUNTER=$TMP/repeat-session-escape.counter \
+   REPEAT_TEST_CALLS=$TMP/repeat-session-escape.calls \
+   REPEAT_TEST_WAIT_PREFIX= \
+   REPEAT_TEST_WAIT_AT= \
+   REPEAT_TEST_DIFF_WAIT_PREFIX= \
+   REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+   REPEAT_TEST_ORPHAN_PID= \
+   REPEAT_TEST_ORPHAN_REAPED= \
+   REPEAT_TEST_ESCAPE_PID=$escape_pid_file \
+   REPEAT_TEST_ESCAPE_RELEASE=$escape_release \
+   OCANNL_TOOL_TEST_RUNS=$repeat_escape_runs \
+   PATH=$repeat_bin:$PATH \
+     "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+     >"$TMP/repeat-session-escape.out" 2>"$TMP/repeat-session-escape.err"; then
+  repeat_escape_rc=0
+else
+  repeat_escape_rc=$?
+fi
+repeat_escape_dir=$(find "$repeat_escape_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+escape_pid=$(cat "$escape_pid_file" 2>/dev/null)
+escape_pgid=$(ppgid "$escape_pid")
+recorded_pgid=$(cat "$repeat_escape_dir/iteration-1/pgid" 2>/dev/null)
+if [ "$repeat_escape_rc" = 2 ] \
+   && [ -n "$escape_pid" ] && kill -0 "$escape_pid" 2>/dev/null \
+   && [ -n "$escape_pgid" ] && [ "$escape_pgid" != "$recorded_pgid" ] \
+   && [ -d "$repeat_escape_dir/build" ] \
+   && [ ! -d "$repeat_escape_dir/iteration-2" ] \
+   && grep -q 'left a session-escaped descendant; refusing to reuse' \
+        "$TMP/repeat-session-escape.err"; then
+  report 0 "repeat: a session-escaped descendant blocks build reuse"
+else
+  report 1 "repeat: a session-escaped descendant blocks build reuse" \
+    "exit $repeat_escape_rc; pid=${escape_pid:-missing}; escaped-pgid=${escape_pgid:-missing}; recorded-pgid=${recorded_pgid:-missing}; stderr=$(cat "$TMP/repeat-session-escape.err")"
+fi
+touch "$escape_release"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  kill -0 "$escape_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$escape_pid" 2>/dev/null; then kill -KILL "$escape_pid" 2>/dev/null; fi
+escape_pid=
+escape_release=
+
+pre_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || break$' "$SRC" | head -1 | cut -d: -f1)
+launch_line=$(grep -n '^        perl -e "$capped_perl" -- "$cap" /bin/bash -c \\' "$SRC" | head -1 | cut -d: -f1)
+supervisor_line=$(grep -n '^      repeat_sup=\$!$' "$SRC" | cut -d: -f1)
+post_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || kill "-\$repeat_cancelled" "\$repeat_sup" 2>/dev/null$' "$SRC" | cut -d: -f1)
+if [ -n "$pre_launch_line" ] && [ -n "$launch_line" ] \
+   && [ -n "$supervisor_line" ] && [ -n "$post_launch_line" ] \
+   && [ "$pre_launch_line" -lt "$launch_line" ] \
+   && [ "$launch_line" -lt "$supervisor_line" ] \
+   && [ "$supervisor_line" -lt "$post_launch_line" ]; then
+  report 0 "repeat: cancellation brackets supervisor launch"
+else
+  report 1 "repeat: cancellation brackets supervisor launch" \
+    "pre=${pre_launch_line:-missing} launch=${launch_line:-missing} supervisor=${supervisor_line:-missing} post=${post_launch_line:-missing}"
+fi
+
+clear_supervisor_line=$(grep -n '^      repeat_sup=$' "$SRC" | tail -1 | cut -d: -f1)
+reap_group_line=$(grep -n '^      reap_repeat_group "$iter"$' "$SRC" | cut -d: -f1)
+if [ -n "$clear_supervisor_line" ] && [ -n "$reap_group_line" ] \
+   && [ "$clear_supervisor_line" -lt "$reap_group_line" ]; then
+  report 0 "repeat: dead supervisor pid is cleared before group reap"
+else
+  report 1 "repeat: dead supervisor pid is cleared before group reap" \
+    "clear=${clear_supervisor_line:-missing} reap=${reap_group_line:-missing}"
+fi
+
+sed -n '/^    reap_repeat_group() {/,/^    }/p' "$SRC" >"$TMP/reap-repeat-group.sh"
+sed -n '/^      if ! group_identity_matches "$iter_dir"; then$/,/^      kill -KILL/p' \
+  "$TMP/reap-repeat-group.sh" >"$TMP/reap-before-kill.sh"
+if grep -q 'kill -0 -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
+   && grep -q 'group_alive "$pg" || return 0' "$TMP/reap-repeat-group.sh" \
+   && ! grep -q 'group_alive' "$TMP/reap-before-kill.sh" \
+   && grep -B6 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
+        | grep -q 'leaderless iteration group \$pg survived TERM' \
+   && grep -q 'leaderless iteration group \$pg survived KILL' "$TMP/reap-repeat-group.sh"; then
+  report 0 "repeat: orphan reap fails closed after TERM and accepts post-KILL zombies"
+else
+  report 1 "repeat: orphan reap fails closed after TERM and accepts post-KILL zombies" \
+    "$(tr '\n' ';' <"$TMP/reap-repeat-group.sh")"
+fi
+
+repeat_probe repeat-identical stable 3 build @cheap
+if [ "$repeat_rc" = 0 ] && grep -q '^repeat result: IDENTICAL -- ' <<<"$repeat_out" \
+   && [ "$(cat "$TMP/repeat-identical.counter")" = 3 ] \
+   && [ "$(grep -c '^clean ' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--force' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--cache=disabled' "$TMP/repeat-identical.calls")" = 3 ] \
+   && [ "$(grep -c -- '--build-dir=' "$TMP/repeat-identical.calls")" = 6 ] \
+   && [ -n "$repeat_dir" ] \
+   && [ ! -e "$repeat_dir/build" ] \
+   && [ "$(find "$repeat_dir" \( -name stdout -o -name stderr \) | wc -l | tr -d ' ')" = 6 ]; then
+  report 0 "repeat: identical forced runs retain every stdout/stderr"
+else
+  report 1 "repeat: identical forced runs retain every stdout/stderr" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}; stderr: $(cat "$TMP/repeat-identical.err")"
+fi
+
+repeat_probe repeat-stdout stdout 3 build @cheap
+if [ "$repeat_rc" = 1 ] && grep -q '^repeat result: DIFFERING -- ' <<<"$repeat_out" \
+   && [ -s "$repeat_dir/diffs/1-2.stdout" ]; then
+  report 0 "repeat: stdout drift is red and pairwise-diffed"
+else
+  report 1 "repeat: stdout drift is red and pairwise-diffed" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-stderr stderr 3 build @cheap
+if [ "$repeat_rc" = 0 ] && grep -q '^repeat result: STDERR-ONLY -- ' <<<"$repeat_out" \
+   && [ -s "$repeat_dir/diffs/1-2.stderr" ]; then
+  report 0 "repeat: stderr-only drift is distinct and diagnostic-green"
+else
+  report 1 "repeat: stderr-only drift is distinct and diagnostic-green" \
+    "exit $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-red fail 2 build @cheap
+if [ "$repeat_rc" = 7 ] && grep -q '^repeat result: IDENTICAL -- ' <<<"$repeat_out"; then
+  report 0 "repeat: a repeatable red dune leg keeps its exit code"
+else
+  report 1 "repeat: a repeatable red dune leg keeps its exit code" \
+    "expected exit 7; got $repeat_rc; output: ${repeat_out:-<nothing>}"
+fi
+
+repeat_probe repeat-alone stable --alone 2 build @cheap
+if [ "$repeat_rc" = 0 ] && [ "$(grep -c -- '-j 1' "$TMP/repeat-alone.calls")" = 2 ] \
+   && grep -q 'iteration 1/2 -- dune (alone, -j 1)' <<<"$repeat_out"; then
+  report 0 "repeat: --alone serializes every dune iteration"
+else
+  report 1 "repeat: --alone serializes every dune iteration" \
+    "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-alone.calls"); output: ${repeat_out:-<nothing>}"
+fi
+
+# The first `--` belongs to Dune, not to repeat. The trailing --force is a
+# program argument on purpose: this fails if isolation flags are appended at
+# the end or if the splice mistakes a later option-looking argument for Dune's.
+repeat_probe repeat-separator stable 2 exec ./prog.exe -- alpha --force
+if [ "$repeat_rc" = 0 ] \
+   && [ "$(grep -c '^exec ./prog.exe --force --cache=disabled --build-dir=.* -- alpha --force$' \
+          "$TMP/repeat-separator.calls")" = 2 ]; then
+  report 0 "repeat: isolation flags precede Dune's argument separator"
+else
+  report 1 "repeat: isolation flags precede Dune's argument separator" \
+    "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-separator.calls")"
+fi
+
+# An active repeat must replace `last`, and stop must signal the OUTER
+# coordinator so it records cancellation and refuses to start iteration two.
+repeat_stop_runs=$TMP/repeat-runs-stop
+repeat_stop_prefix=$TMP/repeat-stop
+mkdir -p "$repeat_stop_runs"
+: >"$TMP/repeat-stop.counter"
+: >"$TMP/repeat-stop.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=stable \
+REPEAT_TEST_COUNTER=$TMP/repeat-stop.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-stop.calls \
+REPEAT_TEST_WAIT_PREFIX=$repeat_stop_prefix \
+OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
+  >"$TMP/repeat-stop.out" 2>"$TMP/repeat-stop.err" &
+repeat_pid=$!
+if ! await_fixture_ready "$repeat_stop_prefix.ready"; then
+  report 1 "repeat: last resolves active state and stop cancels the whole set" \
+    "setup timeout waiting for iteration one's readiness marker"
+  exit 1
+fi
+status_out=$(OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+  "$repeat_root/tools/test-run.sh" status last 2>"$TMP/repeat-stop-status.err")
+status_rc=$?
+stop_out=$(OCANNL_TOOL_TEST_RUNS=$repeat_stop_runs \
+  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-stop-stop.err")
+stop_rc=$?
+touch "$repeat_stop_prefix.release"
+wait "$repeat_pid"
+repeat_stop_rc=$?
+repeat_pid=
+if [ "$status_rc" = 3 ] && grep -q '^running: ' <<<"$status_out" \
+   && [ "$stop_rc" = 0 ] && grep -q '^sent TERM to the repeat coordinator; ' <<<"$stop_out" \
+   && [ "$repeat_stop_rc" = 143 ] \
+   && [ "$(cat "$TMP/repeat-stop.counter")" = 1 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 1 of 3 iterations$' "$TMP/repeat-stop.out"; then
+  report 0 "repeat: last resolves active state and stop cancels the whole set"
+else
+  report 1 "repeat: last resolves active state and stop cancels the whole set" \
+    "status $status_rc: ${status_out:-<nothing>}; stop $stop_rc: ${stop_out:-<nothing>}; repeat $repeat_stop_rc: $(cat "$TMP/repeat-stop.out")"
+fi
+
+# Keep the signal traps armed after the iteration loop: this fixture gives the
+# repeat its own process group, blocks inside the first pairwise diff, then
+# sends TERM to the WHOLE group. The diff dies from that same signal; the exit
+# finalizer must still turn the coordinator's trapped cancellation into an
+# atomic verdict.
+repeat_finalize_runs=$TMP/repeat-runs-finalize
+repeat_finalize_prefix=$TMP/repeat-finalize
+mkdir -p "$repeat_finalize_runs"
+: >"$TMP/repeat-finalize.counter"
+: >"$TMP/repeat-finalize.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=stdout \
+REPEAT_TEST_COUNTER=$TMP/repeat-finalize.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-finalize.calls \
+REPEAT_TEST_WAIT_PREFIX= \
+REPEAT_TEST_DIFF_WAIT_PREFIX=$repeat_finalize_prefix \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+OCANNL_TOOL_TEST_RUNS=$repeat_finalize_runs \
+PATH=$repeat_bin:$PATH \
+  perl -MPOSIX -e 'POSIX::setpgid(0, 0); exec @ARGV' \
+  "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+  >"$TMP/repeat-finalize.out" 2>"$TMP/repeat-finalize.err" &
+repeat_pid=$!
+if ! await_fixture_ready "$repeat_finalize_prefix.ready"; then
+  report 1 "repeat: cancellation during finalization still publishes a verdict" \
+    "setup timeout waiting for the comparison readiness marker"
+  exit 1
+fi
+kill -TERM -- "-$repeat_pid" 2>"$TMP/repeat-finalize-kill.err"
+finalize_kill_rc=$?
+wait "$repeat_pid"
+repeat_finalize_rc=$?
+repeat_pid=
+repeat_finalize_dir=$(find "$repeat_finalize_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+if [ "$finalize_kill_rc" = 0 ] \
+   && [ "$repeat_finalize_rc" = 143 ] \
+   && [ -n "$repeat_finalize_dir" ] \
+   && [ "$(cat "$repeat_finalize_dir/exit" 2>/dev/null)" = 143 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 2 of 2 iterations$' "$TMP/repeat-finalize.out"; then
+  report 0 "repeat: cancellation during finalization still publishes a verdict"
+else
+  report 1 "repeat: cancellation during finalization still publishes a verdict" \
+    "group kill $finalize_kill_rc: $(cat "$TMP/repeat-finalize-kill.err"); repeat $repeat_finalize_rc: $(cat "$TMP/repeat-finalize.out")"
+fi
+
+# The stored cap belongs to ONE iteration. Drive `wait` against a fabricated
+# live coordinator and a no-op sleep until its default deadline expires: cap 2
+# across 3 iterations must report 126 seconds, not the old single-cap 122.
+wait_runs=$TMP/repeat-runs-wait-budget
+wait_dir=$wait_runs/20000101T000000Z-1
+mkdir -p "$wait_dir" "$TMP/wait-bin"
+wait_dir_real=$(cd "$wait_dir" && pwd -P)
+printf 'build @cheap\n' >"$wait_dir/cmd"
+printf '2\n' >"$wait_dir/cap"
+printf 'repeat\n' >"$wait_dir/mode"
+printf '3\n' >"$wait_dir/repeats"
+printf '%s\n' "$$" >"$wait_dir/wpid"
+ps_token "$$" >"$wait_dir/wtoken"
+: >"$wait_dir/log"
+cat >"$TMP/wait-bin/sleep" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >>"$REPEAT_TEST_SLEEP_CALLS"
+EOF
+chmod +x "$TMP/wait-bin/sleep"
+: >"$TMP/repeat-wait-sleeps"
+wait_out=$(REPEAT_TEST_SLEEP_CALLS=$TMP/repeat-wait-sleeps \
+  OCANNL_TOOL_TEST_RUNS=$wait_runs PATH=$TMP/wait-bin:$PATH \
+  "$repeat_root/tools/test-run.sh" wait "$wait_dir" 2>"$TMP/repeat-wait.err")
+wait_rc=$?
+if [ "$wait_rc" = 124 ] \
+   && grep -q "^wait timed out after 126s: $wait_dir_real$" <<<"$wait_out" \
+   && [ "$(wc -l <"$TMP/repeat-wait-sleeps" | tr -d ' ')" = 26 ]; then
+  report 0 "repeat: wait default covers every per-iteration cap"
+else
+  report 1 "repeat: wait default covers every per-iteration cap" \
+    "exit $wait_rc; sleeps $(tr '\n' ',' <"$TMP/repeat-wait-sleeps"); output: ${wait_out:-<nothing>}"
 fi
 
 echo
