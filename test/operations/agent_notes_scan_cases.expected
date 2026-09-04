@@ -149,10 +149,14 @@ ok: citations -- a numeric autolink fragment
 ok: citations -- a decimal entity and a separate bare citation
 ok: citations -- an entity that renders citation whitespace
 ok: citations -- entities that render a hash or work label
+ok: citations -- named entities that render a hash or whitespace
+ok: citations -- a named entity that remains an opaque symbol
 ok: citations -- an ambiguous visible link label
 ok: citations -- links around only the label or number
+ok: citations -- inline HTML around only the label or number
 ok: citations -- emphasis around a hashless label or number
 ok: citations -- emphasis around a soft-wrapped reference
+ok: citations -- visible code remains an opaque barrier
 ok: citations -- a hash attached to a code identifier
 ok: index -- an index whose rows all resolve
 ok: index -- a hook the file it points at does not carry

@@ -1335,10 +1335,70 @@ let autolink_spans ?spans line =
   in
   go 0 []
 
-(** Complete decimal and hexadecimal HTML entities, with the character value they render. Decoding
-    rather than merely hiding them matters in both directions: [&#39;] is not issue 39, while
-    [&#35;12], [PR&#32;12], and [&#80;&#82; 12] visibly are work references. *)
-let numeric_entities ?spans line =
+let opaque_prose = '\001'
+
+let entity_whitespace_names =
+  [
+    "Tab";
+    "NewLine";
+    "nbsp";
+    "NonBreakingSpace";
+    "ensp";
+    "emsp";
+    "emsp13";
+    "emsp14";
+    "numsp";
+    "puncsp";
+    "thinsp";
+    "ThinSpace";
+    "hairsp";
+    "VeryThinSpace";
+    "MediumSpace";
+    "ThickSpace";
+    "NegativeVeryThinSpace";
+    "NegativeThinSpace";
+    "NegativeMediumSpace";
+    "NegativeThickSpace";
+    "ZeroWidthSpace";
+  ]
+
+let unicode_whitespace =
+  [
+    0x00a0;
+    0x1680;
+    0x2000;
+    0x2001;
+    0x2002;
+    0x2003;
+    0x2004;
+    0x2005;
+    0x2006;
+    0x2007;
+    0x2008;
+    0x2009;
+    0x200a;
+    0x2028;
+    0x2029;
+    0x202f;
+    0x205f;
+    0x3000;
+  ]
+
+let rendered_entity_value value =
+  if value <= 0x7f then Char.of_int_exn value
+  else if List.mem unicode_whitespace value ~equal:Int.equal then ' '
+  else opaque_prose
+
+let rendered_named_entity name =
+  if String.equal name "num" then '#'
+  else if List.mem entity_whitespace_names name ~equal:String.equal then ' '
+  else opaque_prose
+
+(** Complete decimal, hexadecimal, and named HTML entities, with the citation-relevant character
+    they render. Decoding matters in both directions: [&#39;] is not issue 39, while [&#35;12],
+    [&num;12], [PR&nbsp;12], and [&#80;&#82; 12] visibly are work references. Named entities that
+    render other symbols become opaque, so they neither join nor separate tokens. *)
+let markdown_entities ?spans line =
   let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
   let is_hex c =
@@ -1347,34 +1407,83 @@ let numeric_entities ?spans line =
   in
   let rec go i acc =
     if i + 3 >= n then List.rev acc
-    else if
-      Char.equal line.[i] '&'
-      && Char.equal line.[i + 1] '#'
-      && (not (in_any_span spans i))
-      && not (escaped_at line i)
-    then (
-      let digits, radix, accepts, value_of =
-        if i + 2 < n && (Char.equal line.[i + 2] 'x' || Char.equal line.[i + 2] 'X') then
-          ( i + 3,
-            16,
-            is_hex,
-            fun c ->
-              if Char.is_digit c then Char.to_int c - Char.to_int '0'
-              else Char.to_int (Char.lowercase c) - Char.to_int 'a' + 10 )
-        else (i + 2, 10, Char.is_digit, fun c -> Char.to_int c - Char.to_int '0')
-      in
-      let stop = ref digits in
-      let value = ref 0 in
-      let valid = ref true in
-      while !stop < n && accepts line.[!stop] do
-        let digit = value_of line.[!stop] in
-        if !value > (0x10ffff - digit) / radix then valid := false
-        else value := (!value * radix) + digit;
-        Int.incr stop
-      done;
-      if !valid && !stop > digits && !stop < n && Char.equal line.[!stop] ';' then
-        go (!stop + 1) ((i, !stop + 1, !value) :: acc)
-      else go (i + 1) acc)
+    else if Char.equal line.[i] '&' && (not (in_any_span spans i)) && not (escaped_at line i) then (
+      if Char.equal line.[i + 1] '#' then (
+        let digits, radix, accepts, value_of =
+          if i + 2 < n && (Char.equal line.[i + 2] 'x' || Char.equal line.[i + 2] 'X') then
+            ( i + 3,
+              16,
+              is_hex,
+              fun c ->
+                if Char.is_digit c then Char.to_int c - Char.to_int '0'
+                else Char.to_int (Char.lowercase c) - Char.to_int 'a' + 10 )
+          else (i + 2, 10, Char.is_digit, fun c -> Char.to_int c - Char.to_int '0')
+        in
+        let stop = ref digits in
+        let value = ref 0 in
+        let valid = ref true in
+        while !stop < n && accepts line.[!stop] do
+          let digit = value_of line.[!stop] in
+          if !value > (0x10ffff - digit) / radix then valid := false
+          else value := (!value * radix) + digit;
+          Int.incr stop
+        done;
+        if !valid && !stop > digits && !stop < n && Char.equal line.[!stop] ';' then
+          go (!stop + 1) ((i, !stop + 1, rendered_entity_value !value) :: acc)
+        else go (i + 1) acc)
+      else
+        let stop = ref (i + 1) in
+        while !stop < n && Char.is_alphanum line.[!stop] do
+          Int.incr stop
+        done;
+        if !stop > i + 1 && !stop < n && Char.equal line.[!stop] ';' then
+          let name = String.sub line ~pos:(i + 1) ~len:(!stop - i - 1) in
+          go (!stop + 1) ((i, !stop + 1, rendered_named_entity name) :: acc)
+        else go (i + 1) acc)
+    else go (i + 1) acc
+  in
+  go 0 []
+
+(** Inline raw-HTML tag syntax. Element text stays prose; only opening/closing tags and attributes
+    disappear. Autolinks have already been classified separately and do not satisfy the tag-name
+    boundary here. *)
+let inline_html_spans ?spans line =
+  let spans = match spans with Some s -> s | None -> inert_of_line line in
+  let n = String.length line in
+  let rec close_tag i quote =
+    if i >= n then None
+    else
+      match quote with
+      | Some q -> if Char.equal line.[i] q then close_tag (i + 1) None else close_tag (i + 1) quote
+      | None ->
+          if Char.equal line.[i] '"' || Char.equal line.[i] '\'' then
+            close_tag (i + 1) (Some line.[i])
+          else if Char.equal line.[i] '>' then Some i
+          else close_tag (i + 1) None
+  in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if Char.equal line.[i] '<' && (not (in_any_span spans i)) && not (escaped_at line i) then (
+      let name_start = if i + 1 < n && Char.equal line.[i + 1] '/' then i + 2 else i + 1 in
+      if name_start >= n || not (Char.is_alpha line.[name_start]) then go (i + 1) acc
+      else
+        let name_stop = ref (name_start + 1) in
+        while
+          !name_stop < n && (Char.is_alphanum line.[!name_stop] || Char.equal line.[!name_stop] '-')
+        do
+          Int.incr name_stop
+        done;
+        let boundary =
+          !name_stop < n
+          && (md_space line.[!name_stop]
+             || Char.equal line.[!name_stop] '/'
+             || Char.equal line.[!name_stop] '>')
+        in
+        if not boundary then go (i + 1) acc
+        else
+          match close_tag !name_stop None with
+          | Some close when not (in_any_span spans close) -> go (close + 1) ((i, close + 1) :: acc)
+          | _ -> go (i + 1) acc)
     else go (i + 1) acc
   in
   go 0 []
@@ -1383,22 +1492,37 @@ let numeric_entities ?spans line =
     code, comments, and fenced content disappear; numeric entities become their rendered ASCII
     character (or a separating space for a non-ASCII value). Findings need only the physical line,
     so the citation matcher does not need a source-offset map. *)
-let citation_line ~inert_spans line =
+let citation_line ~inert_spans ~invisible_spans line =
   let links = markdown_link_parts ~spans:inert_spans line in
-  let hidden = inert_spans @ link_markup_spans links @ autolink_spans ~spans:inert_spans line in
-  let entities = numeric_entities ~spans:hidden line in
+  let autolinks = autolink_spans ~spans:inert_spans line in
+  let link_markup = link_markup_spans links in
+  let html = inline_html_spans ~spans:(inert_spans @ link_markup @ autolinks) line in
+  let hidden = invisible_spans @ link_markup @ autolinks @ html in
+  let opaque_spans =
+    List.filter inert_spans ~f:(fun span ->
+        not
+          (List.mem invisible_spans span ~equal:(fun (a_start, a_stop) (b_start, b_stop) ->
+               a_start = b_start && a_stop = b_stop)))
+  in
+  let entities = markdown_entities ~spans:(hidden @ opaque_spans) line in
   let rendered = Buffer.create (String.length line) in
   let rec go i entities =
     if i >= String.length line then ()
     else
       match entities with
       | (start, stop, value) :: rest when i = start ->
-          Buffer.add_char rendered (if value <= 0x7f then Char.of_int_exn value else ' ');
+          Buffer.add_char rendered value;
           go stop rest
-      | _ when in_any_span hidden i -> go (i + 1) entities
-      | _ ->
-          Buffer.add_char rendered line.[i];
-          go (i + 1) entities
+      | _ -> (
+          match List.find opaque_spans ~f:(fun (start, _) -> start = i) with
+          | Some (_, stop) ->
+              Buffer.add_char rendered opaque_prose;
+              go stop entities
+          | None when in_any_span opaque_spans i -> go (i + 1) entities
+          | None when in_any_span hidden i -> go (i + 1) entities
+          | None ->
+              Buffer.add_char rendered line.[i];
+              go (i + 1) entities)
   in
   go 0 entities;
   Buffer.contents rendered
@@ -1889,7 +2013,10 @@ let check_citations ~file contents =
   in
   let source_lines =
     List.map (lines contents) ~f:(fun (lineno, line) ->
-        (lineno, citation_line ~inert_spans:(spans_at inert lineno) line))
+        let invisible_spans =
+          spans_at scan.comment_ranges lineno @ spans_at scan.fence_ranges lineno
+        in
+        (lineno, citation_line ~inert_spans:(spans_at inert lineno) ~invisible_spans line))
   in
   let report lineno citation =
     finding ~file ~line:lineno ~rule:rule_qualified_citations

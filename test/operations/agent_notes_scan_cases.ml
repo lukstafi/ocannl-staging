@@ -949,17 +949,29 @@ let citation_cases =
     ( "entities that render a hash or work label",
       "&#35;12 and &#80;&#82; 13 remain ambiguous.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "named entities that render a hash or whitespace",
+      "&num;12 and PR&nbsp;13 remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "a named entity that remains an opaque symbol",
+      "PR&copy;12 is not a citation; #13 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
     ( "an ambiguous visible link label",
       "See [PR 12](https://example.test/review).\n",
       [ "qualified-citations @ f.md:1" ] );
     ( "links around only the label or number",
       "[PR](https://example.test/pr) 12 and issue [13](https://example.test/issue).\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "inline HTML around only the label or number",
+      "<strong>PR</strong> 12 and issue <em>13</em> remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "emphasis around a hashless label or number",
       "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "emphasis around a soft-wrapped reference",
       "- Found during **PR**\n  **12**'s review.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "visible code remains an opaque barrier",
+      "PR `buffer` 12 is not a citation; PR<!-- invisible --> 13 is ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]
