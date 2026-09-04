@@ -834,7 +834,10 @@ that they earn a lookup rather than always-loaded space.
   record destructuring maps names to their corresponding value expressions, and a match-bound value
   maps to its scrutinee, so changing the binding pattern cannot hide a quantifier. Mutually recursive
   binding groups are closed over their sibling dependencies; function parameters, conversely,
-  shadow same-named outer helpers while their body is analyzed. The controls pair each accepted
+  shadow same-named outer helpers while their body is analyzed, and later local bindings shadow
+  returned-name references. `Fn.id`/`Fun.id` are transparent to returned-quantifier analysis.
+  Filtered populations retain the filter expression in their identity, so a non-empty view selected
+  by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.
   The literal- and computed-label exemption lists carry the same one-key/one-site contract
   (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while

@@ -50,6 +50,7 @@ refuses a fully applied quantifier compared with true: true
 accepts a fully applied quantifier compared with false: true
 refuses a direct Bool.equal true around a fully applied quantifier: true
 accepts a direct Bool.equal false around a fully applied quantifier: true
+refuses a fully applied quantifier through a transparent Boolean wrapper: true
 refuses a positive intermediate binding: true
 accepts a negated intermediate binding: true
 accepts a piped negated intermediate binding: true
@@ -57,12 +58,15 @@ accepts a directly quantified value piped through not: true
 accepts a positive bound exists: true
 refuses a negated bound exists: true
 accepts a guarded intermediate binding: true
+accepts a quantifier guarded by the same filtered population: true
+refuses a guard on a differently filtered population: true
 conservatively refuses an outer guard across a helper call: true
 refuses a mismatched actual hidden by equal formal names: true
 refuses a shadowed guard identity across a nested alias: true
 refuses a binding nested directly inside a claim argument: true
 accepts a guarded binding nested directly inside a claim argument: true
 accepts a negated binding nested directly inside a claim argument: true
+does not return a quantified binding shadowed by a later local: true
 refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
 refuses a helper that returns a fully applied quantified local binding: true

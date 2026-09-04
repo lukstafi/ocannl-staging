@@ -190,10 +190,14 @@ let rec population_name expr =
   | _ -> (
       match expr.pexp_desc with
       | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> population_name inner
-      | Pexp_apply (callee, arguments)
+      | Pexp_apply (callee, _)
         when is_collection_call callee ~member:"filter"
              || is_collection_call callee ~member:"filter_map" ->
-          List.hd (unlabelled arguments) |> Option.bind ~f:population_name
+          (* A filtered view is its own population. Collapsing it to the source lets a non-empty
+             [filter rows ~f:p1] guard a distinct, empty [filter rows ~f:p2]. Pretty-printing the
+             location-free AST gives repeated spellings the same lexical identity while retaining
+             the predicate that distinguishes derived populations. *)
+          Some (Stdlib.Format.asprintf "%a" Ppxlib.Pprintast.expression expr)
       | _ -> None)
 
 let populations arguments count =
@@ -216,6 +220,11 @@ let bool_literal expr value =
 
 let is_boolean_comparison callee =
   is_name callee "=" || is_name callee "<>" || is_name callee "equal"
+
+let is_transparent_boolean_wrapper callee =
+  match Sources.longident_of callee with
+  | Some ([ "Fn"; "id" ] | [ "Fun"; "id" ] | [ "Stdlib"; "Fun"; "id" ]) -> true
+  | _ -> false
 
 let compared_argument callee left right ~positive =
   if is_boolean_comparison callee then
@@ -351,13 +360,23 @@ let rec returned_quantifiers ?(positive = true) expr =
          || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
          || is_name callee "<>" || is_name callee "equal" || is_name callee "|>" ->
       quantifiers_in ~positive expr
+  | Pexp_apply (callee, arguments) when is_transparent_boolean_wrapper callee -> (
+      match unlabelled arguments with
+      | [ argument ] -> returned_quantifiers ~positive argument
+      | _ -> [])
   | _ -> []
 
 and returned_binding_polarities positive expr =
   match expr.pexp_desc with
   | Pexp_ident { txt = Ppxlib.Longident.Lident name; _ } -> [ (name, positive) ]
   | Pexp_function (_, _, Pfunction_body body) -> returned_binding_polarities positive body
-  | Pexp_let (_, _, body) -> returned_binding_polarities positive body
+  | Pexp_let (_, bindings, body) ->
+      let shadowed =
+        List.concat_map bindings ~f:(fun binding -> List.map (pattern_names binding.pvb_pat) ~f:fst)
+        |> Set.of_list (module String)
+      in
+      returned_binding_polarities positive body
+      |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name))
   | Pexp_sequence (_, result) -> returned_binding_polarities positive result
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
       returned_binding_polarities positive inner
@@ -985,6 +1004,10 @@ let () = Verdict.p "all rows pass" close|ocaml},
       {ocaml|let differs = Bool.equal (List.for_all rows ~f:Fn.id) false
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "refuses a fully applied quantifier through a transparent Boolean wrapper",
+      {ocaml|let ok = Fn.id (List.for_all rows ~f:Fn.id)
+let () = Verdict.p "all rows pass" ok|ocaml},
+      [ "ok" ] );
     ( "refuses a positive intermediate binding",
       {ocaml|let close = List.for_all rows ~f:Fn.id
 let still_close = close
@@ -1017,6 +1040,17 @@ let () = Verdict.p "no row is bad" (not some_bad)|ocaml},
 let guarded = (not (List.is_empty rows)) && close
 let () = Verdict.p "all rows pass" guarded|ocaml},
       [] );
+    ( "accepts a quantifier guarded by the same filtered population",
+      {ocaml|let selected = List.filter rows ~f:eligible
+let close = (not (List.is_empty selected)) && List.for_all selected ~f:Fn.id
+let () = Verdict.p "all selected rows pass" close|ocaml},
+      [] );
+    ( "refuses a guard on a differently filtered population",
+      {ocaml|let close =
+  (not (List.is_empty (List.filter rows ~f:p1)))
+  && List.for_all (List.filter rows ~f:p2) ~f:q
+let () = Verdict.p "all selected rows pass" close|ocaml},
+      [ "close" ] );
     ( "conservatively refuses an outer guard across a helper call",
       {ocaml|let all xs = List.for_all xs ~f:Fn.id
 let checked xs = (not (List.is_empty xs)) && all xs
@@ -1046,6 +1080,13 @@ let () = Verdict.p "all outer rows pass" guarded|ocaml},
     ( "accepts a negated binding nested directly inside a claim argument",
       {ocaml|let () =
   Verdict.p "some row fails" (let ok = List.for_all rows ~f:Fn.id in not ok)|ocaml},
+      [] );
+    ( "does not return a quantified binding shadowed by a later local",
+      {ocaml|let result =
+  let ok = List.for_all rows ~f:Fn.id in
+  let ok = true in
+  ok
+let () = Verdict.p "the constant passes" result|ocaml},
       [] );
     ( "refuses a quantified component of a destructured tuple binding",
       {ocaml|let () =
