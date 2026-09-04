@@ -940,9 +940,21 @@ let citation_cases =
     ( "a numeric autolink fragment",
       "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "a decimal entity and a separate bare citation",
+      "It&#39;s encoded; #12 is still ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "an entity that renders citation whitespace",
+      "PR&#32;12 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "entities that render a hash or work label",
+      "&#35;12 and &#80;&#82; 13 remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "an ambiguous visible link label",
       "See [PR 12](https://example.test/review).\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "links around only the label or number",
+      "[PR](https://example.test/pr) 12 and issue [13](https://example.test/issue).\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "emphasis around a hashless label or number",
       "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );

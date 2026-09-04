@@ -1235,9 +1235,15 @@ let link_destination inside =
       | Some i -> String.prefix inside i
       | None -> inside)
 
-type markdown_link = { text : string; target : string; destination_span : int * int; image : bool }
-(** One parsed Markdown link or image, including the source range occupied by its destination. A
-    fragment in that range is URL syntax, not prose. *)
+type markdown_link = {
+  text : string;
+  target : string;
+  source_span : int * int;
+  text_span : int * int;
+  image : bool;
+}
+(** One parsed Markdown link or image, including its source and rendered text ranges. A citation
+    reader keeps only [text_span]; the rest is Markdown syntax or URL syntax. *)
 
 (** The links and images of a line, outside inline code and HTML comments. *)
 let markdown_link_parts ?spans line =
@@ -1277,7 +1283,16 @@ let markdown_link_parts ?spans line =
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
               let raw_target = String.sub line ~pos:(close + 2) ~len:(rparen - close - 2) in
               let target = link_destination raw_target in
-              let link = { text; target; destination_span = (close + 2, rparen); image } in
+              let source_start = if image then i - 1 else i in
+              let link =
+                {
+                  text;
+                  target;
+                  source_span = (source_start, rparen + 1);
+                  text_span = (i + 1, close);
+                  image;
+                }
+              in
               go (rparen + 1) (link :: acc)
           | _ -> go (i + 1) acc)
       | _ -> go (i + 1) acc
@@ -1294,12 +1309,17 @@ let markdown_links ?spans line =
   markdown_link_parts ?spans line
   |> List.filter_map ~f:(fun link -> if link.image then None else Some (link.text, link.target))
 
-let link_destination_spans ?spans line =
-  List.map (markdown_link_parts ?spans line) ~f:(fun link -> link.destination_span)
+let link_markup_spans links =
+  List.concat_map links ~f:(fun link ->
+      if link.image then [ link.source_span ]
+      else
+        let source_start, source_stop = link.source_span in
+        let text_start, text_stop = link.text_span in
+        [ (source_start, text_start); (text_stop, source_stop) ])
 
 (** CommonMark autolink destinations, excluding their angle brackets. They are visible links, but
     their URL fragments are syntax rather than prose citations. *)
-let autolink_destination_spans ?spans line =
+let autolink_spans ?spans line =
   let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
   let rec go i acc =
@@ -1308,12 +1328,80 @@ let autolink_destination_spans ?spans line =
       match String.index_from line (i + 1) '>' with
       | Some close when not (in_any_span spans close) ->
           let inside = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
-          if autolink_contents inside then go (close + 1) ((i + 1, close) :: acc)
+          if autolink_contents inside then go (close + 1) ((i, close + 1) :: acc)
           else go (i + 1) acc
       | _ -> go (i + 1) acc
     else go (i + 1) acc
   in
   go 0 []
+
+(** Complete decimal and hexadecimal HTML entities, with the character value they render. Decoding
+    rather than merely hiding them matters in both directions: [&#39;] is not issue 39, while
+    [&#35;12], [PR&#32;12], and [&#80;&#82; 12] visibly are work references. *)
+let numeric_entities ?spans line =
+  let spans = match spans with Some s -> s | None -> inert_of_line line in
+  let n = String.length line in
+  let is_hex c =
+    Char.is_digit c
+    || List.mem [ 'a'; 'b'; 'c'; 'd'; 'e'; 'f' ] (Char.lowercase c) ~equal:Char.equal
+  in
+  let rec go i acc =
+    if i + 3 >= n then List.rev acc
+    else if
+      Char.equal line.[i] '&'
+      && Char.equal line.[i + 1] '#'
+      && (not (in_any_span spans i))
+      && not (escaped_at line i)
+    then (
+      let digits, radix, accepts, value_of =
+        if i + 2 < n && (Char.equal line.[i + 2] 'x' || Char.equal line.[i + 2] 'X') then
+          ( i + 3,
+            16,
+            is_hex,
+            fun c ->
+              if Char.is_digit c then Char.to_int c - Char.to_int '0'
+              else Char.to_int (Char.lowercase c) - Char.to_int 'a' + 10 )
+        else (i + 2, 10, Char.is_digit, fun c -> Char.to_int c - Char.to_int '0')
+      in
+      let stop = ref digits in
+      let value = ref 0 in
+      let valid = ref true in
+      while !stop < n && accepts line.[!stop] do
+        let digit = value_of line.[!stop] in
+        if !value > (0x10ffff - digit) / radix then valid := false
+        else value := (!value * radix) + digit;
+        Int.incr stop
+      done;
+      if !valid && !stop > digits && !stop < n && Char.equal line.[!stop] ';' then
+        go (!stop + 1) ((i, !stop + 1, !value) :: acc)
+      else go (i + 1) acc)
+    else go (i + 1) acc
+  in
+  go 0 []
+
+(** The prose a reader sees on a line. Link labels remain; inline-link markup, images, autolinks,
+    code, comments, and fenced content disappear; numeric entities become their rendered ASCII
+    character (or a separating space for a non-ASCII value). Findings need only the physical line,
+    so the citation matcher does not need a source-offset map. *)
+let citation_line ~inert_spans line =
+  let links = markdown_link_parts ~spans:inert_spans line in
+  let hidden = inert_spans @ link_markup_spans links @ autolink_spans ~spans:inert_spans line in
+  let entities = numeric_entities ~spans:hidden line in
+  let rendered = Buffer.create (String.length line) in
+  let rec go i entities =
+    if i >= String.length line then ()
+    else
+      match entities with
+      | (start, stop, value) :: rest when i = start ->
+          Buffer.add_char rendered (if value <= 0x7f then Char.of_int_exn value else ' ');
+          go stop rest
+      | _ when in_any_span hidden i -> go (i + 1) entities
+      | _ ->
+          Buffer.add_char rendered line.[i];
+          go (i + 1) entities
+  in
+  go 0 entities;
+  Buffer.contents rendered
 
 (** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
     the middle line of a multiline code span is not one. *)
@@ -1799,12 +1887,9 @@ let check_citations ~file contents =
   let paragraphs =
     paragraph_lines ~inert ~fences_at:scan.fence_ranges ~comments_at:scan.comment_ranges contents
   in
-  let source_lines = lines contents in
-  let spans_for lineno line =
-    let inert_spans = spans_at inert lineno in
-    inert_spans
-    @ link_destination_spans ~spans:inert_spans line
-    @ autolink_destination_spans ~spans:inert_spans line
+  let source_lines =
+    List.map (lines contents) ~f:(fun (lineno, line) ->
+        (lineno, citation_line ~inert_spans:(spans_at inert lineno) line))
   in
   let report lineno citation =
     finding ~file ~line:lineno ~rule:rule_qualified_citations
@@ -1815,7 +1900,7 @@ let check_citations ~file contents =
   in
   let direct =
     List.concat_map source_lines ~f:(fun (lineno, line) ->
-        let spans = spans_for lineno line in
+        let spans = [] in
         let rec find i acc =
           if i >= String.length line then List.rev acc
           else if in_any_span spans i then find (i + 1) acc
@@ -1826,7 +1911,7 @@ let check_citations ~file contents =
             in
             match reference with
             | Some (start, stop) ->
-                let citation = String.sub line ~pos:start ~len:(stop - start) in
+                let citation = String.sub line ~pos:start ~len:(stop - start) |> normalize in
                 find stop (report lineno citation :: acc)
             | None -> find (i + 1) acc
         in
@@ -1838,13 +1923,14 @@ let check_citations ~file contents =
       ~f:(fun ((lineno, line), (next_lineno, next_line)) ->
         if not (Set.mem paragraphs lineno && Set.mem paragraphs next_lineno) then None
         else
-          let spans = spans_for lineno line in
-          let next_spans = spans_for next_lineno next_line in
+          let spans = [] in
+          let next_spans = [] in
           match (trailing_work_label ~spans line, leading_number ~spans:next_spans next_line) with
           | Some (start, stop), Some (number_start, number_stop) ->
-              let label = String.sub line ~pos:start ~len:(stop - start) in
+              let label = String.sub line ~pos:start ~len:(stop - start) |> normalize in
               let number =
                 String.sub next_line ~pos:number_start ~len:(number_stop - number_start)
+                |> normalize
               in
               Some (report lineno (label ^ " " ^ number))
           | _ -> None)
