@@ -1011,6 +1011,19 @@ class FixtureDigestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_digest.record(digests, [fx], "rog nv")
 
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
+    def test_an_origin_unsafe_for_a_log_filename_is_refused(self):
+        # The same identifiers key sweep log paths. A slash creates an unintended subdirectory;
+        # backslash and colon are not portable to the Windows measurement boxes.
+        fx = self.fixture("lenet.safetensors")
+        for origin in ("rog/nv", r"rog\nv", "rog:nv", ".hidden"):
+            digests = self.dir / f"{origin.encode().hex()}.txt"
+            with self.subTest(origin=origin):
+                with self.assertRaises(ValueError):
+                    fixture_digest.record(digests, [fx], origin)
+                self.assertFalse(digests.exists(), "refused before the file is touched")
+
     def test_a_fixture_name_with_whitespace_is_refused(self):
         # The name-side twin of test_an_origin_with_whitespace_is_refused: `write_digests` emits
         # names unescaped into the whitespace-split format, so `a b.safetensors` would write a

@@ -42,6 +42,7 @@ ones whose fixtures predate any venv you could reconstruct.
 import argparse
 import hashlib
 import platform
+import re
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -138,19 +139,17 @@ def cli_command():
 
 
 def check_origin(origin):
-    """Origins are non-empty, whitespace-free and comma-free.
+    """Origins are portable filename-safe identifiers.
 
-    Whitespace because the digest file is whitespace-split, so a spaced origin writes a line that
-    reads back as a different (or malformed) entry. Commas because AGREEING origins serialize as
-    `a,b` into the single `fixture_origin` field every result row and report section carries
-    (`status`): an origin literally named `minix,rocm` produces a field byte-identical to the one
-    two boxes named `minix` and `rocm` recording the same bytes produce, so no consumer of a
-    published row can tell one box from two. An origin has to name exactly one box.
+    Whitespace is structural in DIGESTS, commas join agreeing origins in reports, and the same IDs
+    key cross-box sweep log filenames. Restricting the alphabet keeps one origin unambiguous in all
+    three places and portable across the Windows and Unix measurement hosts.
     """
-    if not origin or origin.split() != [origin] or "," in origin:
+    if not origin or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", origin) is None:
         raise ValueError(
-            "origin must be a single non-empty word without whitespace or commas (a comma is how "
-            f"the origins of agreeing boxes are joined, so it cannot be inside one), got {origin!r}"
+            "origin must start with an ASCII letter or digit and contain only ASCII letters, "
+            "digits, dot, underscore, or hyphen; it is used in filenames and comma-joined report "
+            f"fields, got {origin!r}"
         )
     return origin
 

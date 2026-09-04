@@ -81,8 +81,8 @@ die() { echo "sweep: $*" >&2; exit 2; }
 # are operator-owned aliases. Require the launcher to bind this physical host to
 # its declared ID before any log or history row can be attributed to it.
 case $LOCAL_BOX in
-  "" | *:* | *,* | *[[:space:]]*)
-    die "set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's single-word measurement-box ID"
+  "" | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*)
+    die "set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's portable measurement-box ID"
     ;;
 esac
 
@@ -304,8 +304,8 @@ fi
 
 # The declaration owns which boxes constitute completeness; UNITS owns how to
 # reach them. Relate the two so adding or renaming a declared box cannot leave a
-# matrix member that no sweep unit can ever satisfy (or an undeclared unit whose
-# evidence the aggregator would reject).
+# matrix member that no sweep unit can ever satisfy. Units absent from a historical
+# target's declaration still contribute backend evidence but not environment evidence.
 if [ ${#known_boxes[@]} -gt 0 ]; then
   scheduled_boxes=()
   for unit in "${UNITS[@]}"; do
@@ -315,10 +315,6 @@ if [ ${#known_boxes[@]} -gt 0 ]; then
   for box in "${known_boxes[@]}"; do
     contains "$box" "${scheduled_boxes[@]}" ||
       die "declared measurement box '$box' has no sweep unit"
-  done
-  for box in "${scheduled_boxes[@]}"; do
-    contains "$box" "${known_boxes[@]}" ||
-      die "sweep unit names undeclared measurement box '$box'"
   done
 fi
 

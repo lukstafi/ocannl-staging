@@ -95,13 +95,7 @@ for ((i = 0; i < ${#run_backends[@]}; i++)); do
   box=${run_boxes[$i]}
   log=${run_logs[$i]}
   contains "$backend" "${known[@]}" || die "run names unknown backend '$backend'"
-  if [ ${#known_boxes[@]} -gt 0 ]; then
-    contains "$box" "${known_boxes[@]}" || die "run names unknown box '$box'"
-  fi
   [ -r "$log" ] || die "cannot read $backend log $log"
-  for ((j = i + 1; j < ${#run_backends[@]}; j++)); do
-    [ "$backend" != "${run_backends[$j]}" ] || die "duplicate run backend '$backend'"
-  done
 done
 
 # macOS's Bash 3.2 treats an empty [@] expansion as unbound under nounset even
@@ -124,23 +118,38 @@ if [ ${#run_backends[@]} -eq 0 ]; then
   exit 0
 fi
 
+completed_backends=()
 missing=()
 for backend in "${known[@]}"; do
-  contains "$backend" "${run_backends[@]}" || missing+=("$backend")
+  if contains "$backend" "${run_backends[@]}"; then
+    completed_backends+=("$backend")
+  else
+    missing+=("$backend")
+  fi
 done
 
 completed_boxes=()
 missing_boxes=()
+environment_logs=()
 if [ ${#known_boxes[@]} -gt 0 ]; then
   for box in "${known_boxes[@]}"; do
-    contains "$box" "${run_boxes[@]}" && completed_boxes+=("$box")
+    if contains "$box" "${run_boxes[@]}"; then
+      completed_boxes+=("$box")
+    else
+      missing_boxes+=("$box")
+    fi
   done
-  for box in "${known_boxes[@]}"; do
-    contains "$box" "${completed_boxes[@]}" || missing_boxes+=("$box")
+  for ((i = 0; i < ${#run_boxes[@]}; i++)); do
+    contains "${run_boxes[$i]}" "${known_boxes[@]}" &&
+      environment_logs+=("${run_logs[$i]}")
   done
 fi
 
-report_line "completed backends: $(join_by_comma "${run_backends[@]}")"
+if [ ${#completed_backends[@]} -eq 0 ]; then
+  report_line "completed backends: <none>"
+else
+  report_line "completed backends: $(join_by_comma "${completed_backends[@]}")"
+fi
 if [ ${#missing[@]} -eq 0 ]; then
   report_line "missing backends: <none>"
 else
@@ -162,7 +171,7 @@ extract_claims() {
       machine++
       if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1
       else if (part[1] == scope) print part[2] "\t" part[3]
-      else if (part[1] != "backend" && part[1] != "environment") malformed = 1
+      else if (part[1] != "backend" && part[1] != "environment" && part[1] != "outside-sweep") malformed = 1
     }
     END { if (malformed || human != machine) exit 3 }
   ' scope="$scope" "$log" | LC_ALL=C sort -u
@@ -170,29 +179,35 @@ extract_claims() {
 
 intersect_claims() {
   local scope=$1 destination=$2
-  extract_claims "$scope" "${run_logs[0]}" >"$destination" ||
-    die "cannot extract compatible skip records from ${run_logs[0]}"
-  for ((i = 1; i < ${#run_logs[@]}; i++)); do
-    extract_claims "$scope" "${run_logs[$i]}" >"$tmp/next-$scope" ||
-      die "cannot extract compatible skip records from ${run_logs[$i]}"
+  shift 2
+  local logs=("$@")
+  extract_claims "$scope" "${logs[0]}" >"$destination" ||
+    die "cannot extract compatible skip records from ${logs[0]}"
+  for ((i = 1; i < ${#logs[@]}; i++)); do
+    extract_claims "$scope" "${logs[$i]}" >"$tmp/next-$scope" ||
+      die "cannot extract compatible skip records from ${logs[$i]}"
     LC_ALL=C comm -12 "$destination" "$tmp/next-$scope" >"$tmp/intersection-$scope" ||
       die "cannot intersect skip records"
     mv "$tmp/intersection-$scope" "$destination" || die "cannot advance skip intersection"
   done
 }
 
-intersect_claims backend "$tmp/common-backend"
-intersect_claims environment "$tmp/common-environment"
+intersect_claims backend "$tmp/common-backend" "${run_logs[@]}"
+if [ ${#environment_logs[@]} -gt 0 ]; then
+  intersect_claims environment "$tmp/common-environment" "${environment_logs[@]}"
+else
+  : >"$tmp/common-environment"
+fi
 
 failed=0
 
-if [ ${#run_backends[@]} -lt 2 ]; then
-  report_line "status: insufficient (${#run_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
+if [ ${#completed_backends[@]} -lt 2 ]; then
+  report_line "status: insufficient (${#completed_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
   report_line "result: NOT AGGREGATED"
 else
   common_count=$(wc -l <"$tmp/common-backend" | tr -d ' ') || die "cannot count common skip records"
   if [ ${#missing[@]} -eq 0 ]; then
-    report_line "status: complete (${#run_backends[@]} of ${#known[@]} known backends completed)"
+    report_line "status: complete (${#completed_backends[@]} of ${#known[@]} known backends completed)"
     if [ "$common_count" -eq 0 ]; then
       report_line "result: PASS -- no claim was skipped on every known backend"
     else
@@ -204,7 +219,7 @@ else
       failed=1
     fi
   else
-    report_line "status: partial (${#run_backends[@]} of ${#known[@]} known backends completed)"
+    report_line "status: partial (${#completed_backends[@]} of ${#known[@]} known backends completed)"
     if [ "$common_count" -eq 0 ]; then
       report_line "result: CLEAR across completed backends -- absent backends remain unknown"
     else
@@ -223,7 +238,11 @@ if [ ${#known_boxes[@]} -eq 0 ]; then
   report_line "environment status: unavailable (target declares no measurement-box matrix)"
   report_line "environment result: NOT AGGREGATED"
 else
-  report_line "completed boxes: $(join_by_comma "${completed_boxes[@]}")"
+  if [ ${#completed_boxes[@]} -eq 0 ]; then
+    report_line "completed boxes: <none>"
+  else
+    report_line "completed boxes: $(join_by_comma "${completed_boxes[@]}")"
+  fi
   if [ ${#missing_boxes[@]} -eq 0 ]; then
     report_line "missing boxes: <none>"
   else
