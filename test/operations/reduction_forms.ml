@@ -198,6 +198,8 @@ let is_loop_rewrite (op : Sched.optop) =
    do not observe each other's placement decisions. It is also what answers the target question
    below, so it is created before the policy is resolved rather than at the first compile. *)
 let base_ctx = lazy (Context.auto ())
+let selected_backend = lazy (Context.backend_name (Lazy.force base_ctx))
+let native_fp16 = lazy (Context.hardware_limits (Lazy.force base_ctx)).native_fp16_arithmetic
 
 (* {1 Which reference the backend's policy selects}
 
@@ -209,18 +211,59 @@ let base_ctx = lazy (Context.auto ())
    independent of anything this run compiled or executed.
 
    The selected backend exposes the exact [C_syntax_config.accum_prec] resolution through
-   [Context.codegen_capabilities]. The test therefore asks the renderer policy directly instead of
-   maintaining four backend-name branches that could drift when a dialect gains a new lowering. *)
+   [Context.codegen_capabilities]. The numerical members select their reference through that query,
+   while one independent policy table below first checks the query itself. That table intentionally
+   matches the canonical backend identity: deriving the oracle from the queried capability would be
+   circular and would silently bless a regression in the capability and renderer together. *)
 
 type residency =
   | Wider  (** The accumulator resides above storage: the whole-nest reference. *)
   | At_storage  (** It resides at storage width: the per-step-narrowed reference. *)
 
 let same_prec a b = String.equal (Ops.prec_string a) (Ops.prec_string b)
+let of_resolved prec resolved = if same_prec resolved prec then At_storage else Wider
+
+let independent_residency prec =
+  let policy = Numerics.get () in
+  let narrow = policy.Numerics.narrow_compute_f32 in
+  let wide_f16 = Numerics.fp16_accum_wide () in
+  match Lazy.force selected_backend with
+  | "cc" | "multidev_cc" -> (
+      match prec with
+      | Ops.Half_prec _ when wide_f16 -> Wider
+      | Ops.Half_prec _
+        when Numerics.equal_fp16_mode policy.fp16_arithmetic Numerics.Fp16_narrow
+             && Lazy.force native_fp16 ->
+          At_storage
+      | _ when Ops.is_narrow_float prec && narrow -> Wider
+      | _ -> At_storage)
+  | "metal" -> (
+      match prec with
+      | Ops.Half_prec _ when wide_f16 -> Wider
+      | Ops.Fp8_prec _ -> Wider
+      | _ -> At_storage)
+  | "cuda" -> (
+      match prec with
+      | Ops.Bfloat16_prec _ -> Wider
+      | Ops.Half_prec _ when wide_f16 -> Wider
+      | Ops.Fp8_prec _ when narrow -> Wider
+      | _ -> At_storage)
+  | "hip" -> (
+      match prec with
+      | Ops.Half_prec _ when wide_f16 -> Wider
+      | Ops.Fp8_prec _ when narrow -> Wider
+      | _ -> At_storage)
+  | other -> failwith ("no independent accumulator policy recorded for backend " ^ other)
 
 let expected_residency prec =
-  let of_resolved resolved = if same_prec resolved prec then At_storage else Wider in
-  of_resolved (codegen_capabilities.Ir.Backend_intf.accum_prec prec)
+  of_resolved prec (codegen_capabilities.Ir.Backend_intf.accum_prec prec)
+
+let () =
+  p_all "the queried accumulator capability matches the independent backend policy table"
+    [ Ops.single; Ops.bfloat16; Ops.half; Ops.fp8 ] ~f:(fun prec ->
+      match (expected_residency prec, independent_residency prec) with
+      | Wider, Wider | At_storage, At_storage -> true
+      | Wider, At_storage | At_storage, Wider -> false)
 
 let residency_name = function
   | Wider -> "wider than storage (whole-nest)"

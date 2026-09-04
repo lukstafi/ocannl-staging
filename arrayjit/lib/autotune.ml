@@ -98,6 +98,8 @@ type report = {
       (** Candidates whose label promises a tensorized pipeline ([spec_expects_mma]) that the search
           put through candidate compile: whole-routine and per-fission-segment seeds, the
           cross-segment recombination composite, and beam-expansion candidates. *)
+  fiss_mma_candidates : int;
+      (** Of [mma_candidates], candidates built from per-fission-segment MMA sketches. *)
   mma_timed : int;
       (** How many of [mma_candidates] survived candidate compile far enough to be TIMED. A search
           with [mma_candidates > 0] and [mma_timed = 0] never measured a tensorized pipeline at all
@@ -160,6 +162,7 @@ let no_search_report ~timing =
     split_reduce_composite_eligible = false;
     split_reduce_composite_timed = false;
     mma_candidates = 0;
+    fiss_mma_candidates = 0;
     mma_timed = 0;
     model_scored = 0;
     model_pruned = 0;
@@ -3004,6 +3007,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
                     split_reduce_composite_eligible = false;
                     split_reduce_composite_timed = false;
                     mma_candidates = 0;
+                    fiss_mma_candidates = 0;
                     mma_timed = 0;
                     model_scored = 0;
                     model_pruned = 0;
@@ -3228,7 +3232,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
         (* Live search state for an honest partial report. Each counter starts at the amount of work
            completed so far and is updated at its ordinary accounting site below. [best_so_far] is
            updated after every successful timing, including midway through seed enumeration. *)
-        let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
+        let n_mma_proposed = ref 0 and n_fiss_mma_proposed = ref 0 and n_mma_timed = ref 0 in
         (* gh-ocannl-546: the crowned candidate's identity, and how close tensorization came to it.
            Labels are keyed by digest rather than carried on the candidate, because the winner is
            picked from the beam pool (and the beam's own expansions time through the same site), so
@@ -3406,6 +3410,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               split_reduce_composite_eligible = !sr_composite_eligible;
               split_reduce_composite_timed = !sr_composite_timed;
               mma_candidates = !n_mma_proposed;
+              fiss_mma_candidates = !n_fiss_mma_proposed;
               mma_timed = !n_mma_timed;
               model_scored = !n_model_scored;
               model_pruned = !n_model_pruned;
@@ -3480,7 +3485,12 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
             else (
               (* Counted only past the pruning gate: [mma_candidates]' contract is candidates put
                  through candidate compilation, and a bound-pruned sketch never was. *)
-              if spec_expects_mma spec then Int.incr n_mma_proposed;
+              if spec_expects_mma spec then begin
+                Int.incr n_mma_proposed;
+                match spec with
+                | Fiss (F_sketch _) -> Int.incr n_fiss_mma_proposed
+                | Whole _ | Fiss (F_preset _ | F_saved _ | F_split _ | F_split_saved _) -> ()
+              end;
               match compile_spec spec with
               | Error (Outcome.Classified classified) ->
                   record_decline declines classified;
@@ -4143,6 +4153,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?timing ?seed_block_sizes ?c
               split_reduce_composite_eligible = !sr_composite_eligible;
               split_reduce_composite_timed = !sr_composite_timed;
               mma_candidates = !n_mma_proposed;
+              fiss_mma_candidates = !n_fiss_mma_proposed;
               mma_timed = !n_mma_timed;
               model_scored = !n_model_scored;
               model_pruned = !n_model_pruned;

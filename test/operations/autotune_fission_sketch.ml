@@ -366,6 +366,10 @@ let () =
   (* [mma_candidates] records the decision after the seeded candidates reached candidate compile; it
      is stronger than reconstructing a per-dialect minimum from the aggregate sketch count. *)
   p "tensorized (mma) sketch instantiations seeded" (mr1.Autotune.mma_candidates > 0);
+  Stdio.eprintf "matmul MMA accounting (not part of the golden): %d total, %d fission-scoped\n"
+    mr1.Autotune.mma_candidates mr1.Autotune.fiss_mma_candidates;
+  p "whole-routine MMA candidates stay out of the fission-scoped counter"
+    (mr1.Autotune.fiss_mma_candidates < mr1.Autotune.mma_candidates);
   p_all2 "tuned matmul matches the serial twin" got_mm1 got_serial ~f:approx;
   p "matmul tune replays exactly after a contention-free search"
     (completed mr1 && Bool.equal (replayed mr2) (mr1.Autotune.timings_contended = 0));
@@ -414,10 +418,10 @@ let () =
   (match !fs_report with
   | Some r ->
       (* The per-segment counter says that fission seeding happened; [mma_candidates] says a
-         tensorized member actually reached candidate compile. Neither depends on dialect
-         identity. *)
+         tensorized member actually reached candidate compile. The MMA counter is fission-scoped: a
+         whole-routine MMA candidate cannot satisfy this assertion. *)
       p "per-segment sketch candidates seeded"
-        (r.Autotune.fiss_sketch_candidates > 0 && r.Autotune.mma_candidates > 0);
+        (r.Autotune.fiss_sketch_candidates > 0 && r.Autotune.fiss_mma_candidates > 0);
       p "per-segment sketch candidates timed" (r.Autotune.fiss_sketch_timed > 0)
   | None ->
       p "per-segment sketch candidates seeded" false;

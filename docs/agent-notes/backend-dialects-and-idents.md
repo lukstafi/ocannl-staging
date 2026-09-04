@@ -204,13 +204,13 @@ configuration.
 | capability | `accum_width.ml` | Resolved bf16 accumulator width; query `codegen_capabilities.accum_prec`. |
 | capability | `float_literal_forms.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
 | capability | `hardware_warp_shuffle.ml` | CPU family uses `Schedule.backend_is_cpu`; resolved bf16 accumulator width uses `codegen_capabilities.accum_prec`. |
-| capability | `reduction_forms.ml` | Resolved accumulator residency for each storage precision; query `codegen_capabilities.accum_prec`. |
+| capability | `reduction_forms.ml` | Resolved accumulator residency for each storage precision; query `codegen_capabilities.accum_prec`, after checking it against the test's independent exact-backend policy table (the table is an oracle, not a capability access path). |
 | capability | `schedule_conv_gemm.ml` | Which typed MMA formats the device advertises; derive the f32/tf32 legs from `hardware_limits.mma_format_tiles`. |
 | capability | `schedule_mma_matmul.ml` | The tf32-only leg; derive it from the advertised tf32 format rather than the CUDA spelling. Other sites in this file are dialect checks below. |
 | capability | `schedule_pad.ml` | Whether the padded extents fit the advertised MMA tile; compare `hardware_limits.mma_tile` with the extents, then check the routine census. |
 | capability | `schedule_pipelined_matmul.ml` | Whether asynchronous staging can render; query `codegen_capabilities.asynchronous_staging_copy`. Its declaration and barrier tokens remain dialect checks below. |
 | capability | `test_fp8_codec_parity.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
-| decision outcome | `autotune_fission_sketch.ml` | Whether tensorized candidates reached candidate compilation; read `Autotune.report.mma_candidates`, not a backend-specific seed-count floor. |
+| decision outcome | `autotune_fission_sketch.ml` | Whether tensorized candidates reached candidate compilation; read `Autotune.report.mma_candidates`, or its `fiss_mma_candidates` subcounter for the per-segment family, not a backend-specific seed-count floor. |
 | decision outcome | `schedule_batched_mma.ml` | Whether each sampled candidate rendered a tensor-core intrinsic; read `Context.routine.mma`. |
 | decision outcome | `schedule_contraction_nest.ml` | Whether each sampled tensorized contraction rendered an intrinsic; read `Context.routine.mma`. Its shared-memory token stays a dialect check below. |
 | dialect identity | `hardware_axes_parity.ml` | The test pins MSL `gid`/`lid`, CUDA/HIP `blockIdx`/`threadIdx`, and C serial-loop spellings. |
