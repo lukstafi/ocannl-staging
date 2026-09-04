@@ -84,6 +84,11 @@ let nvrtc ~cuda_include_options ~arch_options ~with_device_debug =
    caller requests the legacy safe fallback explicitly. *)
 type metal_math_api = Modern_split | Legacy
 
+let metal_math_api ~selector_available =
+  if selector_available "setMathMode:" && selector_available "setMathFloatingPointFunctions:" then
+    Modern_split
+  else Legacy
+
 type metal_option =
   | Language_version_3_1
   | Language_version_3_2

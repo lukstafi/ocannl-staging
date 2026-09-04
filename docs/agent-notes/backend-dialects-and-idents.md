@@ -67,6 +67,11 @@ files.
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- Query optional `MTLCompileOptions` properties on an initialized object, not through the nominal
+  class's `instancesRespondToSelector:`. On macOS 26.6.2 that class-level query returned false for
+  the macOS-15 math properties even though the object accepted them, silently selecting the macOS-14
+  fallback. `Metal_math_api_runtime.get` owns the runtime query shared by backend and probe; the
+  selector-to-branch decision stays injectable in `Compiler_options.metal_math_api` (gh-ocannl-882).
 
 - Emitted float constants go through `C_syntax.c_float_literal`, the single site that turns a
   `Low_level.Constant` into kernel text, and it owes three things at once (gh-ocannl-623): a radix

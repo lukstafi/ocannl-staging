@@ -58,6 +58,7 @@ unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
 sweep=$1
 aggregate=$2
 verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
+rendered_metal_options=$4
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-sweep-test.XXXXXX")
 holder_pid=
 wait_prefix=
@@ -387,10 +388,14 @@ holder_pid=
 # CUDA vector and `compile_metal_source` appends to a Metal failure -- as opposed
 # to the pure policy vectors the context block prints. `fingerprint` is
 # backend-blind, so the local metal unit pins both lines' extraction; producing
-# them is separately covered on their hardware boxes.
+# them is separately covered on their hardware boxes. The Metal vector comes
+# from `Compiler_options.render_metal` through the OCaml driver, while the
+# assertion below stays independent: changing the production rendering now
+# changes this fixture and makes that assertion fail instead of letting two
+# shell literals drift together (gh-ocannl-881).
 nvrtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
-nvrtc options: -I/usr/local/cuda/include --use_fast_math
-metal options: language-version=3.1 math-mode=safe math-functions=fast'
+nvrtc options: -I/usr/local/cuda/include --use_fast_math'
+nvrtc_failure=$nvrtc_failure$'\nmetal options: '"$rendered_metal_options"
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$nvrtc_failure \
   run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"

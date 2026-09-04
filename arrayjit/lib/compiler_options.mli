@@ -31,6 +31,11 @@ val nvrtc :
     the deprecated [fastMathEnabled] fallback (macOS 14). *)
 type metal_math_api = Modern_split | Legacy
 
+val metal_math_api : selector_available:(string -> bool) -> metal_math_api
+(** Select the modern split policy only when both required Objective-C selectors are available. The
+    callback keeps the capability seam injectable without making this pure module depend on the
+    Metal runtime. *)
+
 (** Ordered property writes to apply to an [MTLCompileOptions] object; [Metal_backend] is only the
     interpreter that applies them, so the complete sequence is testable without linking Metal. *)
 type metal_option =

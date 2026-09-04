@@ -1,10 +1,10 @@
 (* Does Metal's compile-time math policy reassociate scalar reductions, preserve a runtime infinity
    mask, and what does the safe policy cost? gh-ocannl-848.
 
-   Standalone on purpose: this links Metal and ctypes, not OCANNL, so it measures the compiler API
-   directly and remains useful if backend lowering changes. The split math properties measured here
-   require macOS 15; the probe checks their selectors and refuses older hosts before using them. Run
-   on a Metal Mac with:
+   Standalone on purpose: this links Metal, ctypes and Arrayjit's pure compiler-option helper, not
+   OCANNL, so it measures the compiler API directly and remains useful if backend lowering changes.
+   The split math properties measured here require macOS 15; the probe checks their selectors and
+   refuses older hosts before using them. Run on a Metal Mac with:
 
    dune exec benchmarks/runners/ocannl/metal_reassoc_probe.exe
 
@@ -109,20 +109,13 @@ let rotate n xs =
   let n = n mod len in
   List.filteri (fun i _ -> i >= n) xs @ List.filteri (fun i _ -> i < n) xs
 
-let split_math_options_available () =
-  let compile_options_class = Runtime.Objc.get_class "MTLCompileOptions" in
-  let has_instance_method selector =
-    Runtime.Objc.msg_send ~self:compile_options_class
-      ~cmd:(Runtime.selector "instancesRespondToSelector:")
-      ~typ:Runtime.Objc.(_SEL @-> returning bool)
-      (Runtime.selector selector)
-  in
-  has_instance_method "setMathMode:" && has_instance_method "setMathFloatingPointFunctions:"
-
 let () =
-  if not (split_math_options_available ()) then (
-    Printf.eprintf "metal_reassoc_probe requires macOS 15+ MTLCompileOptions split math selectors\n";
-    exit 2);
+  (match Metal_math_api_runtime.get () with
+  | Ir.Compiler_options.Modern_split -> ()
+  | Legacy ->
+      Printf.eprintf
+        "metal_reassoc_probe requires macOS 15+ MTLCompileOptions split math selectors\n";
+      exit 2);
   let device = Me.Device.create_system_default () in
   let queue = Me.CommandQueue.on_device device in
   let states = Hashtbl.create 32 in
