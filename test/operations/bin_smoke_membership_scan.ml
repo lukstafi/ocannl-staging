@@ -191,6 +191,18 @@ let rec inferred_action_targets ~subdir = function
       [ resolve_target ~subdir target ]
   | Sexp.List children -> List.concat_map children ~f:(inferred_action_targets ~subdir)
 
+let rec inferred_action_directory_targets ~subdir = function
+  | Sexp.Atom _ -> []
+  | Sexp.List (Sexp.Atom "no-infer" :: _) -> []
+  | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: _) when String.is_substring dir ~substring:"%{"
+    ->
+      []
+  | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: nested) ->
+      List.concat_map nested
+        ~f:(inferred_action_directory_targets ~subdir:(Dune_scan.in_subdir subdir dir))
+  | Sexp.List (Sexp.Atom "mkdir" :: Sexp.Atom target :: _) -> [ resolve_target ~subdir target ]
+  | Sexp.List children -> List.concat_map children ~f:(inferred_action_directory_targets ~subdir)
+
 let produced_targets ~subdir stanza =
   match Dune_scan.head stanza with
   | Some "rule" ->
@@ -216,15 +228,22 @@ let produced_targets ~subdir stanza =
 let produced_directory_targets ~subdir stanza =
   match Dune_scan.head stanza with
   | Some "rule" ->
-      List.concat_map [ "target"; "targets" ] ~f:(fun field ->
-          match Dune_scan.field stanza field with
-          | None -> []
-          | Some targets ->
-              List.filter_map targets ~f:(function
-                | Sexp.List [ Sexp.Atom "dir"; Sexp.Atom target ] ->
-                    Some (resolve_target ~subdir target)
-                | Sexp.Atom _ | Sexp.List _ -> None))
-      |> List.dedup_and_sort ~compare:String.compare
+      let declared =
+        List.concat_map [ "target"; "targets" ] ~f:(fun field ->
+            match Dune_scan.field stanza field with
+            | None -> []
+            | Some targets ->
+                List.filter_map targets ~f:(function
+                  | Sexp.List [ Sexp.Atom "dir"; Sexp.Atom target ] ->
+                      Some (resolve_target ~subdir target)
+                  | Sexp.Atom _ | Sexp.List _ -> None))
+      in
+      let inferred =
+        match Dune_scan.field stanza "action" with
+        | None -> []
+        | Some action -> inferred_action_directory_targets ~subdir (Sexp.List action)
+      in
+      List.rev_append declared inferred |> List.dedup_and_sort ~compare:String.compare
   | _ -> []
 
 let rec contains_head expected = function
@@ -260,6 +279,15 @@ let unresolved_target_chdir_error dune_path =
   Printf.sprintf "%s infers action targets below a chdir whose destination cannot be resolved"
     dune_path
 
+let bin_install_error dune_path =
+  Printf.sprintf "%s installs files into section bin outside public executable declarations"
+    dune_path
+
+let installs_into_bin stanza =
+  match (Dune_scan.head stanza, Dune_scan.field stanza "section") with
+  | Some "install", Some [ Sexp.Atom "bin" ] -> true
+  | _ -> false
+
 let rec action_infers_target = function
   | Sexp.Atom _ -> false
   | Sexp.List (Sexp.Atom "no-infer" :: _) -> false
@@ -291,6 +319,9 @@ let unresolved_target_chdir stanza =
 
 let opaque_smoke_error dune_path command =
   Printf.sprintf "%s: @bin-smoke contains an opaque command: %s" dune_path command
+
+let absolute_smoke_error dune_path path =
+  Printf.sprintf "%s: @bin-smoke runs an absolute executable path: %s" dune_path path
 
 let external_smoke_error dune_path =
   Printf.sprintf "%s: @bin-smoke reaches an external command whose effects are opaque" dune_path
@@ -373,6 +404,8 @@ let smoke_targets_of_stanza ~allow_verified_helper ~dune_path ~subdir stanza =
   Dune_scan.classified_command_sites_with_pins_preserving_multiplicity stanza
   |> List.map ~f:(fun (cwd, _pins, site, command) ->
       match command with
+      | Dune_scan.Runs path when Dune_scan.is_absolute path ->
+          Error (absolute_smoke_error dune_path path)
       | Dune_scan.Runs path ->
           let rec anchored_to_stanza = function
             | Dune_scan.Program (token, _) ->
@@ -463,6 +496,7 @@ let scan dune_files =
                 match Dune_scan.head stanza with
                 | Some "include" -> [ include_error dune_path ]
                 | Some "data_only_dirs" -> [ data_only_dirs_error dune_path ]
+                | Some "install" when installs_into_bin stanza -> [ bin_install_error dune_path ]
                 | _ -> [])
           in
           let inference_errors =
@@ -862,6 +896,18 @@ let directory_target_fixture =
  (deps smoke-output/stamp)
  (action (run %{exe:alpha.exe})))|dune}
 
+let inferred_directory_target_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (mkdir smoke-output))))
+(rule
+ (alias bin-smoke)
+ (deps (universe) smoke-output/stamp)
+ (action (run %{exe:alpha.exe})))|dune}
+
 let directory_target_alias_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -876,6 +922,13 @@ let rewritten_path_fixture =
  (action
   (setenv Path elsewhere
    (run alpha.exe))))|dune}
+
+let absolute_path_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (run /../bin/alpha.exe)))|dune}
 
 let dynamic_run_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
@@ -1010,6 +1063,17 @@ let data_only_alias_fixture =
  (deps (universe))
  (action (run %{exe:../bin/alpha.exe})))|dune}
 
+let bin_install_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(executable (name helper))
+(install
+ (section bin)
+ (files helper.exe))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (run %{exe:alpha.exe})))|dune}
+
 let transitive_path_bin_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -1115,8 +1179,10 @@ let controls_hold () =
   let unresolved_chdir_target = scan_bin_content unresolved_chdir_target_fixture in
   let target_bearing_alias = scan_bin_content target_bearing_alias_fixture in
   let directory_target = scan_bin_content directory_target_fixture in
+  let inferred_directory_target = scan_bin_content inferred_directory_target_fixture in
   let directory_target_alias = scan_bin_content directory_target_alias_fixture in
   let rewritten_path = scan_bin_content rewritten_path_fixture in
+  let absolute_path = scan_bin_content absolute_path_fixture in
   let dynamic_run = scan_bin_content dynamic_run_fixture in
   let directory_path = scan_bin_content directory_path_fixture in
   let directory_binaries = scan_bin_content directory_binaries_fixture in
@@ -1137,6 +1203,7 @@ let controls_hold () =
         ("fixtures/dune", data_only_alias_fixture);
       ]
   in
+  let bin_install = scan_bin_content bin_install_fixture in
   let transitive_path =
     scan
       [ ("bin/dune", transitive_path_bin_fixture); ("test/dune", transitive_path_helper_fixture) ]
@@ -1207,6 +1274,10 @@ let controls_hold () =
   && List.mem directory_target.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke-output/stamp"
        ~equal:String.equal
+  && (not (complete inferred_directory_target))
+  && List.mem inferred_directory_target.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke-output/stamp"
+       ~equal:String.equal
   && (not (complete directory_target_alias))
   && List.mem directory_target_alias.errors
        (cached_alias_error "bin/dune" [ "bin/smoke-output" ])
@@ -1214,6 +1285,10 @@ let controls_hold () =
   && (not (complete rewritten_path))
   && List.mem rewritten_path.errors
        (opaque_smoke_error "bin/dune" "alpha.exe, under `(setenv PATH elsewhere ...)`")
+       ~equal:String.equal
+  && (not (complete absolute_path))
+  && List.mem absolute_path.errors
+       (absolute_smoke_error "bin/dune" "/../bin/alpha.exe")
        ~equal:String.equal
   && (not (complete dynamic_run))
   && List.mem dynamic_run.errors (dynamic_run_error "bin/dune") ~equal:String.equal
@@ -1250,6 +1325,8 @@ let controls_hold () =
        ~equal:String.equal
   && (not (complete data_only))
   && List.mem data_only.errors (data_only_dirs_error "dune") ~equal:String.equal
+  && (not (complete bin_install))
+  && List.mem bin_install.errors (bin_install_error "bin/dune") ~equal:String.equal
   && (not (complete transitive_path))
   && List.mem transitive_path.errors (directory_path_error "test/dune") ~equal:String.equal
   && (not (complete implicit_alias))

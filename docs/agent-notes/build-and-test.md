@@ -1266,15 +1266,17 @@ that they earn a lookup rather than always-loaded space.
   directory target) or
   action-inferred generated-target dependencies (including dependency pforms in fields or actions,
   pforms embedded in larger dependency/action atoms, literal file-input action positions, and
-  output actions under a literal `chdir`), target-bearing alias rules, an unresolved `chdir` around
-  inferred output targets, or unexpanded top-level `include` stanzas. A bare executable name
+  output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
+  rules, an unresolved `chdir` around inferred output targets, an explicit `install` into section
+  `bin`, or unexpanded top-level `include` stanzas. A bare executable name
   under an action-local PATH rewrite, a directory-level PATH rewrite (under any case spelling), or
   an `env` stanza's `binaries` mapping is opaque too, including in transitively reached aliases. A
   directory-level override follows Dune's scope: it reaches descendants of its own `(subdir …)`
   placement, not the parent or a sibling. Paths expanded from `%{exe:…}`, `%{dep:…}`, and named
   dependency pforms remain anchored to the stanza when the process runs under `chdir`; literal
   program paths remain relative to the changed working directory. Each construct needs deliberate
-  scanner support before it can participate in this static guarantee.
+  scanner support before it can participate in this static guarantee. Absolute executable paths are
+  refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
