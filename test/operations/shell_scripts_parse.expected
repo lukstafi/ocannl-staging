@@ -34,6 +34,8 @@ errexit-negation fixture statement-position ! grep is classified as specified: t
 errexit-negation fixture combined errexit option is classified as specified: true
 errexit-negation fixture named errexit option is classified as specified: true
 errexit-negation fixture punctuated named errexit option is classified as specified: true
+errexit-negation fixture quoted named errexit option is classified as specified: true
+errexit-negation fixture quoted short errexit option is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true
 errexit-negation fixture until ! command is classified as specified: true
@@ -47,6 +49,8 @@ errexit-negation fixture quoted AND/OR text is classified as specified: true
 errexit-negation fixture nested AND/OR group is classified as specified: true
 errexit-negation fixture nested AND/OR substitution is classified as specified: true
 errexit-negation fixture nested AND/OR backtick substitution is classified as specified: true
+errexit-negation fixture nested quotes in double-quoted substitution is classified as specified: true
+errexit-negation fixture ANSI-C quoted AND/OR text is classified as specified: true
 errexit-negation fixture outer AND/OR after nested group is classified as specified: true
 the statement-position ! grep fixture reaches the absent()-style refusal: true
 .github/actions/pin-revisions/resolve.sh parses: true

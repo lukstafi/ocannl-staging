@@ -657,23 +657,91 @@ module Errexit_negation = struct
   let words line =
     String.split_on_chars line ~on:[ ' '; '\t' ] |> List.filter ~f:(Fn.non String.is_empty)
 
-  let is_named_errexit word =
-    String.equal word "errexit"
-    || Option.value_map (String.chop_prefix word ~prefix:"errexit") ~default:false ~f:(fun suffix ->
-        (not (String.is_empty suffix)) && List.mem [ ';'; '&'; '|' ] suffix.[0] ~equal:Char.equal)
+  let literal_shell_word word =
+    let rec control_position index =
+      if index >= String.length word then index
+      else if List.mem [ ';'; '&'; '|' ] word.[index] ~equal:Char.equal then index
+      else control_position (index + 1)
+    in
+    let word = String.prefix word (control_position 0) in
+    let length = String.length word in
+    if
+      length >= 2
+      && ((Char.equal word.[0] '\'' && Char.equal word.[length - 1] '\'')
+         || (Char.equal word.[0] '"' && Char.equal word.[length - 1] '"'))
+    then String.sub word ~pos:1 ~len:(length - 2)
+    else word
+
+  let is_named_errexit word = String.equal (literal_shell_word word) "errexit"
 
   let rec options_enable_errexit = function
     | [] | "--" :: _ -> false
-    | "-o" :: name :: rest -> is_named_errexit name || options_enable_errexit rest
-    | option :: rest
-      when String.is_prefix option ~prefix:"-" && not (String.is_prefix option ~prefix:"--") ->
-        String.contains option 'e' || options_enable_errexit rest
-    | _ -> false
+    | option :: rest ->
+        let option = literal_shell_word option in
+        if String.equal option "-o" then
+          match rest with
+          | name :: rest -> is_named_errexit name || options_enable_errexit rest
+          | [] -> false
+        else if String.is_prefix option ~prefix:"-" && not (String.is_prefix option ~prefix:"--")
+        then String.contains option 'e' || options_enable_errexit rest
+        else false
 
   let line_enables_errexit line =
     match words (String.strip line) with
     | "set" :: options -> options_enable_errexit options
     | _ -> false
+
+  let starts_at text ~pos token =
+    let token_length = String.length token in
+    pos + token_length <= String.length text
+    && String.equal (String.sub text ~pos ~len:token_length) token
+
+  (* Skip one [$()] body while preserving its recursive quote scopes. The caller only needs the byte
+     after the matching close: every list operator inside the substitution is nested by definition
+     and cannot consume the outer negated pipeline. *)
+  let rec skip_command_substitution line index =
+    let rec loop index quote escaped depth =
+      if index >= String.length line then index
+      else
+        let character = line.[index] in
+        match quote with
+        | `Single ->
+            if Char.equal character '\'' then loop (index + 1) `None false depth
+            else loop (index + 1) `Single false depth
+        | `Ansi_c ->
+            if escaped then loop (index + 1) `Ansi_c false depth
+            else if Char.equal character '\\' then loop (index + 1) `Ansi_c true depth
+            else if Char.equal character '\'' then loop (index + 1) `None false depth
+            else loop (index + 1) `Ansi_c false depth
+        | `Double ->
+            if escaped then loop (index + 1) `Double false depth
+            else if Char.equal character '\\' then loop (index + 1) `Double true depth
+            else if starts_at line ~pos:index "$(" then
+              loop (skip_command_substitution line (index + 2)) `Double false depth
+            else if Char.equal character '`' then loop (index + 1) `Backtick_double false depth
+            else if Char.equal character '"' then loop (index + 1) `None false depth
+            else loop (index + 1) `Double false depth
+        | (`Backtick_none | `Backtick_double) as backtick ->
+            if escaped then loop (index + 1) backtick false depth
+            else if Char.equal character '\\' then loop (index + 1) backtick true depth
+            else if Char.equal character '`' then
+              loop (index + 1)
+                (match backtick with `Backtick_double -> `Double | `Backtick_none -> `None)
+                false depth
+            else loop (index + 1) backtick false depth
+        | `None ->
+            if escaped then loop (index + 1) `None false depth
+            else if Char.equal character '\\' then loop (index + 1) `None true depth
+            else if starts_at line ~pos:index "$'" then loop (index + 2) `Ansi_c false depth
+            else if Char.equal character '\'' then loop (index + 1) `Single false depth
+            else if Char.equal character '"' then loop (index + 1) `Double false depth
+            else if Char.equal character '`' then loop (index + 1) `Backtick_none false depth
+            else if Char.equal character '(' then loop (index + 1) `None false (depth + 1)
+            else if Char.equal character ')' then
+              if depth = 1 then index + 1 else loop (index + 1) `None false (depth - 1)
+            else loop (index + 1) `None false depth
+    in
+    loop index `None false 1
 
   (* A TOP-LEVEL [&&] or [||] consumes the negated pipeline's value. Ignore spellings inside quotes
      and nested shell constructs: in [! printf '%s\n' 'x || y'] the operator is data, and in [!
@@ -687,9 +755,16 @@ module Errexit_negation = struct
         | `Single ->
             if Char.equal character '\'' then loop (index + 1) `None false nesting
             else loop (index + 1) `Single false nesting
+        | `Ansi_c ->
+            if escaped then loop (index + 1) `Ansi_c false nesting
+            else if Char.equal character '\\' then loop (index + 1) `Ansi_c true nesting
+            else if Char.equal character '\'' then loop (index + 1) `None false nesting
+            else loop (index + 1) `Ansi_c false nesting
         | `Double ->
             if escaped then loop (index + 1) `Double false nesting
             else if Char.equal character '\\' then loop (index + 1) `Double true nesting
+            else if starts_at line ~pos:index "$(" then
+              loop (skip_command_substitution line (index + 2)) `Double false nesting
             else if Char.equal character '"' then loop (index + 1) `None false nesting
             else loop (index + 1) `Double false nesting
         | `Backtick ->
@@ -701,6 +776,7 @@ module Errexit_negation = struct
             if escaped then loop (index + 1) `None false nesting
             else if Char.equal character '\\' then loop (index + 1) `None true nesting
             else if Char.equal character '#' then false
+            else if starts_at line ~pos:index "$'" then loop (index + 2) `Ansi_c false nesting
             else if Char.equal character '\'' then loop (index + 1) `Single false nesting
             else if Char.equal character '"' then loop (index + 1) `Double false nesting
             else if Char.equal character '`' then loop (index + 1) `Backtick false nesting
@@ -746,6 +822,8 @@ module Errexit_negation = struct
       ("combined errexit option", "set -euo pipefail\n! grep -q missing output\n", [ 2 ]);
       ("named errexit option", "set -o errexit\n! grep -q missing output\n", [ 2 ]);
       ("punctuated named errexit option", "set -o errexit;\n! grep -q missing output\n", [ 2 ]);
+      ("quoted named errexit option", "set -o 'errexit'\n! grep -q missing output\n", [ 2 ]);
+      ("quoted short errexit option", "set \"-e\"\n! grep -q missing output\n", [ 2 ]);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);
@@ -759,6 +837,10 @@ module Errexit_negation = struct
       ("nested AND/OR group", "set -e\n! (probe || recover)\n", [ 2 ]);
       ("nested AND/OR substitution", "set -e\n! cmd $(probe || recover)\n", [ 2 ]);
       ("nested AND/OR backtick substitution", "set -e\n! cmd `probe || recover`\n", [ 2 ]);
+      ( "nested quotes in double-quoted substitution",
+        "set -e\n! true \"$(printf \"%s\" \"x || y\")\"\n",
+        [ 2 ] );
+      ("ANSI-C quoted AND/OR text", "set -e\n! true $'can\\'t || consume'\n", [ 2 ]);
       ("outer AND/OR after nested group", "set -e\n! (probe || recover) || fallback\n", []);
     ]
 
