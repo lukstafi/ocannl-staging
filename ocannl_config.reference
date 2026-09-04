@@ -416,8 +416,9 @@
 # The ~25 ms top-up budget accumulates PER-LAUNCH samples in both modes, not queued-batch wall. A
 # fast queued candidate can therefore take all 64 timed batches (about 640 ms when calibration hits
 # the 10 ms target). On CUDA/HIP, before those, one provisional, up to four validating batch probes,
-# and a final confirmation take twelve samples each, so six near-target probes cost about another
-# 720 ms per candidate. cc/Metal retain the historical single-estimate calibration. These are
+# and a final confirmation take twelve samples each; one confirmation outlier over 2x its supported
+# base is retried once, so seven near-target probes can cost about another 840 ms per candidate.
+# cc/Metal retain the historical single-estimate calibration. These are
 # workload-dependent costs, not a shared wall-time ceiling; the exact worst-case dispatch-count
 # bounds are documented on Autotune.time_routine.
 # The objective is part of the schedule disk-cache key (the "timing" component), so entries do not

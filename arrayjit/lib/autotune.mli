@@ -1217,8 +1217,9 @@ val time_routine :
     the minimum of twelve runs: unlike ranked timing, they only choose scale and are already
     milliseconds long. Up to four further probes validate the depth. The first target-sized batch is
     confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained only when the
-    pair's inferred fixed component is below the target. An unresolved single/probe pair retries at
-    double depth, and the next affine fit uses the two batch observations so an inflated single
+    pair's inferred fixed component is below the target. A confirmation over 2x its supported base
+    is retried once before an unresolved pair selects the cap. An unresolved single/probe pair
+    retries at double depth, and the next affine fit uses the two batch observations so an inflated single
     window cannot force the cap. If the bounded loop first reaches the target on its last probe, the
     interpolated target depth is still sampled and checked against the measured overshoot. A
     non-monotone confirmation scales from the deeper measured batch, never the earlier suspect
@@ -1240,9 +1241,9 @@ val time_routine :
     routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
     afterwards. [Queued] raises how many such dispatches happen. For [repeats <= 64], the maxima are
     65 under [Isolated] and, under [Queued], 278593 on CUDA/HIP or 12865 on cc/Metal. The CUDA/HIP
-    bound includes warmup, 64 single-launch calibration runs, at most six twelve-sample calibration
-    probes and 64 timed batches at the cap; cc/Metal have no batch probes. In general the queued
-    bounds are [65 + 2048 * (72 + max 64 repeats)] on CUDA/HIP and
+    bound includes warmup, 64 single-launch calibration runs, at most seven twelve-sample
+    calibration probes and 64 timed batches at the cap; cc/Metal have no batch probes. In general the queued
+    bounds are [65 + 2048 * (84 + max 64 repeats)] on CUDA/HIP and
     [65 + 200 * max 64 repeats] on cc/Metal. Thus a routine whose values grow per run reaches larger
     ones. That is a fact about the scratch buffers, not about the measurement: the cap bounds each
     in-memory queue while the ~25 ms budget accumulates per-launch samples, and a candidate's time

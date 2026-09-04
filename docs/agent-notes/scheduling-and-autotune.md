@@ -635,8 +635,10 @@ files.
   only when the pair's inferred fixed component is below the target and no more than one
   quarter-target negative (the noise tolerance matching that confirmation step), so one fixed stall
   or a physically invalid fit cannot select a shallow final depth while ordinary submit/sync
-  overhead remains in the wall model. An unresolved
-  first pair retries at double depth, and the next fit uses the two batch observations so an
+  overhead remains in the wall model. A confirmation more than 2x its supported target-sized base
+  is itself treated as a contention outlier and retried once before an unresolved pair selects the
+  cap, so one transient stall cannot inflate both the timed batch and its later refusal threshold.
+  An unresolved first pair retries at double depth, and the next fit uses the two batch observations so an
   inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
   the target, the interpolated target depth is still sampled and checked against the measured
   overshoot. A non-monotone confirmation scales from the deeper measured batch instead of returning

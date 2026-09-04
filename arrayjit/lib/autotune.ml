@@ -360,10 +360,10 @@ let search_measurements_cacheable ~nothing_timed ~timings_contended =
    multiplying cc's timed batch did not serve this GPU dispatch-scale correction. A genuinely slow
    routine gets depth 1 and is then measured exactly as [Isolated] measures it; later target-sized
    batch probes require a depth-separated marginal confirmation, so one stall-inflated window does
-   not silently take that same path. The 10 ms target is also the Metal long-command-buffer safety bound
-   established by gh-ocannl-828: on M4 Max / macOS 26.6.2, the standalone SharedEvent chain changed
-   scheduling at about 1.2 s per kernel, while [queued_batch_depth] is already 1 at 10 ms -- about
-   120x below that regime. See [benchmarks/runners/ocannl/metal_queue_probe.ml] for the
+   not silently take that same path. The 10 ms target is also the Metal long-command-buffer safety
+   bound established by gh-ocannl-828: on M4 Max / macOS 26.6.2, the standalone SharedEvent chain
+   changed scheduling at about 1.2 s per kernel, while [queued_batch_depth] is already 1 at 10 ms --
+   about 120x below that regime. See [benchmarks/runners/ocannl/metal_queue_probe.ml] for the
    raw-queue/event-chain discriminator. *)
 let queued_batch_ms = 10.
 let max_queue_depth = 2048
@@ -595,7 +595,7 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                 refine_queued_batch_depth_with_cap ~max_depth:queue_depth_cap
                   ~single_ms:single_estimate.ms ~probe_depth ~probe_ms:probe.ms
               in
-              let confirm_or_scale calibration_dispatches depth wall_ms =
+              let rec confirm_or_scale ?(retry_stall = true) calibration_dispatches depth wall_ms =
                 if depth = queue_depth_cap then
                   (* The cap itself cannot provide a depth-separated confirmation. Its directly
                      measured wall is still the best scale evidence; repeating the same depth only
@@ -618,7 +618,14 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                   else if
                     Float.is_nan confirmed_wall_ms
                     && Float.(confirmation.ms >= queued_batch_ms && confirmation.ms >= wall_ms)
-                  then (calibration_dispatches, queue_depth_cap, Float.nan)
+                  then
+                    if retry_stall && Float.(confirmation.ms > wall_ms * contention_ratio) then
+                      (* This confirmation is itself a contention outlier against the supported
+                         target-sized base. Retry the same depth once: jumping straight to the cap
+                         would inflate the timed batch and its 2x refusal threshold precisely when
+                         calibration observed the stall that rule is meant to reject. *)
+                      confirm_or_scale ~retry_stall:false calibration_dispatches depth wall_ms
+                    else (calibration_dispatches, queue_depth_cap, Float.nan)
                   else
                     let depth, wall_ms =
                       depth_from_batch_wall_with_cap ~max_depth:queue_depth_cap
