@@ -759,10 +759,11 @@ let config_token_command_line_prefixes =
 
 (** Classify one observed token without consulting {!known_config_keys}. Command-line and
     environment assignments are always recognized; [documentation:true] additionally admits the
-    narrowed bare-assignment grammar documented on {!config_token_shape}. A command-line token's key
-    is the maximal name before [=], normalized to underscores. Alternate value separators make
-    shorter readings inherently ambiguous without a key registry; consumers that need one of those
-    readings keep an explicit site judgment. *)
+    narrowed bare-assignment grammar documented on {!config_token_shape}. A command-line token must
+    use one uniform case and one separator style, as {!cmdline_var_names} does; its key is the
+    maximal name before [=], normalized to underscores. Alternate value separators make shorter
+    readings inherently ambiguous without a key registry; consumers that need one of those readings
+    keep an explicit site judgment. *)
 let parse_config_token ?(documentation = false) token =
   let config_token_name_char c =
     Char.is_alpha c || Char.is_digit c || Char.equal c '_' || Char.equal c '-'
@@ -771,7 +772,19 @@ let parse_config_token ?(documentation = false) token =
     let name = Option.value_map (String.lsplit2 token ~on:'=') ~default:token ~f:fst in
     List.find_map config_token_command_line_prefixes ~f:(fun prefix ->
         Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
-            if String.is_empty raw_key || not (String.for_all raw_key ~f:config_token_name_char)
+            let uppercase = String.equal prefix (String.uppercase prefix) in
+            let uniform_case =
+              String.for_all raw_key ~f:(fun c ->
+                  (not (Char.is_alpha c))
+                  || if uppercase then Char.is_uppercase c else Char.is_lowercase c)
+            in
+            let uniform_separator =
+              not (String.contains raw_key '_' && String.contains raw_key '-')
+            in
+            if
+              String.is_empty raw_key
+              || (not (String.for_all raw_key ~f:config_token_name_char))
+              || (not uniform_case) || not uniform_separator
             then None
             else
               let key = String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_' in

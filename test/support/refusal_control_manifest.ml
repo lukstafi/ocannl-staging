@@ -151,6 +151,9 @@ let raw_entries =
         "[scanner-refusal:7c5c4cc0bd161e76fe99e9983d2db70f] command-line value occurrence";
         "[scanner-refusal:e592c4ffcb391edf546553bd50accc7a] runtime value separator";
         "[scanner-refusal:cb1b0916f3d396c6fb100a6cf2ba4a2e] scanner command-line prefix";
+        "[scanner-refusal:319310c8c133f76c009e4954fa7fc7de] runtime-generated command-line \
+         spellings";
+        "[scanner-refusal:1a89fa77e81d61087dc6e598948877ea] runtime-rejected mixed command-line";
         "[scanner-refusal:7371fdf36816a0013ba82ee26c16beea] documentation config tokens";
         "[scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment";
         "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";

@@ -132,6 +132,8 @@ config_usage_scan.ml: [scanner-refusal:8c14e661ffe9cdf859b5111394d557a8] prefix-
 config_usage_scan.ml: [scanner-refusal:7c5c4cc0bd161e76fe99e9983d2db70f] command-line value occurrence (direct failure) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:e592c4ffcb391edf546553bd50accc7a] runtime value separator (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:cb1b0916f3d396c6fb100a6cf2ba4a2e] scanner command-line prefix (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
+config_usage_scan.ml: [scanner-refusal:319310c8c133f76c009e4954fa7fc7de] runtime-generated command-line spellings (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
+config_usage_scan.ml: [scanner-refusal:1a89fa77e81d61087dc6e598948877ea] runtime-rejected mixed command-line (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:7371fdf36816a0013ba82ee26c16beea] documentation config tokens (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true

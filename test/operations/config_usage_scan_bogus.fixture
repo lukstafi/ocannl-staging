@@ -24,4 +24,4 @@ The multi-word value must not hide its key: `definitely_not_a_multiword_config_k
 The lowercase snake-case config spelling must be refused: `definitely_not_a_mixed_case_key=cc`
 The prefixed value must not hide the outer key: `definitely_not_an_outer_config_key=$OCANNL_BACKEND`
 The surviving backend prefix must not hide a removed longer key: --ocannl_backend_variant=true
-Nor may a no-equals value separator hide it: --ocannl_backend_variant-cuda
+Nor may a no-equals value separator hide it: --ocannl-backend-variant-cuda

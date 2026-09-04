@@ -788,6 +788,19 @@ let refusal_control grammar_fixture =
         else sentinel
       in
       List.mem (Utils.cmdline_var_prefixes sentinel) (prefix ^ sentinel ^ "=") ~equal:String.equal);
+  Verdict.p_all ~min:4 "runtime-generated command-line spellings remain config tokens"
+    [
+      "--ocannl_print_decimals_precision=7";
+      "--ocannl-print-decimals-precision=7";
+      "--OCANNL_PRINT_DECIMALS_PRECISION=7";
+      "--OCANNL-PRINT-DECIMALS-PRECISION=7";
+    ] ~f:(fun spelling -> Option.is_some (Utils.parse_config_token spelling));
+  Verdict.p_none "runtime-rejected mixed command-line spellings are not config tokens"
+    [
+      "--ocannl-print_decimals-precision=7";
+      "--ocannl_Print_Decimals_Precision=7";
+      "--OCANNL_print_decimals_precision=7";
+    ] ~f:(fun spelling -> Option.is_some (Utils.parse_config_token spelling));
   let grammar_occurrences =
     markdown_occurrences ~allow_bare:true
       ~path:(Stdlib.Filename.basename grammar_fixture)

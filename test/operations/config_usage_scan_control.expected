@@ -8,7 +8,7 @@ FAIL: config_usage_scan_bogus.fixture:11: command-line flag `--ocannl_definitely
 FAIL: config_usage_scan_bogus.fixture:15: command-line flag `--ocannl-definitely-not-a-third-config-key=true` names `definitely_not_a_third_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:19: command-line flag `--ocannl-definitely-not-a-fifth-config-key=true` names `definitely_not_a_fifth_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:26: command-line flag `--ocannl_backend_variant=true` names `backend_variant`, absent from Utils.known_config_keys
-FAIL: config_usage_scan_bogus.fixture:27: command-line flag `--ocannl_backend_variant-cuda` names `backend_variant_cuda`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:27: command-line flag `--ocannl-backend-variant-cuda` names `backend_variant_cuda`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:2: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:5: environment assignment `OCANNL_DEFINITELY_NOT_A_CONFIG_KEY=` names `definitely_not_a_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:14: environment assignment `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=` names `definitely_not_a_second_config_key`, absent from Utils.known_config_keys
