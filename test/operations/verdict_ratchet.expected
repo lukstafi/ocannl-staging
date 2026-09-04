@@ -49,6 +49,9 @@ refuses a quantified binding passed through a Verdict wrapper: true
 refuses a direct quantifier passed through a Verdict wrapper: true
 accepts a guarded direct quantifier passed through a Verdict wrapper: true
 accepts a negated direct quantifier passed through a Verdict wrapper: true
+refuses a direct exists negated by a labeled Verdict wrapper parameter: true
+refuses a bound exists negated by a labeled Verdict wrapper parameter: true
+accepts a positive exists passed through a labeled Verdict wrapper parameter: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -87,6 +90,8 @@ accepts an inverted bound quantifier returned through a match guard: true
 refuses a direct quantifier returned through a match guard: true
 accepts an inverted direct quantifier returned through a match guard: true
 refuses a bound quantifier returned from a protected try body: true
+refuses a direct quantifier returned through a try-case guard: true
+accepts an inverted direct quantifier returned through a try-case guard: true
 refuses a quantified helper reached through a mutually recursive sibling: true
 does not resolve an outer quantified binding shadowed by a function parameter: true
 does not resolve an outer binding shadowed by a match pattern: true

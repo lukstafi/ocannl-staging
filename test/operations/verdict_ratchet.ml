@@ -67,6 +67,12 @@ let quantifier_name = function
 type quantifier = { kind : quantifier_kind; populations : Set.M(String).t }
 type claim_kind = P | Pf | Pass_fail | Claim | Claimf
 
+type wrapper_slot = {
+  label : string option;
+  unlabelled_index : int option;
+  positive : bool;
+}
+
 (* A definition's [position] is its absolute character offset, which no two bindings share; [line]
    and [column] are for saying where it is. Identity has to be the offset: `let refused = … in`
    twice in one expression, or two local scopes written on one line, are two bodies a line number
@@ -83,7 +89,7 @@ type helper_binding = {
   unguarded : quantifier list;
   negated_unguarded : quantifier list;
   claim_kind : claim_kind option;
-  claim_wrapper : bool;
+  claim_wrapper : wrapper_slot list option;
 }
 
 and helper_dependency = {
@@ -400,7 +406,15 @@ let rec returned_quantifiers ?(positive = true) expr =
                 |> List.concat)))
   | Pexp_try (body, cases) ->
       returned_quantifiers ~positive body
-      @ List.concat_map cases ~f:(fun case -> returned_quantifiers ~positive case.pc_rhs)
+      @ List.concat_map cases ~f:(fun case ->
+          let guard_quantifiers =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                let guard_positive =
+                  if bool_literal case.pc_rhs false then not positive else positive
+                in
+                quantifiers_in ~positive:guard_positive guard)
+          in
+          guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
   | Pexp_apply (callee, _)
     when is_collection_call callee ~member:"for_all"
          || is_collection_call callee ~member:"for_all2_exn"
@@ -578,7 +592,7 @@ let opened_claim_bindings site =
         unguarded = [];
         negated_unguarded = [];
         claim_kind = Some claim_kind;
-        claim_wrapper = false;
+        claim_wrapper = None;
       })
 
 let open_claims environment declaration =
@@ -605,6 +619,78 @@ let claim_target environment callee =
           Option.map binding.claim_kind ~f:(fun kind -> (kind, Some binding)))
   | Some path -> Option.map (claim_kind_of_path path) ~f:(fun kind -> (kind, None))
   | None -> None
+
+let argument_at_slot arguments slot =
+  match (slot.label, slot.unlabelled_index) with
+  | Some name, _ ->
+      List.find_map arguments ~f:(fun (label, argument) ->
+          match label with
+          | Asttypes.Labelled found | Optional found when String.equal found name -> Some argument
+          | _ -> None)
+  | None, Some index -> List.nth (unlabelled arguments) index
+  | None, None -> None
+
+let claim_arguments target arguments =
+  match target with
+  | _, Some { claim_wrapper = Some slots; _ } ->
+      List.filter_map slots ~f:(fun slot ->
+          Option.map (argument_at_slot arguments slot) ~f:(fun argument ->
+              (argument, slot.positive)))
+  | _ ->
+      Option.to_list (List.last (unlabelled arguments))
+      |> List.map ~f:(fun argument -> (argument, true))
+
+let wrapper_signature environment expression =
+  let rec parameters_and_body parameters expression =
+    match expression.pexp_desc with
+    | Pexp_function (more, _, Pfunction_body body) ->
+        parameters_and_body (parameters @ more) body
+    | _ -> (parameters, expression)
+  in
+  let parameters, body = parameters_and_body [] expression in
+  match body.pexp_desc with
+  | Pexp_apply (callee, arguments) -> (
+      match claim_target environment callee with
+      | None -> None
+      | Some ((kind, _) as target) ->
+          let claimed_names =
+            claim_arguments target arguments
+            |> List.concat_map ~f:(fun (argument, positive) ->
+                returned_binding_polarities positive argument)
+          in
+          let _, slots =
+            List.fold parameters ~init:(0, []) ~f:(fun (unlabelled_index, slots) parameter ->
+                match parameter.pparam_desc with
+                | Pparam_newtype _ -> (unlabelled_index, slots)
+                | Pparam_val (label, _, pattern) ->
+                    let names = pattern_names pattern |> List.map ~f:fst in
+                    let matches =
+                      List.filter_map claimed_names ~f:(fun (name, positive) ->
+                          if List.mem names name ~equal:String.equal then Some positive else None)
+                    in
+                    let slot =
+                      match label with
+                      | Asttypes.Nolabel ->
+                          {
+                            label = None;
+                            unlabelled_index = Some unlabelled_index;
+                            positive = true;
+                          }
+                      | Labelled name | Optional name ->
+                          { label = Some name; unlabelled_index = None; positive = true }
+                    in
+                    let slots =
+                      List.rev_append
+                        (List.map matches ~f:(fun positive -> { slot with positive }))
+                        slots
+                    in
+                    let unlabelled_index =
+                      match label with Nolabel -> unlabelled_index + 1 | _ -> unlabelled_index
+                    in
+                    (unlabelled_index, slots))
+          in
+          Some (Some kind, Some (List.rev slots)))
+  | _ -> None
 
 let rec make_bindings environment value =
   binding_parts value.pvb_pat value.pvb_expr |> List.map ~f:(make_binding_part environment)
@@ -634,16 +720,10 @@ and make_binding_part ?optional_label environment part =
     match Sources.longident_of part.expression with
     | Some [ alias ] ->
         lookup environment alias
-        |> Option.value_map ~default:(None, false) ~f:(fun binding ->
+        |> Option.value_map ~default:(None, None) ~f:(fun binding ->
             (binding.claim_kind, binding.claim_wrapper))
-    | Some path -> (claim_kind_of_path path, false)
-    | None -> (
-        match (function_body part.expression).pexp_desc with
-        | Pexp_apply (callee, _) -> (
-            match claim_target environment callee with
-            | Some (kind, _) -> (Some kind, true)
-            | None -> (None, false))
-        | _ -> (None, false))
+    | Some path -> (claim_kind_of_path path, None)
+    | None -> Option.value (wrapper_signature environment part.expression) ~default:(None, None)
   in
   let start = part.location.loc_start in
   let site =
@@ -911,8 +991,8 @@ let quantified_claims structure =
         Int.compare left.site.position right.site.position)
   in
   let found = ref [] in
-  let record_origins ~claim_line environment boolean =
-    binding_dependencies environment boolean
+  let record_origins ~claim_line ~positive environment boolean =
+    binding_dependencies ~positive environment boolean
     |> origins
     |> List.iter ~f:(fun ((binding : helper_binding), quantifiers) ->
         found :=
@@ -926,10 +1006,10 @@ let quantified_claims structure =
           }
           :: !found)
   in
-  let record_direct_quantifiers ~claim_line (wrapper : helper_binding) boolean =
+  let record_direct_quantifiers ~claim_line ~positive (wrapper : helper_binding) boolean =
     let guards = required_nonempty boolean in
     let quantifiers =
-      returned_quantifiers boolean
+      returned_quantifiers ~positive boolean
       |> List.filter ~f:(fun quantifier ->
           Set.is_empty quantifier.populations
           || Set.is_empty (Set.inter guards quantifier.populations))
@@ -951,18 +1031,14 @@ let quantified_claims structure =
     | Pexp_apply (callee, arguments) -> (
         match claim_target environment callee with
         | None -> ()
-        | Some (_, wrapper) ->
+        | Some ((_, wrapper) as target) ->
             let claim_line = expr.pexp_loc.loc_start.pos_lnum in
-            let booleans =
-              match wrapper with
-              | Some binding when binding.claim_wrapper -> unlabelled arguments
-              | _ -> Option.to_list (List.last (unlabelled arguments))
-            in
-            List.iter booleans ~f:(fun boolean ->
-                record_origins ~claim_line environment boolean;
+            claim_arguments target arguments
+            |> List.iter ~f:(fun (boolean, positive) ->
+                record_origins ~claim_line ~positive environment boolean;
                 Option.iter wrapper ~f:(fun binding ->
-                    if binding.claim_wrapper then
-                      record_direct_quantifiers ~claim_line binding boolean)))
+                    if Option.is_some binding.claim_wrapper then
+                      record_direct_quantifiers ~claim_line ~positive binding boolean)))
     | _ -> ()
   in
   let rec scan_expression environment expr =
@@ -1244,6 +1320,19 @@ let () =
       {ocaml|let print_check name passed = Verdict.pass_fail ("  " ^ name) passed
 let () = print_check "some row fails" (not (List.for_all rows ~f:Fn.id))|ocaml},
       [] );
+    ( "refuses a direct exists negated by a labeled Verdict wrapper parameter",
+      {ocaml|let check ~ok = Verdict.p "no rows match" (not ok)
+let () = check ~ok:(List.exists rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "refuses a bound exists negated by a labeled Verdict wrapper parameter",
+      {ocaml|let check ~ok = Verdict.p "no rows match" (not ok)
+let some_match = List.exists rows ~f:Fn.id
+let () = check ~ok:some_match|ocaml},
+      [ "some_match" ] );
+    ( "accepts a positive exists passed through a labeled Verdict wrapper parameter",
+      {ocaml|let check ~ok = Verdict.p "some row matches" ok
+let () = check ~ok:(List.exists rows ~f:Fn.id)|ocaml},
+      [] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1429,6 +1518,20 @@ let () = Verdict.p "some row fails" result|ocaml},
 let close = try all with _ -> false
 let () = Verdict.p "all rows pass" close|ocaml},
       [ "all" ] );
+    ( "refuses a direct quantifier returned through a try-case guard",
+      {ocaml|let close =
+  try raise Exit with
+  | Exit when List.for_all rows ~f:Fn.id -> true
+  | Exit -> false
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "close" ] );
+    ( "accepts an inverted direct quantifier returned through a try-case guard",
+      {ocaml|let differs =
+  try raise Exit with
+  | Exit when List.for_all rows ~f:Fn.id -> false
+  | Exit -> true
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
     ( "refuses a quantified helper reached through a mutually recursive sibling",
       {ocaml|let rec close xs = all xs
 and all xs = List.for_all xs ~f:Fn.id

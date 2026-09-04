@@ -818,7 +818,10 @@ that they earn a lookup rather than always-loaded space.
   negated `exists`, and a fully applied quantified value bound before the claim, must make
   non-emptiness part of its passing result. A file-local wrapper whose body calls one of those
   `Verdict` forms is a claim target too: bound Boolean arguments are traced to their quantified
-  origin, while direct quantified arguments are checked at the wrapper call. Its exact,
+  origin, while direct quantified arguments are checked at the wrapper call. Wrapper parameters
+  are matched to labeled or positional actual arguments with the polarity of their use in the
+  underlying claim, so a wrapper such as `Verdict.p label (not ok)` does not hide a negated
+  `exists`. Its exact,
   stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
   population; synthetic controls include a child process the shipping ratchet demonstrably refuses
   (gh-ocannl-801, gh-ocannl-887). An entry
@@ -854,6 +857,8 @@ that they earn a lookup rather than always-loaded space.
   cases, where equal parameter spellings are distinct runtime branches. A complementary
   `true`/`false` constructor match over a direct quantifier is recognized as either forwarding or
   inverting that Boolean; other constructor matches do not guess a polarity.
+  Direct quantifiers in `try`-handler guards are treated like direct match guards, with polarity
+  derived from the handler result.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.
