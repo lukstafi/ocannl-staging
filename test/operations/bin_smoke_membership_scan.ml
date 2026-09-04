@@ -135,7 +135,7 @@ let literal_dependency_path ~subdir atom =
   | [ Dune_scan.Literal path ] -> Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
   | [ Dune_scan.Pform _ ] | _ -> None
 
-let target_dependencies ~subdir stanza =
+let target_dependencies_in_field ~field ~subdir stanza =
   let rec collect = function
     | Sexp.Atom atom -> dependency_paths ~subdir atom
     | Sexp.List (Sexp.Atom ("alias" | "alias_rec" | "env_var" | "include" | "universe") :: _) -> []
@@ -143,11 +143,12 @@ let target_dependencies ~subdir stanza =
         List.concat_map values ~f:collect
     | Sexp.List children -> List.concat_map children ~f:collect
   in
-  let field_dependencies =
-    match Dune_scan.field stanza "deps" with
-    | None -> []
-    | Some deps -> List.concat_map deps ~f:collect
-  in
+  match Dune_scan.field stanza field with
+  | None -> []
+  | Some deps -> List.concat_map deps ~f:collect
+
+let target_dependencies ~subdir stanza =
+  let field_dependencies = target_dependencies_in_field ~field:"deps" ~subdir stanza in
   let action_dependencies =
     match Dune_scan.field stanza "action" with
     | None -> []
@@ -776,6 +777,9 @@ let scan dune_files =
                   let dependencies, dependency_errors =
                     alias_dependencies_in_field ~field:"link_deps" ~subdir stanza
                   in
+                  let target_dependencies =
+                    target_dependencies_in_field ~field:"link_deps" ~subdir stanza
+                  in
                   let found, resolution_errors =
                     resolve_alias_dependencies dune_path dependencies
                   in
@@ -786,7 +790,41 @@ let scan dune_files =
                       let targets, errors =
                         producer_alias_effects (Set.empty (module String)) node
                       in
-                      List.map targets ~f:(executable_dependency_error dune_path) @ errors))
+                      List.map targets ~f:(executable_dependency_error dune_path) @ errors)
+                  @ List.concat_map target_producer_sites
+                      ~f:(fun (producer_path, producer_subdir, producer_stanza, targets) ->
+                        if
+                          not
+                            (List.exists targets ~f:(fun target ->
+                                 List.mem target_dependencies target ~equal:String.equal))
+                        then []
+                        else
+                          let direct_errors =
+                            smoke_targets_of_stanza ~allow_verified_helper:false
+                              ~dune_path:producer_path ~subdir:producer_subdir producer_stanza
+                            |> List.map ~f:(function
+                              | Ok (Some target) when target_is_public target ->
+                                  executable_dependency_error dune_path target
+                              | Ok (Some target) -> private_producer_run_error producer_path target
+                              | Ok None -> ""
+                              | Error error -> target_producer_command_error producer_path error)
+                            |> List.filter ~f:(Fn.non String.is_empty)
+                          in
+                          let producer_dependencies, producer_dependency_errors =
+                            alias_dependencies ~subdir:producer_subdir producer_stanza
+                          in
+                          let producer_aliases, producer_resolution_errors =
+                            resolve_alias_dependencies producer_path producer_dependencies
+                          in
+                          direct_errors
+                          @ List.map
+                              (List.rev_append producer_dependency_errors producer_resolution_errors)
+                              ~f:(executable_dependency_spec_error dune_path)
+                          @ List.concat_map producer_aliases ~f:(fun node ->
+                              let targets, errors =
+                                producer_alias_effects (Set.empty (module String)) node
+                              in
+                              List.map targets ~f:(executable_dependency_error dune_path) @ errors)))
           with _ -> [])
   in
   let rec visit visited targets errors = function
@@ -1555,6 +1593,28 @@ let executable_link_dependency_fixture =
    (run %{exe:alpha.exe})
    (run %{exe:beta.exe}))))|dune}
 
+let executable_link_target_fixture =
+  {dune|(executable
+ (name alpha)
+ (public_name alpha-tool)
+ (link_deps smoke.stamp))
+(executable (name beta) (public_name beta-tool))
+(rule
+ (alias build-helper)
+ (deps (universe))
+ (action (run %{exe:beta.exe})))
+(rule
+ (target smoke.stamp)
+ (deps (alias build-helper))
+ (action (touch smoke.stamp)))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let action_preprocessor_fixture =
   {dune|(executable
  (name alpha)
@@ -1734,6 +1794,7 @@ let controls_hold () =
   in
   let library_action_preprocessor = scan_bin_content library_action_preprocessor_fixture in
   let executable_link_dependency = scan_bin_content executable_link_dependency_fixture in
+  let executable_link_target = scan_bin_content executable_link_target_fixture in
   let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
     scan
@@ -1927,6 +1988,10 @@ let controls_hold () =
        ~equal:String.equal
   && (not (complete executable_link_dependency))
   && List.mem executable_link_dependency.errors
+       (executable_dependency_error "bin/dune" (Local "bin/beta.exe"))
+       ~equal:String.equal
+  && (not (complete executable_link_target))
+  && List.mem executable_link_target.errors
        (executable_dependency_error "bin/dune" (Local "bin/beta.exe"))
        ~equal:String.equal
   && (not (complete action_preprocessor))
