@@ -102,17 +102,44 @@ let target_dependencies ~subdir stanza =
   | None -> []
   | Some deps -> List.concat_map deps ~f:collect |> List.dedup_and_sort ~compare:String.compare
 
+let resolve_target ~subdir target = Dune_scan.normalize_path (Dune_scan.in_subdir subdir target)
+
+let rec inferred_action_targets ~subdir = function
+  | Sexp.Atom _ -> []
+  | Sexp.List (Sexp.Atom "no-infer" :: _) -> []
+  | Sexp.List
+      (Sexp.Atom ("with-stdout-to" | "with-stderr-to" | "with-outputs-to")
+      :: Sexp.Atom target
+      :: nested) ->
+      resolve_target ~subdir target :: List.concat_map nested ~f:(inferred_action_targets ~subdir)
+  | Sexp.List (Sexp.Atom ("write-file" | "touch" | "mkdir") :: Sexp.Atom target :: _) ->
+      [ resolve_target ~subdir target ]
+  | Sexp.List
+      (Sexp.Atom ("copy" | "copy#" | "copy-and-add-line-directive" | "format-dune-file")
+      :: _source
+      :: Sexp.Atom target
+      :: _) ->
+      [ resolve_target ~subdir target ]
+  | Sexp.List children -> List.concat_map children ~f:(inferred_action_targets ~subdir)
+
 let produced_targets ~subdir stanza =
   match Dune_scan.head stanza with
   | Some "rule" ->
-      List.concat_map [ "target"; "targets" ] ~f:(fun field ->
-          match Dune_scan.field stanza field with
-          | None -> []
-          | Some targets ->
-              List.filter_map targets ~f:(function
-                | Sexp.Atom target ->
-                    Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir target))
-                | Sexp.List _ -> None))
+      let declared =
+        List.concat_map [ "target"; "targets" ] ~f:(fun field ->
+            match Dune_scan.field stanza field with
+            | None -> []
+            | Some targets ->
+                List.filter_map targets ~f:(function
+                  | Sexp.Atom target -> Some (resolve_target ~subdir target)
+                  | Sexp.List _ -> None))
+      in
+      let inferred =
+        match Dune_scan.field stanza "action" with
+        | None -> []
+        | Some action -> inferred_action_targets ~subdir (Sexp.List action)
+      in
+      List.rev_append declared inferred |> List.dedup_and_sort ~compare:String.compare
   | _ -> []
 
 let rec contains_head expected = function
@@ -149,6 +176,10 @@ let external_smoke_error dune_path =
 let accepted_exit_error dune_path =
   Printf.sprintf "%s: @bin-smoke reaches with-accepted-exit-codes, so failure is not a canary"
     dune_path
+
+let cached_alias_error dune_path targets =
+  Printf.sprintf "%s: @bin-smoke reaches a target-bearing rule that may be cached: %s" dune_path
+    (String.concat ~sep:", " targets)
 
 let declarations_of_stanza ~subdir stanza =
   match Dune_scan.head stanza with
@@ -294,6 +325,11 @@ let scan dune_files =
               Printf.sprintf "%s: @bin-smoke reaches generated target dependency %s" node.dune_path
                 dependency)
         in
+        let alias_targets = produced_targets ~subdir:node.subdir node.stanza in
+        let cached_alias_errors =
+          if List.is_empty alias_targets then []
+          else [ cached_alias_error node.dune_path alias_targets ]
+        in
         let dependencies, missing_dependency_errors =
           List.fold node.dependencies ~init:([], []) ~f:(fun (nodes, errors) dependency ->
               let found =
@@ -313,7 +349,8 @@ let scan dune_files =
                (List.rev_append condition_errors
                   (List.rev_append exit_errors
                      (List.rev_append generated_dependency_errors
-                        (List.rev_append missing_dependency_errors errors)))))
+                        (List.rev_append cached_alias_errors
+                           (List.rev_append missing_dependency_errors errors))))))
         in
         visit visited targets errors (List.rev_append dependencies rest)
   in
@@ -486,12 +523,33 @@ let generated_target_fixture =
  (deps smoke.stamp)
  (action (run %{exe:alpha.exe})))|dune}
 
+let inferred_target_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (action
+  (with-stdout-to smoke.stamp
+   (run %{exe:alpha.exe}))))
+(rule
+ (alias bin-smoke)
+ (deps smoke.stamp)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let target_bearing_alias_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (target smoke.stamp)
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (touch smoke.stamp))))|dune}
+
 let rewritten_path_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
  (alias bin-smoke)
  (action
-  (setenv PATH elsewhere
+  (setenv Path elsewhere
    (run alpha.exe))))|dune}
 
 let controls_hold () =
@@ -509,6 +567,8 @@ let controls_hold () =
   let external_result = scan_bin_content external_smoke_fixture in
   let accepted_exit = scan_bin_content accepted_exit_fixture in
   let generated_target = scan_bin_content generated_target_fixture in
+  let inferred_target = scan_bin_content inferred_target_fixture in
+  let target_bearing_alias = scan_bin_content target_bearing_alias_fixture in
   let rewritten_path = scan_bin_content rewritten_path_fixture in
   complete accepted
   && (not (complete refused))
@@ -537,6 +597,14 @@ let controls_hold () =
   && (not (complete generated_target))
   && List.mem generated_target.errors
        "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete inferred_target))
+  && List.mem inferred_target.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete target_bearing_alias))
+  && List.mem target_bearing_alias.errors
+       (cached_alias_error "bin/dune" [ "bin/smoke.stamp" ])
        ~equal:String.equal
   && (not (complete rewritten_path))
   && List.mem rewritten_path.errors

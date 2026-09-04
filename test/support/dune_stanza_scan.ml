@@ -578,7 +578,8 @@ let rec commands_in ?(cwd = "") ?(pinned = Set.empty (module String)) sexp =
      reading the atom: `(setenv PATH . (run env probe))` may launch a local `probe` this scan would
      otherwise call a tool (Codex P2, round 16). Modelling the environment is not on the table;
      saying so is. *)
-  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: value :: rest) ->
+  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: value :: rest)
+    when String.equal (String.uppercase name) "PATH" ->
       let value = match value with Sexp.Atom v -> v | _ -> "..." in
       List.concat_map rest ~f:(commands_in ~cwd ~pinned:(Set.add pinned "PATH"))
       (* The directory a nested `chdir` chose is still where the process runs; PATH says nothing
@@ -1046,7 +1047,8 @@ let raw_stanza_of =
     (* `(setenv PATH …)` changes what a BARE command name resolves to, so the walk stops vouching
        for where such a program runs. Descending through it as an ordinary form would lose that
        (Codex P2, round 9); what is beneath it is marked instead. *)
-    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: _value :: rest) ->
+    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: _value :: rest)
+      when String.equal (String.uppercase name) "PATH" ->
         List.concat_map rest ~f:(commands ~cwd ~unresolved ~under_path:true)
     | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
         if String.is_substring dir ~substring:"%{" then

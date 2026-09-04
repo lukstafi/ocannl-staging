@@ -209,6 +209,12 @@ let cases =
         "rule whose working directory this scan cannot establish: env, under `(setenv PATH . ...)` \
          [declares]";
       ] );
+    ( "a Windows-case PATH spelling makes a bare executable unplaceable",
+      {dune|(rule (deps ocannl_config) (action (setenv Path . (run probe.exe))))|dune},
+      [
+        "rule whose working directory this scan cannot establish: probe.exe, under `(setenv PATH . \
+         ...)` [declares]";
+      ] );
     ( "but a path-qualified command still names what it names",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -758,6 +764,9 @@ let raw_stanza_cases =
       [ "rule{!}" ] );
     ( "a bare executable-looking command under setenv PATH is unnameable",
       {dune|(rule (action (setenv PATH . (run probe.exe))))|dune},
+      [ "rule{!}" ] );
+    ( "a Windows-case PATH spelling is unnameable too",
+      {dune|(rule (action (setenv Path . (run probe.exe))))|dune},
       [ "rule{!}" ] );
     ( "but a named executable under one is still a run",
       {dune|(rule (action (setenv PATH . (run %{dep:probe.exe}))))|dune},

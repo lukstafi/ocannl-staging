@@ -40,6 +40,7 @@ ok: a chdir to a pform over a PATH tool is not
 ok: an unclassified action under a chdir keeps that directory
 ok: and an unclassified action under a pform chdir is unplaceable, like a command
 ok: a rewritten PATH makes a bare command unplaceable
+ok: a Windows-case PATH spelling makes a bare executable unplaceable
 ok: but a path-qualified command still names what it names
 ok: a chdir under a PATH rewrite keeps its directory
 ok: a chdir to the stanza's own directory changes nothing
@@ -192,6 +193,7 @@ ok: raw stanzas -- and a binding of only a non-path form resolves to nothing
 ok: raw stanzas -- a binding outside the deps field is not a binding
 ok: raw stanzas -- a bare command under setenv PATH is unnameable
 ok: raw stanzas -- a bare executable-looking command under setenv PATH is unnameable
+ok: raw stanzas -- a Windows-case PATH spelling is unnameable too
 ok: raw stanzas -- but a named executable under one is still a run
 ok: raw stanzas -- two bare ones are two, and repeats collapse
 ok: raw stanzas -- a shell line alongside one is a different thing
