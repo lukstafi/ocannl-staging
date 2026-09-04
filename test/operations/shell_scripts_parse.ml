@@ -704,6 +704,32 @@ module Errexit_negation = struct
             else (
               Buffer.add_char decoded (Char.of_int_exn value);
               finish)
+        | ('u' | 'U') as kind ->
+            let maximum = if Char.equal kind 'u' then 4 else 8 in
+            let rec unicode position count value =
+              if position >= length || count = maximum then (position, value)
+              else
+                match digit_value word.[position] with
+                | Some digit -> unicode (position + 1) (count + 1) ((value * 16) + digit)
+                | None -> (position, value)
+            in
+            let finish, value = unicode (index + 2) 0 0 in
+            if finish = index + 2 then add kind
+            else (
+              if value <= 0x7f then Buffer.add_char decoded (Char.of_int_exn value)
+              else if value <= 0x7ff then (
+                Buffer.add_char decoded (Char.of_int_exn (0xc0 lor (value lsr 6)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor (value land 0x3f))))
+              else if value <= 0xffff && not (value >= 0xd800 && value <= 0xdfff) then (
+                Buffer.add_char decoded (Char.of_int_exn (0xe0 lor (value lsr 12)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor ((value lsr 6) land 0x3f)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor (value land 0x3f))))
+              else if value <= 0x10ffff then (
+                Buffer.add_char decoded (Char.of_int_exn (0xf0 lor (value lsr 18)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor ((value lsr 12) land 0x3f)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor ((value lsr 6) land 0x3f)));
+                Buffer.add_char decoded (Char.of_int_exn (0x80 lor (value land 0x3f))));
+              finish)
         | '0' .. '7' ->
             let rec octal position count value =
               if position >= length || count = 3 then (position, value)
@@ -879,17 +905,51 @@ module Errexit_negation = struct
 
   let brace_group_runs_outside_parent line index =
     let after_group = skip_parameter_expansion line (index + 1) in
+    let length = String.length line in
     let rec skip_space index =
-      if index < String.length line && Char.is_whitespace line.[index] then skip_space (index + 1)
+      if index < length && Char.is_whitespace line.[index] then skip_space (index + 1) else index
+    in
+    let rec token_end index =
+      if
+        index < length
+        && (not (Char.is_whitespace line.[index]))
+        && not (List.mem [ ';'; '&'; '|' ] line.[index] ~equal:Char.equal)
+      then token_end (index + 1)
       else index
     in
-    let operator = skip_space after_group in
+    let rec skip_redirections index =
+      let start = skip_space index in
+      let rec skip_descriptor index =
+        if index < length && Char.is_digit line.[index] then skip_descriptor (index + 1) else index
+      in
+      let operator = if starts_at line ~pos:start "&>" then start else skip_descriptor start in
+      if
+        operator >= length
+        || not
+             (List.mem [ '<'; '>' ] line.[operator] ~equal:Char.equal
+             || starts_at line ~pos:operator "&>")
+      then start
+      else
+        let rec skip_operator index =
+          if index < length && List.mem [ '<'; '>'; '&'; '|' ] line.[index] ~equal:Char.equal then
+            skip_operator (index + 1)
+          else index
+        in
+        let after_operator = skip_operator operator in
+        let after_target =
+          if after_operator < length && not (Char.is_whitespace line.[after_operator]) then
+            token_end after_operator
+          else token_end (skip_space after_operator)
+        in
+        skip_redirections after_target
+    in
+    let operator = skip_redirections after_group in
     if
-      operator < String.length line
+      operator < length
       && (Char.equal line.[operator] '|'
-          && (operator + 1 >= String.length line || not (Char.equal line.[operator + 1] '|'))
+          && (operator + 1 >= length || not (Char.equal line.[operator + 1] '|'))
          || Char.equal line.[operator] '&'
-            && (operator + 1 >= String.length line || not (Char.equal line.[operator + 1] '&')))
+            && (operator + 1 >= length || not (Char.equal line.[operator + 1] '&')))
     then Some after_group
     else None
 
@@ -946,6 +1006,14 @@ module Errexit_negation = struct
               loop (index + 1) start `None true nesting pipeline fragments
             else if Char.equal character '#' then
               List.rev (add_fragment fragments start index (not pipeline))
+            else if starts_at line ~pos:index "$(" then
+              loop
+                (skip_command_substitution line (index + 2))
+                start `None false nesting pipeline fragments
+            else if starts_at line ~pos:index "${" then
+              loop
+                (skip_parameter_expansion line (index + 2))
+                start `None false nesting pipeline fragments
             else if starts_at line ~pos:index "$'" then
               loop (index + 2) start `Ansi_c false nesting pipeline fragments
             else if Char.equal character '\'' then
@@ -973,7 +1041,10 @@ module Errexit_negation = struct
             then
               loop (index + 2) (index + 2) `None false nesting false
                 (add_fragment fragments start index (not pipeline))
-            else if nesting = 0 && Char.equal character '|' then
+            else if
+              nesting = 0 && Char.equal character '|'
+              && (index = 0 || not (Char.equal line.[index - 1] '>'))
+            then
               let next =
                 if index + 1 < length && Char.equal line.[index + 1] '&' then index + 2
                 else index + 1
@@ -1038,6 +1109,14 @@ module Errexit_negation = struct
               Buffer.add_char current character;
               loop (index + 1) `None true words)
             else if Char.is_whitespace character then loop (index + 1) `None false (finish words)
+            else if starts_at command ~pos:index "$(" then (
+              let finish = skip_command_substitution command (index + 2) in
+              Buffer.add_substring current command ~pos:index ~len:(finish - index);
+              loop finish `None false words)
+            else if starts_at command ~pos:index "${" then (
+              let finish = skip_parameter_expansion command (index + 2) in
+              Buffer.add_substring current command ~pos:index ~len:(finish - index);
+              loop finish `None false words)
             else if starts_at command ~pos:index "$'" then (
               Buffer.add_string current "$'";
               loop (index + 2) `Ansi_c false words)
@@ -1081,7 +1160,9 @@ module Errexit_negation = struct
     then None
     else
       let rec skip_operator index =
-        if index < String.length word && List.mem [ '<'; '>'; '&' ] word.[index] ~equal:Char.equal
+        if
+          index < String.length word
+          && List.mem [ '<'; '>'; '&'; '|' ] word.[index] ~equal:Char.equal
         then skip_operator (index + 1)
         else index
       in
@@ -1311,6 +1392,20 @@ module Errexit_negation = struct
       ("quoted set command", "s'et' -e\n! grep -q missing output\n", [ 2 ]);
       ("ANSI-C octal errexit option", "set -$'\\145'\n! grep -q missing output\n", [ 2 ]);
       ("ANSI-C hexadecimal errexit option", "set $'-\\x65'\n! grep -q missing output\n", [ 2 ]);
+      ("ANSI-C short Unicode errexit option", "set -$'\\u0065'\n! grep -q missing output\n", [ 2 ]);
+      ( "ANSI-C long Unicode errexit option",
+        "set -$'\\U00000065'\n! grep -q missing output\n",
+        [ 2 ] );
+      ( "command-substitution assignment prefix",
+        "X=$(printf value) set -e\n! grep -q missing output\n",
+        [ 2 ] );
+      ( "parameter-expansion assignment prefix",
+        "X=${x:-some value} set -e\n! grep -q missing output\n",
+        [ 2 ] );
+      ("noclobber redirection-prefixed set", ">| output set -e\n! grep -q missing output\n", [ 2 ]);
+      ( "attached noclobber redirection-prefixed set",
+        ">|output set -e\n! grep -q missing output\n",
+        [ 2 ] );
       ("later set after set", "set -u; set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after command", "prepare; set -e\n! grep -q missing output\n", [ 2 ]);
       ("later set after AND", "prepare && set -e\n! grep -q missing output\n", [ 2 ]);
@@ -1328,11 +1423,23 @@ module Errexit_negation = struct
       ("set inside piped brace group", "{ set -e; } | cat\n! grep -q missing output\n", []);
       ("set inside pipe-and brace group", "{ set -e; } |& cat\n! grep -q missing output\n", []);
       ("set inside background brace group", "{ set -e; } &\n! grep -q missing output\n", []);
+      ( "set inside redirected piped brace group",
+        "{ set -e; } >/dev/null | cat\n! grep -q missing output\n",
+        [] );
+      ( "set inside separately redirected piped brace group",
+        "{ set -e; } > /dev/null | cat\n! grep -q missing output\n",
+        [] );
       ("set in if condition", "if set -e; then :; fi\n! grep -q missing output\n", [ 2 ]);
       ("set in while condition", "while set -e; do :; done\n! grep -q missing output\n", [ 2 ]);
       ("set in then body", "if true; then set -e; fi\n! grep -q missing output\n", [ 2 ]);
       ("set in case arm", "case x in x) set -e;; esac\n! grep -q missing output\n", [ 2 ]);
       ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
+      ( "set text inside unquoted parameter expansion",
+        "echo ${x:-foo; set -e}\n! grep -q missing output\n",
+        [] );
+      ( "set text inside unquoted command substitution",
+        "echo $(printf x; set -e)\n! grep -q missing output\n",
+        [] );
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
       ("until ! command", "set -e\nuntil ! ready; do :; done\n", []);

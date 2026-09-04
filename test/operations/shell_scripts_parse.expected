@@ -55,6 +55,12 @@ errexit-negation fixture separate ampersand-redirection-prefixed set is classifi
 errexit-negation fixture quoted set command is classified as specified: true
 errexit-negation fixture ANSI-C octal errexit option is classified as specified: true
 errexit-negation fixture ANSI-C hexadecimal errexit option is classified as specified: true
+errexit-negation fixture ANSI-C short Unicode errexit option is classified as specified: true
+errexit-negation fixture ANSI-C long Unicode errexit option is classified as specified: true
+errexit-negation fixture command-substitution assignment prefix is classified as specified: true
+errexit-negation fixture parameter-expansion assignment prefix is classified as specified: true
+errexit-negation fixture noclobber redirection-prefixed set is classified as specified: true
+errexit-negation fixture attached noclobber redirection-prefixed set is classified as specified: true
 errexit-negation fixture later set after set is classified as specified: true
 errexit-negation fixture later set after command is classified as specified: true
 errexit-negation fixture later set after AND is classified as specified: true
@@ -70,11 +76,15 @@ errexit-negation fixture set inside parenthesized group is classified as specifi
 errexit-negation fixture set inside piped brace group is classified as specified: true
 errexit-negation fixture set inside pipe-and brace group is classified as specified: true
 errexit-negation fixture set inside background brace group is classified as specified: true
+errexit-negation fixture set inside redirected piped brace group is classified as specified: true
+errexit-negation fixture set inside separately redirected piped brace group is classified as specified: true
 errexit-negation fixture set in if condition is classified as specified: true
 errexit-negation fixture set in while condition is classified as specified: true
 errexit-negation fixture set in then body is classified as specified: true
 errexit-negation fixture set in case arm is classified as specified: true
 errexit-negation fixture quoted set text is classified as specified: true
+errexit-negation fixture set text inside unquoted parameter expansion is classified as specified: true
+errexit-negation fixture set text inside unquoted command substitution is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true
 errexit-negation fixture until ! command is classified as specified: true
