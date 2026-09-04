@@ -874,11 +874,14 @@ case $sub in
         iter_rc=$?
         proc_alive "$iter/pid" "$iter/ptoken" || break
       done
+      # The numeric pid is no longer ours once wait/proc_alive prove the
+      # supervisor gone. Clear it before the slower orphan-group reap so a
+      # cancellation cannot signal a recycled, unrelated process.
+      repeat_sup=
       # SIGKILL can remove the supervisor without reaching the Dune process
       # group it owned. Reap that identity-verified group before recording the
       # iteration, starting another one, or deleting their shared build tree.
       reap_repeat_group "$iter"
-      repeat_sup=
       printf '%s\n' "$iter_rc" >"$iter/exit" || die "cannot record iteration $i verdict"
       [ "$first_nonzero" != 0 ] || [ "$iter_rc" = 0 ] || first_nonzero=$iter_rc
       {

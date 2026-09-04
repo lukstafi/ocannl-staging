@@ -51,6 +51,7 @@
 #  18. cancellation is checked on both sides of supervisor launch.
 #  19. cancelling a later iteration preserves an earlier test failure.
 #  20. a supervisor killed without its Dune group cannot overlap the next run.
+#  21. the dead supervisor pid is cleared before orphan-group reaping.
 
 set -u
 
@@ -895,6 +896,16 @@ if [ -n "$pre_launch_line" ] && [ -n "$launch_line" ] \
 else
   report 1 "repeat: cancellation brackets supervisor launch" \
     "pre=${pre_launch_line:-missing} launch=${launch_line:-missing} supervisor=${supervisor_line:-missing} post=${post_launch_line:-missing}"
+fi
+
+clear_supervisor_line=$(grep -n '^      repeat_sup=$' "$SRC" | tail -1 | cut -d: -f1)
+reap_group_line=$(grep -n '^      reap_repeat_group "$iter"$' "$SRC" | cut -d: -f1)
+if [ -n "$clear_supervisor_line" ] && [ -n "$reap_group_line" ] \
+   && [ "$clear_supervisor_line" -lt "$reap_group_line" ]; then
+  report 0 "repeat: dead supervisor pid is cleared before group reap"
+else
+  report 1 "repeat: dead supervisor pid is cleared before group reap" \
+    "clear=${clear_supervisor_line:-missing} reap=${reap_group_line:-missing}"
 fi
 
 repeat_probe repeat-identical stable 3 build @cheap

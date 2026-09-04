@@ -95,11 +95,13 @@ mkdir -p "$main/test"
 printf 'initial golden\n' >"$main/test/unit.cc_expected.ml"
 printf 'unrelated fixture\n' >"$main/test/noise.expected"
 printf 'pre-diff golden\n' >"$main/test/pre_diff_expected.ml"
+printf 'let%%expect_test _ = print_endline "old" [%%expect {| old |}]\n' \
+  >"$main/test/inline_expect.ml"
 printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc_expected.ml noise.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}_expected.ml" unit.actual)))\n(rule\n (alias runtest-pre-diff-probe)\n (deps pre_diff_expected.ml)\n (action (progn (run crashing.exe) (diff pre_diff_expected.ml pre_diff.actual))))\n' \
   >"$main/test/dune"
 git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune \
   test/unit.cc_expected.ml test/noise.expected \
-  test/pre_diff_expected.ml
+  test/pre_diff_expected.ml test/inline_expect.ml
 git -C "$main" commit -qm fixture
 fixture_sha=$(git -C "$main" rev-parse HEAD)
 git -C "$main" remote add origin "$origin"
@@ -254,6 +256,26 @@ git -C "$main" push -q origin master
 pre_diff_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$pre_diff_failure \
   run_sweep_args --target pre-diff-probe)
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$pre_diff_second"
+
+# Inline ppx_expect promotion compares the checked-in source directly with an
+# _build .corrected file. That resolved unified-diff header is proof of the
+# failed baseline even though the first operand is neither under _build nor
+# named *.expected.
+inline_failure='File "test/inline_expect.ml", line 1, characters 0-0:
+diff --git a/test/inline_expect.ml b/_build/default/test/inline_expect.ml.corrected'
+inline_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$inline_failure \
+  run_sweep_args --target inline-expect-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$inline_first"
+printf 'let%%expect_test _ = print_endline "new" [%%expect {| stale |}]\n' \
+  >"$main/test/inline_expect.ml"
+git -C "$main" add test/inline_expect.ml
+git -C "$main" commit -qm 'attempt inline expectation fix'
+git -C "$main" push -q origin master
+inline_fix_sha=$(git -C "$main" rev-parse HEAD)
+inline_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$inline_failure \
+  run_sweep_args --target inline-expect-probe)
+grep -q "local/cc: REGRESSION OR FIX DID NOT TAKE -- test/inline_expect.ml last changed at $(printf '%s' "$inline_fix_sha" | cut -c1-8) (previous failing copy: $(printf '%s' "$fixture_sha" | cut -c1-8))" \
+  <<<"$inline_second"
 
 # An expected fixture merely listed in the failing stanza's deps is not the
 # failed diff input. The old all-token extraction records it and makes this

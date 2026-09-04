@@ -825,6 +825,9 @@ goldens_from_log() { # log destination -- source-tree paths proved to have faile
   {
     sed -n 's/^File "\([^"]*\.expected\)".*/\1/p' "$log"
     sed -n 's|^diff --git a/_build/default/\([^ ]*\) b/_build/default/.*$|\1|p' "$log"
+    # Inline ppx_expect compares the source baseline directly with a generated
+    # .corrected file, so its first operand has no _build/default prefix.
+    sed -n 's|^diff --git a/\([^ ]*\) b/_build/default/[^ ]*\.corrected$|\1|p' "$log"
   } | sort -u >"$candidates" || die "cannot extract proven failing goldens"
   while IFS= read -r token; do
     [ -n "$token" ] || continue

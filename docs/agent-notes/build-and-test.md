@@ -524,7 +524,8 @@ that they earn a lookup rather than always-loaded space.
   iteration rechecks cancellation immediately before and after supervisor launch.
   If a supervisor is killed while its identity-verified Dune process group survives, the group is
   reaped before another iteration can reuse—or final cleanup can remove—the shared build tree. A
-  prior nonzero iteration remains the set's exit status when a later iteration is cancelled.
+  prior nonzero iteration remains the set's exit status when a later iteration is cancelled. The
+  dead supervisor pid is cleared before the potentially slower process-group reap.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1637,8 +1638,9 @@ that they earn a lookup rather than always-loaded space.
   full log: ordinary test diffs name their `.expected` file directly, while an explicit rule's
   resolved `diff --git` header proves its diff actually ran and supplies the first operand. Thus a
   producer crash before a later `diff` records no golden, `%{read:...}` substitutions are already
-  expanded, and PPX `*_expected.ml` operands need no naming special case. The normalized fingerprint
-  deliberately no longer carries enough source relationship to recover this provenance.
+  expanded, and PPX `*_expected.ml` operands need no naming special case. Inline `ppx_expect`
+  source-to-`.corrected` headers contribute their checked-in source first operand. The normalized
+  fingerprint deliberately no longer carries enough source relationship to recover this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other
