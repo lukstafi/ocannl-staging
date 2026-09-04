@@ -293,6 +293,12 @@ let public_action_preprocess_error names =
     "public executable `%s` uses an action preprocessor, so its build-time executions are opaque"
     (String.concat ~sep:", " names)
 
+let library_action_preprocess_error dune_path =
+  Printf.sprintf
+    "%s defines a library action preprocessor, so public executable build-time executions are \
+     opaque"
+    dune_path
+
 let has_action_preprocessor stanza =
   match Dune_scan.field stanza "preprocess" with
   | Some preprocess -> contains_head "action" (Sexp.List preprocess)
@@ -329,6 +335,14 @@ let generated_public_run_error dune_path public targets =
 let target_producer_command_error dune_path error =
   Printf.sprintf "%s: target-producing rule contains a command opaque to the census: %s" dune_path
     error
+
+let target_producer_dependency_error dune_path target =
+  let target = match target with Local path -> path | Public name -> "%{bin:" ^ name ^ "}" in
+  Printf.sprintf "%s: target-producing rule depends on an alias that runs public executable %s"
+    dune_path target
+
+let absolute_chdir_error dune_path cwd =
+  Printf.sprintf "%s: @bin-smoke runs a command beneath absolute chdir %s" dune_path cwd
 
 let installs_into_bin stanza =
   match (Dune_scan.head stanza, Dune_scan.field stanza "section") with
@@ -496,6 +510,8 @@ let smoke_targets_of_stanza ~allow_verified_helper ~dune_path ~subdir stanza =
       | Dune_scan.Runs path
         when Option.exists (program_token site) ~f:Dune_scan.is_path_lookup_token ->
           Error (bare_smoke_error dune_path path)
+      | Dune_scan.Runs _ when Dune_scan.is_absolute cwd ->
+          Error (absolute_chdir_error dune_path cwd)
       | Dune_scan.Runs path ->
           let rec anchored_to_stanza = function
             | Dune_scan.Program (token, _) ->
@@ -587,6 +603,8 @@ let scan dune_files =
                 | Some "include" -> [ include_error dune_path ]
                 | Some "data_only_dirs" -> [ data_only_dirs_error dune_path ]
                 | Some "install" when installs_into_bin stanza -> [ bin_install_error dune_path ]
+                | Some "library" when has_action_preprocessor stanza ->
+                    [ library_action_preprocess_error dune_path ]
                 | _ -> [])
           in
           let inference_errors =
@@ -644,8 +662,6 @@ let scan dune_files =
         |> List.fold ~init:(producers, errors) ~f:(fun (producers, errors) -> function
           | Ok (Some target) -> ((dune_path, targets, target) :: producers, errors)
           | Ok None -> (producers, errors)
-          | Error error when String.equal error (external_smoke_error dune_path) ->
-              (producers, errors)
           | Error error -> (producers, target_producer_command_error dune_path error :: errors)))
   in
   let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
@@ -681,25 +697,26 @@ let scan dune_files =
     | Public name ->
         List.exists declarations ~f:(fun declaration -> String.equal declaration.public name)
   in
-  let rec reaches_public visited node =
-    if Set.mem visited node.id then false
+  let rec public_targets_reached visited node =
+    if Set.mem visited node.id then []
     else
       let visited = Set.add visited node.id in
-      let runs_public =
+      let direct =
         smoke_targets_of_stanza ~allow_verified_helper:false ~dune_path:node.dune_path
           ~subdir:node.subdir node.stanza
-        |> List.exists ~f:(function Ok (Some target) -> target_is_public target | _ -> false)
+        |> List.filter_map ~f:(function
+          | Ok (Some target) when target_is_public target -> Some target
+          | Ok (Some _) | Ok None | Error _ -> None)
       in
-      runs_public
-      ||
       let dependencies, _errors = resolve_alias_dependencies node.dune_path node.dependencies in
-      List.exists dependencies ~f:(reaches_public visited)
+      direct @ List.concat_map dependencies ~f:(public_targets_reached visited)
   in
-  let producer_dependency_roots =
+  let target_producer_dependency_errors =
     List.concat_map target_producer_sites ~f:(fun (dune_path, subdir, stanza, _targets) ->
         let dependencies, _dependency_errors = alias_dependencies ~subdir stanza in
         let found, _resolution_errors = resolve_alias_dependencies dune_path dependencies in
-        List.filter found ~f:(reaches_public (Set.empty (module String))))
+        List.concat_map found ~f:(public_targets_reached (Set.empty (module String)))
+        |> List.map ~f:(target_producer_dependency_error dune_path))
   in
   let rec visit visited targets errors = function
     | [] -> (targets, errors)
@@ -781,8 +798,9 @@ let scan dune_files =
   let targets, smoke_errors =
     visit
       (Set.empty (module String))
-      [] target_producer_command_errors
-      (List.rev_append producer_dependency_roots smoke_roots)
+      []
+      (List.rev_append target_producer_command_errors target_producer_dependency_errors)
+      smoke_roots
   in
   let smoke_stanza_count = List.length smoke_roots in
   let scan_errors = List.rev_append smoke_errors scan_errors in
@@ -978,6 +996,13 @@ let chdir_parent_pform_fixture =
  (alias bin-smoke)
  (deps (universe))
  (action (chdir smoke (run %{exe:../alpha.exe}))))|dune}
+
+let absolute_chdir_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (chdir /tmp (run ../../bin/alpha.exe))))|dune}
 
 let generated_target_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
@@ -1294,6 +1319,57 @@ let generated_source_alias_fixture =
    (run %{exe:alpha.exe})
    (run %{exe:beta.exe}))))|dune}
 
+let external_generated_source_input_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(rule
+ (target alpha.ml)
+ (deps generator.py)
+ (action (run python3 generator.py)))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
+let unused_generated_source_alias_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(rule
+ (alias source-helper)
+ (deps (universe))
+ (action (run %{exe:beta.exe})))
+(rule
+ (target unused.stamp)
+ (deps (alias source-helper))
+ (action (touch unused.stamp)))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (run %{exe:alpha.exe})))|dune}
+
+let library_action_preprocessor_fixture =
+  {dune|(library
+ (name linked)
+ (preprocess
+  (action (run %{exe:beta.exe} %{input-file}))))
+(executable
+ (name alpha)
+ (public_name alpha-tool)
+ (libraries linked))
+(executable (name beta) (public_name beta-tool))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let action_preprocessor_fixture =
   {dune|(executable
  (name alpha)
@@ -1426,6 +1502,7 @@ let controls_hold () =
   let cached_root = scan_bin_content cached_root_fixture in
   let chdir_pform = scan_bin_content chdir_pform_fixture in
   let chdir_parent_pform = scan_bin_content chdir_parent_pform_fixture in
+  let absolute_chdir = scan_bin_content absolute_chdir_fixture in
   let external_result = scan_bin_content external_smoke_fixture in
   let accepted_exit = scan_bin_content accepted_exit_fixture in
   let generated_target = scan_bin_content generated_target_fixture in
@@ -1457,6 +1534,9 @@ let controls_hold () =
   let generated_source_input = scan_bin_content generated_source_input_fixture in
   let opaque_generated_source_input = scan_bin_content opaque_generated_source_input_fixture in
   let generated_source_alias = scan_bin_content generated_source_alias_fixture in
+  let external_generated_source_input = scan_bin_content external_generated_source_input_fixture in
+  let unused_generated_source_alias = scan_bin_content unused_generated_source_alias_fixture in
+  let library_action_preprocessor = scan_bin_content library_action_preprocessor_fixture in
   let action_preprocessor = scan_bin_content action_preprocessor_fixture in
   let data_only =
     scan
@@ -1509,6 +1589,8 @@ let controls_hold () =
   && complete chdir_pform
   && (not (complete chdir_parent_pform))
   && List.mem chdir_parent_pform.unexpected "alpha.exe" ~equal:String.equal
+  && (not (complete absolute_chdir))
+  && List.mem absolute_chdir.errors (absolute_chdir_error "bin/dune" "/tmp") ~equal:String.equal
   && (not (complete external_result))
   && List.mem external_result.errors (external_smoke_error "bin/dune") ~equal:String.equal
   && (not (complete accepted_exit))
@@ -1609,7 +1691,21 @@ let controls_hold () =
           (opaque_smoke_error "bin/dune" "shell: ./beta.exe > alpha.ml"))
        ~equal:String.equal
   && (not (complete generated_source_alias))
-  && List.mem generated_source_alias.errors "@bin-smoke runs more than once: bin/beta.exe"
+  && List.mem generated_source_alias.errors
+       (target_producer_dependency_error "bin/dune" (Local "bin/beta.exe"))
+       ~equal:String.equal
+  && (not (complete external_generated_source_input))
+  && List.mem external_generated_source_input.errors
+       (target_producer_command_error "bin/dune" (external_smoke_error "bin/dune"))
+       ~equal:String.equal
+  && (not (complete unused_generated_source_alias))
+  && List.equal String.equal unused_generated_source_alias.missing [ "bin/beta.exe" ]
+  && List.mem unused_generated_source_alias.errors
+       (target_producer_dependency_error "bin/dune" (Local "bin/beta.exe"))
+       ~equal:String.equal
+  && (not (complete library_action_preprocessor))
+  && List.mem library_action_preprocessor.errors
+       (library_action_preprocess_error "bin/dune")
        ~equal:String.equal
   && (not (complete action_preprocessor))
   && List.mem action_preprocessor.errors

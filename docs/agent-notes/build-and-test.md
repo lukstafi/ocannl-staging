@@ -1268,7 +1268,8 @@ that they earn a lookup rather than always-loaded space.
   pforms embedded in larger dependency/action atoms, literal file-input action positions, and
   output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
   rules, a pform in an inferred output path, an unresolved `chdir` around inferred output targets,
-  an action preprocessor on a public executable, an explicit `install` into section `bin`, or
+  an action preprocessor on a public executable or any library, an explicit `install` into section
+  `bin`, or
   unexpanded top-level `include` stanzas. A bare
   executable name is itself refused: its `.exe` suffix does not stop ambient PATH from selecting a
   program outside the workspace. Action-local or directory-level PATH rewrites (under any case
@@ -1280,12 +1281,13 @@ that they earn a lookup rather than always-loaded space.
   program paths remain relative to the changed working directory. Each construct needs deliberate
   scanner support before it can participate in this static guarantee. Absolute executable paths are
   refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
-  A target-producing rule anywhere in the repository may not run a public bin executable: its
-  output could be an implicit build prerequisite of a smoked executable, hiding an extra execution
-  outside the alias dependency edges the census can see. The scan follows alias dependencies of
-  target-producing rules through the same recursive visitor, and refuses their opaque commands;
-  otherwise a generated source could run a public executable through a helper or shell without
-  entering the exact-once count.
+  A target-producing rule anywhere in the repository may not run a public bin executable, directly
+  or through an alias dependency: its output could be an implicit build prerequisite of a smoked
+  executable, hiding an extra execution outside the alias dependency edges the census can see. Its
+  shell, interpreter, or otherwise opaque commands are refused for the same reason. Producer-side
+  executions are errors rather than smoke credit because an unrelated generated target may never
+  be built. Commands under absolute `chdir` destinations are likewise refused before path
+  normalization can turn a host path into an apparent workspace identity.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
