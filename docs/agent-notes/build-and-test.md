@@ -842,8 +842,10 @@ that they earn a lookup rather than always-loaded space.
   right-hand sides, while a case guard that selects a Boolean result is itself a signed dependency.
   Optional-parameter defaults are resolved in the environment before that parameter shadows its
   name. They become labeled local bindings, so later defaults can depend on earlier ones and a call
-  that supplies an optional argument suppresses exactly that default edge. Direct quantifiers in an
-  `if` condition are attributed to the returned binding as well as dependencies named there.
+  that definitely supplies an optional argument suppresses exactly that default edge; `?arg` only
+  does so for a syntactic `Some`, since `None` invokes the default. Direct quantifiers in an `if`
+  condition or match guard are attributed to the returned binding as well as dependencies named
+  there. `function`-case bodies and guards receive the same scoped analysis as ordinary matches.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

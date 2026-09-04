@@ -312,6 +312,16 @@ let quantifiers_in ?(positive = true) expr =
 let rec returned_quantifiers ?(positive = true) expr =
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> returned_quantifiers ~positive body
+  | Pexp_function (_, _, Pfunction_cases (cases, _, _)) ->
+      List.concat_map cases ~f:(fun case ->
+          let guard_quantifiers =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                let guard_positive =
+                  if bool_literal case.pc_rhs false then not positive else positive
+                in
+                quantifiers_in ~positive:guard_positive guard)
+          in
+          guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
   | Pexp_let (_, bindings, body) ->
       let returned_bindings = returned_binding_polarities positive body in
       returned_quantifiers ~positive body
@@ -343,7 +353,15 @@ let rec returned_quantifiers ?(positive = true) expr =
   | Pexp_match (scrutinee, cases) ->
       List.concat_map cases ~f:(fun case ->
           let returned_bindings = returned_binding_polarities positive case.pc_rhs in
-          returned_quantifiers ~positive case.pc_rhs
+          let guard_quantifiers =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                let guard_positive =
+                  if bool_literal case.pc_rhs false then not positive else positive
+                in
+                quantifiers_in ~positive:guard_positive guard)
+          in
+          guard_quantifiers
+          @ returned_quantifiers ~positive case.pc_rhs
           @ (binding_parts case.pc_lhs scrutinee
             |> List.concat_map ~f:(fun part ->
                 List.filter_map returned_bindings ~f:(fun (name, returned_positive) ->
@@ -375,6 +393,13 @@ and returned_binding_polarities positive expr =
   match expr.pexp_desc with
   | Pexp_ident { txt = Ppxlib.Longident.Lident name; _ } -> [ (name, positive) ]
   | Pexp_function (_, _, Pfunction_body body) -> returned_binding_polarities positive body
+  | Pexp_function (_, _, Pfunction_cases (cases, _, _)) ->
+      List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          returned_binding_polarities positive case.pc_rhs
+          |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
   | Pexp_let (_, bindings, body) ->
       let shadowed =
         List.concat_map bindings ~f:(fun binding -> List.map (pattern_names binding.pvb_pat) ~f:fst)
@@ -438,6 +463,10 @@ let rec required_nonempty expr =
   let none () = Set.empty (module String) in
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> required_nonempty body
+  | Pexp_function (_, _, Pfunction_cases (cases, _, _)) ->
+      List.fold cases
+        ~init:(Set.empty (module String))
+        ~f:(fun guards case -> Set.union guards (required_nonempty case.pc_rhs))
   | Pexp_let (_, _, body) -> required_nonempty body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> required_nonempty inner
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" -> (
@@ -608,32 +637,49 @@ and make_binding_group environment recursive values =
 and function_dependencies environment expr =
   match expr.pexp_desc with
   | Pexp_function (parameters, _, Pfunction_body body) ->
-      let body_environment =
-        List.fold parameters ~init:environment ~f:(fun parameter_environment parameter ->
-            match parameter.pparam_desc with
-            | Pparam_val (label, default, pattern) ->
-                let names = pattern_names pattern |> List.map ~f:fst in
-                let shadowed = Set.of_list (module String) names in
-                let outer_environment =
-                  List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
-                      not (Set.mem shadowed binding.name))
-                in
-                Option.value_map default ~default:outer_environment ~f:(fun default ->
-                    let optional_label =
-                      match label with
-                      | Asttypes.Optional name -> Some name
-                      | Labelled name -> Some name
-                      | Nolabel -> None
-                    in
-                    let defaults =
-                      binding_parts pattern default
-                      |> List.map ~f:(make_binding_part ?optional_label parameter_environment)
-                    in
-                    List.rev_append defaults outer_environment)
-            | Pparam_newtype _ -> parameter_environment)
-      in
+      let body_environment = function_parameter_environment environment parameters in
       function_dependencies body_environment body
+  | Pexp_function (parameters, _, Pfunction_cases (cases, _, _)) ->
+      let body_environment = function_parameter_environment environment parameters in
+      List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          let case_environment =
+            List.filter body_environment ~f:(fun (binding : helper_binding) ->
+                not (Set.mem shadowed binding.name))
+          in
+          let guard_dependencies =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                let positive = not (bool_literal case.pc_rhs false) in
+                binding_dependencies ~positive case_environment guard)
+          in
+          guard_dependencies @ function_dependencies case_environment case.pc_rhs)
   | _ -> binding_dependencies environment expr
+
+and function_parameter_environment environment parameters =
+  List.fold parameters ~init:environment ~f:(fun parameter_environment parameter ->
+      match parameter.pparam_desc with
+      | Pparam_val (label, default, pattern) ->
+          let names = pattern_names pattern |> List.map ~f:fst in
+          let shadowed = Set.of_list (module String) names in
+          let outer_environment =
+            List.filter parameter_environment ~f:(fun (binding : helper_binding) ->
+                not (Set.mem shadowed binding.name))
+          in
+          Option.value_map default ~default:outer_environment ~f:(fun default ->
+              let optional_label =
+                match label with
+                | Asttypes.Optional name -> Some name
+                | Labelled name -> Some name
+                | Nolabel -> None
+              in
+              let defaults =
+                binding_parts pattern default
+                |> List.map ~f:(make_binding_part ?optional_label parameter_environment)
+              in
+              List.rev_append defaults outer_environment)
+      | Pparam_newtype _ -> parameter_environment)
 
 and binding_dependencies ?(positive = true) environment expr =
   let bindings = ref [] in
@@ -720,9 +766,14 @@ and binding_dependencies ?(positive = true) environment expr =
             match lookup environment name with
             | Some binding ->
                 let supplied_optional =
-                  List.filter_map arguments ~f:(fun (label, _) ->
+                  List.filter_map arguments ~f:(fun (label, argument) ->
                       match label with
-                      | Asttypes.Labelled name | Optional name -> Some name
+                      | Asttypes.Labelled name -> Some name
+                      | Optional name -> (
+                          match argument.pexp_desc with
+                          | Pexp_construct ({ txt = Ppxlib.Longident.Lident "Some"; _ }, Some _) ->
+                              Some name
+                          | _ -> None)
                       | Nolabel -> None)
                   |> Set.of_list (module String)
                 in
@@ -1252,6 +1303,16 @@ let () = Verdict.p "all rows pass" result|ocaml},
 let result = match () with () when all -> false | () -> true
 let () = Verdict.p "some row fails" result|ocaml},
       [] );
+    ( "refuses a direct quantifier returned through a match guard",
+      {ocaml|let result =
+  match () with () when List.for_all rows ~f:Fn.id -> true | () -> false
+let () = Verdict.p "all rows pass" result|ocaml},
+      [ "result" ] );
+    ( "accepts an inverted direct quantifier returned through a match guard",
+      {ocaml|let result =
+  match () with () when List.for_all rows ~f:Fn.id -> false | () -> true
+let () = Verdict.p "some row fails" result|ocaml},
+      [] );
     ( "refuses a bound quantifier returned from a protected try body",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let close = try all with _ -> false
@@ -1287,6 +1348,16 @@ let () = Verdict.p "all rows pass" (use ())|ocaml},
 let use ?(ok = outer_ok) () = ok
 let () = Verdict.p "the supplied constant passes" (use ~ok:true ())|ocaml},
       [] );
+    ( "uses an optional default when a forwarded argument is None",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let use ?(ok = all) () = ok
+let () = Verdict.p "all rows pass" (use ?ok:None ())|ocaml},
+      [ "all" ] );
+    ( "does not use an optional default when a forwarded argument is definitely Some",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let use ?(ok = all) () = ok
+let () = Verdict.p "the forwarded constant passes" (use ?ok:(Some true) ())|ocaml},
+      [] );
     ( "resolves a quantified binding through chained optional defaults",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let use ?(x = all) ?(result = x) () = result
@@ -1301,6 +1372,15 @@ let () = Verdict.p "the supplied constant passes" (use ~x:true ())|ocaml},
       {ocaml|let ok = List.for_all rows ~f:Fn.id
 let use ?(ok = not ok) () = ok
 let () = Verdict.p "some row fails" (use ())|ocaml},
+      [] );
+    ( "refuses a quantified helper written with function-case syntax",
+      {ocaml|let close = function xs -> List.for_all xs ~f:Fn.id
+let () = Verdict.p "all rows pass" (close rows)|ocaml},
+      [ "close" ] );
+    ( "accepts a guarded quantified helper written with function-case syntax",
+      {ocaml|let close = function
+  | xs -> (not (List.is_empty xs)) && List.for_all xs ~f:Fn.id
+let () = Verdict.p "all rows pass" (close rows)|ocaml},
       [] );
     ( "accepts a helper that negates a quantified local binding",
       {ocaml|let differs xs =
