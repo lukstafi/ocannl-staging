@@ -397,6 +397,43 @@ let () =
            ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ])
       opt_h
   in
+  (* A zero explicit k-block is only statement-scoped when the contraction has one axis. With an
+     inherited outer contraction loop ([m_ko]), the tensorized accumulator survives across that loop
+     even though [sk_bk = 0], so it needs the fragment-scope arm too. This multi-axis shape is the
+     negative control for the old [bk]-only classification: a per-statement-only capability must not
+     admit even its nominally unstaged MMA seeds. *)
+  let check_wide_outer_scope () =
+    Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+    let whh = 2 and wee = 8 in
+    let wide_outer_w =
+      NTDSL.init ~l:"wide_outer_w" ~prec:Ir.Ops.half ~o:[ nn ] ~i:[ whh; wee ] ~f:(fun _ -> 0.25) ()
+    in
+    let wide_outer_x =
+      NTDSL.init ~l:"wide_outer_x" ~prec:Ir.Ops.half ~b:[ 2; 16 ] ~o:[ whh; wee ]
+        ~f:(fun _ -> 0.25)
+        ()
+    in
+    let%op wide_outer = wide_outer_w * wide_outer_x in
+    let opt_wide_outer = with_lowering ~name:"sft_wide_outer" wide_outer in
+    let wide_outer_statement =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
+        ~limits:(gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ])
+        opt_wide_outer
+    in
+    let wide_outer_both =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
+        ~limits:
+          (gpu_f16_limits
+             ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ])
+        opt_wide_outer
+    in
+    Numerics.set_policy saved_policy;
+    Verdict.p
+      "a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no \
+       explicit k-block"
+      ((not (has_mma wide_outer_statement))
+      && has_unstaged_mma wide_outer_both && has_staged_mma wide_outer_both)
+  in
   (* The CPU register tiling has the same wide-policy divergence case: under [Fp16_wide] with
      [narrow_compute_f32 = false] on a native-fp16 target, compute resolves half while the
      accumulator residency ([Numerics.cpu_accum_prec]) is f32, so the C-tile cannot honor it and
@@ -739,6 +776,7 @@ let () =
   (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
   | None -> Stdio.printf "cpu traffic: no site detected\n"
   | Some tree -> traffic_pins "cpu simd32" ~limits:cpu_limits ~elt_bytes:4 ~n_extent:64 tree opt);
+  check_wide_outer_scope ();
   (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
      tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
      "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)

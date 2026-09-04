@@ -2897,8 +2897,9 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                [Schedule.apply]: an inapplicable twin is refuted with its witness, not merely
                failed. *)
             let staged_layout = mma_staged_layout_for_precisions mma ~a_prec ~b_prec ~d_prec in
+            let has_outer_contraction = List.exists site.m_ko ~f:(fun (_, extent) -> extent > 1) in
             let scope_of_bk bk =
-              if bk = 0 then Ir.Backend_intf.Mma_per_statement
+              if bk = 0 && not has_outer_contraction then Ir.Backend_intf.Mma_per_statement
               else Ir.Backend_intf.Mma_fragment_scope
             in
             let scope_name = function
