@@ -281,6 +281,18 @@ files.
   maximum-one symbolic axis without an iterator, so runtime zero cannot escape the refusal through
   `Fixed_idx 0`. An unbound extent retains the standing maximum-shape semantics; padded-window
   clamping remains unreachable by construction.
+- **A gh-490 extent guard is per-ITERATOR, so an axis with no product iterator gets none**, and
+  `Accum_op` reaches that shape from ordinary `%op` code: a maximum-one symbolic axis has an empty
+  product space, both sides indexed at `Fixed_idx 0`. Reducing over one bound to zero returned the
+  operand where the empty sum is the accumulation's neutral element -- a wrong value in an
+  IN-extent output cell, not merely a write past the logical shape (`test/operations/
+  accum_max_one_extent.ml` executes both, against a maximum-two twin that guards correctly).
+  `with_product_loops` now refuses a bound extent whose iterator is absent, for both the `Block` and
+  `Rev_sides` roles (gh-ocannl-878). An enclosing `0 < extent` guard is NOT the local repair it
+  looks like: with no iterator the assignment is surjective and injective, so
+  `can_skip_accumulation` drops the neutral-element init, and skipping the write would leave the
+  target holding whatever preceded it rather than zero -- soundness would have to couple the guard
+  to the accumulation-elision decision, for a symbol that can only take the values 0 and 1.
 - A lowering-time reader of `Indexing.variable_ref` must force a dims lazy (or otherwise finish
   inference) FIRST: forcing dims is what runs `Shape.finish_inference` and fills row-var-bound refs
   (`..d..` captures such as layer norm's `/. dim d`). "Inference is already forced by now" is not an

@@ -1,0 +1,14 @@
+a maximum-two symbolic reduction axis carries a product iterator: true
+its bound lowering emits the gh-490 extent guard: true
+the guarded reduction of 37.0 over an extent-0 axis is the empty sum 0.0: true
+an ordinary %op reduction reaches Accum_op with a maximum-one extent and no iterator: true
+its product space is empty, so no loop exists for an extent guard to sit in: true
+both sides of the reduction are indexed at element zero: true
+zero is a legal runtime binding for a maximum-one extent: true
+Accum_op lowering refuses a bound maximum-one symbolic extent: true
+the refusal names Accum_op, the absent iterator and the element-zero write: true
+the user-facing compile path refuses it too: true
+the same extent left unbound still lowers, retaining maximum-shape semantics: true
+that lowering is what the bound path emitted: it contains no guard for static indices to fill: true
+the refused program would have returned its operand where the empty sum is 0.0: true
+so the refusal guards a wrong VALUE in a concrete output cell, not a beyond-extent margin: true
