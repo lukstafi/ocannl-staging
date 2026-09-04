@@ -1257,10 +1257,10 @@ that they earn a lookup rather than always-loaded space.
   command sites so a duplicated smoke is not collapsed into a set, follows `(alias ...)`
   dependencies transitively, and ignores only private `bin/dune` helper executables along that
   graph. It fails closed on external or otherwise opaque actions, `with-accepted-exit-codes`,
-  `enabled_if`, `alias_rec`, explicit or action-inferred generated-target dependencies,
-  target-bearing alias rules, or unexpanded `include` stanzas; a bare executable name under any
-  case spelling of a rewritten `PATH` is opaque too. Each construct needs deliberate scanner support
-  before it can participate in this static guarantee.
+  `enabled_if`, `alias_rec`, explicit (file or directory) or action-inferred generated-target
+  dependencies, target-bearing alias rules, or unexpanded `include` stanzas; a bare executable name
+  under any case spelling of a rewritten `PATH` is opaque too. Each construct needs deliberate
+  scanner support before it can participate in this static guarantee.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.

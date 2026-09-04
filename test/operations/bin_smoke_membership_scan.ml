@@ -132,6 +132,8 @@ let produced_targets ~subdir stanza =
             | Some targets ->
                 List.filter_map targets ~f:(function
                   | Sexp.Atom target -> Some (resolve_target ~subdir target)
+                  | Sexp.List [ Sexp.Atom "dir"; Sexp.Atom target ] ->
+                      Some (resolve_target ~subdir target)
                   | Sexp.List _ -> None))
       in
       let inferred =
@@ -544,6 +546,26 @@ let target_bearing_alias_fixture =
    (run %{exe:alpha.exe})
    (touch smoke.stamp))))|dune}
 
+let directory_target_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (targets (dir smoke-output))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (mkdir smoke-output))))
+(rule
+ (alias bin-smoke)
+ (deps smoke-output)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let directory_target_alias_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (targets (dir smoke-output))
+ (action (run %{exe:alpha.exe})))|dune}
+
 let rewritten_path_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -569,6 +591,8 @@ let controls_hold () =
   let generated_target = scan_bin_content generated_target_fixture in
   let inferred_target = scan_bin_content inferred_target_fixture in
   let target_bearing_alias = scan_bin_content target_bearing_alias_fixture in
+  let directory_target = scan_bin_content directory_target_fixture in
+  let directory_target_alias = scan_bin_content directory_target_alias_fixture in
   let rewritten_path = scan_bin_content rewritten_path_fixture in
   complete accepted
   && (not (complete refused))
@@ -605,6 +629,14 @@ let controls_hold () =
   && (not (complete target_bearing_alias))
   && List.mem target_bearing_alias.errors
        (cached_alias_error "bin/dune" [ "bin/smoke.stamp" ])
+       ~equal:String.equal
+  && (not (complete directory_target))
+  && List.mem directory_target.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke-output"
+       ~equal:String.equal
+  && (not (complete directory_target_alias))
+  && List.mem directory_target_alias.errors
+       (cached_alias_error "bin/dune" [ "bin/smoke-output" ])
        ~equal:String.equal
   && (not (complete rewritten_path))
   && List.mem rewritten_path.errors
