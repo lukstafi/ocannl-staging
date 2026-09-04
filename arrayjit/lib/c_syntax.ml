@@ -6218,6 +6218,15 @@ module C_syntax (B : C_syntax_config) = struct
         let idx_doc = if affine_needs_parens idx then parens idx_doc else idx_doc in
         let expr = string prefix ^^ idx_doc ^^ string postfix in
         ([], expr)
+    | Ternop (Ops.FMA, _, _, _) when not (Ops.is_float prec) ->
+        (* gh-ocannl-873: hand-built low-level IR can bypass the simplifier's float-only FMA rewrite
+           guard. Reject it at the shared C-family scalar-emission seam before a backend's syntax
+           table can turn integer arithmetic into [fma]/[fmaf]. The explicit SIMD and MMA renderings
+           are already gated by [vector_prec_ok], which admits only float-capable compute
+           precisions. *)
+        invalid_arg
+          (Printf.sprintf "C_syntax.pp_scalar: FMA requires floating-point precision, got %s"
+             (Ops.prec_string prec))
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
         (* A heterogeneous argument keeps its own precision, which -- like every precision reaching
            here from [Low_level] -- is a storage precision; the rendering takes [comp_prec] of
