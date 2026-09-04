@@ -830,10 +830,11 @@ that they earn a lookup rather than always-loaded space.
   value aliases in that setup retain their connection to the claimed formal. Every claim in a
   sequential or control-flow wrapper contributes its Boolean slot, and partial `pf`/`claimf` calls
   count the literal format's still-owed arguments before that slot. Partially applying an already
-  recognised local wrapper carries its remaining slots forward. Its exact, stale-checked exemption
-  list is only for bindings whose intended passing meaning allows an empty population; synthetic
-  controls include a child process the shipping ratchet demonstrably refuses (gh-ocannl-801,
-  gh-ocannl-887). An entry
+  recognised local wrapper carries its remaining slots forward. Local `open Verdict.Claims` scopes
+  extend discovery, and eager outer calls do not hide a nested claim argument. Its exact,
+  stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
+  population; synthetic controls include a child process the shipping ratchet demonstrably refuses
+  (gh-ocannl-801, gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
@@ -889,8 +890,8 @@ that they earn a lookup rather than always-loaded space.
   offset, and each refuses a key that resolves to more than one site. Multiline and same-line
   duplicate controls exist for both literal and computed labels, because a line number merges the
   exact same-line shape the check must distinguish. Direct quantifiers passed to a Verdict wrapper
-  use the wrapper CALL offset, so one intentional call-site exemption cannot silently cover another
-  call through the same wrapper.
+  use the claimed ARGUMENT offset, so one intentional exemption cannot silently cover another call
+  through the same wrapper or another claimed slot in the same call.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
   `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or

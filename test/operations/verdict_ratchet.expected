@@ -64,6 +64,8 @@ refuses a direct quantifier passed through a wrapper setup alias: true
 does not connect a wrapper parameter hidden by a setup constant: true
 refuses every quantified argument passed through a sequential wrapper: true
 refuses a quantified argument claimed inside wrapper control flow: true
+refuses a quantified argument claimed inside an eager wrapper call: true
+refuses a quantified argument claimed under a local Verdict open: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -159,6 +161,8 @@ a same-line shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both same-line shadowed definitions: true
 a reused wrapper call helper name resolves to two call sites, not one: true
 refuses an exemption key that names both reused wrapper call call sites: true
+a multi-slot wrapper call helper name resolves to two call slots, not one: true
+refuses an exemption key that names both multi-slot wrapper call call slots: true
 a repeated literal-label exemption key resolves to two source sites, not one: true
 refuses an exemption key that names both repeated literal-label source sites: true
 a same-line repeated literal-label exemption key resolves to two source sites, not one: true

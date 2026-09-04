@@ -1017,7 +1017,7 @@ and wrapper_signature environment expression =
     let shadowed = pattern_names pattern |> List.map ~f:fst |> Set.of_list (module String) in
     List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name))
   in
-  let rec claim_calls aliases expression =
+  let rec claim_calls claim_environment aliases expression =
     match expression.pexp_desc with
     | Pexp_let (recursive, bindings, body) ->
         let binding_aliases =
@@ -1025,27 +1025,36 @@ and wrapper_signature environment expression =
           | Asttypes.Nonrecursive -> aliases
           | Recursive -> extend_aliases aliases recursive bindings
         in
-        List.concat_map bindings ~f:(fun binding -> claim_calls binding_aliases binding.pvb_expr)
-        @ claim_calls (extend_aliases aliases recursive bindings) body
-    | Pexp_sequence (left, right) -> claim_calls aliases left @ claim_calls aliases right
-    | Pexp_open (_, body) -> claim_calls aliases body
-    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> claim_calls aliases inner
+        List.concat_map bindings ~f:(fun binding ->
+            claim_calls claim_environment binding_aliases binding.pvb_expr)
+        @ claim_calls claim_environment (extend_aliases aliases recursive bindings) body
+    | Pexp_sequence (left, right) ->
+        claim_calls claim_environment aliases left @ claim_calls claim_environment aliases right
+    | Pexp_open (declaration, body) ->
+        claim_calls (open_claims claim_environment declaration) aliases body
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
+        claim_calls claim_environment aliases inner
     | Pexp_ifthenelse (_, yes, no) ->
-        claim_calls aliases yes @ Option.value_map no ~default:[] ~f:(claim_calls aliases)
+        claim_calls claim_environment aliases yes
+        @ Option.value_map no ~default:[] ~f:(claim_calls claim_environment aliases)
     | Pexp_match (_, cases) ->
         List.concat_map cases ~f:(fun case ->
-            claim_calls (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
+            claim_calls claim_environment (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
     | Pexp_try (body, cases) ->
-        claim_calls aliases body
+        claim_calls claim_environment aliases body
         @ List.concat_map cases ~f:(fun case ->
-            claim_calls (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
-    | Pexp_apply (callee, arguments) ->
-        Option.value_map (claim_target environment callee) ~default:[] ~f:(fun target ->
-            [ (target, arguments, aliases) ])
+            claim_calls claim_environment (shadow_aliases aliases case.pc_lhs) case.pc_rhs)
+    | Pexp_apply (callee, arguments) -> (
+        match claim_target claim_environment callee with
+        | Some target -> [ (target, arguments, aliases) ]
+        | None ->
+            claim_calls claim_environment aliases callee
+            @ List.concat_map arguments ~f:(fun (_, argument) ->
+                claim_calls claim_environment aliases argument))
     | _ -> []
   in
   let parameters, body = parameters_and_body [] expression in
-  let calls = claim_calls [] body in
+  let calls = claim_calls environment [] body in
   let unlabelled_parameters =
     List.count parameters ~f:(fun parameter ->
         match parameter.pparam_desc with
@@ -1483,10 +1492,11 @@ let quantified_claims structure =
           || Set.is_empty (Set.inter guards quantifier.populations))
     in
     if not (List.is_empty quantifiers) then
+      let argument_site = site_of_location boolean.pexp_loc in
       found :=
         {
           helper = wrapper.name;
-          helper_site = claim_site;
+          helper_site = argument_site;
           claim_line = claim_site.line;
           quantifiers =
             List.map quantifiers ~f:(fun quantifier -> quantifier.kind)
@@ -1872,6 +1882,16 @@ let () = check (List.for_all first_rows ~f:Fn.id) true|ocaml},
     ( "refuses a quantified argument claimed inside wrapper control flow",
       {ocaml|let enabled = true
 let check ok = if enabled then Verdict.p "all rows pass" ok else ()
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "refuses a quantified argument claimed inside an eager wrapper call",
+      {ocaml|let check ok = ignore (Verdict.p "all rows pass" ok)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "refuses a quantified argument claimed under a local Verdict open",
+      {ocaml|let check ok =
+  let open Verdict.Claims in
+  p "all rows pass" ok
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
@@ -2344,6 +2364,12 @@ let repeated_wrapper_call_fixture =
 let () = check (List.is_empty optional_rows)
 let () = check (List.for_all rows ~f:Fn.id)|ocaml}
 
+let multi_slot_wrapper_call_fixture =
+  {ocaml|let check first second =
+  Verdict.p "the optional rows are absent" first;
+  Verdict.p "all rows pass" second
+let () = check (List.is_empty optional_rows) (List.for_all rows ~f:Fn.id)|ocaml}
+
 (* The definitions each exemption key resolves to, so that "one key, one helper" is something this
    check reads off the corpus rather than a property of names it hopes holds. Keyed by offset and
    carrying the printable site, so the report says where each body is and the identity does not
@@ -2493,6 +2519,8 @@ let run_shadowed_quantified_controls () =
   @ run_shadowed_quantified_control "same-line shadowed" same_line_shadowed_helper_fixture
   @ run_shadowed_quantified_control ~helper:"check" ~site_kind:"call sites" "reused wrapper call"
       repeated_wrapper_call_fixture
+  @ run_shadowed_quantified_control ~helper:"check" ~site_kind:"call slots"
+      "multi-slot wrapper call" multi_slot_wrapper_call_fixture
 
 let run_stale_quantified_control () =
   let source = "test/operations/verdict_ratchet.ml" in
