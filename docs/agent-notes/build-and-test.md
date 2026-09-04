@@ -532,8 +532,9 @@ that they earn a lookup rather than always-loaded space.
   before escalating from TERM to KILL so a recycled numeric group is never targeted. Identity
   matching deliberately admits the original zombie leader; after KILL, a verified zombie-only
   residue is inert and does not replace the iteration's timeout/cancellation verdict with an error.
-  A reachable group that loses leader identity before or after KILL is accepted only when its
-  census is zombie-only; any live leaderless descendant is a loud refusal to reuse the tree.
+  A reachable group that loses leader identity before KILL is refused without consulting the
+  fallible census. After KILL reached a verified group, leaderless residue is accepted only when
+  its census is zombie-only; any live leaderless descendant is a loud refusal to reuse the tree.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded

@@ -55,6 +55,7 @@
 #  22. orphan cleanup gates on reachability and revalidates identity for KILL.
 #  23. a zombie retains its recorded identity while remaining non-live.
 #  24. a setsid descendant cannot escape into the next repeat build context.
+#  25. repeat isolation flags precede `dune exec`'s argument separator.
 
 set -u
 
@@ -1085,6 +1086,19 @@ if [ "$repeat_rc" = 0 ] && [ "$(grep -c -- '-j 1' "$TMP/repeat-alone.calls")" = 
 else
   report 1 "repeat: --alone serializes every dune iteration" \
     "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-alone.calls"); output: ${repeat_out:-<nothing>}"
+fi
+
+# The first `--` belongs to Dune, not to repeat. The trailing --force is a
+# program argument on purpose: this fails if isolation flags are appended at
+# the end or if the splice mistakes a later option-looking argument for Dune's.
+repeat_probe repeat-separator stable 2 exec ./prog.exe -- alpha --force
+if [ "$repeat_rc" = 0 ] \
+   && [ "$(grep -c '^exec ./prog.exe --force --cache=disabled --build-dir=.* -- alpha --force$' \
+          "$TMP/repeat-separator.calls")" = 2 ]; then
+  report 0 "repeat: isolation flags precede Dune's argument separator"
+else
+  report 1 "repeat: isolation flags precede Dune's argument separator" \
+    "exit $repeat_rc; calls: $(tr '\n' ';' <"$TMP/repeat-separator.calls")"
 fi
 
 # An active repeat must replace `last`, and stop must signal the OUTER

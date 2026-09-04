@@ -883,8 +883,23 @@ case $sub in
     while [ "$i" -le "$repeats" ] && [ -z "$repeat_cancelled" ]; do
       iter=$run_dir/iteration-$i
       mkdir "$iter" || die "cannot create $iter"
-      repeat_cmd=("$DUNE" "$@" --force --cache=disabled --build-dir="$repeat_build")
-      [ "$alone" = 0 ] || repeat_cmd+=(-j 1)
+      # Dune's first `--` ends Dune option parsing (`dune exec PROG -- ARGS`).
+      # Isolation options belong immediately before it; appending them would
+      # silently hand them to PROG and run Dune in its ambient build context.
+      repeat_cmd=("$DUNE")
+      repeat_separator=0
+      for repeat_arg in "$@"; do
+        if [ "$repeat_separator" = 0 ] && [ "$repeat_arg" = -- ]; then
+          repeat_cmd+=(--force --cache=disabled --build-dir="$repeat_build")
+          [ "$alone" = 0 ] || repeat_cmd+=(-j 1)
+          repeat_separator=1
+        fi
+        repeat_cmd+=("$repeat_arg")
+      done
+      if [ "$repeat_separator" = 0 ]; then
+        repeat_cmd+=(--force --cache=disabled --build-dir="$repeat_build")
+        [ "$alone" = 0 ] || repeat_cmd+=(-j 1)
+      fi
       {
         printf '%q clean --build-dir=%q && ' "$DUNE" "$repeat_build"
         printf '%q ' "${repeat_cmd[@]}"
