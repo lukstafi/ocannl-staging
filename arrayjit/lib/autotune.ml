@@ -341,7 +341,11 @@ let search_measurements_cacheable ~nothing_timed ~timings_contended =
    not batch wall (gh-ocannl-855), so [max_timing_runs] rather than [min_timing_ms] bounds the wall
    cost of queued timing. [max_queue_depth] stops a microsecond kernel from minting an unbounded
    batch. A genuinely slow routine gets depth 1 and is then measured exactly as [Isolated] measures
-   it; a stall-inflated calibration is refused instead of taking that same path silently. *)
+   it. The 10 ms target is also the Metal long-command-buffer safety bound established by
+   gh-ocannl-828: on M4 Max / macOS 26.6.2, the standalone SharedEvent chain changed scheduling at
+   about 1.2 s per kernel, while [queued_batch_depth] is already 1 at 10 ms -- about 120x below that
+   regime. See [benchmarks/runners/ocannl/metal_queue_probe.ml] for the raw-queue/event-chain
+   discriminator. *)
 let queued_batch_ms = 10.
 let max_queue_depth = 200
 
