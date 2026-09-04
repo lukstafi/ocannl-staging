@@ -47,6 +47,10 @@ module Codegen_text_scan = Codegen_text_scan
 (** Deciding what pins the TEXT of generated code: goldens holding emitted kernel or IR source, and
     test sources asserting on it from a string literal. *)
 
+module Source_inventory = Source_inventory
+(** A source-only repository inventory derived from a clean Dune sandbox. Repository scans select
+    their corpus from this shared set instead of maintaining recursive source-root lists. *)
+
 module Scan_argv = Scan_argv
 (** Response-file expansion for the repository-wide scans: a [@<path>] argument stands for the words
     in that file. What a scan reads is handed to it on the command line, and Windows caps a command

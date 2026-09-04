@@ -152,14 +152,12 @@ let raw_entries =
         "[scanner-refusal:e592c4ffcb391edf546553bd50accc7a] runtime value separator";
         "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";
         "[scanner-refusal:ed12f66c93e310aaa2996f755dd93a06] config-usage refusal control";
-        "[scanner-refusal:f399eac2002ea39f1205a4bf86641d99] tools scripts benchmarks";
-        "[scanner-refusal:bf02240774c91428eb2d9e12479f6ade] under tools benchmarks";
-        "[scanner-refusal:c70062d940bba6a9b13ae0e4dd0aea0f] reaches OCaml tutorial";
-        "[scanner-refusal:e58cf294bf65466dac521681df692812] OCaml implementation diagnostics";
-        "[scanner-refusal:f484855a1cb36781d8658f3b8ad41c91] GitHub workflow guidance";
-        "[scanner-refusal:4ad6b6a11faf600e54da5c072a3bfede] AGENTS.md";
+        "[scanner-refusal:abf34118c8986fba00fd6d04dbec92e2] source inventory supplies";
+        "[scanner-refusal:98de32226b019b81ff6e88bf4e44c14b] supplies OCaml implementation";
+        "[scanner-refusal:05a2eb509694607c615f131c6949c1f1] inventory supplies Markdown";
+        "[scanner-refusal:df5189a065c11f8226a214b6573c426b] inventory supplies workflow";
         "[scanner-refusal:a51b0bb0846baca8ae1abb956920d3a6] reaches Dune actions";
-        "[scanner-refusal:65a1d9a747256ef8ae0066af6a4ff523] ocannl_config";
+        "[scanner-refusal:13b4153d0202d6c0c37807c3b9149ec9] ocannl_config";
         "[scanner-refusal:e457cc60db51565a141d184de6993035] ocannl_config.reference";
         "[scanner-refusal:e325a76c47f652bc02203717ce08c44a] checked-in debug config";
       ] );
@@ -186,6 +184,8 @@ let raw_entries =
     ( "env_var_deps.ml",
       [
         "[scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives";
+        "[scanner-refusal:35bab4283cd8b87d51ca3476cb0e971e] source_tree";
+        "[scanner-refusal:51b4c42723bc3fa6bfc678d091151ed9] source_tree";
         "[scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from";
         "[scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment";
         "[scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence";

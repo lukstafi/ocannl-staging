@@ -87,8 +87,8 @@
 ; diff.
 ;
 ; A scan whose per-test alias this list omits is one `@scans` skips silently. `env_var_deps` checks
-; that: it derives the family from the rules that glob the repository recursively -- which is what
-; makes a scan repo-wide -- rather than from a second copy of this list.
+; that: it derives the family from rules that either glob the repository recursively or declare its
+; source tree -- which is what makes a scan repo-wide -- rather than from a second copy of this list.
 
 (alias
  (name scans)
@@ -99,6 +99,7 @@
   (alias runtest-config_dep_completeness)
   (alias runtest-env_var_deps)
   (alias runtest-env_var_deps_control)
+  (alias runtest-source_inventory_cases)
   (alias runtest-cache_dir_ignores)
   (alias runtest-cache_dir_ignores_control)
   (alias runtest-atomic_file_rename_scan)
@@ -236,6 +237,14 @@
  (libraries base ocannl stdio printbox-text)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- exercises source-inventory filesystem classification and links no backend.
+ (name source_inventory_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules source_inventory_cases)
+ (libraries base stdio unix test_utils arrayjit.verdict))
 
 ; gh-ocannl-859: `@check` proves that a non-default ppx_minidebug gate compiles, but not that a
 ; trace expression resolved the intended binding. The ordinary level-0 suite records an explicit
@@ -4608,21 +4617,18 @@
 ; prose are consumers of the key registry too. The OCaml-source scanners cannot see either, so a
 ; rename otherwise leaves them behind until a reviewer remembers the site.
 ;
-; Script scope is every `*.sh` and `*.py` recursively under tools/, scripts/, benchmarks/, and
-; test/ -- test harness scripts select backends through the same keys, so a rename drifts there
-; too -- plus
-; user-facing `*.ml` help text under tools/, benchmarks/, bin/, and test/ (excluding generated
-; `*.pp.ml`/`*.pp.mli` renderings), plus implementation `*.ml`/`*.mli` under arrayjit/lib/, tensor/,
-; and lib/:
-; the four checked-in script roots and the OCaml roots have non-vacuity claims. Qualified
+; Source membership comes from `Test_utils.Source_inventory`. Every checked-in `*.sh` and `*.py`
+; is in scope independent of which root contains it; the existing user-help and implementation
+; `*.ml`/`*.mli` scope is selected from that inventory, with generated `*.pp.ml`/`*.pp.mli`
+; renderings excluded. File-kind non-vacuity claims keep a missing class loud without duplicating
+; script-root membership. Qualified
 ; command-line spellings and value separators accepted by
 ; Utils.cmdline_var_prefixes, and identifier-delimited `OCANNL_<KEY>` mentions, are consumers.
 ; Supported prefix-free flags are file/key/count-pinned because their namespace belongs to the host
 ; application and cannot safely be claimed globally; the runtime's per-key qualified-only policy
 ; decides whether those spellings exist.
-; Documentation scope is AGENTS.md, checked-in skill Markdown, the root README, and every `*.md`
-; under docs/ and benchmarks/. Workflow `*.yml`/`*.yaml` under .github/workflows/ contributes
-; unambiguous prefixed tokens too.
+; The existing AGENTS/root-README/docs/benchmarks/skill Markdown scope and workflow YAML scope are
+; selected from the inventory too.
 ; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
 ; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
 ; occupy the whole inline span (case-insensitively, with optional whitespace around `=` or in its
@@ -4630,9 +4636,9 @@
 ; checked-in dune file contributes action arguments, and every checked-in
 ; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
 ; assignment keys, retaining empty keys for registry rejection (and including commented
-; ready-to-enable assignments in the latter); the five
-; checked-in config roots are named in the non-vacuity floor so Dune's generated local copy cannot
-; satisfy it. Prefixed tokens and whole-span inline assignments in ocannl_config.reference join too.
+; ready-to-enable assignments in the latter). The action's generated local copy is excluded from
+; source membership. Prefixed tokens and whole-span inline assignments in ocannl_config.reference
+; join too.
 ; Non-config judgments,
 ; spaced bare config mentions, ambiguous alternate-value spellings, and intentional-invalid
 ; exemptions pin file/key occurrence counts.
@@ -4646,54 +4652,25 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads shell scripts and Markdown as text.
- ; Two targets: the file list is written by dune's own `echo`, which spawns nothing and so has
- ; no length limit, and handed over as a `@<path>` response file -- expanded into argv, a
- ; repository-wide list outgrows Windows' 32,767-character command line, where `CreateProcess`
- ; fails with `No such file or directory` and names neither. See `test/support/scan_argv.ml`.
- (targets config_usage_scan.actual config_usage_scan.filelist)
+ ; The clean sandbox holds the declared source tree without Git metadata or stale build outputs.
+ ; The scanner enumerates it in-process, preserving whitespace boundaries and keeping the source
+ ; list off Windows' length-limited command line. Its own executable, redirected output, and the
+ ; mandatory copied local config are generated sandbox occupants and are excluded explicitly.
+ (target config_usage_scan.actual)
  (package neural_nets_lib)
  (deps
   ocannl_config
-  ../../AGENTS.md
-  ../../README.md
-  ../../ocannl_config.for_debug
-  ../../ocannl_config.reference
-  (glob_files_rec ../../.github/workflows/*.yml)
-  (glob_files_rec ../../.github/workflows/*.yaml)
-  (glob_files_rec ../../.claude/skills/*.md)
-  (glob_files_rec ../../docs/*.md)
-  (glob_files_rec ../../benchmarks/*.md)
-  (glob_files_rec ../../dune)
-  (glob_files_rec ../../ocannl_config)
-  (glob_files_rec ../../tools/*.sh)
-  (glob_files_rec ../../tools/*.py)
-  (glob_files_rec ../../tools/*.ml)
-  (glob_files_rec ../../scripts/*.sh)
-  (glob_files_rec ../../scripts/*.py)
-  (glob_files_rec ../../benchmarks/*.sh)
-  (glob_files_rec ../../benchmarks/*.py)
-  (glob_files_rec ../../test/*.sh)
-  (glob_files_rec ../../test/*.py)
-  (glob_files_rec ../../benchmarks/*.ml)
-  (glob_files_rec ../../bin/*.ml)
-  (glob_files_rec ../../test/*.ml)
-  (glob_files_rec ../../arrayjit/lib/*.ml)
-  (glob_files_rec ../../arrayjit/lib/*.mli)
-  (glob_files_rec ../../tensor/*.ml)
-  (glob_files_rec ../../tensor/*.mli)
-  (glob_files_rec ../../lib/*.ml)
-  (glob_files_rec ../../lib/*.mli))
+  (sandbox always)
+  (source_tree ../..))
  (action
-  (progn
-   (with-stdout-to
-    config_usage_scan.filelist
-    (echo "%{deps}"))
-   (with-stdout-to
-    config_usage_scan.actual
-    (run
-     %{dep:config_usage_scan.exe}
-     %{workspace_root}
-     @config_usage_scan.filelist)))))
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:config_usage_scan.exe}
+    %{workspace_root}
+    %{target}
+    %{dep:config_usage_scan.exe}
+    %{dep:ocannl_config}))))
 
 (rule
  ; ocannl-backend: none -- runs the same text scanner on a synthetic unknown key and requires its

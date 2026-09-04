@@ -2,6 +2,8 @@ The per-directory seam is put to a root stanza and two nested `(subdir ...)` gro
 checker plugged into it contains no traversal of its own.
 
 a newly plugged-in check receives the root and every nested directory without adding descent: true
+an escaping source_tree dependency identifies a repository-wide scan: true
+a local source_tree fixture does not identify a repository-wide scan: true
 
 The refusal relationship is put to a synthesized `Verdict.fail` format. Its stable fragment
 appears in no permanent control golden in the negative arm, and appears in the positive arm.
@@ -113,6 +115,8 @@ a stanza neither derivation calls a member is asked for no family alias: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
   [scanner-refusal:2b65edf20e36d983c1a016b72c2aadd1] plugged-in check receives
+  [scanner-refusal:35bab4283cd8b87d51ca3476cb0e971e] source_tree
+  [scanner-refusal:51b4c42723bc3fa6bfc678d091151ed9] source_tree
   [scanner-refusal:3182e84964718fd8189a6dd0d93d14b1] diagnostic absent from
   [scanner-refusal:8daa7afe8b321ab7932dac6060588501] same diagnostic fragment
   [scanner-refusal:08ac167f3e68d870e2cfb7f7c85accc3] control marker occurrence

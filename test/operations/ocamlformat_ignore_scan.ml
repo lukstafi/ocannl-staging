@@ -21,6 +21,8 @@ open Stdio
 
 let printf = Test_utils.Refusal_control_manifest.printf
 
+module Inventory = Test_utils.Source_inventory
+
 type line = { number : int; entry : string }
 
 let is_ppx_golden path =
@@ -30,38 +32,6 @@ let is_ppx_golden path =
       && (not (String.mem basename '\\'))
       && String.is_suffix basename ~suffix:"_expected.ml"
   | None -> false
-
-let raw_components path =
-  String.split_on_chars path ~on:[ '/'; '\\' ] |> List.filter ~f:(Fn.non String.is_empty)
-
-let path_components path =
-  let components =
-    if Stdlib.Filename.is_relative path then
-      raw_components (Stdlib.Sys.getcwd ()) @ raw_components path
-    else raw_components path
-  in
-  List.fold components ~init:[] ~f:(fun reversed component ->
-      match (component, reversed) with
-      | ".", _ -> reversed
-      | "..", _ :: rest -> rest
-      | "..", [] -> []
-      | component, _ -> component :: reversed)
-  |> List.rev
-
-let rec drop_prefix path prefix =
-  match (path, prefix) with
-  | path, [] -> Some path
-  | p :: path, q :: prefix when String.equal p q -> drop_prefix path prefix
-  | _ -> None
-
-(* Dune hands the golden paths relative to the rule directory ([../ppx/...]) and [%{workspace_root}]
-   as a different relative route from there ([../..]). Resolve both against the current directory
-   before comparing their components; textual prefix stripping would see no relation between those
-   two spellings and make the golden census vacuously empty. The synthetic controls pass absolute
-   paths, which reach the same comparison without the first resolution. *)
-let relative_to path_root path =
-  let path = path_components path and root = path_components path_root in
-  Option.value (drop_prefix path root) ~default:path |> String.concat ~sep:"/"
 
 let strip_cr line = Option.value (String.chop_suffix line ~suffix:"\r") ~default:line
 
@@ -74,41 +44,13 @@ let lines_of content =
 
 let report_details details = List.iter details ~f:(eprintf "%s\n")
 
-let rec regular_files path =
-  match Unix.stat path with
-  | { Unix.st_kind = Unix.S_DIR; _ } ->
-      Array.to_list (Stdlib.Sys.readdir path)
-      |> List.concat_map ~f:(fun entry -> regular_files (Stdlib.Filename.concat path entry))
-  | { Unix.st_kind = Unix.S_REG; _ } -> [ path ]
-  | _ -> []
-  | exception Unix.Unix_error _ -> []
-
-let scan ~path_root ~ignore_file ~excluded =
-  (* The clean sandbox also contains the action's generated dependencies: this executable, plus the
-     redirected output target while the process is running. The dune action passes both as
-     exclusions. Everything else under [path_root] comes from the declared [source_tree]. *)
-  let excluded = List.map excluded ~f:(relative_to path_root) |> Set.of_list (module String) in
-  let arguments =
-    regular_files path_root
-    |> List.filter ~f:(fun path -> not (Set.mem excluded (relative_to path_root path)))
-  in
-  let paths =
-    List.map arguments ~f:(fun on_disk -> (relative_to path_root on_disk, on_disk))
-    |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
-  in
+let scan ~path_root ~ignore_file ~generated =
+  let inventory = Inventory.of_dune_sandbox ~workspace_root:path_root ~generated in
   let goldens =
-    List.filter_map paths ~f:(fun (path, _) -> Option.some_if (is_ppx_golden path) path)
-    |> List.dedup_and_sort ~compare:String.compare
+    Inventory.select inventory ~f:is_ppx_golden
+    |> List.map ~f:(fun (file : Inventory.file) -> file.path)
   in
-  let declared_file path =
-    match List.Assoc.find paths path ~equal:String.equal with
-    | None -> false
-    | Some on_disk -> (
-        match Unix.stat on_disk with
-        | { Unix.st_kind = Unix.S_REG; _ } -> true
-        | _ -> false
-        | exception Unix.Unix_error _ -> false)
-  in
+  let declared_file = Inventory.mem inventory in
   let content = In_channel.read_all ignore_file in
   let lines = lines_of content in
   let nonempty, empty =
@@ -267,9 +209,9 @@ let usage () =
 let () =
   match Array.to_list Stdlib.Sys.argv with
   | [ _; "--control" ] -> control ()
-  | _ :: "--scan-only" :: path_root :: ignore_file :: excluded ->
-      scan ~path_root ~ignore_file ~excluded
-  | _ :: path_root :: ignore_file :: excluded ->
-      scan ~path_root ~ignore_file ~excluded;
+  | _ :: "--scan-only" :: path_root :: ignore_file :: generated ->
+      scan ~path_root ~ignore_file ~generated
+  | _ :: path_root :: ignore_file :: generated ->
+      scan ~path_root ~ignore_file ~generated;
       control ()
   | _ -> usage ()
