@@ -102,9 +102,9 @@ type mma_capability = {
           would require {!Mma_fragment_scope} are withheld. HIP advertises both scopes since
           gh-ocannl-789 (rocWMMA's [(f16, f16, f32)] fragments and converted boundary), and Metal
           advertises both since gh-ocannl-837 (mixed-type [simdgroup_multiply_accumulate] plus a
-          [thread_elements()] boundary copy). Withholding only the unsupported scope preserves
-          legal tensorized schedules without letting an outer [k] split introduce extra f16
-          narrowing boundaries. *)
+          [thread_elements()] boundary copy). Withholding only the unsupported scope preserves legal
+          tensorized schedules without letting an outer [k] split introduce extra f16 narrowing
+          boundaries. *)
   mma_staged_layouts :
     ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
       (** Format triples whose cooperatively staged operand tiles the backend can read in a

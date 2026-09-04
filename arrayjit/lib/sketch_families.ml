@@ -233,14 +233,14 @@ let mma_tile_for_precisions_in_scope (mma : Ir.Backend_intf.mma_capability) ~sco
   else mma_tile_for_precisions mma ~a_prec ~b_prec ~d_prec
 
 (* The swizzled staged layout, if any, that the backend can read for this site's formats
-   (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. *)
+   (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. Operand layout is
+   independent of the accumulator lifetime; the geometry that consumes this result applies the
+   wide-f16 scope gate separately. *)
 let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec
     : LL.swizzle_kind option =
-  if fp16_wide_withholds mma ~scope:Ir.Backend_intf.Mma_fragment_scope ~d_prec then None
-  else
-    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-        List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
-    |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
+  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+  |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -642,6 +642,14 @@ let pad_composition_ok ~n_staged ~n_operands = n_operands > 0 && n_staged = n_op
 (* Blocks of size [b] covering a possibly padded extent [n]. *)
 let blocks_of n b = (n + b - 1) / b
 
+let mma_scope_of_reduction_extents extents =
+  if List.exists extents ~f:(fun extent -> extent > 1) then Ir.Backend_intf.Mma_fragment_scope
+  else Ir.Backend_intf.Mma_per_statement
+
+let matmul_mma_scope (site : matmul_site) ~bk =
+  mma_scope_of_reduction_extents
+    (List.map site.m_ko ~f:snd @ if bk > 0 then [ blocks_of site.m_nk bk ] else [])
+
 (** {2 Convolution detection and the implicit-GEMM sketch (gh-ocannl-493)}
 
     A convolution is a matmul over a virtual im2col operand. Conv einsums lower to affine-indexed
@@ -692,6 +700,9 @@ type conv_site = {
   c_zeroed : bool;
   c_fma : bool;
 }
+
+let conv_mma_scope (site : conv_site) =
+  mma_scope_of_reduction_extents (List.map site.c_axes ~f:(fun cx -> cx.cx_nk))
 
 let detect_conv_procedural (llc : LL.t) : conv_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
@@ -2325,7 +2336,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
         match (is_gpu, limits.Ir.Backend_intf.mma) with
         | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
             match
-              mma_tile_for_precisions_in_scope mma ~scope:Ir.Backend_intf.Mma_fragment_scope
+              mma_tile_for_precisions_in_scope mma ~scope:(conv_mma_scope site)
                 ~a_prec:(Lazy.force site.c_a.Ir.Tnode.storage_prec)
                 ~b_prec:(Lazy.force site.c_b.Ir.Tnode.storage_prec)
                 ~d_prec:(Lazy.force site.c_d.Ir.Tnode.storage_prec)
@@ -2897,11 +2908,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                [Schedule.apply]: an inapplicable twin is refuted with its witness, not merely
                failed. *)
             let staged_layout = mma_staged_layout_for_precisions mma ~a_prec ~b_prec ~d_prec in
-            let has_outer_contraction = List.exists site.m_ko ~f:(fun (_, extent) -> extent > 1) in
-            let scope_of_bk bk =
-              if bk = 0 && not has_outer_contraction then Ir.Backend_intf.Mma_per_statement
-              else Ir.Backend_intf.Mma_fragment_scope
-            in
+            let scope_of_bk bk = matmul_mma_scope site ~bk in
             let scope_name = function
               | Ir.Backend_intf.Mma_per_statement -> "per-statement"
               | Ir.Backend_intf.Mma_fragment_scope -> "persistent-fragment"
@@ -2959,9 +2966,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                [model_default_geometry_lattice]. Curated staged pairs reappear as lattice singletons
                — the search may re-score them, it never re-times anything. *)
             let lattice_child =
-              if not (wide_scope_ok Ir.Backend_intf.Mma_fragment_scope) then
-                Sspace.Refuted (wide_scope_witness Ir.Backend_intf.Mma_fragment_scope)
-              else if site.m_ni / tm_t = 0 || site.m_nk / tk_t = 0 then
+              if site.m_ni / tm_t = 0 || site.m_nk / tk_t = 0 then
                 Sspace.Refuted
                   (Printf.sprintf
                      "no staged lattice: m=%d or %s is below one intrinsic tile (%dx%d)" site.m_ni
@@ -2998,17 +3003,20 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                        ~box_verdict:(fun bk_lo _bk_hi ->
                                          staged_tiles_exceed ~bm ~bn:w ~bk:bk_lo ~depth:1)
                                        ~singleton:(fun bk ->
-                                         leaf
-                                           {
-                                             base_params with
-                                             sk_gpu = true;
-                                             sk_mma = true;
-                                             sk_simd = w;
-                                             sk_bm = bm;
-                                             sk_bn = w;
-                                             sk_bk = bk;
-                                             sk_batch_grid = batch_grid;
-                                           }))))))) )
+                                         if not (wide_scope_ok (scope_of_bk bk)) then
+                                           Sspace.Refuted (wide_scope_witness (scope_of_bk bk))
+                                         else
+                                           leaf
+                                             {
+                                               base_params with
+                                               sk_gpu = true;
+                                               sk_mma = true;
+                                               sk_simd = w;
+                                               sk_bm = bm;
+                                               sk_bn = w;
+                                               sk_bk = bk;
+                                               sk_batch_grid = batch_grid;
+                                             }))))))) )
             in
             subt (fun () ->
                 choice

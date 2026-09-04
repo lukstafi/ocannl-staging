@@ -294,6 +294,7 @@ tree leaves = flat enumeration: true
  0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
 the wide-f16 policy withholds uniform-f16 mma seeds exactly in unsupported emission scopes: true
+placement eligibility omits a wide-f16 site with no applicable MMA scope: true
 the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates (accumulator residency diverges from compute): true
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
@@ -610,6 +611,7 @@ cpu simd32: every leaf path commits its pipeline's shape level: true
   unpriced geometry          0 bytes
     fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16
   lattice leaf               (none in this tree)
+a one-block staged matmul uses the per-statement wide-f16 capability: true
 a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no explicit k-block: true
 == lattice under a 2048-byte workgroup-memory cap ==
 surviving lattice leaves 4; box-level refutations 13, e.g.:

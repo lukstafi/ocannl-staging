@@ -520,9 +520,14 @@ let () =
      in
      match !wide_seed_scopes with
      | Some (unstaged, staged) ->
+         (* This site's K=32 staged menu contains bk=32, hence a one-block staged form whose
+            accumulator is still per-statement. Multi-block staged forms require fragment scope; the
+            k=144 discriminator below pins that complementary case. *)
          p claim
            (Bool.equal unstaged (advertised Ir.Backend_intf.Mma_per_statement)
-           && Bool.equal staged (advertised Ir.Backend_intf.Mma_fragment_scope))
+           && Bool.equal staged
+                (advertised Ir.Backend_intf.Mma_per_statement
+                || advertised Ir.Backend_intf.Mma_fragment_scope))
      | None -> p claim false
    else skipped claim);
   (let src = Generated.read "mm_h_wide_mma" in

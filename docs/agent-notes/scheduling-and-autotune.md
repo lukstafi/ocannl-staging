@@ -552,7 +552,9 @@ files.
   whole-triple) keep the outer contraction loops above the block statement. Accumulator contraction
   then promotes one logical fragment around that whole loop chain, so this shape is
   **fragment-scoped for capability purposes**: a wide-f16 backend that advertises only
-  per-statement MMA must not seed even `bk = 0` for a multi-axis contraction. Pinned by
+  per-statement MMA must not seed even `bk = 0` for a multi-axis contraction. Conversely, a
+  staged split whose padded block count is one has no nontrivial enclosing reduction and remains
+  per-statement. Pinned by
   `test/operations/schedule_contraction_nest.ml` (detection, every family's construction, GPU
   blocktile execution, CPU-family execution on cc) and the scope negative control in
   `test/operations/sketch_family_tree.ml`.

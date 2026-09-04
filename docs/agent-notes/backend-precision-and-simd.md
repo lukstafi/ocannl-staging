@@ -534,8 +534,14 @@ files.
   .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its f16-accumulate
   wmma combo is gated off. Its persistent-fragment scope has no corresponding wide arm —
   `wmma_combo` cannot load/store an f16 destination through an f32 accumulator fragment — so
-  `mma_f16_wide_acc_scopes = [Mma_per_statement]` preserves the two unstaged seeds and withholds
-  every staged (`bk > 0`) seed. Before gh-ocannl-836 the scope-blind boolean admitted both: a
+  `mma_f16_wide_acc_scopes = [Mma_per_statement]` preserves only candidates whose emitted
+  accumulator has no enclosing reduction loop with extent greater than one. That includes the
+  unstaged rank-2 forms and a staged matmul whose padded k-block count is one; a multi-axis matmul's
+  inherited contraction loops, a multi-block staged matmul, and a multi-window convolution require
+  `Mma_fragment_scope`. A detected convolution with only extent-one kernel-window loops likewise
+  resolves per-statement, though today's affine-fingerprint detector does not recognize a fully
+  degenerate 1x1 convolution after lowering erases those loops. Before gh-ocannl-836 the scope-blind
+  boolean admitted both scopes: a
   staged discriminator with a 144-element `k` extent, starting at 2048 with +1 per 16-wide tile,
   emitted the inline-PTX arm
   inside the nine-iteration outer loop and returned 2048, while a single wide scope reaches 2057
@@ -543,9 +549,11 @@ files.
   d-boundary bullet below). Metal advertises both scopes since gh-ocannl-837: its per-statement and
   persistent-fragment hooks use an f32 accumulator with converted `thread_elements()` boundaries.
   `Sketch_families.fp16_wide_withholds` is keyed on the DESTINATION's storage precision, so
-  `(f16,f16,f32-storage)` sites are untouched; conv's staged GPU family asks for the fragment scope,
-  while matmul selects per-statement at `bk = 0` and fragment at `bk > 0`. Thus CUDA alone trades
-  the staged legs under the wide policy. `auto`
+  `(f16,f16,f32-storage)` sites are untouched; `matmul_mma_scope` and `conv_mma_scope` derive the
+  scope from the actual outer reduction extents rather than from whether operands happen to be
+  staged. Placement enablement applies the same resolver to its unstaged eligibility gate, so a
+  device with no applicable wide scope cannot spend its placement budget unlocking an empty
+  family. Thus CUDA alone trades multi-statement legs under the wide policy. `auto`
   deliberately RETAINS LATITUDE to later resolve wide on hardware where wide f16 accumulate is
   free (datacenter NVIDIA runs f32-accumulate f16 mma at full rate; GeForce halves it) — do not
   write code or tests assuming `auto ≡ narrow` as a contract; `accum_width.ml`'s default-policy

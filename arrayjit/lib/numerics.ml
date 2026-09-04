@@ -26,9 +26,9 @@ open Base
       tensor-unit f16 legs cannot accumulate f32 in the required emission scope
       ({!Backend_intf.mma_capability.mma_f16_wide_acc_scopes} omits it) have those uniform-f16 mma
       seeds withheld, per the gh-ocannl-545 seeding-vs-emission discipline — widening only the
-      serial legs would restore the schedule-dependent width gh-ocannl-663 removed. Metal
-      advertises both scopes since gh-ocannl-837 through mixed [simdgroup_matrix] accumulation and
-      boundary conversion.
+      serial legs would restore the schedule-dependent width gh-ocannl-663 removed. Metal advertises
+      both scopes since gh-ocannl-837 through mixed [simdgroup_matrix] accumulation and boundary
+      conversion.
     - [Fp16_narrow] (config [true]): compute fp16 in fp16 on CPU targets that have native 16-bit
       arithmetic (ARMv8.2-FP16, AVX512-FP16) — gh-ocannl-516's opt-in, trading fp16's 10-bit
       mantissa and 65504 range for a doubled lane count. On targets that merely promote to float it

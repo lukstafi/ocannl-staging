@@ -347,11 +347,11 @@ let () =
   Numerics.set_policy saved_policy;
   (* gh-ocannl-680/836: the wide-f16 seeding gate is per emission scope. A GPU capability
      advertising the uniform-f16 triple seeds every scope under the default policy. Under
-     [Fp16_wide], no wide scope removes every uniform-f16 mma seed (Metal); the per-statement scope
-     alone keeps only unstaged [bk=0] seeds (CUDA sm_80+); both scopes keep the full family (HIP
-     since gh-ocannl-789). The mixed [(f16, f16, f32)] triple is advertised too, standing in for the
-     f32-storage destinations the gate must NOT touch — the gate keys on the DESTINATION's storage
-     precision, which for [opt_h] is f16. *)
+     [Fp16_wide], no wide scope removes every uniform-f16 mma seed; the per-statement scope alone
+     keeps only eligible single-statement seeds (CUDA sm_80+); both scopes keep the full family (HIP
+     since gh-ocannl-789 and Metal since gh-ocannl-837). The mixed [(f16, f16, f32)] triple is
+     advertised too, standing in for the f32-storage destinations the gate must NOT touch — the gate
+     keys on the DESTINATION's storage precision, which for [opt_h] is f16. *)
   let f16t = Ir.Backend_intf.Mma_f16 in
   let gpu_f16_limits ~wide_scopes =
     {
@@ -384,6 +384,10 @@ let () =
     section "half-prec gpu, f16 tiles, wide policy, no wide-accumulate scope" ~is_gpu:true
       ~is_cpu:false ~limits:(gpu_f16_limits ~wide_scopes:[]) opt_h
   in
+  let f16_wide_no_arm_enablement, f16_wide_no_arm_disablement =
+    Autotune.placement_enablement ~limits:(gpu_f16_limits ~wide_scopes:[]) ~static_indices:[]
+      ~base:opt_h ~allmat:opt_h
+  in
   let f16_wide_statement =
     section "half-prec gpu, f16 tiles, wide policy, per-statement scope only" ~is_gpu:true
       ~is_cpu:false
@@ -402,8 +406,26 @@ let () =
      even though [sk_bk = 0], so it needs the fragment-scope arm too. This multi-axis shape is the
      negative control for the old [bk]-only classification: a per-statement-only capability must not
      admit even its nominally unstaged MMA seeds. *)
-  let check_wide_outer_scope () =
+  let check_wide_scope_edges () =
     Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+    let statement_limits = gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ] in
+    let both_limits =
+      gpu_f16_limits
+        ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ]
+    in
+    let seeds limits opt = Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt in
+    (* A staged split whose padded block count is one does not extend the accumulator beyond its
+       single Tile_mma statement. *)
+    let one_block_a =
+      NTDSL.init ~l:"one_block_a" ~prec:Ir.Ops.half ~o:[ 32; 16 ] ~f:(fun _ -> 0.25) ()
+    in
+    let one_block_b =
+      NTDSL.init ~l:"one_block_b" ~prec:Ir.Ops.half ~o:[ 16; 32 ] ~f:(fun _ -> 0.25) ()
+    in
+    let%op one_block = one_block_a +* "ik;kj=>ij" one_block_b in
+    let one_block_statement =
+      seeds statement_limits (with_lowering ~name:"sft_one_block" one_block)
+    in
     let whh = 2 and wee = 8 in
     let wide_outer_w =
       NTDSL.init ~l:"wide_outer_w" ~prec:Ir.Ops.half ~o:[ nn ] ~i:[ whh; wee ] ~f:(fun _ -> 0.25) ()
@@ -415,19 +437,11 @@ let () =
     in
     let%op wide_outer = wide_outer_w * wide_outer_x in
     let opt_wide_outer = with_lowering ~name:"sft_wide_outer" wide_outer in
-    let wide_outer_statement =
-      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
-        ~limits:(gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ])
-        opt_wide_outer
-    in
-    let wide_outer_both =
-      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
-        ~limits:
-          (gpu_f16_limits
-             ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ])
-        opt_wide_outer
-    in
+    let wide_outer_statement = seeds statement_limits opt_wide_outer in
+    let wide_outer_both = seeds both_limits opt_wide_outer in
     Numerics.set_policy saved_policy;
+    Verdict.p "a one-block staged matmul uses the per-statement wide-f16 capability"
+      (has_staged_mma one_block_statement);
     Verdict.p
       "a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no \
        explicit k-block"
@@ -453,6 +467,8 @@ let () =
     && has_unstaged_mma f16_wide_statement
     && (not (has_staged_mma f16_wide_statement))
     && has_unstaged_mma f16_wide_both && has_staged_mma f16_wide_both);
+  Verdict.p "placement eligibility omits a wide-f16 site with no applicable MMA scope"
+    (Set.is_empty f16_wide_no_arm_enablement && Set.is_empty f16_wide_no_arm_disablement);
   Verdict.p
     "the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates \
      (accumulator residency diverges from compute)"
@@ -776,7 +792,7 @@ let () =
   (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
   | None -> Stdio.printf "cpu traffic: no site detected\n"
   | Some tree -> traffic_pins "cpu simd32" ~limits:cpu_limits ~elt_bytes:4 ~n_extent:64 tree opt);
-  check_wide_outer_scope ();
+  check_wide_scope_edges ();
   (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
      tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
      "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)

@@ -1871,7 +1871,9 @@ let mma_eligible_sites ~(limits : Ir.Backend_intf.hardware_limits) ~static_indic
           let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
           let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
           let d_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
-          Option.is_some (mma_tile_for_precisions mma ~a_prec ~b_prec ~d_prec))
+          Option.is_some
+            (mma_tile_for_precisions_in_scope mma ~scope:(matmul_mma_scope site ~bk:0) ~a_prec
+               ~b_prec ~d_prec))
 
 let placement_enablement ~limits ~static_indices ~(base : LL.optimized) ~(allmat : LL.optimized) =
   let site_tns sites =
