@@ -174,6 +174,16 @@ let rec binding_parts pattern expression =
       |> Option.value_map ~default:(conservative_binding_parts pattern expression) ~f:List.concat
   | _ -> conservative_binding_parts pattern expression
 
+let rec function_parameter_names expr =
+  match expr.pexp_desc with
+  | Pexp_function (parameters, _, Pfunction_body body) ->
+      List.concat_map parameters ~f:(fun parameter ->
+          match parameter.pparam_desc with
+          | Pparam_val (_, _, pattern) -> List.map (pattern_names pattern) ~f:fst
+          | Pparam_newtype _ -> [])
+      @ function_parameter_names body
+  | _ -> []
+
 let rec population_name expr =
   match Sources.longident_of expr with
   | Some [ name ] -> Some name
@@ -316,8 +326,23 @@ let rec returned_quantifiers ?(positive = true) expr =
   | Pexp_ifthenelse (_, yes, no) ->
       returned_quantifiers ~positive yes
       @ Option.value_map no ~default:[] ~f:(returned_quantifiers ~positive)
-  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
-      List.concat_map cases ~f:(fun case -> returned_quantifiers ~positive case.pc_rhs)
+  | Pexp_match (scrutinee, cases) ->
+      List.concat_map cases ~f:(fun case ->
+          let returned_bindings = returned_binding_polarities positive case.pc_rhs in
+          returned_quantifiers ~positive case.pc_rhs
+          @ (binding_parts case.pc_lhs scrutinee
+            |> List.concat_map ~f:(fun part ->
+                List.filter_map returned_bindings ~f:(fun (name, returned_positive) ->
+                    if String.equal name part.name then
+                      Some
+                        (if part.exact then
+                           returned_quantifiers ~positive:returned_positive part.expression
+                         else quantifiers_in ~positive:returned_positive part.expression)
+                    else None)
+                |> List.concat)))
+  | Pexp_try (body, cases) ->
+      returned_quantifiers ~positive body
+      @ List.concat_map cases ~f:(fun case -> returned_quantifiers ~positive case.pc_rhs)
   | Pexp_apply (callee, _)
     when is_collection_call callee ~member:"for_all"
          || is_collection_call callee ~member:"for_all2_exn"
@@ -497,8 +522,15 @@ let rec make_bindings environment value =
             || Set.is_empty (Set.inter guards quantifier.populations))
       in
       let negated_unguarded = returned_quantifiers ~positive:false part.expression in
+      let shadowed_parameters =
+        function_parameter_names part.expression |> Set.of_list (module String)
+      in
+      let dependency_environment =
+        List.filter environment ~f:(fun (binding : helper_binding) ->
+            not (Set.mem shadowed_parameters binding.name))
+      in
       let dependencies =
-        binding_dependencies environment (function_body part.expression)
+        binding_dependencies dependency_environment (function_body part.expression)
         |> List.filter ~f:(fun dependency ->
             (* A returned local quantifier is already attributed to this binding by
                [returned_quantifiers]. Keep outer dependencies beside it, but not the local
@@ -506,7 +538,7 @@ let rec make_bindings environment value =
                two exemptions. With no direct hole, local dependencies remain the path that carries
                intermediate negation and guards to an outer binding. *)
             (List.is_empty unguarded && List.is_empty negated_unguarded)
-            || List.exists environment ~f:(fun outer ->
+            || List.exists environment ~f:(fun (outer : helper_binding) ->
                 outer.site.position = dependency.binding.site.position))
       in
       let claim_kind =
@@ -526,6 +558,25 @@ let rec make_bindings environment value =
       in
       { name = part.name; site; dependencies; guards; unguarded; negated_unguarded; claim_kind })
 
+and make_binding_group environment recursive values =
+  match recursive with
+  | Asttypes.Nonrecursive -> List.concat_map values ~f:(make_bindings environment)
+  | Recursive ->
+      (* Recursive siblings are simultaneously in scope. Recompute the finite group once per bound
+         name so a dependency can cross the longest possible sibling chain without making the
+         surrounding lexical environment recursive too. *)
+      let iterations =
+        List.sum (module Int) values ~f:(fun value -> List.length (pattern_names value.pvb_pat))
+        |> Int.max 1
+      in
+      let rec close remaining siblings =
+        if remaining = 0 then siblings
+        else
+          let recursive_environment = List.rev_append siblings environment in
+          close (remaining - 1) (List.concat_map values ~f:(make_bindings recursive_environment))
+      in
+      close iterations []
+
 and binding_dependencies environment expr =
   let bindings = ref [] in
   let rec visit environment positive forwards_guards expr =
@@ -534,8 +585,8 @@ and binding_dependencies environment expr =
           visit environment positive forwards_guards argument)
     in
     match expr.pexp_desc with
-    | Pexp_let (_, values, body) ->
-        let local = List.concat_map values ~f:(make_bindings environment) in
+    | Pexp_let (recursive, values, body) ->
+        let local = make_binding_group environment recursive values in
         visit (List.rev_append local environment) positive false body
     | Pexp_sequence (_, result) -> visit environment positive forwards_guards result
     | Pexp_ifthenelse (_, yes, no) ->
@@ -656,9 +707,14 @@ let quantified_claims structure =
   let rec scan_expression environment expr =
     record_claim environment expr;
     match expr.pexp_desc with
-    | Pexp_let (_, bindings, body) ->
-        List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
-        let local = List.concat_map bindings ~f:(make_bindings environment) in
+    | Pexp_let (recursive, bindings, body) ->
+        let local = make_binding_group environment recursive bindings in
+        let binding_environment =
+          match recursive with
+          | Asttypes.Nonrecursive -> environment
+          | Recursive -> List.rev_append local environment
+        in
+        List.iter bindings ~f:(fun binding -> scan_expression binding_environment binding.pvb_expr);
         scan_expression (List.rev_append local environment) body
     | Pexp_open (declaration, body) ->
         scan_module environment declaration.popen_expr;
@@ -678,9 +734,16 @@ let quantified_claims structure =
     ignore
       (List.fold items ~init:environment ~f:(fun environment item ->
            match item.pstr_desc with
-           | Pstr_value (_, bindings) ->
-               List.iter bindings ~f:(fun binding -> scan_expression environment binding.pvb_expr);
-               List.rev_append (List.concat_map bindings ~f:(make_bindings environment)) environment
+           | Pstr_value (recursive, bindings) ->
+               let local = make_binding_group environment recursive bindings in
+               let binding_environment =
+                 match recursive with
+                 | Asttypes.Nonrecursive -> environment
+                 | Recursive -> List.rev_append local environment
+               in
+               List.iter bindings ~f:(fun binding ->
+                   scan_expression binding_environment binding.pvb_expr);
+               List.rev_append local environment
            | Pstr_eval (expr, _) ->
                scan_expression environment expr;
                environment
@@ -1002,6 +1065,26 @@ let () = Verdict.p "all outer rows pass" guarded|ocaml},
   ok
 let () = Verdict.p "every sample agrees" (close samples)|ocaml},
       [ "close" ] );
+    ( "refuses a helper that returns a match-bound quantified value",
+      {ocaml|let close xs =
+  match List.for_all xs ~f:Fn.id with ok -> ok
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "close" ] );
+    ( "refuses a quantified helper reached through a mutually recursive sibling",
+      {ocaml|let rec close xs = all xs
+and all xs = List.for_all xs ~f:Fn.id
+let () = Verdict.p "every sample agrees" (close samples)|ocaml},
+      [ "all" ] );
+    ( "does not resolve an outer quantified binding shadowed by a function parameter",
+      {ocaml|let ok = List.for_all rows ~f:Fn.id
+let identity ok = ok
+let () = Verdict.p "constant identity passes" (identity true)|ocaml},
+      [] );
+    ( "still resolves a non-shadowed quantified binding returned by a function",
+      {ocaml|let ok = List.for_all rows ~f:Fn.id
+let return_ok value = ok
+let () = Verdict.p "all rows pass" (return_ok true)|ocaml},
+      [ "ok" ] );
     ( "accepts a helper that negates a quantified local binding",
       {ocaml|let differs xs =
   let close = List.for_all xs ~f:Fn.id in

@@ -831,9 +831,11 @@ that they earn a lookup rather than always-loaded space.
   shadowed collection can reuse the same spelling for a different identity. Dependency edges retain
   their sign, so a bound `exists` later used under `not` is checked as `not exists`; direct and piped
   `not` have the same polarity, including when a helper returns a negated local binding. Tuple and
-  record destructuring maps names to their corresponding value expressions, so changing the binding
-  pattern cannot hide a quantifier. The controls pair each accepted negation with a positive form
-  the ratchet must still refuse.
+  record destructuring maps names to their corresponding value expressions, and a match-bound value
+  maps to its scrutinee, so changing the binding pattern cannot hide a quantifier. Mutually recursive
+  binding groups are closed over their sibling dependencies; function parameters, conversely,
+  shadow same-named outer helpers while their body is analyzed. The controls pair each accepted
+  negation or shadow with a positive form the ratchet must still refuse.
   The literal- and computed-label exemption lists carry the same one-key/one-site contract
   (gh-ocannl-891). `Verdict_scan.site.position` is the parser's absolute character offset, while
   line and column are report text; `record_definition` aggregates all three exemption families by
