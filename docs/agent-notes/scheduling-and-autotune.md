@@ -637,8 +637,8 @@ files.
   inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
   the target, the interpolated target depth is still sampled and checked against the measured
   overshoot. A non-monotone confirmation scales from the deeper measured batch instead of returning
-  to the earlier suspect target crossing; only an invalid or genuinely cap-short batch remains
-  unresolved there. After four noisy but resolved
+  to the earlier suspect target crossing; a monotone pair whose inferred fixed component fills the
+  target remains unresolved and binds at the cap. After four noisy but resolved
   misses the latest projected depth wins rather than jumping
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
   On Metal's ~0.17 ms kernels the first probe already spans the target; its 25%-deeper confirmation

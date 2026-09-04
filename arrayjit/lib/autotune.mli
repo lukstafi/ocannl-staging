@@ -1215,15 +1215,15 @@ val time_routine :
     window cannot force the cap. If the bounded loop first reaches the target on its last probe, the
     interpolated target depth is still sampled and checked against the measured overshoot. A
     non-monotone confirmation scales from the deeper measured batch, never the earlier suspect
-    crossing; only an invalid or genuinely cap-short batch leaves the wall unresolved. After four
-    noisy but resolved underestimates, calibration keeps the latest affine projection rather than
-    jumping to a 20--30 ms cap batch that would blunt the 2x contention threshold. A routine slower
-    than the target stays at depth 1 and is measured identically in both modes. The calibration
-    always yields a depth; the result of the timed loop reports when most of ITS samples were
-    stalled, and the tuner refuses such a candidate measurement rather than ranking and caching it
-    (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can spend
-    up to [max 64 repeats] batches on a fast candidate; [max_timing_runs] bounds the top-up beyond
-    the caller's requested floor.
+    crossing; a monotone pair whose inferred fixed component fills the target remains unresolved and
+    binds at the cap. After four noisy but resolved underestimates, calibration keeps the latest
+    affine projection rather than jumping to a 20--30 ms cap batch that would blunt the 2x
+    contention threshold. A routine slower than the target stays at depth 1 and is measured
+    identically in both modes. The calibration always yields a depth; the result of the timed loop
+    reports when most of ITS samples were stalled, and the tuner refuses such a candidate
+    measurement rather than ranking and caching it (gh-ocannl-888). Since the budget is per-launch
+    rather than batch wall, queued timing can spend up to [max 64 repeats] batches on a fast
+    candidate; [max_timing_runs] bounds the top-up beyond the caller's requested floor.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
