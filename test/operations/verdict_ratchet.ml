@@ -82,6 +82,7 @@ type helper_binding = {
   guards : Set.M(String).t;
   unguarded : quantifier list;
   negated_unguarded : quantifier list;
+  constant_bool : bool option;
   claim_kind : claim_kind option;
   claim_wrapper : wrapper_slot list option;
 }
@@ -110,6 +111,14 @@ type quantified_claim = {
 
 let describe_site site = Printf.sprintf "%d:%d" site.line site.column
 
+let site_of_location location =
+  let start = location.Ppxlib.Location.loc_start in
+  {
+    line = start.Stdlib.Lexing.pos_lnum;
+    column = start.Stdlib.Lexing.pos_cnum - start.Stdlib.Lexing.pos_bol;
+    position = start.Stdlib.Lexing.pos_cnum;
+  }
+
 let path_ends path ~container ~member =
   match List.rev path with
   | found_member :: found_container :: _ ->
@@ -130,6 +139,12 @@ let is_name expr name =
 let rec function_body expr =
   match expr.pexp_desc with
   | Pexp_function (_, _, Pfunction_body body) -> function_body body
+  | _ -> expr
+
+let rec tail_expression expr =
+  match expr.pexp_desc with
+  | Pexp_let (_, _, body) | Pexp_sequence (_, body) | Pexp_open (_, body) -> tail_expression body
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> tail_expression inner
   | _ -> expr
 
 let unlabelled arguments =
@@ -223,6 +238,9 @@ let bool_literal expr value =
       String.equal found (Bool.to_string value)
   | _ -> false
 
+let literal_bool expr =
+  if bool_literal expr true then Some true else if bool_literal expr false then Some false else None
+
 let bool_pattern pattern value =
   match pattern.ppat_desc with
   | Ppat_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
@@ -247,6 +265,17 @@ let result_polarities positive result =
   if bool_literal result true then [ positive ]
   else if bool_literal result false then [ not positive ]
   else [ positive; not positive ]
+
+let condition_polarities positive yes no =
+  match no with
+  | None -> []
+  | Some no when bool_literal yes true && bool_literal no false -> [ positive ]
+  | Some no when bool_literal yes false && bool_literal no true -> [ not positive ]
+  | Some no
+    when (bool_literal yes true && bool_literal no true)
+         || (bool_literal yes false && bool_literal no false) ->
+      []
+  | Some _ -> []
 
 let is_boolean_comparison callee =
   is_name callee "=" || is_name callee "<>" || is_name callee "equal"
@@ -289,6 +318,9 @@ let quantifiers_in ?(positive = true) expr =
         in
         match expr.pexp_desc with
         | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+            visit_with_polarity (not !positive) argument
+        | Pexp_apply (apply, [ (Asttypes.Nolabel, function_); (Asttypes.Nolabel, argument) ])
+          when is_name apply "@@" && is_name function_ "not" ->
             visit_with_polarity (not !positive) argument
         | Pexp_apply (pipe, [ (Asttypes.Nolabel, population); (Asttypes.Nolabel, piped_call) ])
           when is_name pipe "|>" -> (
@@ -363,6 +395,7 @@ let rec required_nonempty expr =
   | Pexp_function (_, _, Pfunction_cases ([ case ], _, _)) -> required_nonempty case.pc_rhs
   | Pexp_function (_, _, Pfunction_cases (_, _, _)) -> Set.empty (module String)
   | Pexp_let (_, _, body) -> required_nonempty body
+  | Pexp_open (_, body) -> required_nonempty body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> required_nonempty inner
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" -> (
       match argument.pexp_desc with
@@ -436,6 +469,7 @@ let rec returned_quantifiers ?(positive = true) expr =
                   else None)
               |> List.concat))
   | Pexp_sequence (_, result) -> returned_quantifiers ~positive result
+  | Pexp_open (_, body) -> returned_quantifiers ~positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> returned_quantifiers ~positive inner
   | Pexp_tuple expressions -> List.concat_map expressions ~f:(unguarded_component ~positive)
   | Pexp_record (fields, base) ->
@@ -443,12 +477,9 @@ let rec returned_quantifiers ?(positive = true) expr =
       @ Option.value_map base ~default:[] ~f:(unguarded_component ~positive)
   | Pexp_ifthenelse (condition, yes, no) ->
       let condition_quantifiers =
-        match no with
-        | Some no when bool_literal yes true && bool_literal no false ->
-            quantifiers_in ~positive condition
-        | Some no when bool_literal yes false && bool_literal no true ->
-            quantifiers_in ~positive:(not positive) condition
-        | _ -> []
+        condition_polarities positive yes no
+        |> List.concat_map ~f:(fun condition_positive ->
+            quantifiers_in ~positive:condition_positive condition)
       in
       condition_quantifiers
       @ returned_quantifiers ~positive yes
@@ -500,7 +531,8 @@ let rec returned_quantifiers ?(positive = true) expr =
          || is_collection_call callee ~member:"is_empty"
          || is_collection_call callee ~member:"exists"
          || is_name callee "not" || is_name callee "&&" || is_name callee "||" || is_name callee "="
-         || is_name callee "<>" || is_name callee "equal" || is_name callee "|>" ->
+         || is_name callee "<>" || is_name callee "equal" || is_name callee "|>"
+         || is_name callee "@@" ->
       quantifiers_in ~positive expr
   | Pexp_apply (callee, arguments) when is_transparent_boolean_wrapper callee -> (
       match unlabelled arguments with
@@ -535,6 +567,7 @@ and returned_binding_polarities positive expr =
       returned_binding_polarities positive body
       |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name))
   | Pexp_sequence (_, result) -> returned_binding_polarities positive result
+  | Pexp_open (_, body) -> returned_binding_polarities positive body
   | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
       returned_binding_polarities positive inner
   | Pexp_ifthenelse (_, yes, no) ->
@@ -556,6 +589,9 @@ and returned_binding_polarities positive expr =
           returned_binding_polarities positive case.pc_rhs
           |> List.filter ~f:(fun (name, _) -> not (Set.mem shadowed name)))
   | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+      returned_binding_polarities (not positive) argument
+  | Pexp_apply (apply, [ (Asttypes.Nolabel, function_); (Asttypes.Nolabel, argument) ])
+    when is_name apply "@@" && is_name function_ "not" ->
       returned_binding_polarities (not positive) argument
   | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
     when is_name pipe "|>" -> (
@@ -620,6 +656,7 @@ let opened_claim_bindings site =
         guards = Set.empty (module String);
         unguarded = [];
         negated_unguarded = [];
+        constant_bool = None;
         claim_kind = Some claim_kind;
         claim_wrapper = None;
       })
@@ -648,6 +685,123 @@ let claim_target environment callee =
           Option.map binding.claim_kind ~f:(fun kind -> (kind, Some binding)))
   | Some path -> Option.map (claim_kind_of_path path) ~f:(fun kind -> (kind, None))
   | None -> None
+
+let resolved_bool environment expr =
+  match literal_bool expr with
+  | Some _ as value -> value
+  | None -> (
+      match Sources.longident_of expr with
+      | Some [ name ] ->
+          lookup environment name |> Option.bind ~f:(fun binding -> binding.constant_bool)
+      | _ -> None)
+
+let resolved_result_polarities environment positive result =
+  match resolved_bool environment result with
+  | Some true -> [ positive ]
+  | Some false -> [ not positive ]
+  | None -> []
+
+let dependency_result_polarities environment positive result =
+  match resolved_bool environment result with
+  | Some true -> [ positive ]
+  | Some false -> [ not positive ]
+  | None -> result_polarities positive result
+
+let resolved_condition_polarities environment positive yes no =
+  match
+    Option.bind no ~f:(fun no ->
+        Option.both (resolved_bool environment yes) (resolved_bool environment no))
+  with
+  | Some (true, false) -> [ positive ]
+  | Some (false, true) -> [ not positive ]
+  | Some (true, true | false, false) | None -> []
+
+let dependency_condition_polarities environment positive yes no =
+  match
+    Option.bind no ~f:(fun no ->
+        Option.both (resolved_bool environment yes) (resolved_bool environment no))
+  with
+  | Some (true, false) -> [ positive ]
+  | Some (false, true) -> [ not positive ]
+  | Some (true, true | false, false) -> []
+  | None -> [ positive ]
+
+let shadow_parameters environment parameters =
+  List.fold parameters ~init:environment ~f:(fun environment parameter ->
+      match parameter.pparam_desc with
+      | Pparam_val (_, _, pattern) ->
+          let shadowed = pattern_names pattern |> List.map ~f:fst |> Set.of_list (module String) in
+          List.filter environment ~f:(fun (binding : helper_binding) ->
+              not (Set.mem shadowed binding.name))
+      | Pparam_newtype _ -> environment)
+
+let rec alias_quantifiers environment ?(positive = true) expr =
+  match expr.pexp_desc with
+  | Pexp_function (parameters, _, Pfunction_body body) ->
+      alias_quantifiers (shadow_parameters environment parameters) ~positive body
+  | Pexp_function (parameters, _, Pfunction_cases (cases, _, _)) ->
+      let environment = shadow_parameters environment parameters in
+      List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          let case_environment =
+            List.filter environment ~f:(fun (binding : helper_binding) ->
+                not (Set.mem shadowed binding.name))
+          in
+          let guards =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                resolved_result_polarities case_environment positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
+          in
+          guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
+  | Pexp_let (_, bindings, body) ->
+      let returned = returned_binding_polarities positive body in
+      alias_quantifiers environment ~positive body
+      @ List.concat_map bindings ~f:(fun binding ->
+          binding_parts binding.pvb_pat binding.pvb_expr
+          |> List.concat_map ~f:(fun part ->
+              List.filter_map returned ~f:(fun (name, returned_positive) ->
+                  if String.equal name part.name then
+                    Some (alias_quantifiers environment ~positive:returned_positive part.expression)
+                  else None)
+              |> List.concat))
+  | Pexp_sequence (_, result) | Pexp_open (_, result) ->
+      alias_quantifiers environment ~positive result
+  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) ->
+      alias_quantifiers environment ~positive inner
+  | Pexp_tuple expressions ->
+      List.concat_map expressions ~f:(alias_quantifiers environment ~positive)
+  | Pexp_record (fields, base) ->
+      List.concat_map fields ~f:(fun (_, field) -> alias_quantifiers environment ~positive field)
+      @ Option.value_map base ~default:[] ~f:(alias_quantifiers environment ~positive)
+  | Pexp_ifthenelse (condition, yes, no) ->
+      let from_condition =
+        resolved_condition_polarities environment positive yes no
+        |> List.concat_map ~f:(fun condition_positive ->
+            quantifiers_in ~positive:condition_positive condition)
+      in
+      from_condition
+      @ alias_quantifiers environment ~positive yes
+      @ Option.value_map no ~default:[] ~f:(alias_quantifiers environment ~positive)
+  | Pexp_match (_, cases) | Pexp_try (_, cases) ->
+      List.concat_map cases ~f:(fun case ->
+          let shadowed =
+            pattern_names case.pc_lhs |> List.map ~f:fst |> Set.of_list (module String)
+          in
+          let case_environment =
+            List.filter environment ~f:(fun (binding : helper_binding) ->
+                not (Set.mem shadowed binding.name))
+          in
+          let guards =
+            Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
+                resolved_result_polarities case_environment positive case.pc_rhs
+                |> List.concat_map ~f:(fun guard_positive ->
+                    quantifiers_in ~positive:guard_positive guard))
+          in
+          guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
+  | _ -> []
 
 let argument_at_slot arguments slot =
   match (slot.label, slot.unlabelled_index) with
@@ -701,14 +855,28 @@ let rec make_bindings environment value =
 
 and make_binding_part ?optional_label environment part =
   let guards = required_nonempty part.expression in
-  let returned = returned_quantifiers part.expression in
+  let returned =
+    returned_quantifiers part.expression @ alias_quantifiers environment part.expression
+  in
   let unguarded =
     List.filter returned ~f:(fun quantifier ->
         quantifier.sealed
         || Set.is_empty quantifier.populations
         || Set.is_empty (Set.inter guards quantifier.populations))
   in
-  let negated_unguarded = returned_quantifiers ~positive:false part.expression in
+  let negated_unguarded =
+    returned_quantifiers ~positive:false part.expression
+    @ alias_quantifiers environment ~positive:false part.expression
+  in
+  let constant_bool =
+    match literal_bool part.expression with
+    | Some _ as value -> value
+    | None -> (
+        match Sources.longident_of part.expression with
+        | Some [ alias ] ->
+            lookup environment alias |> Option.bind ~f:(fun binding -> binding.constant_bool)
+        | _ -> None)
+  in
   let dependencies =
     function_dependencies environment part.expression
     |> List.filter ~f:(fun dependency ->
@@ -746,6 +914,7 @@ and make_binding_part ?optional_label environment part =
     guards;
     unguarded;
     negated_unguarded;
+    constant_bool;
     claim_kind;
     claim_wrapper;
   }
@@ -757,6 +926,7 @@ and wrapper_signature environment expression =
     | _ -> (parameters, expression)
   in
   let parameters, body = parameters_and_body [] expression in
+  let body = tail_expression body in
   let unlabelled_parameters =
     List.count parameters ~f:(fun parameter ->
         match parameter.pparam_desc with
@@ -899,7 +1069,7 @@ and function_dependencies environment expr =
           in
           let guard_dependencies =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
-                result_polarities true case.pc_rhs
+                dependency_result_polarities case_environment true case.pc_rhs
                 |> List.concat_map ~f:(fun positive ->
                     binding_dependencies ~positive case_environment guard))
           in
@@ -943,12 +1113,9 @@ and binding_dependencies ?(positive = true) environment expr =
         visit (List.rev_append local environment) positive false body
     | Pexp_sequence (_, result) -> visit environment positive forwards_guards result
     | Pexp_ifthenelse (condition, yes, no) ->
-        let condition_positive =
-          match no with
-          | Some no when bool_literal yes false && bool_literal no true -> not positive
-          | _ -> positive
-        in
-        visit environment condition_positive false condition;
+        dependency_condition_polarities environment positive yes no
+        |> List.iter ~f:(fun condition_positive ->
+            visit environment condition_positive false condition);
         visit environment positive forwards_guards yes;
         Option.iter no ~f:(visit environment positive forwards_guards)
     | Pexp_match (scrutinee, cases) ->
@@ -966,7 +1133,7 @@ and binding_dependencies ?(positive = true) environment expr =
                   not (Set.mem shadowed binding.name))
             in
             Option.iter case.pc_guard ~f:(fun guard ->
-                result_polarities positive case.pc_rhs
+                dependency_result_polarities case_environment positive case.pc_rhs
                 |> List.iter ~f:(fun guard_positive ->
                     visit case_environment guard_positive false guard));
             visit case_environment positive forwards_guards case.pc_rhs)
@@ -981,11 +1148,14 @@ and binding_dependencies ?(positive = true) environment expr =
                   not (Set.mem shadowed binding.name))
             in
             Option.iter case.pc_guard ~f:(fun guard ->
-                result_polarities positive case.pc_rhs
+                dependency_result_polarities case_environment positive case.pc_rhs
                 |> List.iter ~f:(fun guard_positive ->
                     visit case_environment guard_positive false guard));
             visit case_environment positive forwards_guards case.pc_rhs)
     | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) when is_name callee "not" ->
+        visit environment (not positive) forwards_guards argument
+    | Pexp_apply (apply, [ (Asttypes.Nolabel, function_); (Asttypes.Nolabel, argument) ])
+      when is_name apply "@@" && is_name function_ "not" ->
         visit environment (not positive) forwards_guards argument
     | Pexp_apply (pipe, [ (Asttypes.Nolabel, value); (Asttypes.Nolabel, piped_call) ])
       when is_name pipe "|>" -> (
@@ -1134,7 +1304,7 @@ let quantified_claims structure =
   let record_origins ~claim_line ~positive environment boolean =
     binding_dependencies ~positive environment boolean |> record_dependencies ~claim_line
   in
-  let record_direct_quantifiers ~claim_line ~positive (wrapper : helper_binding) boolean =
+  let record_direct_quantifiers ~claim_site ~positive (wrapper : helper_binding) boolean =
     let guards = required_nonempty boolean in
     let quantifiers =
       returned_quantifiers ~positive boolean
@@ -1147,8 +1317,8 @@ let quantified_claims structure =
       found :=
         {
           helper = wrapper.name;
-          helper_site = wrapper.site;
-          claim_line;
+          helper_site = claim_site;
+          claim_line = claim_site.line;
           quantifiers =
             List.map quantifiers ~f:(fun quantifier -> quantifier.kind)
             |> List.dedup_and_sort ~compare:Poly.compare;
@@ -1161,13 +1331,14 @@ let quantified_claims structure =
         match claim_target environment callee with
         | None -> ()
         | Some ((_, wrapper) as target) ->
-            let claim_line = expr.pexp_loc.loc_start.pos_lnum in
+            let claim_site = site_of_location expr.pexp_loc in
+            let claim_line = claim_site.line in
             claim_arguments target arguments
             |> List.iter ~f:(fun (boolean, positive) ->
                 record_origins ~claim_line ~positive environment boolean;
                 Option.iter wrapper ~f:(fun binding ->
                     if Option.is_some binding.claim_wrapper then
-                      record_direct_quantifiers ~claim_line ~positive binding boolean));
+                      record_direct_quantifiers ~claim_site ~positive binding boolean));
             claim_default_bindings target arguments
             |> List.iter ~f:(fun (binding, positive) ->
                 record_dependencies ~claim_line
@@ -1496,6 +1667,12 @@ let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       {ocaml|let check label = Verdict.p label
 let () = check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a direct quantifier passed through a wrapper with tail setup",
+      {ocaml|let check ok =
+  let label = "all rows pass" in
+  Verdict.p label ok
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1525,6 +1702,10 @@ let () = Verdict.p "some row fails" differs|ocaml},
       {ocaml|let ok = Fn.id (List.for_all rows ~f:Fn.id)
 let () = Verdict.p "all rows pass" ok|ocaml},
       [ "ok" ] );
+    ( "refuses a returned quantifier behind a local open",
+      {ocaml|let result = let open Base in List.for_all rows ~f:Fn.id
+let () = Verdict.p "all rows pass" result|ocaml},
+      [ "result" ] );
     ( "refuses a positive intermediate binding",
       {ocaml|let close = List.for_all rows ~f:Fn.id
 let still_close = close
@@ -1544,6 +1725,10 @@ let () = Verdict.p "some row fails" differs|ocaml},
       {ocaml|let differs = List.for_all rows ~f:Fn.id |> not
 let () = Verdict.p "some row fails" differs|ocaml},
       [] );
+    ( "refuses a negated exists written with the application operator",
+      {ocaml|let none = not @@ List.exists rows ~f:bad
+let () = Verdict.p "no row is bad" none|ocaml},
+      [ "none" ] );
     ( "accepts a positive bound exists",
       {ocaml|let some_bad = List.exists rows ~f:bad
 let () = Verdict.p "some row is bad" some_bad|ocaml},
@@ -1677,6 +1862,22 @@ let () = Verdict.p "all rows pass" close|ocaml},
     ( "accepts an inverted direct quantifier returned through an if condition",
       {ocaml|let differs = if List.for_all rows ~f:Fn.id then false else true
 let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
+    ( "refuses a direct if condition whose false outcome is a Boolean alias",
+      {ocaml|let no = false
+let result = if List.exists rows ~f:Fn.id then no else true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
+    ( "refuses a bound if condition whose false outcome is a Boolean alias",
+      {ocaml|let some = List.exists rows ~f:Fn.id
+let no = false
+let result = if some then no else true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "some" ] );
+    ( "does not attribute a condition whose branches return the same literal",
+      {ocaml|let all = List.for_all rows ~f:Fn.id
+let result = if all then true else true
+let () = Verdict.p "the constant passes" result|ocaml},
       [] );
     ( "refuses a bound quantifier returned through a match guard",
       {ocaml|let all = List.for_all rows ~f:Fn.id
@@ -1902,6 +2103,11 @@ let () = Verdict.p "the second pair agrees" (close got want)|ocaml}
 let same_line_shadowed_helper_fixture =
   {ocaml|let () = (let close got want = Array.for_all2_exn got want ~f:Float.equal in Verdict.p "the first pair agrees" (close got want)); (let close got want = Array.for_all2_exn got want ~f:Float.equal in Verdict.p "the second pair agrees" (close got want))|ocaml}
 
+let repeated_wrapper_call_fixture =
+  {ocaml|let check value = Verdict.p "the collection property holds" value
+let () = check (List.is_empty optional_rows)
+let () = check (List.for_all rows ~f:Fn.id)|ocaml}
+
 (* The definitions each exemption key resolves to, so that "one key, one helper" is something this
    check reads off the corpus rather than a property of names it hopes holds. Keyed by offset and
    carrying the printable site, so the report says where each body is and the identity does not
@@ -2011,7 +2217,7 @@ let refuse_colliding_quantified ~fail colliding =
             (List.map colliding ~f:(fun (key, sites) ->
                  Printf.sprintf "%s (definitions at %s)" key (String.concat ~sep:", " sites)))))
 
-let run_shadowed_quantified_control label fixture =
+let run_shadowed_quantified_control ?(helper = "close") ?(site_kind = "definitions") label fixture =
   let colliding =
     quantified_claims (Sources.structure_of fixture)
     |> definition_sites ~source:"fixture"
@@ -2019,14 +2225,16 @@ let run_shadowed_quantified_control label fixture =
   in
   let two_definitions =
     match colliding with
-    | [ ("fixture:close", [ first; second ]) ] -> not (String.equal first second)
+    | [ (key, [ first; second ]) ] ->
+        String.equal key ("fixture:" ^ helper) && not (String.equal first second)
     | _ -> false
   in
   if not two_definitions then
-    eprintf "the %s fixture resolved to %s, not to one name with two definitions\n" label
+    eprintf "the %s fixture resolved to %s, not to one name with two %s\n" label
       (String.concat ~sep:", "
          (List.map colliding ~f:(fun (key, sites) ->
-              Printf.sprintf "%s (%s)" key (String.concat ~sep:", " sites))));
+              Printf.sprintf "%s (%s)" key (String.concat ~sep:", " sites))))
+      site_kind;
   let source = "test/operations/verdict_ratchet.ml" in
   let format =
     "exempted quantified bindings whose key names more than one definition, so one granted \
@@ -2040,13 +2248,15 @@ let run_shadowed_quantified_control label fixture =
   in
   refuse_colliding_quantified ~fail colliding;
   [
-    (Printf.sprintf "a %s helper name resolves to two definitions, not one" label, two_definitions);
-    (Printf.sprintf "refuses an exemption key that names both %s definitions" label, !refused);
+    (Printf.sprintf "a %s helper name resolves to two %s, not one" label site_kind, two_definitions);
+    (Printf.sprintf "refuses an exemption key that names both %s %s" label site_kind, !refused);
   ]
 
 let run_shadowed_quantified_controls () =
   run_shadowed_quantified_control "shadowed" shadowed_helper_fixture
   @ run_shadowed_quantified_control "same-line shadowed" same_line_shadowed_helper_fixture
+  @ run_shadowed_quantified_control ~helper:"check" ~site_kind:"call sites" "reused wrapper call"
+      repeated_wrapper_call_fixture
 
 let run_stale_quantified_control () =
   let source = "test/operations/verdict_ratchet.ml" in

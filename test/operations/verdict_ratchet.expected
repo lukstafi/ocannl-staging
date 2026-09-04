@@ -57,6 +57,7 @@ does not use a Verdict wrapper default when its argument is supplied: true
 inspects the possible payload of an unknown forwarded wrapper option: true
 refuses a direct quantifier passed to a partially applied Verdict claim: true
 refuses a direct quantifier passed to a curried partial Verdict wrapper: true
+refuses a direct quantifier passed through a wrapper with tail setup: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -64,10 +65,12 @@ accepts a fully applied quantifier compared with false: true
 refuses a direct Bool.equal true around a fully applied quantifier: true
 accepts a direct Bool.equal false around a fully applied quantifier: true
 refuses a fully applied quantifier through a transparent Boolean wrapper: true
+refuses a returned quantifier behind a local open: true
 refuses a positive intermediate binding: true
 accepts a negated intermediate binding: true
 accepts a piped negated intermediate binding: true
 accepts a directly quantified value piped through not: true
+refuses a negated exists written with the application operator: true
 accepts a positive bound exists: true
 refuses a negated bound exists: true
 accepts a guarded intermediate binding: true
@@ -94,6 +97,9 @@ refuses a bound quantifier returned through an if condition: true
 accepts an inverted bound quantifier returned through an if condition: true
 refuses a direct quantifier returned through an if condition: true
 accepts an inverted direct quantifier returned through an if condition: true
+refuses a direct if condition whose false outcome is a Boolean alias: true
+refuses a bound if condition whose false outcome is a Boolean alias: true
+does not attribute a condition whose branches return the same literal: true
 refuses a bound quantifier returned through a match guard: true
 accepts an inverted bound quantifier returned through a match guard: true
 refuses a direct quantifier returned through a match guard: true
@@ -139,6 +145,8 @@ a shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both shadowed definitions: true
 a same-line shadowed helper name resolves to two definitions, not one: true
 refuses an exemption key that names both same-line shadowed definitions: true
+a reused wrapper call helper name resolves to two call sites, not one: true
+refuses an exemption key that names both reused wrapper call call sites: true
 a repeated literal-label exemption key resolves to two source sites, not one: true
 refuses an exemption key that names both repeated literal-label source sites: true
 a same-line repeated literal-label exemption key resolves to two source sites, not one: true

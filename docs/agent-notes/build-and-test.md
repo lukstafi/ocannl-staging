@@ -825,7 +825,8 @@ that they earn a lookup rather than always-loaded space.
   followed instead; a definitely supplied argument suppresses that edge, while an unknown
   forwarded option conservatively checks both its possible payload and the default. A partial
   application such as `let check = Verdict.p label` records the Boolean slot that its later call
-  still owes, after any positional parameters a curried wrapper has already consumed. Its exact,
+  still owes, after any positional parameters a curried wrapper has already consumed. Tail-position
+  setup (`let`, sequence, local open, or constraint) is unwrapped before wrapper recognition. Its exact,
   stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
   population; synthetic controls include a child process the shipping ratchet demonstrably refuses
   (gh-ocannl-801, gh-ocannl-887). An entry
@@ -868,6 +869,11 @@ that they earn a lookup rather than always-loaded space.
   and record destructuring remains component-exact. A quantifier returned from a nested `let` is
   checked against witnesses inside that scope and then sealed, so an outer witness with the same
   textual name cannot license a shadowed population.
+  Constant Boolean aliases in an `if` or guarded-case result carry the same polarity as literal
+  `true` and `false`; unresolved outcomes retain the existing conservative dependency traversal,
+  while identical resolved branches prove that the condition does not contribute. Local opens are
+  transparent to returned-quantifier analysis, and `not @@ quantified` retains the same negative
+  polarity as direct and piped `not`.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.
@@ -876,7 +882,9 @@ that they earn a lookup rather than always-loaded space.
   line and column are report text; `record_definition` aggregates all three exemption families by
   offset, and each refuses a key that resolves to more than one site. Multiline and same-line
   duplicate controls exist for both literal and computed labels, because a line number merges the
-  exact same-line shape the check must distinguish.
+  exact same-line shape the check must distinguish. Direct quantifiers passed to a Verdict wrapper
+  use the wrapper CALL offset, so one intentional call-site exemption cannot silently cover another
+  call through the same wrapper.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
   `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or
