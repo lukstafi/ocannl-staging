@@ -1241,6 +1241,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-878: real-graph maximum-one reachability and executed index-zero-write probe.
+
+(test
+ (name accum_max_one_extent)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules accum_max_one_extent)
+ (libraries base ocannl arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name virtual_uncaptured_loop)
  (package neural_nets_lib)

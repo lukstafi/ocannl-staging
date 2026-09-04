@@ -554,10 +554,42 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
      block selects: a single LHS [Concat] whose segment count matches [arity] selects among the
      buffers, otherwise every buffer participates. [f] raising [Empty_block] -- directly, or from
      [subst_index] -- means this block contributes nothing. *)
-  let with_product_loops ~(projections : Indexing.projections) ~arity ~role ~f : Low_level.t =
+  let with_product_loops ~(projections : Indexing.projections) ~lhs ~arity ~role ~f : Low_level.t =
     let all_prod_iters =
       Set.of_list (module Indexing.Symbol) (Indexing.all_iterators projections)
     in
+    (* gh-ocannl-878: [extent_guard] above is per-iterator, so a bound extent whose axis has NO
+       product iterator gets no guard at all -- the axis is indexed at [Fixed_idx 0] whatever the
+       runtime extent is. A maximum-one symbolic axis is exactly that shape (gh-ocannl-817 retains
+       its metadata under [None]), and it is reachable from ordinary [%op] code: reducing over a
+       maximum-one axis bound to zero yields the operand instead of the accumulation's neutral
+       element, a wrong value in an in-extent output cell.
+
+       An enclosing [0 < extent] guard around the nest is NOT a local repair: with no product
+       iterator the assignment is surjective and injective, so [can_skip_accumulation] drops the
+       neutral-element initialization, and skipping the write would leave the target holding
+       whatever preceded it rather than the empty reduction's zero. Making that sound means coupling
+       the guard to the accumulation-elision decision, for a declaration whose symbol can only ever
+       take the values 0 and 1. Refuse it loudly instead, as [Set_vec_unop] below does for its own
+       unguardable extents. An extent absent from [static_indices] keeps the standing maximum-shape
+       semantics. *)
+    let unguardable =
+      List.filter_map projections.extent_syms ~f:(fun (iter, extent) ->
+          if
+            List.mem static_indices extent ~equal:Indexing.equal_static_symbol
+            && not (Option.exists iter ~f:(Set.mem all_prod_iters))
+          then Some (Indexing.symbol_ident extent.Indexing.static_symbol)
+          else None)
+    in
+    if not (List.is_empty unguardable) then
+      raise
+      @@ Utils.User_error
+           [%string
+             "Accum_op (%{role} lowering) of %{Tn.debug_name lhs}: bound symbolic extent(s) \
+              %{String.concat ~sep:\", \" unguardable} have no iterator, so the runtime extent \
+              cannot be guarded and the axis is read and written at element zero whatever the \
+              extent is bound to. This is the maximum-one symbolic axis: use a concrete dimension \
+              of 1, or leave the extent unbound to generate the declared maximum shape"];
     let iter_sizes = Indexing.iterator_sizes projections in
     let concat_syms_opt =
       match
@@ -609,7 +641,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
       =
     let projections : Indexing.projections = Lazy.force projections in
     let for_loops =
-      with_product_loops ~projections ~arity:(Array.length rhses) ~role:"Block"
+      with_product_loops ~projections ~lhs ~arity:(Array.length rhses) ~role:"Block"
         ~f:(fun ~subst_index ~fresh_sizes ~is_allowed ->
           let lhs_idcs : Indexing.axis_index array =
             Array.map projections.project_lhs ~f:subst_index
@@ -703,7 +735,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     (* Same walker as [loop_accum], the roles swapped: the assignment's [lhs] is read at
        [project_lhs] and the [lhses] are written at their [project_rhs]. *)
     let for_loops =
-      with_product_loops ~projections ~arity:(Array.length lhses) ~role:"Rev_sides"
+      with_product_loops ~projections ~lhs ~arity:(Array.length lhses) ~role:"Rev_sides"
         ~f:(fun ~subst_index ~fresh_sizes ~is_allowed ->
           let rhs_idcs : Indexing.axis_index array =
             Array.map projections.project_lhs ~f:subst_index
