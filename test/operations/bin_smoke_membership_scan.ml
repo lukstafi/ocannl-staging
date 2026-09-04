@@ -51,6 +51,9 @@ let verified_helper_command = "%{dep:env_spelling_gate.exe}"
 let path_dirname path =
   match String.rsplit2 path ~on:'/' with Some (directory, _) -> directory | None -> ""
 
+let path_basename path =
+  match String.rsplit2 path ~on:'/' with Some (_, basename) -> basename | None -> path
+
 let duplicates strings =
   List.sort_and_group strings ~compare:String.compare
   |> List.filter_map ~f:(function first :: _ :: _ -> Some first | _ -> None)
@@ -101,9 +104,27 @@ let target_dependencies ~subdir stanza =
         List.concat_map values ~f:collect
     | Sexp.List children -> List.concat_map children ~f:collect
   in
-  match Dune_scan.field stanza "deps" with
-  | None -> []
-  | Some deps -> List.concat_map deps ~f:collect |> List.dedup_and_sort ~compare:String.compare
+  let field_dependencies =
+    match Dune_scan.field stanza "deps" with
+    | None -> []
+    | Some deps -> List.concat_map deps ~f:collect
+  in
+  let action_dependencies =
+    match Dune_scan.field stanza "action" with
+    | None -> []
+    | Some action ->
+        List.concat_map action ~f:Dune_scan.atoms
+        |> List.filter_map ~f:(fun atom ->
+            match Dune_scan.pieces atom with
+            | [ Dune_scan.Pform pform ] -> (
+                match String.lsplit2 pform ~on:':' with
+                | Some (("dep" | "read" | "read-lines" | "read-strings" | "path" | "file"), path) ->
+                    Some (Dune_scan.normalize_path (Dune_scan.in_subdir subdir path))
+                | _ -> None)
+            | _ -> None)
+  in
+  List.rev_append field_dependencies action_dependencies
+  |> List.dedup_and_sort ~compare:String.compare
 
 let resolve_target ~subdir target = Dune_scan.normalize_path (Dune_scan.in_subdir subdir target)
 
@@ -187,6 +208,14 @@ let dynamic_run_error dune_path =
 
 let directory_path_error dune_path =
   Printf.sprintf "%s rewrites PATH for a directory containing an @bin-smoke definition" dune_path
+
+let implicit_alias_error dune_path dependency =
+  Printf.sprintf "%s: @bin-smoke reaches implicit alias %s, whose contributors are not explicit"
+    dune_path dependency
+
+let may_have_implicit_contributors dependency =
+  let name = path_basename dependency in
+  String.equal name "runtest" || String.is_prefix name ~prefix:"runtest-"
 
 let cached_alias_error dune_path targets =
   Printf.sprintf "%s: @bin-smoke reaches a target-bearing rule that may be cached: %s" dune_path
@@ -326,16 +355,14 @@ let scan dune_files =
         with _ -> None)
   in
   let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
-  let directory_path_errors =
-    List.concat_map smoke_roots ~f:(fun node ->
-        List.filter_map path_rewriting_directories ~f:(fun (directory, dune_path) ->
-            if
-              String.is_empty directory
-              || String.equal directory node.subdir
-              || String.is_prefix node.subdir ~prefix:(directory ^ "/")
-            then Some (directory_path_error dune_path)
-            else None))
-    |> List.dedup_and_sort ~compare:String.compare
+  let directory_path_errors node =
+    List.filter_map path_rewriting_directories ~f:(fun (directory, dune_path) ->
+        if
+          String.is_empty directory
+          || String.equal directory node.subdir
+          || String.is_prefix node.subdir ~prefix:(directory ^ "/")
+        then Some (directory_path_error dune_path)
+        else None)
   in
   let rec visit visited targets errors = function
     | [] -> (targets, errors)
@@ -364,6 +391,7 @@ let scan dune_files =
           if contains_head "dynamic-run" node.stanza then [ dynamic_run_error node.dune_path ]
           else []
         in
+        let directory_path_errors = directory_path_errors node in
         let generated_dependency_errors =
           List.filter node.target_dependencies ~f:(fun dependency ->
               List.mem generated_targets dependency ~equal:String.equal)
@@ -378,6 +406,11 @@ let scan dune_files =
         in
         let dependencies, missing_dependency_errors =
           List.fold node.dependencies ~init:([], []) ~f:(fun (nodes, errors) dependency ->
+              let errors =
+                if may_have_implicit_contributors dependency then
+                  implicit_alias_error node.dune_path dependency :: errors
+                else errors
+              in
               let found =
                 List.filter alias_nodes ~f:(fun candidate ->
                     List.mem candidate.aliases dependency ~equal:String.equal)
@@ -395,17 +428,16 @@ let scan dune_files =
                (List.rev_append condition_errors
                   (List.rev_append exit_errors
                      (List.rev_append dynamic_run_errors
-                        (List.rev_append generated_dependency_errors
-                           (List.rev_append cached_alias_errors
-                              (List.rev_append missing_dependency_errors errors)))))))
+                        (List.rev_append directory_path_errors
+                           (List.rev_append generated_dependency_errors
+                              (List.rev_append cached_alias_errors
+                                 (List.rev_append missing_dependency_errors errors))))))))
         in
         visit visited targets errors (List.rev_append dependencies rest)
   in
   let targets, smoke_errors = visit (Set.empty (module String)) [] [] smoke_roots in
   let smoke_stanza_count = List.length smoke_roots in
-  let scan_errors =
-    List.rev_append directory_path_errors (List.rev_append smoke_errors scan_errors)
-  in
+  let scan_errors = List.rev_append smoke_errors scan_errors in
   let declarations = List.sort declarations ~compare:(fun a b -> String.compare a.local b.local) in
   let duplicate_locals =
     duplicates (List.map declarations ~f:(fun declaration -> declaration.local))
@@ -651,6 +683,39 @@ let verified_helper_launcher_fixture =
  (deps (alias bin-smoke-env_spelling_gate))
  (action (run %{exe:alpha.exe})))|dune}
 
+let action_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke.stamp)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (action (run %{exe:alpha.exe} %{dep:smoke.stamp})))|dune}
+
+let transitive_path_bin_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (alias ../test/helper-smoke))
+ (action (run %{exe:alpha.exe})))|dune}
+
+let transitive_path_helper_fixture =
+  {dune|(env (_ (env-vars (Path elsewhere))))
+(rule
+ (alias helper-smoke)
+ (action (chdir ../bin (run alpha.exe))))|dune}
+
+let implicit_alias_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(test
+ (name hidden)
+ (action (run %{exe:alpha.exe})))
+(alias (name runtest))
+(rule
+ (alias bin-smoke)
+ (deps (alias runtest))
+ (action (run %{exe:alpha.exe})))|dune}
+
 let controls_hold () =
   let accepted = scan_bin_content complete_fixture in
   let refused = scan_bin_content missing_fixture in
@@ -675,6 +740,12 @@ let controls_hold () =
   let directory_path = scan_bin_content directory_path_fixture in
   let private_launcher = scan_bin_content private_launcher_fixture in
   let verified_helper_launcher = scan_bin_content verified_helper_launcher_fixture in
+  let action_dependency = scan_bin_content action_dependency_fixture in
+  let transitive_path =
+    scan
+      [ ("bin/dune", transitive_path_bin_fixture); ("test/dune", transitive_path_helper_fixture) ]
+  in
+  let implicit_alias = scan_bin_content implicit_alias_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "bin/beta.exe" ]
@@ -731,6 +802,16 @@ let controls_hold () =
   && List.mem private_launcher.unexpected "bin/helper.exe" ~equal:String.equal
   && (not (complete verified_helper_launcher))
   && List.mem verified_helper_launcher.unexpected "bin/env_spelling_gate.exe" ~equal:String.equal
+  && (not (complete action_dependency))
+  && List.mem action_dependency.errors
+       "bin/dune: @bin-smoke reaches generated target dependency bin/smoke.stamp"
+       ~equal:String.equal
+  && (not (complete transitive_path))
+  && List.mem transitive_path.errors (directory_path_error "test/dune") ~equal:String.equal
+  && (not (complete implicit_alias))
+  && List.mem implicit_alias.errors
+       (implicit_alias_error "bin/dune" "bin/runtest")
+       ~equal:String.equal
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)

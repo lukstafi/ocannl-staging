@@ -1258,10 +1258,11 @@ that they earn a lookup rather than always-loaded space.
   dependencies transitively, and exempts only the no-argument `env_spelling_gate.exe` invocation on
   the exact infrastructure alias that owns it. It fails closed on other private helpers, external or
   otherwise opaque actions, `dynamic-run`, `with-accepted-exit-codes`, `enabled_if`, `alias_rec`,
-  explicit (file or directory) or action-inferred generated-target dependencies, target-bearing
-  alias rules, or unexpanded `include` stanzas. A bare executable name under an action-local or
-  directory-level rewrite of `PATH` (under any case spelling) is opaque too. Each construct needs
-  deliberate scanner support before it can participate in this static guarantee.
+  implicit `runtest*` aliases, explicit (file or directory) or action-inferred generated-target
+  dependencies (including action dependency pforms), target-bearing alias rules, or unexpanded
+  `include` stanzas. A bare executable name under an action-local or directory-level rewrite of
+  `PATH` (under any case spelling) is opaque too, including in transitively reached aliases. Each
+  construct needs deliberate scanner support before it can participate in this static guarantee.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
