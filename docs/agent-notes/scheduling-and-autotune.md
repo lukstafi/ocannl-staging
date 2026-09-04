@@ -623,9 +623,14 @@ files.
   the superlinear symptom returns.
   A synchronized
   single dispatch includes the round trip batching removes, so it selects only a provisional depth;
-  a queued probe at that depth supplies the steady-state per-launch estimate used for the final
-  depth. On Metal's ~0.17 ms kernels that probe already spans the target and the historical ~59
-  depth is unchanged; on faster CUDA/HIP kernels it grows the batch toward the same wall target.
+  a queued probe at that depth separates fixed synchronization cost from marginal launch cost, and
+  that affine wall model selects the final depth. This matters even when the provisional batch is
+  shallow: dividing its wall by depth would charge part of the fixed synchronization to every
+  launch and leave the final batch below the contention scale. The selected depth is validated by
+  up to four further batch probes; each short probe refits the affine model, and four misses bind at
+  the memory cap rather than feed a short window to the contention rule. On Metal's ~0.17 ms
+  kernels the first probe already spans the target and the historical ~59 depth is unchanged; on
+  faster CUDA/HIP kernels it grows the batch toward the same wall target.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall,
   and every calibration and timed window has a 16-sample floor: a host stall can no longer spend
   the whole budget and collapse a min-of-N to three samples. `Autotune.timing_result` also marks a
