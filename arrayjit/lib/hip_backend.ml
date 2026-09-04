@@ -151,7 +151,11 @@ let fp8_guard_source () =
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
-module Impl : Ir.Backend_impl.Lowered_backend = struct
+module Impl : sig
+  include Ir.Backend_impl.Lowered_backend
+
+  val hip_to_code : name:string -> string -> Hiprtc.compile_to_code_result
+end = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
   (* The concrete [buffer_ptr]/[buffer] + sexps for the impl-facing interface (no longer carried by
@@ -326,7 +330,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         ~rocwmma_include_options:rocwmma_include_opt ~uses_rocwmma
         ~with_debug:(Utils.with_runtime_debug ())
     in
-    let code = Hiprtc.compile_to_code ~hip_src ~name:name_hip ~options ~with_debug in
+    let code =
+      try Hiprtc.compile_to_code ~hip_src ~name:name_hip ~options ~with_debug
+      with Hiprtc.Hiprtc_error { status; message } ->
+        (* Re-raise the SAME constructor and status -- [classify_failure] dispatches on them -- with
+           the effective option vector appended to hiprtc's compilation log. A compile failure that
+           reaches a sweep's fingerprint then carries the flags it was compiled under, matching the
+           CUDA path's diagnostic contract (gh-ocannl-849). *)
+        raise
+          (Hiprtc.Hiprtc_error
+             { status; message = message ^ "\nhiprtc options: " ^ Compiler_options.render options })
+    in
     if Utils.settings.output_debug_files_in_build_directory then (
       let oc = Stdio.Out_channel.create ~binary:true @@ Utils.build_file @@ name ^ ".hsaco" in
       Stdio.Out_channel.output_string oc @@ Hiprtc.string_from_code code;

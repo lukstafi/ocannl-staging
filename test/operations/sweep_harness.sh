@@ -59,6 +59,7 @@ sweep=$1
 aggregate=$2
 verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 rendered_metal_options=$4
+rendered_hip_options=$5
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-sweep-test.XXXXXX")
 holder_pid=
 wait_prefix=
@@ -383,20 +384,19 @@ holder_pid=
 #
 # A red unit, not a green one: this is diagnosis, and emitting it on a pass would
 # run dune a second time on every sweep.
-# The failure text the fake dune writes. Its second and third lines are the shapes
-# `cuda_to_ptx` appends to nvrtc's message when a compile fails -- the one
-# CUDA vector and `compile_metal_source` appends to a Metal failure -- as opposed
-# to the pure policy vectors the context block prints. `fingerprint` is
-# backend-blind, so the local metal unit pins both lines' extraction; producing
-# them is separately covered on their hardware boxes. The Metal vector comes
-# from `Compiler_options.render_metal` through the OCaml driver, while the
-# assertion below stays independent: changing the production rendering now
-# changes this fixture and makes that assertion fail instead of letting two
-# shell literals drift together (gh-ocannl-881).
-nvrtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
+# The failure text the fake dune writes. Its remaining lines are the shapes
+# `cuda_to_ptx` and `hip_to_code` append to their compiler's message when a
+# compile fails, and `compile_metal_source` appends to a Metal failure -- as
+# opposed to the pure policy vectors the context block prints. `fingerprint` is
+# backend-blind, so the local metal unit pins all three lines' extraction;
+# producing them is separately covered on their hardware boxes. The HIP and
+# Metal vectors come from their production renderers through the OCaml driver,
+# so this fixture cannot drift from either source of truth (gh-ocannl-881).
+rtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
 nvrtc options: -I/usr/local/cuda/include --use_fast_math'
-nvrtc_failure=$nvrtc_failure$'\nmetal options: '"$rendered_metal_options"
-SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$nvrtc_failure \
+rtc_failure=$rtc_failure$'\nhiprtc options: '"$rendered_hip_options"
+rtc_failure=$rtc_failure$'\nmetal options: '"$rendered_metal_options"
+SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$rtc_failure \
   run_sweep_backend metal >"$tmp/metal.out" 2>&1
 grep -q 'local/metal: fail' "$tmp/metal.out"
 # The recorded outcome is the column the collection must not be able to corrupt.
@@ -419,6 +419,7 @@ grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
 # stopped at the log and never reached the file callers diff.
 grep -q '^nvrtc options: -I/usr/local/cuda/include --use_fast_math$' \
   "${metal_log%.log}.fingerprint"
+grep -Fxq "hiprtc options: $rendered_hip_options" "${metal_log%.log}.fingerprint"
 grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast$' \
   "${metal_log%.log}.fingerprint"
 

@@ -364,13 +364,10 @@ test_cmd() {
 # the debug variant was in play. The per-slot inputs are printed as what they are,
 # environment readings from the owning box.
 #
-# Where the effective vector genuinely exists the block points at it -- and that
-# is CUDA only, which is what the per-backend line below now says. `cuda_to_ptx`
-# re-raises `Nvrtc_error` with the vector appended to nvrtc's message, while
-# `hip_to_code` still calls `Hiprtc.compile_to_code` bare, so a hiprtc failure
-# carries no vector anywhere (Codex P2 on PR #510). Promising both would be a
-# claim the tree does not implement; the HIP-side append is left to a box that
-# can compile hip_backend.ml (gh-ocannl-794).
+# Where the effective vector genuinely exists the block points at it:
+# `cuda_to_ptx` and `hip_to_code` re-raise their runtime compiler's exception
+# with the vector appended to its message. The hardware-backed compile-failure
+# probes pin that each backend writes the line this block promises (gh-ocannl-849).
 
 # Which runtime compiler the BACKEND loads, not which one happens to be first on
 # PATH (Codex P2 on PR #510). cudajit and hipjit reach nvrtc/hiprtc through a
@@ -440,7 +437,7 @@ rtc_context_cmd() {
         printf 'echo "rtc option policy from %s; the include dir and"; ' "${alias_name#@}"
         printf 'echo "any arch target below are TEST SENTINELS, not this box\x27s: those come from the"; '
         printf 'echo "discovery input above and the failing kernel arch markers."; '
-        printf 'echo "A failed hiprtc compile logs no vector of its own: nothing appends one yet."; '
+        printf 'echo "A failed hiprtc compile also logged its OWN vector, on a \x27hiprtc options:\x27 line."; '
         ;;
       metal)
         printf 'echo "rtc option policy from %s; exact MTLCompileOptions property sequence."; ' "${alias_name#@}"
@@ -693,15 +690,13 @@ fingerprint() {
       END { flush() }
     ' "$1"
     grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$1"
-    # The one PRODUCTION option vector a sweep can ever hold: `cuda_to_ptx`
-    # appends it to the nvrtc message it re-raises, so a CUDA compile failure --
-    # and only a compile failure -- carries the flags it was compiled under on its
-    # own line. The selectors above cannot reach it (it starts neither at an error
-    # site nor at `Error`/`Fatal error`/`Exception`), so it stopped at the log and
-    # never reached the file callers actually diff (Codex P2 on PR #510). Matched
-    # by the prefix the backend writes, not by the rendered vector, so a changed
-    # option set shows up as a fingerprint diff rather than as a missing line.
-    grep -hoE '^(nvrtc|metal) options: .*' "$1"
+    # A production compiler option vector appended to the exception message by
+    # `cuda_to_ptx`, `hip_to_code`, or `compile_metal_source`. The selectors above
+    # cannot reach it (it starts neither at an error site nor at
+    # `Error`/`Fatal error`/`Exception`), so match the prefix each backend writes.
+    # A changed option set then appears as a fingerprint diff rather than as a
+    # missing line (gh-ocannl-849; Codex P2 on PR #510).
+    grep -hoE '^(nvrtc|hiprtc|metal) options: .*' "$1"
   } 2>/dev/null | sort -u | head -60
   # The rtc-context block a failing GPU unit appended (see rtc_context_cmd),
   # verbatim and unsorted: it is a small fixed-size report whose ORDER is what

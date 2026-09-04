@@ -1,4 +1,11 @@
-module Impl : Ir.Backend_impl.Lowered_backend
+module Impl : sig
+  include Ir.Backend_impl.Lowered_backend
+
+  val hip_to_code : name:string -> string -> Hiprtc.compile_to_code_result
+  (** Compile one complete HIP source through the same option assembly as backend-generated kernels.
+      Exposed for hardware-backed compiler regression probes; callers normally enter through
+      {!compile}. *)
+end
 
 val hip_include_options : unit -> string list
 (** The [-I] options a hiprtc compile needs in order to find the HIP headers ([<hip/hip_fp16.h>],
