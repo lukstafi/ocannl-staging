@@ -46,6 +46,9 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* Intentional dialect identity: this test exists to pin CUDA inline-PTX [ldmatrix] instruction
+   forms and the other dialects' explicit decline source, cross-checked with the MMA census. *)
 let on_cuda = String.is_substring backend_name ~substring:"cuda"
 let on_gpu = Sched.backend_is_gpu backend_name
 

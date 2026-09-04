@@ -55,6 +55,9 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
       match path stmt with [] -> None | p -> Some p)
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* Intentional dialect identity: the remaining branch pins the exact MSL fragment-store and barrier
+   ordering versus the CUDA/HIP emitted spellings. Whether MMA fired is censused. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu = Sched.backend_is_gpu backend_name
 

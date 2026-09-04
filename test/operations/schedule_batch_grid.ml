@@ -213,6 +213,8 @@ let () =
   in
   (* --- The q/k/v shape: rank-4 output, two outer batch loops (batch, head) --- *)
   (* Slots: j-blocks 0, s-blocks 1, h 2 (extent 4: "% 4"), b 3 (stride 4: "/ 4"). *)
+  (* This is intentionally dialect identity: the source assertion spells the folded grid-z
+     register as MSL [gid.z] or CUDA/HIP [blockIdx.z]. *)
   let reg = if String.is_substring backend_name ~substring:"metal" then "gid.z" else "blockIdx.z" in
   leg ~tag:"qkv" ~batch_product:(bb * hh) ~fold_div:(reg ^ " / 4") ~fold_mod:(reg ^ " % 4")
     ~build:(fun () ->

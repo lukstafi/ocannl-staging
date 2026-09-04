@@ -158,6 +158,8 @@ let () =
       && count_sub "if (" = 2
       && String.is_substring src ~substring:"acc_mc1"
       &&
+      (* This is intentionally dialect identity: the assertion counts the language's literal
+         shared-address-space declaration in emitted source. *)
       if String.is_substring backend_name ~substring:"metal" then
         count_sub "threadgroup float tile_" = 2
       else count_sub "__shared__ float tile_" = 2))

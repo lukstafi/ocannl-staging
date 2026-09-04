@@ -98,6 +98,8 @@ let () =
   p_all2 "annotated multiply-nest values match the serial twin" got_c2a got_c2s ~f:approx;
   (let src = Generated.read "combo_annot" in
    let has s = String.is_substring src ~substring:s in
+   (* This is intentionally dialect identity: the assertion names the MSL, CUDA/HIP, and C spellings
+      of the hardware-axis registers and serial-loop fallback. *)
    let structure_ok =
      if String.is_substring backend_name ~substring:"metal" then
        (* Hardware bindings from the gid/lid extra args, no loops left, and the launch-extent guard

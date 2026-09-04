@@ -267,6 +267,8 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
   if on_gpu then begin
     execute ~what:"GPU blocktile" gpu_seeds;
     (* The seed that shipped untiled before: its kernel now carries a workgroup-shared tile. *)
+    (* This is intentionally dialect identity: [assert_emits] below searches for the language's
+       literal shared-address-space qualifier; tensorization itself is read from the routine. *)
     let shared =
       if String.is_substring backend_name ~substring:"metal" then "threadgroup " else "__shared__"
     in

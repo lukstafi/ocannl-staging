@@ -140,6 +140,8 @@ let () =
     p "workgroup reduction parity (GPU) or clean rejection (CPU)" (approx got_s1.(0) expected_sum);
     let src = Generated.read "sum_wg_reduce" in
     let has sub = String.is_substring src ~substring:sub in
+    (* This is intentionally dialect identity: the claim pins each language's shared-address-space
+       qualifier and workgroup barrier token, not whether the reduction was selected. *)
     let shared_ok =
       if String.is_substring backend_name ~substring:"metal" then
         has "threadgroup float partial_sums[64]" && has "threadgroup_barrier"
