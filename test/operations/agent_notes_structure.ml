@@ -111,12 +111,12 @@ let () =
   report Notes.rule_no_repetition "no bullet is repeated across the notes";
   report Notes.rule_qualified_citations
     "no numeric GitHub citation uses a bare hash or PR/issue label";
-  (* The relationship the six calls above rest on, and nothing used to state (gh-ocannl-706): a
-     rule this file does not report is a rule whose findings the live tree never shows, and the
-     omission is silent -- the scan computes them, [of_rule] is never asked for them, and the golden
-     is five green lines either way. Sorted lists rather than sets, so a rule reported twice (two
-     verdicts over one set of findings, one of them dead) is a mismatch as well; a bare boolean, so
-     the golden stays fixed as rules come and go and only the stderr line moves. *)
+  (* The relationship the six calls above rest on, and nothing used to state (gh-ocannl-706): a rule
+     this file does not report is a rule whose findings the live tree never shows, and the omission
+     is silent -- the scan computes them, [of_rule] is never asked for them, and the golden is five
+     green lines either way. Sorted lists rather than sets, so a rule reported twice (two verdicts
+     over one set of findings, one of them dead) is a mismatch as well; a bare boolean, so the
+     golden stays fixed as rules come and go and only the stderr line moves. *)
   let sorted l = List.sort l ~compare:String.compare in
   let reported = sorted !reported and named = sorted Notes.rules in
   let all_reported = List.equal String.equal reported named in

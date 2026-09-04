@@ -918,15 +918,27 @@ let citation_cases =
     ( "hashless PR and issue labels",
       "PR 12 introduced it; issue 13 tracks the remainder.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
-    ( "the canonical issue and PR forms",
-      "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n",
+    ( "a hashless PR label across a soft line break",
+      "- Found during PR\n  12's review.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "a blank line prevents a cross-paragraph match",
+      "A paragraph ending in PR\n\n12 observations followed.\n",
       [] );
+    ( "an ordered item is not a soft continuation",
+      "A paragraph ending in PR\n12. A separate list item.\n",
+      [] );
+    ("the canonical issue and PR forms", "Facts: gh-ocannl-12; staging#12; ahrefs/ocannl#12.\n", []);
     ( "work references inside a code span",
       "The literals `#12`, `PR#12`, and `issue 12` are example text.\n",
       [] );
     ( "a hash inside a fenced block",
       "```text\n#12, PR#12, and issue 12 are fixture output\n```\n",
       [] );
+    ("a numeric local-link target", "See [layout details](#12-byte-layout).\n", []);
+    ("a numeric URL fragment", "See [the review](https://example.test/review#12).\n", []);
+    ( "an ambiguous visible link label",
+      "See [PR 12](https://example.test/review).\n",
+      [ "qualified-citations @ f.md:1" ] );
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]
 

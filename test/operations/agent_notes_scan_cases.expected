@@ -136,9 +136,15 @@ ok: exemption -- a finished bullet has no finding to key
 ok: citations -- a bare numeric citation
 ok: citations -- compact PR and issue labels
 ok: citations -- hashless PR and issue labels
+ok: citations -- a hashless PR label across a soft line break
+ok: citations -- a blank line prevents a cross-paragraph match
+ok: citations -- an ordered item is not a soft continuation
 ok: citations -- the canonical issue and PR forms
 ok: citations -- work references inside a code span
 ok: citations -- a hash inside a fenced block
+ok: citations -- a numeric local-link target
+ok: citations -- a numeric URL fragment
+ok: citations -- an ambiguous visible link label
 ok: citations -- a hash attached to a code identifier
 ok: index -- an index whose rows all resolve
 ok: index -- a hook the file it points at does not carry

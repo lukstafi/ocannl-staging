@@ -54,8 +54,8 @@
       twice is a fact that will be updated once.
     - {b qualified-citations}: numeric GitHub references do not use a bare [#NNN] or an unqualified
       [PR]/[issue] label. Those forms are ambiguous between the two repositories; [staging#NNN],
-      [gh-ocannl-NNN] and [ahrefs/ocannl#NNN] are not. Inline code, fenced blocks, comments and
-      code identifiers carrying a hash are inert to this rule.
+      [gh-ocannl-NNN] and [ahrefs/ocannl#NNN] are not. Inline code, fenced blocks, comments and code
+      identifiers carrying a hash are inert to this rule.
 
     {1 What it deliberately does not read}
 
@@ -1218,11 +1218,12 @@ let link_destination inside =
       | Some i -> String.prefix inside i
       | None -> inside)
 
-(** The NAVIGABLE links of a line: [\[text\](target)] outside inline code, outside HTML comments, and
-    not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
-    ["](../agent-notes.md)"] called a file reachable when those same bytes sat in a code span, in a
-    comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot follow. *)
-let markdown_links ?spans line =
+type markdown_link = { text : string; target : string; destination_span : int * int; image : bool }
+(** One parsed Markdown link or image, including the source range occupied by its destination. A
+    fragment in that range is URL syntax, not prose. *)
+
+(** The links and images of a line, outside inline code and HTML comments. *)
+let markdown_link_parts ?spans line =
   let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
   let rec go i acc =
@@ -1257,16 +1258,27 @@ let markdown_links ?spans line =
           match unescaped_rparen (close + 1) with
           | Some rparen when not (in_any_span spans rparen) ->
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
-              let target =
-                link_destination (String.sub line ~pos:(close + 2) ~len:(rparen - close - 2))
-              in
-              let acc = if image then acc else (text, target) :: acc in
-              go (rparen + 1) acc
+              let raw_target = String.sub line ~pos:(close + 2) ~len:(rparen - close - 2) in
+              let target = link_destination raw_target in
+              let link = { text; target; destination_span = (close + 2, rparen); image } in
+              go (rparen + 1) (link :: acc)
           | _ -> go (i + 1) acc)
       | _ -> go (i + 1) acc
     else go (i + 1) acc
   in
   go 0 []
+
+(** The NAVIGABLE links of a line: [[text](target)] outside inline code, outside HTML comments, and
+    not an image ([![alt](src)] renders a picture, not a way back). A substring test for a closing
+    quote followed by [../agent-notes.md] called a file reachable when those same bytes sat in a
+    code span, in a comment, or behind an image (Codex P2, round 1) — all three of which a reader
+    cannot follow. *)
+let markdown_links ?spans line =
+  markdown_link_parts ?spans line
+  |> List.filter_map ~f:(fun link -> if link.image then None else Some (link.text, link.target))
+
+let link_destination_spans ?spans line =
+  List.map (markdown_link_parts ?spans line) ~f:(fun link -> link.destination_span)
 
 (** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
     the middle line of a multiline code span is not one. *)
@@ -1577,16 +1589,16 @@ let preceding_identifier line i =
   while !start > 0 && identifier_char line.[!start - 1] do
     Int.decr start
   done;
-  String.sub line ~pos:!start ~len:(i - !start), !start
+  (String.sub line ~pos:!start ~len:(i - !start), !start)
 
 let is_work_label s =
   let s = String.lowercase s in
   String.equal s "pr" || String.equal s "issue"
 
-(** Whether [#] at [i] opens an unqualified numeric citation. [staging#12] and
-    [ahrefs/ocannl#12] are qualified; [node#12] is a code identifier. The compact work labels
-    [PR#12] and [issue#12] are still ambiguous, so they are returned with the label included. A
-    second hash makes the occurrence a heading marker. *)
+(** Whether [#] at [i] opens an unqualified numeric citation. [staging#12] and [ahrefs/ocannl#12]
+    are qualified; [node#12] is a code identifier. The compact work labels [PR#12] and [issue#12]
+    are still ambiguous, so they are returned with the label included. A second hash makes the
+    occurrence a heading marker. *)
 let unqualified_hash_reference_at line i =
   let n = String.length line in
   if i + 1 >= n || (i > 0 && Char.equal line.[i - 1] '#') then None
@@ -1616,44 +1628,95 @@ let unqualified_label_reference_at line i =
             else
               let digits = ref after_label in
               while
-                !digits < n
-                && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t')
+                !digits < n && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t')
               do
                 Int.incr digits
               done;
               if !digits = after_label then None
               else Option.map (digit_run line !digits) ~f:(fun stop -> (i, stop)))
 
+let trailing_work_label ~spans line =
+  let stop = ref (String.length line) in
+  while !stop > 0 && (Char.equal line.[!stop - 1] ' ' || Char.equal line.[!stop - 1] '\t') do
+    Int.decr stop
+  done;
+  List.find_map [ "pr"; "issue" ] ~f:(fun label ->
+      let start = !stop - String.length label in
+      if start < 0 || (start > 0 && identifier_char line.[start - 1]) then None
+      else
+        let candidate = String.sub line ~pos:start ~len:(String.length label) |> String.lowercase in
+        if
+          String.equal candidate label
+          && List.for_all (List.range start !stop) ~f:(fun i -> not (in_any_span spans i))
+        then Some (start, !stop)
+        else None)
+
+let leading_number ~spans line =
+  let start = ref 0 in
+  while
+    !start < String.length line && (Char.equal line.[!start] ' ' || Char.equal line.[!start] '\t')
+  do
+    Int.incr start
+  done;
+  let stripped = String.drop_prefix line !start in
+  if Option.is_some (foreign_list_marker stripped) then None
+  else
+    Option.bind (digit_run line !start) ~f:(fun stop ->
+        if List.for_all (List.range !start stop) ~f:(fun i -> not (in_any_span spans i)) then
+          Some (!start, stop)
+        else None)
+
 (** Unqualified numeric work references outside the inert regions of the notes. The same
     paragraph-aware lexer used by the structural rules owns code spans, fenced blocks and comments,
-    so this rule cannot acquire a second, drifting interpretation of Markdown. *)
+    and the link parser owns destination ranges, so this rule cannot acquire a second, drifting
+    interpretation of Markdown. *)
 let check_citations ~file contents =
   let inert = (inert_by_line contents).ranges in
-  List.concat_map (lines contents) ~f:(fun (lineno, line) ->
-      let spans = spans_at inert lineno in
-      let rec find i acc =
-        if i >= String.length line then List.rev acc
-        else if in_any_span spans i then find (i + 1) acc
-        else
-          let reference =
-            if Char.equal line.[i] '#' then unqualified_hash_reference_at line i
-            else unqualified_label_reference_at line i
-          in
-          match reference with
-          | Some (start, stop) ->
-              let citation = String.sub line ~pos:start ~len:(stop - start) in
-              let f =
-                finding ~file ~line:lineno ~rule:rule_qualified_citations
-                  (Printf.sprintf
-                     "an unqualified GitHub citation %s: write staging#NNN for a staging PR, \
-                      gh-ocannl-NNN for a codebase-fact issue, or ahrefs/ocannl#NNN for another \
-                      upstream issue mention"
-                     citation)
-              in
-              find stop (f :: acc)
-          | None -> find (i + 1) acc
-      in
-      find 0 [])
+  let source_lines = lines contents in
+  let spans_for lineno line =
+    let inert_spans = spans_at inert lineno in
+    inert_spans @ link_destination_spans ~spans:inert_spans line
+  in
+  let report lineno citation =
+    finding ~file ~line:lineno ~rule:rule_qualified_citations
+      (Printf.sprintf
+         "an unqualified GitHub citation %s: write staging#NNN for a staging PR, gh-ocannl-NNN for \
+          a codebase-fact issue, or ahrefs/ocannl#NNN for another upstream issue mention"
+         citation)
+  in
+  let direct =
+    List.concat_map source_lines ~f:(fun (lineno, line) ->
+        let spans = spans_for lineno line in
+        let rec find i acc =
+          if i >= String.length line then List.rev acc
+          else if in_any_span spans i then find (i + 1) acc
+          else
+            let reference =
+              if Char.equal line.[i] '#' then unqualified_hash_reference_at line i
+              else unqualified_label_reference_at line i
+            in
+            match reference with
+            | Some (start, stop) ->
+                let citation = String.sub line ~pos:start ~len:(stop - start) in
+                find stop (report lineno citation :: acc)
+            | None -> find (i + 1) acc
+        in
+        find 0 [])
+  in
+  let wrapped =
+    List.filter_map
+      (List.zip_exn (List.drop_last_exn source_lines) (List.drop source_lines 1))
+      ~f:(fun ((lineno, line), (next_lineno, next_line)) ->
+        let spans = spans_for lineno line in
+        let next_spans = spans_for next_lineno next_line in
+        match (trailing_work_label ~spans line, leading_number ~spans:next_spans next_line) with
+        | Some (start, stop), Some (number_start, number_stop) ->
+            let label = String.sub line ~pos:start ~len:(stop - start) in
+            let number = String.sub next_line ~pos:number_start ~len:(number_stop - number_start) in
+            Some (report lineno (label ^ " " ^ number))
+        | _ -> None)
+  in
+  List.sort (direct @ wrapped) ~compare:(fun a b -> Option.compare Int.compare a.line b.line)
 
 (* ------------------------------------------------------------------ *)
 (* The whole scan *)
