@@ -49,6 +49,8 @@
 #  16. `wait`'s default bounded deadline covers every repeat iteration.
 #  17. repeat cancellation state and traps precede publication as `last`.
 #  18. cancellation is checked on both sides of supervisor launch.
+#  19. cancelling a later iteration preserves an earlier test failure.
+#  20. a supervisor killed without its Dune group cannot overlap the next run.
 
 set -u
 
@@ -712,7 +714,8 @@ n=0
 n=$((n + 1))
 printf '%s\n' "$n" >"$REPEAT_TEST_COUNTER"
 printf '%s\n' "$*" >>"$REPEAT_TEST_CALLS"
-if [ -n "${REPEAT_TEST_WAIT_PREFIX:-}" ]; then
+if [ -n "${REPEAT_TEST_WAIT_PREFIX:-}" ] \
+   && { [ -z "${REPEAT_TEST_WAIT_AT:-}" ] || [ "$REPEAT_TEST_WAIT_AT" = "$n" ]; }; then
   : >"$REPEAT_TEST_WAIT_PREFIX.ready"
   while [ ! -e "$REPEAT_TEST_WAIT_PREFIX.release" ]; do sleep 0.05; done
 fi
@@ -721,6 +724,20 @@ case $REPEAT_TEST_MODE in
   stdout) printf 'stdout %s\n' "$n"; printf 'stable stderr\n' >&2 ;;
   stderr) printf 'stable stdout\n'; printf 'stderr %s\n' "$n" >&2 ;;
   fail) printf 'stable stdout\n'; printf 'stable failure\n' >&2; exit 7 ;;
+  fail_first)
+    if [ "$n" = 1 ]; then printf 'first failure\n' >&2; exit 7; fi
+    printf 'later stdout\n'; printf 'later stderr\n' >&2
+    ;;
+  orphan_first)
+    if [ "$n" = 1 ]; then
+      printf '%s\n' "$$" >"$REPEAT_TEST_ORPHAN_PID"
+      trap ': >"$REPEAT_TEST_ORPHAN_REAPED"; exit 0' TERM
+      kill -KILL "$PPID"
+      while :; do sleep 1; done
+    fi
+    [ -e "$REPEAT_TEST_ORPHAN_REAPED" ] || exit 93
+    printf 'post-reap stdout\n'; printf 'post-reap stderr\n' >&2
+    ;;
   *) echo "unknown repeat fixture mode: $REPEAT_TEST_MODE" >&2; exit 92 ;;
 esac
 EOF
@@ -748,6 +765,9 @@ repeat_probe() { # tag mode [repeat options/count/dune argv...]
   REPEAT_TEST_COUNTER=$TMP/$tag.counter \
   REPEAT_TEST_CALLS=$TMP/$tag.calls \
   REPEAT_TEST_WAIT_PREFIX= \
+  REPEAT_TEST_WAIT_AT= \
+  REPEAT_TEST_ORPHAN_PID= \
+  REPEAT_TEST_ORPHAN_REAPED= \
   REPEAT_TEST_DIFF_WAIT_PREFIX= \
   REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
   OCANNL_TOOL_TEST_RUNS=$runs \
@@ -774,6 +794,92 @@ if [ -n "$completed_line" ] && [ -n "$signal_trap_line" ] \
 else
   report 1 "repeat: cancellation lifecycle is armed before publication" \
     "completed=${completed_line:-missing} signal=${signal_trap_line:-missing} exit=${exit_trap_line:-missing} publish=${publish_line:-missing}"
+fi
+
+# A real red remains the useful verdict when a later iteration is cancelled.
+# Block only iteration two, stop the managed set there, and prove both the
+# retained exit 7 and the cancellation annotation.
+repeat_red_cancel_runs=$TMP/repeat-runs-red-cancel
+repeat_red_cancel_prefix=$TMP/repeat-red-cancel
+mkdir -p "$repeat_red_cancel_runs"
+: >"$TMP/repeat-red-cancel.counter"
+: >"$TMP/repeat-red-cancel.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=fail_first \
+REPEAT_TEST_COUNTER=$TMP/repeat-red-cancel.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-red-cancel.calls \
+REPEAT_TEST_WAIT_PREFIX=$repeat_red_cancel_prefix \
+REPEAT_TEST_WAIT_AT=2 \
+REPEAT_TEST_DIFF_WAIT_PREFIX= \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+REPEAT_TEST_ORPHAN_PID= \
+REPEAT_TEST_ORPHAN_REAPED= \
+OCANNL_TOOL_TEST_RUNS=$repeat_red_cancel_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 3 build @cheap \
+  >"$TMP/repeat-red-cancel.out" 2>"$TMP/repeat-red-cancel.err" &
+repeat_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -e "$repeat_red_cancel_prefix.ready" ] && break
+  sleep 0.1
+done
+red_cancel_stop=$(OCANNL_TOOL_TEST_RUNS=$repeat_red_cancel_runs \
+  "$repeat_root/tools/test-run.sh" stop last 2>"$TMP/repeat-red-cancel-stop.err")
+red_cancel_stop_rc=$?
+touch "$repeat_red_cancel_prefix.release"
+wait "$repeat_pid"
+repeat_red_cancel_rc=$?
+repeat_pid=
+repeat_red_cancel_dir=$(find "$repeat_red_cancel_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+if [ "$red_cancel_stop_rc" = 0 ] \
+   && grep -q '^sent TERM to the repeat coordinator; ' <<<"$red_cancel_stop" \
+   && [ "$repeat_red_cancel_rc" = 7 ] \
+   && [ "$(cat "$repeat_red_cancel_dir/exit" 2>/dev/null)" = 7 ] \
+   && grep -q '^repeat result: CANCELLED -- completed 2 of 3 iterations$' "$TMP/repeat-red-cancel.out"; then
+  report 0 "repeat: earlier failure survives later cancellation"
+else
+  report 1 "repeat: earlier failure survives later cancellation" \
+    "stop $red_cancel_stop_rc; repeat $repeat_red_cancel_rc: $(cat "$TMP/repeat-red-cancel.out")"
+fi
+
+# Kill the first capped supervisor from inside its Dune child, leaving that
+# child/group alive. Iteration two refuses to pass unless the coordinator's
+# identity-verified reap completed first.
+repeat_orphan_runs=$TMP/repeat-runs-orphan
+repeat_orphan_marker=$TMP/repeat-orphan-reaped
+repeat_orphan_pid_file=$TMP/repeat-orphan-pid
+mkdir -p "$repeat_orphan_runs"
+: >"$TMP/repeat-orphan.counter"
+: >"$TMP/repeat-orphan.calls"
+REPEAT_TEST_ROOT=$repeat_root \
+REPEAT_TEST_MODE=orphan_first \
+REPEAT_TEST_COUNTER=$TMP/repeat-orphan.counter \
+REPEAT_TEST_CALLS=$TMP/repeat-orphan.calls \
+REPEAT_TEST_WAIT_PREFIX= \
+REPEAT_TEST_WAIT_AT= \
+REPEAT_TEST_DIFF_WAIT_PREFIX= \
+REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+REPEAT_TEST_ORPHAN_PID=$repeat_orphan_pid_file \
+REPEAT_TEST_ORPHAN_REAPED=$repeat_orphan_marker \
+OCANNL_TOOL_TEST_RUNS=$repeat_orphan_runs \
+PATH=$repeat_bin:$PATH \
+  "$repeat_root/tools/test-run.sh" repeat 2 build @cheap \
+  >"$TMP/repeat-orphan.out" 2>"$TMP/repeat-orphan.err"
+repeat_orphan_rc=$?
+repeat_orphan_dir=$(find "$repeat_orphan_runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
+orphan_pid=$(cat "$repeat_orphan_pid_file" 2>/dev/null)
+if [ "$repeat_orphan_rc" = 137 ] \
+   && [ -e "$repeat_orphan_marker" ] \
+   && [ "$(cat "$repeat_orphan_dir/iteration-2/exit" 2>/dev/null)" = 0 ] \
+   && grep -q '^repeat: iteration group .* survived its supervisor; reaping before reuse$' "$TMP/repeat-orphan.out"; then
+  report 0 "repeat: surviving iteration group is reaped before reuse"
+else
+  report 1 "repeat: surviving iteration group is reaped before reuse" \
+    "exit $repeat_orphan_rc; marker=$([ -e "$repeat_orphan_marker" ] && echo yes || echo no); output: $(cat "$TMP/repeat-orphan.out")"
+fi
+if [ -n "$orphan_pid" ] && kill -0 "$orphan_pid" 2>/dev/null; then
+  kill -KILL -- "-$orphan_pid" 2>/dev/null
+  kill -KILL "$orphan_pid" 2>/dev/null
 fi
 
 pre_launch_line=$(grep -n '^      \[ -z "$repeat_cancelled" \] || break$' "$SRC" | head -1 | cut -d: -f1)

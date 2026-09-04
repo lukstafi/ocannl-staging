@@ -811,97 +811,30 @@ state_field() { # state key -> first value
   awk -F '\t' -v key="$2" '$1 == key { print $2; exit }' "$1"
 }
 
-goldens_from_log() { # log destination backend -- source-tree paths at the pinned ref
-  local log=$1 destination=$2 backend=$3 locations source excerpt dune_file beg end dir token candidate
-  local prefix rest read_path suffix read_source value
-  locations=$destination.locations.$$
-  source=$destination.source.$$
-  excerpt=$destination.excerpt.$$
+goldens_from_log() { # log destination -- source-tree paths proved to have failed a diff
+  local log=$1 destination=$2 candidates token
+  candidates=$destination.candidates.$$
   : >"$destination" || die "cannot stage failing golden paths"
 
-  # Ordinary `(test)` failures name the expected file directly.
-  sed -n 's/^File "\([^"]*\.expected\)".*/\1/p' "$log" >>"$destination" ||
-    die "cannot extract directly named failing goldens"
-
-  # Explicit-rule tests often anchor only to the dune STANZA. Fingerprint
-  # normalization intentionally reduces that span to its alias/target, so read
-  # the exact source span at the pinned commit and derive its .expected inputs
-  # before normalization discards the relationship.
+  # An ordinary `(test)` failure names its expected file directly. Explicit
+  # rules name only their dune stanza, but a diff that ACTUALLY RAN and found a
+  # mismatch emits a resolved `diff --git` header. Reading that header—rather
+  # than guessing from the stanza—distinguishes a failed diff from an earlier
+  # command in a run-then-diff `progn`, and naturally carries `%{read:...}`
+  # expansions plus PPX's `*_expected.ml` naming.
   {
-    sed -n 's/^File "\([^"]*dune\)", line \([0-9][0-9]*\),.*/\1\t\2\t\2/p' "$log"
-    sed -n 's/^File "\([^"]*dune\)", lines \([0-9][0-9]*\)-\([0-9][0-9]*\),.*/\1\t\2\t\3/p' "$log"
-  } | sort -u >"$locations" || die "cannot extract failing dune spans"
-  while IFS=$'\t' read -r dune_file beg end; do
-    [ -n "$dune_file" ] || continue
-    # A diagnostic can point into an installed dependency or a generated dune
-    # file that is not source-controlled at this ref. It has no golden whose
-    # Git provenance this sweep can establish, so leave it out rather than
-    # turning a test failure into a harness error.
-    git -C "$MAIN" show "$full_sha:$dune_file" >"$source" 2>/dev/null || continue
-    sed -n "${beg},${end}p" "$source" >"$excerpt" ||
-      die "cannot read lines $beg-$end of $dune_file"
-    dir=${dune_file%/dune}
-    [ "$dir" != "$dune_file" ] || dir=.
-    while IFS= read -r token; do
-      [ -n "$token" ] || continue
-      # Dune expands `%{read:...}` before running diff, but its failure points
-      # back to the unexpanded source stanza. Resolve the two generated config
-      # readings used by this repository from the unit's canonical backend;
-      # for an ordinary checked-in read target, use its contents at full_sha.
-      while [[ $token == *'%{read:'*'}'* ]]; do
-        prefix=${token%%'%{read:'*}
-        rest=${token#*'%{read:'}
-        read_path=${rest%%'}'*}
-        suffix=${rest#*'}'}
-        case ${read_path##*/} in
-          ocannl_backend.txt) value=$backend ;;
-          ocannl_backend_extension.txt)
-            case $backend in
-              cc | multidev_cc) value=c ;;
-              cuda) value=cu ;;
-              hip) value=hip ;;
-              metal) value=metal ;;
-              *) value= ;;
-            esac
-            ;;
-          *)
-            read_source=$(perl -e '
-              my @out;
-              for (split m{/}, $ARGV[0]) {
-                next if $_ eq "" || $_ eq ".";
-                if ($_ eq "..") { @out or exit 1; pop @out }
-                else { push @out, $_ }
-              }
-              print join "/", @out
-            ' "$dir/$read_path") || { value=; break; }
-            value=$(git -C "$MAIN" show "$full_sha:$read_source" 2>/dev/null) || { value=; break; }
-            case $value in *$'\n'*) value=; break ;; esac
-            ;;
-        esac
-        [ -n "$value" ] || break
-        token=$prefix$value$suffix
-      done
-      [[ $token != *'%{read:'* ]] || continue
-      token=${token#./}
-      candidate=$token
-      if ! git -C "$MAIN" cat-file -e "$full_sha:$candidate" 2>/dev/null; then
-        candidate=$dir/$token
-        candidate=${candidate#./}
-        git -C "$MAIN" cat-file -e "$full_sha:$candidate" 2>/dev/null || continue
-      fi
-      printf '%s\n' "$candidate" >>"$destination" ||
-        die "cannot stage failing golden path $candidate"
-    # Only a diff action's EXPECTED operand is provenance for this failure.
-    # A self-verdicting test stanza can carry many .expected fixtures in deps;
-    # recording all tokens would blame an unrelated fixture edit for its red.
-    done < <(perl -0777 -ne '
-      while (/\(\s*diff\??\s+(?:"([^"]+)"|([^\s()"]+))\s+/g) {
-        print(($1 // $2), "\n")
-      }
-    ' "$excerpt" | sort -u)
-  done <"$locations"
+    sed -n 's/^File "\([^"]*\.expected\)".*/\1/p' "$log"
+    sed -n 's|^diff --git a/_build/default/\([^ ]*\) b/_build/default/.*$|\1|p' "$log"
+  } | sort -u >"$candidates" || die "cannot extract proven failing goldens"
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    token=${token#./}
+    git -C "$MAIN" cat-file -e "$full_sha:$token" 2>/dev/null || continue
+    printf '%s\n' "$token" >>"$destination" ||
+      die "cannot stage failing golden path $token"
+  done <"$candidates"
   sort -u "$destination" -o "$destination" || die "cannot normalize failing golden paths"
-  rm -f "$locations" "$source" "$excerpt"
+  rm -f "$candidates"
 }
 
 update_unit_state() { # machine backend outcome [fingerprint] [log]
@@ -956,7 +889,7 @@ update_unit_state() { # machine backend outcome [fingerprint] [log]
       fi
     fi
 
-    goldens_from_log "$log" "$golden_paths" "$backend"
+    goldens_from_log "$log" "$golden_paths"
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       commit=$(git -C "$MAIN" log -1 --format=%H "$full_sha" -- "$path" 2>/dev/null) ||

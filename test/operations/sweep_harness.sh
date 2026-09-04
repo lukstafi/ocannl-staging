@@ -94,10 +94,12 @@ printf 'fixture\n' >"$main/fixture"
 mkdir -p "$main/test"
 printf 'initial golden\n' >"$main/test/unit.cc_expected.ml"
 printf 'unrelated fixture\n' >"$main/test/noise.expected"
-printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc_expected.ml noise.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}_expected.ml" unit.actual)))\n' \
+printf 'pre-diff golden\n' >"$main/test/pre_diff_expected.ml"
+printf '(rule\n (alias runtest-state-probe)\n (deps unit.cc_expected.ml noise.expected)\n (action (diff "unit.%%{read:../config/ocannl_backend.txt}_expected.ml" unit.actual)))\n(rule\n (alias runtest-pre-diff-probe)\n (deps pre_diff_expected.ml)\n (action (progn (run crashing.exe) (diff pre_diff_expected.ml pre_diff.actual))))\n' \
   >"$main/test/dune"
 git -C "$main" add fixture benchmarks/fixtures/DIGESTS.txt test/dune \
-  test/unit.cc_expected.ml test/noise.expected
+  test/unit.cc_expected.ml test/noise.expected \
+  test/pre_diff_expected.ml
 git -C "$main" commit -qm fixture
 fixture_sha=$(git -C "$main" rev-parse HEAD)
 git -C "$main" remote add origin "$origin"
@@ -215,7 +217,8 @@ state_failure='File "test/dune", lines 1-4, characters 0-0:
 1 | (rule
 2 |  (alias runtest-state-probe)
 ......
-FAILED: fixture state failure.'
+FAILED: fixture state failure.
+diff --git a/_build/default/test/unit.cc_expected.ml b/_build/default/test/unit.actual'
 state_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_first"
@@ -231,6 +234,26 @@ state_same=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \
   run_sweep_args --target state-probe)
 absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$state_same"
 absent 'fingerprint moved since the previous failure' <<<"$state_same"
+
+# A run-then-diff progn that crashes in its producer never ran the diff. Its
+# stanza contains a source-controlled expected operand, but without a unified
+# diff header that operand is not proven to have failed and must not enter the
+# cursor's golden provenance.
+pre_diff_failure='File "test/dune", lines 5-8, characters 0-0:
+5 | (rule
+6 |  (alias runtest-pre-diff-probe)
+......
+Error: crashing.exe exited 2 before diff'
+pre_diff_first=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$pre_diff_failure \
+  run_sweep_args --target pre-diff-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$pre_diff_first"
+printf 'changed without reaching diff\n' >"$main/test/pre_diff_expected.ml"
+git -C "$main" add test/pre_diff_expected.ml
+git -C "$main" commit -qm 'change expectation behind crashing producer'
+git -C "$main" push -q origin master
+pre_diff_second=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$pre_diff_failure \
+  run_sweep_args --target pre-diff-probe)
+absent 'REGRESSION OR FIX DID NOT TAKE' <<<"$pre_diff_second"
 
 # An expected fixture merely listed in the failing stanza's deps is not the
 # failed diff input. The old all-token extraction records it and makes this

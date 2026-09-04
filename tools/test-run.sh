@@ -768,6 +768,7 @@ case $sub in
     repeat_sup=
     repeat_cancelled=
     completed=0
+    first_nonzero=0
     repeat_signal() {
       repeat_cancelled=$1
       [ -n "$repeat_sup" ] && kill "-$1" "$repeat_sup" 2>/dev/null
@@ -788,7 +789,11 @@ case $sub in
       # that disposition and the atomic exit file cannot be interrupted.
       trap '' INT TERM HUP
       if [ -n "$repeat_cancelled" ]; then
-        case $repeat_cancelled in INT) rc=130 ;; *) rc=143 ;; esac
+        if [ "$first_nonzero" != 0 ]; then
+          rc=$first_nonzero
+        else
+          case $repeat_cancelled in INT) rc=130 ;; *) rc=143 ;; esac
+        fi
         if [ -z "${repeat_reported_cancelled:-}" ]; then
           printf 'repeat result: CANCELLED -- completed %s of %s iterations\n' \
             "$completed" "$repeats"
@@ -806,13 +811,33 @@ case $sub in
     }
     trap repeat_exit EXIT
 
+    reap_repeat_group() { # iteration dir -- no verified survivor may share repeat_build
+      local iter_dir=$1 pg n
+      pg=$(cat "$iter_dir/pgid" 2>/dev/null) || return 0
+      group_alive "$pg" || return 0
+      group_verified "$iter_dir" ||
+        die "iteration group $pg survived without a verifiable identity; refusing to reuse $repeat_build"
+      printf 'repeat: iteration group %s survived its supervisor; reaping before reuse\n' "$pg" \
+        | tee -a "$run_dir/log"
+      kill -TERM -- "-$pg" 2>/dev/null
+      for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        group_alive "$pg" || return 0
+        sleep 0.1
+      done
+      kill -KILL -- "-$pg" 2>/dev/null
+      for n in 1 2 3 4 5 6 7 8 9 10; do
+        group_alive "$pg" || return 0
+        sleep 0.1
+      done
+      die "iteration group $pg survived TERM/KILL; refusing to reuse $repeat_build"
+    }
+
     # A repeat can be long enough to manage from another shell. Its complete
     # cancellation state and exit finalizer are armed BEFORE it becomes `last`:
     # every externally discoverable coordinator can therefore publish a
     # verdict even if stop or a group signal lands in the publication gap.
     with_meta_lock publish_run || die "cannot publish repeat run $run_dir"
 
-    first_nonzero=0
     repeat_build=$run_dir/build
     i=1
     while [ "$i" -le "$repeats" ] && [ -z "$repeat_cancelled" ]; do
@@ -849,6 +874,10 @@ case $sub in
         iter_rc=$?
         proc_alive "$iter/pid" "$iter/ptoken" || break
       done
+      # SIGKILL can remove the supervisor without reaching the Dune process
+      # group it owned. Reap that identity-verified group before recording the
+      # iteration, starting another one, or deleting their shared build tree.
+      reap_repeat_group "$iter"
       repeat_sup=
       printf '%s\n' "$iter_rc" >"$iter/exit" || die "cannot record iteration $i verdict"
       [ "$first_nonzero" != 0 ] || [ "$iter_rc" = 0 ] || first_nonzero=$iter_rc

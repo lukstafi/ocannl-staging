@@ -522,6 +522,9 @@ that they earn a lookup rather than always-loaded space.
   ignored, so even a finalizer child killed by the original signal cannot strand the managed run.
   Cancellation state and that finalizer are armed before the run is published as `last`; each
   iteration rechecks cancellation immediately before and after supervisor launch.
+  If a supervisor is killed while its identity-verified Dune process group survives, the group is
+  reaped before another iteration can reuse—or final cleanup can remove—the shared build tree. A
+  prior nonzero iteration remains the set's exit status when a later iteration is cancelled.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded
@@ -1631,12 +1634,11 @@ that they earn a lookup rather than always-loaded space.
   previous run. Standing identical reds stay quiet, which is the signal-to-noise property the
   cursor exists to preserve. The cursor key includes the requested logical ref, so an exploratory
   branch or historical run cannot become `origin/master`'s predecessor. Golden paths come from the
-  full log and, where Dune names only an explicit-rule stanza, from that exact source span at the
-  pinned commit; `%{read:...}` substitutions used by per-backend goldens are resolved before the Git
-  lookup. Only the source-controlled expected operand of a `diff` action counts—a self-verdicting
-  test's unrelated `.expected` dependencies are not failing goldens, while PPX `*_expected.ml`
-  operands are. The normalized fingerprint deliberately no longer carries enough source
-  relationship to recover any of this provenance.
+  full log: ordinary test diffs name their `.expected` file directly, while an explicit rule's
+  resolved `diff --git` header proves its diff actually ran and supplies the first operand. Thus a
+  producer crash before a later `diff` records no golden, `%{read:...}` substitutions are already
+  expanded, and PPX `*_expected.ml` operands need no naming special case. The normalized fingerprint
+  deliberately no longer carries enough source relationship to recover this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other
