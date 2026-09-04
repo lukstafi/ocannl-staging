@@ -90,6 +90,8 @@ let raw_entries =
       ] );
     ( "backend_golden_family_scan.ml",
       [ "[scanner-refusal:2fcd4d491da746e829dc7cec63905091] self-certifying and provenance" ] );
+    ( "bin_smoke_membership_scan.ml",
+      [ "[scanner-refusal:9446215c7b3c2270741bbb1cd8300733] executable exactly once" ] );
     ( "cache_dir_ignores.ml",
       [
         "[scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore";
@@ -121,7 +123,7 @@ let raw_entries =
       [
         "[scanner-refusal:2ade05f14bd972f85a1792722f8a0ab6] arguments the rule's";
         "[scanner-refusal:6c29eb9b1db92bba229707a7cd8e1b5b] Dune_stanza_scan.action_heads";
-        "[scanner-refusal:57862024aefd0884bbbd6d074a2e173b] Dune_stanza_scan";
+        "[scanner-refusal:cebf445823df462f70b459a86b20e3d3] Dune_stanza_scan";
         "[scanner-refusal:6d151bed80a45201e61d096c2c38d210] which has no";
         "[scanner-refusal:5509acc7fac8ff0412e3631b49c06dc7] change directory without";
         "[scanner-refusal:e11f1dd0ebe8035f6b6bb919c904e611] this check cannot";
@@ -466,7 +468,7 @@ let raw_direct_evidence =
       "ok: a program action's arguments are not actions" );
     ( "config_dep_completeness.ml:6c29eb9b1db92bba229707a7cd8e1b5b",
       "ok: a rule that copies an executable does not run it" );
-    ( "config_dep_completeness.ml:57862024aefd0884bbbd6d074a2e173b",
+    ( "config_dep_completeness.ml:cebf445823df462f70b459a86b20e3d3",
       "ok: raw stanzas -- a name the stanza binds resolves under one too" );
     ( "config_dep_completeness.ml:6d151bed80a45201e61d096c2c38d210",
       "ok: copies the config -- no copy_files at all" );

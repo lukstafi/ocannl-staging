@@ -40,6 +40,7 @@ ok: a chdir to a pform over a PATH tool is not
 ok: an unclassified action under a chdir keeps that directory
 ok: and an unclassified action under a pform chdir is unplaceable, like a command
 ok: a rewritten PATH makes a bare command unplaceable
+ok: a Windows-case PATH spelling makes a bare executable unplaceable
 ok: but a path-qualified command still names what it names
 ok: a chdir under a PATH rewrite keeps its directory
 ok: a chdir to the stanza's own directory changes nothing
@@ -191,6 +192,8 @@ ok: raw stanzas -- a non-path form in a binding is not its value
 ok: raw stanzas -- and a binding of only a non-path form resolves to nothing
 ok: raw stanzas -- a binding outside the deps field is not a binding
 ok: raw stanzas -- a bare command under setenv PATH is unnameable
+ok: raw stanzas -- a bare executable-looking command under setenv PATH is unnameable
+ok: raw stanzas -- a Windows-case PATH spelling is unnameable too
 ok: raw stanzas -- but a named executable under one is still a run
 ok: raw stanzas -- two bare ones are two, and repeats collapse
 ok: raw stanzas -- a shell line alongside one is a different thing
@@ -201,8 +204,15 @@ ok: raw stanzas -- an executable only depended on
 ok: raw stanzas -- one named in a comment
 ok: raw stanzas -- one inside a string
 ok: path-rewriting stanzas -- an env stanza setting PATH
+ok: path-rewriting stanzas -- an env stanza setting Windows-case Path
+ok: path-rewriting stanzas -- an env stanza mapping binaries
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither
+ok: path-rewriting stanza scope -- a root env stanza
+ok: path-rewriting stanza scope -- an env stanza nested under subdir
+ok: path-rewriting stanza scope -- a binaries mapping nested under subdir
+ok: path-rewriting stanza scope -- nested subdirs compose
+ok: path-rewriting stanza scope -- an unrelated nested env stanza
 ok: declared config paths -- the local one
 ok: declared config paths -- one in a sibling
 ok: declared config paths -- one in a common parent, which a sibling chdir may legitimately need
@@ -294,7 +304,7 @@ ok: refused -- a datum comment
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
   [scanner-refusal:2ade05f14bd972f85a1792722f8a0ab6] arguments the rule's
   [scanner-refusal:6c29eb9b1db92bba229707a7cd8e1b5b] Dune_stanza_scan.action_heads
-  [scanner-refusal:57862024aefd0884bbbd6d074a2e173b] Dune_stanza_scan
+  [scanner-refusal:cebf445823df462f70b459a86b20e3d3] Dune_stanza_scan
   [scanner-refusal:6d151bed80a45201e61d096c2c38d210] which has no
   [scanner-refusal:5509acc7fac8ff0412e3631b49c06dc7] change directory without
   [scanner-refusal:e11f1dd0ebe8035f6b6bb919c904e611] this check cannot

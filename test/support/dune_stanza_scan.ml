@@ -446,6 +446,11 @@ let is_absolute path =
 let is_explicit_path path =
   (not (is_absolute path)) && (String.is_prefix path ~prefix:"./" || String.contains path '/')
 
+let is_path_lookup_token token =
+  match pieces token with
+  | [ Literal _ ] -> (not (is_absolute token)) && not (is_explicit_path token)
+  | _ -> false
+
 let classify_command ~named_deps cmd =
   let explicit = is_explicit_path cmd in
   let cmd = program_path cmd in
@@ -573,7 +578,8 @@ let rec commands_in ?(cwd = "") ?(pinned = Set.empty (module String)) sexp =
      reading the atom: `(setenv PATH . (run env probe))` may launch a local `probe` this scan would
      otherwise call a tool (Codex P2, round 16). Modelling the environment is not on the table;
      saying so is. *)
-  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: value :: rest) ->
+  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: value :: rest)
+    when String.equal (String.uppercase name) "PATH" ->
       let value = match value with Sexp.Atom v -> v | _ -> "..." in
       List.concat_map rest ~f:(commands_in ~cwd ~pinned:(Set.add pinned "PATH"))
       (* The directory a nested `chdir` chose is still where the process runs; PATH says nothing
@@ -665,9 +671,10 @@ let unclassified_action_heads stanza =
   | Some args ->
       List.concat_map args ~f:(walk_action ~cwd:"") |> List.dedup_and_sort ~compare:Poly.compare
 
-(** What a stanza runs: the directory each process runs in, the environment variables pinned around
-    it by an enclosing [(setenv …)], and what it is. *)
-let rec executables_run_with_pins stanza =
+(** Every command site in a stanza, including commands classified as external tools. The original
+    site, directory, enclosing environment pins, and classification are preserved so a closed-world
+    consumer can distinguish a verified no-argument helper from an opaque launcher. *)
+let classified_command_sites_with_pins_preserving_multiplicity stanza =
   let named_deps = named_deps_of stanza in
   let rec classify command =
     match command with
@@ -698,19 +705,35 @@ let rec executables_run_with_pins stanza =
        wherever it is (Codex P2, round 13). *)
     | Elsewhere (what, command) -> (
         match classify command with External -> External | _ -> Unknown_directory what)
-    (* Under a rewritten PATH the External verdict is the one that cannot be trusted: it was read
-       off a bare name, and PATH is what gives a bare name its meaning. A path-qualified command
-       still names what it names (Codex P2, round 16). *)
+    (* Under a rewritten PATH no BARE literal can be trusted, including [probe.exe]: the suffix
+       makes it workspace-shaped but does not stop PATH from selecting another file. A path or pform
+       still names what it names (gh-ocannl-874, Codex P2 round 4). *)
+    | Unnameable (what, Program (cmd, _)) when is_path_lookup_token cmd -> Path_rewritten what
     | Unnameable (what, command) -> (
         match classify command with External -> Path_rewritten what | other -> other)
   in
-  List.filter_map (commands_in stanza) ~f:(fun (cwd, pinned, command) ->
-      match classify command with External -> None | classified -> Some (cwd, pinned, classified))
+  List.map (commands_in stanza) ~f:(fun (cwd, pinned, command) ->
+      (cwd, pinned, command, classify command))
+
+let classified_commands_with_pins_preserving_multiplicity stanza =
+  List.map (classified_command_sites_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (cwd, pinned, _site, command) -> (cwd, pinned, command))
+
+(** What a stanza runs from this workspace. This form preserves one entry per command site;
+    consumers enforcing execution multiplicity must use it rather than the deduplicated census. *)
+let executables_run_with_pins_preserving_multiplicity stanza =
+  List.filter (classified_commands_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (_, _, command) -> match command with External -> false | _ -> true)
+
+(** The set-like reading used by directory and dependency checks, where two identical command sites
+    ask the same question. *)
+let executables_run_with_pins stanza =
+  executables_run_with_pins_preserving_multiplicity stanza
   |> List.dedup_and_sort ~compare:Poly.compare
 
 (** What a stanza runs, each with the directory it runs in — the shape every caller but the runner
     machinery wants. *)
-and executables_run stanza =
+let executables_run stanza =
   List.map (executables_run_with_pins stanza) ~f:(fun (cwd, _pinned, command) -> (cwd, command))
   |> List.dedup_and_sort ~compare:Poly.compare
 
@@ -988,13 +1011,14 @@ let raw_stanza_of =
             | Some _ -> None
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
-  (* A command name PATH decides the meaning of: no pform to resolve, no extension and no explicit
-     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so
-     it places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the
-     opaque one both rest on, so they read one predicate rather than restating it. *)
+  (* A command name PATH decides the meaning of: no pform and no explicit path to read it off. An
+     [.exe] suffix makes the name workspace-shaped but does not stop PATH from selecting another
+     file. Under a rewritten PATH the walk refuses to vouch for such a name, so it places a site for
+     it wherever it runs -- which is what the [raw_unnameable] floor and the opaque one both rest
+     on, so they read one predicate rather than restating it. *)
   let is_bare_name cmd =
     (not (String.is_substring cmd ~substring:"%{"))
-    && (not (is_executable cmd))
+    && (not (is_absolute cmd))
     && not (is_explicit_path cmd)
   in
   (* Whether a command-line word names something this workspace provides, as far as the RAW TEXT can
@@ -1028,7 +1052,8 @@ let raw_stanza_of =
     (* `(setenv PATH …)` changes what a BARE command name resolves to, so the walk stops vouching
        for where such a program runs. Descending through it as an ordinary form would lose that
        (Codex P2, round 9); what is beneath it is marked instead. *)
-    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: _value :: rest) ->
+    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom name :: _value :: rest)
+      when String.equal (String.uppercase name) "PATH" ->
         List.concat_map rest ~f:(commands ~cwd ~unresolved ~under_path:true)
     | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
         if String.is_substring dir ~substring:"%{" then
@@ -1094,8 +1119,9 @@ let raw_stanza_of =
             raw_inline_tests = inline;
             raw_subdir = subdir;
             raw_runs =
-              List.filter_map placed ~f:(fun (cwd, cmd, _) ->
-                  if String.equal (program_path cmd) test_pform then None
+              List.filter_map placed ~f:(fun (cwd, cmd, under_path) ->
+                  if under_path && is_bare_name cmd then None
+                  else if String.equal (program_path cmd) test_pform then None
                   else
                     match program ~bindings cmd with Some path -> Some (cwd, path) | None -> None)
               |> List.dedup_and_sort ~compare:(fun (c1, e1) (c2, e2) ->
@@ -1317,26 +1343,39 @@ let unclassified_heads content =
       | None -> [ "<not a stanza>" ])
   |> List.dedup_and_sort ~compare:String.compare
 
-(** Stanzas that rewrite PATH for a whole directory: [(env (_ (env-vars (PATH …))))] and its kin.
+(** Stanzas that override command resolution for a whole directory: PATH bindings and
+    [(env (_ (binaries …)))] mappings.
 
     There a bare command name may resolve to something this repository builds, so every
     classification that reads one off an atom is unreliable -- and unlike the action-local
     [(setenv PATH …)], the effect reaches other dune files, since an [env] stanza applies to
-    subdirectories too. Modelling that is not what a stanza scan should attempt, so it is refused
-    instead: this repository has no [env] stanza at all, and the day one touches PATH the check says
-    so rather than quietly reading bare names as tools (Codex P2, round 17 of PR #343). *)
-let path_rewriting_stanzas content =
+    subdirectories too. A [binaries] mapping poses the same problem without spelling PATH.
+    [path_rewriting_stanza_scopes] retains the [(subdir …)] placement so a caller can refuse exactly
+    the affected directory tree; [path_rewriting_stanzas] is the older head-only census used by
+    checks that reject every occurrence. This repository has no [env] stanza at all, and the day one
+    overrides command resolution those checks say so rather than quietly reading bare names as tools
+    (Codex P2, round 17 of PR #343; PR #623 rounds 12-13). *)
+let path_rewriting_stanza_scopes content =
   (* The NAME position of an `env-vars` binding, not any atom in the stanza: setting some other
-     variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
-  let rec sets_path sexp =
+     variable to the literal value `PATH` rewrites nothing. `binaries` is itself a command lookup
+     override (Codex P2, round 18 of PR #343; round 13 of PR #623). *)
+  let rec overrides_resolution sexp =
     match sexp with
     | Sexp.List (Sexp.Atom "env-vars" :: bindings) ->
-        List.exists bindings ~f:(function Sexp.List (Sexp.Atom "PATH" :: _) -> true | _ -> false)
-    | Sexp.List l -> List.exists l ~f:sets_path
+        List.exists bindings ~f:(function
+          | Sexp.List (Sexp.Atom name :: _) -> String.equal (String.uppercase name) "PATH"
+          | _ -> false)
+    | Sexp.List (Sexp.Atom "binaries" :: _) -> true
+    | Sexp.List l -> List.exists l ~f:overrides_resolution
     | Sexp.Atom _ -> false
   in
-  walk "" (stanzas content) ~f:(fun _subdir stanza ->
-      match head stanza with Some "env" when sets_path stanza -> [ "env" ] | _ -> [])
+  walk "" (stanzas content) ~f:(fun subdir stanza ->
+      match head stanza with Some "env" when overrides_resolution stanza -> [ subdir ] | _ -> [])
+  |> List.dedup_and_sort ~compare:String.compare
+
+let path_rewriting_stanzas content =
+  path_rewriting_stanza_scopes content
+  |> List.map ~f:(fun _subdir -> "env")
   |> List.dedup_and_sort ~compare:String.compare
 
 (** The directories this dune file materializes the shared configuration into with a
@@ -1892,8 +1931,9 @@ let normalize_path path =
     the real program as unrun and credit a same-named local one with this rule's declarations (Codex
     P2, round 4 of PR #484). [commands_in] already tracked the directory for the configuration
     search; this is the same fact answering a second question. *)
-let runs_of ~subdir stanza =
-  List.filter_map (executables_run_with_pins stanza) ~f:(fun (cwd, pinned, command) ->
+let runs_of_with_multiplicity ~subdir stanza =
+  List.filter_map (executables_run_with_pins_preserving_multiplicity stanza)
+    ~f:(fun (cwd, pinned, command) ->
       match command with
       (* A FILE is resolved to a workspace-relative path -- the working directory is part of its
          identity, since `(chdir ../a (run probe.exe))` in a rule under `b` runs `a`'s program. A
@@ -1904,6 +1944,10 @@ let runs_of ~subdir stanza =
       | Runs path -> Some (`File (normalize_path (in_subdir subdir (in_subdir cwd path))), pinned)
       | Runs_public name -> Some (`Public name, pinned)
       | _ -> None)
+
+(** The set-like counterpart to {!runs_of_with_multiplicity}. *)
+let runs_of ~subdir stanza =
+  runs_of_with_multiplicity ~subdir stanza |> List.dedup_and_sort ~compare:Poly.compare
 
 (** The public names a stanza gives, in the order it gives them. [(public_names a b)] pairs
     POSITIONALLY with [(names a b)], which is what lets one name of an [(executables …)] be asked

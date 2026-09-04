@@ -84,15 +84,19 @@
 ; any claim about the measurements, whose hermeticity and validity belong to gh-ocannl-743. One
 ; sequential action keeps CPU and linker pressure bounded on shared and CI machines. The alias is
 ; included in the main CI Dune walk; keeping it outside `runtest` also makes the policy and its cost
-; visible at the call site as `dune build @bin-smoke`.
+; visible at the call site as `dune build @bin-smoke`. The gh-ocannl-874 scans-family check derives
+; this action's executable members and holds them equal to the public executable declarations below.
 
 (rule
  ; ocannl-backend: cc -- every command pins the runtime canary to the cheap CPU backend.
  (alias bin-smoke)
  (package neural_nets_lib)
+ ; The membership scan requires every command-bearing contribution to rerun rather than become a
+ ; cached alias action; the environment gate has the same dependency for the same reason.
  (deps
   (alias bin-smoke-env_spelling_gate)
-  ocannl_config)
+  ocannl_config
+  (universe))
  (action
   (progn
    (run %{exe:compilation_speed.exe} 1 --ocannl_backend=cc)

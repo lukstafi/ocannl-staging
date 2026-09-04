@@ -209,6 +209,12 @@ let cases =
         "rule whose working directory this scan cannot establish: env, under `(setenv PATH . ...)` \
          [declares]";
       ] );
+    ( "a Windows-case PATH spelling makes a bare executable unplaceable",
+      {dune|(rule (deps ocannl_config) (action (setenv Path . (run probe.exe))))|dune},
+      [
+        "rule whose working directory this scan cannot establish: probe.exe, under `(setenv PATH . \
+         ...)` [declares]";
+      ] );
     ( "but a path-qualified command still names what it names",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -354,8 +360,27 @@ let cases =
 let path_rewriting_cases =
   [
     ("an env stanza setting PATH", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "env" ]);
+    ("an env stanza setting Windows-case Path", {dune|(env (_ (env-vars (Path .))))|dune}, [ "env" ]);
+    ("an env stanza mapping binaries", {dune|(env (_ (binaries helper.exe)))|dune}, [ "env" ]);
     ("one setting something else to PATH", {dune|(env (_ (env-vars (OTHER PATH))))|dune}, []);
     ("an env stanza that touches neither", {dune|(env (_ (flags (:standard))))|dune}, []);
+  ]
+
+let path_rewriting_scope_cases =
+  [
+    ("a root env stanza", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "" ]);
+    ( "an env stanza nested under subdir",
+      {dune|(subdir tools (env (_ (env-vars (PATH .)))))|dune},
+      [ "tools" ] );
+    ( "a binaries mapping nested under subdir",
+      {dune|(subdir tools (env (_ (binaries helper.exe))))|dune},
+      [ "tools" ] );
+    ( "nested subdirs compose",
+      {dune|(subdir tools (subdir private (env (_ (env-vars (Path .))))))|dune},
+      [ "tools/private" ] );
+    ( "an unrelated nested env stanza",
+      {dune|(subdir tools (env (_ (env-vars (OTHER PATH)))))|dune},
+      [] );
   ]
 
 (* WHICH config file a stanza depends on, as written. The scan reports the paths; which of them is
@@ -751,10 +776,16 @@ let raw_stanza_cases =
       {dune|(rule (action (progn (:pp pp.exe) (run %{pp}))))|dune},
       [ "rule{?%{pp}, itself named out of this workspace}" ] );
     (* `(setenv PATH …)` changes what a bare name resolves to, so the walk stops vouching for the
-       program -- and the floor records that it must have said so. A command the text CAN name stays
-       an ordinary run even there, because the walk still names it. *)
+       program -- including an executable-looking literal -- and the floor records that it must have
+       said so. An explicit path or pform stays an ordinary run because PATH cannot redirect it. *)
     ( "a bare command under setenv PATH is unnameable",
       {dune|(rule (action (setenv PATH . (run probe))))|dune},
+      [ "rule{!}" ] );
+    ( "a bare executable-looking command under setenv PATH is unnameable",
+      {dune|(rule (action (setenv PATH . (run probe.exe))))|dune},
+      [ "rule{!}" ] );
+    ( "a Windows-case PATH spelling is unnameable too",
+      {dune|(rule (action (setenv Path . (run probe.exe))))|dune},
       [ "rule{!}" ] );
     ( "but a named executable under one is still a run",
       {dune|(rule (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
@@ -1623,6 +1654,11 @@ let () =
       check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
+  List.iter path_rewriting_scope_cases ~f:(fun (name, source, expected) ->
+      check
+        ("path-rewriting stanza scope -- " ^ name)
+        expected
+        (Scan.path_rewriting_stanza_scopes source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
       let found =
         List.concat_map (Scan.sites source) ~f:(fun site -> site.Scan.declared_config_paths)

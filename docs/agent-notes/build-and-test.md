@@ -1250,6 +1250,50 @@ that they earn a lookup rather than always-loaded space.
   `@default @runtest` Dune walk, so `@check`'s inability to link or execute an executable no longer
   leaves first-iteration failures in these tools uncovered. Keep benchmark-reproducibility work in
   gh-ocannl-743 rather than expanding this alias into a benchmark assertion suite.
+  `bin_smoke_membership_scan` (gh-ocannl-874) derives the public executable declarations from
+  every Dune file below `bin/` and every recursive-alias contribution from the repository's dune
+  files, then requires exact one-to-one membership; its separate negative-control rule runs the
+  same checker on a synthetic omitted member and accepts only the failing exit status. The scan
+  preserves repeated command sites so a duplicated smoke is not collapsed into a set, follows
+  `(alias ...)` dependencies transitively, and exempts only the no-argument
+  `env_spelling_gate.exe` invocation on the exact infrastructure alias that owns it. Every
+  command-bearing alias contribution, root or transitive helper, must depend directly on
+  `(universe)`, so Dune cannot cache away runtime coverage after another contribution reruns.
+  Alias edges and generated file producers in a public executable's `link_deps` or
+  `preprocessor_deps` are also traversed and refused if they run a public executable or contain an
+  opaque dependency/action: they execute while the smoke target is being built, before its credited
+  runtime canary.
+  It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
+  `with-accepted-exit-codes`, `enabled_if` on a public
+  declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
+  `data_only_dirs`, dependency-list `include`, `read*` expansion or an otherwise unmodeled pform,
+  explicit (file or directory, including files below a directory target) or
+  action-inferred generated-target dependencies (including dependency pforms in fields or actions,
+  pforms embedded in larger dependency/action atoms, literal file-input action positions, and
+  output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
+  rules, a pform in an inferred output path, an unresolved `chdir` around inferred output targets,
+  an action preprocessor on a public executable or any library, an explicit `install` into section
+  `bin`, or unexpanded top-level `include` stanzas. A bare executable name is itself refused: its
+  `.exe` suffix does not stop ambient PATH from selecting a program outside the workspace.
+  Action-local or directory-level PATH rewrites (under any case
+  spelling), and an `env` stanza's `binaries` mapping, are opaque too, including in transitively
+  reached aliases. A
+  directory-level override follows Dune's scope: it reaches descendants of its own `(subdir …)`
+  placement, not the parent or a sibling. Paths expanded from `%{exe:…}`, `%{dep:…}`, and named
+  dependency pforms remain anchored to the stanza when the process runs under `chdir`; literal
+  program paths remain relative to the changed working directory. Each construct needs deliberate
+  scanner support before it can participate in this static guarantee. Absolute executable paths are
+  refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
+  A target-producing rule anywhere in the repository may not run a public bin executable directly:
+  its output could be an implicit build prerequisite of a smoked executable, hiding an extra
+  execution outside the alias dependency edges the census can see. For rules that produce a
+  declared public executable's generated source or interface below `bin/`, the same check
+  recursively covers alias dependencies and
+  refuses shell, interpreter, private-workspace-generator, or otherwise opaque commands plus
+  unexpandable dependency specifications. Producer-side executions are errors rather than smoke
+  credit because an unrelated generated target may never be built. Commands under absolute
+  `chdir` destinations are likewise refused before path normalization can turn a host path into an
+  apparent workspace identity.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
