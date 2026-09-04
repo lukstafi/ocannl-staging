@@ -147,7 +147,7 @@ let exited_zero child =
   | Some (Unix.WEXITED 0) -> true
   | Some (Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _) | None -> false
 
-let transition_holds_record_lock () =
+let record_lock_held_by_other_process () =
   let fd = Unix.openfile lock_file [ Unix.O_RDWR ] 0o600 in
   Exn.protect
     ~finally:(fun () -> Unix.close fd)
@@ -189,7 +189,7 @@ let () =
       p "the concurrent writer reaches the record-lock attempt while stamping is paused"
         (await_marker "writer-at-lock");
       p "the transition's record lock excludes the writer at its attempt boundary"
-        (transition_holds_record_lock ());
+        (record_lock_held_by_other_process ());
       p "the waiting writer has not published its entry"
         (not (Stdlib.Sys.file_exists (entry_file writer_key)));
 
@@ -199,6 +199,8 @@ let () =
         (await_marker "transition-done");
       p "the writer reaches entry commit after the transition releases the lock"
         (await_marker "entry-commit");
+      p "the writer retains the record lock through its entry commit"
+        (record_lock_held_by_other_process ());
       touch "writer-release";
       p "the released writer finishes its store" (await_marker "writer-done");
       p "both cache-opening processes exit successfully"
