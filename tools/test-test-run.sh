@@ -52,6 +52,7 @@
 #  19. cancelling a later iteration preserves an earlier test failure.
 #  20. a supervisor killed without its Dune group cannot overlap the next run.
 #  21. the dead supervisor pid is cleared before orphan-group reaping.
+#  22. orphan cleanup gates on reachability and revalidates identity for KILL.
 
 set -u
 
@@ -906,6 +907,17 @@ if [ -n "$clear_supervisor_line" ] && [ -n "$reap_group_line" ] \
 else
   report 1 "repeat: dead supervisor pid is cleared before group reap" \
     "clear=${clear_supervisor_line:-missing} reap=${reap_group_line:-missing}"
+fi
+
+sed -n '/^    reap_repeat_group() {/,/^    }/p' "$SRC" >"$TMP/reap-repeat-group.sh"
+if grep -q 'kill -0 -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
+   && ! grep -q '^[[:space:]]*group_alive ' "$TMP/reap-repeat-group.sh" \
+   && grep -B1 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
+        | grep -q 'group_verified "$iter_dir" || return 0'; then
+  report 0 "repeat: orphan reap uses reachability and revalidates before KILL"
+else
+  report 1 "repeat: orphan reap uses reachability and revalidates before KILL" \
+    "$(tr '\n' ';' <"$TMP/reap-repeat-group.sh")"
 fi
 
 repeat_probe repeat-identical stable 3 build @cheap

@@ -814,19 +814,27 @@ case $sub in
     reap_repeat_group() { # iteration dir -- no verified survivor may share repeat_build
       local iter_dir=$1 pg n
       pg=$(cat "$iter_dir/pgid" 2>/dev/null) || return 0
-      group_alive "$pg" || return 0
+      # Reachability gates cleanup. group_alive is a fallible census and may
+      # miss a member that forks/exits while /proc is enumerated; it must never
+      # turn a surviving group into permission to reuse repeat_build.
+      kill -0 -- "-$pg" 2>/dev/null || return 0
       group_verified "$iter_dir" ||
         die "iteration group $pg survived without a verifiable identity; refusing to reuse $repeat_build"
       printf 'repeat: iteration group %s survived its supervisor; reaping before reuse\n' "$pg" \
         | tee -a "$run_dir/log"
       kill -TERM -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        group_alive "$pg" || return 0
+        kill -0 -- "-$pg" 2>/dev/null || return 0
+        # A mismatched leader token means the original group is gone; never
+        # escalate against a numeric pgid that may already have been recycled.
+        group_verified "$iter_dir" || return 0
         sleep 0.1
       done
+      group_verified "$iter_dir" || return 0
       kill -KILL -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10; do
-        group_alive "$pg" || return 0
+        kill -0 -- "-$pg" 2>/dev/null || return 0
+        group_verified "$iter_dir" || return 0
         sleep 0.1
       done
       die "iteration group $pg survived TERM/KILL; refusing to reuse $repeat_build"
