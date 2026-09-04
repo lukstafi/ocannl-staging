@@ -1129,8 +1129,8 @@ val set_test_bindings : Context.routine -> unit
 
 val queued_batch_depth : timing_result -> int
 (** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
-    synchronization costs. Aims at ~10 ms of wall time per batch, capped at 200 launches and floored
-    at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
+    synchronization costs. Aims at ~10 ms of wall time per batch, capped at 2048 launches and
+    floored at 1 — so a routine at or above the target is batched at depth 1 and measured exactly as
     {!Isolated} measures it, and a microsecond routine cannot mint an unbounded batch. A
     non-positive or NaN estimate is a clock that resolved nothing rather than a zero-cost kernel and
     batches at the cap; an infinite one floors at 1, the far end of the scale the policy is for.
@@ -1179,12 +1179,15 @@ val time_routine :
     minimizes the per-launch time over at least 16 and [repeats] timed runs, topping up until ~25 ms
     of per-launch samples has accumulated (at most 64 runs) so that a host stall cannot collapse the
     min-of-N. Under [~timing:Queued] a "run" is a whole batch of dispatches whose depth is
-    calibrated per candidate to ~10 ms of wall, capped at 200 and floored at 1 — a routine slower
-    than that target is measured identically in both modes. The calibration always yields a depth;
-    the result of the timed loop reports when most of ITS samples were stalled, and the tuner
-    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since
-    the budget is per-launch rather than batch wall, queued timing can spend up to 64 batches on a
-    fast candidate; [max_timing_runs] is its wall-cost bound.
+    calibrated per candidate to ~10 ms of wall, capped at 2048 and floored at 1. A synchronized
+    single-launch estimate seeds a provisional depth; when that is above 1, a provisional queued
+    probe refines it from the steady-state per-launch cost, without the round trip queueing is meant
+    to amortize. A routine slower than the target stays at depth 1 and is measured identically in
+    both modes. The calibration always yields a depth; the result of the timed loop reports when
+    most of ITS samples were stalled, and the tuner refuses such a candidate measurement rather
+    than ranking and caching it (gh-ocannl-888). Since the budget is per-launch rather than batch
+    wall, queued timing can spend up to 64 batches on a fast candidate; [max_timing_runs] is its
+    wall-cost bound.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
@@ -1192,10 +1195,11 @@ val time_routine :
     propagate raw. Timing dispatches the routine repeatedly against live buffers, so an accumulating
     routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
     afterwards. [Queued] raises how many such dispatches happen — at most 65 under [Isolated],
-    against at most 12865 for a microsecond kernel (warmup, 64 calibration launches, then 64 batches
-    at the cap) — so a routine whose values grow per run reaches larger ones. That is a fact about
-    the scratch buffers, not about the measurement: the cap bounds dispatches while the ~25 ms
-    budget accumulates per-launch samples, and a candidate's time is not what it accumulated. *)
+    against at most 262209 (warmup, 64 single-launch calibration runs, 64 provisional and 64 timed
+    batches at the cap) — so a routine whose values grow per run reaches larger ones. That is a
+    fact about the scratch buffers, not about the measurement: the cap bounds each in-memory queue
+    while the ~25 ms budget accumulates per-launch samples, and a candidate's time is not what it
+    accumulated. *)
 
 val on_batch_depth : (int -> calibration_samples:int -> unit) ref
 (** Observation seam for the timing tests (gh-ocannl-851), called by each {!time_routine} call with
@@ -1203,8 +1207,9 @@ val on_batch_depth : (int -> calibration_samples:int -> unit) ref
     reports 1. The negative control for a twice-divided queued reading needs the depth the call
     ACTUALLY used: the call recalibrates independently, so re-applying {!queued_batch_depth} to an
     estimate taken outside it guesses wrong exactly on the busy runners the control must survive.
-    [calibration_samples] is zero for {!Isolated} and the actual number of single-launch samples for
-    {!Queued}. The default is a no-op and no configuration selects it. *)
+    [calibration_samples] retains its historical label for source compatibility; its value is zero
+    for {!Isolated} and the actual number of launches spent on single-launch and provisional-batch
+    calibration for {!Queued}. The default is a no-op and no configuration selects it. *)
 
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's

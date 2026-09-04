@@ -57,6 +57,20 @@ type timing_sample = { per_launch_ms : float; contention_ms : float }
    cannot silently consume it as an ordinary measurement (gh-ocannl-855). *)
 type timing_result = { ms : float; contended : bool; samples : int }
 
+(* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. Kept above the
+   timing policy because a cap-bound queued batch reports the target wall it could not reach. *)
+let log_enabled =
+  lazy
+    (match
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
+     with
+    | "true" | "1" -> true
+    | _ -> false)
+
+let logf fmt =
+  Printf.ksprintf (fun s -> if Lazy.force log_enabled then Stdio.eprintf "autotune: %s\n%!" s) fmt
+
 (* The one admission gate for a timing verdict, for the consumers that RANK: candidate selection,
    the calibration rows, the roofline consistency check, cache attribution. Keeping it next to the
    result type prevents such a caller from proving only one half of usability (usually [not
@@ -339,15 +353,16 @@ let search_measurements_cacheable ~nothing_timed ~timings_contended =
    one batch aims for: at a ~60 us round trip it keeps the overhead under 1% of the reading, and it
    makes each sample long enough to amortize the host round trip. The sampling budget is per-launch,
    not batch wall (gh-ocannl-855), so [max_timing_runs] rather than [min_timing_ms] bounds the wall
-   cost of queued timing. [max_queue_depth] stops a microsecond kernel from minting an unbounded
-   batch. A genuinely slow routine gets depth 1 and is then measured exactly as [Isolated] measures
-   it. The 10 ms target is also the Metal long-command-buffer safety bound established by
-   gh-ocannl-828: on M4 Max / macOS 26.6.2, the standalone SharedEvent chain changed scheduling at
-   about 1.2 s per kernel, while [queued_batch_depth] is already 1 at 10 ms -- about 120x below that
-   regime. See [benchmarks/runners/ocannl/metal_queue_probe.ml] for the raw-queue/event-chain
-   discriminator. *)
+   cost of queued timing. [max_queue_depth] stops a sub-microsecond kernel from minting an
+   unbounded in-memory dispatch queue. A genuinely slow routine gets depth 1 and is then measured
+   exactly as [Isolated] measures it; a stall-inflated calibration is refused instead of taking
+   that same path silently. The 10 ms target is also the Metal long-command-buffer safety bound
+   established by gh-ocannl-828: on M4 Max / macOS 26.6.2, the standalone SharedEvent chain changed
+   scheduling at about 1.2 s per kernel, while [queued_batch_depth] is already 1 at 10 ms -- about
+   120x below that regime. See [benchmarks/runners/ocannl/metal_queue_probe.ml] for the
+   raw-queue/event-chain discriminator. *)
 let queued_batch_ms = 10.
-let max_queue_depth = 200
+let max_queue_depth = 2048
 
 (* The depth is calibrated from timed single launches, not from the warmup: the warmup absorbs lazy
    initialization and module loading, so on a fast kernel it can overestimate by enough to collapse
@@ -409,9 +424,9 @@ let on_candidate_timed : (string -> timed_so_far:int -> unit) ref =
    [time_routine] call settles on -- after calibration, before the timed loop; [Isolated] reports 1.
    The negative control for a twice-divided queued reading needs the depth the call ACTUALLY used:
    the call recalibrates independently, so re-applying the policy to an estimate taken outside it
-   guesses wrong exactly on the busy runners the control must survive. The calibration sample count
-   accompanies it because that loop now has the same variable top-up as timing. Default no-op, no
-   config key selects it. *)
+   guesses wrong exactly on the busy runners the control must survive. The calibration dispatch
+   count accompanies it so the instrument can account for both the single-launch estimate and the
+   provisional queued probe. Default no-op, no config key selects it. *)
 let on_batch_depth : (int -> calibration_samples:int -> unit) ref =
   ref (fun _depth ~calibration_samples:_ -> ())
 
@@ -456,18 +471,51 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
         sync !ctx;
         Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6
       in
-      let calibration_samples, depth =
+      let calibration_dispatches, depth, depth_estimate =
         match timing with
-        | Isolated -> (0, 1)
+        | Isolated -> (0, 1, None)
         | Queued ->
-            let estimate =
+            let single_estimate =
               sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
                   let wall = batch 1 in
                   { per_launch_ms = wall; contention_ms = wall })
             in
-            (estimate.samples, queued_batch_depth estimate)
+            let probe_depth = queued_batch_depth single_estimate in
+            if probe_depth = 1 then (single_estimate.samples, 1, Some single_estimate)
+            else
+              (* A synchronized single dispatch includes the round trip queueing is meant to
+                 amortize, so its estimate safely seeds a probe but is not the batch's steady-state
+                 per-launch cost. On HIP's STREAM kernels it selected 105--209 launches whose
+                 actual batch wall was only 1.3--2.6 ms. Measure that provisional queue and refine
+                 once from what repeated dispatches actually sustain; the provisional depth is
+                 already large on the GPU backends, so one refinement removes the round trip.
+                 Budget the probe on batch wall rather than per-launch time: it is calibration, not
+                 a candidate measurement, and need not spend 64 whole batches to learn the scale. *)
+              let probe =
+                sample_min ~repeats:queue_calibration_runs ~sample:(fun () ->
+                    let wall = batch probe_depth in
+                    { per_launch_ms = wall; contention_ms = wall })
+              in
+              let estimate = { probe with ms = probe.ms /. Float.of_int probe_depth } in
+              ( single_estimate.samples + (probe.samples * probe_depth),
+                queued_batch_depth estimate,
+                Some estimate )
       in
-      !on_batch_depth depth ~calibration_samples;
+      Option.iter depth_estimate ~f:(fun estimate ->
+          if depth = max_queue_depth then
+            if Float.is_finite estimate.ms && Float.is_positive estimate.ms then (
+              let estimated_wall_ms = estimate.ms *. Float.of_int depth in
+              if Float.(estimated_wall_ms < queued_batch_ms) then
+                logf
+                  "queued batch capped at depth %d: estimated wall %.4f ms, %.4f ms short of the \
+                   %.1f ms target"
+                  depth estimated_wall_ms (queued_batch_ms -. estimated_wall_ms) queued_batch_ms)
+            else
+              logf
+                "queued batch capped at depth %d: steady-state estimate %.4g ms does not resolve \
+                 how far the batch falls short of the %.1f ms target"
+                depth estimate.ms queued_batch_ms);
+      !on_batch_depth depth ~calibration_samples:calibration_dispatches;
       (* The calibration's own contention verdict is not consulted (gh-ocannl-888): it judged single
          dispatches, and the window that gets judged for refusal is the batch below. *)
       sample_min ~repeats ~sample:(fun () ->
@@ -985,19 +1033,6 @@ type compiled = {
           the timing runs actually execute, for calibration analysis. *)
   digest_after : string;
 }
-
-(* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. *)
-let log_enabled =
-  lazy
-    (match
-       String.lowercase
-         (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
-     with
-    | "true" | "1" -> true
-    | _ -> false)
-
-let logf fmt =
-  Printf.ksprintf (fun s -> if Lazy.force log_enabled then Stdio.eprintf "autotune: %s\n%!" s) fmt
 
 (* Log tag for a (possibly '+'-concatenated, fissioned) digest: a plain prefix only reflects the
    first segment — two fissioned programs identical in segment 1 would read as "the same digest"

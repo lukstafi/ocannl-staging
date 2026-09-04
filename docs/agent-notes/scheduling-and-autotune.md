@@ -603,7 +603,7 @@ files.
   under `isolated` it is not a throughput number at all (the gh-ocannl-728 arc compared one to a
   batched harness figure and the agreement was a coincidence of two instrument errors). And the
   batch depth is the thing to check when a queued search behaves like an isolated one:
-  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch, caps at 200 and floors at 1, so a
+  `Autotune.queued_batch_depth` targets ~10 ms of wall per batch, caps at 2048 and floors at 1, so a
   routine slower than 10 ms per launch is measured identically in both modes by construction —
   `test/operations/autotune_timing_modes.ml` pins the policy and, via a `n[0] += 1` routine that
   counts its own launches, that the reading is per launch rather than per batch.
@@ -621,6 +621,11 @@ files.
   depth 1, so the autotuner cannot put a second long kernel in flight. Do not add a per-repeat host
   sync to the timing path on this evidence; rerun the standalone probe after an OS/driver change if
   the superlinear symptom returns.
+  A synchronized
+  single dispatch includes the round trip batching removes, so it selects only a provisional depth;
+  a queued probe at that depth supplies the steady-state per-launch estimate used for the final
+  depth. On Metal's ~0.17 ms kernels that probe already spans the target and the historical ~59
+  depth is unchanged; on faster CUDA/HIP kernels it grows the batch toward the same wall target.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall,
   and every calibration and timed window has a 16-sample floor: a host stall can no longer spend
   the whole budget and collapse a min-of-N to three samples. `Autotune.timing_result` also marks a
