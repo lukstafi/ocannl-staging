@@ -41,6 +41,8 @@ errexit-negation fixture concatenated quoted short option is classified as speci
 errexit-negation fixture builtin set is classified as specified: true
 errexit-negation fixture command set is classified as specified: true
 errexit-negation fixture command -- set is classified as specified: true
+errexit-negation fixture command -p set is classified as specified: true
+errexit-negation fixture command -p -- set is classified as specified: true
 errexit-negation fixture builtin -- set is classified as specified: true
 errexit-negation fixture plus bundle before errexit is classified as specified: true
 errexit-negation fixture named plus option before errexit is classified as specified: true
@@ -48,6 +50,8 @@ errexit-negation fixture assignment-prefixed set is classified as specified: tru
 errexit-negation fixture quoted assignment-prefixed set is classified as specified: true
 errexit-negation fixture redirection-prefixed set is classified as specified: true
 errexit-negation fixture separate redirection-prefixed set is classified as specified: true
+errexit-negation fixture ampersand-redirection-prefixed set is classified as specified: true
+errexit-negation fixture separate ampersand-redirection-prefixed set is classified as specified: true
 errexit-negation fixture quoted set command is classified as specified: true
 errexit-negation fixture ANSI-C octal errexit option is classified as specified: true
 errexit-negation fixture ANSI-C hexadecimal errexit option is classified as specified: true
@@ -69,6 +73,7 @@ errexit-negation fixture set inside background brace group is classified as spec
 errexit-negation fixture set in if condition is classified as specified: true
 errexit-negation fixture set in while condition is classified as specified: true
 errexit-negation fixture set in then body is classified as specified: true
+errexit-negation fixture set in case arm is classified as specified: true
 errexit-negation fixture quoted set text is classified as specified: true
 errexit-negation fixture if ! command is classified as specified: true
 errexit-negation fixture while ! command is classified as specified: true

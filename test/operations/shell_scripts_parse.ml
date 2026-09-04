@@ -1070,10 +1070,14 @@ module Errexit_negation = struct
       if index < String.length word && Char.is_digit word.[index] then skip_descriptor (index + 1)
       else index
     in
-    let operator = skip_descriptor 0 in
+    let operator = if String.is_prefix word ~prefix:"&>" then 0 else skip_descriptor 0 in
     if
       operator >= String.length word
-      || not (List.mem [ '<'; '>' ] word.[operator] ~equal:Char.equal)
+      || not
+           (List.mem [ '<'; '>' ] word.[operator] ~equal:Char.equal
+           || Char.equal word.[operator] '&'
+              && operator + 1 < String.length word
+              && Char.equal word.[operator + 1] '>')
     then None
     else
       let rec skip_operator index =
@@ -1101,13 +1105,28 @@ module Errexit_negation = struct
           drop_command_prefixes rest
       | words -> words
     in
+    let drop_case_arm_prefix words =
+      match words with
+      | word :: rest when String.equal (literal_shell_word word) "case" ->
+          let rec after_pattern = function
+            | [] -> []
+            | word :: rest ->
+                if String.is_suffix (literal_shell_word word) ~suffix:")" then rest
+                else after_pattern rest
+          in
+          after_pattern rest
+      | words -> words
+    in
     match
       shell_words (String.strip command)
-      |> strip_redirections |> drop_command_prefixes |> List.map ~f:literal_shell_word
+      |> strip_redirections |> drop_case_arm_prefix |> drop_command_prefixes
+      |> List.map ~f:literal_shell_word
     with
     | "set" :: options -> options_enable_errexit options
     | ("builtin" | "command") :: "set" :: options -> options_enable_errexit options
     | ("builtin" | "command") :: "--" :: "set" :: options -> options_enable_errexit options
+    | "command" :: "-p" :: "set" :: options -> options_enable_errexit options
+    | "command" :: "-p" :: "--" :: "set" :: options -> options_enable_errexit options
     | _ -> false
 
   let line_enables_errexit line =
@@ -1276,6 +1295,8 @@ module Errexit_negation = struct
       ("builtin set", "builtin set -e\n! grep -q missing output\n", [ 2 ]);
       ("command set", "command set -e\n! grep -q missing output\n", [ 2 ]);
       ("command -- set", "command -- set -e\n! grep -q missing output\n", [ 2 ]);
+      ("command -p set", "command -p set -e\n! grep -q missing output\n", [ 2 ]);
+      ("command -p -- set", "command -p -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("builtin -- set", "builtin -- set -e\n! grep -q missing output\n", [ 2 ]);
       ("plus bundle before errexit", "set +u -e\n! grep -q missing output\n", [ 2 ]);
       ("named plus option before errexit", "set +o nounset -e\n! grep -q missing output\n", [ 2 ]);
@@ -1283,6 +1304,10 @@ module Errexit_negation = struct
       ("quoted assignment-prefixed set", "X='a b' set -e\n! grep -q missing output\n", [ 2 ]);
       ("redirection-prefixed set", ">/dev/null set -e\n! grep -q missing output\n", [ 2 ]);
       ("separate redirection-prefixed set", "> /dev/null set -e\n! grep -q missing output\n", [ 2 ]);
+      ("ampersand-redirection-prefixed set", "&>/dev/null set -e\n! grep -q missing output\n", [ 2 ]);
+      ( "separate ampersand-redirection-prefixed set",
+        "&> /dev/null set -e\n! grep -q missing output\n",
+        [ 2 ] );
       ("quoted set command", "s'et' -e\n! grep -q missing output\n", [ 2 ]);
       ("ANSI-C octal errexit option", "set -$'\\145'\n! grep -q missing output\n", [ 2 ]);
       ("ANSI-C hexadecimal errexit option", "set $'-\\x65'\n! grep -q missing output\n", [ 2 ]);
@@ -1306,6 +1331,7 @@ module Errexit_negation = struct
       ("set in if condition", "if set -e; then :; fi\n! grep -q missing output\n", [ 2 ]);
       ("set in while condition", "while set -e; do :; done\n! grep -q missing output\n", [ 2 ]);
       ("set in then body", "if true; then set -e; fi\n! grep -q missing output\n", [ 2 ]);
+      ("set in case arm", "case x in x) set -e;; esac\n! grep -q missing output\n", [ 2 ]);
       ("quoted set text", "printf '%s' 'set -e;'; set -u\n! grep -q missing output\n", []);
       ("if ! command", "set -e\nif ! grep -q missing output; then :; fi\n", []);
       ("while ! command", "set -e\nwhile ! ready; do :; done\n", []);
