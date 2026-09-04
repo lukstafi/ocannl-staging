@@ -293,10 +293,11 @@ let set_test_bindings routine =
       | _ -> ())
 
 (* Fast routines get extra timed runs beyond [repeats], until this much accumulated PER-SAMPLE time
-   (or [max_timing_runs]); every routine gets [min_timing_samples]. On sub-millisecond kernels a
-   min-of-3 is dominated by launch jitter, and under contention a wall budget used to stop after the
-   three worst samples because each host stall spent the whole budget. Noise only ever adds time, so
-   min-of-N converges monotonically to the true best case and more samples reduce mis-selection. *)
+   (or [max_timing_runs]); every routine gets [min_timing_samples]. A caller's larger [repeats]
+   floor still wins over that top-up limit. On sub-millisecond kernels a min-of-3 is dominated by
+   launch jitter, and under contention a wall budget used to stop after the three worst samples
+   because each host stall spent the whole budget. Noise only ever adds time, so min-of-N converges
+   monotonically to the true best case and more samples reduce mis-selection. *)
 let min_timing_ms = 25.
 let min_timing_samples = 16
 let max_timing_runs = 64
@@ -353,7 +354,8 @@ let search_measurements_cacheable ~nothing_timed ~timings_contended =
    one batch aims for: at a ~60 us round trip it keeps the overhead under 1% of the reading, and it
    makes each sample long enough to amortize the host round trip. The sampling budget is per-launch,
    not batch wall (gh-ocannl-855), so [max_timing_runs] rather than [min_timing_ms] bounds the wall
-   cost of queued timing. [max_queue_depth] stops a sub-microsecond kernel from minting an
+   cost of queued timing once the caller's [repeats] floor is met. [max_queue_depth] stops a
+   sub-microsecond kernel from minting an
    unbounded in-memory dispatch queue. A genuinely slow routine gets depth 1 and is then measured
    exactly as [Isolated] measures it; a stall-inflated calibration is refused instead of taking
    that same path silently. The 10 ms target is also the Metal long-command-buffer safety bound
