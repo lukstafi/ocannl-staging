@@ -214,6 +214,26 @@ let bool_literal expr value =
       String.equal found (Bool.to_string value)
   | _ -> false
 
+let bool_pattern pattern value =
+  match pattern.ppat_desc with
+  | Ppat_construct ({ txt = Ppxlib.Longident.Lident found; _ }, None) ->
+      String.equal found (Bool.to_string value)
+  | _ -> false
+
+let boolean_match_polarity cases =
+  let output_for input =
+    List.find_map cases ~f:(fun case ->
+        if Option.is_none case.pc_guard && bool_pattern case.pc_lhs input then
+          if bool_literal case.pc_rhs true then Some true
+          else if bool_literal case.pc_rhs false then Some false
+          else None
+        else None)
+  in
+  match (output_for true, output_for false) with
+  | Some true, Some false -> Some true
+  | Some false, Some true -> Some false
+  | _ -> None
+
 let is_boolean_comparison callee =
   is_name callee "=" || is_name callee "<>" || is_name callee "equal"
 
@@ -351,7 +371,12 @@ let rec returned_quantifiers ?(positive = true) expr =
       @ returned_quantifiers ~positive yes
       @ Option.value_map no ~default:[] ~f:(returned_quantifiers ~positive)
   | Pexp_match (scrutinee, cases) ->
-      List.concat_map cases ~f:(fun case ->
+      let scrutinee_quantifiers =
+        Option.value_map (boolean_match_polarity cases) ~default:[] ~f:(fun same_polarity ->
+            quantifiers_in ~positive:(Bool.equal positive same_polarity) scrutinee)
+      in
+      scrutinee_quantifiers
+      @ List.concat_map cases ~f:(fun case ->
           let returned_bindings = returned_binding_polarities positive case.pc_rhs in
           let guard_quantifiers =
             Option.value_map case.pc_guard ~default:[] ~f:(fun guard ->
@@ -1286,6 +1311,16 @@ let () = Verdict.p "every sample agrees" (close samples)|ocaml},
   match List.for_all xs ~f:Fn.id with ok -> ok
 let () = Verdict.p "every sample agrees" (close samples)|ocaml},
       [ "close" ] );
+    ( "refuses a direct quantifier forwarded by a Boolean constructor match",
+      {ocaml|let close =
+  match List.for_all rows ~f:Fn.id with true -> true | false -> false
+let () = Verdict.p "all rows pass" close|ocaml},
+      [ "close" ] );
+    ( "accepts a direct quantifier inverted by a Boolean constructor match",
+      {ocaml|let differs =
+  match List.for_all rows ~f:Fn.id with true -> false | false -> true
+let () = Verdict.p "some row fails" differs|ocaml},
+      [] );
     ( "refuses a bound quantifier returned through an if condition",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let close = if all then true else false

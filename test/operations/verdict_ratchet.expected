@@ -72,6 +72,8 @@ refuses a quantified component of a destructured tuple binding: true
 conservatively refuses a quantified component of a record binding: true
 refuses a helper that returns a fully applied quantified local binding: true
 refuses a helper that returns a match-bound quantified value: true
+refuses a direct quantifier forwarded by a Boolean constructor match: true
+accepts a direct quantifier inverted by a Boolean constructor match: true
 refuses a bound quantifier returned through an if condition: true
 accepts an inverted bound quantifier returned through an if condition: true
 refuses a direct quantifier returned through an if condition: true
