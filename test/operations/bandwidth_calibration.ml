@@ -23,6 +23,25 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module Cal = Ir.Cost_model.Calibration
 
+let contributed rows name = List.exists rows ~f:(fun row -> String.equal row.Cal.routine name)
+
+let row_presence_matches_timing rows (name, report) =
+  Bool.equal (contributed rows name) (report.Autotune.candidates_timed > 0)
+
+(* Exercise the exact gh-ocannl-886 defect class against the same predicate as the live claim: start
+   from a kernel that really timed and emitted, hide every one of its rows, and require the
+   resulting timed-with-no-row observation to be rejected. Selecting from the live run keeps the
+   control honest about the report schema without pinning which host-dependent kernel
+   contributes. *)
+let omission_control_rejected rows reports =
+  List.find reports ~f:(fun (name, report) ->
+      report.Autotune.candidates_timed > 0 && contributed rows name)
+  |> Option.exists ~f:(fun ((name, _) as report) ->
+      let rows_without_kernel =
+        List.filter rows ~f:(fun row -> not (String.equal row.Cal.routine name))
+      in
+      not (row_presence_matches_timing rows_without_kernel report))
+
 let () =
   let file =
     String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:"")
@@ -46,21 +65,22 @@ let () =
   let kernels = List.map reports ~f:fst in
   Verdict.p_all "every row names its routine" rows ~f:(fun r ->
       List.mem kernels r.Cal.routine ~equal:String.equal);
-  let contributed name = List.exists rows ~f:(fun r -> String.equal r.Cal.routine name) in
   List.iter reports ~f:(fun (name, rep) ->
       Stdio.eprintf
         "%s (not part of the golden): %d candidate(s) timed, %d timing(s) refused, %d candidate(s) \
          failed, %s\n"
         name rep.Autotune.candidates_timed rep.Autotune.timings_contended
         rep.Autotune.candidates_failed
-        (if contributed name then "contributed rows" else "NO ROWS"));
+        (if contributed rows name then "contributed rows" else "NO ROWS"));
   (* The pass emits one row per admitted candidate timing and nothing anywhere else. Stated as the
      biconditional it is: a kernel whose rows went missing while its search did time something is
      the emission defect this test exists to catch, and a kernel with rows it never timed for would
      mean the [routine] column named the wrong computation. Neither is what a contended host
      produces -- that moves both sides at once. *)
   Verdict.p_all "a kernel contributed rows exactly when its search timed a candidate" reports
-    ~f:(fun (name, rep) -> Bool.equal (contributed name) (rep.Autotune.candidates_timed > 0));
+    ~f:(row_presence_matches_timing rows);
+  Verdict.p "omission control: a timed kernel with no row is rejected"
+    (omission_control_rejected rows reports);
   (* The biconditional alone would also accept a kernel whose every candidate failed compile or
      dispatch ([candidates_failed]): nothing timed, nothing contributed, both sides false. That is
      the loss of coverage the ordered list used to catch, and it is not what load does -- a refused
@@ -68,7 +88,7 @@ let () =
      evidence. Cache replay would zero both counters, but [Calibrate.stream] passes [~cache_dir:""],
      so every search here times live. *)
   Verdict.p_all "a kernel with no rows was refused its timings, not silently lost" reports
-    ~f:(fun (name, rep) -> contributed name || rep.Autotune.timings_contended > 0);
+    ~f:(fun (name, rep) -> contributed rows name || rep.Autotune.timings_contended > 0);
   let exact_bytes =
     List.filter rows ~f:(fun r ->
         (not r.Cal.bytes_approx) && (not r.Cal.opaque) && r.Cal.bytes > 0
