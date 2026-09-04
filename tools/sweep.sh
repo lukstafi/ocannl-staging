@@ -895,7 +895,7 @@ goldens_from_log() { # log destination backend -- source-tree paths at the pinne
     # A self-verdicting test stanza can carry many .expected fixtures in deps;
     # recording all tokens would blame an unrelated fixture edit for its red.
     done < <(perl -0777 -ne '
-      while (/\(\s*diff\??\s+(?:"([^"]+\.expected)"|([^\s()"]+\.expected))\s+/g) {
+      while (/\(\s*diff\??\s+(?:"([^"]+)"|([^\s()"]+))\s+/g) {
         print(($1 // $2), "\n")
       }
     ' "$excerpt" | sort -u)

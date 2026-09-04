@@ -47,6 +47,7 @@
 #      the current iteration rather than launching the remaining ones.
 #  15. cancellation during post-loop comparison still publishes a verdict.
 #  16. `wait`'s default bounded deadline covers every repeat iteration.
+#  17. repeat cancellation state and traps precede publication as `last`.
 
 set -u
 
@@ -682,7 +683,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Legs 9-13: repeat mode's output and exit-code contract
+# Legs 9-17: repeat mode's output, lifecycle and exit-code contract
 # ---------------------------------------------------------------------------
 repeat_root=$TMP/repeat-repo
 repeat_bin=$TMP/repeat-bin
@@ -755,6 +756,24 @@ repeat_probe() { # tag mode [repeat options/count/dune argv...]
   repeat_out=$(cat "$TMP/$tag.out")
   repeat_dir=$(find "$runs" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' | head -1)
 }
+
+# This is an ordering invariant, not a timing lottery: once publish_run writes
+# `last`, an external stop may arrive on the next instruction. Pin all three
+# prerequisites above that line so a future refactor cannot reopen the gap.
+completed_line=$(grep -n '^    completed=0$' "$SRC" | cut -d: -f1)
+signal_trap_line=$(grep -n "^    trap 'repeat_signal TERM' TERM$" "$SRC" | cut -d: -f1)
+exit_trap_line=$(grep -n '^    trap repeat_exit EXIT$' "$SRC" | cut -d: -f1)
+publish_line=$(grep -n '^    with_meta_lock publish_run || die "cannot publish repeat run ' "$SRC" | cut -d: -f1)
+if [ -n "$completed_line" ] && [ -n "$signal_trap_line" ] \
+   && [ -n "$exit_trap_line" ] && [ -n "$publish_line" ] \
+   && [ "$completed_line" -lt "$publish_line" ] \
+   && [ "$signal_trap_line" -lt "$publish_line" ] \
+   && [ "$exit_trap_line" -lt "$publish_line" ]; then
+  report 0 "repeat: cancellation lifecycle is armed before publication"
+else
+  report 1 "repeat: cancellation lifecycle is armed before publication" \
+    "completed=${completed_line:-missing} signal=${signal_trap_line:-missing} exit=${exit_trap_line:-missing} publish=${publish_line:-missing}"
+fi
 
 repeat_probe repeat-identical stable 3 build @cheap
 if [ "$repeat_rc" = 0 ] && grep -q '^repeat result: IDENTICAL -- ' <<<"$repeat_out" \

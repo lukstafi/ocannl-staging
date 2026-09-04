@@ -765,13 +765,9 @@ case $sub in
       printf '%s\n' "$$" >"$run_dir/wpid" &&
       ps_token "$$" >"$run_dir/wtoken"; } ||
       die "cannot record repeat metadata in $run_dir"
-    # A repeat can be long enough to manage from another shell. Publish only
-    # after its coordinator identity exists, so status/wait/stop last all name
-    # this active set rather than an older ordinary run.
-    with_meta_lock publish_run || die "cannot publish repeat run $run_dir"
-
     repeat_sup=
     repeat_cancelled=
+    completed=0
     repeat_signal() {
       repeat_cancelled=$1
       [ -n "$repeat_sup" ] && kill "-$1" "$repeat_sup" 2>/dev/null
@@ -810,11 +806,16 @@ case $sub in
     }
     trap repeat_exit EXIT
 
+    # A repeat can be long enough to manage from another shell. Its complete
+    # cancellation state and exit finalizer are armed BEFORE it becomes `last`:
+    # every externally discoverable coordinator can therefore publish a
+    # verdict even if stop or a group signal lands in the publication gap.
+    with_meta_lock publish_run || die "cannot publish repeat run $run_dir"
+
     first_nonzero=0
-    completed=0
     repeat_build=$run_dir/build
     i=1
-    while [ "$i" -le "$repeats" ]; do
+    while [ "$i" -le "$repeats" ] && [ -z "$repeat_cancelled" ]; do
       iter=$run_dir/iteration-$i
       mkdir "$iter" || die "cannot create $iter"
       repeat_cmd=("$DUNE" "$@" --force --cache=disabled --build-dir="$repeat_build")
