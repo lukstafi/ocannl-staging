@@ -63,10 +63,12 @@ let cli_token_char c =
    character: [backend_cuda=true] can mean key [backend] with value [cuda=true], or a key named
    [backend_cuda]. The no-equals separators have the same problem. Prefer the explicit syntactic
    name so a removed longer key cannot be absorbed by a surviving prefix. Exceptional runtime-value
-   readings are counted site judgments. For example, the runtime-valid
-   [--ocannl_print_decimals_precision-7] mixes separators only across the key/value boundary, so it
-   needs that judgment before the parser can know where the key ends. Store suffixes separately so
-   these declarations do not scan themselves as more command-line occurrences. *)
+   readings and deliberately invalid mixed-key examples are counted site judgments: the judgment
+   records which registry key the site discusses, not that the runtime accepts its spelling. For
+   example, the runtime-valid [--ocannl_print_decimals_precision-7] mixes separators only across the
+   key/value boundary, so it needs that judgment before the parser can know where the key ends.
+   Store suffixes separately so these declarations do not scan themselves as more command-line
+   occurrences. *)
 let ambiguous_cli_value_mentions =
   [
     ("arrayjit/lib/utils.ml", "--ocannl_", "log_level_1", "log_level", 1);
@@ -88,6 +90,16 @@ let ambiguous_cli_value_mentions =
       "print_decimals_precision-7",
       "print_decimals_precision",
       1 );
+    ( "docs/agent-notes/conventions.md",
+      "--ocannl-",
+      "print_decimals-precision=1",
+      "print_decimals_precision",
+      1 );
+    ( "test/operations/dune",
+      "--ocannl-",
+      "print_decimals-precision=7",
+      "print_decimals_precision",
+      1 );
   ]
 
 let declared_ambiguous_cli_value_key ~path token =
@@ -105,6 +117,14 @@ let registry_ambiguous_cli_value_key token =
   |> List.max_elt ~compare:(fun (_, left) (_, right) -> Int.compare left right)
   |> Option.map ~f:fst
 
+let registry_independent_unknown_cli_key token =
+  let name = Option.value_map (String.lsplit2 token ~on:'=') ~default:token ~f:fst in
+  List.find_map cli_name_prefixes ~f:(fun prefix ->
+      Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
+          Option.some_if
+            (not (String.is_empty raw_key))
+            (String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_')))
+
 let cli_key_of_token ~path token =
   match Utils.parse_config_token token with
   | Some { token_shape = Utils.Command_line_token; token_key } ->
@@ -116,7 +136,9 @@ let cli_key_of_token ~path token =
   | None ->
       Option.first_some
         (declared_ambiguous_cli_value_key ~path token)
-        (registry_ambiguous_cli_value_key token)
+        (Option.first_some
+           (registry_ambiguous_cli_value_key token)
+           (registry_independent_unknown_cli_key token))
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -338,6 +360,10 @@ let ambiguous_bare_config_mentions =
   [
     ("AGENTS.md", "profile", 1);
     ("docs/agent-notes/backend-dialects-and-idents.md", "backend", 1);
+    ("docs/agent-notes/build-and-test.md", "backend", 3);
+    ("docs/agent-notes/build-and-test.md", "profile", 1);
+    ("docs/proposals/gh-ocannl-409.md", "backend", 1);
+    ("ocannl_config.reference", "profile", 1);
     ( "docs/proposals/fix-inline-complex-computations-default-doc.md",
       "inline_complex_computations",
       1 );
@@ -369,7 +395,15 @@ let one_assignment ~path rendered =
         let parsed_key =
           match Utils.parse_config_token ~documentation:true (name ^ "=" ^ value) with
           | Some parsed -> Some parsed.token_key
-          | None -> Option.some_if (tracked_ambiguous_bare_config path name) name
+          | None ->
+              let registered_one_word =
+                (not (String.contains name '_'))
+                && (not (String.is_empty name))
+                && Char.is_lowercase name.[0]
+                && String.for_all name ~f:(fun c -> Char.is_lowercase c || Char.is_digit c)
+                && Set.mem Utils.known_config_keys name
+              in
+              Option.some_if (registered_one_word || tracked_ambiguous_bare_config path name) name
         in
         Option.bind parsed_key ~f:(fun key ->
             if
@@ -873,6 +907,10 @@ let refusal_control grammar_fixture =
        (cli_key_of_token ~path:"undeclared-alternate.md"
           ("--ocannl_" ^ "print_decimals_precision-8"))
        (Some "print_decimals_precision"));
+  Verdict.p "an unknown cross-style command-line token remains classifiable for refusal"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"unknown-cross-style.sh" ("--ocannl_" ^ "typo_key-7"))
+       (Some "typo_key_7"));
   Verdict.p_all ~min:2 "counted one-word documentation assignments remain config tokens"
     [
       ("AGENTS.md", "profile=reproducible|performance", "profile");
@@ -882,6 +920,10 @@ let refusal_control grammar_fixture =
       match one_assignment ~path spelling with
       | Some (key, ambiguous_bare) -> String.equal key expected_key && ambiguous_bare
       | None -> false);
+  Verdict.p "a new registered one-word assignment remains classifiable for a required judgment"
+    (match one_assignment ~path:"new-one-word.md" "backend=metal" with
+    | Some (key, ambiguous_bare) -> String.equal key "backend" && ambiguous_bare
+    | None -> false);
   let grammar_text = In_channel.read_all grammar_fixture in
   let grammar_occurrences =
     markdown_occurrences ~allow_bare:true
@@ -910,6 +952,8 @@ let refusal_control grammar_fixture =
       occurrence ~path:"undeclared-alternate.md" ~key:"print_decimals_precision"
         ~spelling:("--ocannl_" ^ "print_decimals_precision-8")
         ~kind:Cli_flag ();
+      occurrence ~ambiguous_bare:true ~path:"new-one-word.md" ~key:"backend"
+        ~spelling:"backend=metal" ~kind:Markdown_assignment ();
     ];
   Verdict.p_all ~min:11 "every config-usage direct refusal format is observed"
     direct_refusal_formats ~f:(Hash_set.mem observed);
