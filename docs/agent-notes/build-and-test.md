@@ -527,7 +527,9 @@ that they earn a lookup rather than always-loaded space.
   prior nonzero iteration remains the set's exit status when a later iteration is cancelled. The
   dead supervisor pid is cleared before the potentially slower process-group reap. That reap gates
   on group reachability, not the fallible process census, and revalidates the recorded leader token
-  before escalating from TERM to KILL so a recycled numeric group is never targeted.
+  before escalating from TERM to KILL so a recycled numeric group is never targeted. Identity
+  matching deliberately admits the original zombie leader; after KILL, a verified zombie-only
+  residue is inert and does not replace the iteration's timeout/cancellation verdict with an error.
 - Every liveness question in that script — per pid and per process GROUP — reads process STATE and
   not only the signal, because `kill -0` succeeds on a ZOMBIE exactly as on a live process, and an
   identity token does not rescue the check either: a zombie leader still prints its recorded

@@ -466,7 +466,7 @@ ps_token() {
   fi
 }
 
-proc_alive() { # pid-file token-file
+proc_identity_matches() { # pid-file token-file -- zombies retain identity
   local pid tok now
   pid=$(cat "$1" 2>/dev/null) || return 1
   # A corrupted or forged pid file must never reach kill: 0 and negative
@@ -474,11 +474,6 @@ proc_alive() { # pid-file token-file
   # positive decimal integer is a pid at all.
   case $pid in '' | *[!0-9]* | 0) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  # A zombie passes kill -0 and still prints its recorded lstart, but it
-  # will never publish anything -- treating it as alive would make status
-  # lie forever under an init that does not reap. Empty state (ps without
-  # the column) falls through to the token check.
-  case $(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
   tok=$(tr -s ' ' <"$2" 2>/dev/null | sed 's/^ *//; s/ *$//') || tok=
   # No RECORDED identity (MSYS ps without lstart) degrades to the plain pid
   # check -- but where one was recorded, a pid that can no longer produce a
@@ -488,6 +483,16 @@ proc_alive() { # pid-file token-file
   now=$(ps_token "$pid")
   [ -n "$now" ] || return 1
   [ "$tok" = "$now" ]
+}
+proc_alive() { # pid-file token-file
+  local pid
+  proc_identity_matches "$1" "$2" || return 1
+  pid=$(cat "$1" 2>/dev/null) || return 1
+  # A zombie retains identity but will never publish anything; status/wait
+  # must not treat it as live. Empty state (ps without the column) falls
+  # through as the portable over-reporting fallback.
+  case $(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
+  return 0
 }
 sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
 # The wrapper outlives the supervisor only briefly (publication plus a
@@ -499,6 +504,9 @@ wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 # and is too weak to aim a signal at a whole, possibly recycled, process
 # group.
 group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
+group_identity_matches() {
+  [ -s "$1/gtoken" ] && proc_identity_matches "$1/pgid" "$1/gtoken"
+}
 
 # "Is anything in this process group still RUNNING?" -- the group-scale twin of
 # the zombie filter proc_alive applies per pid, and for the same reason: a
@@ -818,25 +826,30 @@ case $sub in
       # miss a member that forks/exits while /proc is enumerated; it must never
       # turn a surviving group into permission to reuse repeat_build.
       kill -0 -- "-$pg" 2>/dev/null || return 0
-      group_verified "$iter_dir" ||
+      group_identity_matches "$iter_dir" ||
         die "iteration group $pg survived without a verifiable identity; refusing to reuse $repeat_build"
       printf 'repeat: iteration group %s survived its supervisor; reaping before reuse\n' "$pg" \
         | tee -a "$run_dir/log"
       kill -TERM -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         kill -0 -- "-$pg" 2>/dev/null || return 0
-        # A mismatched leader token means the original group is gone; never
-        # escalate against a numeric pgid that may already have been recycled.
-        group_verified "$iter_dir" || return 0
         sleep 0.1
       done
-      group_verified "$iter_dir" || return 0
+      # Revalidate immediately before the destructive escalation. A zombie
+      # leader still has the original token and safely identifies its group;
+      # a missing/mismatched leader means this numeric pgid is no longer ours.
+      group_identity_matches "$iter_dir" || return 0
       kill -KILL -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 -- "-$pg" 2>/dev/null || return 0
-        group_verified "$iter_dir" || return 0
+        group_identity_matches "$iter_dir" || return 0
         sleep 0.1
       done
+      # KILL has already reached the identity-verified original group, so no
+      # live member can subsequently fork. A remaining verified group whose
+      # census is now zombie-only is inert residue under a non-reaping init,
+      # not a reason to discard the iteration's real verdict.
+      group_alive "$pg" || return 0
       die "iteration group $pg survived TERM/KILL; refusing to reuse $repeat_build"
     }
 

@@ -14,10 +14,10 @@
 # zombie-group control (gh-ocannl-795).
 #
 # It tests the WORKING-TREE copy: `group_alive` is extracted from the shared
-# scripts/process-group.sh, `ps_token` from tools/test-run.sh, and the `stop`
-# legs drive that same tool as a subprocess. Each extraction is asserted
-# structurally before use, so a sed that matched nothing cannot leave every leg
-# passing without testing anything.
+# scripts/process-group.sh; `ps_token`, `proc_identity_matches`, and `proc_alive`
+# come from tools/test-run.sh. The `stop` legs drive that same tool as a
+# subprocess. Each extraction is asserted structurally before use, so a sed
+# that matched nothing cannot leave every leg passing without testing anything.
 #
 # Legs:
 #   1. extraction -- the functions came out of the shipping script.
@@ -53,6 +53,7 @@
 #  20. a supervisor killed without its Dune group cannot overlap the next run.
 #  21. the dead supervisor pid is cleared before orphan-group reaping.
 #  22. orphan cleanup gates on reachability and revalidates identity for KILL.
+#  23. a zombie retains its recorded identity while remaining non-live.
 
 set -u
 
@@ -226,7 +227,7 @@ trap 'exit 143' TERM
 # from the one the shipping script recomputes would leave every one of them
 # falling through to "nothing left to signal" -- passing no leg, but testing
 # neither sentence either.
-for fn in group_alive ps_token; do
+for fn in group_alive ps_token proc_identity_matches proc_alive; do
   if [ "$fn" = group_alive ]; then fn_src="$GROUP_SRC"; else fn_src="$SRC"; fi
   sed -n "/^$fn() {/,/^}/p" "$fn_src" >"$TMP/$fn.sh"
   g_lines="$(wc -l <"$TMP/$fn.sh" | tr -d ' ')"
@@ -332,10 +333,12 @@ fi
 zlabel="a group holding nothing but a zombie reads as dead"
 clabel="the state reader alone rejects a zombie-only group (signal probe forced to say alive)"
 rlabel="the zombie leg reaps its own zombie, leaving no process-table entry"
+ilabel="a zombie retains identity without being reported alive"
 if [ "$have_state" = 0 ]; then
   skip "$zlabel" "no way to read a process's state on this system"
   skip "$clabel" "no way to read a process's state on this system"
   skip "$rlabel" "the zombie leg did not run, so it left nothing to reap"
+  skip "$ilabel" "the zombie leg did not run, so identity was not testable"
 else
 zpidfile="$TMP/zombie.pid"; rm -f "$zpidfile"
 bash -c 'set -m
@@ -382,6 +385,15 @@ else
       else
         report 0 "$zlabel ($zwhere)"
       fi
+      printf '%s\n' "$zpid" >"$TMP/zombie-identity.pid"
+      ps_token "$zpid" >"$TMP/zombie-identity.token"
+      if proc_identity_matches "$TMP/zombie-identity.pid" "$TMP/zombie-identity.token" \
+         && ! proc_alive "$TMP/zombie-identity.pid" "$TMP/zombie-identity.token"; then
+        report 0 "$ilabel"
+      else
+        report 1 "$ilabel" \
+          "the zombie either lost its recorded identity or was incorrectly reported live"
+      fi
       # The negative control, run everywhere: shadow `kill` so the signal probe
       # inside group_alive succeeds, which is exactly what the bare check did on
       # the kernel where this was reproduced. The state reader must still refuse
@@ -407,6 +419,8 @@ else
         "the child never reached state Z (saw '${zstate:-gone}'), so the leg tested nothing"
       report 1 "$clabel" \
         "the child never reached state Z (saw '${zstate:-gone}'), so the leg tested nothing"
+      report 1 "$ilabel" \
+        "the child never reached state Z (saw '${zstate:-gone}'), so identity was not tested"
       ;;
   esac
 fi
@@ -911,12 +925,12 @@ fi
 
 sed -n '/^    reap_repeat_group() {/,/^    }/p' "$SRC" >"$TMP/reap-repeat-group.sh"
 if grep -q 'kill -0 -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
-   && ! grep -q '^[[:space:]]*group_alive ' "$TMP/reap-repeat-group.sh" \
+   && grep -q 'group_alive "$pg" || return 0' "$TMP/reap-repeat-group.sh" \
    && grep -B1 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
-        | grep -q 'group_verified "$iter_dir" || return 0'; then
-  report 0 "repeat: orphan reap uses reachability and revalidates before KILL"
+        | grep -q 'group_identity_matches "$iter_dir" || return 0'; then
+  report 0 "repeat: orphan reap revalidates identity and accepts post-KILL zombies"
 else
-  report 1 "repeat: orphan reap uses reachability and revalidates before KILL" \
+  report 1 "repeat: orphan reap revalidates identity and accepts post-KILL zombies" \
     "$(tr '\n' ';' <"$TMP/reap-repeat-group.sh")"
 fi
 
