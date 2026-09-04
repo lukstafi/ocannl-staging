@@ -729,6 +729,83 @@ let cmdline_var_prefixes ?qualified_only n =
   List.concat_map (cmdline_var_names ?qualified_only n) ~f:(fun n ->
       [ n ^ "_"; n ^ "-"; n ^ "="; n ])
 
+(** The registry-independent grammatical shape of a configuration token. This is deliberately a
+    lexer for scanners and documentation tooling, not another configuration lookup: the runtime
+    readers below still resolve a literal key through {!cmdline_var_prefixes}, {!env_var_name}, and
+    the registered key set.
+
+    A documentation assignment has no namespace prefix to distinguish it from another API or from
+    mathematical notation, so its bare name must look like an OCANNL key: lowercase snake case with
+    at least one underscore. One-word keys remain discoverable under the explicit [ocannl_] spelling
+    (for example [ocannl_backend=cc]) and through the unambiguous command-line/environment forms. *)
+type config_token_shape =
+  | Command_line_token
+  | Environment_assignment_token
+  | Documentation_assignment_token
+
+type config_token = { token_shape : config_token_shape; token_key : string }
+
+(** Prefixes that can begin a qualified command-line token. Exposed with the parser so a scanner can
+    discover candidate tokens without reconstructing the command-line spelling grammar. *)
+let config_token_command_line_prefixes =
+  let sentinel = "configtokengrammarkey" in
+  cmdline_var_names ~qualified_only:true sentinel
+  |> List.filter_map ~f:(fun name ->
+      let suffix =
+        if String.equal name (String.uppercase name) then String.uppercase sentinel else sentinel
+      in
+      String.chop_suffix name ~suffix)
+  |> List.dedup_and_sort ~compare:String.compare
+
+(** Classify one observed token without consulting {!known_config_keys}. Command-line and
+    environment assignments are always recognized; [documentation:true] additionally admits the
+    narrowed bare-assignment grammar documented on {!config_token_shape}. A command-line token's key
+    is the maximal name before [=], normalized to underscores. Alternate value separators make
+    shorter readings inherently ambiguous without a key registry; consumers that need one of those
+    readings keep an explicit site judgment. *)
+let parse_config_token ?(documentation = false) token =
+  let config_token_name_char c =
+    Char.is_alpha c || Char.is_digit c || Char.equal c '_' || Char.equal c '-'
+  in
+  let command_line_config_token token =
+    let name = Option.value_map (String.lsplit2 token ~on:'=') ~default:token ~f:fst in
+    List.find_map config_token_command_line_prefixes ~f:(fun prefix ->
+        Option.bind (String.chop_prefix name ~prefix) ~f:(fun raw_key ->
+            if String.is_empty raw_key || not (String.for_all raw_key ~f:config_token_name_char)
+            then None
+            else
+              let key = String.lowercase raw_key |> String.tr ~target:'-' ~replacement:'_' in
+              Some { token_shape = Command_line_token; token_key = key }))
+  in
+  let environment_config_token token =
+    Option.bind (String.lsplit2 token ~on:'=') ~f:(fun (name, _value) ->
+        Option.bind (String.chop_prefix name ~prefix:"OCANNL_") ~f:(fun raw_key ->
+            Option.some_if
+              ((not (String.is_empty raw_key))
+              && String.for_all raw_key ~f:(fun c ->
+                  Char.is_uppercase c || Char.is_digit c || Char.equal c '_'))
+              { token_shape = Environment_assignment_token; token_key = String.lowercase raw_key }))
+  in
+  let documentation_config_token token =
+    Option.bind (String.lsplit2 token ~on:'=') ~f:(fun (raw_name, _value) ->
+        let name = String.strip raw_name in
+        let config_looking =
+          (not (String.is_empty name))
+          && Char.is_lowercase name.[0]
+          && String.for_all name ~f:(fun c ->
+              Char.is_lowercase c || Char.is_digit c || Char.equal c '_')
+          && String.contains name '_'
+        in
+        let key = Option.value (String.chop_prefix name ~prefix:"ocannl_") ~default:name in
+        Option.some_if
+          (config_looking && not (String.is_empty key))
+          { token_shape = Documentation_assignment_token; token_key = key })
+  in
+  let token = String.strip token in
+  Option.first_some (command_line_config_token token)
+    (Option.first_some (environment_config_token token)
+       (if documentation then documentation_config_token token else None))
+
 (* Keys whose prefix-free command-line spellings are never claimed: common application flags a host
    executable is likely to own ({!cmdline_var_names}' [qualified_only] doc; Codex P2 on PR #291).
    The single source of the policy — {!read_cmdline_var}'s default and {!cmdline_arg_is_config_key}

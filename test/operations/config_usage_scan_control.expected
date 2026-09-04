@@ -27,7 +27,7 @@ FAIL: config_usage_scan_bogus.fixture:12: documentation assignment `definitely_n
 FAIL: config_usage_scan_bogus.fixture:14: documentation assignment `OCANNL_DEFINITELY_NOT_A_SECOND_CONFIG_KEY=` names `definitely_not_a_second_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:15: documentation assignment `--ocannl-definitely-not-a-third-config-key=true` names `definitely_not_a_third_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:23: documentation assignment `definitely_not_a_multiword_config_key = one | two` names `definitely_not_a_multiword_config_key`, absent from Utils.known_config_keys
-FAIL: config_usage_scan_bogus.fixture:24: documentation assignment `Definitely_Not_A_Mixed_Case_Key=cc` names `definitely_not_a_mixed_case_key`, absent from Utils.known_config_keys
+FAIL: config_usage_scan_bogus.fixture:24: documentation assignment `definitely_not_a_mixed_case_key=cc` names `definitely_not_a_mixed_case_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:25: documentation assignment `definitely_not_an_outer_config_key=$OCANNL_BACKEND` names `definitely_not_an_outer_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:18: documentation assignment `OCANNL_DEFINITELY_NOT_A_FOURTH_CONFIG_KEY=` names `definitely_not_a_fourth_config_key`, absent from Utils.known_config_keys
 FAIL: config_usage_scan_bogus.fixture:19: documentation assignment `--ocannl-definitely-not-a-fifth-config-key=true` names `definitely_not_a_fifth_config_key`, absent from Utils.known_config_keys

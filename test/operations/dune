@@ -4684,8 +4684,10 @@
 ; selected from the inventory too.
 ; Benchmark reports contribute only prefixed tokens; every Markdown fence contributes prefixed
 ; tokens (including every physical segment of a multiline span), and elsewhere a bare assignment may
-; occupy the whole inline span (case-insensitively, with optional whitespace around `=` or in its
-; value). Embedded prefixed tokens and the outer bare assignment are both checked. Every
+; occupy the whole inline span when its name has lowercase snake-case shape with an underscore
+; (with optional whitespace around `=` or in its value). `Utils.parse_config_token` owns that grammar
+; together with the command-line and environment forms. Embedded prefixed tokens and the outer bare
+; assignment are both checked. Every
 ; checked-in dune file contributes action arguments, and every checked-in
 ; ocannl_config plus the ready-to-copy ocannl_config.for_debug contribute their runtime-normalized
 ; assignment keys, retaining empty keys for registry rejection (and including commented
@@ -4780,11 +4782,17 @@
  ; ocannl-backend: none -- drives every direct config-usage refusal through injected state.
  (target config_usage_scan_refusal_control.actual)
  (package neural_nets_lib)
- (deps ocannl_config config_usage_scan.ml)
+ (deps
+  ocannl_config
+  config_usage_scan.ml
+  config_usage_scan_token_grammar.fixture)
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:config_usage_scan.exe} --refusal-control))))
+   (run
+    %{dep:config_usage_scan.exe}
+    --refusal-control
+    %{dep:config_usage_scan_token_grammar.fixture}))))
 
 (rule
  (alias runtest-config_usage_scan_refusal_control)
