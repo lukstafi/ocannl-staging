@@ -630,9 +630,10 @@ files.
   up to four further batch probes; each short probe refits the affine model. The first probe that
   reaches the target is first interpolated back inside a measured below/above bracket when it
   overshoots, then confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained
-  only when the pair's inferred fixed component is below the target, so one fixed stall spanning
-  both probes cannot select a shallow final depth while ordinary submit/sync overhead remains in the
-  wall model. An unresolved
+  only when the pair's inferred fixed component is below the target and no more than one
+  quarter-target negative (the noise tolerance matching that confirmation step), so one fixed stall
+  or a physically invalid fit cannot select a shallow final depth while ordinary submit/sync
+  overhead remains in the wall model. An unresolved
   first pair retries at double depth, and the next fit uses the two batch observations so an
   inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
   the target, the interpolated target depth is still sampled and checked against the measured

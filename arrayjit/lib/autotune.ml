@@ -376,6 +376,7 @@ let max_queue_depth = 2048
 let queue_calibration_runs = 3
 let queue_batch_probe_runs = 12
 let max_depth_validation_probes = 4
+let fixed_fit_noise_tolerance_ms = queued_batch_ms /. 4.
 
 (* The calibration policy itself, as a function of the estimate, so a test can pin it without a
    device: what [Queued] measures depends on it, and its two boundaries are the ones a regression
@@ -429,7 +430,8 @@ let refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth ~probe_m
       (retry_depth, Float.nan)
     else
       let fixed_ms = base_ms -. (marginal_ms *. Float.of_int base_depth) in
-      if Float.(fixed_ms >= queued_batch_ms) then (retry_depth, Float.nan)
+      if Float.(fixed_ms < -.fixed_fit_noise_tolerance_ms || fixed_ms >= queued_batch_ms) then
+        (retry_depth, Float.nan)
       else if Float.(base_ms >= queued_batch_ms) then (base_depth, base_ms)
       else
         let wanted = (queued_batch_ms -. fixed_ms) /. marginal_ms in

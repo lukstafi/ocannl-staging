@@ -148,6 +148,9 @@ let confirmation_cases =
     (* Two nearby depths inside one shared stall still have a positive slope, but its marginal work
        is nowhere near the target. The fixed stall must not masquerade as confirmation. *)
     ("two target-sized batches dominated by a shared stall", 2, 12.2, 3, 12.3, 6, None);
+    (* A deeper stalled window can manufacture a steep positive slope and an impossible negative
+       fixed component. Beyond the bounded noise tolerance, that fit is unresolved too. *)
+    ("a confirmation with impossible negative fixed overhead", 2, 12.2, 3, 20.3, 6, None);
     (* Legitimate fixed synchronization is part of batch wall. A stable affine pair with a small
        fixed component retains its already-target-sized base. *)
     ("a target-sized batch with fixed synchronization", 199, 10.01, 248, 12.46, 199, Some 10.01);

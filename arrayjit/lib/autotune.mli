@@ -1161,11 +1161,12 @@ val refine_queued_batch_depth : single_ms:float -> probe_depth:int -> probe_ms:f
 val refine_queued_batch_depth_between :
   base_depth:int -> base_ms:float -> probe_depth:int -> probe_ms:float -> int * float
 (** The same affine refinement between two batch observations. An already-target-sized [base_ms] is
-    retained only when the pair's inferred fixed component is below the target; this is the
-    depth-separated confirmation that keeps one shared fixed stall from selecting a shallow final
-    depth while preserving legitimate submit/sync overhead. Otherwise an unresolved pair requests a
-    deeper retry and reports a [nan] wall. Exposed as the deterministic validation-policy seam for
-    tests. *)
+    retained only when the pair's inferred fixed component is below the target and no more than one
+    quarter-target negative (the noise tolerance matching the 25% confirmation step); this is the
+    depth-separated confirmation that keeps a shared fixed stall or a physically invalid fit from
+    selecting a shallow final depth while preserving legitimate submit/sync overhead. Otherwise an
+    unresolved pair requests a deeper retry and reports a [nan] wall. Exposed as the deterministic
+    validation-policy seam for tests. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
