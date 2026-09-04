@@ -2365,9 +2365,10 @@
    backend_golden_family_scan.expected
    backend_golden_family_scan.actual)))
 
-; gh-ocannl-874: the runtime-smoke alias and the public bin executables are independent lists in
-; `bin/dune`. Derive both from that file and require exact one-to-one membership, so a newly added
-; public executable cannot compile under `@check` while silently missing its runtime canary.
+; gh-ocannl-874: the runtime-smoke alias and the public bin executables are independent lists.
+; Derive the declarations from `bin/dune`, and derive the recursive alias's contributions from every
+; dune file, so a newly added public executable cannot compile under `@check` while silently missing
+; its runtime canary and a competing alias contribution cannot escape the exact-membership check.
 
 (executable
  (name bin_smoke_membership_scan)
@@ -2375,16 +2376,16 @@
  (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
- ; ocannl-backend: none -- links no backend and parses bin/dune as text.
+ ; ocannl-backend: none -- links no backend and parses repository dune files as text.
  (target bin_smoke_membership_scan.actual)
  (package neural_nets_lib)
  (deps
   ocannl_config
-  (glob_files_rec ../../bin/dune))
+  (glob_files_rec ../../dune))
  (action
   (with-stdout-to
    %{target}
-   (run %{dep:bin_smoke_membership_scan.exe} %{workspace_root}/bin/dune))))
+   (run %{dep:bin_smoke_membership_scan.exe} %{workspace_root} %{deps}))))
 
 (rule
  (alias runtest-bin_smoke_membership_scan)
