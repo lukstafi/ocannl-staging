@@ -411,21 +411,18 @@ let queued_batch_depth { ms = est_ms; contended = _; samples = _ } =
 let refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms =
   if probe_depth <= 1 then (1, probe_ms)
   else if
+    Float.is_finite probe_ms && Float.is_positive probe_ms && Float.(probe_ms >= queued_batch_ms)
+  then (probe_depth, probe_ms)
+  else if
     (not (Float.is_finite single_ms))
     || (not (Float.is_positive single_ms))
     || (not (Float.is_finite probe_ms))
     || not (Float.is_positive probe_ms)
-  then
-    let per_launch_ms = probe_ms /. Float.of_int probe_depth in
-    let depth =
-      queued_batch_depth { ms = per_launch_ms; contended = false; samples = probe_depth }
-    in
-    (depth, per_launch_ms *. Float.of_int depth)
-  else if Float.(probe_ms >= queued_batch_ms) then (probe_depth, probe_ms)
+  then (max_queue_depth, Float.nan)
   else
     let marginal_ms = (probe_ms -. single_ms) /. Float.of_int (probe_depth - 1) in
     if (not (Float.is_finite marginal_ms)) || not (Float.is_positive marginal_ms) then
-      (max_queue_depth, probe_ms)
+      (max_queue_depth, Float.nan)
     else
       let fixed_ms = single_ms -. marginal_ms in
       let wanted = (queued_batch_ms -. fixed_ms) /. marginal_ms in
@@ -565,7 +562,7 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                       (* The affine estimate has repeatedly missed the target. Bind memory, rather
                          than letting another underestimated non-cap depth reach the contention
                          test. *)
-                      (calibration_dispatches, max_queue_depth, next_wall_ms)
+                      (calibration_dispatches, max_queue_depth, Float.nan)
                     else
                       validate_depth (probes_left - 1) calibration_dispatches next_depth
                         next_wall_ms
@@ -591,9 +588,9 @@ let time_routine ?(tag_failures = false) ~timing ~repeats cctx routine =
                   queued_batch_ms)
             else
               logf
-                "queued batch capped at depth %d: estimated wall %.4g ms does not resolve how far \
-                 the batch falls short of the %.1f ms target"
-                depth estimated_wall_ms queued_batch_ms);
+                "queued batch capped at depth %d: batch wall estimate is unresolved, so the \
+                 shortfall from the %.1f ms target cannot be quantified"
+                depth queued_batch_ms);
       !on_batch_depth depth ~calibration_samples:calibration_dispatches;
       (* The calibration's own contention verdict is not consulted (gh-ocannl-888): it judged single
          dispatches, and the window that gets judged for refusal is the batch below. *)

@@ -1151,7 +1151,8 @@ val refine_queued_batch_depth : single_ms:float -> probe_depth:int -> probe_ms:f
     The two observations separate fixed synchronization cost from marginal launch cost, so even a
     shallow provisional batch reaches the ~10 ms contention scale rather than counting a fraction of
     the fixed cost against every launch. A probe already at the target keeps its depth; an
-    unresolved marginal cost grows to the 2048-launch memory cap. Exposed as the deterministic
+    unresolved marginal cost grows to the 2048-launch memory cap and returns [nan] for the wall,
+    rather than labeling the shallow probe as a cap-wall estimate. Exposed as the deterministic
     policy seam for tests. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result

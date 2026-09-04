@@ -129,11 +129,11 @@ let refinement_cases =
   [
     (* A 6 ms fixed synchronization around a 1 ms launch. Dividing the depth-2 probe by two would
        select depth 3; separating the fixed term selects the depth-4, 10 ms batch. *)
-    ("a shallow probe with dominant fixed synchronization", 7., 2, 8., 4, 10.);
+    ("a shallow probe with dominant fixed synchronization", 7., 2, 8., 4, Some 10.);
     (* No resolved marginal work means no finite depth can be inferred. Grow to the memory cap and
        preserve the observed shortfall for the diagnostic. *)
-    ("a probe with unresolved marginal cost", 6., 2, 6., 2048, 6.);
-    ("a probe already at the target", 1., 10, 10., 10, 10.);
+    ("a probe with unresolved marginal cost", 6., 2, 6., 2048, None);
+    ("a probe already at the target", 1., 10, 10., 10, Some 10.);
   ]
 
 let () =
@@ -165,10 +165,14 @@ let () =
   Verdict.p_all "depth refinement removes fixed synchronization cost from launch scaling"
     refinement_cases ~f:(fun (what, single_ms, probe_depth, probe_ms, want_depth, want_wall) ->
       let depth, wall = Autotune.refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms in
-      if depth <> want_depth || not (Float.equal wall want_wall) then
-        Stdio.eprintf "  %s: depth %d, wall %g ms; expected %d, %g ms\n%!" what depth wall
-          want_depth want_wall;
-      depth = want_depth && Float.equal wall want_wall)
+      let wall_matches =
+        match want_wall with None -> Float.is_nan wall | Some want -> Float.equal wall want
+      in
+      if depth <> want_depth || not wall_matches then
+        Stdio.eprintf "  %s: depth %d, wall %g ms; expected depth %d, wall %s\n%!" what depth wall
+          want_depth
+          (Option.value_map want_wall ~default:"unresolved" ~f:Float.to_string);
+      depth = want_depth && wall_matches)
 
 (* {1 The setting's spelling} *)
 
