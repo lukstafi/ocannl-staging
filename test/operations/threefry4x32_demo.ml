@@ -86,6 +86,7 @@ let () =
     max_abs_error;
   print_check "Count is 40" (Int.equal (Array.length result) 40);
   print_check "All values in [0, 1)"
-    (Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)));
+    ((not (Array.is_empty result))
+    && Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)));
   print_check "Matches expected stream within 0.01" Float.(max_abs_error <= 0.01);
   print_check "Mean within 0.40..0.60" Float.(mean >= 0.40 && mean <= 0.60)

@@ -45,6 +45,10 @@ refuses an unguarded helper behind an open of Verdict.Claims: true
 keeps an open of Verdict.Claims inside its local scope: true
 refuses a sibling for_all helper through an intermediate result binding: true
 refuses a fully applied quantifier bound before the claim: true
+refuses a quantified binding passed through a Verdict wrapper: true
+refuses a direct quantifier passed through a Verdict wrapper: true
+accepts a guarded direct quantifier passed through a Verdict wrapper: true
+accepts a negated direct quantifier passed through a Verdict wrapper: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true

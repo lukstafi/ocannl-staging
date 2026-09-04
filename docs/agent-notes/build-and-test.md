@@ -816,9 +816,12 @@ that they earn a lookup rather than always-loaded space.
   `verdict_ratchet` also follows file-local boolean bindings into `Verdict.p`/`claim`/`pass_fail`
   (and their format-taking forms): a helper returning `for_all`, `for_all2_exn`, `is_empty`, or a
   negated `exists`, and a fully applied quantified value bound before the claim, must make
-  non-emptiness part of its passing result. Its exact, stale-checked exemption list is only for
-  bindings whose intended passing meaning allows an empty population; synthetic controls include a
-  child process the shipping ratchet demonstrably refuses (gh-ocannl-801, gh-ocannl-887). An entry
+  non-emptiness part of its passing result. A file-local wrapper whose body calls one of those
+  `Verdict` forms is a claim target too: bound Boolean arguments are traced to their quantified
+  origin, while direct quantified arguments are checked at the wrapper call. Its exact,
+  stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
+  population; synthetic controls include a child process the shipping ratchet demonstrably refuses
+  (gh-ocannl-801, gh-ocannl-887). An entry
   there names ONE definition, and that is checked rather than assumed: a name shadowed by a second
   definition would hand both bodies to one key, so an exempted key resolving to two definition
   offsets refuses the run instead of covering the body nobody read.
