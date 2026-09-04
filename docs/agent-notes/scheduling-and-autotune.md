@@ -653,6 +653,10 @@ files.
   calibration grows the batch toward the same wall target. A CUDA/HIP synchronized-single estimate
   at or above the target is likewise checked at depth 2: a genuinely slow routine retains depth 1,
   while a transient single-window stall cannot bypass batch validation.
+  CUDA/HIP cache keys spell this changed queued policy as `queued-v2` while entries and user-facing
+  configuration still say `queued`; otherwise a depth-200 winner already on disk would replay
+  without running any of this calibration. cc/Metal keep the unversioned `queued` key because their
+  policy did not change.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall.
   The jitter-sensitive synchronized-single calibration and every timed window have a 16-sample
   floor; the CUDA/HIP-only, already-millisecond batch probes use twelve minima because they choose

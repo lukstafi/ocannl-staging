@@ -450,6 +450,14 @@ let () =
   p "the cache key is stable within one objective" (String.equal (key "queued") (key "queued"));
   p "the cache key separates the two timing objectives"
     (not (String.equal (key "isolated") (key "queued")));
+  Verdict.p_all "CUDA and HIP queued keys carry the new timing-policy generation" [ "cuda"; "hip" ]
+    ~f:(fun backend ->
+      String.is_suffix
+        (SC.cache_key ~objective:"queued" ~limits canon ~backend)
+        ~suffix:"-tqueued-v2");
+  Verdict.p_all "cc and Metal queued keys retain their unchanged timing generation"
+    [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
+      String.is_suffix (SC.cache_key ~objective:"queued" ~limits canon ~backend) ~suffix:"-tqueued");
   (* Derived, not restated: a caller that resolved no mode of its own must key exactly as one that
      resolved the configured mode, or a test's hand-built entry would sit under a key no search
      looks up. *)
