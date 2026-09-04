@@ -141,12 +141,6 @@ let rec function_body expr =
   | Pexp_function (_, _, Pfunction_body body) -> function_body body
   | _ -> expr
 
-let rec tail_expression expr =
-  match expr.pexp_desc with
-  | Pexp_let (_, _, body) | Pexp_sequence (_, body) | Pexp_open (_, body) -> tail_expression body
-  | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> tail_expression inner
-  | _ -> expr
-
 let unlabelled arguments =
   List.filter_map arguments ~f:(function Asttypes.Nolabel, argument -> Some argument | _ -> None)
 
@@ -686,7 +680,7 @@ let claim_target environment callee =
   | Some path -> Option.map (claim_kind_of_path path) ~f:(fun kind -> (kind, None))
   | None -> None
 
-let resolved_bool environment expr =
+let constant_bool_of environment expr =
   match literal_bool expr with
   | Some _ as value -> value
   | None -> (
@@ -694,6 +688,8 @@ let resolved_bool environment expr =
       | Some [ name ] ->
           lookup environment name |> Option.bind ~f:(fun binding -> binding.constant_bool)
       | _ -> None)
+
+let resolved_bool = constant_bool_of
 
 let resolved_result_polarities environment positive result =
   match resolved_bool environment result with
@@ -735,6 +731,20 @@ let shadow_parameters environment parameters =
               not (Set.mem shadowed binding.name))
       | Pparam_newtype _ -> environment)
 
+let constant_binding environment part =
+  {
+    name = part.name;
+    site = site_of_location part.location;
+    optional_label = None;
+    dependencies = [];
+    guards = Set.empty (module String);
+    unguarded = [];
+    negated_unguarded = [];
+    constant_bool = constant_bool_of environment part.expression;
+    claim_kind = None;
+    claim_wrapper = None;
+  }
+
 let rec alias_quantifiers environment ?(positive = true) expr =
   match expr.pexp_desc with
   | Pexp_function (parameters, _, Pfunction_body body) ->
@@ -757,8 +767,14 @@ let rec alias_quantifiers environment ?(positive = true) expr =
           in
           guards @ alias_quantifiers case_environment ~positive case.pc_rhs)
   | Pexp_let (_, bindings, body) ->
+      let local =
+        List.concat_map bindings ~f:(fun binding ->
+            binding_parts binding.pvb_pat binding.pvb_expr
+            |> List.map ~f:(constant_binding environment))
+      in
+      let body_environment = List.rev_append local environment in
       let returned = returned_binding_polarities positive body in
-      alias_quantifiers environment ~positive body
+      alias_quantifiers body_environment ~positive body
       @ List.concat_map bindings ~f:(fun binding ->
           binding_parts binding.pvb_pat binding.pvb_expr
           |> List.concat_map ~f:(fun part ->
@@ -868,15 +884,7 @@ and make_binding_part ?optional_label environment part =
     returned_quantifiers ~positive:false part.expression
     @ alias_quantifiers environment ~positive:false part.expression
   in
-  let constant_bool =
-    match literal_bool part.expression with
-    | Some _ as value -> value
-    | None -> (
-        match Sources.longident_of part.expression with
-        | Some [ alias ] ->
-            lookup environment alias |> Option.bind ~f:(fun binding -> binding.constant_bool)
-        | _ -> None)
-  in
+  let constant_bool = constant_bool_of environment part.expression in
   let dependencies =
     function_dependencies environment part.expression
     |> List.filter ~f:(fun dependency ->
@@ -925,8 +933,40 @@ and wrapper_signature environment expression =
     | Pexp_function (more, _, Pfunction_body body) -> parameters_and_body (parameters @ more) body
     | _ -> (parameters, expression)
   in
+  let resolve_alias aliases (name, positive) =
+    match List.Assoc.find aliases name ~equal:String.equal with
+    | None -> [ (name, positive) ]
+    | Some targets ->
+        List.map targets ~f:(fun (target, target_positive) ->
+            (target, Bool.equal positive target_positive))
+  in
+  let rec tail_and_aliases aliases expression =
+    match expression.pexp_desc with
+    | Pexp_let (recursive, bindings, body) ->
+        let parts =
+          List.concat_map bindings ~f:(fun binding ->
+              binding_parts binding.pvb_pat binding.pvb_expr)
+        in
+        let shadowed = List.map parts ~f:(fun part -> part.name) |> Set.of_list (module String) in
+        let outer_aliases = List.filter aliases ~f:(fun (name, _) -> not (Set.mem shadowed name)) in
+        let local_aliases =
+          match recursive with
+          | Asttypes.Nonrecursive ->
+              List.map parts ~f:(fun part ->
+                  let targets =
+                    returned_binding_polarities true part.expression
+                    |> List.concat_map ~f:(resolve_alias aliases)
+                  in
+                  (part.name, targets))
+          | Recursive -> List.map parts ~f:(fun part -> (part.name, []))
+        in
+        tail_and_aliases (List.rev_append local_aliases outer_aliases) body
+    | Pexp_sequence (_, body) | Pexp_open (_, body) -> tail_and_aliases aliases body
+    | Pexp_constraint (inner, _) | Pexp_coerce (inner, _, _) -> tail_and_aliases aliases inner
+    | _ -> (expression, aliases)
+  in
   let parameters, body = parameters_and_body [] expression in
-  let body = tail_expression body in
+  let body, aliases = tail_and_aliases [] body in
   let unlabelled_parameters =
     List.count parameters ~f:(fun parameter ->
         match parameter.pparam_desc with
@@ -955,7 +995,8 @@ and wrapper_signature environment expression =
           let claimed_names =
             claim_arguments target arguments
             |> List.concat_map ~f:(fun (argument, positive) ->
-                returned_binding_polarities positive argument)
+                returned_binding_polarities positive argument
+                |> List.concat_map ~f:(resolve_alias aliases))
           in
           let _, slots, _ =
             List.fold parameters ~init:(0, [], environment)
@@ -1673,6 +1714,18 @@ let () = check "all rows pass" (List.for_all rows ~f:Fn.id)|ocaml},
   Verdict.p label ok
 let () = check (List.for_all rows ~f:Fn.id)|ocaml},
       [ "check" ] );
+    ( "refuses a direct quantifier passed through a wrapper setup alias",
+      {ocaml|let check ok =
+  let result = ok in
+  Verdict.p "all rows pass" result
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
+    ( "does not connect a wrapper parameter hidden by a setup constant",
+      {ocaml|let check ok =
+  let result = true in
+  Verdict.p "the constant passes" result
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1874,6 +1927,12 @@ let no = false
 let result = if some then no else true
 let () = Verdict.p "no rows match" result|ocaml},
       [ "some" ] );
+    ( "refuses a direct if condition whose local false outcome is a Boolean alias",
+      {ocaml|let result =
+  let no = false in
+  if List.exists rows ~f:Fn.id then no else true
+let () = Verdict.p "no rows match" result|ocaml},
+      [ "result" ] );
     ( "does not attribute a condition whose branches return the same literal",
       {ocaml|let all = List.for_all rows ~f:Fn.id
 let result = if all then true else true
