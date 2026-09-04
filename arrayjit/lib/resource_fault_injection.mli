@@ -15,6 +15,8 @@ type point =
   | To_host_before_copy
   | Finalize_before_await
   | Finalize_before_free
+  | Schedule_cache_before_lock
+  | Schedule_cache_before_regime_commit
   | Schedule_cache_before_commit
   | Schedule_cache_before_replay
 [@@deriving sexp, equal]

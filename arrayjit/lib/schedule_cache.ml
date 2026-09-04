@@ -645,6 +645,7 @@ let read_regime_stamp dir =
 let write_regime_stamp dir =
   Utils.Atomic_file.write_all ~path:(regime_stamp_file dir)
     ~data:(Int.to_string cache_regime_version ^ "\n")
+    ~before_commit:(fun () -> Resource_fault_injection.hit Schedule_cache_before_regime_commit)
     ()
 
 let open_current_regime dir =
@@ -673,6 +674,7 @@ let with_cache_open ~dir f =
           Stdlib.Fun.protect
             ~finally:(fun () -> Unix.close fd)
             (fun () ->
+              Resource_fault_injection.hit Schedule_cache_before_lock;
               Unix.lockf fd Unix.F_LOCK 0;
               if open_current_regime dir then Some (f ()) else None)
         with Unix.Unix_error _ | Stdlib.Sys_error _ -> None))
