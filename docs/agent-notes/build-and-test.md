@@ -1251,14 +1251,14 @@ that they earn a lookup rather than always-loaded space.
   leaves first-iteration failures in these tools uncovered. Keep benchmark-reproducibility work in
   gh-ocannl-743 rather than expanding this alias into a benchmark assertion suite.
   `bin_smoke_membership_scan` (gh-ocannl-874) derives the public executable declarations from
-  `bin/dune` and every recursive-alias contribution from the repository's dune files, then requires
-  exact one-to-one membership; its separate negative-control rule runs the same checker on a
-  synthetic omitted member and accepts only the failing exit status. The scan preserves repeated
-  command sites so a duplicated smoke is not collapsed into a set, follows `(alias ...)`
-  dependencies transitively, and exempts only the no-argument `env_spelling_gate.exe` invocation on
-  the exact infrastructure alias that owns it. Every command-bearing alias contribution, root or
-  transitive helper, must depend directly on `(universe)`, so Dune cannot cache away runtime
-  coverage after another contribution reruns.
+  every Dune file below `bin/` and every recursive-alias contribution from the repository's dune
+  files, then requires exact one-to-one membership; its separate negative-control rule runs the
+  same checker on a synthetic omitted member and accepts only the failing exit status. The scan
+  preserves repeated command sites so a duplicated smoke is not collapsed into a set, follows
+  `(alias ...)` dependencies transitively, and exempts only the no-argument
+  `env_spelling_gate.exe` invocation on the exact infrastructure alias that owns it. Every
+  command-bearing alias contribution, root or transitive helper, must depend directly on
+  `(universe)`, so Dune cannot cache away runtime coverage after another contribution reruns.
   It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
   `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
@@ -1269,10 +1269,9 @@ that they earn a lookup rather than always-loaded space.
   output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
   rules, a pform in an inferred output path, an unresolved `chdir` around inferred output targets,
   an action preprocessor on a public executable or any library, an explicit `install` into section
-  `bin`, or
-  unexpanded top-level `include` stanzas. A bare
-  executable name is itself refused: its `.exe` suffix does not stop ambient PATH from selecting a
-  program outside the workspace. Action-local or directory-level PATH rewrites (under any case
+  `bin`, or unexpanded top-level `include` stanzas. A bare executable name is itself refused: its
+  `.exe` suffix does not stop ambient PATH from selecting a program outside the workspace.
+  Action-local or directory-level PATH rewrites (under any case
   spelling), and an `env` stanza's `binaries` mapping, are opaque too, including in transitively
   reached aliases. A
   directory-level override follows Dune's scope: it reaches descendants of its own `(subdir …)`
@@ -1284,7 +1283,8 @@ that they earn a lookup rather than always-loaded space.
   A target-producing rule anywhere in the repository may not run a public bin executable directly:
   its output could be an implicit build prerequisite of a smoked executable, hiding an extra
   execution outside the alias dependency edges the census can see. For rules that produce a
-  declared public executable's source, the same check recursively covers alias dependencies and
+  declared public executable's generated source or interface below `bin/`, the same check
+  recursively covers alias dependencies and
   refuses shell, interpreter, private-workspace-generator, or otherwise opaque commands plus
   unexpandable dependency specifications. Producer-side executions are errors rather than smoke
   credit because an unrelated generated target may never be built. Commands under absolute
