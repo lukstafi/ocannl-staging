@@ -248,6 +248,7 @@ let historical_invalid_config_mentions =
   [
     ("docs/agent-notes/conventions.md", "cc_parallel_grid_private_bytes_cap", 1);
     ("docs/agent-notes/conventions.md", "private_bytes_cap", 1);
+    ("docs/proposals/gh-ocannl-409.md", "bacend", 1);
     ("docs/proposals/gh-ocannl-409.md", "output_debug_files_in_run_directory", 1);
     ("docs/proposals/gh-ocannl-409.md", "randomness_lib", 4);
     ("test/operations/dune", "backedn", 3);
@@ -418,7 +419,11 @@ let one_assignment ~path rendered =
                 && String.for_all name ~f:(fun c -> Char.is_lowercase c || Char.is_digit c)
                 && Set.mem Utils.known_config_keys name
               in
-              Option.some_if (registered_one_word || tracked_ambiguous_bare_config path name) name
+              Option.some_if
+                (registered_one_word
+                || tracked_ambiguous_bare_config path name
+                || tracked_historical_config path name)
+                name
         in
         Option.bind parsed_key ~f:(fun key ->
             if
@@ -938,6 +943,10 @@ let refusal_control grammar_fixture =
   Verdict.p "a new registered one-word assignment remains classifiable for a required judgment"
     (match one_assignment ~path:"new-one-word.md" "backend=metal" with
     | Some (key, ambiguous_bare) -> String.equal key "backend" && ambiguous_bare
+    | None -> false);
+  Verdict.p "a tracked historical one-word typo remains classifiable after registry removal"
+    (match one_assignment ~path:"docs/proposals/gh-ocannl-409.md" "bacend=multicore_cc" with
+    | Some (key, ambiguous_bare) -> String.equal key "bacend" && not ambiguous_bare
     | None -> false);
   let grammar_text = In_channel.read_all grammar_fixture in
   let grammar_candidates = complete_inline_code_candidates grammar_text in

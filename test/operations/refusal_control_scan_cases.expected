@@ -140,6 +140,7 @@ config_usage_scan.ml: [scanner-refusal:ebb0dca085588641133d48ef9f80a504] undecla
 config_usage_scan.ml: [scanner-refusal:41ac9c9af9469dc36eb0fdc3623c419f] unknown cross-style command-line (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:1eca4460778f143859eea42da85bbd72] one-word documentation assignments (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:7e32dcb7afdd8103e02384cf64776cae] assignment remains classifiable (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
+config_usage_scan.ml: [scanner-refusal:f39c89d1f700c14082d119fea8a9fb93] tracked historical one-word (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:6bb17d62436571b3e716c4bba5c0f746] promised non-OCANNL assignment (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true
 config_usage_scan.ml: [scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal (claim) is catalogued beside config_usage_scan.expected, config_usage_scan_refusal_control.expected: true

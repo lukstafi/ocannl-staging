@@ -160,6 +160,7 @@ let raw_entries =
         "[scanner-refusal:41ac9c9af9469dc36eb0fdc3623c419f] unknown cross-style command-line";
         "[scanner-refusal:1eca4460778f143859eea42da85bbd72] one-word documentation assignments";
         "[scanner-refusal:7e32dcb7afdd8103e02384cf64776cae] assignment remains classifiable";
+        "[scanner-refusal:f39c89d1f700c14082d119fea8a9fb93] tracked historical one-word";
         "[scanner-refusal:6bb17d62436571b3e716c4bba5c0f746] promised non-OCANNL assignment";
         "[scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment";
         "[scanner-refusal:84bf7dbb3e9182b1eced5e76a271e5f6] config-usage direct refusal";
