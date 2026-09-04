@@ -701,7 +701,50 @@ let autolink_contents inside =
              ~f:(fun c -> Char.is_alphanum c || List.mem [ '+'; '-'; '.' ] c ~equal:Char.equal)
     | _ -> false
   in
-  no_whitespace && (uri || String.contains inside '@')
+  let email =
+    let local_char c =
+      Char.is_alphanum c
+      || List.mem
+           [
+             '.';
+             '!';
+             '#';
+             '$';
+             '%';
+             '&';
+             '\'';
+             '*';
+             '+';
+             '/';
+             '=';
+             '?';
+             '^';
+             '_';
+             '`';
+             '{';
+             '|';
+             '}';
+             '~';
+             '-';
+           ]
+           c ~equal:Char.equal
+    in
+    let domain_label label =
+      let len = String.length label in
+      len > 0 && len <= 63
+      && Char.is_alphanum label.[0]
+      && Char.is_alphanum label.[len - 1]
+      && String.for_all label ~f:(fun c -> Char.is_alphanum c || Char.equal c '-')
+    in
+    match String.rsplit2 inside ~on:'@' with
+    | Some (local, domain) ->
+        (not (String.is_empty local))
+        && (not (String.contains local '@'))
+        && String.for_all local ~f:local_char
+        && List.for_all (String.split domain ~on:'.') ~f:domain_label
+    | None -> false
+  in
+  no_whitespace && (uri || email)
 
 (** Whether a line opens a raw HTML block, as opposed to merely starting with ['<']. Every
     column-zero ['<'] used to count, which failed two kinds of perfectly ordinary prose: an autolink
@@ -1273,12 +1316,24 @@ let markdown_link_parts ?spans line =
              "[index](../agent-notes.md#draft\)" finishes no link, and accepting the escaped one
              resolved to the index anyway once the fragment was dropped (Codex P2, round 8). Fourth
              site of the parity rule. *)
-          let rec unescaped_rparen from =
-            match String.index_from line from ')' with
-            | Some j when escaped_at line j -> unescaped_rparen (j + 1)
-            | other -> other
+          let rec unescaped_rparen from depth quote =
+            if from >= n then None
+            else if escaped_at line from then unescaped_rparen (from + 1) depth quote
+            else
+              match quote with
+              | Some q ->
+                  if Char.equal line.[from] q then unescaped_rparen (from + 1) depth None
+                  else unescaped_rparen (from + 1) depth quote
+              | None ->
+                  if Char.equal line.[from] '"' || Char.equal line.[from] '\'' then
+                    unescaped_rparen (from + 1) depth (Some line.[from])
+                  else if Char.equal line.[from] '(' then
+                    unescaped_rparen (from + 1) (depth + 1) None
+                  else if Char.equal line.[from] ')' then
+                    if depth = 0 then Some from else unescaped_rparen (from + 1) (depth - 1) None
+                  else unescaped_rparen (from + 1) depth None
           in
-          match unescaped_rparen (close + 1) with
+          match unescaped_rparen (close + 2) 0 None with
           | Some rparen when not (in_any_span spans rparen) ->
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
               let raw_target = String.sub line ~pos:(close + 2) ~len:(rparen - close - 2) in
@@ -1311,11 +1366,14 @@ let markdown_links ?spans line =
 
 let link_markup_spans links =
   List.concat_map links ~f:(fun link ->
-      if link.image then [ link.source_span ]
+      if link.image then []
       else
         let source_start, source_stop = link.source_span in
         let text_start, text_stop = link.text_span in
         [ (source_start, text_start); (text_stop, source_stop) ])
+
+let image_spans links =
+  List.filter_map links ~f:(fun link -> if link.image then Some link.source_span else None)
 
 (** CommonMark autolink destinations, excluding their angle brackets. They are visible links, but
     their URL fragments are syntax rather than prose citations. *)
@@ -1385,7 +1443,8 @@ let unicode_whitespace =
   ]
 
 let rendered_entity_value value =
-  if value <= 0x7f then Char.of_int_exn value
+  if List.mem [ 9; 10; 11; 12; 13; 32 ] value ~equal:Int.equal then ' '
+  else if value <= 0x7f then Char.of_int_exn value
   else if List.mem unicode_whitespace value ~equal:Int.equal then ' '
   else opaque_prose
 
@@ -1488,22 +1547,92 @@ let inline_html_spans ?spans line =
   in
   go 0 []
 
-(** The prose a reader sees on a line. Link labels remain; inline-link markup, images, autolinks,
-    code, comments, and fenced content disappear; numeric entities become their rendered ASCII
-    character (or a separating space for a non-ASCII value). Findings need only the physical line,
-    so the citation matcher does not need a source-offset map. *)
+let inline_delimiter c = Char.equal c '*' || Char.equal c '_' || Char.equal c '~'
+
+(** Matched inline emphasis/strong/strikethrough delimiter runs. Only delimiters disappear; their
+    content stays prose, including when formatting splits a token such as [P**R**]. The flanking
+    tests keep intraword underscores literal, as CommonMark does. *)
+let inline_format_spans ~spans line =
+  let n = String.length line in
+  let whitespace = function ' ' | '\t' -> true | _ -> false in
+  let punctuation c = (not (Char.is_alphanum c)) && not (whitespace c) in
+  let char_before i = if i = 0 then None else Some line.[i - 1] in
+  let char_after i = if i >= n then None else Some line.[i] in
+  let is_space = function None -> true | Some c -> whitespace c in
+  let is_punct = function None -> false | Some c -> punctuation c in
+  let roles marker start stop =
+    let before = char_before start and after = char_after stop in
+    let left =
+      (not (is_space after)) && ((not (is_punct after)) || is_space before || is_punct before)
+    in
+    let right =
+      (not (is_space before)) && ((not (is_punct before)) || is_space after || is_punct after)
+    in
+    if Char.equal marker '_' then
+      (left && ((not right) || is_punct before), right && ((not left) || is_punct after))
+    else (left, right)
+  in
+  let clear start stop =
+    List.for_all (List.range start stop) ~f:(fun i -> not (in_any_span spans i))
+  in
+  let delimiter_at i =
+    if i >= n || (not (inline_delimiter line.[i])) || escaped_at line i || in_any_span spans i then
+      None
+    else
+      let marker = line.[i] in
+      let width = run_length line i marker in
+      if Char.equal marker '~' && width < 2 then None else Some (marker, width)
+  in
+  let rec find_close marker width i limit =
+    if i >= limit then None
+    else
+      match delimiter_at i with
+      | Some (candidate, candidate_width)
+        when Char.equal candidate marker && candidate_width = width && clear i (i + width) ->
+          let _, can_close = roles marker i (i + width) in
+          if can_close then Some i else find_close marker width (i + width) limit
+      | Some (_, candidate_width) -> find_close marker width (i + candidate_width) limit
+      | None -> find_close marker width (i + 1) limit
+  in
+  let rec collect i limit acc =
+    if i >= limit then acc
+    else
+      match delimiter_at i with
+      | Some (marker, width) when clear i (i + width) -> (
+          let can_open, _ = roles marker i (i + width) in
+          if not can_open then collect (i + width) limit acc
+          else
+            match find_close marker width (i + width) limit with
+            | None -> collect (i + width) limit acc
+            | Some close ->
+                let acc = (i, i + width) :: (close, close + width) :: acc in
+                let acc = collect (i + width) close acc in
+                collect (close + width) limit acc)
+      | Some (_, width) -> collect (i + width) limit acc
+      | None -> collect (i + 1) limit acc
+  in
+  collect 0 n []
+
+(** The prose a reader sees on a line. Link labels and inline-HTML element text remain; markup,
+    destinations, autolinks, comments, and fenced content disappear. Formatting delimiters disappear
+    around their content. Images and excluded inline code become opaque barriers, and entities
+    become their citation-relevant rendered character. Findings need only the physical line, so the
+    matcher does not need a source-offset map. *)
 let citation_line ~inert_spans ~invisible_spans line =
   let links = markdown_link_parts ~spans:inert_spans line in
   let autolinks = autolink_spans ~spans:inert_spans line in
   let link_markup = link_markup_spans links in
   let html = inline_html_spans ~spans:(inert_spans @ link_markup @ autolinks) line in
-  let hidden = invisible_spans @ link_markup @ autolinks @ html in
-  let opaque_spans =
+  let code_spans =
     List.filter inert_spans ~f:(fun span ->
         not
           (List.mem invisible_spans span ~equal:(fun (a_start, a_stop) (b_start, b_stop) ->
                a_start = b_start && a_stop = b_stop)))
   in
+  let opaque_spans = code_spans @ image_spans links in
+  let hidden_without_format = invisible_spans @ link_markup @ autolinks @ html in
+  let formatting = inline_format_spans ~spans:(hidden_without_format @ opaque_spans) line in
+  let hidden = formatting @ hidden_without_format in
   let entities = markdown_entities ~spans:(hidden @ opaque_spans) line in
   let rendered = Buffer.create (String.length line) in
   let rec go i entities =
@@ -1842,90 +1971,19 @@ let is_work_label s =
   let s = String.lowercase s in
   String.equal s "pr" || String.equal s "issue"
 
-let formatting_delimiter c = Char.equal c '*' || Char.equal c '_' || Char.equal c '~'
-
-let visible_range ~spans start stop =
-  List.for_all (List.range start stop) ~f:(fun i -> not (in_any_span spans i))
-
-(** A Markdown emphasis/strong/strikethrough wrapper immediately around the half-open range from
-    [start] to [stop]. This is deliberately a matched pair rather than punctuation skipping:
-    unmatched stars render literally, and stripping them would invent a citation the reader does not
-    see. *)
-let inline_wrapper ~spans line start stop =
-  if start = 0 || not (formatting_delimiter line.[start - 1]) then None
-  else
-    let marker = line.[start - 1] in
-    let opening = ref (start - 1) in
-    while !opening > 0 && Char.equal line.[!opening - 1] marker do
-      Int.decr opening
-    done;
-    let width = start - !opening in
-    let valid_width = (not (Char.equal marker '~')) || width >= 2 in
-    let closes =
-      stop + width <= String.length line
-      && String.for_all (String.sub line ~pos:stop ~len:width) ~f:(Char.equal marker)
-      && (stop + width = String.length line || not (Char.equal line.[stop + width] marker))
-    in
-    let separated_before = !opening = 0 || not (identifier_char line.[!opening - 1]) in
-    let separated_after =
-      stop + width = String.length line || not (identifier_char line.[stop + width])
-    in
-    if
-      valid_width && closes && separated_before && separated_after
-      && (not (escaped_at line !opening))
-      && visible_range ~spans !opening (stop + width)
-    then Some (!opening, stop + width)
-    else None
-
-let label_token_starting_at ~spans line i label =
+let label_token_starting_at line i label =
   let stop = i + String.length label in
   if stop > String.length line then None
   else
     let candidate = String.sub line ~pos:i ~len:(String.length label) |> String.lowercase in
-    if not (String.equal candidate label) then None
-    else
-      match inline_wrapper ~spans line i stop with
-      | Some bounds -> Some bounds
-      | None ->
-          if
-            (i = 0 || not (identifier_char line.[i - 1]))
-            && (stop = String.length line || not (identifier_char line.[stop]))
-            && visible_range ~spans i stop
-          then Some (i, stop)
-          else None
+    if
+      String.equal candidate label
+      && (i = 0 || not (identifier_char line.[i - 1]))
+      && (stop = String.length line || not (identifier_char line.[stop]))
+    then Some (i, stop)
+    else None
 
-let formatting_run_at line i =
-  if i >= String.length line || (not (formatting_delimiter line.[i])) || escaped_at line i then None
-  else
-    let marker = line.[i] in
-    let width = run_length line i marker in
-    if Char.equal marker '~' && width < 2 then None else Some (marker, width)
-
-let digit_token ~spans line start =
-  let plain () =
-    Option.bind (digit_run line start) ~f:(fun stop ->
-        if visible_range ~spans start stop then Some (start, stop) else None)
-  in
-  match plain () with
-  | Some bounds -> Some bounds
-  | None -> (
-      match formatting_run_at line start with
-      | None -> None
-      | Some (marker, width) ->
-          let digits = start + width in
-          Option.bind (digit_run line digits) ~f:(fun stop ->
-              let closes =
-                stop + width <= String.length line
-                && String.for_all (String.sub line ~pos:stop ~len:width) ~f:(Char.equal marker)
-                && (stop + width = String.length line || not (Char.equal line.[stop + width] marker))
-              in
-              let outer_stop = stop + width in
-              if
-                closes
-                && (outer_stop = String.length line || not (identifier_char line.[outer_stop]))
-                && visible_range ~spans start outer_stop
-              then Some (start, outer_stop)
-              else None))
+let digit_token line start = Option.map (digit_run line start) ~f:(fun stop -> (start, stop))
 
 (** Whether [#] at [i] opens an unqualified numeric citation. [staging#12] and [ahrefs/ocannl#12]
     are qualified; [node#12] is a code identifier. The compact work labels [PR#12] and [issue#12]
@@ -1944,54 +2002,30 @@ let unqualified_hash_reference_at line i =
           if is_work_label label then Some (start, stop) else None
 
 (** Hashless [PR 12] and [issue 12], with at least one space and complete word/digit boundaries. *)
-let unqualified_label_reference_at ~spans line i =
+let unqualified_label_reference_at line i =
   let n = String.length line in
   List.find_map [ "pr"; "issue" ] ~f:(fun label ->
-      Option.bind (label_token_starting_at ~spans line i label)
-        ~f:(fun (outer_start, after_label) ->
+      Option.bind (label_token_starting_at line i label) ~f:(fun (outer_start, after_label) ->
           let digits = ref after_label in
           while !digits < n && (Char.equal line.[!digits] ' ' || Char.equal line.[!digits] '\t') do
             Int.incr digits
           done;
           if !digits = after_label then None
-          else
-            Option.map (digit_token ~spans line !digits) ~f:(fun (_, stop) -> (outer_start, stop))))
+          else Option.map (digit_token line !digits) ~f:(fun (_, stop) -> (outer_start, stop))))
 
-let trailing_work_label ~spans line =
+let trailing_work_label line =
   let stop = ref (String.length line) in
   while !stop > 0 && (Char.equal line.[!stop - 1] ' ' || Char.equal line.[!stop - 1] '\t') do
     Int.decr stop
   done;
   List.find_map [ "pr"; "issue" ] ~f:(fun label ->
-      let plain_start = !stop - String.length label in
-      let plain =
-        if plain_start < 0 then None
-        else
-          Option.filter (label_token_starting_at ~spans line plain_start label)
-            ~f:(fun (_, finish) -> finish = !stop)
-      in
-      match plain with
-      | Some bounds -> Some bounds
-      | None ->
-          let opening_before close_start =
-            if close_start = 0 || not (formatting_delimiter line.[close_start - 1]) then None
-            else
-              let marker = line.[close_start - 1] in
-              let opening = ref (close_start - 1) in
-              while !opening > 0 && Char.equal line.[!opening - 1] marker do
-                Int.decr opening
-              done;
-              Some !opening
-          in
-          Option.bind (opening_before !stop) ~f:(fun close_start ->
-              let content_stop = close_start in
-              let content_start = content_stop - String.length label in
-              if content_start < 0 then None
-              else
-                Option.filter (label_token_starting_at ~spans line content_start label)
-                  ~f:(fun (_, finish) -> finish = !stop)))
+      let start = !stop - String.length label in
+      if start < 0 then None
+      else
+        Option.filter (label_token_starting_at line start label) ~f:(fun (_, finish) ->
+            finish = !stop))
 
-let leading_number ~spans line =
+let leading_number line =
   let start = ref 0 in
   while
     !start < String.length line && (Char.equal line.[!start] ' ' || Char.equal line.[!start] '\t')
@@ -1999,7 +2033,7 @@ let leading_number ~spans line =
     Int.incr start
   done;
   let stripped = String.drop_prefix line !start in
-  if Option.is_some (foreign_list_marker stripped) then None else digit_token ~spans line !start
+  if Option.is_some (foreign_list_marker stripped) then None else digit_token line !start
 
 (** Unqualified numeric work references outside the inert regions of the notes. The same
     paragraph-aware lexer used by the structural rules owns code spans, fenced blocks and comments,
@@ -2027,14 +2061,12 @@ let check_citations ~file contents =
   in
   let direct =
     List.concat_map source_lines ~f:(fun (lineno, line) ->
-        let spans = [] in
         let rec find i acc =
           if i >= String.length line then List.rev acc
-          else if in_any_span spans i then find (i + 1) acc
           else
             let reference =
               if Char.equal line.[i] '#' then unqualified_hash_reference_at line i
-              else unqualified_label_reference_at ~spans line i
+              else unqualified_label_reference_at line i
             in
             match reference with
             | Some (start, stop) ->
@@ -2050,9 +2082,7 @@ let check_citations ~file contents =
       ~f:(fun ((lineno, line), (next_lineno, next_line)) ->
         if not (Set.mem paragraphs lineno && Set.mem paragraphs next_lineno) then None
         else
-          let spans = [] in
-          let next_spans = [] in
-          match (trailing_work_label ~spans line, leading_number ~spans:next_spans next_line) with
+          match (trailing_work_label line, leading_number next_line) with
           | Some (start, stop), Some (number_start, number_stop) ->
               let label = String.sub line ~pos:start ~len:(stop - start) |> normalize in
               let number =

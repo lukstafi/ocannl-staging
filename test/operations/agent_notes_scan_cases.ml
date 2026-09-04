@@ -937,6 +937,9 @@ let citation_cases =
       [] );
     ("a numeric local-link target", "See [layout details](#12-byte-layout).\n", []);
     ("a numeric URL fragment", "See [the review](https://example.test/review#12).\n", []);
+    ( "balanced parentheses in a numeric URL fragment",
+      "See [the review](https://example.test/a_(b)#12).\n",
+      [] );
     ( "a numeric autolink fragment",
       "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
@@ -946,6 +949,9 @@ let citation_cases =
     ( "an entity that renders citation whitespace",
       "PR&#32;12 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );
+    ( "ASCII newline and carriage-return entities render whitespace",
+      "PR&#10;12 and issue&#xD;13 remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "entities that render a hash or work label",
       "&#35;12 and &#80;&#82; 13 remain ambiguous.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
@@ -967,11 +973,20 @@ let citation_cases =
     ( "emphasis around a hashless label or number",
       "**PR** 12 introduced it; issue **13** tracks the remainder.\n",
       [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
+    ( "emphasis inside a hashless label",
+      "P**R** 12 and is*sue* 13 remain ambiguous.\n",
+      [ "qualified-citations @ f.md:1"; "qualified-citations @ f.md:1" ] );
     ( "emphasis around a soft-wrapped reference",
       "- Found during **PR**\n  **12**'s review.\n",
       [ "qualified-citations @ f.md:1" ] );
     ( "visible code remains an opaque barrier",
       "PR `buffer` 12 is not a citation; PR<!-- invisible --> 13 is ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "an image remains an opaque barrier",
+      "PR ![buffer](image.png) 12 is not a citation; PR 13 remains ambiguous.\n",
+      [ "qualified-citations @ f.md:1" ] );
+    ( "valid and invalid email autolinks",
+      "Valid <PR#12@example.test>; invalid <PR#13@> remains prose.\n",
       [ "qualified-citations @ f.md:1" ] );
     ("a hash attached to a code identifier", "The generated name is node#12.\n", []);
   ]
