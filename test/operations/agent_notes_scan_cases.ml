@@ -940,6 +940,12 @@ let citation_cases =
     ( "balanced parentheses in a numeric URL fragment",
       "See [the review](https://example.test/a_(b)#12).\n",
       [] );
+    ( "an apostrophe in a numeric URL fragment",
+      "See [the review](https://example.test/O'Brien#12).\n",
+      [] );
+    ( "a quoted link title containing a parenthesis",
+      "See [the review](https://example.test/review#12 \"a ) title\").\n",
+      [] );
     ( "a numeric autolink fragment",
       "See <https://example.test/review#12>; plain #13 remains ambiguous.\n",
       [ "qualified-citations @ f.md:1" ] );

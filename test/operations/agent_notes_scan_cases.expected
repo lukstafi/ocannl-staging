@@ -146,6 +146,8 @@ ok: citations -- a hash inside a fenced block
 ok: citations -- a numeric local-link target
 ok: citations -- a numeric URL fragment
 ok: citations -- balanced parentheses in a numeric URL fragment
+ok: citations -- an apostrophe in a numeric URL fragment
+ok: citations -- a quoted link title containing a parenthesis
 ok: citations -- a numeric autolink fragment
 ok: citations -- a decimal entity and a separate bare citation
 ok: citations -- an entity that renders citation whitespace

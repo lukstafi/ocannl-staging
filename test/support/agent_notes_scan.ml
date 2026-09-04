@@ -1316,24 +1316,27 @@ let markdown_link_parts ?spans line =
              "[index](../agent-notes.md#draft\)" finishes no link, and accepting the escaped one
              resolved to the index anyway once the fragment was dropped (Codex P2, round 8). Fourth
              site of the parity rule. *)
-          let rec unescaped_rparen from depth quote =
+          let rec unescaped_rparen from depth quote in_title =
             if from >= n then None
-            else if escaped_at line from then unescaped_rparen (from + 1) depth quote
+            else if escaped_at line from then unescaped_rparen (from + 1) depth quote in_title
             else
               match quote with
               | Some q ->
-                  if Char.equal line.[from] q then unescaped_rparen (from + 1) depth None
-                  else unescaped_rparen (from + 1) depth quote
+                  if Char.equal line.[from] q then unescaped_rparen (from + 1) depth None in_title
+                  else unescaped_rparen (from + 1) depth quote in_title
               | None ->
-                  if Char.equal line.[from] '"' || Char.equal line.[from] '\'' then
-                    unescaped_rparen (from + 1) depth (Some line.[from])
+                  if in_title && (Char.equal line.[from] '"' || Char.equal line.[from] '\'') then
+                    unescaped_rparen (from + 1) depth (Some line.[from]) true
+                  else if depth = 0 && md_space line.[from] then
+                    unescaped_rparen (from + 1) depth None true
                   else if Char.equal line.[from] '(' then
-                    unescaped_rparen (from + 1) (depth + 1) None
+                    unescaped_rparen (from + 1) (depth + 1) None in_title
                   else if Char.equal line.[from] ')' then
-                    if depth = 0 then Some from else unescaped_rparen (from + 1) (depth - 1) None
-                  else unescaped_rparen (from + 1) depth None
+                    if depth = 0 then Some from
+                    else unescaped_rparen (from + 1) (depth - 1) None in_title
+                  else unescaped_rparen (from + 1) depth None in_title
           in
-          match unescaped_rparen (close + 2) 0 None with
+          match unescaped_rparen (close + 2) 0 None false with
           | Some rparen when not (in_any_span spans rparen) ->
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
               let raw_target = String.sub line ~pos:(close + 2) ~len:(rparen - close - 2) in
