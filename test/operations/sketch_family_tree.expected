@@ -611,6 +611,7 @@ cpu simd32: every leaf path commits its pipeline's shape level: true
   unpriced geometry          0 bytes
     fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16
   lattice leaf               (none in this tree)
+MMA emission-scope serialization and comparison distinguish accumulator lifetimes: true
 a one-block staged matmul uses the per-statement wide-f16 capability: true
 a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no explicit k-block: true
 == lattice under a 2048-byte workgroup-memory cap ==

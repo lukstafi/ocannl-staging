@@ -408,6 +408,12 @@ let () =
      admit even its nominally unstaged MMA seeds. *)
   let check_wide_scope_edges () =
     Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+    let per_statement = Ir.Backend_intf.Mma_per_statement in
+    let fragment_scope = Ir.Backend_intf.Mma_fragment_scope in
+    let round_tripped_scope =
+      Ir.Backend_intf.mma_emission_scope_of_sexp
+        (Ir.Backend_intf.sexp_of_mma_emission_scope per_statement)
+    in
     let statement_limits = gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ] in
     let both_limits =
       gpu_f16_limits
@@ -440,6 +446,9 @@ let () =
     let wide_outer_statement = seeds statement_limits opt_wide_outer in
     let wide_outer_both = seeds both_limits opt_wide_outer in
     Numerics.set_policy saved_policy;
+    Verdict.p "MMA emission-scope serialization and comparison distinguish accumulator lifetimes"
+      (Ir.Backend_intf.equal_mma_emission_scope round_tripped_scope per_statement
+      && Ir.Backend_intf.compare_mma_emission_scope per_statement fragment_scope <> 0);
     Verdict.p "a one-block staged matmul uses the per-statement wide-f16 capability"
       (has_staged_mma one_block_statement);
     Verdict.p
