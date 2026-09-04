@@ -1097,6 +1097,30 @@ class FixtureDigestTest(unittest.TestCase):
             ["m4-max", "minix", "rog-nv"],
         )
 
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = fixture_digest._main(
+                ["--list-declared-measurement-boxes", "--digests", str(digests)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "m4-max\nminix\nrog-nv\n")
+
+    def test_listing_boxes_does_not_infer_a_matrix_for_a_legacy_file(self):
+        # A pre-gh-ocannl-850 file can still be swept for backend coverage, but its row origins
+        # are not a declaration that every measuring host is present. Environment aggregation
+        # must therefore receive no matrix rather than quietly treating the observed rows as one.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(
+            fixture_digest.HEADER + "deadbeef  17  lenet.safetensors  rog-nv\n"
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = fixture_digest._main(
+                ["--list-declared-measurement-boxes", "--digests", str(digests)]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+
     def test_the_unrecorded_metal_box_is_reported_for_checked_in_fixtures(self):
         digests = HERE / "fixtures" / fixture_digest.DIGEST_FILE
         entries = fixture_digest.read_digests(digests)

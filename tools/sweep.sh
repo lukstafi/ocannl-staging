@@ -67,7 +67,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# (machine, backend, ssh-host) -- ssh-host empty means run locally.
+# (measurement-box, backend, ssh-host) -- ssh-host empty means run locally. The
+# box identifiers are the stable names declared by benchmarks/fixtures/DIGESTS.txt;
+# that declaration is validated against this execution map below rather than
+# restated as the aggregation matrix.
 # The WSL sides of the GPU boxes, not the native-Windows ones: plain Linux
 # toolchain, and Windows portability is covered by the scheduled CI job.
 #
@@ -82,10 +85,10 @@ done
 # notice. A backend with its own goldens and no leg here is a silent regression
 # channel whether or not it needs hardware.
 UNITS=(
-  "local:cc:"
-  "local:multidev_cc:"
-  "local:metal:"
-  "rog:cuda:rog-nv-wsl"
+  "m4-max:cc:"
+  "m4-max:multidev_cc:"
+  "m4-max:metal:"
+  "rog-nv:cuda:rog-nv-wsl"
   "minix:hip:minix-amd-wsl"
 )
 
@@ -96,6 +99,7 @@ UNITS=(
 # than recovering it by timestamp from history (two invocations can begin in
 # the same second in the integration harness).
 SKIP_RUN_BACKENDS=()
+SKIP_RUN_BOXES=()
 SKIP_RUN_LOGS=()
 
 # Errexit is off so that a FAILING TEST does not abort the remaining units --
@@ -104,6 +108,13 @@ SKIP_RUN_LOGS=()
 # that was not the one under test, has to be loud. A sweep that silently reports
 # coverage it did not perform is worse than one that does not run.
 die() { echo "sweep: $*" >&2; exit 2; }
+
+contains() {
+  local wanted=$1 item
+  shift
+  for item in "$@"; do [ "$item" = "$wanted" ] && return 0; done
+  return 1
+}
 
 # The scope columns are load-bearing rather than bookkeeping. The consumer ages
 # the most recent `pass` per backend, so without them a narrow smoke run --
@@ -257,6 +268,47 @@ git -C "$MAIN" fetch -q origin master || die "cannot fetch origin master in $MAI
 full_sha=$(git -C "$MAIN" rev-parse "$REF" 2>/dev/null) ||
   die "cannot resolve $REF in $MAIN"
 run_sha=$(git -C "$MAIN" rev-parse --short "$full_sha")
+
+# Read the environment matrix from the exact commit every unit is about to run.
+# The Python CLI is the checked-in DIGESTS parser, so the sweep does not grow a
+# second implementation of the header grammar. A pre-gh-ocannl-850 ref has no
+# declaration and deliberately leaves environment coverage unaggregated while
+# preserving backend aggregation for that historical run.
+known_boxes=()
+matrix_document=$(mktemp "${TMPDIR:-/tmp}/ocannl-measurement-boxes.XXXXXX") ||
+  die "cannot create temporary measurement-box document"
+if git -C "$MAIN" show "$full_sha:benchmarks/fixtures/DIGESTS.txt" >"$matrix_document" 2>/dev/null; then
+  matrix_output=$(python3 "$SWEEP_TOOLS/../benchmarks/fixture_digest.py" \
+    --list-declared-measurement-boxes --digests "$matrix_document")
+  matrix_rc=$?
+  rm -f "$matrix_document"
+  [ "$matrix_rc" -eq 0 ] || die "cannot parse measurement boxes at $run_sha"
+  while IFS= read -r box; do
+    [ -n "$box" ] && known_boxes+=("$box")
+  done <<<"$matrix_output"
+else
+  rm -f "$matrix_document"
+fi
+
+# The declaration owns which boxes constitute completeness; UNITS owns how to
+# reach them. Relate the two so adding or renaming a declared box cannot leave a
+# matrix member that no sweep unit can ever satisfy (or an undeclared unit whose
+# evidence the aggregator would reject).
+if [ ${#known_boxes[@]} -gt 0 ]; then
+  scheduled_boxes=()
+  for unit in "${UNITS[@]}"; do
+    IFS=: read -r box _ <<<"$unit"
+    contains "$box" "${scheduled_boxes[@]:-}" || scheduled_boxes+=("$box")
+  done
+  for box in "${known_boxes[@]}"; do
+    contains "$box" "${scheduled_boxes[@]}" ||
+      die "declared measurement box '$box' has no sweep unit"
+  done
+  for box in "${scheduled_boxes[@]}"; do
+    contains "$box" "${known_boxes[@]}" ||
+      die "sweep unit names undeclared measurement box '$box'"
+  done
+fi
 
 wanted() {
   [ ${#ONLY[@]} -eq 0 ] && return 0
@@ -880,6 +932,7 @@ for unit in "${UNITS[@]}"; do
   record "$machine" "$backend" "$outcome" "$elapsed" "$log" "$execution"
   if [ "$outcome" = pass ] && [ -z "$TARGET" ]; then
     SKIP_RUN_BACKENDS+=("$backend")
+    SKIP_RUN_BOXES+=("$machine")
     SKIP_RUN_LOGS+=("$log")
   fi
   # Diagnosis, strictly after the row and the elapsed time it reports: this phase
@@ -902,8 +955,12 @@ if [ "$FORCE" = 1 ] && [ -z "$TARGET" ]; then
   while IFS= read -r backend; do
     [ -n "$backend" ] && aggregate_args+=(--known "$backend")
   done <<<"$known_backends"
+  for box in "${known_boxes[@]:-}"; do
+    [ -n "$box" ] && aggregate_args+=(--known-box "$box")
+  done
   for ((i = 0; i < ${#SKIP_RUN_BACKENDS[@]}; i++)); do
-    aggregate_args+=(--run "${SKIP_RUN_BACKENDS[$i]}" "${SKIP_RUN_LOGS[$i]}")
+    aggregate_args+=(--run "${SKIP_RUN_BACKENDS[$i]}" "${SKIP_RUN_BOXES[$i]}" \
+      "${SKIP_RUN_LOGS[$i]}")
   done
 
   report=$LOGS/$stamp-skip-coverage.txt
@@ -934,7 +991,7 @@ if [ "$FORCE" = 1 ] && [ -z "$TARGET" ]; then
   # findings are the intersection across backends, already small by
   # construction, and a cap here would silently hide the very claims this
   # exists to surface.
-  grep -E '^(result|FAIL|POTENTIAL): ' "$report" | sed 's/^/  /'
+  grep -E '^(result|environment result|FAIL|POTENTIAL): ' "$report" | sed 's/^/  /'
 else
   echo "skip coverage: not aggregated (requires --force with no --target)"
 fi

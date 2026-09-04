@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Intersect backend-scoped Verdict.skipped announcements from complete
-# per-backend test logs. Environment-gated skips remain human-visible but are
-# deliberately excluded from this backend-coverage question.
+# Intersect Verdict.skipped announcements from complete per-backend test logs.
+# Backend-scoped records are judged against the backend vocabulary; environment-
+# scoped records are judged against the declared measurement-box vocabulary.
 #
 # A claim absent from one COMPLETE backend log was evaluated there; a claim
 # present in every complete log was not.  The caller owns completeness -- the
@@ -12,16 +12,19 @@
 # Usage:
 #   tools/aggregate-skips.sh \
 #     --known cc --known multidev_cc --known metal --known cuda --known hip \
-#     --run cc /path/to/cc.log --run metal /path/to/metal.log
+#     --known-box m4-max --known-box minix --known-box rog-nv \
+#     --run cc m4-max /path/to/cc.log --run metal m4-max /path/to/metal.log
 #
-# Exit 1 means every known backend was represented and at least one claim was
-# skipped by all of them.  Partial coverage is a loud report but exits 0 because
-# an absent backend may have evaluated the claim.  Malformed input exits 2.
+# Exit 1 means a complete backend or declared-box matrix has a claim skipped in
+# every member. Partial coverage is a loud report but exits 0 because an absent
+# member may have evaluated the claim. Malformed input exits 2.
 
 set -uo pipefail
 
 known=()
+known_boxes=()
 run_backends=()
+run_boxes=()
 run_logs=()
 
 die() {
@@ -40,11 +43,17 @@ while [ $# -gt 0 ]; do
       known+=("$2")
       shift 2
       ;;
+    --known-box)
+      [ $# -ge 2 ] || die "--known-box needs a box"
+      known_boxes+=("$2")
+      shift 2
+      ;;
     --run)
-      [ $# -ge 3 ] || die "--run needs a backend and log"
+      [ $# -ge 4 ] || die "--run needs a backend, box and log"
       run_backends+=("$2")
-      run_logs+=("$3")
-      shift 3
+      run_boxes+=("$3")
+      run_logs+=("$4")
+      shift 4
       ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -74,10 +83,21 @@ for ((i = 0; i < ${#known[@]}; i++)); do
   done
 done
 
+for ((i = 0; i < ${#known_boxes[@]}; i++)); do
+  for ((j = i + 1; j < ${#known_boxes[@]}; j++)); do
+    [ "${known_boxes[$i]}" != "${known_boxes[$j]}" ] ||
+      die "duplicate known box '${known_boxes[$i]}'"
+  done
+done
+
 for ((i = 0; i < ${#run_backends[@]}; i++)); do
   backend=${run_backends[$i]}
+  box=${run_boxes[$i]}
   log=${run_logs[$i]}
   contains "$backend" "${known[@]}" || die "run names unknown backend '$backend'"
+  if [ ${#known_boxes[@]} -gt 0 ]; then
+    contains "$box" "${known_boxes[@]}" || die "run names unknown box '$box'"
+  fi
   [ -r "$log" ] || die "cannot read $backend log $log"
   for ((j = i + 1; j < ${#run_backends[@]}; j++)); do
     [ "$backend" != "${run_backends[$j]}" ] || die "duplicate run backend '$backend'"
@@ -91,12 +111,31 @@ if [ ${#run_backends[@]} -eq 0 ]; then
   report_line "missing backends: $(join_by_comma "${known[@]}")"
   report_line "status: insufficient (0 of ${#known[@]} known backends completed; need at least 2)"
   report_line "result: NOT AGGREGATED"
+  if [ ${#known_boxes[@]} -eq 0 ]; then
+    report_line "completed boxes: <none>"
+    report_line "missing boxes: <none declared>"
+    report_line "environment status: unavailable (target declares no measurement-box matrix)"
+  else
+    report_line "completed boxes: <none>"
+    report_line "missing boxes: $(join_by_comma "${known_boxes[@]}")"
+    report_line "environment status: insufficient (0 of ${#known_boxes[@]} declared boxes completed; need at least 2)"
+  fi
+  report_line "environment result: NOT AGGREGATED"
   exit 0
 fi
 
 missing=()
 for backend in "${known[@]}"; do
   contains "$backend" "${run_backends[@]}" || missing+=("$backend")
+done
+
+completed_boxes=()
+for box in "${known_boxes[@]}"; do
+  contains "$box" "${run_boxes[@]}" && completed_boxes+=("$box")
+done
+missing_boxes=()
+for box in "${known_boxes[@]}"; do
+  contains "$box" "${completed_boxes[@]}" || missing_boxes+=("$box")
 done
 
 report_line "completed backends: $(join_by_comma "${run_backends[@]}")"
@@ -106,18 +145,13 @@ else
   report_line "missing backends: $(join_by_comma "${missing[@]}")"
 fi
 
-if [ ${#run_backends[@]} -lt 2 ]; then
-  report_line "status: insufficient (${#run_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
-  report_line "result: NOT AGGREGATED"
-  exit 0
-fi
-
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-skip-coverage.XXXXXX") ||
   die "cannot create temporary directory"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
 extract_claims() {
+  local scope=$1 log=$2
   awk '
     index($0, "SKIPPED on ") == 1 { human++ }
     index($0, "OCANNL_TOOL_VERDICT_SKIP\t") == 1 {
@@ -125,45 +159,106 @@ extract_claims() {
       fields = split(record, part, "\t")
       machine++
       if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1
-      else if (part[1] == "backend") print part[2] "\t" part[3]
-      else if (part[1] != "environment") malformed = 1
+      else if (part[1] == scope) print part[2] "\t" part[3]
+      else if (part[1] != "backend" && part[1] != "environment") malformed = 1
     }
     END { if (malformed || human != machine) exit 3 }
-  ' "$1" | LC_ALL=C sort -u
+  ' scope="$scope" "$log" | LC_ALL=C sort -u
 }
 
-extract_claims "${run_logs[0]}" >"$tmp/common" ||
-  die "cannot extract compatible skip records from ${run_logs[0]}"
-for ((i = 1; i < ${#run_logs[@]}; i++)); do
-  extract_claims "${run_logs[$i]}" >"$tmp/next" ||
-    die "cannot extract compatible skip records from ${run_logs[$i]}"
-  LC_ALL=C comm -12 "$tmp/common" "$tmp/next" >"$tmp/intersection" ||
-    die "cannot intersect skip records"
-  mv "$tmp/intersection" "$tmp/common" || die "cannot advance skip intersection"
-done
+intersect_claims() {
+  local scope=$1 destination=$2
+  extract_claims "$scope" "${run_logs[0]}" >"$destination" ||
+    die "cannot extract compatible skip records from ${run_logs[0]}"
+  for ((i = 1; i < ${#run_logs[@]}; i++)); do
+    extract_claims "$scope" "${run_logs[$i]}" >"$tmp/next-$scope" ||
+      die "cannot extract compatible skip records from ${run_logs[$i]}"
+    LC_ALL=C comm -12 "$destination" "$tmp/next-$scope" >"$tmp/intersection-$scope" ||
+      die "cannot intersect skip records"
+    mv "$tmp/intersection-$scope" "$destination" || die "cannot advance skip intersection"
+  done
+}
 
-common_count=$(wc -l <"$tmp/common" | tr -d ' ') || die "cannot count common skip records"
-if [ ${#missing[@]} -eq 0 ]; then
-  report_line "status: complete (${#run_backends[@]} of ${#known[@]} known backends completed)"
-  if [ "$common_count" -eq 0 ]; then
-    report_line "result: PASS -- no claim was skipped on every known backend"
-    exit 0
-  fi
-  report_line "result: FAIL -- $common_count claim(s) skipped on every known backend"
-  while IFS=$'\t' read -r test_id claim; do
-    printf 'FAIL: skipped on every known backend: %s: %s\n' "$test_id" "$claim" ||
-      die "cannot write report"
-  done <"$tmp/common"
-  exit 1
-fi
+intersect_claims backend "$tmp/common-backend"
+intersect_claims environment "$tmp/common-environment"
 
-report_line "status: partial (${#run_backends[@]} of ${#known[@]} known backends completed)"
-if [ "$common_count" -eq 0 ]; then
-  report_line "result: CLEAR across completed backends -- absent backends remain unknown"
+failed=0
+
+if [ ${#run_backends[@]} -lt 2 ]; then
+  report_line "status: insufficient (${#run_backends[@]} of ${#known[@]} known backends completed; need at least 2)"
+  report_line "result: NOT AGGREGATED"
 else
-  report_line "result: POTENTIAL -- $common_count claim(s) skipped on every completed backend; absent backends remain unknown"
-  while IFS=$'\t' read -r test_id claim; do
-    printf 'POTENTIAL: skipped on every completed backend: %s: %s\n' "$test_id" "$claim" ||
-      die "cannot write report"
-  done <"$tmp/common"
+  common_count=$(wc -l <"$tmp/common-backend" | tr -d ' ') || die "cannot count common skip records"
+  if [ ${#missing[@]} -eq 0 ]; then
+    report_line "status: complete (${#run_backends[@]} of ${#known[@]} known backends completed)"
+    if [ "$common_count" -eq 0 ]; then
+      report_line "result: PASS -- no claim was skipped on every known backend"
+    else
+      report_line "result: FAIL -- $common_count claim(s) skipped on every known backend"
+      while IFS=$'\t' read -r test_id claim; do
+        printf 'FAIL: skipped on every known backend: %s: %s\n' "$test_id" "$claim" ||
+          die "cannot write report"
+      done <"$tmp/common-backend"
+      failed=1
+    fi
+  else
+    report_line "status: partial (${#run_backends[@]} of ${#known[@]} known backends completed)"
+    if [ "$common_count" -eq 0 ]; then
+      report_line "result: CLEAR across completed backends -- absent backends remain unknown"
+    else
+      report_line "result: POTENTIAL -- $common_count claim(s) skipped on every completed backend; absent backends remain unknown"
+      while IFS=$'\t' read -r test_id claim; do
+        printf 'POTENTIAL: skipped on every completed backend: %s: %s\n' "$test_id" "$claim" ||
+          die "cannot write report"
+      done <"$tmp/common-backend"
+    fi
+  fi
 fi
+
+if [ ${#known_boxes[@]} -eq 0 ]; then
+  report_line "completed boxes: <none>"
+  report_line "missing boxes: <none declared>"
+  report_line "environment status: unavailable (target declares no measurement-box matrix)"
+  report_line "environment result: NOT AGGREGATED"
+else
+  report_line "completed boxes: $(join_by_comma "${completed_boxes[@]}")"
+  if [ ${#missing_boxes[@]} -eq 0 ]; then
+    report_line "missing boxes: <none>"
+  else
+    report_line "missing boxes: $(join_by_comma "${missing_boxes[@]}")"
+  fi
+
+  if [ ${#completed_boxes[@]} -lt 2 ]; then
+    report_line "environment status: insufficient (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed; need at least 2)"
+    report_line "environment result: NOT AGGREGATED"
+  else
+    environment_count=$(wc -l <"$tmp/common-environment" | tr -d ' ') ||
+      die "cannot count common environment skip records"
+    if [ ${#missing_boxes[@]} -eq 0 ]; then
+      report_line "environment status: complete (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
+      if [ "$environment_count" -eq 0 ]; then
+        report_line "environment result: PASS -- no claim was skipped on every declared box"
+      else
+        report_line "environment result: FAIL -- $environment_count claim(s) skipped on every declared box"
+        while IFS=$'\t' read -r test_id claim; do
+          printf 'FAIL: skipped on every declared box: %s: %s\n' "$test_id" "$claim" ||
+            die "cannot write report"
+        done <"$tmp/common-environment"
+        failed=1
+      fi
+    else
+      report_line "environment status: partial (${#completed_boxes[@]} of ${#known_boxes[@]} declared boxes completed)"
+      if [ "$environment_count" -eq 0 ]; then
+        report_line "environment result: CLEAR across completed boxes -- absent boxes remain unknown"
+      else
+        report_line "environment result: POTENTIAL -- $environment_count claim(s) skipped on every completed box; absent boxes remain unknown"
+        while IFS=$'\t' read -r test_id claim; do
+          printf 'POTENTIAL: skipped on every completed box: %s: %s\n' "$test_id" "$claim" ||
+            die "cannot write report"
+        done <"$tmp/common-environment"
+      fi
+    fi
+  fi
+fi
+
+exit "$failed"

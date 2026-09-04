@@ -251,8 +251,9 @@ type skip_aggregation = [ `Backend | `Environment ]
     distinct when sweep logs are intersected across backends. [scope] is [backend] by default. Pass
     [~aggregation:`Environment] when the leg is gated by a host or configuration capability rather
     than the selected backend, such as a compiler target, preprocessing flag or filesystem feature;
-    its human announcement remains visible, but a backend sweep cannot mistake that environment gate
-    for unsupported backend coverage.
+    its human announcement remains visible, and the forced fleet sweep aggregates it across the
+    measurement boxes declared by [benchmarks/fixtures/DIGESTS.txt] instead of mistaking it for
+    unsupported backend coverage.
 
     Use it in place of a bare [p name true]: that line is byte-identical to a verified run's, so
     neither the transcript nor a reviewer can tell the claim was never evaluated — which is how a
