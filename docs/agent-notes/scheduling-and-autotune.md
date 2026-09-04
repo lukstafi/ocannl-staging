@@ -549,10 +549,15 @@ files.
   per-axis index maps cannot express `f / M, f mod M`), so a tile's k-extent is judged against the
   innermost contraction extent alone and `bk` values above it are refuted by the ordinary
   divisibility gates; and the whole-`m_k` forms (the unstaged `bk = 0` tensorize, the CPU
-  whole-triple) keep the outer contraction loops above the block statement, so the accumulator
-  fragment is loaded and stored once per outer-contraction iteration there. Pinned by
+  whole-triple) keep the outer contraction loops above the block statement. Accumulator contraction
+  then promotes one logical fragment around that whole loop chain, so this shape is
+  **fragment-scoped for capability purposes**: a wide-f16 backend that advertises only
+  per-statement MMA must not seed even `bk = 0` for a multi-axis contraction. Conversely, a
+  staged split whose padded block count is one has no nontrivial enclosing reduction and remains
+  per-statement. Pinned by
   `test/operations/schedule_contraction_nest.ml` (detection, every family's construction, GPU
-  blocktile execution, CPU-family execution on cc).
+  blocktile execution, CPU-family execution on cc) and the scope negative control in
+  `test/operations/sketch_family_tree.ml`.
 - Non-multiple extents PAD in both GPU matmul pipelines, not only the tensorized one
   (gh-ocannl-730). `Sketch_families.pad_composition_ok` is the shared judgment both consult, from
   their seeding gate and from their `pad_to` triple alike: a geometry may replace a divisibility

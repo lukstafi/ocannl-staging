@@ -71,7 +71,7 @@ let gpu_limits =
               ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
                 (8, 8, 8) );
             ];
-          mma_f16_wide_acc = false;
+          mma_f16_wide_acc_scopes = [];
           mma_staged_layouts = [];
           mma_pipeline_depths = [];
         };

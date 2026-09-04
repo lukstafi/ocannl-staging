@@ -46,7 +46,7 @@ let gpu_plain_limits =
           Ir.Backend_intf.mma_simd_width = 32;
           mma_tile = (8, 8, 8);
           mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
-          mma_f16_wide_acc = false;
+          mma_f16_wide_acc_scopes = [];
           mma_staged_layouts = [];
           mma_pipeline_depths = [];
         };
@@ -64,7 +64,7 @@ let gpu_full_limits =
           Ir.Backend_intf.mma_simd_width = 32;
           mma_tile = (8, 8, 8);
           mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
-          mma_f16_wide_acc = false;
+          mma_f16_wide_acc_scopes = [];
           mma_staged_layouts = [ ((f32, f32, f32), Ir.Backend_intf.Mma_swizzled_b128) ];
           mma_pipeline_depths = [ 2 ];
         };
@@ -345,15 +345,15 @@ let () =
       ~limits:cpu_limits opt_h
   in
   Numerics.set_policy saved_policy;
-  (* gh-ocannl-680: the wide-f16 seeding gate. A GPU capability advertising the uniform-f16 triple
-     seeds mma candidates under the default policy; under [Fp16_wide] those seeds are withheld
-     exactly where the capability lacks the f32-accumulate uniform-f16 arm ([mma_f16_wide_acc] —
-     Metal, structurally) and kept where it has one (CUDA sm_80+; HIP since gh-ocannl-789). The
-     mixed [(f16, f16, f32)] triple is advertised too, standing in for the f32-storage destinations
-     the gate must NOT touch — the gate keys on the DESTINATION's storage precision, which for
-     [opt_h] is f16. *)
+  (* gh-ocannl-680/836: the wide-f16 seeding gate is per emission scope. A GPU capability
+     advertising the uniform-f16 triple seeds every scope under the default policy. Under
+     [Fp16_wide], no wide scope removes every uniform-f16 mma seed; the per-statement scope alone
+     keeps only eligible single-statement seeds (CUDA sm_80+); both scopes keep the full family (HIP
+     since gh-ocannl-789 and Metal since gh-ocannl-837). The mixed [(f16, f16, f32)] triple is
+     advertised too, standing in for the f32-storage destinations the gate must NOT touch — the gate
+     keys on the DESTINATION's storage precision, which for [opt_h] is f16. *)
   let f16t = Ir.Backend_intf.Mma_f16 in
-  let gpu_f16_limits ~wide_acc =
+  let gpu_f16_limits ~wide_scopes =
     {
       Ir.Backend_intf.no_hardware_limits with
       mma =
@@ -362,25 +362,100 @@ let () =
             Ir.Backend_intf.mma_simd_width = 32;
             mma_tile = (8, 8, 8);
             mma_format_tiles = [ ((f16t, f16t, f16t), (8, 8, 8)); ((f16t, f16t, f32), (8, 8, 8)) ];
-            mma_f16_wide_acc = wide_acc;
+            mma_f16_wide_acc_scopes = wide_scopes;
             mma_staged_layouts = [];
             mma_pipeline_depths = [];
           };
     }
   in
   let has_mma seeds = List.exists seeds ~f:(fun p -> p.Autotune.sk_mma) in
+  let has_unstaged_mma seeds =
+    List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_bk = 0)
+  in
+  let has_staged_mma seeds =
+    List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_bk > 0)
+  in
   let f16_default =
     section "half-prec gpu, f16 tiles, default policy" ~is_gpu:true ~is_cpu:false
-      ~limits:(gpu_f16_limits ~wide_acc:false) opt_h
+      ~limits:(gpu_f16_limits ~wide_scopes:[]) opt_h
   in
   Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
   let f16_wide_no_arm =
-    section "half-prec gpu, f16 tiles, wide policy, no wide-accumulate arm" ~is_gpu:true
-      ~is_cpu:false ~limits:(gpu_f16_limits ~wide_acc:false) opt_h
+    section "half-prec gpu, f16 tiles, wide policy, no wide-accumulate scope" ~is_gpu:true
+      ~is_cpu:false ~limits:(gpu_f16_limits ~wide_scopes:[]) opt_h
   in
-  let f16_wide_arm =
-    section "half-prec gpu, f16 tiles, wide policy, wide-accumulate arm" ~is_gpu:true ~is_cpu:false
-      ~limits:(gpu_f16_limits ~wide_acc:true) opt_h
+  let f16_wide_no_arm_enablement, f16_wide_no_arm_disablement =
+    Autotune.placement_enablement ~limits:(gpu_f16_limits ~wide_scopes:[]) ~static_indices:[]
+      ~base:opt_h ~allmat:opt_h
+  in
+  let f16_wide_statement =
+    section "half-prec gpu, f16 tiles, wide policy, per-statement scope only" ~is_gpu:true
+      ~is_cpu:false
+      ~limits:(gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ])
+      opt_h
+  in
+  let f16_wide_both =
+    section "half-prec gpu, f16 tiles, wide policy, both emission scopes" ~is_gpu:true ~is_cpu:false
+      ~limits:
+        (gpu_f16_limits
+           ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ])
+      opt_h
+  in
+  (* A zero explicit k-block is only statement-scoped when the contraction has one axis. With an
+     inherited outer contraction loop ([m_ko]), the tensorized accumulator survives across that loop
+     even though [sk_bk = 0], so it needs the fragment-scope arm too. This multi-axis shape is the
+     negative control for the old [bk]-only classification: a per-statement-only capability must not
+     admit even its nominally unstaged MMA seeds. *)
+  let check_wide_scope_edges () =
+    Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+    let per_statement = Ir.Backend_intf.Mma_per_statement in
+    let fragment_scope = Ir.Backend_intf.Mma_fragment_scope in
+    let round_tripped_scope =
+      Ir.Backend_intf.mma_emission_scope_of_sexp
+        (Ir.Backend_intf.sexp_of_mma_emission_scope per_statement)
+    in
+    let statement_limits = gpu_f16_limits ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement ] in
+    let both_limits =
+      gpu_f16_limits
+        ~wide_scopes:[ Ir.Backend_intf.Mma_per_statement; Ir.Backend_intf.Mma_fragment_scope ]
+    in
+    let seeds limits opt = Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt in
+    (* A staged split whose padded block count is one does not extend the accumulator beyond its
+       single Tile_mma statement. *)
+    let one_block_a =
+      NTDSL.init ~l:"one_block_a" ~prec:Ir.Ops.half ~o:[ 32; 16 ] ~f:(fun _ -> 0.25) ()
+    in
+    let one_block_b =
+      NTDSL.init ~l:"one_block_b" ~prec:Ir.Ops.half ~o:[ 16; 32 ] ~f:(fun _ -> 0.25) ()
+    in
+    let%op one_block = one_block_a +* "ik;kj=>ij" one_block_b in
+    let one_block_statement =
+      seeds statement_limits (with_lowering ~name:"sft_one_block" one_block)
+    in
+    let whh = 2 and wee = 8 in
+    let wide_outer_w =
+      NTDSL.init ~l:"wide_outer_w" ~prec:Ir.Ops.half ~o:[ nn ] ~i:[ whh; wee ] ~f:(fun _ -> 0.25) ()
+    in
+    let wide_outer_x =
+      NTDSL.init ~l:"wide_outer_x" ~prec:Ir.Ops.half ~b:[ 2; 16 ] ~o:[ whh; wee ]
+        ~f:(fun _ -> 0.25)
+        ()
+    in
+    let%op wide_outer = wide_outer_w * wide_outer_x in
+    let opt_wide_outer = with_lowering ~name:"sft_wide_outer" wide_outer in
+    let wide_outer_statement = seeds statement_limits opt_wide_outer in
+    let wide_outer_both = seeds both_limits opt_wide_outer in
+    Numerics.set_policy saved_policy;
+    Verdict.p "MMA emission-scope serialization and comparison distinguish accumulator lifetimes"
+      (Ir.Backend_intf.equal_mma_emission_scope round_tripped_scope per_statement
+      && Ir.Backend_intf.compare_mma_emission_scope per_statement fragment_scope <> 0);
+    Verdict.p "a one-block staged matmul uses the per-statement wide-f16 capability"
+      (has_staged_mma one_block_statement);
+    Verdict.p
+      "a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no \
+       explicit k-block"
+      ((not (has_mma wide_outer_statement))
+      && has_unstaged_mma wide_outer_both && has_staged_mma wide_outer_both)
   in
   (* The CPU register tiling has the same wide-policy divergence case: under [Fp16_wide] with
      [narrow_compute_f32 = false] on a native-fp16 target, compute resolves half while the
@@ -395,9 +470,14 @@ let () =
   in
   Numerics.set_policy saved_policy;
   Verdict.p
-    "the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the \
-     wide-accumulate arm"
-    (has_mma f16_default && (not (has_mma f16_wide_no_arm)) && has_mma f16_wide_arm);
+    "the wide-f16 policy withholds uniform-f16 mma seeds exactly in unsupported emission scopes"
+    (has_unstaged_mma f16_default && has_staged_mma f16_default
+    && (not (has_mma f16_wide_no_arm))
+    && has_unstaged_mma f16_wide_statement
+    && (not (has_staged_mma f16_wide_statement))
+    && has_unstaged_mma f16_wide_both && has_staged_mma f16_wide_both);
+  Verdict.p "placement eligibility omits a wide-f16 site with no applicable MMA scope"
+    (Set.is_empty f16_wide_no_arm_enablement && Set.is_empty f16_wide_no_arm_disablement);
   Verdict.p
     "the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates \
      (accumulator residency diverges from compute)"
@@ -721,6 +801,7 @@ let () =
   (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
   | None -> Stdio.printf "cpu traffic: no site detected\n"
   | Some tree -> traffic_pins "cpu simd32" ~limits:cpu_limits ~elt_bytes:4 ~n_extent:64 tree opt);
+  check_wide_scope_edges ();
   (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
      tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
      "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)
@@ -759,7 +840,7 @@ let () =
                 Ir.Backend_intf.mma_simd_width = 32;
                 mma_tile = (16, 16, 16);
                 mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
-                mma_f16_wide_acc = false;
+                mma_f16_wide_acc_scopes = [];
                 mma_staged_layouts = [];
                 mma_pipeline_depths = [];
               };

@@ -568,7 +568,7 @@ end = struct
        mma legs follow — not by being withheld, but by swapping arms: [mma_combo] renders the
        uniform-f16 combination against a [float] accumulator fragment, converting at the [d]
        boundary (gh-ocannl-789), so width stays schedule-uniform WITH the tensor unit rather than
-       against it, and [mma_f16_wide_acc] answers true. *)
+       against it, and [mma_f16_wide_acc_scopes] advertises both emission scopes. *)
     let accum_prec prec =
       match prec with
       | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
@@ -641,8 +641,9 @@ end = struct
            mutually exclusive by construction. Under [Fp16_auto]/[Fp16_narrow] the accumulator
            fragment is itself f16, so the [d] boundary is rocWMMA's own load/store. Under
            [Fp16_wide] (gh-ocannl-789) the accumulator is [float] against the same f16 STORAGE, and
-           [mma_d_boundary] converts once at each end -- which is what lets [mma_f16_wide_acc]
-           answer true and the uniform-f16 seeds survive the wide policy on this backend. *)
+           [mma_d_boundary] converts once at each end -- which is what lets
+           [mma_f16_wide_acc_scopes] advertise both scopes and the uniform-f16 seeds survive the
+           wide policy on this backend. *)
         | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ when Numerics.fp16_accum_wide () ->
             Some ("rocwmma::float16_t", "float", "rocwmma::float16_t", 8, 8)
         | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
@@ -2062,7 +2063,8 @@ end = struct
                        accumulator with the f16 STORAGE destination and [mma_d_boundary] converts
                        elementwise at each end — so the wide policy no longer costs this backend its
                        f16 tensor-unit legs (gh-ocannl-680's stated remainder). *)
-                    mma_f16_wide_acc = true;
+                    mma_f16_wide_acc_scopes =
+                      [ Backend_intf.Mma_per_statement; Backend_intf.Mma_fragment_scope ];
                     (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load here
                        (gh-ocannl-481 item 3, D3). *)
                     mma_staged_layouts = [];

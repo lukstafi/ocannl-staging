@@ -341,7 +341,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_f32),
                   (16, 16, 16) );
               ];
-            mma_f16_wide_acc = false;
+            mma_f16_wide_acc_scopes = [];
             mma_staged_layouts = [];
             mma_pipeline_depths = [];
           };
@@ -412,7 +412,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
                   (16, 16, 16) );
               ];
-            mma_f16_wide_acc = false;
+            mma_f16_wide_acc_scopes = [];
             mma_staged_layouts =
               (if advertised then
                  [

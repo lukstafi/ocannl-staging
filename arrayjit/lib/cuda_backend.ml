@@ -631,9 +631,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Bfloat16_prec _ -> Ops.single
       (* gh-ocannl-680: [Fp16_wide] gives f16 accumulators f32 residency on every backend; here the
          uniform-f16 mma legs keep width-uniform with it through the f32-accumulate inline-PTX
-         m16n8k16 arm (the fragment layouts are shared by .f16 and .bf16), seeded via
-         [mma_f16_wide_acc]. Under [Fp16_auto]/[Fp16_narrow] f16 keeps storage residency, matching
-         the f16-accumulate wmma triple — the pre-gh-680 behavior. *)
+         m16n8k16 arm (the fragment layouts are shared by .f16 and .bf16), seeded via the
+         per-statement entry in [mma_f16_wide_acc_scopes]. Under [Fp16_auto]/[Fp16_narrow] f16 keeps
+         storage residency, matching the f16-accumulate wmma triple — the pre-gh-680 behavior. *)
       | Ops.Half_prec _ when Numerics.fp16_accum_wide () -> Ops.single
       | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
       | _ -> prec
@@ -2452,11 +2452,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                        through the f32-accumulate inline-PTX m16n8k16 arm (sm_80+, sharing the bf16
                        form's body). The advertised (16, 16, 16) tile stays valid for it — its
                        divisibility constraints (m%16, n%8, k%16) are implied — merely conservative
-                       about n. Below sm_80 the arm cannot render, so the capability answers false
-                       and the seeding gate withholds uniform-f16 candidates there under the wide
-                       policy instead of timing scalar fallbacks under a tensorized label
-                       (gh-ocannl-545). *)
-                    mma_f16_wide_acc = cc >= 80;
+                       about n. The scope list contains only [Mma_per_statement]: CUDA's wmma
+                       combination table has no uniform-f16 wide fragment arm, so a staged outer-k
+                       split must not inherit this inner tile's capability (gh-ocannl-836). Below
+                       sm_80 the arm cannot render and the list is empty, withholding every
+                       uniform-f16 candidate under the wide policy instead of timing scalar
+                       fallbacks under a tensorized label (gh-ocannl-545). *)
+                    mma_f16_wide_acc_scopes =
+                      (if cc >= 80 then [ Backend_intf.Mma_per_statement ] else []);
                     (* Swizzled staged tiles (gh-ocannl-481 item 3, D3): only the inline-PTX arms
                        can read them, and only in the orientations the staged sketches mint. That is
                        the uniform-bf16 combination — both its operands' fragment registers hold

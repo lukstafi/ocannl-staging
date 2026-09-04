@@ -246,7 +246,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_f32),
                   (16, 16, 8) );
               ];
-            mma_f16_wide_acc = false;
+            mma_f16_wide_acc_scopes = [];
             mma_staged_layouts = [];
             mma_pipeline_depths = [];
           };
@@ -488,7 +488,19 @@ let () =
   let want_hw = compile_serial ~name:"mm_h_wide_serial" mchw0 in
   let%op mchw1 = mwa * mwb in
   Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
-  let got_hw, census_hw = compile_mma_with_census ~name:"mm_h_wide_mma" mchw1 in
+  let wide_seed_scopes = ref None in
+  let got_hw, census_hw =
+    compile_mma_with_census
+      ~inspect:(fun opt ->
+        let ctx = Context.auto () in
+        let limits = Context.hardware_limits ctx in
+        let seeds = Autotune.sketch_seed_params ~is_gpu:on_gpu ~is_cpu:(not on_gpu) ~limits opt in
+        let has_mma_with predicate =
+          List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && predicate p.Autotune.sk_bk)
+        in
+        wide_seed_scopes := Some (has_mma_with (( = ) 0), has_mma_with (fun bk -> bk > 0)))
+      ~name:"mm_h_wide_mma" mchw1
+  in
   Numerics.set_policy saved_policy;
   p_all2 "Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise" want_hw
     wide_ref_hw ~f:Float.equal;
@@ -496,6 +508,28 @@ let () =
     "Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not \
      the schedule, sets the width)"
     got_hw wide_ref_hw ~f:Float.equal;
+  (let claim = "Fp16_wide mma seeds match the backend's advertised emission scopes" in
+   if on_gpu then
+     let wide_scopes =
+       match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+       | Some m -> m.Ir.Backend_intf.mma_f16_wide_acc_scopes
+       | None -> []
+     in
+     let advertised scope =
+       List.mem wide_scopes scope ~equal:Ir.Backend_intf.equal_mma_emission_scope
+     in
+     match !wide_seed_scopes with
+     | Some (unstaged, staged) ->
+         (* This site's K=32 staged menu contains bk=32, hence a one-block staged form whose
+            accumulator is still per-statement. Multi-block staged forms require fragment scope; the
+            k=144 discriminator below pins that complementary case. *)
+         p claim
+           (Bool.equal unstaged (advertised Ir.Backend_intf.Mma_per_statement)
+           && Bool.equal staged
+                (advertised Ir.Backend_intf.Mma_per_statement
+                || advertised Ir.Backend_intf.Mma_fragment_scope))
+     | None -> p claim false
+   else skipped claim);
   (let src = Generated.read "mm_h_wide_mma" in
    let has s = String.is_substring src ~substring:s in
    let intrinsics =
@@ -523,18 +557,25 @@ let () =
        && not (has "== 0)")
      else if on_gpu then
        (* CUDA: the f32-accumulate inline-PTX arm where the device advertises it (sm_80+); below
-          that floor the capability answers [mma_f16_wide_acc = false] and the deliberate rendering
-          is the recorded scalar fallback — derive the expectation from the advertised capability
-          rather than assuming the arm (Codex P1 round 1 on staging PR #477). *)
-       let wide_arm =
+          that floor the capability advertises no wide scope and the deliberate rendering is the
+          recorded scalar fallback — derive the expectation from the advertised capability rather
+          than assuming the arm (Codex P1 round 1 on staging PR #477). The fragment scope remains
+          absent even on sm_80+: that is what prevents staged seeds from narrowing at each [k_o]
+          boundary (gh-ocannl-836). *)
+       let wide_scopes =
          match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-         | Some m -> m.Ir.Backend_intf.mma_f16_wide_acc
-         | None -> false
+         | Some m -> m.Ir.Backend_intf.mma_f16_wide_acc_scopes
+         | None -> []
        in
+       let has_scope scope =
+         List.mem wide_scopes scope ~equal:Ir.Backend_intf.equal_mma_emission_scope
+       in
+       let wide_arm = has_scope Ir.Backend_intf.Mma_per_statement in
        if wide_arm then
          intrinsics && has "(mma-f16)"
          && has "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-         && not (has "nvcuda::wmma")
+         && (not (has "nvcuda::wmma"))
+         && not (has_scope Ir.Backend_intf.Mma_fragment_scope)
        else fallback && (not (has "nvcuda::wmma")) && has "== 0)"
      else has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
    in

@@ -265,13 +265,21 @@ tree leaves = flat enumeration: true
  7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  9  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-== half-prec gpu, f16 tiles, wide policy, no wide-accumulate arm: 5 seeds ==
+== half-prec gpu, f16 tiles, wide policy, no wide-accumulate scope: 5 seeds ==
  0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
  4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
-== half-prec gpu, f16 tiles, wide policy, wide-accumulate arm: 10 seeds ==
+== half-prec gpu, f16 tiles, wide policy, per-statement scope only: 7 seeds ==
+ 0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:true mma:true simd:32 bm:16  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:true mma:true simd:32 bm:32  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+== half-prec gpu, f16 tiles, wide policy, both emission scopes: 10 seeds ==
  0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
@@ -285,7 +293,8 @@ tree leaves = flat enumeration: true
 == half-prec cpu seeds, wide policy + narrow_compute_f32 off, native fp16: 2 seeds ==
  0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-the wide-f16 policy withholds uniform-f16 mma seeds exactly where the backend lacks the wide-accumulate arm: true
+the wide-f16 policy withholds uniform-f16 mma seeds exactly in unsupported emission scopes: true
+placement eligibility omits a wide-f16 site with no applicable MMA scope: true
 the wide-f16 policy under narrow_compute_f32 off omits the CPU register-tiled candidates (accumulator residency diverges from compute): true
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
@@ -602,6 +611,9 @@ cpu simd32: every leaf path commits its pipeline's shape level: true
   unpriced geometry          0 bytes
     fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16
   lattice leaf               (none in this tree)
+MMA emission-scope serialization and comparison distinguish accumulator lifetimes: true
+a one-block staged matmul uses the per-statement wide-f16 capability: true
+a multi-axis contraction requires fragment-scope wide-f16 accumulation even with no explicit k-block: true
 == lattice under a 2048-byte workgroup-memory cap ==
 surviving lattice leaves 4; box-level refutations 13, e.g.:
   fusion=unfused > pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=16: staged operand tiles need 2560 bytes of workgroup memory, exceeding the 2048-byte limit

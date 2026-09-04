@@ -924,13 +924,13 @@ val placement_enablement :
     [(enablement, disablement)]:
 
     - [enablement]: operand/destination nodes of an mma-eligible matmul site (the backend advertises
-      a format tile for the site's storage-precision triple, whole-routine or per-fission-segment —
-      the granularity the seeders detect at) that exists in the all-materialized lowering but has no
-      eligible counterpart under default placements. Materializing such a node is what makes the
-      tensorized family expressible — the flip changes the feasible set, not just the objective,
-      which the per-node recompute-cost bound has no term for (on gh-558's [mlp_wide]/hip/bf16, cost
-      ranking buried the family-unlocking cast twins below four no-op [`Inline] flips and a budget-5
-      chain found nothing).
+      a format tile and the wide-f16 policy's required scope for the site's unstaged form,
+      whole-routine or per-fission-segment — the granularity the seeders detect at) that exists in
+      the all-materialized lowering but has no eligible counterpart under default placements.
+      Materializing such a node is what makes the tensorized family expressible — the flip changes
+      the feasible set, not just the objective, which the per-node recompute-cost bound has no term
+      for (on gh-558's [mlp_wide]/hip/bf16, cost ranking buried the family-unlocking cast twins
+      below four no-op [`Inline] flips and a budget-5 chain found nothing).
     - [disablement]: operand/destination nodes of sites already eligible under default placements.
       An [`Inline] flip of a node in {e either} set can only move away from an eligible site —
       {!rank_flip_candidates} demotes those.

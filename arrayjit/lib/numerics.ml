@@ -22,12 +22,13 @@ open Base
       not write code that assumes [Fp16_auto] equals [Fp16_narrow] — ask the backend's
       [accum_prec]/seeding instead.
     - [Fp16_wide] (config [false]): f16 reduction accumulators reside in f32 on every backend,
-      narrowing once per nest — the strict cross-backend-uniform semantics. A backend whose
-      tensor-unit f16 legs cannot accumulate f32 ({!Backend_intf.mma_capability.mma_f16_wide_acc} is
-      false) has its uniform-f16 mma seeds withheld, per the gh-ocannl-545 seeding-vs-emission
-      discipline — widening only the serial legs would restore the schedule-dependent width
-      gh-ocannl-663 removed. Metal advertises this capability since gh-ocannl-837 through a mixed
-      [simdgroup_matrix] accumulator and boundary conversion.
+      narrowing once per nest — the strict cross-backend-uniform semantics. Backends whose
+      tensor-unit f16 legs cannot accumulate f32 in the required emission scope
+      ({!Backend_intf.mma_capability.mma_f16_wide_acc_scopes} omits it) have those uniform-f16 mma
+      seeds withheld, per the gh-ocannl-545 seeding-vs-emission discipline — widening only the
+      serial legs would restore the schedule-dependent width gh-ocannl-663 removed. Metal advertises
+      both scopes since gh-ocannl-837 through mixed [simdgroup_matrix] accumulation and boundary
+      conversion.
     - [Fp16_narrow] (config [true]): compute fp16 in fp16 on CPU targets that have native 16-bit
       arithmetic (ARMv8.2-FP16, AVX512-FP16) — gh-ocannl-516's opt-in, trading fp16's 10-bit
       mantissa and 65504 range for a doubled lane count. On targets that merely promote to float it

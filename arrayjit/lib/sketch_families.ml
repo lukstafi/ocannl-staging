@@ -209,35 +209,38 @@ let mma_format_triples ~a_prec ~b_prec ~d_prec =
           List.map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
               (a_format, b_format, d_format)))
 
-(* gh-ocannl-680: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only where the
-   backend's uniform-f16 storage arm accumulates f32 ([mma_f16_wide_acc] — CUDA's inline-PTX
-   m16n8k16 arm on sm_80+, HIP's converted rocWMMA d boundary since gh-ocannl-789, and Metal's
-   converted [thread_elements()] boundary since gh-ocannl-837); elsewhere the seeds are withheld and
-   the serial legs carry the f32 residency via [accum_prec], keeping the accumulation width
-   schedule-uniform per backend (gh-ocannl-545/663). Consulting [Numerics.fp16_accum_wide] here —
-   the same predicate the emission hooks consult — is what keeps seeding and emission from drifting
-   apart on which f16 sites tensorize. Applied in the tile AND staged-layout lookups, so no seed
-   escapes the gate. *)
-let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~d_prec =
+(* gh-ocannl-680/836: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only in an
+   emission scope where the backend's uniform-f16 arm accumulates f32. CUDA sm_80+ supports the
+   per-statement inline-PTX m16n8k16 scope but not the persistent-fragment scope; HIP's converted
+   rocWMMA d boundary supports both since gh-ocannl-789, and Metal's converted [thread_elements()]
+   boundary supports both since gh-ocannl-837. Consulting the scope list here keeps a staged outer-k
+   split from acquiring an extra f16 boundary merely because the same intrinsic is wide over its
+   inner tile. *)
+let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~scope ~d_prec =
   (match d_prec with Ir.Ops.Half_prec _ -> true | _ -> false)
   && Ir.Numerics.fp16_accum_wide ()
-  && not mma.Ir.Backend_intf.mma_f16_wide_acc
+  && not
+       (List.mem mma.Ir.Backend_intf.mma_f16_wide_acc_scopes scope
+          ~equal:Ir.Backend_intf.equal_mma_emission_scope)
 
 let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
-  if fp16_wide_withholds mma ~d_prec then None
-  else
-    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-        List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+
+let mma_tile_for_precisions_in_scope (mma : Ir.Backend_intf.mma_capability) ~scope ~a_prec ~b_prec
+    ~d_prec =
+  if fp16_wide_withholds mma ~scope ~d_prec then None
+  else mma_tile_for_precisions mma ~a_prec ~b_prec ~d_prec
 
 (* The swizzled staged layout, if any, that the backend can read for this site's formats
-   (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. *)
+   (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. Operand layout is
+   independent of the accumulator lifetime; the geometry that consumes this result applies the
+   wide-f16 scope gate separately. *)
 let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec
     : LL.swizzle_kind option =
-  if fp16_wide_withholds mma ~d_prec then None
-  else
-    List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-        List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
-    |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
+  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+  |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -639,6 +642,14 @@ let pad_composition_ok ~n_staged ~n_operands = n_operands > 0 && n_staged = n_op
 (* Blocks of size [b] covering a possibly padded extent [n]. *)
 let blocks_of n b = (n + b - 1) / b
 
+let mma_scope_of_reduction_extents extents =
+  if List.exists extents ~f:(fun extent -> extent > 1) then Ir.Backend_intf.Mma_fragment_scope
+  else Ir.Backend_intf.Mma_per_statement
+
+let matmul_mma_scope (site : matmul_site) ~bk =
+  mma_scope_of_reduction_extents
+    (List.map site.m_ko ~f:snd @ if bk > 0 then [ blocks_of site.m_nk bk ] else [])
+
 (** {2 Convolution detection and the implicit-GEMM sketch (gh-ocannl-493)}
 
     A convolution is a matmul over a virtual im2col operand. Conv einsums lower to affine-indexed
@@ -689,6 +700,9 @@ type conv_site = {
   c_zeroed : bool;
   c_fma : bool;
 }
+
+let conv_mma_scope (site : conv_site) =
+  mma_scope_of_reduction_extents (List.map site.c_axes ~f:(fun cx -> cx.cx_nk))
 
 let detect_conv_procedural (llc : LL.t) : conv_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
@@ -2322,7 +2336,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
         match (is_gpu, limits.Ir.Backend_intf.mma) with
         | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
             match
-              mma_tile_for_precisions mma
+              mma_tile_for_precisions_in_scope mma ~scope:(conv_mma_scope site)
                 ~a_prec:(Lazy.force site.c_a.Ir.Tnode.storage_prec)
                 ~b_prec:(Lazy.force site.c_b.Ir.Tnode.storage_prec)
                 ~d_prec:(Lazy.force site.c_d.Ir.Tnode.storage_prec)
@@ -2894,6 +2908,18 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                [Schedule.apply]: an inapplicable twin is refuted with its witness, not merely
                failed. *)
             let staged_layout = mma_staged_layout_for_precisions mma ~a_prec ~b_prec ~d_prec in
+            let scope_of_bk bk = matmul_mma_scope site ~bk in
+            let scope_name = function
+              | Ir.Backend_intf.Mma_per_statement -> "per-statement"
+              | Ir.Backend_intf.Mma_fragment_scope -> "persistent-fragment"
+            in
+            let wide_scope_ok scope = not (fp16_wide_withholds mma ~scope ~d_prec) in
+            let wide_scope_witness scope =
+              Printf.sprintf
+                "Fp16_wide requires a wide uniform-f16 accumulator in the %s emission scope, which \
+                 the backend does not advertise"
+                (scope_name scope)
+            in
             let b128_units_ok prec extent =
               let bytes = extent * Ir.Ops.prec_in_bytes prec in
               bytes % 16 = 0
@@ -2977,17 +3003,20 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                        ~box_verdict:(fun bk_lo _bk_hi ->
                                          staged_tiles_exceed ~bm ~bn:w ~bk:bk_lo ~depth:1)
                                        ~singleton:(fun bk ->
-                                         leaf
-                                           {
-                                             base_params with
-                                             sk_gpu = true;
-                                             sk_mma = true;
-                                             sk_simd = w;
-                                             sk_bm = bm;
-                                             sk_bn = w;
-                                             sk_bk = bk;
-                                             sk_batch_grid = batch_grid;
-                                           }))))))) )
+                                         if not (wide_scope_ok (scope_of_bk bk)) then
+                                           Sspace.Refuted (wide_scope_witness (scope_of_bk bk))
+                                         else
+                                           leaf
+                                             {
+                                               base_params with
+                                               sk_gpu = true;
+                                               sk_mma = true;
+                                               sk_simd = w;
+                                               sk_bm = bm;
+                                               sk_bn = w;
+                                               sk_bk = bk;
+                                               sk_batch_grid = batch_grid;
+                                             }))))))) )
             in
             subt (fun () ->
                 choice
@@ -2997,7 +3026,11 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                        ( Family_decision.Geometry
                            (Gpu_mma { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = 0; g_tn = 0 }),
                          refute_unless
-                           ([ nmul "bm" bm ~of_:"m" tm_t; nmul "bn" bn ~of_:"n" tn_t ]
+                           ([
+                              nmul "bm" bm ~of_:"m" tm_t;
+                              nmul "bn" bn ~of_:"n" tn_t;
+                              (wide_scope_ok (scope_of_bk bk), wide_scope_witness (scope_of_bk bk));
+                            ]
                            @ (match staged_tiles_exceed ~bm ~bn ~bk ~depth:1 with
                              | Some w -> [ (false, w) ]
                              | None -> [])
