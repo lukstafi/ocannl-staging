@@ -3,6 +3,7 @@ every scanner command-line prefix belongs to the runtime grammar: true
 runtime-generated command-line spellings remain config tokens: true
 runtime-rejected mixed command-line spellings are not config tokens: true
 a counted alternate separator recovers the runtime key/value boundary: true
+an undeclared alternate separator is classified so the scan can refuse it: true
 counted one-word documentation assignments remain config tokens: true
 non-OCANNL API and math assignments are not documentation config tokens: true
 a real documented OCANNL assignment remains a config token: true
@@ -10,6 +11,7 @@ every config-usage direct refusal format is observed: true
 the config-usage refusal control emits no unexpected diagnostic: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:7f7db667dc63d73faefa570451cf5f2b] ambiguous command-line value
   [scanner-refusal:7a3d690e9ef5541a1c754952c6cf6877] ambiguous bare config
   [scanner-refusal:200477f5fecf3e08ff5055af77a00298] prefix-free config flag
   [scanner-refusal:8acb2b9087cf4a7e4112382c5e058e1a] Utils.known_config_keys
@@ -26,6 +28,7 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:319310c8c133f76c009e4954fa7fc7de] runtime-generated command-line spellings
   [scanner-refusal:1a89fa77e81d61087dc6e598948877ea] runtime-rejected mixed command-line
   [scanner-refusal:0e70daaacc716dc0bae79f3c55148dff] alternate separator recovers
+  [scanner-refusal:ebb0dca085588641133d48ef9f80a504] undeclared alternate separator
   [scanner-refusal:1eca4460778f143859eea42da85bbd72] one-word documentation assignments
   [scanner-refusal:7371fdf36816a0013ba82ee26c16beea] documentation config tokens
   [scanner-refusal:b8ac42648b6918233995586551724f6f] documented OCANNL assignment

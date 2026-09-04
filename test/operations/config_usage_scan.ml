@@ -83,11 +83,27 @@ let ambiguous_cli_value_mentions =
       "print_decimals_precision-7",
       "print_decimals_precision",
       1 );
+    ( "docs/agent-notes/build-and-test.md",
+      "--ocannl_",
+      "print_decimals_precision-7",
+      "print_decimals_precision",
+      1 );
   ]
 
 let declared_ambiguous_cli_value_key ~path token =
   List.find_map ambiguous_cli_value_mentions ~f:(fun (tracked_path, prefix, suffix, key, _) ->
       Option.some_if (String.equal path tracked_path && String.equal token (prefix ^ suffix)) key)
+
+let registry_ambiguous_cli_value_key token =
+  Set.to_list Utils.known_config_keys
+  |> List.concat_map ~f:(fun key ->
+      Utils.cmdline_var_prefixes ~qualified_only:true key
+      |> List.filter_map ~f:(fun prefix ->
+          Option.some_if
+            (String.is_prefix token ~prefix && String.length token > String.length prefix)
+            (key, String.length prefix)))
+  |> List.max_elt ~compare:(fun (_, left) (_, right) -> Int.compare left right)
+  |> Option.map ~f:fst
 
 let cli_key_of_token ~path token =
   match Utils.parse_config_token token with
@@ -97,7 +113,10 @@ let cli_key_of_token ~path token =
       { token_shape = Utils.Environment_assignment_token | Utils.Documentation_assignment_token; _ }
     ->
       None
-  | None -> declared_ambiguous_cli_value_key ~path token
+  | None ->
+      Option.first_some
+        (declared_ambiguous_cli_value_key ~path token)
+        (registry_ambiguous_cli_value_key token)
 
 (* Prefix-free flags belong to the host application's namespace, so they cannot be discovered
    globally without claiming flags such as [--profile=prod]. Counted site judgments identify the
@@ -573,6 +592,19 @@ let kind_name = function
   | Markdown_assignment -> "documentation assignment"
   | Config_file_assignment -> "configuration-file assignment"
 
+let has_ambiguous_cli_value occurrence =
+  let qualified_cli =
+    Poly.equal occurrence.kind Cli_flag
+    || List.exists cli_name_prefixes ~f:(fun prefix -> String.is_prefix occurrence.spelling ~prefix)
+  in
+  if qualified_cli then
+    match Utils.parse_config_token occurrence.spelling with
+    | Some { token_shape = Utils.Command_line_token; token_key } ->
+        not (String.equal token_key occurrence.key)
+    | Some _ -> false
+    | None -> true
+  else false
+
 let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
     ?(control_non_config_environment_mentions = non_config_environment_mentions)
     ?(control_non_config_assignment_mentions = non_config_assignment_mentions)
@@ -605,8 +637,15 @@ let check ?(fail = Verdict.fail) ?(known_keys = Utils.known_config_keys)
       let ambiguous_site =
         ambiguous_cli_value_site occurrence.path occurrence.spelling occurrence.key
       in
-      if Set.mem ambiguous_cli_value_sites ambiguous_site then
-        Hashtbl.incr seen_ambiguous_cli_value ambiguous_site;
+      if has_ambiguous_cli_value occurrence then
+        if Set.mem ambiguous_cli_value_sites ambiguous_site then
+          Hashtbl.incr seen_ambiguous_cli_value ambiguous_site
+        else
+          fail
+            (Printf.sprintf
+               "%s:%d: ambiguous command-line value `%s` for `%s` lacks a file/token/key/count \
+                entry in ambiguous_cli_value_mentions"
+               occurrence.path occurrence.line occurrence.spelling occurrence.key);
       (if occurrence.ambiguous_bare then
          let site = mention_site occurrence.path occurrence.key in
          if Set.mem ambiguous_bare_config_sites site then
@@ -760,6 +799,8 @@ let direct_refusal_formats =
     "%s:%d: prefix-free config flag `%s` lacks a file/key/count entry in \
      prefix_free_config_mentions";
     "%s:%d: %s `%s` names `%s`, absent from Utils.known_config_keys";
+    "%s:%d: ambiguous command-line value `%s` for `%s` lacks a file/token/key/count entry in \
+     ambiguous_cli_value_mentions";
     "non-config environment exemptions now name registered config keys -- remove: %s";
     "non-config environment-mention occurrence counts drifted: %s";
     "non-config assignment exemptions now name registered config keys -- remove: %s";
@@ -817,14 +858,20 @@ let refusal_control grammar_fixture =
     ] ~f:(fun spelling -> Option.is_some (Utils.parse_config_token spelling));
   Verdict.p_none "runtime-rejected mixed command-line spellings are not config tokens"
     [
-      "--ocannl-print_decimals-precision=7";
-      "--ocannl_Print_Decimals_Precision=7";
-      "--OCANNL_print_decimals_precision=7";
-    ] ~f:(fun spelling -> Option.is_some (Utils.parse_config_token spelling));
+      ("--ocannl-", "print_decimals-precision=7");
+      ("--ocannl_", "Print_Decimals_Precision=7");
+      ("--OCANNL_", "print_decimals_precision=7");
+    ]
+    ~f:(fun (prefix, suffix) -> Option.is_some (Utils.parse_config_token (prefix ^ suffix)));
   Verdict.p "a counted alternate separator recovers the runtime key/value boundary"
     (Option.equal String.equal
        (cli_key_of_token ~path:"test/operations/config_usage_scan.ml"
           ("--ocannl_" ^ "print_decimals_precision-7"))
+       (Some "print_decimals_precision"));
+  Verdict.p "an undeclared alternate separator is classified so the scan can refuse it"
+    (Option.equal String.equal
+       (cli_key_of_token ~path:"undeclared-alternate.md"
+          ("--ocannl_" ^ "print_decimals_precision-8"))
        (Some "print_decimals_precision"));
   Verdict.p_all ~min:2 "counted one-word documentation assignments remain config tokens"
     [
@@ -856,6 +903,9 @@ let refusal_control grammar_fixture =
         ~kind:Prefix_free_cli_flag ();
       occurrence ~path:"unknown.sh" ~key:"definitely_missing"
         ~spelling:("--ocannl_" ^ "missing=true") ~kind:Cli_flag ();
+      occurrence ~path:"undeclared-alternate.md" ~key:"print_decimals_precision"
+        ~spelling:("--ocannl_" ^ "print_decimals_precision-8")
+        ~kind:Cli_flag ();
     ];
   Verdict.p_all ~min:11 "every config-usage direct refusal format is observed"
     direct_refusal_formats ~f:(Hash_set.mem observed);
