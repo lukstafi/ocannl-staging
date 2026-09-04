@@ -926,8 +926,9 @@ fi
 sed -n '/^    reap_repeat_group() {/,/^    }/p' "$SRC" >"$TMP/reap-repeat-group.sh"
 if grep -q 'kill -0 -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
    && grep -q 'group_alive "$pg" || return 0' "$TMP/reap-repeat-group.sh" \
-   && grep -B1 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
-        | grep -q 'group_identity_matches "$iter_dir" || return 0'; then
+   && grep -B2 'kill -KILL -- "-\$pg"' "$TMP/reap-repeat-group.sh" \
+        | grep -q 'lost its leader identity but remains reachable' \
+   && grep -q 'leaderless iteration group \$pg survived KILL' "$TMP/reap-repeat-group.sh"; then
   report 0 "repeat: orphan reap revalidates identity and accepts post-KILL zombies"
 else
   report 1 "repeat: orphan reap revalidates identity and accepts post-KILL zombies" \

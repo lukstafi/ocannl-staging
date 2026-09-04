@@ -837,12 +837,21 @@ case $sub in
       done
       # Revalidate immediately before the destructive escalation. A zombie
       # leader still has the original token and safely identifies its group;
-      # a missing/mismatched leader means this numeric pgid is no longer ours.
-      group_identity_matches "$iter_dir" || return 0
+      # a missing leader while the group remains reachable can also mean a
+      # live descendant survived TERM, so it is not permission to reuse.
+      group_identity_matches "$iter_dir" ||
+        die "iteration group $pg lost its leader identity but remains reachable; refusing to reuse $repeat_build"
       kill -KILL -- "-$pg" 2>/dev/null
       for n in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 -- "-$pg" 2>/dev/null || return 0
-        group_identity_matches "$iter_dir" || return 0
+        if ! group_identity_matches "$iter_dir"; then
+          # KILL already reached the verified original group, so a live
+          # leaderless member is now an unkillable survivor; only a zombie-only
+          # residue is inert enough to release the shared build tree.
+          group_alive "$pg" &&
+            die "leaderless iteration group $pg survived KILL; refusing to reuse $repeat_build"
+          return 0
+        fi
         sleep 0.1
       done
       # KILL has already reached the identity-verified original group, so no
