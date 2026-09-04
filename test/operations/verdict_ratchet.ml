@@ -64,7 +64,7 @@ let quantifier_name = function
   | Is_empty -> "is_empty"
   | Not_exists -> "not exists"
 
-type quantifier = { kind : quantifier_kind; populations : Set.M(String).t }
+type quantifier = { kind : quantifier_kind; populations : Set.M(String).t; sealed : bool }
 type claim_kind = P | Pf | Pass_fail | Claim | Claimf
 
 (* A definition's [position] is its absolute character offset, which no two bindings share; [line]
@@ -300,6 +300,7 @@ let quantifiers_in ?(positive = true) expr =
                         kind;
                         populations =
                           populations ((Asttypes.Nolabel, population) :: arguments) count;
+                        sealed = false;
                       }
                       :: !found;
                     self#expression population;
@@ -319,7 +320,7 @@ let quantifiers_in ?(positive = true) expr =
             | None -> super#expression expr)
         | Pexp_apply (callee, arguments) ->
             let add kind count =
-              found := { kind; populations = populations arguments count } :: !found
+              found := { kind; populations = populations arguments count; sealed = false } :: !found
             in
             if !positive && is_collection_call callee ~member:"for_all" then add For_all 1
             else if !positive && is_collection_call callee ~member:"for_all2_exn" then
@@ -411,16 +412,23 @@ let rec returned_quantifiers ?(positive = true) expr =
           guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
   | Pexp_let (_, bindings, body) ->
       let returned_bindings = returned_binding_polarities positive body in
-      returned_quantifiers ~positive body
+      (unguarded_component ~positive body
+      |> List.map ~f:(fun quantifier -> { quantifier with sealed = true }))
       @ List.concat_map bindings ~f:(fun binding ->
           binding_parts binding.pvb_pat binding.pvb_expr
           |> List.concat_map ~f:(fun part ->
               List.filter_map returned_bindings ~f:(fun (name, returned_positive) ->
                   if String.equal name part.name then
                     Some
-                      (if part.exact then
-                         returned_quantifiers ~positive:returned_positive part.expression
-                       else quantifiers_in ~positive:returned_positive part.expression)
+                      ((if part.exact then
+                          unguarded_component ~positive:returned_positive part.expression
+                        else
+                          let guards = required_nonempty part.expression in
+                          quantifiers_in ~positive:returned_positive part.expression
+                          |> List.filter ~f:(fun quantifier ->
+                              Set.is_empty quantifier.populations
+                              || Set.is_empty (Set.inter guards quantifier.populations)))
+                      |> List.map ~f:(fun quantifier -> { quantifier with sealed = true }))
                   else None)
               |> List.concat))
   | Pexp_sequence (_, result) -> returned_quantifiers ~positive result
@@ -479,6 +487,11 @@ let rec returned_quantifiers ?(positive = true) expr =
                 quantifiers_in ~positive:guard_positive guard)
           in
           guard_quantifiers @ returned_quantifiers ~positive case.pc_rhs)
+  | Pexp_apply (callee, [ (Asttypes.Nolabel, left); (Asttypes.Nolabel, right) ])
+    when is_name callee "&&" ->
+      returned_quantifiers ~positive left @ returned_quantifiers ~positive right
+  | Pexp_construct ({ txt = Ppxlib.Longident.Lident "Some"; _ }, Some payload) ->
+      returned_quantifiers ~positive payload
   | Pexp_apply (callee, _)
     when is_collection_call callee ~member:"for_all"
          || is_collection_call callee ~member:"for_all2_exn"
@@ -497,7 +510,9 @@ and unguarded_component ~positive expression =
   let guards = required_nonempty expression in
   returned_quantifiers ~positive expression
   |> List.filter ~f:(fun quantifier ->
-      Set.is_empty quantifier.populations || Set.is_empty (Set.inter guards quantifier.populations))
+      quantifier.sealed
+      || Set.is_empty quantifier.populations
+      || Set.is_empty (Set.inter guards quantifier.populations))
 
 and returned_binding_polarities positive expr =
   match expr.pexp_desc with
@@ -642,10 +657,24 @@ let argument_at_slot arguments slot =
               match argument.pexp_desc with
               | Pexp_construct ({ txt = Ppxlib.Longident.Lident "Some"; _ }, Some payload) ->
                   Some payload
-              | _ -> None)
+              | Pexp_construct ({ txt = Ppxlib.Longident.Lident "None"; _ }, None) -> None
+              | _ -> Some argument)
           | _ -> None)
   | None, Some index -> List.nth (unlabelled arguments) index
   | None, None -> None
+
+let slot_definitely_supplied arguments slot =
+  match slot.label with
+  | None -> Option.is_some (argument_at_slot arguments slot)
+  | Some name ->
+      List.exists arguments ~f:(fun (label, argument) ->
+          match label with
+          | Asttypes.Labelled found -> String.equal found name
+          | Optional found when slot.optional && String.equal found name -> (
+              match argument.pexp_desc with
+              | Pexp_construct ({ txt = Ppxlib.Longident.Lident "Some"; _ }, Some _) -> true
+              | _ -> false)
+          | _ -> false)
 
 let claim_arguments target arguments =
   match target with
@@ -661,7 +690,7 @@ let claim_default_bindings target arguments =
   match target with
   | _, Some { claim_wrapper = Some slots; _ } ->
       List.filter_map slots ~f:(fun slot ->
-          if Option.is_some (argument_at_slot arguments slot) then None
+          if slot_definitely_supplied arguments slot then None
           else Option.map slot.default_binding ~f:(fun binding -> (binding, slot.positive)))
   | _ -> []
 
@@ -673,7 +702,8 @@ and make_binding_part ?optional_label environment part =
   let returned = returned_quantifiers part.expression in
   let unguarded =
     List.filter returned ~f:(fun quantifier ->
-        Set.is_empty quantifier.populations
+        quantifier.sealed
+        || Set.is_empty quantifier.populations
         || Set.is_empty (Set.inter guards quantifier.populations))
   in
   let negated_unguarded = returned_quantifiers ~positive:false part.expression in
@@ -730,6 +760,20 @@ and wrapper_signature environment expression =
       match claim_target environment callee with
       | None -> None
       | Some ((kind, _) as target) ->
+          let partial_claim_slot =
+            match target with
+            | _, Some { claim_wrapper = Some _; _ } -> None
+            | _ when List.is_empty parameters && List.length (unlabelled arguments) = 1 ->
+                Some
+                  {
+                    label = None;
+                    optional = false;
+                    unlabelled_index = Some 0;
+                    positive = true;
+                    default_binding = None;
+                  }
+            | _ -> None
+          in
           let claimed_names =
             claim_arguments target arguments
             |> List.concat_map ~f:(fun (argument, positive) ->
@@ -806,7 +850,9 @@ and wrapper_signature environment expression =
                     in
                     (unlabelled_index, slots, List.rev_append default_bindings outer_environment))
           in
-          Some (Some kind, Some (List.rev slots)))
+          Some
+            ( Some kind,
+              Some (Option.value_map partial_claim_slot ~default:(List.rev slots) ~f:List.return) ))
   | _ -> None
 
 and make_binding_group environment recursive values =
@@ -1035,7 +1081,8 @@ let quantified_claims structure =
         let candidates = if positive then binding.unguarded else binding.negated_unguarded in
         let uncovered =
           List.filter candidates ~f:(fun quantifier ->
-              Set.is_empty quantifier.populations
+              quantifier.sealed
+              || Set.is_empty quantifier.populations
               || Set.is_empty (Set.inter guards quantifier.populations))
         in
         let direct = if List.is_empty uncovered then [] else [ (binding, uncovered) ] in
@@ -1085,7 +1132,8 @@ let quantified_claims structure =
     let quantifiers =
       returned_quantifiers ~positive boolean
       |> List.filter ~f:(fun quantifier ->
-          Set.is_empty quantifier.populations
+          quantifier.sealed
+          || Set.is_empty quantifier.populations
           || Set.is_empty (Set.inter guards quantifier.populations))
     in
     if not (List.is_empty quantifiers) then
@@ -1428,6 +1476,15 @@ let () = check ()|ocaml},
 let check ?(ok = all) () = Verdict.p "the supplied constant passes" ok
 let () = check ~ok:true ()|ocaml},
       [] );
+    ( "inspects the possible payload of an unknown forwarded wrapper option",
+      {ocaml|let forwarded = Some (List.for_all rows ~f:Fn.id)
+let check ?(ok = false) () = Verdict.p "all rows pass" ok
+let () = check ?ok:forwarded ()|ocaml},
+      [ "forwarded" ] );
+    ( "refuses a direct quantifier passed to a partially applied Verdict claim",
+      {ocaml|let check = Verdict.p "all rows pass"
+let () = check (List.for_all rows ~f:Fn.id)|ocaml},
+      [ "check" ] );
     ( "accepts a fully applied quantified binding with a non-empty witness",
       {ocaml|let close =
   (not (Array.is_empty got)) && Array.for_all2_exn got want ~f:Float.equal
@@ -1525,6 +1582,18 @@ let () = Verdict.p "all outer rows pass" guarded|ocaml},
       {ocaml|let () =
   Verdict.p "all rows pass"
     (let ok = (not (List.is_empty rows)) && List.for_all rows ~f:Fn.id in ok)|ocaml},
+      [] );
+    ( "keeps an outer witness from guarding a shadowed nested population",
+      {ocaml|let checked =
+  (not (List.is_empty rows))
+  && (let rows = [] in List.for_all rows ~f:Fn.id)
+let () = Verdict.p "all rows pass" checked|ocaml},
+      [ "checked" ] );
+    ( "accepts a nested quantified population with its own witness",
+      {ocaml|let checked =
+  let rows = [ true ] in
+  (not (List.is_empty rows)) && List.for_all rows ~f:Fn.id
+let () = Verdict.p "all rows pass" checked|ocaml},
       [] );
     ( "accepts a negated binding nested directly inside a claim argument",
       {ocaml|let () =

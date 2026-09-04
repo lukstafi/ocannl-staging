@@ -822,7 +822,10 @@ that they earn a lookup rather than always-loaded space.
   are matched to labeled or positional actual arguments with the polarity of their use in the
   underlying claim, so a wrapper such as `Verdict.p label (not ok)` does not hide a negated
   `exists`. When an optional claim parameter is omitted, its definition-time default binding is
-  followed instead; a definitely supplied argument suppresses that edge. Its exact,
+  followed instead; a definitely supplied argument suppresses that edge, while an unknown
+  forwarded option conservatively checks both its possible payload and the default. A partial
+  application such as `let check = Verdict.p label` records the Boolean slot that its later call
+  still owes. Its exact,
   stale-checked exemption list is only for bindings whose intended passing meaning allows an empty
   population; synthetic controls include a child process the shipping ratchet demonstrably refuses
   (gh-ocannl-801, gh-ocannl-887). An entry
@@ -861,7 +864,9 @@ that they earn a lookup rather than always-loaded space.
   other constructor matches do not guess a polarity. Direct and bound quantifiers in `try`-handler
   guards are treated like match guards, with polarity derived from the handler result. An aggregate
   bound before it is destructured conservatively retains every quantified component; literal tuple
-  and record destructuring remains component-exact.
+  and record destructuring remains component-exact. A quantifier returned from a nested `let` is
+  checked against witnesses inside that scope and then sealed, so an outer witness with the same
+  textual name cannot license a shadowed population.
   Filtered populations retain the filter expression in their identity, so a non-empty view selected
   by one predicate cannot guard an empty view selected by another. The controls pair each accepted
   negation or shadow with a positive form the ratchet must still refuse.

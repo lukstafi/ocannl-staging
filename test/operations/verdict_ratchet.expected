@@ -54,6 +54,8 @@ refuses a bound exists negated by a labeled Verdict wrapper parameter: true
 accepts a positive exists passed through a labeled Verdict wrapper parameter: true
 uses an omitted optional default that feeds a Verdict wrapper claim: true
 does not use a Verdict wrapper default when its argument is supplied: true
+inspects the possible payload of an unknown forwarded wrapper option: true
+refuses a direct quantifier passed to a partially applied Verdict claim: true
 accepts a fully applied quantified binding with a non-empty witness: true
 accepts a negated fully applied quantified binding: true
 refuses a fully applied quantifier compared with true: true
@@ -75,6 +77,8 @@ refuses a mismatched actual hidden by equal formal names: true
 refuses a shadowed guard identity across a nested alias: true
 refuses a binding nested directly inside a claim argument: true
 accepts a guarded binding nested directly inside a claim argument: true
+keeps an outer witness from guarding a shadowed nested population: true
+accepts a nested quantified population with its own witness: true
 accepts a negated binding nested directly inside a claim argument: true
 does not return a quantified binding shadowed by a later local: true
 refuses a quantified component of a destructured tuple binding: true
