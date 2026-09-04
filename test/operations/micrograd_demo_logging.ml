@@ -13,7 +13,8 @@ let () =
   Utils.set_log_level 2;
   Utils.settings.output_debug_files_in_build_directory <- true;
   Utils.settings.debug_log_from_routines <- true;
-  let backend = Context.Backends.(backend_name (get_backend ())) in
+  let ctx = Context.auto () in
+  let backend = Context.backend_name ctx in
   Utils.log_debug_routine_logs
     ~log_contents:[ "OCANNL backend: " ^ backend ]
     ~stream_name:(backend ^ "-0-0");
@@ -40,7 +41,6 @@ let () =
          Utils.restore_settings ();
          Stdlib.exit 0
      | _ -> ());
-  let ctx = Context.auto () in
   let%op c = { a = [ -4 ] } + { b = [ 2 ] } in
   let%op d = (a *. b) + (b **. 3) in
   let%op c = c + c + 1 in
