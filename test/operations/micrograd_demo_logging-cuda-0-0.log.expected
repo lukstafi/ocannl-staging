@@ -1,1 +1,2 @@
+OCANNL backend: cuda
 CUDA routine stream logging is skipped: CUDA logs inline expressions differently from the CPU backend and can include unstable intermediate debug reads.

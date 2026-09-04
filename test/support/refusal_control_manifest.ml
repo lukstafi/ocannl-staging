@@ -89,7 +89,7 @@ let raw_entries =
         "[scanner-refusal:95468bc3bac3466d68db9d3b9602b3f2] level-4 subheading stays";
       ] );
     ( "backend_golden_family_scan.ml",
-      [ "[scanner-refusal:74f8ad0895d43808105a7ac3163bba75] backend golden families" ] );
+      [ "[scanner-refusal:2fcd4d491da746e829dc7cec63905091] self-certifying and provenance" ] );
     ( "cache_dir_ignores.ml",
       [
         "[scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore";
