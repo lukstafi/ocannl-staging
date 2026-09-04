@@ -9,14 +9,14 @@
     below it out of the index. Each was caught by a human reading carefully. A note that corrupts
     silently is worse than one that is missing, because every later session inherits it as fact.
 
-    The five rules, and what each is for, are stated in {!Test_utils.Agent_notes_scan}, which is
+    The six rules, and what each is for, are stated in {!Test_utils.Agent_notes_scan}, which is
     where they are decided — pure functions over strings, so the negative controls in
     [agent_notes_scan_cases.ml] exercise the same code this runs over the repository. This file is
     the live-tree half: it opens what dune hands it and reports one verdict per rule.
 
     {1 What the golden holds}
 
-    The five claims, and nothing that counts. A tally ("12 notes files", "177 bullets") moves on
+    The six claims, and nothing that counts. A tally ("12 notes files", "177 bullets") moves on
     every correct addition, so every contributor promotes a file they did not touch and the promote
     is indistinguishable from blessing a regression (gh-ocannl-665, and the notes' own entry on it).
     The exact numbers go to stderr. What the counts were there for — the assurance that a scan
@@ -109,7 +109,8 @@ let () =
   report Notes.rule_table_shape "every table is a table, row by row";
   report Notes.rule_reachability "every notes file is reachable from the index, and links back";
   report Notes.rule_no_repetition "no bullet is repeated across the notes";
-  (* The relationship the five calls above rest on, and nothing used to state (gh-ocannl-706): a
+  report Notes.rule_qualified_citations "every GitHub citation names its repository";
+  (* The relationship the six calls above rest on, and nothing used to state (gh-ocannl-706): a
      rule this file does not report is a rule whose findings the live tree never shows, and the
      omission is silent -- the scan computes them, [of_rule] is never asked for them, and the golden
      is five green lines either way. Sorted lists rather than sets, so a rule reported twice (two

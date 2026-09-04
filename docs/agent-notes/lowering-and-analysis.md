@@ -201,7 +201,7 @@ files.
   across sibling `Arg`s: two scope bodies inlined into one statement must neither interleave
   their interior components (a `Seq`-bodied sibling's `Stmt` sorts before a bare-bodied one's
   `Rhs` — a later operand's write would pose as prior to an earlier operand's read; Codex P1 on
-  PR #297) nor claim cross-operand evaluation order at all (it would silently depend on codegen's
+  staging#297) nor claim cross-operand evaluation order at all (it would silently depend on codegen's
   scope emission order).
 - **`Ir.Affine` owns the peel-guard rule** (gh-ocannl-722), which is the pattern to follow when a
   legality question starts growing clauses somewhere else: `Affine.separates` is `pair_conflict`

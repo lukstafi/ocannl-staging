@@ -8,7 +8,7 @@ files.
 - Operator gotchas: unary sum-reduction is `++` (einsum1, e.g. `a ++ "i => 0"`); `+++` is the
   BINARY `outer_sum`, not a reduction. `m ++ "ii => i"` extracts diagonals. The `%op` `O` scope
   has the full comparison set `<`, `<=`, `>`, `>=`, `=`, `<>` (plus `not`, `where`) since the
-  `Cmple` primitive (PR #216); `<=` is IEEE-exact (NaN-false), not a `not <` composite.
+  `Cmple` primitive (staging#216); `<=` is IEEE-exact (NaN-false), not a `not <` composite.
   A NUMBER in an axis spec is a fixed-index placement (size k+1 axis, value at slot k), not "axis
   N": per-axis index grids are `range n ++ "i=>i0"` ([n,1]) and `range n ++ "j=>0j"` ([1,n]),
   and comparing them broadcasts to an [n,n] grid; `range_of_shape` gives row-major flattened

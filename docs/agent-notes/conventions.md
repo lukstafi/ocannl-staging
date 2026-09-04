@@ -160,8 +160,12 @@ files.
 - Stacked PRs: once the base PR merges, RETARGET the stacked one to master BEFORE merging it. A merge
   into the now-stale base branch lands the work on that branch and nowhere else while GitHub still
   reports the PR as "merged" — staging#168's conv sketches were stranded exactly that way and had to
-  be re-landed as #170. The same audit question ("is this on master?") is worth asking of any PR whose
+  be re-landed as staging#170. The same audit question ("is this on master?") is worth asking of any PR whose
   base was not master.
+- Cross-repository work references always name their home: `staging#NNN` for PRs in
+  `lukstafi/ocannl-staging`, `gh-ocannl-NNN` for upstream issues cited as facts about the codebase,
+  and `ahrefs/ocannl#NNN` for other upstream issue mentions. A bare `#NNN` silently resolves against
+  whichever repository renders the note, so the agent-notes scan refuses it outside code examples.
 - For a measurement or report PR, substance stabilizes early: two full review rounds plus one
   verdict-stability check, after which findings are answered rather than actioned unless they touch
   validity, consequence, or arithmetic (validated on the gh-ocannl-530 campaign, where rounds 5–7 were

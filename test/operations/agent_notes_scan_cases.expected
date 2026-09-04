@@ -133,6 +133,11 @@ ok: exemption -- the key names the file and the bullet's opening
 ok: exemption -- a re-wrapped bullet has the same key
 ok: exemption -- two bullets agreeing past the display length keep distinct keys
 ok: exemption -- a finished bullet has no finding to key
+ok: citations -- a bare numeric citation
+ok: citations -- the canonical issue and PR forms
+ok: citations -- a hash inside a code span
+ok: citations -- a hash inside a fenced block
+ok: citations -- a hash attached to a code identifier
 ok: index -- an index whose rows all resolve
 ok: index -- a hook the file it points at does not carry
 ok: index -- a hook whose wording drifted from the file's
@@ -174,6 +179,7 @@ ok: index -- a backlink written with a redundant ./ still resolves
 ok: index -- a file no row links
 ok: index -- two rows for one file
 ok: index -- a file that does not link back to the index
+ok: index -- a bare citation reaches the whole scan
 ok: index -- the same bullet in two files
 ok: index -- the same bullet re-wrapped
 ok: index -- two bullets opening alike and diverging

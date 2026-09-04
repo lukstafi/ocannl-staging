@@ -392,7 +392,7 @@ files.
   backend — so `classify_raw` made them `Fatal` and the handler poisoned the lineage. A one-line
   user mistake (a `timing_ctx` scratch context missing one of the caller's initializations, which
   its own docs warn about) thus condemned the search *and* the context, with no restore
-  (gh-ocannl-564; #536 for why there is no restore). `Schedule_outcome.Preflight` now tags that
+  (gh-ocannl-564; gh-ocannl-536 for why there is no restore). `Schedule_outcome.Preflight` now tags that
   region and classifies as a contained `No_device_writes` decline **without consulting the
   backend** — host-side validation, so a classifier guessing `Writes_may_have_occurred` would
   escalate a failure that provably wrote nothing. Rule for any new boundary around `Context.run`:
@@ -529,7 +529,7 @@ files.
   to filter *after* `menu` had capped, so a tensorize-rich unit got its share of five categories and
   kept only a fraction of the one category the beam could use. The old plain prefix happened to hand
   all 48 to the tensorizes, so sharing without moving the filter would have been a regression
-  exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
+  exactly where gh-ocannl-685 meant to help. When adding a consumer-side filter over a capped list, ask
   whether the cap should see it.
 - A site contracting over SEVERAL axes is a matmul site whose k-loop lowering has already split
   (gh-ocannl-683): the matcher's contraction nest is the maximal innermost suffix of loops absent
@@ -568,7 +568,7 @@ files.
   absorb the masks the leaf keeps its `If`, and `Schedule.Privatize` used to reject any guard
   mentioning a symbol bound inside the accumulation loop, so a padded candidate died at
   construction with "varies across the accumulation" rather than at the gate. Privatize now
-  classifies: an iteration-invariant condition still gates the init-load and store-back (PR #91's
+  classifies: an iteration-invariant condition still gates the init-load and store-back (staging#91's
   lane-restriction rule, unchanged); a condition free of hardware-typed loop symbols is an
   iteration mask over one thread's own accumulator, kept on the update alone; and a condition that
   IS the target's own index compared against a bound no larger than that axis's dimension is a
