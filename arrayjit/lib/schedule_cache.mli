@@ -274,6 +274,11 @@ val regime_stamp_filename : string
     cache format, including for tools and synthetic cache-directory tests; callers should not edit a
     live cache's stamp. *)
 
+val regime_lock_filename : string
+(** The permanent record-lock file shared by cache-opening processes. Exposed as part of the on-disk
+    cache format for synthetic cache-directory tests; callers must never unlink a live cache's lock
+    file. *)
+
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Publication goes
     through {!Utils.Atomic_file}, so concurrent writers tolerate each other (last write wins) and a

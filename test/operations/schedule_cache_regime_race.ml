@@ -7,8 +7,9 @@
    The rendezvous makes the interleaving deliberate rather than scheduler-dependent. Every wait is
    bounded in monotonic seconds, so a missing hook or a child that stops making progress fails
    instead of hanging the test. The lock's negative control is the production defect this exists to
-   catch: removing [Unix.lockf fd Unix.F_LOCK 0] from [Schedule_cache.with_cache_open] lets the
-   writer report its entry commit while stamp publication is still paused, and this test exits 1. *)
+   catch: removing [Unix.lockf fd Unix.F_LOCK 0] from [Schedule_cache.with_cache_open] makes the
+   parent's direct lock-state probe report no exclusion at the writer's attempt boundary, and this
+   test exits 1. *)
 
 open Base
 module FI = Ir.Resource_fault_injection
@@ -40,6 +41,7 @@ let entry backend : SC.entry =
   }
 
 let stamp_file = Stdlib.Filename.concat cache_dir SC.regime_stamp_filename
+let lock_file = Stdlib.Filename.concat cache_dir SC.regime_lock_filename
 let entry_file key = Stdlib.Filename.concat cache_dir (key ^ ".sexp")
 let marker name = Stdlib.Filename.concat cache_dir ("rendezvous-" ^ name)
 
@@ -90,16 +92,20 @@ let transition_child () =
 let writer_child () =
   touch "writer-ready";
   if not (await_marker "writer-go") then child_exit 2;
-  touch "writer-attempting";
-  let reached = ref false in
+  let reached_lock = ref false in
+  let reached_commit = ref false in
   FI.with_callback
     (fun point ->
-      if FI.equal_point point FI.Schedule_cache_before_commit then (
-        reached := true;
+      if FI.equal_point point FI.Schedule_cache_before_lock then (
+        reached_lock := true;
+        touch "writer-at-lock";
+        if not (await_marker "writer-lock-go") then child_exit 2)
+      else if FI.equal_point point FI.Schedule_cache_before_commit then (
+        reached_commit := true;
         touch "entry-commit";
         if not (await_marker "writer-release") then child_exit 2))
     ~f:(fun () -> SC.store ~dir:cache_dir ~key:writer_key (entry "writer"));
-  if !reached then (
+  if !reached_lock && !reached_commit then (
     touch "writer-done";
     child_exit 0)
   else child_exit 3
@@ -141,6 +147,18 @@ let exited_zero child =
   | Some (Unix.WEXITED 0) -> true
   | Some (Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _) | None -> false
 
+let transition_holds_record_lock () =
+  let fd = Unix.openfile lock_file [ Unix.O_RDWR ] 0o600 in
+  Exn.protect
+    ~finally:(fun () -> Unix.close fd)
+    ~f:(fun () ->
+      match Unix.lockf fd Unix.F_TEST 0 with
+      | () -> false
+      | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) -> true
+      | exception exn ->
+          Stdio.eprintf "record-lock probe failed: %s\n" (Exn.to_string exn);
+          false)
+
 let () =
   clean_dir ();
   Stdlib.Sys.mkdir cache_dir 0o755;
@@ -168,13 +186,14 @@ let () =
       p "the concurrent writer is ready before it attempts the cache open"
         (await_marker "writer-ready");
       touch "writer-go";
-      p "the concurrent writer begins its cache-open attempt while stamping is paused"
-        (await_marker "writer-attempting");
-      p "the concurrent writer is blocked before entry commit while stamping is paused"
-        (not (await_marker ~seconds:1. "entry-commit"));
-      p "the blocked writer has not published its entry"
+      p "the concurrent writer reaches the record-lock attempt while stamping is paused"
+        (await_marker "writer-at-lock");
+      p "the transition's record lock excludes the writer at its attempt boundary"
+        (transition_holds_record_lock ());
+      p "the waiting writer has not published its entry"
         (not (Stdlib.Sys.file_exists (entry_file writer_key)));
 
+      touch "writer-lock-go";
       touch "transition-release";
       p "the released transition finishes publishing the current stamp"
         (await_marker "transition-done");
