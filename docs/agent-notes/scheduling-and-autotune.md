@@ -627,13 +627,20 @@ files.
   that affine wall model selects the final depth. This matters even when the provisional batch is
   shallow: dividing its wall by depth would charge part of the fixed synchronization to every
   launch and leave the final batch below the contention scale. The selected depth is validated by
-  up to four further batch probes; each short probe refits the affine model. An unresolved first
-  pair retries at double depth, and the next fit uses the two batch observations so an inflated
-  synchronized-single window cannot force the cap; only repeated unresolved batch pairs bind
-  there. After four noisy but resolved misses the latest projected depth wins rather than jumping
+  up to four further batch probes; each short probe refits the affine model. The first probe that
+  reaches the target is first interpolated back inside a measured below/above bracket when it
+  overshoots, then confirmed at a 25% deeper depth and retained only when that batch is slower too,
+  so a single inflated validation window cannot select a shallow final depth. An unresolved
+  first pair retries at double depth, and the next fit uses the two batch observations so an
+  inflated synchronized-single window cannot force the cap. If the last bounded probe first reaches
+  the target, one final confirmation is still taken. A non-monotone confirmation scales from that
+  deeper measured batch instead of returning to the earlier suspect target crossing; only an
+  invalid or genuinely cap-short batch remains unresolved there. After four noisy but resolved
+  misses the latest projected depth wins rather than jumping
   to a 20--30 ms cap batch, because such an overlong batch would blunt the 2x contention threshold.
-  On Metal's ~0.17 ms kernels the first probe already spans the target and the historical ~59 depth
-  is unchanged; on faster CUDA/HIP kernels it grows the batch toward the same wall target.
+  On Metal's ~0.17 ms kernels the first probe already spans the target; its 25%-deeper confirmation
+  retains the historical ~59 depth when marginal work is present. On faster CUDA/HIP kernels
+  calibration grows the batch toward the same wall target.
   Since gh-ocannl-855 the top-up budget accumulates PER-LAUNCH samples, never queued-batch wall.
   The jitter-sensitive synchronized-single calibration and every timed window have a 16-sample
   floor; the already-millisecond batch probes use twelve minima because they choose scale rather

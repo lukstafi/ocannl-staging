@@ -137,6 +137,19 @@ let refinement_cases =
     ("a probe already at the target", 1., 10, 10., 10, Some 10.);
   ]
 
+let confirmation_cases =
+  [
+    (* Metal-like steady work: the provisional batch is already target-sized, and a 25% deeper batch
+       grows proportionally. Retaining the base preserves the historical Metal depth. *)
+    ("a target-sized batch with confirmed marginal work", 59, 10., 73, 12.5, 59, Some 10.);
+    (* A stalled base followed by a clean deeper batch has negative apparent marginal cost. It must
+       retry deeper, never accept the stalled base solely because its wall crossed the target. *)
+    ("an inflated target-sized batch", 2, 12., 3, 0.4, 6, None);
+    (* A resolved overshoot brackets the target. Interpolation should reduce it rather than
+       preserving a batch substantially longer than the contention rule's stated scale. *)
+    ("a batch probe that overshoots the target", 512, 8., 1024, 16., 640, Some 10.);
+  ]
+
 let () =
   Stdio.printf "== queued batch depth ==\n";
   Verdict.p_all "every calibration estimate gets the depth the policy owes it" depth_cases
@@ -166,6 +179,20 @@ let () =
   Verdict.p_all "depth refinement removes fixed synchronization cost from launch scaling"
     refinement_cases ~f:(fun (what, single_ms, probe_depth, probe_ms, want_depth, want_wall) ->
       let depth, wall = Autotune.refine_queued_batch_depth ~single_ms ~probe_depth ~probe_ms in
+      let wall_matches =
+        match want_wall with None -> Float.is_nan wall | Some want -> Float.equal wall want
+      in
+      if depth <> want_depth || not wall_matches then
+        Stdio.eprintf "  %s: depth %d, wall %g ms; expected depth %d, wall %s\n%!" what depth wall
+          want_depth
+          (Option.value_map want_wall ~default:"unresolved" ~f:Float.to_string);
+      depth = want_depth && wall_matches);
+  Verdict.p_all "over-target calibration requires a depth-separated marginal confirmation"
+    confirmation_cases
+    ~f:(fun (what, base_depth, base_ms, probe_depth, probe_ms, want_depth, want_wall) ->
+      let depth, wall =
+        Autotune.refine_queued_batch_depth_between ~base_depth ~base_ms ~probe_depth ~probe_ms
+      in
       let wall_matches =
         match want_wall with None -> Float.is_nan wall | Some want -> Float.equal wall want
       in

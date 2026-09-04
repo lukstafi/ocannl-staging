@@ -17,6 +17,7 @@ every degenerate calibration estimate is refused by ranking but still batched: t
 no calibration estimate ever yields a depth below 1: true
 no calibration estimate ever yields a depth above the cap: true
 depth refinement removes fixed synchronization cost from launch scaling: true
+over-target calibration requires a depth-separated marginal confirmation: true
 
 == autotune_timing spelling ==
 "queued" selects the queued objective: true

@@ -1152,11 +1152,19 @@ val refine_queued_batch_depth : single_ms:float -> probe_depth:int -> probe_ms:f
     minimum of a batch at [probe_depth]. Returns the final depth and its estimated whole-batch wall.
     The two observations separate fixed synchronization cost from marginal launch cost, so even a
     shallow provisional batch reaches the ~10 ms contention scale rather than counting a fraction of
-    the fixed cost against every launch. A probe already at the target keeps its depth. An
-    unresolved pair requests a doubled retry and returns [nan] for the wall rather than jumping to
-    the cap or labeling the shallow probe as a cap-wall estimate; repeated unresolved batch pairs
-    eventually reach the 2048-launch memory cap. Exposed as the deterministic policy seam for tests.
-*)
+    the fixed cost against every launch. A probe exactly at the target keeps its depth; one that
+    overshoots is interpolated back inside the measured bracket. An unresolved pair requests a
+    doubled retry and returns [nan] for the wall rather than jumping to the cap or labeling the
+    shallow probe as a cap-wall estimate; repeated unresolved batch pairs eventually reach the
+    2048-launch memory cap. Exposed as the deterministic policy seam for tests. *)
+
+val refine_queued_batch_depth_between :
+  base_depth:int -> base_ms:float -> probe_depth:int -> probe_ms:float -> int * float
+(** The same affine refinement between two batch observations. An already-target-sized [base_ms] is
+    retained only when a deeper probe establishes positive marginal cost; this is the
+    depth-separated confirmation that keeps one inflated batch window from selecting a shallow final
+    depth. Otherwise an unresolved pair requests a deeper retry and reports a [nan] wall. Exposed as
+    the deterministic validation-policy seam for tests. *)
 
 val sample_min : repeats:int -> sample:(unit -> timing_sample) -> timing_result
 (** Pure sampling-policy seam used by calibration and the timed loop (gh-ocannl-855). Takes at least
@@ -1199,17 +1207,21 @@ val time_routine :
     above 1, a provisional queued probe separates fixed synchronization from marginal launch cost
     and selects the depth whose affine wall estimate reaches the target. The batch probes take the
     minimum of twelve runs: unlike ranked timing, they only choose scale and are already
-    milliseconds long. Up to four further probes validate the depth. An unresolved single/probe pair
-    retries at double depth, and the next affine fit uses the two batch observations so an inflated
-    single window cannot force the cap; only repeated unresolved batch pairs bind there. After four
-    noisy but resolved underestimates, calibration keeps the latest affine projection rather than
-    jumping to a 20--30 ms cap batch that would blunt the 2x contention threshold. A routine slower
-    than the target stays at depth 1 and is measured identically in both modes. The calibration
-    always yields a depth; the result of the timed loop reports when most of ITS samples were
-    stalled, and the tuner refuses such a candidate measurement rather than ranking and caching it
-    (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can spend
-    up to [max 64 repeats] batches on a fast candidate; [max_timing_runs] bounds the top-up beyond
-    the caller's requested floor.
+    milliseconds long. Up to four further probes validate the depth. The first target-sized batch is
+    confirmed at a 25% deeper depth and retained only when that batch is slower too. An unresolved
+    single/probe pair retries at double depth, and the next affine fit uses the two batch
+    observations so an inflated single window cannot force the cap. If the bounded loop first
+    reaches the target on its last probe, one final confirmation is still taken. A non-monotone
+    confirmation scales from that deeper measured batch, never the earlier suspect crossing; only an
+    invalid or genuinely cap-short batch leaves the wall unresolved. After four noisy but resolved
+    underestimates, calibration keeps the latest affine projection rather than jumping to a 20--30
+    ms cap batch that would blunt the 2x contention threshold. A routine slower than the target
+    stays at depth 1 and is measured identically in both modes. The calibration always yields a
+    depth; the result of the timed loop reports when most of ITS samples were stalled, and the tuner
+    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since
+    the budget is per-launch rather than batch wall, queued timing can spend up to [max 64 repeats]
+    batches on a fast candidate; [max_timing_runs] bounds the top-up beyond the caller's requested
+    floor.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
@@ -1217,9 +1229,9 @@ val time_routine :
     propagate raw. Timing dispatches the routine repeatedly against live buffers, so an accumulating
     routine must be timed on a scratch lineage (see [tune]'s [?timing_ctx]) if its inputs matter
     afterwards. [Queued] raises how many such dispatches happen. For [repeats <= 64], the maxima are
-    65 under [Isolated] and 254017 under [Queued] (warmup, 64 single-launch calibration runs, at
-    most five twelve-sample calibration probes and 64 timed batches at the cap). In general they are
-    [1 + max 64 repeats] and [65 + 2048 * (60 + max 64 repeats)], respectively. Thus a routine whose
+    65 under [Isolated] and 278593 under [Queued] (warmup, 64 single-launch calibration runs, at
+    most six twelve-sample calibration probes and 64 timed batches at the cap). In general they are
+    [1 + max 64 repeats] and [65 + 2048 * (72 + max 64 repeats)], respectively. Thus a routine whose
     values grow per run reaches larger ones. That is a fact about the scratch buffers, not about the
     measurement: the cap bounds each in-memory queue while the ~25 ms budget accumulates per-launch
     samples, and a candidate's time is not what it accumulated. *)
