@@ -253,6 +253,21 @@ let () =
   let on s = String.is_substring backend_name ~substring:s in
   p "gpu" (on "cuda" || on "metal")|ocaml},
       "" );
+    ( "an unannotated compiler-plan classifier remains visible as an unattributed pin",
+      {ocaml|let plan_has_mutable_input plan =
+  List.exists ["-fplugin"; "-fprofile-use"]
+    ~f:(fun option -> String.is_substring plan ~substring:option)
+let () = ignore (Generated.read "r")|ocaml},
+      "+partial" );
+    ( "the compiler-plan annotation is binding-scoped and cannot hide a real generated-text pin",
+      {ocaml|let plan_has_mutable_input plan =
+  List.exists ["-fplugin"; "-fprofile-use"]
+    ~f:(fun option -> String.is_substring plan ~substring:option)
+[@@ocannl.codegen_text.compiler_plan]
+let () =
+  p "real pin"
+    (String.is_substring (Generated.read "r") ~substring:"emitted_kernel_token")|ocaml},
+      {|"emitted_kernel_token"|} );
     ( "a source reached through a tuple pattern is still a source",
       {ocaml|let run () = (values, Generated.read "uvl_fwd")
 let () =

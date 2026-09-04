@@ -1010,6 +1010,12 @@ that they earn a lookup rather than always-loaded space.
   the read travels along, by the same fixed point taint uses — marks that file's itemisation
   **partial** rather than dropping the fragment silently — the file is listed, the fragment is
   unnamed, and the inventory says which.
+- A test that classifies COMPILER-PLAN text rather than generated text marks that one binding with
+  `[@@ocannl.codegen_text.compiler_plan]` (gh-ocannl-865). The inventory excludes text tests only
+  inside that binding: the annotation is not file-wide, so a real generated-source pin elsewhere in
+  the same test remains visible. `codegen_text_scan_cases` controls both directions — an unannotated
+  compiler-plan classifier is still reported as partial, and an annotated classifier beside a real
+  generated-text assertion still reports the real fragment.
 - **An `open` (or `include`) that hides a route is refused, not approximated — over its own scope,
   and never over a name the file binds.** A structure open governs the items after it, `let open M
   in` its body, and a nested structure's opens die with it. A name the file binds anywhere is struck

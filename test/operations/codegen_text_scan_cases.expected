@@ -38,6 +38,8 @@ ok: source -- counting occurrences with ~pattern pins the fragment counted
 ok: source -- a concatenation with a literal part is a fragment with a hole in it
 ok: source -- the haystack may reach the test through a local binding
 ok: source -- a predicate over the backend's NAME pins nothing, however it is spelled
+ok: source -- an unannotated compiler-plan classifier remains visible as an unattributed pin
+ok: source -- the compiler-plan annotation is binding-scoped and cannot hide a real generated-text pin
 ok: source -- a source reached through a tuple pattern is still a source
 ok: source -- a test binding its own build_file is not reading the artifact directory
 ok: source -- the qualified Utils.build_file is a read of the artifact directory

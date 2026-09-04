@@ -2840,8 +2840,11 @@
  ; ocannl-backend: cc -- censuses the cc backend's C emission and compiles it under foreign
  ; -march flags; the emit children are spawned with OCANNL_BACKEND=cc forced, and the driver
  ; itself never creates a context, so there is nothing here for an ambient backend to select.
+ ; The configured compiler command may name mutable @response/spec files that dune cannot discover;
+ ; rerun the action unconditionally and let the census's persistent listing cache serve warm work.
  (name cc_march_census)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   (env_var OCANNL_BUILD_FILES_PREFIX)
   (env_var OCANNL_CC_BACKEND_COMPILER_COMMAND)
@@ -2855,6 +2858,7 @@
   (env_var COMPILER_PATH)
   (env_var GCC_EXEC_PREFIX)
   (env_var AARCH64_CROSS_GCC)
+  (universe)
   ocannl_config)
  (modules cc_march_census)
  (libraries base ocannl stdio unix arrayjit.verdict ll_test test_utils)
