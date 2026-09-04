@@ -1348,10 +1348,12 @@ let unclassified_heads content =
     There a bare command name may resolve to something this repository builds, so every
     classification that reads one off an atom is unreliable -- and unlike the action-local
     [(setenv PATH …)], the effect reaches other dune files, since an [env] stanza applies to
-    subdirectories too. Modelling that is not what a stanza scan should attempt, so it is refused
-    instead: this repository has no [env] stanza at all, and the day one touches PATH the check says
-    so rather than quietly reading bare names as tools (Codex P2, round 17 of PR #343). *)
-let path_rewriting_stanzas content =
+    subdirectories too. [path_rewriting_stanza_scopes] retains the [(subdir …)] placement so a
+    caller can refuse exactly the affected directory tree; [path_rewriting_stanzas] is the older
+    head-only census used by checks that reject every occurrence. This repository has no [env]
+    stanza at all, and the day one touches PATH those checks say so rather than quietly reading bare
+    names as tools (Codex P2, round 17 of PR #343; PR #623 round 12). *)
+let path_rewriting_stanza_scopes content =
   (* The NAME position of an `env-vars` binding, not any atom in the stanza: setting some other
      variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
   let rec sets_path sexp =
@@ -1363,8 +1365,12 @@ let path_rewriting_stanzas content =
     | Sexp.List l -> List.exists l ~f:sets_path
     | Sexp.Atom _ -> false
   in
-  walk "" (stanzas content) ~f:(fun _subdir stanza ->
-      match head stanza with Some "env" when sets_path stanza -> [ "env" ] | _ -> [])
+  walk "" (stanzas content) ~f:(fun subdir stanza ->
+      match head stanza with Some "env" when sets_path stanza -> [ subdir ] | _ -> [])
+  |> List.dedup_and_sort ~compare:String.compare
+
+let path_rewriting_stanzas content =
+  path_rewriting_stanza_scopes content |> List.map ~f:(fun _subdir -> "env")
   |> List.dedup_and_sort ~compare:String.compare
 
 (** The directories this dune file materializes the shared configuration into with a

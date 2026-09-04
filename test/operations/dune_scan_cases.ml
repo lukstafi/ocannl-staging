@@ -365,6 +365,20 @@ let path_rewriting_cases =
     ("an env stanza that touches neither", {dune|(env (_ (flags (:standard))))|dune}, []);
   ]
 
+let path_rewriting_scope_cases =
+  [
+    ("a root env stanza", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "" ]);
+    ( "an env stanza nested under subdir",
+      {dune|(subdir tools (env (_ (env-vars (PATH .)))))|dune},
+      [ "tools" ] );
+    ( "nested subdirs compose",
+      {dune|(subdir tools (subdir private (env (_ (env-vars (Path .))))))|dune},
+      [ "tools/private" ] );
+    ( "an unrelated nested env stanza",
+      {dune|(subdir tools (env (_ (env-vars (OTHER PATH)))))|dune},
+      [] );
+  ]
+
 (* WHICH config file a stanza depends on, as written. The scan reports the paths; which of them is
    the one the process will actually read is the check's decision, since only it knows where configs
    exist -- OCANNL walks up from the process directory and reads the first it finds, so an
@@ -1636,6 +1650,9 @@ let () =
       check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
+  List.iter path_rewriting_scope_cases ~f:(fun (name, source, expected) ->
+      check ("path-rewriting stanza scope -- " ^ name) expected
+        (Scan.path_rewriting_stanza_scopes source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
       let found =
         List.concat_map (Scan.sites source) ~f:(fun site -> site.Scan.declared_config_paths)

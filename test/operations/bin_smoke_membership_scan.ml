@@ -269,6 +269,21 @@ let cached_alias_error dune_path targets =
   Printf.sprintf "%s: @bin-smoke reaches a target-bearing rule that may be cached: %s" dune_path
     (String.concat ~sep:", " targets)
 
+let cached_helper_alias_error dune_path aliases =
+  Printf.sprintf
+    "%s: @bin-smoke reaches command-bearing helper alias %s without a direct (universe) dependency"
+    dune_path (String.concat ~sep:", " aliases)
+
+let depends_on_universe stanza =
+  let rec contains = function
+    | Sexp.List [ Sexp.Atom "universe" ] -> true
+    | Sexp.List children -> List.exists children ~f:contains
+    | Sexp.Atom _ -> false
+  in
+  match Dune_scan.field stanza "deps" with
+  | None -> false
+  | Some dependencies -> contains (Sexp.List dependencies)
+
 let declarations_of_stanza ~subdir stanza =
   match Dune_scan.head stanza with
   | Some ("executable" | "executables") ->
@@ -397,11 +412,11 @@ let scan dune_files =
             Printf.sprintf "cannot parse %s: %s" dune_path (Exn.to_string exn) :: all_errors ))
   in
   let path_rewriting_directories =
-    List.filter_map dune_files ~f:(fun (dune_path, content) ->
+    List.concat_map dune_files ~f:(fun (dune_path, content) ->
         try
-          if List.is_empty (Dune_scan.path_rewriting_stanzas content) then None
-          else Some (path_dirname dune_path, dune_path)
-        with _ -> None)
+          List.map (Dune_scan.path_rewriting_stanza_scopes content) ~f:(fun subdir ->
+              (Dune_scan.in_subdir (path_dirname dune_path) subdir, dune_path))
+        with _ -> [])
   in
   let generated_directory_targets =
     List.concat_map dune_files ~f:(fun (dune_path, content) ->
@@ -447,6 +462,16 @@ let scan dune_files =
         in
         let dynamic_run_errors =
           if contains_head "dynamic-run" node.stanza then [ dynamic_run_error node.dune_path ]
+          else []
+        in
+        let cached_helper_alias_errors =
+          let command_bearing =
+            not
+              (List.is_empty
+                 (Dune_scan.classified_command_sites_with_pins_preserving_multiplicity node.stanza))
+          in
+          if command_bearing && not node.is_bin_smoke && not (depends_on_universe node.stanza)
+          then [ cached_helper_alias_error node.dune_path node.aliases ]
           else []
         in
         let implicit_runner_errors =
@@ -495,11 +520,12 @@ let scan dune_files =
                (List.rev_append condition_errors
                   (List.rev_append exit_errors
                      (List.rev_append dynamic_run_errors
-                        (List.rev_append implicit_runner_errors
-                           (List.rev_append directory_path_errors
-                              (List.rev_append generated_dependency_errors
-                                 (List.rev_append cached_alias_errors
-                                    (List.rev_append missing_dependency_errors errors)))))))))
+                        (List.rev_append cached_helper_alias_errors
+                           (List.rev_append implicit_runner_errors
+                              (List.rev_append directory_path_errors
+                                 (List.rev_append generated_dependency_errors
+                                    (List.rev_append cached_alias_errors
+                                       (List.rev_append missing_dependency_errors errors))))))))))
         in
         visit visited targets errors (List.rev_append dependencies rest)
   in
@@ -564,6 +590,7 @@ let complete_fixture =
 (executable (name env_spelling_gate))
 (rule
  (alias bin-smoke-env_spelling_gate)
+ (deps (universe))
  (action (run %{dep:env_spelling_gate.exe})))
 (rule
  (alias bin-smoke)
@@ -651,6 +678,25 @@ let accepted_exit_fixture =
   (with-accepted-exit-codes 1
    (run %{exe:alpha.exe}))))|dune}
 
+let rerunning_helper_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias helper-smoke)
+ (deps (universe))
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (alias helper-smoke)))|dune}
+
+let cached_helper_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias helper-smoke)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (alias helper-smoke)))|dune}
+
 let generated_target_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
 (rule
@@ -728,6 +774,32 @@ let directory_path_fixture =
 (rule
  (alias bin-smoke)
  (action (run alpha.exe)))|dune}
+
+let nested_unaffected_path_fixture =
+  {dune|(subdir tools
+ (env
+  (_
+   (env-vars
+    (Path elsewhere)))))
+(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let nested_affected_path_fixture =
+  {dune|(subdir tools
+ (env
+  (_
+   (env-vars
+    (Path elsewhere))))
+ (rule
+  (alias helper-smoke)
+  (deps (universe))
+  (action (chdir .. (run alpha.exe)))))
+(executable (name alpha) (public_name alpha-tool))
+(rule
+ (alias bin-smoke)
+ (deps (alias tools/helper-smoke)))|dune}
 
 let private_launcher_fixture =
   {dune|(executable (name alpha) (public_name alpha-tool))
@@ -846,6 +918,8 @@ let controls_hold () =
     scan [ ("bin/dune", complete_fixture); ("test/synthetic/dune", competing_alias_fixture) ]
   in
   let transitive = scan_bin_content transitive_duplicate_fixture in
+  let rerunning_helper = scan_bin_content rerunning_helper_fixture in
+  let cached_helper = scan_bin_content cached_helper_fixture in
   let external_result = scan_bin_content external_smoke_fixture in
   let accepted_exit = scan_bin_content accepted_exit_fixture in
   let generated_target = scan_bin_content generated_target_fixture in
@@ -856,6 +930,8 @@ let controls_hold () =
   let rewritten_path = scan_bin_content rewritten_path_fixture in
   let dynamic_run = scan_bin_content dynamic_run_fixture in
   let directory_path = scan_bin_content directory_path_fixture in
+  let nested_unaffected_path = scan_bin_content nested_unaffected_path_fixture in
+  let nested_affected_path = scan_bin_content nested_affected_path_fixture in
   let private_launcher = scan_bin_content private_launcher_fixture in
   let verified_helper_launcher = scan_bin_content verified_helper_launcher_fixture in
   let action_dependency = scan_bin_content action_dependency_fixture in
@@ -889,6 +965,11 @@ let controls_hold () =
   && List.mem competing.errors "@bin-smoke runs more than once: bin/alpha.exe" ~equal:String.equal
   && (not (complete transitive))
   && List.mem transitive.errors "@bin-smoke runs more than once: bin/alpha.exe" ~equal:String.equal
+  && complete rerunning_helper
+  && (not (complete cached_helper))
+  && List.mem cached_helper.errors
+       (cached_helper_alias_error "bin/dune" [ "bin/helper-smoke" ])
+       ~equal:String.equal
   && (not (complete external_result))
   && List.mem external_result.errors (external_smoke_error "bin/dune") ~equal:String.equal
   && (not (complete accepted_exit))
@@ -921,6 +1002,9 @@ let controls_hold () =
   && List.mem dynamic_run.errors (dynamic_run_error "bin/dune") ~equal:String.equal
   && (not (complete directory_path))
   && List.mem directory_path.errors (directory_path_error "bin/dune") ~equal:String.equal
+  && complete nested_unaffected_path
+  && (not (complete nested_affected_path))
+  && List.mem nested_affected_path.errors (directory_path_error "bin/dune") ~equal:String.equal
   && (not (complete private_launcher))
   && List.mem private_launcher.unexpected "bin/helper.exe" ~equal:String.equal
   && (not (complete verified_helper_launcher))

@@ -207,6 +207,10 @@ ok: path-rewriting stanzas -- an env stanza setting PATH
 ok: path-rewriting stanzas -- an env stanza setting Windows-case Path
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither
+ok: path-rewriting stanza scope -- a root env stanza
+ok: path-rewriting stanza scope -- an env stanza nested under subdir
+ok: path-rewriting stanza scope -- nested subdirs compose
+ok: path-rewriting stanza scope -- an unrelated nested env stanza
 ok: declared config paths -- the local one
 ok: declared config paths -- one in a sibling
 ok: declared config paths -- one in a common parent, which a sibling chdir may legitimately need
