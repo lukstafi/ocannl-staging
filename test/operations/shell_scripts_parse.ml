@@ -692,12 +692,18 @@ module Errexit_negation = struct
             else if Char.equal character '\\' then loop (index + 1) `Double true nesting
             else if Char.equal character '"' then loop (index + 1) `None false nesting
             else loop (index + 1) `Double false nesting
+        | `Backtick ->
+            if escaped then loop (index + 1) `Backtick false nesting
+            else if Char.equal character '\\' then loop (index + 1) `Backtick true nesting
+            else if Char.equal character '`' then loop (index + 1) `None false nesting
+            else loop (index + 1) `Backtick false nesting
         | `None ->
             if escaped then loop (index + 1) `None false nesting
             else if Char.equal character '\\' then loop (index + 1) `None true nesting
             else if Char.equal character '#' then false
             else if Char.equal character '\'' then loop (index + 1) `Single false nesting
             else if Char.equal character '"' then loop (index + 1) `Double false nesting
+            else if Char.equal character '`' then loop (index + 1) `Backtick false nesting
             else if List.mem [ '('; '{'; '[' ] character ~equal:Char.equal then
               loop (index + 1) `None false (nesting + 1)
             else if List.mem [ ')'; '}'; ']' ] character ~equal:Char.equal then
@@ -752,6 +758,7 @@ module Errexit_negation = struct
       ("quoted AND/OR text", "set -e\n! printf '%s\\n' 'not || consumed'\n", [ 2 ]);
       ("nested AND/OR group", "set -e\n! (probe || recover)\n", [ 2 ]);
       ("nested AND/OR substitution", "set -e\n! cmd $(probe || recover)\n", [ 2 ]);
+      ("nested AND/OR backtick substitution", "set -e\n! cmd `probe || recover`\n", [ 2 ]);
       ("outer AND/OR after nested group", "set -e\n! (probe || recover) || fallback\n", []);
     ]
 

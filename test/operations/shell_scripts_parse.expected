@@ -46,6 +46,7 @@ errexit-negation fixture negation without errexit is classified as specified: tr
 errexit-negation fixture quoted AND/OR text is classified as specified: true
 errexit-negation fixture nested AND/OR group is classified as specified: true
 errexit-negation fixture nested AND/OR substitution is classified as specified: true
+errexit-negation fixture nested AND/OR backtick substitution is classified as specified: true
 errexit-negation fixture outer AND/OR after nested group is classified as specified: true
 the statement-position ! grep fixture reaches the absent()-style refusal: true
 .github/actions/pin-revisions/resolve.sh parses: true
