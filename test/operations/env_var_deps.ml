@@ -755,10 +755,9 @@ let per_directory_control () =
   let one_stanza source = List.hd_exn (Scan.stanzas source) in
   Verdict.p "an escaping source_tree dependency identifies a repository-wide scan"
     (is_repo_wide_scan (one_stanza "(rule (deps (source_tree ../..)) (action (run scan.exe)))"));
-  Verdict.p "a local source_tree fixture does not identify a repository-wide scan"
-    (not
-       (is_repo_wide_scan
-          (one_stanza "(rule (deps (source_tree fixture)) (action (run scan.exe)))")));
+  Verdict.p_none "a local source_tree fixture does not identify a repository-wide scan"
+    [ one_stanza "(rule (deps (source_tree fixture)) (action (run scan.exe)))" ]
+    ~f:is_repo_wide_scan;
   printf "\n"
 
 (* gh-ocannl-800's own negative control. The repository is normally complete, so an empty orphan

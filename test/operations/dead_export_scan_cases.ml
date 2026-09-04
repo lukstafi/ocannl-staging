@@ -194,8 +194,8 @@ let () =
     && referenced extensions "compare"
     && referenced extensions "sexp_of_named"
     && referenced extensions "named_of_sexp");
-  Verdict.p "an extension does not credit a different derivation from the same type"
-    (not (referenced extensions "compare_named"));
+  Verdict.p_none "an extension does not credit a different derivation from the same type"
+    [ "compare_named" ] ~f:(referenced extensions);
   let derived =
     refs [ ("derived.ml", "type t = Sample.named [@@deriving sexp, compare, equal]\n") ]
   in
@@ -207,8 +207,9 @@ let () =
   let inherited =
     refs [ ("inherited.ml", "type t = [ Sample.poly | `Three ] [@@deriving of_sexp]\n") ]
   in
-  Verdict.p "an inherited row references its internal parser helper"
-    (referenced inherited "__poly_of_sexp__" && not (referenced inherited "poly_of_sexp"));
+  Verdict.p_all "an inherited row references its internal parser helper"
+    [ ("__poly_of_sexp__", true); ("poly_of_sexp", false) ]
+    ~f:(fun (value, expected) -> Bool.equal (referenced inherited value) expected);
   let poly_rec_flag, poly_declaration = single_type_declaration "type poly = [ `One | `Two ]\n" in
   let poly_expansion =
     Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc:poly_declaration.ptype_loc ~poly:false
@@ -220,9 +221,9 @@ let () =
   let inherited_extension =
     refs [ ("extension.ml", "let f = [%of_sexp: [ Sample.poly | `Three ]]\n") ]
   in
-  Verdict.p "an inherited row in an extension also references its internal parser helper"
-    (referenced inherited_extension "__poly_of_sexp__"
-    && not (referenced inherited_extension "poly_of_sexp"));
+  Verdict.p_all "an inherited row in an extension also references its internal parser helper"
+    [ ("__poly_of_sexp__", true); ("poly_of_sexp", false) ]
+    ~f:(fun (value, expected) -> Bool.equal (referenced inherited_extension value) expected);
   let ignored =
     refs
       [
@@ -235,22 +236,19 @@ let () =
            let b = [%sexp_of: Sample.named sexp_opaque]\n" );
       ]
   in
-  Verdict.p "opaque and ignored types do not credit unused derived values"
-    (not
-       (referenced ignored "sexp_of_named"
-       || referenced ignored "named_of_sexp"
-       || referenced ignored "compare_named"
-       || referenced ignored "equal_named"));
+  Verdict.p_none "opaque and ignored types do not credit unused derived values"
+    [ "sexp_of_named"; "named_of_sexp"; "compare_named"; "equal_named" ]
+    ~f:(referenced ignored);
   let deriving_attribute =
     refs [ ("attribute.ml", "open Sample\ntype t = T [@@deriving equal]\n") ]
   in
-  Verdict.p "a deriving attribute is not an ordinary opened value reference"
-    (not (referenced deriving_attribute "equal"));
+  Verdict.p_none "a deriving attribute is not an ordinary opened value reference" [ "equal" ]
+    ~f:(referenced deriving_attribute);
   let gadt_index =
     refs [ ("gadt.ml", "type _ witness = Witness : Sample.named witness [@@deriving sexp_of]\n") ]
   in
-  Verdict.p "a GADT result index is not a derived converter dependency"
-    (not (referenced gadt_index "sexp_of_named"));
+  Verdict.p_none "a GADT result index is not a derived converter dependency" [ "sexp_of_named" ]
+    ~f:(referenced gadt_index);
   let gadt_rec_flag, gadt_declaration =
     single_type_declaration "type _ witness = Witness : Sample.named witness\n"
   in
