@@ -26,11 +26,15 @@
 # measurement-boxes: minix rog-nv
 #
 # <sha256>  <bytes>  <name>  <origin>
+c27e59b4163397290685aa1736bf7176f56de5ec5019da89db5ad29f80d855c2  26190952  cifar_conv.safetensors  minix
 d008d1cff9885ffaa01eca91b95b9a0cadc2175f9b79a9e4ed8c06dc1dd7b74a  26190952  cifar_conv.safetensors  rog-nv
+023d0f51049e6eccd65ec92d0f05ab03aeeb024aad50e6f7f15044ad0029153b  32789600  cifar_stride.safetensors  minix
 b9540f5a6a084a81b764b84108e6c319837448f6064f0f9359e15f7a7e4ea734  32789600  cifar_stride.safetensors  rog-nv
 10839bd1dee72a62c54f6589a727e53cfe174f6d676dfba201ede80f6269defb  13871360  gpt2_mini.safetensors  minix
 043c1ea8b42817fca8b713ac0eadae6e8b7b7326cb5ff7ea0fd527487ca2009e  13871360  gpt2_mini.safetensors  rog-nv
+f4c736b569d98ff271f4240cf580b620a1e75ff041dc2d99b2cc1b75a95c1189  4483288  lenet.safetensors  minix
 5a38f19751d03b412be66d70b2462968c1e43c9bd0b0fb7167592d95bbbc3c93  4483288  lenet.safetensors  rog-nv
 2c48b1d78c6820f639d431b3f57902bcdb79e09f909e0f83415d851cc20ec0c1  51384  mlp_small.safetensors  minix
 f09de9504262eb184672c9f58da821c47e0ee9f6311bd69207700c33298c44ca  51384  mlp_small.safetensors  rog-nv
+4309ccbb2cf62ad678aa99c797ceed0a70f5370572015b601910e05c3f72a3eb  9650952  mlp_wide.safetensors  minix
 56b3d2ce63ac668bc150264f40850cfb49ad477ea8a42b82d2f033841ed15742  9650952  mlp_wide.safetensors  rog-nv
