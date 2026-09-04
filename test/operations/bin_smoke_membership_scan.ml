@@ -81,6 +81,18 @@ let expanding_dependency_pform atom =
         | None -> false)
     | Dune_scan.Literal _ -> false)
 
+let unmodeled_dependency_pform atom =
+  List.exists (Dune_scan.pieces atom) ~f:(function
+    | Dune_scan.Pform pform -> (
+        match String.lsplit2 pform ~on:':' with
+        | Some (prefix, _) ->
+            not
+              (List.mem
+                 [ "dep"; "file"; "path"; "read"; "read-lines"; "read-strings" ]
+                 prefix ~equal:String.equal)
+        | None -> true)
+    | Dune_scan.Literal _ -> false)
+
 let alias_dependencies ~subdir stanza =
   let rec collect = function
     | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom name ] -> ([ alias_key ~subdir name ], [])
@@ -95,6 +107,8 @@ let alias_dependencies ~subdir stanza =
     | Sexp.Atom atom ->
         if expanding_dependency_pform atom then
           ([], [ "@bin-smoke reaches a dependency specification expanded from file contents" ])
+        else if unmodeled_dependency_pform atom then
+          ([], [ "@bin-smoke reaches a dependency path computed by an unmodeled pform" ])
         else ([], [])
   in
   match Dune_scan.field stanza "deps" with
@@ -297,6 +311,10 @@ let unresolved_inferred_target_error dune_path =
 let bin_install_error dune_path =
   Printf.sprintf "%s installs files into section bin outside public executable declarations"
     dune_path
+
+let generated_public_run_error dune_path public targets =
+  Printf.sprintf "%s generates %s while running public executable %s" dune_path
+    (String.concat ~sep:", " targets) public
 
 let installs_into_bin stanza =
   match (Dune_scan.head stanza, Dune_scan.field stanza "section") with
@@ -589,6 +607,21 @@ let scan dune_files =
         with _ -> [])
     |> List.dedup_and_sort ~compare:String.compare
   in
+  let target_producers =
+    List.concat_map dune_files ~f:(fun (dune_path, content) ->
+        try
+          let directory = path_dirname dune_path in
+          Dune_scan.walk "" (Dune_scan.stanzas content) ~f:(fun subdir stanza ->
+              let subdir = Dune_scan.in_subdir directory subdir in
+              let targets = produced_targets ~subdir stanza in
+              if List.is_empty targets then []
+              else
+                smoke_targets_of_stanza ~allow_verified_helper:false ~dune_path ~subdir stanza
+                |> List.filter_map ~f:(function
+                  | Ok (Some target) -> Some (dune_path, targets, target)
+                  | Ok None | Error _ -> None))
+        with _ -> [])
+  in
   let smoke_roots = List.filter alias_nodes ~f:(fun node -> node.is_bin_smoke) in
   let directory_path_errors node =
     List.filter_map path_rewriting_directories ~f:(fun (directory, dune_path) ->
@@ -725,6 +758,12 @@ let scan dune_files =
     List.filter expected ~f:(fun local -> not (List.mem smoked local ~equal:String.equal))
   in
   let duplicate_smoked = duplicates smoked in
+  let generated_public_run_errors =
+    List.filter_map target_producers ~f:(fun (dune_path, targets, target) ->
+        match canonicalize target with
+        | Ok local -> Some (generated_public_run_error dune_path local targets)
+        | Error _ -> None)
+  in
   let errors =
     List.rev scan_errors
     @ (if Int.equal smoke_stanza_count 0 then [ "the repository defines no @bin-smoke action" ]
@@ -732,6 +771,7 @@ let scan dune_files =
     @ List.map duplicate_locals ~f:(Printf.sprintf "duplicate public local identity: %s")
     @ List.map duplicate_public ~f:(Printf.sprintf "duplicate public installed identity: %s")
     @ List.map duplicate_smoked ~f:(Printf.sprintf "@bin-smoke runs more than once: %s")
+    @ generated_public_run_errors
   in
   { declarations; smoked; missing; unexpected = sorted unexpected; errors }
 
@@ -1135,6 +1175,31 @@ let expanded_dependency_fixture =
  (deps (universe) %{read-lines:manifest})
  (action (run %{exe:alpha.exe})))|dune}
 
+let unmodeled_dependency_fixture =
+  {dune|(executable (name alpha) (public_name alpha-tool))
+(rule
+ (target smoke-default.stamp)
+ (action (run %{exe:alpha.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (universe) smoke-%{context_name}.stamp)
+ (action (run %{exe:alpha.exe})))|dune}
+
+let generated_source_input_fixture =
+  {dune|(executables
+ (names alpha beta)
+ (public_names alpha-tool beta-tool))
+(rule
+ (target alpha.ml)
+ (action (run %{exe:beta.exe})))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:alpha.exe})
+   (run %{exe:beta.exe}))))|dune}
+
 let data_only_root_fixture = {dune|(data_only_dirs fixtures)|dune}
 let data_only_bin_fixture = {dune|(executable (name alpha) (public_name alpha-tool))|dune}
 
@@ -1279,6 +1344,8 @@ let controls_hold () =
   let explicit_read_dependency = scan_bin_content explicit_read_dependency_fixture in
   let embedded_explicit_dependency = scan_bin_content embedded_explicit_dependency_fixture in
   let expanded_dependency = scan_bin_content expanded_dependency_fixture in
+  let unmodeled_dependency = scan_bin_content unmodeled_dependency_fixture in
+  let generated_source_input = scan_bin_content generated_source_input_fixture in
   let data_only =
     scan
       [
@@ -1416,6 +1483,13 @@ let controls_hold () =
   && (not (complete expanded_dependency))
   && List.mem expanded_dependency.errors
        "@bin-smoke reaches a dependency specification expanded from file contents"
+       ~equal:String.equal
+  && (not (complete unmodeled_dependency))
+  && List.mem unmodeled_dependency.errors
+       "@bin-smoke reaches a dependency path computed by an unmodeled pform" ~equal:String.equal
+  && (not (complete generated_source_input))
+  && List.mem generated_source_input.errors
+       (generated_public_run_error "bin/dune" "bin/beta.exe" [ "bin/alpha.ml" ])
        ~equal:String.equal
   && (not (complete data_only))
   && List.mem data_only.errors (data_only_dirs_error "dune") ~equal:String.equal

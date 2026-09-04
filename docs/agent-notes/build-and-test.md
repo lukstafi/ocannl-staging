@@ -1262,8 +1262,8 @@ that they earn a lookup rather than always-loaded space.
   It fails closed on other private helpers, external or otherwise opaque actions, `dynamic-run`,
   `with-accepted-exit-codes`, `enabled_if` on a public
   declaration, `alias_rec`, implicit built-in aliases, implicit test runners on arbitrary aliases,
-  `data_only_dirs`, dependency-list `include` or `read*` expansion, explicit (file or directory,
-  including files below a directory target) or
+  `data_only_dirs`, dependency-list `include`, `read*` expansion or an otherwise unmodeled pform,
+  explicit (file or directory, including files below a directory target) or
   action-inferred generated-target dependencies (including dependency pforms in fields or actions,
   pforms embedded in larger dependency/action atoms, literal file-input action positions, and
   output actions under a literal `chdir`, including `mkdir`'s directory kind), target-bearing alias
@@ -1279,6 +1279,9 @@ that they earn a lookup rather than always-loaded space.
   program paths remain relative to the changed working directory. Each construct needs deliberate
   scanner support before it can participate in this static guarantee. Absolute executable paths are
   refused before normalization, so `/../bin/tool.exe` cannot collapse into a workspace identity.
+  A target-producing rule anywhere in the repository may not run a public bin executable: its
+  output could be an implicit build prerequisite of a smoked executable, hiding an extra execution
+  outside the alias dependency edges the census can see.
 - GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
