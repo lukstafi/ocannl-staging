@@ -2668,5 +2668,29 @@ class CellTimeoutTest(unittest.TestCase):
         self.assertNotIn("Runner failures", (out / "report.md").read_text())
 
 
+class CommandLineTest(unittest.TestCase):
+    """What the flags parse to — the wiring between a module constant and the sweep.
+
+    `CellTimeoutTest` pins the values themselves: that `DEFAULT_BEAM_PARALLEL` is zero, that
+    `beam_parallel_arg` refuses a negative pool, that `beam_cell_env` turns the number into
+    `PARALLEL`. None of that reaches the sweep unless the flag is declared with that default,
+    and a `default=` edit is invisible to every one of those tests.
+    """
+
+    def test_a_sweep_with_no_arguments_runs_the_beam_cells_without_a_pool(self):
+        # gh-ocannl-843: the pool deadlocks tinygrad 0.13/0.14 on both GPU boxes, so no pool is
+        # what an operator gets by not asking -- on a newly provisioned box as much as here.
+        args = orchestrate.build_arg_parser().parse_args([])
+
+        self.assertEqual(args.beam_parallel, 0)
+
+    def test_an_explicit_pool_size_reaches_the_beam_cells(self):
+        # The opt-in half: the pin is a default, not a ceiling, and an operator who asks for a
+        # parallel search gets the size they asked for rather than the pinned zero.
+        args = orchestrate.build_arg_parser().parse_args(["--beam-parallel", "4"])
+
+        self.assertEqual(args.beam_parallel, 4)
+
+
 if __name__ == "__main__":
     unittest.main()
