@@ -82,13 +82,16 @@
    whose only content is a call to a same-kernel conversion carries no [.loc] inside the loop at
    all. Every row tries its exact source lines first and, only when none is carried, falls back to
    the smallest brace-delimited range containing its unique patterns after the generated function's
-   [Main logic] marker. - {b whether a whole-vector builtin is lowered whole-vector}, which is what
-   the sharp scalarization claim reads -- see {!packed_half_widen}. - {b how the assembler SPELLS a
-   packed instruction}, which is what every count reads. Apple's arm64 dialect carries the
-   arrangement on the mnemonic ([fmla.4s v0, v1, v2]) rather than on the registers, and a census
-   blind to that spelling reports a fully packed k-loop as [vector=0 scalar_fp=0] -- 34 of its 49
-   instructions invisible -- which is how macos-latest failed the vector-majority claim on [0 > 0]
-   over a tile nothing was wrong with. See {!dialect_probes}.
+   [Main logic] marker -- in that order, because the range also names the compiler's OWN loops
+   inside the construct, and the shortest of those is what [Innermost] would then report on the gcc
+   columns that never needed the widening. See {!anchor_precedence_probe}. - {b whether a
+   whole-vector builtin is lowered whole-vector}, which is what the sharp scalarization claim reads
+   -- see {!packed_half_widen}. - {b how the assembler SPELLS a packed instruction}, which is what
+   every count reads. Apple's arm64 dialect carries the arrangement on the mnemonic ([fmla.4s v0,
+   v1, v2]) rather than on the registers, and a census blind to that spelling reports a fully packed
+   k-loop as [vector=0 scalar_fp=0] -- 34 of its 49 instructions invisible -- which is how
+   macos-latest failed the vector-majority claim on [0 > 0] over a tile nothing was wrong with. See
+   {!dialect_probes}.
 
    Before claiming a count is zero, ask whether the zero is the emission's, the compiler's, or the
    reader's: every census profile prints a [residual] count of instructions no classifier
@@ -1370,6 +1373,116 @@ let dialect_probes () =
         && c.Census.counts.Census.scalar_fp_ops = 0
     | None -> false)
 
+(* {2 That the exact anchor is tried before the range}
+
+   The range fallback is a WIDENING, and a widening that fires unconditionally changes the answer on
+   the toolchain that never needed it. gcc attributes the established rows precisely AND emits loops
+   of its own inside the same construct -- a staging copy, a vectorizer peel -- which the
+   construct's brace-delimited range names just as readily as the accumulator loop the widening was
+   for. [Innermost] then reports the compiler's little loop: a smaller span, a handful of
+   instructions, and every inequality about "the accumulator loop" evaluated over something that is
+   not one. That is what the first CI cycle of the fallback showed on the gcc columns
+   (gh-ocannl-844), and it is a regression no fixture here could have caught: the clang probe above
+   pins the case where the exact anchor answers NOTHING, so the two readings never disagree in it
+   and the ordering between them is unobservable. Hence a fixture whose readings DISAGREE, and a
+   claim on each of the three answers -- what the range alone says, what the exact lines alone say,
+   and which of the two {!census_loop} returns. Pinning only the third would pass just as well over
+   a fixture that had stopped discriminating.
+
+   The source is a reduction whose tensor-derived name appears on its accumulator declaration, its
+   update and its store, so the smallest brace-delimited block containing all three is the
+   construct's -- which also contains the staging loop's line, one nesting level in. The exact lines
+   name the update alone, which only the accumulator loop carries. *)
+let anchor_precedence_probe () =
+  (* Line 4 declares the accumulator, line 10 updates it and line 13 stores it, all three carrying
+     the row's tensor-derived name; line 7 is the staging copy's, which no anchor pattern names. *)
+  let source =
+    String.concat ~sep:"\n"
+      [
+        "int f(void) {";
+        "  /* Main logic. */";
+        "  { /* one generated reduction */";
+        "    float acc_dot_bf16[K];";
+        "    for (int i = 0; i < N; ++i) {";
+        "      for (int lane = 0; lane < K; ++lane) {";
+        "        stage[lane] = bfloat16_to_single(raw[i][lane]);";
+        "      }";
+        "      for (int k = 0; k < K; ++k) {";
+        "        acc_dot_bf16[k] = ocannl_fma(acc_dot_bf16[k], stage[k], wgt[i][k]);";
+        "      }";
+        "    }";
+        "    out_dot_bf16 = ocannl_hsum(acc_dot_bf16);";
+        "  }";
+        "  return 0;";
+        "}";
+      ]
+  in
+  (* [.Li] is the row's own outer loop, [.Lk] its accumulator loop, and [.Lstage] the staging copy
+     gcc emitted for line 7 -- inside [.Li], nested beside [.Lk] and shorter than it, which is the
+     whole point: [Innermost] prefers whichever candidate is shortest, so admitting [.Lstage] as a
+     candidate is admitting it as the answer. Only [.Lk] carries a [.loc] for an exact anchor line;
+     [.Li] carries one only by containing [.Lk]. *)
+  let asm =
+    String.concat ~sep:"\n"
+      [
+        "\t.file 1 \"/build/census_kernel.c\"";
+        "f:";
+        ".Li:";
+        "\t.loc 1 5 3";
+        "\taddq\t$1, %rax";
+        ".Lstage:";
+        "\t.loc 1 7 9";
+        "\tmovdqu\t(%rsi), %xmm3";
+        "\tcvtph2ps\t%xmm3, %xmm3";
+        "\tjne\t.Lstage";
+        ".Lk:";
+        "\t.loc 1 10 9";
+        "\tvmovups\t(%rdi), %ymm1";
+        "\tvfmadd231ps\t(%rdx), %ymm1, %ymm0";
+        "\tvmovups\t%ymm0, (%rdi)";
+        "\taddq\t$32, %rdi";
+        "\taddq\t$32, %rdx";
+        "\tcmpq\t%rcx, %rdi";
+        "\tjne\t.Lk";
+        "\tjne\t.Li";
+        "\tret";
+      ]
+  in
+  (* An ordinary [Reduce] row of the census: a storage precision other than fp8, so
+     {!loop_selection} answers [Innermost] here for the same reason it does for the gcc rows this
+     models, rather than by this fixture asking for it. *)
+  let loop =
+    {
+      anchors = [ "dot_bf16" ];
+      op_class = Census.Fma;
+      kind = Reduce;
+      what = "anchor precedence control";
+      store = Ir.Ops.prec_string Ir.Ops.single;
+      comp = Ir.Ops.prec_string Ir.Ops.single;
+      widen = "";
+      narrow = "";
+    }
+  in
+  let e = { width = 32; fp16 = "wide"; src_path = routine ^ ".c"; source; loops = [ loop ] } in
+  let parsed = Census.parse ~asm ~source_basename:(routine ^ ".c") in
+  let read anchor =
+    Census.census_in ~selection:(loop_selection loop) parsed loop.op_class ~anchor
+  in
+  let exact = read (Census.anchor_lines ~source ~patterns:loop.anchors) in
+  let range = read (loop_anchor_range e loop) in
+  (* Label AND span, so a reading that found the right loop under the wrong edge, or the wrong loop
+     under a label rename, is not a pass. *)
+  let is c ~label ~span =
+    match c with
+    | Some (c : Census.t) -> String.equal c.Census.loop_label label && c.Census.span = span
+    | None -> false
+  in
+  Verdict.p "the brace range alone reads the staging loop gcc nested beside the accumulator"
+    (is range ~label:".Lstage" ~span:4);
+  Verdict.p "the exact source anchor reads the accumulator loop" (is exact ~label:".Lk" ~span:8);
+  Verdict.p "a census row takes its exact source anchor ahead of the brace-range fallback"
+    (is (census_loop parsed e loop) ~label:".Lk" ~span:8)
+
 let () =
   match Stdlib.Sys.getenv_opt "CC_MARCH_CENSUS_EMIT" with
   | Some dir -> build dir
@@ -1380,6 +1493,7 @@ let () =
       mkdir_p root;
       cache_format_probes ();
       dialect_probes ();
+      anchor_precedence_probe ();
       let emitted = emit_all ~exe ~root in
       Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->
           List.exists emitted ~f:(fun e -> e.width = w));

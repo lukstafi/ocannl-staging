@@ -1350,7 +1350,16 @@ def report(results, out_dir, unavailable=(), failures=(), digests_path=None):
     print("\n" + text)
 
 
-def main():
+def build_arg_parser():
+    """The sweep's command line, built without touching anything.
+
+    Separated from `main` so a test can read what the flags actually parse to.  A default
+    that lives only in the parser is a claim no other test can reach: `DEFAULT_BEAM_PARALLEL`
+    being zero says nothing about the sweep unless `--beam-parallel` is wired to it, and the
+    wiring is what an edit here breaks (gh-ocannl-843).  Everything `main` does that touches
+    the machine -- the signal handler, the torch probe, the sweep itself -- stays in `main`,
+    so calling this is free.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--workloads", nargs="*", help="workload names (default: all fixtures)")
     ap.add_argument("--tuned", action="store_true", help="add the OCANNL autotuned variant")
@@ -1443,7 +1452,11 @@ def main():
         default=["ocannl", "pytorch", "tinygrad"],
         help="frameworks to run",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
     install_termination_handler()
     gpu_ocannl, gpu_torch, gpu_tiny = GPU_DEVICES[args.gpu]
     if args.gpu == "hip" and gpu_torch and "pytorch" in args.only:

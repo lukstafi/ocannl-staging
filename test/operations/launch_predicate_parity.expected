@@ -37,5 +37,5 @@ seed .z grid fold: seeding and the gate refuse it with the same sentence: true
 conv prediction: the fission segment seeds a whole-extent GPU flavor: true
 conv prediction: the fission segment seeds a row-blocked GPU flavor: true
 conv prediction: no GPU seed predicts a dimension above its applied launch geometry: true
-conv control: a permissive cap proposes a blocked seed folding batch x spatial past 65535: true
+conv control: a permissive cap proposes a blocked seed folding the 65536 batch onto grid.z: true
 conv seeding: the 65535 grid.z cap omits every deliberately over-cap seed: true

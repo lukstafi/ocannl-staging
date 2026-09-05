@@ -195,11 +195,6 @@ let mma_acc_format_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_form
   | Ir.Ops.Single_prec _ -> Some Ir.Backend_intf.Mma_f32
   | _ -> None
 
-let equal_mma_format_triple (a1, b1, d1) (a2, b2, d2) =
-  Ir.Backend_intf.equal_mma_input_format a1 a2
-  && Ir.Backend_intf.equal_mma_input_format b1 b2
-  && Ir.Backend_intf.equal_mma_input_format d1 d2
-
 (* The site's resolved format triples, in [mma_input_formats_of_prec]'s preference order. *)
 let mma_format_triples ~a_prec ~b_prec ~d_prec =
   match mma_acc_format_of_prec d_prec with
@@ -225,7 +220,8 @@ let fp16_wide_withholds (mma : Ir.Backend_intf.mma_capability) ~scope ~d_prec =
 
 let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
   List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key
+        ~equal:Ir.Backend_intf.equal_mma_format_triple)
 
 let mma_tile_for_precisions_in_scope (mma : Ir.Backend_intf.mma_capability) ~scope ~a_prec ~b_prec
     ~d_prec =
@@ -239,7 +235,8 @@ let mma_tile_for_precisions_in_scope (mma : Ir.Backend_intf.mma_capability) ~sco
 let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec
     : LL.swizzle_kind option =
   List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
-      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key
+        ~equal:Ir.Backend_intf.equal_mma_format_triple)
   |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {

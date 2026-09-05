@@ -59,14 +59,8 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
 
-let advertises_mma_format a_format b_format d_format =
-  match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-  | None -> false
-  | Some mma ->
-      List.exists mma.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
-          Ir.Backend_intf.equal_mma_input_format a a_format
-          && Ir.Backend_intf.equal_mma_input_format b b_format
-          && Ir.Backend_intf.equal_mma_input_format d d_format)
+let advertises_mma_format a b d =
+  Ir.Backend_intf.advertises_mma_format (Context.hardware_limits (Context.auto ())) ~a ~b ~d
 
 let has_uniform_f32_mma =
   advertises_mma_format Ir.Backend_intf.Mma_f32 Ir.Backend_intf.Mma_f32 Ir.Backend_intf.Mma_f32
