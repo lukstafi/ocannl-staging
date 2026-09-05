@@ -129,14 +129,13 @@ let () =
       ~name:"accum_max_one_preboundary" legacy
   in
   let ctx1, routine1 =
-    Context.compile ~name:"accum_max_one_preboundary" ~prelowered:optimized
-      ~lowered_transform:(fun x -> [ x ])
-      (Context.auto ()) Asgns.empty_comp one.bindings
+    Ll_test.link ~bindings:one.bindings ~name:"accum_max_one_preboundary" optimized
   in
   Idx.find_exn routine1.Context.bindings one.extent := 0;
-  let ctx1 = Context.set_values ctx1 one.x.Tensor.value [| 37. |] in
-  let ctx1 = Context.set_values ctx1 one.y.Tensor.value (Ll_test.blank 1) in
-  let ctx1 = Context.run ctx1 routine1 in
+  let ctx1 =
+    Ll_test.run_linked (ctx1, routine1)
+      ~seed:[ (one.x.Tensor.value, [| 37. |]); (one.y.Tensor.value, Ll_test.blank 1) ]
+  in
   let got = Context.get_values ctx1 one.y.Tensor.value in
   p "the refused program would have returned its operand where the empty sum is 0.0"
     (Array.equal Float.equal got [| 37. |]);

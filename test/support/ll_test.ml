@@ -420,12 +420,19 @@ let base_ctx = lazy (Context.auto ())
 
     The identity [lowered_transform] takes the place of the default schedule annotator, which would
     otherwise parallelize or fission the hand-built loop nest — the point of the case is usually the
-    nest's exact shape. *)
-let link ?ctx ~name (o : LL.optimized) =
+    nest's exact shape.
+
+    [~bindings] are the routine's launch parameters, for code that mentions a symbol no loop binds:
+    a gh-490 symbolic extent, a batch-slice index. Pass the same [unit_bindings] whose bound symbols
+    were declared as {!optimize}'s [~static_indices], and set each parameter's value through
+    [Context.bindings] on the RETURNED routine — [Idx.find_exn routine.Context.bindings sym := v] —
+    before {!run_linked}; the unit bindings themselves carry no cell to write. Empty by default,
+    which is right for every nest whose indices are all loop indices. *)
+let link ?ctx ?(bindings = Idx.Empty) ~name (o : LL.optimized) =
   let ctx = match ctx with Some ctx -> ctx | None -> Lazy.force base_ctx in
   Context.compile ~name ~prelowered:o
     ~lowered_transform:(fun x -> [ x ])
-    ctx Ir.Assignments.empty_comp Idx.Empty
+    ctx Ir.Assignments.empty_comp bindings
 
 (** [link_finalized ~placements ~name o] links through the real backend, then checks that every
     requested node has left the undecided placement classes. Backend code generation is the
@@ -459,11 +466,12 @@ let run_linked (ctx, routine) ~(seed : (Tn.t * float array) list) =
 
 (** [run ~name o ~seed] is {!link} followed by {!run_linked}, for the tests that have no use for the
     routine itself. Same materialization requirement on [seed]. *)
-let run ?ctx ~name (o : LL.optimized) ~seed = run_linked (link ?ctx ~name o) ~seed
+let run ?ctx ?bindings ~name (o : LL.optimized) ~seed =
+  run_linked (link ?ctx ?bindings ~name o) ~seed
 
 (** {!run}, then read back [read] in order. Same materialization requirement, on both lists. *)
-let execute ?ctx ~name (o : LL.optimized) ~seed ~(read : Tn.t list) =
-  let ctx = run ?ctx ~name o ~seed in
+let execute ?ctx ?bindings ~name (o : LL.optimized) ~seed ~(read : Tn.t list) =
+  let ctx = run ?ctx ?bindings ~name o ~seed in
   List.map read ~f:(Context.get_values ctx)
 
 (** Whether [f] was refused because the node it touched is placed [Local] — routine-scoped scratch
@@ -475,10 +483,12 @@ let refused_as_local f =
   with Utils.User_error msg -> String.is_substring msg ~substring:"placed Local"
 
 (** [optimize_and_execute] is {!optimize} followed by {!execute} under the same name, returning both
-    the optimized record (for structural probes) and the values read back. *)
-let optimize_and_execute ?ctx ?materialized ~name llc ~seed ~read =
+    the optimized record (for structural probes) and the values read back. A case whose [~bindings]
+    also have to be declared to the optimization as [~static_indices] calls {!optimize} and
+    {!execute} separately: this helper's optimize half takes no [~static_indices]. *)
+let optimize_and_execute ?ctx ?bindings ?materialized ~name llc ~seed ~read =
   let o = optimize ?materialized ~name llc in
-  (o, execute ?ctx ~name o ~seed ~read)
+  (o, execute ?ctx ?bindings ~name o ~seed ~read)
 
 (** The value seeded into cells no writer is supposed to cover: distinct from every producer value
     the builders above generate, and from the zero-init. *)
