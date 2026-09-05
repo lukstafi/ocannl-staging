@@ -10,8 +10,9 @@
     over-approximated to the whole source, and an [include M] counts as a reference to every value
     because it re-exports the whole interface. Both choices can hide a dead export through a false
     positive, but cannot falsely reject an ordinary use. Values generated for top-level types by
-    [sexp_of], [sexp], [compare], and [equal] derivings are included; their expression extensions
-    count as references without needing to spell the generated value. Values introduced by other PPX
+    [sexp_of], [of_sexp], [sexp], [compare], and [equal] derivings are included (a standalone
+    [of_sexp] deriving as much as the [of_sexp] half of [sexp]); their expression extensions count
+    as references without needing to spell the generated value. Values introduced by other PPX
     expansions or by an [include] inside the defining module remain outside this source-level
     census. *)
 
