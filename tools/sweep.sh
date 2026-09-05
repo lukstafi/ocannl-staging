@@ -112,6 +112,36 @@ UNITS=(
   "minix:hip:minix-amd-wsl"
 )
 
+# Dune's job count for the TEST phase of a unit, empty for dune's default (one
+# per core). The hip box's GPU is an iGPU reached through WSL2's dxg bridge --
+# every allocation and every module load is a synchronous message over a Hyper-V
+# VM bus ring -- and that ring overflows when the suite's test executables hold
+# the device at once (dune's default on that box is 32 jobs, 16 of them GPU
+# processes at the moment it was measured). The kernel logs
+# `dxgvmb_send_sync_msg: vmbus_sendpacket failed: fffffff5` (-EAGAIN) and the
+# HIP runtime surfaces the lost messages as HIP_ERROR_INVALID_DEVICE at
+# hip_init, HIP_ERROR_NO_BINARY_FOR_GPU at module load, and failed stream
+# creation: 60+ red tests in a suite whose logic never ran, with a device that
+# passes every standalone probe (2026-09-05, minix after two host resumes kept
+# the VM alive with a degraded bridge; a fresh VM tolerated the full width for
+# eleven daily sweeps before that). Measured on that degraded bridge the same
+# day: full width 67 red, `-j 4` still 27 red with 120 kernel-side refusals,
+# `-j 2` zero of either over a forced full unit in 18.5 minutes, `-j 1` clean
+# on every rerun. A single GPU serialises the kernels anyway, so the cap costs
+# the test phase little; the compile phase stays uncapped (`test_cmd` runs
+# `@check` first). Override for one run with OCANNL_TOOL_SWEEP_JOBS=<n>, which
+# then applies to every unit.
+unit_jobs() {
+  if [ -n "${OCANNL_TOOL_SWEEP_JOBS:-}" ]; then
+    printf '%s' "$OCANNL_TOOL_SWEEP_JOBS"
+    return
+  fi
+  case "$1:$2" in
+    minix:hip) printf 2 ;;
+    *) ;;
+  esac
+}
+
 # Successful forced full-suite units are the only logs from which absence of a
 # skip announcement means execution. Incremental Dune runs may serve a cached
 # test without replaying its stderr, and a red or interrupted unit may not have
@@ -350,8 +380,9 @@ wanted() {
 # arithmetic survive into the shell that finally runs them. The result is spliced
 # into the remote string via command substitution, which bash does not rescan.
 test_cmd() {
-  local backend=$1 wt=$2 force_arg=
+  local backend=$1 wt=$2 jobs=${3:-} force_arg= jobs_arg=
   [ "$FORCE" = 1 ] && force_arg=--force
+  [ -n "$jobs" ] && jobs_arg="-j $jobs"
   # 127, not a generic failure: a worktree that is not there means nothing ran,
   # which the outcome mapping treats as non-coverage rather than a red suite.
   printf 'cd "%s" || exit 127; ' "$wt"
@@ -367,16 +398,28 @@ test_cmd() {
   # the two suites share a build graph and rc1 stays one verdict. A narrow
   # --target run keeps its narrow meaning -- the `target` column already marks
   # it as refreshing no coverage.
+  # A capped full-suite unit compiles at full width first: `@check` runs no
+  # test action (it is the compile-only alias), so the cap -- which exists to
+  # bound how many test executables hold the GPU at once -- does not also
+  # serialise the build. Its status is deliberately dropped: a compile failure
+  # reaches the verdict through the capped call, which rebuilds the same cone and
+  # fails the same way. A --target run gets no prebuild: a workspace-wide
+  # `@check` ahead of a narrow target would spend the unit's deadline compiling
+  # code the target never reaches, and its cone is small enough to compile under
+  # the cap (Codex P2 on PR #658).
+  if [ -n "$jobs" ] && [ -z "$TARGET" ]; then
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build @check; ' "$backend"
+  fi
   if [ -z "$TARGET" ]; then
-    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s @runtest @train; rc1=$?; ' \
-      "$backend" "$force_arg"
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s%s @runtest @train; rc1=$?; ' \
+      "$backend" "$jobs_arg${jobs_arg:+ }" "$force_arg"
   else
-    printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s %s; rc1=$?; ' \
-      "$backend" "$force_arg" "$TARGET"
+    printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s%s %s; rc1=$?; ' \
+      "$backend" "$jobs_arg${jobs_arg:+ }" "$force_arg" "$TARGET"
   fi
   if [ "$SLOW" = 1 ]; then
-    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s @slow; rc2=$?; ' \
-      "$backend" "$force_arg"
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s%s @slow; rc2=$?; ' \
+      "$backend" "$jobs_arg${jobs_arg:+ }" "$force_arg"
   else
     printf 'rc2=0; '
   fi
@@ -1004,7 +1047,7 @@ for unit in "${UNITS[@]}"; do
     # supervisor capped() uses locally, see remote_capped -- because a
     # per-dune-call cap would let a --slow unit run for twice the budget the
     # script advertises.
-    remote="$(remote_capped "$CAP" "$path_prefix $(remote_lock_cmd "$wt") $(test_cmd "$backend" "$wt")")"
+    remote="$(remote_capped "$CAP" "$path_prefix $(remote_lock_cmd "$wt") $(test_cmd "$backend" "$wt" "$(unit_jobs "$machine" "$backend")")")"
     # The far-side cap does not bound the LOCAL ssh: if the connection blackholes
     # after the command starts -- the box suspends, the WiFi drops -- the remote
     # cap may kill dune while this ssh sits waiting for a status that will
@@ -1043,7 +1086,7 @@ for unit in "${UNITS[@]}"; do
       update_unit_state "$machine" "$backend" error "$WRITTEN_FINGERPRINT"
       continue
     fi
-    run_capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
+    run_capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt" "$(unit_jobs "$machine" "$backend")")" >"$log" 2>&1
     rc=$?
   fi
 

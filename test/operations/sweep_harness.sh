@@ -26,7 +26,8 @@ on_error() {
     environment_executed partial_matrix singleton_fail repeated_backend_fail \
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
     local_identity_error unsafe_identity_error matrix_error state_first state_same \
-    state_other_ref state_green state_unjudged state_regression state_after_fix state_moved; do
+    state_other_ref state_green state_unjudged state_regression state_after_fix state_moved \
+    capped capped_target; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -57,7 +58,7 @@ absent() {
 # where its environment is built.
 unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
   SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
-  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX
+  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX SWEEP_TEST_JOBS
 
 sweep=$1
 aggregate=$2
@@ -172,6 +173,7 @@ run_sweep_args() {
     "SWEEP_TEST_OPAM_OUT_MULTIDEV_CC=${SWEEP_TEST_OPAM_OUT_MULTIDEV_CC:-}" \
     "SWEEP_TEST_OPAM_OUT_METAL=${SWEEP_TEST_OPAM_OUT_METAL:-}" \
     "OCANNL_TOOL_SWEEP_LOCAL_BOX=${SWEEP_TEST_LOCAL_BOX-m4-max}" \
+    "OCANNL_TOOL_SWEEP_JOBS=${SWEEP_TEST_JOBS:-}" \
     "OCANNL_TOOL_SWEEP_REPO=$main" \
     "OCANNL_TOOL_SWEEP_STATE=$state" \
     "$sweep" "$@"
@@ -872,6 +874,25 @@ set -e
 [ "$unsafe_identity_error_rc" -eq 2 ]
 grep -q "^sweep: set OCANNL_TOOL_SWEEP_LOCAL_BOX to this host's portable measurement-box ID$" \
   <<<"$unsafe_identity_error"
+
+# A unit with a dune job cap -- the per-unit table names minix/hip, a unit this
+# harness cannot reach, so the run-wide override stands in -- compiles at full
+# width under `@check` and only then runs its tests under `-j`. The compile
+# leg's status is dropped on purpose (test_cmd says why), so the verdict must
+# still come from the capped call, and the cap must not reach the uncapped
+# units: the run before this one recorded no `@check` and no `-j`.
+capped=$(SWEEP_TEST_JOBS=2 run_sweep --force)
+grep -q 'm4-max/cc: pass .*execution=forced' <<<"$capped"
+[ "$(tail -3 "$calls" | sed -n '1p')" = 'exec -- dune clean' ]
+[ "$(tail -3 "$calls" | sed -n '2p')" = 'exec -- dune build @check' ]
+[ "$(tail -3 "$calls" | sed -n '3p')" = 'exec -- dune build -j 2 --force @runtest @train' ]
+absent 'dune build \(-j\|@check\)' <<<"$(tail -4 "$calls" | sed -n '1p')"
+# A capped --target run keeps its narrow meaning: the cap reaches the test call,
+# and no workspace-wide `@check` runs ahead of it to eat the unit's deadline on
+# code the target never reaches.
+capped_target=$(SWEEP_TEST_JOBS=2 run_sweep_args --target state-probe)
+[ "$(tail -1 "$calls")" = 'exec -- dune runtest -j 2 state-probe' ]
+absent '@check' <<<"$(tail -2 "$calls" | sed -n '1p')"
 
 # A historical target may declare fewer boxes than today's execution map. The
 # extra local unit still proves backend facts, but cannot be counted as a member
