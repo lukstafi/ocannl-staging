@@ -136,22 +136,21 @@ let () =
      parameter left unnamed would run at the backend's [ref 0] whether or not a test meant zero,
      which in a case ABOUT what an extent-0 launch computes is exactly the reading that must not be
      reachable by accident. Both refusals are checked before anything is compiled. *)
-  let unset () =
-    ignore
-      (Ll_test.execute ~bindings:one.bindings ~name:"accum_max_one_unset" optimized ~seed:[]
-         ~read:[]
-        : float array list)
+  let refused launch =
+    Option.is_some
+      (misuse (fun () ->
+           ignore
+             (Ll_test.execute ~bindings:one.bindings ~launch ~name:"accum_max_one_misuse" optimized
+                ~seed:[] ~read:[]
+               : float array list)))
   in
-  p "the harness refuses an executed leg that leaves a launch parameter unset"
-    (Option.is_some (misuse unset));
-  p "and one whose ~launch names a symbol the bindings do not bind"
-    (Option.is_some
-       (misuse (fun () ->
-            ignore
-              (Ll_test.execute
-                 ~launch:[ (one.extent, 0) ]
-                 ~name:"accum_max_one_stray" optimized ~seed:[] ~read:[]
-                : float array list))));
+  p_all ~min:3 "the harness refuses every ~launch that does not value the parameter exactly once"
+    [
+      ("left unset", []);
+      ("valued twice", [ (one.extent, 0); (one.extent, 1) ]);
+      ("naming a symbol the bindings do not bind", [ (one.extent, 0); (two.extent, 0) ]);
+    ]
+    ~f:(fun (_, launch) -> refused launch);
   let got =
     List.hd_exn
       (Ll_test.execute ~bindings:one.bindings

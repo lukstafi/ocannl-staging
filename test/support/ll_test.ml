@@ -465,13 +465,15 @@ let run_linked (ctx, routine) ~(seed : (Tn.t * float array) list) =
   let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   Context.run ctx routine
 
-(** Refuses a [launch] list that does not name EXACTLY the bound symbols of [bindings]. Backend
-    linking initializes every launch parameter to [ref 0], so an uncovered one would launch silently
-    at zero — a value a test never chose, and indistinguishable in the result from one it did —
-    while a stray entry is a value that reaches no launch at all. Both are the wrong-value class the
-    executed legs exist to catch, so both raise rather than default, and they raise BEFORE the
-    routine is compiled: a misuse costs no codegen, and a test can pin the refusal for the price of
-    the check. *)
+(** Refuses a [launch] list that does not give EXACTLY ONE value to EACH bound symbol of [bindings].
+    That invariant, not a list of the ways to break it, is what the check tests: it counts, so no
+    entry can be silently absorbed. Backend linking initializes every launch parameter to [ref 0],
+    so an uncovered symbol would launch at a zero the test never chose and could not distinguish in
+    the result from one it did; a repeated symbol would launch at whichever value the assignment
+    loop wrote last; a stray entry is a value that reaches no launch at all. All three are the
+    wrong-value class the executed legs exist to catch, so all three raise rather than default, and
+    they raise BEFORE the routine is compiled: a misuse costs no codegen, and a test can pin the
+    refusal for the price of the check. *)
 let check_launch ~bindings ~launch =
   let bound = Idx.bound_symbols bindings in
   let ident (sym : Idx.static_symbol) = Idx.symbol_ident sym.Idx.static_symbol in
@@ -482,9 +484,9 @@ let check_launch ~bindings ~launch =
            (Printf.sprintf "Ll_test: ~launch %s: %s" what
               (String.concat ~sep:", " (List.map syms ~f:ident))))
   in
-  refuse "does not cover the launch parameter(s)"
-    (List.filter bound ~f:(fun sym ->
-         not (List.Assoc.mem launch sym ~equal:Idx.equal_static_symbol)));
+  let values sym = List.count launch ~f:(fun (s, _) -> Idx.equal_static_symbol s sym) in
+  refuse "does not give exactly one value to the launch parameter(s)"
+    (List.filter bound ~f:(fun sym -> values sym <> 1));
   refuse "names symbol(s) the bindings do not bind"
     (List.filter_map launch ~f:(fun (sym, _) ->
          Option.some_if (not (List.mem bound sym ~equal:Idx.equal_static_symbol)) sym))
@@ -494,9 +496,9 @@ let check_launch ~bindings ~launch =
 
     [~launch] carries what a {!link} caller would write into the returned routine's
     [Context.bindings]: these wrappers never hand the routine back, so it is their only way to set a
-    launch parameter, and {!check_launch} requires it to name exactly [~bindings]' bound symbols. A
-    case that also needs [~static_indices] on the optimization, or the routine itself, calls {!link}
-    directly. *)
+    launch parameter, and {!check_launch} requires it to give each of [~bindings]' bound symbols
+    exactly one value. A case that also needs [~static_indices] on the optimization, or the routine
+    itself, calls {!link} directly. *)
 let run ?ctx ?(bindings = Idx.Empty) ?(launch = []) ~name (o : LL.optimized) ~seed =
   check_launch ~bindings ~launch;
   let ctx, routine = link ?ctx ~bindings ~name o in
