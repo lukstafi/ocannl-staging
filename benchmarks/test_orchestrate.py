@@ -2673,8 +2673,9 @@ class CommandLineTest(unittest.TestCase):
 
     `CellTimeoutTest` pins the values themselves: that `DEFAULT_BEAM_PARALLEL` is zero, that
     `beam_parallel_arg` refuses a negative pool, that `beam_cell_env` turns the number into
-    `PARALLEL`. None of that reaches the sweep unless the flag is declared with that default,
-    and a `default=` edit is invisible to every one of those tests.
+    `PARALLEL`, that `cell_timeout_arg` refuses a cap that cannot mean anything. None of that
+    reaches the sweep unless the flag is declared with that default, and a `default=` edit is
+    invisible to every one of those tests.
     """
 
     def test_a_sweep_with_no_arguments_runs_the_beam_cells_without_a_pool(self):
@@ -2690,6 +2691,22 @@ class CommandLineTest(unittest.TestCase):
         args = orchestrate.build_arg_parser().parse_args(["--beam-parallel", "4"])
 
         self.assertEqual(args.beam_parallel, 4)
+
+    def test_a_sweep_with_no_arguments_caps_each_cell_at_half_an_hour(self):
+        # gh-ocannl-760: the cap is what makes an unattended sweep lose a wedged cell rather than
+        # the sweep, and it only does that from a bare `orchestrate.py`. The literal is the pin --
+        # comparing against DEFAULT_CELL_TIMEOUT_S would still pass if the constant and the flag
+        # were edited together, which is the drift this claim exists to catch.
+        args = orchestrate.build_arg_parser().parse_args([])
+
+        self.assertEqual(args.cell_timeout, 1800)
+
+    def test_an_explicit_cap_reaches_the_cells(self):
+        # The opt-in half: an operator who knows a workload outlives the pinned default gets the
+        # cap they asked for, through the same `cell_timeout_arg` that refuses a meaningless one.
+        args = orchestrate.build_arg_parser().parse_args(["--cell-timeout", "900"])
+
+        self.assertEqual(args.cell_timeout, 900.0)
 
 
 if __name__ == "__main__":
