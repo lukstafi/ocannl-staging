@@ -1905,9 +1905,6 @@ let exempt_quantified_helpers =
     ( "test/operations/reduction_forms.ml:extra_ok",
       "an empty extra-fragment list deliberately means the member requires no additional emitted \
        assignment fragments" );
-    ( "test/operations/schedule_batched_mma.ml:has_uniform_bf16_tile",
-      "an absent or empty hardware mma capability list is the environment gate that makes the \
-       backend-uniform non-support legs pass without attempting a tensor-core candidate" );
     ( "test/operations/shell_scripts_parse.ml:line_enables_errexit",
       "a line may legitimately parse to no parent-affecting command fragment; this exists result \
        is an internal classification input, while the fixed non-empty case table is the test \

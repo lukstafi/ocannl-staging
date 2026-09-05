@@ -27,9 +27,9 @@ module Read = Test_utils.Config_key_scan
 module Scan = Test_utils.Dead_export_scan
 module Dune = Test_utils.Dune_stanza_scan
 
-(* Filled from the first live census. Every entry names one exact implicit export and shares the
-   reason stated above: it predates the ratchet and needs an explicit interface or a usage
-   decision. *)
+(* Filled from the first live census. Every unannotated entry names one exact implicit export and
+   shares the reason stated above: it predates the ratchet and needs an explicit interface or a
+   usage decision. A value that goes zero-reference later carries its own reason where it sits. *)
 let exempt_zero_reference_exports =
   [
     "Backend_impl._get_local_debug_runtime";
@@ -40,6 +40,12 @@ let exempt_zero_reference_exports =
     "Backend_intf.compare_mma_staged_layout";
     "Backend_intf.equal_hardware_limits";
     "Backend_intf.equal_mma_capability";
+    (* Not pre-existing. [Backend_intf.equal_mma_format_triple] and [advertises_mma_format] -- the
+       typed way to interrogate the MMA seam of gh-ocannl-822 -- absorbed what used to be open-coded
+       per-constructor comparisons at the call sites, which were this derived equality's only
+       external references. It stays derived because the record equalities exempted above are
+       generated from it, and asking the descriptor is what callers should reach for instead. *)
+    "Backend_intf.equal_mma_input_format";
     "Backend_intf.equal_mma_staged_layout";
     "Backend_intf.hardware_limits_of_sexp";
     "Backend_intf.mma_capability_of_sexp";

@@ -261,13 +261,9 @@ let () =
       ~f:(fun p -> p.Autotune.sk_mma)
   in
   let advertises_tf32 =
-    match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-    | None -> false
-    | Some mma ->
-        List.exists mma.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
-            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_tf32
-            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_tf32
-            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_f32)
+    Ir.Backend_intf.advertises_mma_format
+      (Context.hardware_limits (Context.auto ()))
+      ~a:Ir.Backend_intf.Mma_tf32 ~b:Ir.Backend_intf.Mma_tf32 ~d:Ir.Backend_intf.Mma_f32
   in
   if advertises_tf32 then (
     let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
