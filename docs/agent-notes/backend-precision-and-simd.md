@@ -838,7 +838,11 @@ files.
   line. That keeps GCC's established narrow selection while clang's different attribution no longer
   makes x86 `dot` rows disappear; the modeled set is stated as GCC/GAS and Clang assembly on x86-64
   and aarch64, with an ELF/clang attribution probe alongside the existing dialect probes
-  (gh-ocannl-844). (c) **How the
+  (gh-ocannl-844). The ORDER between the two readings needs a fixture of its own -- the clang probe
+  pins the case where the exact anchor answers nothing, so the readings never disagree in it --
+  which is `anchor_precedence_probe`: a construct whose brace range also names a staging loop GCC
+  nested beside the accumulator, shorter than it and therefore what `Innermost` reports as soon as
+  the widening fires unconditionally. (c) **How the
   assembler SPELLS a packed instruction.** Apple's arm64 assembler carries a NEON instruction's
   arrangement on the MNEMONIC (`fmla.4s v0, v1, v2`) where GAS carries it on the registers (`fmla
   v0.4s, v1.4s, v2.4s`), so `Asm_census`'s operand rules saw three plain `v` names and classified 34
