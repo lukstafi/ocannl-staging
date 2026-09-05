@@ -426,7 +426,8 @@ let base_ctx = lazy (Context.auto ())
     a gh-490 symbolic extent, a batch-slice index. Pass the same [unit_bindings] whose bound symbols
     were declared as {!optimize}'s [~static_indices], and set each parameter's value through
     [Context.bindings] on the RETURNED routine — [Idx.find_exn routine.Context.bindings sym := v] —
-    before {!run_linked}; the unit bindings themselves carry no cell to write. Empty by default,
+    before {!run_linked}; the unit bindings themselves carry no cell to write. ({!run} and
+    {!execute}, which return no routine, take those values as [~launch] instead.) Empty by default,
     which is right for every nest whose indices are all loop indices. *)
 let link ?ctx ?(bindings = Idx.Empty) ~name (o : LL.optimized) =
   let ctx = match ctx with Some ctx -> ctx | None -> Lazy.force base_ctx in
@@ -464,14 +465,47 @@ let run_linked (ctx, routine) ~(seed : (Tn.t * float array) list) =
   let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   Context.run ctx routine
 
+(** Refuses a [launch] list that does not name EXACTLY the bound symbols of [bindings]. Backend
+    linking initializes every launch parameter to [ref 0], so an uncovered one would launch silently
+    at zero — a value a test never chose, and indistinguishable in the result from one it did —
+    while a stray entry is a value that reaches no launch at all. Both are the wrong-value class the
+    executed legs exist to catch, so both raise rather than default, and they raise BEFORE the
+    routine is compiled: a misuse costs no codegen, and a test can pin the refusal for the price of
+    the check. *)
+let check_launch ~bindings ~launch =
+  let bound = Idx.bound_symbols bindings in
+  let ident (sym : Idx.static_symbol) = Idx.symbol_ident sym.Idx.static_symbol in
+  let refuse what syms =
+    if not (List.is_empty syms) then
+      raise
+        (Invalid_argument
+           (Printf.sprintf "Ll_test: ~launch %s: %s" what
+              (String.concat ~sep:", " (List.map syms ~f:ident))))
+  in
+  refuse "does not cover the launch parameter(s)"
+    (List.filter bound ~f:(fun sym ->
+         not (List.Assoc.mem launch sym ~equal:Idx.equal_static_symbol)));
+  refuse "names symbol(s) the bindings do not bind"
+    (List.filter_map launch ~f:(fun (sym, _) ->
+         Option.some_if (not (List.mem bound sym ~equal:Idx.equal_static_symbol)) sym))
+
 (** [run ~name o ~seed] is {!link} followed by {!run_linked}, for the tests that have no use for the
-    routine itself. Same materialization requirement on [seed]. *)
-let run ?ctx ?bindings ~name (o : LL.optimized) ~seed =
-  run_linked (link ?ctx ?bindings ~name o) ~seed
+    routine itself. Same materialization requirement on [seed].
+
+    [~launch] carries what a {!link} caller would write into the returned routine's
+    [Context.bindings]: these wrappers never hand the routine back, so it is their only way to set a
+    launch parameter, and {!check_launch} requires it to name exactly [~bindings]' bound symbols. A
+    case that also needs [~static_indices] on the optimization, or the routine itself, calls {!link}
+    directly. *)
+let run ?ctx ?(bindings = Idx.Empty) ?(launch = []) ~name (o : LL.optimized) ~seed =
+  check_launch ~bindings ~launch;
+  let ctx, routine = link ?ctx ~bindings ~name o in
+  List.iter launch ~f:(fun (sym, v) -> Idx.find_exn routine.Context.bindings sym := v);
+  run_linked (ctx, routine) ~seed
 
 (** {!run}, then read back [read] in order. Same materialization requirement, on both lists. *)
-let execute ?ctx ?bindings ~name (o : LL.optimized) ~seed ~(read : Tn.t list) =
-  let ctx = run ?ctx ?bindings ~name o ~seed in
+let execute ?ctx ?bindings ?launch ~name (o : LL.optimized) ~seed ~(read : Tn.t list) =
+  let ctx = run ?ctx ?bindings ?launch ~name o ~seed in
   List.map read ~f:(Context.get_values ctx)
 
 (** Whether [f] was refused because the node it touched is placed [Local] — routine-scoped scratch
@@ -486,9 +520,9 @@ let refused_as_local f =
     the optimized record (for structural probes) and the values read back. A case whose [~bindings]
     also have to be declared to the optimization as [~static_indices] calls {!optimize} and
     {!execute} separately: this helper's optimize half takes no [~static_indices]. *)
-let optimize_and_execute ?ctx ?bindings ?materialized ~name llc ~seed ~read =
+let optimize_and_execute ?ctx ?bindings ?launch ?materialized ~name llc ~seed ~read =
   let o = optimize ?materialized ~name llc in
-  (o, execute ?ctx ?bindings ~name o ~seed ~read)
+  (o, execute ?ctx ?bindings ?launch ~name o ~seed ~read)
 
 (** The value seeded into cells no writer is supposed to cover: distinct from every producer value
     the builders above generate, and from the zero-init. *)
