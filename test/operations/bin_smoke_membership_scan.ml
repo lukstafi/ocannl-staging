@@ -885,9 +885,12 @@ let scan dune_files =
           smoke_targets_of_stanza ~allow_verified_helper ~dune_path:node.dune_path
             ~subdir:node.subdir node.stanza
         in
-        (* Spent only where the stanza runs the pinned probe and nothing else: an opaque command or
-           a second program beside it puts the stanza back under every refusal, so the exemption
-           cannot be widened by adding to the rule it was written for. *)
+        (* Spent only where the stanza runs the pinned probe ONCE and nothing else: an opaque
+           command or a second program beside it puts the stanza back under every refusal, so the
+           exemption cannot be widened by adding to the rule it was written for. Exactly once, not
+           at least once, because this scan preserves repeated command sites on purpose -- dropping
+           a duplicated probe as a set would hide the very multiplicity the census is careful to
+           keep. *)
         let platform_exempt =
           match platform_contribution_of ~dune_path:node.dune_path node.stanza with
           | None -> false
@@ -896,7 +899,7 @@ let scan dune_files =
                 | Ok (Some (Local local)) -> String.equal local contribution.contribution_local
                 | _ -> false
               in
-              List.exists found ~f:is_probe
+              List.count found ~f:is_probe = 1
               && List.for_all found ~f:(function Ok None -> true | found -> is_probe found)
         in
         let targets, command_errors =
@@ -1126,6 +1129,19 @@ let foreign_condition_contribution_fixture =
  (enabled_if (= %{profile} release))
  (deps (universe))
  (action (run %{exe:metal_queue_probe.exe} --iterations=1024)))|dune}
+
+let duplicated_contribution_fixture =
+  {dune|(executable
+ (name metal_queue_probe)
+ (enabled_if (= %{system} macosx)))
+(rule
+ (alias bin-smoke)
+ (enabled_if (= %{system} macosx))
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:metal_queue_probe.exe} --iterations=1024)
+   (run %{exe:metal_queue_probe.exe} --iterations=1024))))|dune}
 
 let widened_contribution_fixture =
   {dune|(executable
@@ -1953,6 +1969,7 @@ let controls_hold () =
   let platform_contribution = scan_contribution platform_contribution_fixture in
   let unconditional_contribution = scan_contribution unconditional_contribution_fixture in
   let foreign_condition = scan_contribution foreign_condition_contribution_fixture in
+  let duplicated_contribution = scan_contribution duplicated_contribution_fixture in
   let widened_contribution = scan_contribution widened_contribution_fixture in
   let foreign_path = scan_contribution ~dune_path:"benchmarks/dune" platform_contribution_fixture in
   complete accepted
@@ -2168,7 +2185,8 @@ let controls_hold () =
   (* The pinned platform contribution is accepted, and each way of not being it is refused: an
      unconditional run of the same probe is an ordinary private executable, a condition that is not
      the pinned one is a different claim about when the stanza runs, a second program beside the
-     probe takes the exemption away, and the same stanza in another dune file is another file. *)
+     probe takes the exemption away, the same stanza in another dune file is another file, and the
+     probe run TWICE is the multiplicity this scan exists to keep -- reported, not absorbed. *)
   && complete platform_contribution
   && (not (complete unconditional_contribution))
   && List.mem unconditional_contribution.unexpected contribution.contribution_local
@@ -2178,6 +2196,9 @@ let controls_hold () =
        (smoke_condition_error contribution.contribution_dune)
        ~equal:String.equal
   && List.mem foreign_condition.unexpected contribution.contribution_local ~equal:String.equal
+  && (not (complete duplicated_contribution))
+  && List.count duplicated_contribution.unexpected ~f:(String.equal contribution.contribution_local)
+     = 2
   && (not (complete widened_contribution))
   && List.mem widened_contribution.errors
        (smoke_condition_error contribution.contribution_dune)

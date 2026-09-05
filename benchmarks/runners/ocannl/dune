@@ -78,7 +78,9 @@
 ; somebody reruns the probe by hand. `--iterations=N` is the exact-loop-count mode -- no calibration
 ; -- so the whole path costs a few milliseconds. Nothing here has a timing tolerance to lose on a
 ; contended runner: the arm comparisons are ratios the probe prints, and only a failed command
-; buffer or a stalled event wait exits nonzero.
+; buffer exits nonzero. `--deadline-seconds` supplies the other half of that: every wait in the
+; probe is unbounded by design, so a regression that WEDGES a submission would otherwise hold the
+; CI job to its own timeout instead of reporting anything.
 
 (rule
  ; ocannl-backend: metal -- the probe drives Metal directly through the `metal` bindings and links
@@ -90,7 +92,7 @@
  ; alias action is a canary that ran once.
  (deps (universe))
  (action
-  (run %{exe:metal_queue_probe.exe} --iterations=1024)))
+  (run %{exe:metal_queue_probe.exe} --iterations=1024 --deadline-seconds=120)))
 
 ; The Metal-pinned family (gh-ocannl-783): the rule above names `metal` in its marker, so no other
 ; box can judge it, and `dune build @metal-codegen` is the entry point a Metal binding change reruns
