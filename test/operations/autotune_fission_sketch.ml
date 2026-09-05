@@ -357,11 +357,22 @@ let () =
     Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits:(Context.hardware_limits ctx) opt
     |> List.exists ~f:(fun q -> q.Autotune.sk_mma)
   in
+  (* The skip's scope says WHY the seed is missing. HIP's rocWMMA has no f32-input shape, so on HIP
+     an f32 site never seeds a tensorized sketch whatever the configuration (verified with
+     [tf32_matmuls] on): a backend fact. CUDA seeds one through the tf32 arm, which the repository
+     default [tf32_matmuls=false] turns off: the measurement environment's choice, not the backend's
+     limit, so that skip aggregates as environment non-coverage rather than as CUDA universally
+     lacking the coverage (the sibling companion test draws the same line). *)
+  let mma_skip_aggregation =
+    match backend_name with
+    | "cuda" when not (Ir.Numerics.get ()).tf32_matmuls -> `Environment
+    | _ -> `Backend
+  in
   let mma_claim ~seeded name b =
     if seeded then p name b
     else (
       Stdio.eprintf "af: no tensorized seed for this site on %s\n" backend_name;
-      skipped ~backend:backend_name name)
+      skipped ~aggregation:mma_skip_aggregation ~backend:backend_name name)
   in
   let mm_mma_seeded = tensorized_seeded sctx (Option.value_exn ~here:[%here] !mm_capture) in
   let%op mc1 = ma * mb in
@@ -423,17 +434,41 @@ let () =
   let%op qe0 = qd0 * qc in
   let fs_serial_comp = named "af_fs_serial" (Train.forward qe0) in
   let qsctx = Context.auto () in
-  let fs_capture = ref None in
+  let qslimits = Context.hardware_limits qsctx in
+  let fs_mma_seeded = ref false in
   let qsctx, qsroutine =
     Context.compile
       ~lowered_transform:(fun opt ->
-        fs_capture := Some opt;
+        (* The per-segment oracle asks the question the tuner asks, of the segments the tuner seeds:
+           [F_sketch] entries come from [sketch_seed_params] on each post-fission [`Normal]
+           segment's pre-schedule form, under the same fission pipeline and presets. The whole
+           routine is the wrong subject here -- a materialized producer can fail the whole-routine
+           tensorized family's companion coverage while the isolated matmul segment seeds fine
+           (Codex P2 on PR #658). An unfissioned routine falls back to the whole-routine question,
+           as the tuner does. *)
+        let preset o =
+          if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits:qslimits o
+          else if is_cpu then Sched.default_cpu ~min_parallel:1 o
+          else []
+        in
+        let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits:qslimits tns else [] in
+        (fs_mma_seeded :=
+           match
+             Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices:[]
+               opt
+           with
+           | [] | [ _ ] -> tensorized_seeded qsctx opt
+           | tuples ->
+               List.exists tuples ~f:(fun (kind, pre, _, _) ->
+                   match kind with
+                   | `Normal -> tensorized_seeded qsctx pre
+                   | `Zeros | `Solo -> false));
         [ opt ])
       qsctx fs_serial_comp Ir.Indexing.Empty
   in
   let qsctx = Context.run qsctx qsroutine in
   let got_fs_serial = Context.get_values qsctx qe0.Tensor.value in
-  let fs_mma_seeded = tensorized_seeded qsctx (Option.value_exn ~here:[%here] !fs_capture) in
+  let fs_mma_seeded = !fs_mma_seeded in
   let%op qd1 = qa + qb in
   Train.set_materialized qd1.Tensor.value;
   let%op qe1 = qd1 * qc in

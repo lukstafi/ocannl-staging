@@ -27,7 +27,7 @@ on_error() {
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
     local_identity_error unsafe_identity_error matrix_error state_first state_same \
     state_other_ref state_green state_unjudged state_regression state_after_fix state_moved \
-    capped; do
+    capped capped_target; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -58,7 +58,7 @@ absent() {
 # where its environment is built.
 unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
   SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
-  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX
+  SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX SWEEP_TEST_JOBS
 
 sweep=$1
 aggregate=$2
@@ -887,6 +887,12 @@ grep -q 'm4-max/cc: pass .*execution=forced' <<<"$capped"
 [ "$(tail -3 "$calls" | sed -n '2p')" = 'exec -- dune build @check' ]
 [ "$(tail -3 "$calls" | sed -n '3p')" = 'exec -- dune build -j 2 --force @runtest @train' ]
 absent 'dune build \(-j\|@check\)' <<<"$(tail -4 "$calls" | sed -n '1p')"
+# A capped --target run keeps its narrow meaning: the cap reaches the test call,
+# and no workspace-wide `@check` runs ahead of it to eat the unit's deadline on
+# code the target never reaches.
+capped_target=$(SWEEP_TEST_JOBS=2 run_sweep_args --target state-probe)
+[ "$(tail -1 "$calls")" = 'exec -- dune runtest -j 2 state-probe' ]
+absent '@check' <<<"$(tail -2 "$calls" | sed -n '1p')"
 
 # A historical target may declare fewer boxes than today's execution map. The
 # extra local unit still proves backend facts, but cannot be counted as a member

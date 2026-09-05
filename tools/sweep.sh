@@ -398,12 +398,16 @@ test_cmd() {
   # the two suites share a build graph and rc1 stays one verdict. A narrow
   # --target run keeps its narrow meaning -- the `target` column already marks
   # it as refreshing no coverage.
-  # A capped unit compiles at full width first: `@check` runs no test action
-  # (it is the compile-only alias), so the cap -- which exists to bound how many
-  # test executables hold the GPU at once -- does not also serialise the build.
-  # Its status is deliberately dropped: a compile failure reaches the verdict
-  # through the capped call, which rebuilds the same cone and fails the same way.
-  if [ -n "$jobs" ]; then
+  # A capped full-suite unit compiles at full width first: `@check` runs no
+  # test action (it is the compile-only alias), so the cap -- which exists to
+  # bound how many test executables hold the GPU at once -- does not also
+  # serialise the build. Its status is deliberately dropped: a compile failure
+  # reaches the verdict through the capped call, which rebuilds the same cone and
+  # fails the same way. A --target run gets no prebuild: a workspace-wide
+  # `@check` ahead of a narrow target would spend the unit's deadline compiling
+  # code the target never reaches, and its cone is small enough to compile under
+  # the cap (Codex P2 on PR #658).
+  if [ -n "$jobs" ] && [ -z "$TARGET" ]; then
     printf 'OCANNL_BACKEND=%s opam exec -- dune build @check; ' "$backend"
   fi
   if [ -z "$TARGET" ]; then
