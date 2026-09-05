@@ -202,8 +202,12 @@ label they print is listed so the inventory the ratchet checks is complete.
   `a same-line repeated computed-label exemption key resolves to two source sites, not one`;
   `refuses an exemption key that names both same-line repeated computed-label source sites`.
 - `run_manifest_controls`: this file against every label above, both directions, as the
-  conventions state. Labels: `every synthetic control has a row in the mutation-run manifest`;
-  `every control phrase in the mutation-run manifest names a live control`. Its mutation runs
+  conventions state, after holding the labels themselves duplicate-free (two controls under one
+  label would be one row here and one golden line, so the second identity would vanish before
+  either direction is checked). Labels: `every synthetic control has a row in the mutation-run manifest`;
+  `every control phrase in the mutation-run manifest names a live control`;
+  `synthetic control labels are pairwise distinct` (mutation: a duplicated label in
+  `quantified_helper_controls`, `20260905T010417Z-49456`). Its inventory mutation runs
   misspelled one phrase here and saw both claims report `false` with the missing label and the
   stale phrase named on stderr: a quantified-list row (`value` to `result` in a round-5 row,
   `20260905T004841Z-76830`) and a family label (`20260905T005706Z-70118`).

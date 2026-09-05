@@ -2726,12 +2726,21 @@ let manifest_control_phrases text =
 
 let manifest_row_label = "every synthetic control has a row in the mutation-run manifest"
 let manifest_phrase_label = "every control phrase in the mutation-run manifest names a live control"
+let manifest_distinct_label = "synthetic control labels are pairwise distinct"
 
 (* [controls] is every control result printed under "Synthetic helper-rule controls:" before these
    two -- the quantified list AND the run_*_control families, since the manifest promises them all
    -- so a case added to any family without a row fails here, not only one added to the list. *)
 let run_manifest_controls ~manifest ~controls =
-  let labels = List.map controls ~f:fst @ [ manifest_row_label; manifest_phrase_label ] in
+  let labels =
+    List.map controls ~f:fst
+    @ [ manifest_row_label; manifest_phrase_label; manifest_distinct_label ]
+  in
+  (* Two controls under one label are one row here and one line in the golden: the second identity
+     is gone before either inventory check runs, so the label set is held duplicate-free first. *)
+  let duplicate = List.find_a_dup labels ~compare:String.compare in
+  Option.iter duplicate ~f:(fun label ->
+      eprintf "two synthetic controls share the label %S -- give each its own\n" label);
   let phrases =
     match manifest with
     | Some text -> manifest_control_phrases text
@@ -2752,6 +2761,7 @@ let run_manifest_controls ~manifest ~controls =
     (manifest_row_label, (not (List.is_empty labels)) && List.for_all labels ~f:(Set.mem phrase_set));
     ( manifest_phrase_label,
       (not (List.is_empty phrases)) && List.for_all phrases ~f:(Set.mem label_set) );
+    (manifest_distinct_label, Option.is_none duplicate);
   ]
 
 let quantified_failure source claim =

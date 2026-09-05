@@ -195,6 +195,7 @@ a same-line repeated computed-label exemption key resolves to two source sites, 
 refuses an exemption key that names both same-line repeated computed-label source sites: true
 every synthetic control has a row in the mutation-run manifest: true
 every control phrase in the mutation-run manifest names a live control: true
+synthetic control labels are pairwise distinct: true
 
 every test source decides its claims through Verdict: true
 every quantified binding used by a claim witnesses a non-empty population: true
