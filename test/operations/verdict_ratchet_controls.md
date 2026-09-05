@@ -25,8 +25,9 @@ Conventions:
   runs exited 0.
 - A control listed here is **maintained**, and the ratchet checks it on every run: a backticked
   phrase containing a space in this file names a control (the one exception is a phrase starting
-  with `dune`, a command), every such phrase must be a label in `quantified_helper_controls`, and
-  every label there must appear in this file. Renaming a control on one side only fails the run
+  with `dune`, a command), every such phrase must be a control label the ratchet prints under
+  "Synthetic helper-rule controls:" in its golden, and every label printed there, the
+  `run_*_control` families included, must appear in this file. Renaming a control on one side only fails the run
   with the offending names on stderr. When a scanner change makes a mutation no longer meaningful,
   replace the row rather than deleting it.
 
@@ -168,21 +169,41 @@ exercised by every `dune build @test/operations/runtest-verdict_ratchet`. A roun
 
 ## The `run_*_control` families
 
-These predate PR #633 and are exercised on every run rather than by a one-off mutation; they are
-listed so the inventory is complete.
+These predate PR #633 and are exercised on every run rather than by a one-off mutation; every
+label they print is listed so the inventory the ratchet checks is complete.
 
 - `run_refusal_control` (`--quantified-helper-refusal-control`): the ratchet re-executes itself on a
   synthetic offending fixture and checks the exact refusal diagnostic and exit status. Introduced
-  by `cf1874075` (bind refusal markers to exercised controls).
+  by `cf1874075` (bind refusal markers to exercised controls). Label:
+  `the shipping ratchet process refuses the planted helper fixture`.
+- `run_stale_quantified_control`: an exemption whose key no longer matches a live claim is refused.
+  Introduced by `ad983d863`. Label: `refuses a stale quantified-helper exemption`.
 - `run_shadowed_quantified_controls`: an exempted quantified helper key must name exactly one
   definition, including two definitions on one physical line, one call site, or one call slot.
   Introduced by `ad983d863`; the wrapper call-site and call-slot members by rounds 18 and 22 above.
-- `run_stale_quantified_control`: an exemption whose key no longer matches a live claim is refused.
-  Introduced by `ad983d863`.
+  Labels, a resolution claim and a refusal claim per fixture:
+  `a shadowed helper name resolves to two definitions, not one`;
+  `refuses an exemption key that names both shadowed definitions`;
+  `a same-line shadowed helper name resolves to two definitions, not one`;
+  `refuses an exemption key that names both same-line shadowed definitions`;
+  `a reused wrapper call helper name resolves to two call sites, not one`;
+  `refuses an exemption key that names both reused wrapper call call sites`;
+  `a multi-slot wrapper call helper name resolves to two call slots, not one`;
+  `refuses an exemption key that names both multi-slot wrapper call call slots`.
 - `run_colliding_site_controls`: literal-label and computed-label exemption keys that resolve to
   two sites, on separate lines or twice on one line, are refused. Introduced by `7c4e8a826`
-  (gh-ocannl-891 offset-based identities).
-- `run_manifest_controls`: this file against `quantified_helper_controls`, both directions, as the
-  conventions above state. Its mutation run misspelled one phrase here (`value` to `result` in a
-  round-5 row): both claims reported `false`, with the missing label and the stale phrase named on
-  stderr, in `20260905T004841Z-76830`.
+  (gh-ocannl-891 offset-based identities). Labels, the same pair per fixture:
+  `a repeated literal-label exemption key resolves to two source sites, not one`;
+  `refuses an exemption key that names both repeated literal-label source sites`;
+  `a same-line repeated literal-label exemption key resolves to two source sites, not one`;
+  `refuses an exemption key that names both same-line repeated literal-label source sites`;
+  `a repeated computed-label exemption key resolves to two source sites, not one`;
+  `refuses an exemption key that names both repeated computed-label source sites`;
+  `a same-line repeated computed-label exemption key resolves to two source sites, not one`;
+  `refuses an exemption key that names both same-line repeated computed-label source sites`.
+- `run_manifest_controls`: this file against every label above, both directions, as the
+  conventions state. Labels: `every synthetic control has a row in the mutation-run manifest`;
+  `every control phrase in the mutation-run manifest names a live control`. Its mutation runs
+  misspelled one phrase here and saw both claims report `false` with the missing label and the
+  stale phrase named on stderr: a quantified-list row (`value` to `result` in a round-5 row,
+  `20260905T004841Z-76830`) and a family label (`20260905T005706Z-70118`).

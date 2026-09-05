@@ -2699,10 +2699,11 @@ let run_quantified_helper_controls () =
 (* The manifest's pin. [verdict_ratchet_controls.md] is prose, and prose drifts: a control renamed
    here and not there leaves a row nobody can find, and a row whose phrase names nothing leaves an
    inventory that reads complete. So the two are held equal from where the labels already are, in
-   both directions -- every label above appears in the manifest, and every phrase the manifest sets
-   in backticks with a space in it (its convention for naming a control; a phrase starting with
-   [dune] is a command) is a label above. The manifest is handed over by the rule's [(deps ...)],
-   which is what makes a change to it re-run this. *)
+   both directions -- every control label printed under "Synthetic helper-rule controls:", the
+   run_*_control families included, appears in the manifest, and every phrase the manifest sets in
+   backticks with a space in it (its convention for naming a control; a phrase starting with [dune]
+   is a command) is such a label. The manifest is handed over by the rule's [(deps ...)], which is
+   what makes a change to it re-run this. *)
 let manifest_file = "verdict_ratchet_controls.md"
 
 let manifest_control_phrases text =
@@ -2723,8 +2724,14 @@ let manifest_control_phrases text =
   in
   collect [] 0 |> List.dedup_and_sort ~compare:String.compare
 
-let run_manifest_controls ~manifest =
-  let labels = List.map quantified_helper_controls ~f:(fun (label, _, _) -> label) in
+let manifest_row_label = "every synthetic control has a row in the mutation-run manifest"
+let manifest_phrase_label = "every control phrase in the mutation-run manifest names a live control"
+
+(* [controls] is every control result printed under "Synthetic helper-rule controls:" before these
+   two -- the quantified list AND the run_*_control families, since the manifest promises them all
+   -- so a case added to any family without a row fails here, not only one added to the list. *)
+let run_manifest_controls ~manifest ~controls =
+  let labels = List.map controls ~f:fst @ [ manifest_row_label; manifest_phrase_label ] in
   let phrases =
     match manifest with
     | Some text -> manifest_control_phrases text
@@ -2742,9 +2749,8 @@ let run_manifest_controls ~manifest =
       if not (Set.mem label_set phrase) then
         eprintf "phrase in %s names no synthetic control: %S\n" manifest_file phrase);
   [
-    ( "every synthetic control has a row in the mutation-run manifest",
-      (not (List.is_empty labels)) && List.for_all labels ~f:(Set.mem phrase_set) );
-    ( "every control phrase in the mutation-run manifest names a live control",
+    (manifest_row_label, (not (List.is_empty labels)) && List.for_all labels ~f:(Set.mem phrase_set));
+    ( manifest_phrase_label,
       (not (List.is_empty phrases)) && List.for_all phrases ~f:(Set.mem label_set) );
   ]
 
@@ -2989,7 +2995,10 @@ let () =
     run_quantified_helper_controls ()
     @ [ run_refusal_control (); run_stale_quantified_control () ]
     @ run_shadowed_quantified_controls ()
-    @ run_colliding_site_controls () @ run_manifest_controls ~manifest
+    @ run_colliding_site_controls ()
+  in
+  let control_results =
+    control_results @ run_manifest_controls ~manifest ~controls:control_results
   in
   let per_directory = Hashtbl.create (module String) in
   printf
