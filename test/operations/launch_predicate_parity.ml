@@ -349,10 +349,13 @@ let () =
           Stdio.eprintf "conv prediction: schedule FAILED: %s\n" (Exn.to_string exn);
           true);
 
-  (* Negative control: the blocked flavor adds a row-block [.x] coordinate, leaves the non-row
-     spatial axis on [.y], and folds a deliberately large batch of 65536 onto [.z]. This is the
-     batch x spatial outer geometry whose product can cross the 16-bit cap; a unit non-row spatial
-     extent keeps the fixture small. The graph is compiled but never dispatched. *)
+  (* Negative control: a 2-D conv whose outer [Grid] loops are the batch (65536) then the non-row
+     spatial axis (2), with the row axis (16) blocked. The blocked flavor's row-block loop is the
+     innermost grid coordinate, so the slot rule binds the row blocks to [.x] and the non-row
+     spatial extent to [.y], leaving the batch ALONE to fold onto [.z] -- 65536, one past the 16-bit
+     cap. Blocking is what makes this a [.z] question: unblocked, the same site has only two grid
+     coordinates and the batch lands on [.y] instead. The small spatial extents keep the fixture
+     cheap; the graph is compiled but never dispatched. *)
   let make_large_conv2 tag =
     let x =
       NTDSL.init ~l:(tag ^ "_x") ~prec:Ir.Ops.single ~b:[ 65_536 ] ~o:[ 3; 17; 2 ]
@@ -386,7 +389,7 @@ let () =
     | None -> false
   in
   p_exists
-    "conv control: a permissive cap proposes a blocked seed folding batch x spatial past 65535"
+    "conv control: a permissive cap proposes a blocked seed folding the 65536 batch onto grid.z"
     permissive ~f:over_cap;
   let rejected_keys = List.filter permissive ~f:over_cap |> List.map ~f:key in
   let leaked =
