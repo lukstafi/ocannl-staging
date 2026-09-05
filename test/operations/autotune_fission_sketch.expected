@@ -18,6 +18,7 @@ tuned matmul matches the serial twin: true
 matmul tune replays exactly after a contention-free search: true
 matmul cache-hit values match the serial twin: true
 per-segment sketch candidates seeded: true
+per-segment tensorized sketch candidates seeded: true
 per-segment sketch candidates timed: true
 tuned fissioned matmul matches the serial twin: true
 multi-site: both sites seed per-segment sketches: true

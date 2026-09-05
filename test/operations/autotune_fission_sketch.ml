@@ -335,11 +335,35 @@ let () =
   let%op mc0 = ma * mb in
   let serial_comp = named "af_mm_serial" (Train.forward mc0) in
   let sctx = Context.auto () in
+  let mm_capture = ref None in
   let sctx, sroutine =
-    Context.compile ~lowered_transform:(fun opt -> [ opt ]) sctx serial_comp Ir.Indexing.Empty
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        mm_capture := Some opt;
+        [ opt ])
+      sctx serial_comp Ir.Indexing.Empty
   in
   let sctx = Context.run sctx sroutine in
   let got_serial = nonzero "af_mm_serial" (Context.get_values sctx mc0.Tensor.value) in
+  (* Whether the search proposes a tensorized sketch for a site at all is the backend's call, and
+     [sketch_seed_params] is the composition the search enumerates, so the tests below ask it the
+     same question rather than a backend-name substring: a GPU backend seeds [sk_mma] sketches only
+     where its descriptor advertises an mma format for the site's f32 triple (Metal's simdgroup,
+     CUDA's tf32 arm), and HIP's rocWMMA advertises none for f32, so on HIP every MMA counter of an
+     f32 site is zero by design. The claims that count MMA candidates are then vacuous there and say
+     so through [skipped], the way the sibling tuner tests treat a site with no tensorized seed; the
+     scalar seeding and the value parity stay pinned on every backend. *)
+  let tensorized_seeded ctx opt =
+    Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits:(Context.hardware_limits ctx) opt
+    |> List.exists ~f:(fun q -> q.Autotune.sk_mma)
+  in
+  let mma_claim ~seeded name b =
+    if seeded then p name b
+    else (
+      Stdio.eprintf "af: no tensorized seed for this site on %s\n" backend_name;
+      skipped ~backend:backend_name name)
+  in
+  let mm_mma_seeded = tensorized_seeded sctx (Option.value_exn ~here:[%here] !mm_capture) in
   let%op mc1 = ma * mb in
   let mm_comp = named "af_mm_tuned" (Train.forward mc1) in
   let cache_dir3 = "autotune_cache_sketch" in
@@ -365,10 +389,12 @@ let () =
   p "matmul sketch instantiations seeded" (mr1.Autotune.sketch_candidates > 0);
   (* [mma_candidates] records the decision after the seeded candidates reached candidate compile; it
      is stronger than reconstructing a per-dialect minimum from the aggregate sketch count. *)
-  p "tensorized (mma) sketch instantiations seeded" (mr1.Autotune.mma_candidates > 0);
+  mma_claim ~seeded:mm_mma_seeded "tensorized (mma) sketch instantiations seeded"
+    (mr1.Autotune.mma_candidates > 0);
   Stdio.eprintf "matmul MMA accounting (not part of the golden): %d total, %d fission-scoped\n"
     mr1.Autotune.mma_candidates mr1.Autotune.fiss_mma_candidates;
-  p "whole-routine MMA candidates stay out of the fission-scoped counter"
+  mma_claim ~seeded:mm_mma_seeded
+    "whole-routine MMA candidates stay out of the fission-scoped counter"
     (mr1.Autotune.fiss_mma_candidates < mr1.Autotune.mma_candidates);
   p_all2 "tuned matmul matches the serial twin" got_mm1 got_serial ~f:approx;
   p "matmul tune replays exactly after a contention-free search"
@@ -397,11 +423,17 @@ let () =
   let%op qe0 = qd0 * qc in
   let fs_serial_comp = named "af_fs_serial" (Train.forward qe0) in
   let qsctx = Context.auto () in
+  let fs_capture = ref None in
   let qsctx, qsroutine =
-    Context.compile ~lowered_transform:(fun opt -> [ opt ]) qsctx fs_serial_comp Ir.Indexing.Empty
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        fs_capture := Some opt;
+        [ opt ])
+      qsctx fs_serial_comp Ir.Indexing.Empty
   in
   let qsctx = Context.run qsctx qsroutine in
   let got_fs_serial = Context.get_values qsctx qe0.Tensor.value in
+  let fs_mma_seeded = tensorized_seeded qsctx (Option.value_exn ~here:[%here] !fs_capture) in
   let%op qd1 = qa + qb in
   Train.set_materialized qd1.Tensor.value;
   let%op qe1 = qd1 * qc in
@@ -420,11 +452,13 @@ let () =
       (* The per-segment counter says that fission seeding happened; [mma_candidates] says a
          tensorized member actually reached candidate compile. The MMA counter is fission-scoped: a
          whole-routine MMA candidate cannot satisfy this assertion. *)
-      p "per-segment sketch candidates seeded"
-        (r.Autotune.fiss_sketch_candidates > 0 && r.Autotune.fiss_mma_candidates > 0);
+      p "per-segment sketch candidates seeded" (r.Autotune.fiss_sketch_candidates > 0);
+      mma_claim ~seeded:fs_mma_seeded "per-segment tensorized sketch candidates seeded"
+        (r.Autotune.fiss_mma_candidates > 0);
       p "per-segment sketch candidates timed" (r.Autotune.fiss_sketch_timed > 0)
   | None ->
       p "per-segment sketch candidates seeded" false;
+      p "per-segment tensorized sketch candidates seeded" false;
       p "per-segment sketch candidates timed" false);
   p_all2 "tuned fissioned matmul matches the serial twin" got_fs got_fs_serial ~f:approx;
 
