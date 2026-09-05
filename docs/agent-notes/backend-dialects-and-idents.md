@@ -205,8 +205,10 @@ configuration.
 | capability | `float_literal_forms.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
 | capability | `hardware_warp_shuffle.ml` | CPU family uses `Schedule.backend_is_cpu`; resolved bf16 accumulator width uses `codegen_capabilities.accum_prec`. |
 | capability | `reduction_forms.ml` | Resolved accumulator residency for each storage precision; query `codegen_capabilities.accum_prec`, after checking it against the test's independent exact-backend policy table (the table is an oracle, not a capability access path). |
-| capability | `schedule_conv_gemm.ml` | Which typed MMA formats the device advertises; derive the f32/tf32 legs from `hardware_limits.mma_format_tiles`. |
-| capability | `schedule_mma_matmul.ml` | The tf32-only leg; derive it from the advertised tf32 format rather than the CUDA spelling. Other sites in this file are dialect checks below. |
+| capability | `schedule_batched_mma.ml` | Whether the device advertises the uniform-bf16 tile the tensorized execution leg needs; query `Backend_intf.advertises_mma_format`, and report the leg skipped when it answers no. |
+| capability | `schedule_conv_gemm.ml` | Which typed MMA formats the device advertises; derive the f32/tf32 legs with `Backend_intf.advertises_mma_format`, never an open-coded `mma_format_tiles` scan (which is easy to write with the accumulator dropped from the key). |
+| capability | `schedule_contraction_nest.ml` | Same uniform-bf16 gate as `schedule_batched_mma.ml`, on the multi-axis site's tensorized leg; query `Backend_intf.advertises_mma_format`. Its intrinsic census and shared-memory token are separate checks below. |
+| capability | `schedule_mma_matmul.ml` | The tf32-only leg; derive it from the advertised tf32 format via `Backend_intf.advertises_mma_format` rather than the CUDA spelling. Other sites in this file are dialect checks below. |
 | capability | `schedule_pad.ml` | Whether the padded extents fit the advertised MMA tile; compare `hardware_limits.mma_tile` with the extents, then check the routine census. |
 | capability | `schedule_pipelined_matmul.ml` | Whether asynchronous staging can render; query `codegen_capabilities.asynchronous_staging_copy`. Its declaration and barrier tokens remain dialect checks below. |
 | capability | `test_fp8_codec_parity.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |

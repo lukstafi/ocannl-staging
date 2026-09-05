@@ -311,13 +311,8 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
 let bf16_leg ~tag ~build =
   let real_limits = Context.hardware_limits (Context.auto ()) in
   let has_uniform_bf16_tile =
-    match real_limits.Ir.Backend_intf.mma with
-    | None -> false
-    | Some cap ->
-        List.exists cap.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
-            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_bf16
-            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_bf16
-            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_bf16)
+    Ir.Backend_intf.advertises_mma_format real_limits ~a:Ir.Backend_intf.Mma_bf16
+      ~b:Ir.Backend_intf.Mma_bf16 ~d:Ir.Backend_intf.Mma_bf16
   in
   let shapes =
     [

@@ -243,6 +243,27 @@ type hardware_limits = {
 }
 [@@deriving sexp, compare, equal]
 
+(** Equality of the [(a-operand, b-operand, accumulator)] format triple that keys
+    {!field-mma_capability.mma_format_tiles} and {!field-mma_capability.mma_staged_layouts}. All
+    three components are part of the key, for the reason those fields document (gh-ocannl-545):
+    which operand pair a backend supports is a function of the accumulator it is paired against. *)
+let equal_mma_format_triple (a1, b1, d1) (a2, b2, d2) =
+  equal_mma_input_format a1 a2 && equal_mma_input_format b1 b2 && equal_mma_input_format d1 d2
+
+(** Whether the backend's tensor-core unit advertises an intrinsic tile for this [(a, b, d)] format
+    triple -- [false] when it advertises the triple's operands only against another accumulator, and
+    [false] when the backend has no such unit at all ([mma = None]).
+
+    The typed way to interrogate the MMA seam ({!field-hardware_limits.mma}, gh-ocannl-822): callers
+    ask the descriptor rather than re-deriving the [mma_format_tiles] lookup, which is easy to
+    open-code with the accumulator dropped from the key. Whether a given call ultimately emits is
+    still decided per call by the backend's [mma_syntax] hook plus the {!Ir.Numerics} policy; this
+    answers what schedule construction and its tests can know statically. *)
+let advertises_mma_format (limits : hardware_limits) ~a ~b ~d =
+  match limits.mma with
+  | None -> false
+  | Some mma -> List.Assoc.mem mma.mma_format_tiles (a, b, d) ~equal:equal_mma_format_triple
+
 type codegen_capabilities = {
   supports_f64 : bool;
       (** Whether the backend dialect can represent f64 tensor storage. This is explicit rather than

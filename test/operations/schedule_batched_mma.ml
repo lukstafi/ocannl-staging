@@ -217,13 +217,8 @@ let () =
      O(1). *)
   let real_limits = Context.hardware_limits (Context.auto ()) in
   let has_uniform_bf16_tile =
-    match real_limits.Ir.Backend_intf.mma with
-    | None -> false
-    | Some cap ->
-        List.exists cap.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
-            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_bf16
-            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_bf16
-            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_bf16)
+    Ir.Backend_intf.advertises_mma_format real_limits ~a:Ir.Backend_intf.Mma_bf16
+      ~b:Ir.Backend_intf.Mma_bf16 ~d:Ir.Backend_intf.Mma_bf16
   in
   let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
   (* At most this many candidates are executed per site: each one is a full backend compile, and on
