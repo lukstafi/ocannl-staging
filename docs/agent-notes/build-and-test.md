@@ -1728,6 +1728,36 @@ that they earn a lookup rather than always-loaded space.
   default 90 minutes).
   When the execution column was introduced, existing `pass` rows became `legacy-pass` with
   `execution=unknown`; old incremental evidence is retained, but cannot masquerade as a forced run.
+- **The hip unit runs its tests under `dune -j 2`, and a red minix/hip whose failures are all
+  `HIP_ERROR_INVALID_DEVICE` at `hip_init`, `HIP_ERROR_NO_BINARY_FOR_GPU` at module load, or
+  failed stream creation is the WSL2 dxg bridge overflowing, not the backend.** minix's GPU is
+  an iGPU reached through `/dev/dxg`: every allocation and module load is a synchronous message
+  over a Hyper-V VM bus ring, and the ring fills when the suite's test executables hold the
+  device at once (dune's default there is 32 jobs). The kernel says so —
+  `dmesg | grep 'misc dxg'` shows `vmbus_sendpacket failed: fffffff5` (-EAGAIN) bursts exactly
+  spanning the unit — and the HIP runtime reports the lost messages under those three names,
+  while `rocminfo`, a standalone `hipGetDeviceCount`/hiprtc/`hipModuleLoadData` probe, and the
+  single tests all pass. The 2026-09-05 sweep recorded it twice (60+ red tests, zero test-logic
+  failures) after the box had kept its VM across two host resumes (dmesg shows
+  `hv_utils: TimeSync IC version` renegotiations between the last green unit and the first
+  burst): a fresh VM had tolerated the full width for eleven daily sweeps, so the degraded
+  bridge lowers the tolerance rather than removing it. Under WSL2 `/dev/kfd` and `/dev/dri`
+  are never present and `rocm-smi` always reports the driver as uninitialized — neither is
+  evidence of a lost passthrough; `hipGetDeviceCount` is. The `unit_jobs` table in
+  `tools/sweep.sh` holds the cap (`OCANNL_TOOL_SWEEP_JOBS=<n>` overrides it for one run),
+  applied to the test phase only: `test_cmd` compiles under `@check` at full width first, since
+  the cap bounds GPU-holding processes, not the build. The value is measured, not guessed: on
+  the degraded bridge `-j 4` still lost 27 stanzas while `-j 2` ran a forced full unit clean
+  in 18.5 minutes (the sweep harness pins the call shape). A single GPU serialises the
+  kernels anyway, so the capped test phase is not much slower. Recovery for the bridge itself
+  is `wsl --shutdown` from the Windows side, then a kick from the coordinator
+  (`wake-lab.sh kick-wsl minix`) — from inside the VM the shutdown kills the session issuing
+  it. And an environment-red unit is still worth reading past its fingerprint: the same day's
+  wide run hid a genuine hip-only test regression under the runtime noise
+  (`autotune_fission_sketch`, whose staging#639 MMA-count claims assumed every GPU backend seeds
+  a tensorized sketch for an f32 site — HIP's rocWMMA advertises no f32 triple, so the counters
+  are zero there by design; now gated through the seeder's own decision), which only a serial
+  rerun of the failing stanzas told apart from the bridge.
 - A forced full-suite sweep also intersects the backend-scoped `Verdict.skipped`
   executable-and-claim keys from every successful unit through `tools/aggregate-skips.sh`
   (gh-ocannl-792), writing
@@ -1780,7 +1810,8 @@ that they earn a lookup rather than always-loaded space.
   rather than only adding to it; otherwise it reads the launcher's backend and is green everywhere
   except inside the sweep, the one place its verdict gates anything. `test/operations/sweep_harness.sh`
   is the worked example (gh-ocannl-893): the nested sweep's environment is built with
-  `env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP`, and one
+  `env -u OCANNL_BACKEND -u OCANNL_TOOL_SWEEP_CAP -u OCANNL_TOOL_SWEEP_CONTEXT_CAP` (every
+  sweep knob added since is pinned there explicitly, `OCANNL_TOOL_SWEEP_JOBS` included), and one
   aggregation is re-run with a hostile ambient backend so the neutralization cannot lapse unnoticed.
   Reproduce the condition on any alias with `OCANNL_BACKEND=<backend> dune build --force @<alias>`;
   a plain local run never sets it, which is what makes this class of failure look like flakiness.
