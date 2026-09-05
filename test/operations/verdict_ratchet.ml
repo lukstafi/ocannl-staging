@@ -42,7 +42,12 @@
    and ten helpers carried the empty-population hole until a manual read found them. The second
    reader below follows local bindings from a Verdict boolean back to [for_all], [for_all2_exn],
    [is_empty], or a negated [exists], and requires the helper to make non-emptiness part of its
-   passing result. *)
+   passing result.
+
+   Every synthetic control below earned its place by a mutation run -- the scanner mechanism it pins
+   disabled, this alias re-run, exactly that control failing. The manifest of those runs, one row
+   per mechanism with the control labels and the retained `tools/test-run.sh` run ids, is
+   `test/operations/verdict_ratchet_controls.md`; renaming or adding a control updates both. *)
 
 open Base
 open Stdio
@@ -1918,7 +1923,8 @@ let exempt_quantified_helpers =
    repository today. The first four are negative controls: the rule must return an offender for
    each, which is the same list the corpus loop below turns into a [Verdict.fail]. The rest are the
    nearest accepted forms, so widening the ratchet until ordinary boolean helpers need exemptions
-   also fails here rather than growing a noisy central list. *)
+   also fails here rather than growing a noisy central list. Which scanner mechanism each label
+   guards, and the mutation run that proved it, is the table in verdict_ratchet_controls.md. *)
 let quantified_helper_controls =
   [
     ( "refuses an unguarded for_all2_exn helper behind a local Verdict alias",
