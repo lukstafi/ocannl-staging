@@ -9,7 +9,9 @@
     inspected because [@bin-smoke] is recursive from the workspace root. Conditional executable or
     smoke stanzas, opaque smoke actions, and unexpanded [(include ...)] forms are refused: without
     evaluating or expanding them, a syntactic census could claim commands CI does not execute or
-    miss additional commands that it does.
+    miss additional commands that it does. The one exception is a platform-gated probe outside
+    [bin/], pinned by dune file, program and condition in [platform_contributions] below and exempt
+    only while it is exactly that.
 
     [--negative-control] applies the production scan to a synthetic dune file with two public
     executables and only one smoke command. Its dune rule accepts exit 1 and no other status, so a
@@ -48,6 +50,33 @@ let verified_helper_alias = "bin/bin-smoke-env_spelling_gate"
 let verified_helper_local = "bin/env_spelling_gate.exe"
 let verified_helper_command = "%{dep:env_spelling_gate.exe}"
 
+(* The contributions to [@bin-smoke] that are neither a public bin executable nor unconditional: a
+   standalone probe for hardware only some machines have, gated by the platform predicate that
+   decides whether it can run at all (gh-ocannl-905). Pinned the way the environment gate's command
+   is pinned above -- by dune file, by executable path, and by the exact condition -- because the
+   two refusals such a stanza otherwise draws are load-bearing everywhere else.
+
+   Neither claim this scan makes weakens under it. The census is of bin/'s PUBLIC executables, and a
+   probe outside bin/ is none of them; the conditionality it announces is about the probe alone, and
+   the exemption is spent only where the stanza runs that one program, so a public executable whose
+   only smoke run is platform-gated is still reported as missing and any second program in the
+   stanza takes the whole exemption away. *)
+type platform_contribution = {
+  contribution_dune : string;
+  contribution_local : string;
+  contribution_condition : Sexp.t list;
+}
+
+let platform_contributions =
+  [
+    {
+      contribution_dune = "benchmarks/runners/ocannl/dune";
+      contribution_local = "benchmarks/runners/ocannl/metal_queue_probe.exe";
+      contribution_condition =
+        [ Sexp.List [ Sexp.Atom "="; Sexp.Atom "%{system}"; Sexp.Atom "macosx" ] ];
+    };
+  ]
+
 let path_dirname path =
   match String.rsplit2 path ~on:'/' with Some (directory, _) -> directory | None -> ""
 
@@ -70,6 +99,19 @@ let aliases_of stanza =
               List.filter_map args ~f:(function Sexp.Atom name -> Some name | _ -> None))
 
 let has_enabled_if stanza = Option.is_some (Dune_scan.field stanza "enabled_if")
+
+(* The pinned contribution a stanza IS, if any: the same dune file and the same condition, spelled
+   exactly. A stanza at that path without the condition is an ordinary unconditional contribution
+   and gets no exemption; one carrying a different condition is a different claim about when it
+   runs, and is refused like any other. *)
+let platform_contribution_of ~dune_path stanza =
+  List.find platform_contributions ~f:(fun contribution ->
+      String.equal contribution.contribution_dune dune_path
+      &&
+      match Dune_scan.field stanza "enabled_if" with
+      | Some condition -> List.equal Sexp.equal condition contribution.contribution_condition
+      | None -> false)
+
 let alias_key ~subdir name = Dune_scan.normalize_path (Dune_scan.in_subdir subdir name)
 
 let expanding_dependency_pform atom =
@@ -839,16 +881,36 @@ let scan dune_files =
         let allow_verified_helper =
           List.equal String.equal node.aliases [ verified_helper_alias ]
         in
-        let targets, command_errors =
+        let found =
           smoke_targets_of_stanza ~allow_verified_helper ~dune_path:node.dune_path
             ~subdir:node.subdir node.stanza
-          |> List.fold ~init:(targets, []) ~f:(fun (targets, errors) -> function
-            | Ok (Some target) -> (target :: targets, errors)
-            | Ok None -> (targets, errors)
-            | Error error -> (targets, error :: errors))
+        in
+        (* Spent only where the stanza runs the pinned probe and nothing else: an opaque command or
+           a second program beside it puts the stanza back under every refusal, so the exemption
+           cannot be widened by adding to the rule it was written for. *)
+        let platform_exempt =
+          match platform_contribution_of ~dune_path:node.dune_path node.stanza with
+          | None -> false
+          | Some contribution ->
+              let is_probe = function
+                | Ok (Some (Local local)) -> String.equal local contribution.contribution_local
+                | _ -> false
+              in
+              List.exists found ~f:is_probe
+              && List.for_all found ~f:(function Ok None -> true | found -> is_probe found)
+        in
+        let targets, command_errors =
+          if platform_exempt then (targets, [])
+          else
+            List.fold found ~init:(targets, []) ~f:(fun (targets, errors) -> function
+              | Ok (Some target) -> (target :: targets, errors)
+              | Ok None -> (targets, errors)
+              | Error error -> (targets, error :: errors))
         in
         let condition_errors =
-          if has_enabled_if node.stanza then [ smoke_condition_error node.dune_path ] else []
+          if has_enabled_if node.stanza && not platform_exempt then
+            [ smoke_condition_error node.dune_path ]
+          else []
         in
         let exit_errors =
           if accepts_nonstandard_exit node.stanza then [ accepted_exit_error node.dune_path ]
@@ -1029,6 +1091,54 @@ let conditional_public_fixture =
 (rule
  (alias bin-smoke)
  (action (run %{exe:alpha.exe})))|dune}
+
+(* The pinned platform contribution and the four ways of not being it. Each is scanned beside a
+   complete bin/ census, since the file carrying such a contribution declares no public executable
+   of its own. *)
+let contribution = List.hd_exn platform_contributions
+
+let scan_contribution ?(dune_path = contribution.contribution_dune) content =
+  scan [ ("bin/dune", complete_fixture); (dune_path, content) ]
+
+let platform_contribution_fixture =
+  {dune|(executable
+ (name metal_queue_probe)
+ (enabled_if (= %{system} macosx)))
+(rule
+ (alias bin-smoke)
+ (enabled_if (= %{system} macosx))
+ (deps (universe))
+ (action (run %{exe:metal_queue_probe.exe} --iterations=1024)))|dune}
+
+let unconditional_contribution_fixture =
+  {dune|(executable (name metal_queue_probe))
+(rule
+ (alias bin-smoke)
+ (deps (universe))
+ (action (run %{exe:metal_queue_probe.exe} --iterations=1024)))|dune}
+
+let foreign_condition_contribution_fixture =
+  {dune|(executable
+ (name metal_queue_probe)
+ (enabled_if (= %{profile} release)))
+(rule
+ (alias bin-smoke)
+ (enabled_if (= %{profile} release))
+ (deps (universe))
+ (action (run %{exe:metal_queue_probe.exe} --iterations=1024)))|dune}
+
+let widened_contribution_fixture =
+  {dune|(executable
+ (names metal_queue_probe other_probe)
+ (enabled_if (= %{system} macosx)))
+(rule
+ (alias bin-smoke)
+ (enabled_if (= %{system} macosx))
+ (deps (universe))
+ (action
+  (progn
+   (run %{exe:metal_queue_probe.exe} --iterations=1024)
+   (run %{exe:other_probe.exe}))))|dune}
 
 let included_fixture = complete_fixture ^ "\n(include extra-stanzas.inc)\n"
 
@@ -1840,6 +1950,11 @@ let controls_hold () =
   let chdir_literal_action_dependency = scan_bin_content chdir_literal_action_dependency_fixture in
   let conditional_private = scan_bin_content conditional_private_fixture in
   let implicit_runner = scan_bin_content implicit_runner_fixture in
+  let platform_contribution = scan_contribution platform_contribution_fixture in
+  let unconditional_contribution = scan_contribution unconditional_contribution_fixture in
+  let foreign_condition = scan_contribution foreign_condition_contribution_fixture in
+  let widened_contribution = scan_contribution widened_contribution_fixture in
+  let foreign_path = scan_contribution ~dune_path:"benchmarks/dune" platform_contribution_fixture in
   complete accepted
   && (not (complete refused))
   && List.equal String.equal refused.missing [ "bin/beta.exe" ]
@@ -2050,6 +2165,27 @@ let controls_hold () =
   && complete conditional_private
   && (not (complete implicit_runner))
   && List.mem implicit_runner.errors (implicit_runner_error "bin/dune") ~equal:String.equal
+  (* The pinned platform contribution is accepted, and each way of not being it is refused: an
+     unconditional run of the same probe is an ordinary private executable, a condition that is not
+     the pinned one is a different claim about when the stanza runs, a second program beside the
+     probe takes the exemption away, and the same stanza in another dune file is another file. *)
+  && complete platform_contribution
+  && (not (complete unconditional_contribution))
+  && List.mem unconditional_contribution.unexpected contribution.contribution_local
+       ~equal:String.equal
+  && (not (complete foreign_condition))
+  && List.mem foreign_condition.errors
+       (smoke_condition_error contribution.contribution_dune)
+       ~equal:String.equal
+  && List.mem foreign_condition.unexpected contribution.contribution_local ~equal:String.equal
+  && (not (complete widened_contribution))
+  && List.mem widened_contribution.errors
+       (smoke_condition_error contribution.contribution_dune)
+       ~equal:String.equal
+  && List.mem widened_contribution.unexpected contribution.contribution_local ~equal:String.equal
+  && (not (complete foreign_path))
+  && List.mem foreign_path.errors (smoke_condition_error "benchmarks/dune") ~equal:String.equal
+  && List.mem foreign_path.unexpected "benchmarks/metal_queue_probe.exe" ~equal:String.equal
 
 let report_diagnostics result =
   eprintf "Public bin executables (%d): [%s]\n" (List.length result.declarations)

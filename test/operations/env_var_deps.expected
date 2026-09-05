@@ -102,6 +102,8 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   arrayjit/test/dune                       @metal-codegen
   arrayjit/test/dune                       @runtest
   arrayjit/test/dune                       @runtest-env_spelling_gate
+  benchmarks/runners/ocannl/dune           @bin-smoke
+  benchmarks/runners/ocannl/dune           @metal-codegen
   bin/dune                                 @bin-smoke
   bin/dune                                 @bin-smoke-env_spelling_gate
   test/einsum/dune                         @runtest
@@ -234,7 +236,7 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
   arrayjit/lib/dune: nothing that runs a test executable
   arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
   benchmarks/dune: markers: none
-  benchmarks/runners/ocannl/dune: nothing that runs a test executable
+  benchmarks/runners/ocannl/dune: markers: metal
   bin/dune: markers: cc, none
   dune: nothing that runs a test executable
   lib/dune: nothing that runs a test executable
@@ -256,6 +258,7 @@ identically in every directory that has members, so `dune build @<family>` from 
 root runs the whole family; membership is derived from what a member stanza declares, and a
 member the family's `(alias (name <family>) (deps ...))` stanza omits fails this scan.
   arrayjit/test/dune: metal-codegen
+  benchmarks/runners/ocannl/dune: metal-codegen
   test/operations/dune: lifecycle, metal-codegen
 
 every stanza that runs an executable either declares the backend variable or says in place why it does not: true

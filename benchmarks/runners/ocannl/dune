@@ -71,3 +71,32 @@
  (enabled_if
   (= %{system} macosx))
  (modes exe))
+
+; Runtime canary for the queue probe (gh-ocannl-905). `dune build @check` compiles it, which says
+; nothing about the Metal calls it makes: a binding change that breaks the library compile, one of
+; the three command-buffer submission shapes, or the SharedEvent signal/wait is invisible until
+; somebody reruns the probe by hand. `--iterations=N` is the exact-loop-count mode -- no calibration
+; -- so the whole path costs a few milliseconds. Nothing here has a timing tolerance to lose on a
+; contended runner: the arm comparisons are ratios the probe prints, and only a failed command
+; buffer or a stalled event wait exits nonzero.
+
+(rule
+ ; ocannl-backend: metal -- the probe drives Metal directly through the `metal` bindings and links
+ ; no OCANNL configuration reader, so there is no backend selection in reach to invalidate on.
+ (alias bin-smoke)
+ (enabled_if
+  (= %{system} macosx))
+ ; `(universe)` for the reason every command-bearing contribution to this alias has it: a cached
+ ; alias action is a canary that ran once.
+ (deps (universe))
+ (action
+  (run %{exe:metal_queue_probe.exe} --iterations=1024)))
+
+; The Metal-pinned family (gh-ocannl-783): the rule above names `metal` in its marker, so no other
+; box can judge it, and `dune build @metal-codegen` is the entry point a Metal binding change reruns
+; without a backend-wide directory run.
+
+(alias
+ (name metal-codegen)
+ (deps
+  (alias bin-smoke)))

@@ -72,6 +72,10 @@ let exempt_sites =
       "the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links \
        base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can \
        reach its output" );
+    ( "benchmarks/runners/ocannl:metal_queue_probe.exe",
+      "the standalone Metal queue probe, run on `@bin-smoke` as the bindings' runtime canary \
+       (gh-ocannl-905): it links `metal`, `ctypes` and `unix` and no arrayjit at all -- no \
+       configuration reader, so no `ocannl_config` can reach what it does" );
     ( "benchmarks:python3, handed %{dep:test_orchestrate.py}",
       "the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that \
        imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there \
