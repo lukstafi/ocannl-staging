@@ -625,7 +625,10 @@ files.
   and leaves `queued_batch_ms` about 120x below it: any estimate at or above 10 ms already selects
   depth 1, so the autotuner cannot put a second long kernel in flight. Do not add a per-repeat host
   sync to the timing path on this evidence; rerun the standalone probe after an OS/driver change if
-  the superlinear symptom returns.
+  the superlinear symptom returns. The probe takes a duration target it feedback-corrects to within
+  2% (it prints the requested and achieved single-kernel ms and the iteration count it settled on)
+  or an exact `--iterations=N`, so a narrow threshold rerun pins the count from the previous
+  report instead of re-adjusting the target by hand.
   On CUDA/HIP a synchronized single dispatch includes the round trip batching removes, so it selects
   only a provisional depth; a queued probe at that depth separates fixed synchronization cost from
   marginal launch cost, and that affine wall model selects the final depth. This matters even when

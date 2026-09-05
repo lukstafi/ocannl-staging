@@ -11,12 +11,24 @@
    followed by one host wait on the final SharedEvent value.
 
    The kernel's loop bound is runtime data and every iteration performs a volatile device read, so
-   the compiler cannot fold the long loop away. The first argument is a target duration in
-   milliseconds for one kernel (default 1000); calibration measures a short kernel and scales its
-   iteration count to the target. Run only on an otherwise idle Metal Mac, recording [uptime] beside
-   the output:
+   the compiler cannot fold the long loop away. The kernel length is fixed one of two ways.
 
-   dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- 2000 *)
+   [target_ms] (positional, default 1000) is a duration target for one kernel. Calibration measures
+   a short kernel, scales its iteration count to the target, then feedback-corrects: it re-times the
+   scaled kernel and rescales by the miss until the measurement lands within [--tolerance] of the
+   target (default 2%) or [--max-corrections] rounds run out. One-shot scaling alone undershoots,
+   because the fixed launch overhead inflates the short seed kernel's per-iteration cost.
+
+   [--iterations=N] is an exact loop count, no calibration. The report always prints the iteration
+   count the arms ran with, so a threshold found under a duration target is rerun exactly by pinning
+   that count.
+
+   The report prints the requested duration and the achieved single-kernel duration side by side.
+   Run only on an otherwise idle Metal Mac, recording [uptime] beside the output:
+
+   dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- 2000
+
+   dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- --iterations=734003200 *)
 
 module Me = Metal
 
@@ -74,20 +86,58 @@ let check_completed label cb =
         (Sexplib0.Sexp.to_string_hum (Me.CommandBuffer.Status.sexp_of_t status));
       exit 1
 
+let usage () =
+  Printf.eprintf
+    "usage: metal_queue_probe [target_ms] [--iterations=N] [--tolerance=FRACTION] \
+     [--max-corrections=N]\n";
+  exit 2
+
+let max_iterations = 1 lsl 30
+
+type request = Target_ms of float | Exact_iterations of int
+
 let () =
-  let target_ms =
-    match Array.to_list Sys.argv with
-    | [ _ ] -> 1000.
-    | [ _; value ] -> (
-        match Float.of_string_opt value with
-        | Some value when Float.is_finite value && value > 0. -> value
-        | _ ->
-            Printf.eprintf "metal_queue_probe: target_ms must be a positive finite number\n";
-            exit 2)
-    | _ ->
-        Printf.eprintf "usage: metal_queue_probe [target_ms]\n";
-        exit 2
+  let request = ref None and tolerance = ref 0.02 and max_corrections = ref 6 in
+  let set_request value =
+    if Option.is_some !request then (
+      Printf.eprintf "metal_queue_probe: give either target_ms or --iterations, once\n";
+      usage ());
+    request := Some value
   in
+  let positive_float ~name value =
+    match Float.of_string_opt value with
+    | Some value when Float.is_finite value && value > 0. -> value
+    | _ ->
+        Printf.eprintf "metal_queue_probe: %s must be a positive finite number\n" name;
+        usage ()
+  in
+  let positive_int ~name ~max value =
+    match int_of_string_opt value with
+    | Some value when value > 0 && value <= max -> value
+    | _ ->
+        Printf.eprintf "metal_queue_probe: %s must be an integer in 1..%d\n" name max;
+        usage ()
+  in
+  List.iter
+    (fun arg ->
+      let flag name = String.starts_with ~prefix:(name ^ "=") arg in
+      let value name =
+        String.sub arg (String.length name + 1) (String.length arg - String.length name - 1)
+      in
+      if flag "--iterations" then
+        set_request
+          (Exact_iterations
+             (positive_int ~name:"--iterations" ~max:max_iterations (value "--iterations")))
+      else if flag "--tolerance" then
+        tolerance := positive_float ~name:"--tolerance" (value "--tolerance")
+      else if flag "--max-corrections" then
+        max_corrections :=
+          positive_int ~name:"--max-corrections" ~max:100 (value "--max-corrections")
+      else if String.starts_with ~prefix:"-" arg then usage ()
+      else set_request (Target_ms (positive_float ~name:"target_ms" arg)))
+    (List.tl (Array.to_list Sys.argv));
+  let request = Option.value !request ~default:(Target_ms 1000.) in
+  let tolerance = !tolerance and max_corrections = !max_corrections in
   let device = Me.Device.create_system_default () in
   let queue = Me.CommandQueue.on_device device in
   let options = Me.CompileOptions.init () in
@@ -123,23 +173,59 @@ let () =
   (* Warm compilation/dispatch before asking the calibration clock a question. *)
   set_iterations 1;
   ignore (run_one output_a);
-  let calibration_iterations = 1 lsl 18 in
-  set_iterations calibration_iterations;
-  let seed_ms, _ = run_one output_a in
-  if (not (Float.is_finite seed_ms)) || seed_ms <= 0. then (
-    Printf.eprintf "metal_queue_probe: calibration clock returned %.9g ms\n" seed_ms;
-    exit 1);
-  let iterations =
-    let scaled =
-      Float.ceil (Float.of_int calibration_iterations *. target_ms /. seed_ms) |> Int.of_float
-    in
-    Int.max 1 (Int.min (1 lsl 30) scaled)
+  let timed_single iterations =
+    set_iterations iterations;
+    let ms, _ = run_one output_a in
+    if (not (Float.is_finite ms)) || ms <= 0. then (
+      Printf.eprintf "metal_queue_probe: calibration clock returned %.9g ms for %d iterations\n" ms
+        iterations;
+      exit 1);
+    ms
   in
-  set_iterations iterations;
-  let calibration_ms, _ = run_one output_a in
+  let rescale iterations ~measured_ms ~target_ms =
+    let scaled = Float.ceil (Float.of_int iterations *. target_ms /. measured_ms) |> Int.of_float in
+    Int.max 1 (Int.min max_iterations scaled)
+  in
+  (* [iterations] is what the arms run with; [achieved_ms] is a single kernel measured at exactly
+     that count, so the report's achieved figure is never an extrapolation. *)
+  let iterations, achieved_ms, corrections =
+    match request with
+    | Exact_iterations iterations -> (iterations, timed_single iterations, 0)
+    | Target_ms target_ms ->
+        let seed_iterations = 1 lsl 18 in
+        let seed_ms = timed_single seed_iterations in
+        (* Feedback loop: each round re-times the current count and rescales by the miss. A fixed
+           launch overhead makes the seed's ms/iteration too high, so the first scaled count
+           undershoots; rounds after the first converge as the kernel dominates the launch. *)
+        let rec correct iterations round =
+          let measured_ms = timed_single iterations in
+          let off = Float.abs (measured_ms -. target_ms) /. target_ms in
+          if
+            off <= tolerance || round >= max_corrections
+            || (iterations = max_iterations && measured_ms < target_ms)
+            || (iterations = 1 && measured_ms > target_ms)
+          then (iterations, measured_ms, round)
+          else correct (rescale iterations ~measured_ms ~target_ms) (round + 1)
+        in
+        correct (rescale seed_iterations ~measured_ms:seed_ms ~target_ms) 0
+  in
   Printf.printf "device: %s\n" (Me.Device.get_attributes device).name;
-  Printf.printf "target: %.0f ms; iterations: %d; calibrated single: %.3f ms\n" target_ms iterations
-    calibration_ms;
+  (match request with
+  | Target_ms target_ms ->
+      Printf.printf "requested: %.3f ms single kernel (tolerance %.1f%%, correction rounds: %d)\n"
+        target_ms (tolerance *. 100.) corrections;
+      Printf.printf "achieved:  %.3f ms single kernel (%+.2f%% vs requested); iterations: %d\n"
+        achieved_ms
+        ((achieved_ms -. target_ms) /. target_ms *. 100.)
+        iterations;
+      if Float.abs (achieved_ms -. target_ms) /. target_ms > tolerance then
+        Printf.printf
+          "achieved duration is outside tolerance: rerun with --iterations=%d to pin this count, \
+           or raise --max-corrections\n"
+          iterations
+  | Exact_iterations _ ->
+      Printf.printf "requested: exact iterations, no duration target; iterations: %d\n" iterations;
+      Printf.printf "achieved:  %.3f ms single kernel\n" achieved_ms);
 
   let sync_between () =
     set_iterations iterations;
