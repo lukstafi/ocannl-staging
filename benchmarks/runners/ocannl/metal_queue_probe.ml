@@ -5,10 +5,12 @@
    This links the Metal bindings directly and contains no OCANNL lowering, scheduling, context or
    stream code. It measures three shapes over the same pipeline and two independent output buffers:
 
-   - [sync-between]: commit one kernel and await it before committing the next; - [raw-queued]:
-   commit both kernels, then await both (no intervening host synchronization); - [event-chain]:
-   reproduce Metal_backend's command-buffer sequence exactly: kernel, signal, wait+kernel, signal,
-   followed by one host wait on the final SharedEvent value.
+   - [sync-between]: commit one kernel and await it before committing the next.
+
+   - [raw-queued]: commit both kernels, then await both (no intervening host synchronization).
+
+   - [event-chain]: reproduce Metal_backend's command-buffer sequence exactly: kernel, signal,
+   wait+kernel, signal, followed by one host wait on the final SharedEvent value.
 
    The kernel's loop bound is runtime data and every iteration performs a volatile device read, so
    the compiler cannot fold the long loop away. The kernel length is fixed one of two ways.
