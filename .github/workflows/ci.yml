@@ -357,11 +357,12 @@ jobs:
     # One walk, not `dune build` then `dune runtest`: as two commands, the
     # `(test)` stanzas and inline-test runners only start after every file
     # target -- including the golden-rule test executions `@default` carries and
-    # the cheap cc runtime canaries for every bin/ executable in `@bin-smoke` --
-    # has finished, so the serialized `ocannl_training_test` chain runs against
-    # an otherwise idle runner. One invocation lets dune schedule that chain
-    # concurrently with the rest of the build, overlapping the two phases. A
-    # failure still names its rule, so nothing is lost in attribution.
+    # the cheap cc runtime canaries for every bin/ executable in `@bin-smoke`,
+    # plus on macOS the exact-iteration Metal queue probe that alias also
+    # carries -- has finished, so the serialized `ocannl_training_test` chain
+    # runs against an otherwise idle runner. One invocation lets dune schedule
+    # that chain concurrently with the rest of the build, overlapping the two
+    # phases. A failure still names its rule, so nothing is lost in attribution.
     #
     # One backend only: test/config pins `backend=cc` and nothing here sets
     # OCANNL_BACKEND. multidev_cc needs no hardware and COULD run on these

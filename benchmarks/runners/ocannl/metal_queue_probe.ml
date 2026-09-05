@@ -30,7 +30,9 @@
 
    dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- 2000
 
-   dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- --iterations=734003200 *)
+   dune exec benchmarks/runners/ocannl/metal_queue_probe.exe -- --iterations=734003200
+
+   [--deadline-seconds=N] bounds the whole run for unattended use; see [arm_deadline]. *)
 
 module Me = Metal
 
@@ -91,15 +93,27 @@ let check_completed label cb =
 let usage () =
   Printf.eprintf
     "usage: metal_queue_probe [target_ms] [--iterations=N] [--tolerance=FRACTION] \
-     [--max-corrections=N]\n";
+     [--max-corrections=N] [--deadline-seconds=N]\n";
   exit 2
 
+(* [--deadline-seconds=N] bounds the whole run, for the unattended smoke use: every wait here is
+   unbounded on purpose -- [wait_until_completed] has no timeout and the SharedEvent wait is given
+   [ULLong.max_int] -- so a binding or driver regression that WEDGES a submission does not fail, it
+   hangs, and an unattended run then holds its CI job until the job's own timeout rather than
+   reporting anything.
+
+   Deliberately no OCaml signal handler: SIGALRM's default action kills the process from the kernel,
+   which is what reaches a thread parked inside a blocking Metal call. An OCaml handler runs only at
+   a safepoint, so the one case worth bounding is exactly the case it would not interrupt. The
+   process therefore dies by signal, and its runner reports the action as failed. *)
+let arm_deadline seconds = ignore (Unix.alarm seconds : int)
 let max_iterations = 1 lsl 30
 
 type request = Target_ms of float | Exact_iterations of int
 
 let () =
   let request = ref None and tolerance = ref 0.02 and max_corrections = ref 6 in
+  let deadline_seconds = ref None in
   let set_request value =
     if Option.is_some !request then (
       Printf.eprintf "metal_queue_probe: give either target_ms or --iterations, once\n";
@@ -135,11 +149,15 @@ let () =
       else if flag "--max-corrections" then
         max_corrections :=
           positive_int ~name:"--max-corrections" ~max:100 (value "--max-corrections")
+      else if flag "--deadline-seconds" then
+        deadline_seconds :=
+          Some (positive_int ~name:"--deadline-seconds" ~max:86400 (value "--deadline-seconds"))
       else if String.starts_with ~prefix:"-" arg then usage ()
       else set_request (Target_ms (positive_float ~name:"target_ms" arg)))
     (List.tl (Array.to_list Sys.argv));
   let request = Option.value !request ~default:(Target_ms 1000.) in
   let tolerance = !tolerance and max_corrections = !max_corrections in
+  Option.iter arm_deadline !deadline_seconds;
   let device = Me.Device.create_system_default () in
   let queue = Me.CommandQueue.on_device device in
   let options = Me.CompileOptions.init () in

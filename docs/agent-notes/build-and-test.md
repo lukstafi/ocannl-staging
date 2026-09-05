@@ -1348,7 +1348,14 @@ that they earn a lookup rather than always-loaded space.
 ### What CI actually covers
 
 - `dune build @bin-smoke` runs every `bin/` executable sequentially on deliberately tiny workloads
-  with the `cc` backend pinned (gh-ocannl-858). It is an exit-status canary only: its output and
+  with the `cc` backend pinned (gh-ocannl-858), plus one macOS-only contribution outside `bin/`:
+  `benchmarks/runners/ocannl/metal_queue_probe.exe --iterations=1024`, the exact-loop-count mode
+  that takes milliseconds and exercises the whole Metal path — library compile, the three
+  command-buffer submission shapes, SharedEvent signal/wait — so a binding change that breaks it at
+  runtime fails here rather than the next time somebody reruns the probe by hand (gh-ocannl-905).
+  Exact iterations means no calibration and so no timing tolerance to lose on the contended macOS
+  runner; the arm ratios it prints are not asserted on. That rule also sits on `@metal-codegen`,
+  since it names `metal` in its backend marker. It is an exit-status canary only: its output and
   timings are not goldens and make no measurement-validity claim. Per-PR CI includes it in the main
   `@default @runtest` Dune walk, so `@check`'s inability to link or execute an executable no longer
   leaves first-iteration failures in these tools uncovered. Keep benchmark-reproducibility work in
@@ -1358,8 +1365,13 @@ that they earn a lookup rather than always-loaded space.
   files, then requires exact one-to-one membership; its separate negative-control rule runs the
   same checker on a synthetic omitted member and accepts only the failing exit status. The scan
   preserves repeated command sites so a duplicated smoke is not collapsed into a set, follows
-  `(alias ...)` dependencies transitively, and exempts only the no-argument
-  `env_spelling_gate.exe` invocation on the exact infrastructure alias that owns it. Every
+  `(alias ...)` dependencies transitively, and exempts exactly two things: the no-argument
+  `env_spelling_gate.exe` invocation on the infrastructure alias that owns it, and the
+  platform-gated probe pinned in `platform_contributions` — by dune file, program path and the
+  literal `(= %{system} macosx)` condition, and only while the stanza runs that one program, so an
+  unconditional run, a different condition, a second command beside it, or the same stanza in
+  another file is refused as before (a public executable whose only smoke run is platform-gated is
+  still reported missing). Every
   command-bearing alias contribution, root or transitive helper, must depend directly on
   `(universe)`, so Dune cannot cache away runtime coverage after another contribution reruns.
   Alias edges and generated file producers in a public executable's `link_deps` or
@@ -1397,9 +1409,15 @@ that they earn a lookup rather than always-loaded space.
   credit because an unrelated generated target may never be built. Commands under absolute
   `chdir` destinations are likewise refused before path normalization can turn a host path into an
   apparent workspace identity.
-- GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
-  runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
-  read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- GitHub CI exercises exactly ONE OCANNL backend. `test/config/ocannl_config` pins `backend=cc`,
+  and no runner has a CUDA or HIP device, so a green `ci` run says nothing about the Metal, CUDA or
+  HIP *backends*. Do not read a green PR check as cross-backend validation; it is a CPU-backend and
+  portability check. The macOS runners are not deviceless, though, and reading this bullet as "no
+  Metal at all" is what cost a review round: `MTLCreateSystemDefaultDevice` returns an `Apple
+  Paravirtual device` there, and `@bin-smoke`'s `metal_queue_probe` run uses it — library compile,
+  three command-buffer submission shapes and SharedEvent signal/wait, about 50 ms on every macOS
+  `main` leg (gh-ocannl-905). That is a canary for the Metal BINDINGS; OCANNL's Metal backend, its
+  codegen and its scheduling are still reached by no CI leg.
 - A red on merged master is presumptively CLAIMED work. `ci.yml`'s `notify-triage-routine` job
   fires the "ocannl-staging CI-red triage" Claude Code cloud routine on any non-PR master red —
   push and scheduled sweeps alike (a logged no-op until the `ROUTINE_FIRE_URL`/`ROUTINE_FIRE_TOKEN`
