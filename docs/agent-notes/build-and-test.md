@@ -509,7 +509,12 @@ that they earn a lookup rather than always-loaded space.
   invocation refuses loudly instead of queueing behind dune's lock — "I lost track of a run so
   I started another" being the usual start of the spiral. Prefer foreground `run` launched
   through the agent harness's background mode (the harness notifies on exit); `start`/`status`/
-  `wait`/`stop` are only for runs that must outlive the launching session.
+  `wait`/`stop` are only for runs that must outlive the launching session. Its own options go
+  BETWEEN the subcommand and the dune arguments (`run --cap 900 build @alias`); both
+  misplacements are refused with exit 2 having run nothing — the interesting one being an option
+  written AFTER the target, which forwarded to dune exits 1 on the unknown option, and the digest
+  then reads `FAIL (exit 1)` with no error lines, indistinguishable from a failing test. Past
+  dune's own `--` the same word belongs to the executable and is passed through.
   `repeat [--alone] N` is the supported flake diagnostic: it holds that same worktree lock once,
   gives every Dune invocation a freshly cleaned cache-disabled build context, retains each
   iteration's separate stdout, stderr and exit status, and writes every pairwise diff. Stdout or status drift is red;
