@@ -698,6 +698,16 @@ case $rendered_nvrtc_options in
     false
     ;;
 esac
+# The metal vector has no sentinel to lose: this arm pins the production
+# property sequence itself, so there is nothing artificial in it to look for.
+# What it must not silently become is EMPTY -- the whole-line check below would
+# then hold against a bare `metal options: ` prefix, and its controls with it.
+case $rendered_metal_options in
+  '')
+    printf 'sweep_harness: metal vector rendered empty\n' >&2
+    false
+    ;;
+esac
 rtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
 nvrtc options: '"$rendered_nvrtc_options"
 rtc_failure=$rtc_failure$'\nhiprtc options: '"$rendered_hip_options"
@@ -736,8 +746,16 @@ altered_nvrtc_options=${rendered_nvrtc_options/sentinel/altered}
 [ "$altered_nvrtc_options" != "$rendered_nvrtc_options" ]
 absent -Fx "nvrtc options: $altered_nvrtc_options" "${metal_log%.log}.fingerprint"
 grep -Fxq "hiprtc options: $rendered_hip_options" "${metal_log%.log}.fingerprint"
-grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast$' \
-  "${metal_log%.log}.fingerprint"
+grep -Fxq "metal options: $rendered_metal_options" "${metal_log%.log}.fingerprint"
+# And the same whole-line controls, for the same reason. With no sentinel to
+# corrupt, the alteration rewrites the first property's VALUE -- a spelling no
+# renderer output can produce -- rather than a slot the fixture invented.
+truncated_metal_options=${rendered_metal_options% *}
+[ "$truncated_metal_options" != "$rendered_metal_options" ]
+absent -Fx "metal options: $truncated_metal_options" "${metal_log%.log}.fingerprint"
+altered_metal_options=${rendered_metal_options/=/=altered-}
+[ "$altered_metal_options" != "$rendered_metal_options" ]
+absent -Fx "metal options: $altered_metal_options" "${metal_log%.log}.fingerprint"
 
 # And a GREEN unit must NOT pay for it -- the same backend, so the only thing
 # that differs is the outcome. The log path is derived from the sweep's timestamp
