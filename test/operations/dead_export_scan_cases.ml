@@ -12,6 +12,7 @@ let pair, alias = (2, 3)
 let (!@) x = x
 let%trace extended = 4
 external primitive : int -> int = "fixture_primitive"
+let sexp_of_handwritten () = Sexplib0.Sexp.List []
 type t = Root [@@deriving sexp_of, compare, equal]
 type named = Named [@@deriving sexp, compare, equal]
 type poly = [ `One | `Two ] [@@deriving sexp]
@@ -43,21 +44,6 @@ let generated_value_names structure =
       | _ -> [])
   |> List.dedup_and_sort ~compare:String.compare
 
-let expression_paths structure =
-  let paths = ref [] in
-  let iterator =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! expression expression =
-        Option.iter (Test_utils.Config_key_scan.longident_of expression) ~f:(fun path ->
-            paths := String.concat ~sep:"." path :: !paths);
-        super#expression expression
-    end
-  in
-  iterator#structure structure;
-  !paths
-
 let deriver_context loc =
   let base =
     Expansion_context.Base.top_level ~tool_name:"ocamlc" ~file_path:"fixture.ml"
@@ -71,12 +57,10 @@ let expanded_names deriver source =
   let declarations = (rec_flag, [ declaration ]) in
   let expansion =
     match deriver with
-    | "sexp_of" -> Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc ~path:"Fixture" declarations
-    | "of_sexp" ->
+    (* The [sexp_of] half of [sexp] is excluded from the census by policy, so only the parser half
+       of the expansion is expected. *)
+    | "of_sexp" | "sexp" ->
         Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc ~poly:false ~path:"Fixture" declarations
-    | "sexp" ->
-        Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc ~path:"Fixture" declarations
-        @ Ppx_sexp_conv_expander.Of_sexp.str_type_decl ~loc ~poly:false ~path:"Fixture" declarations
     | "compare" ->
         Ppx_compare_expander.Compare.str_type_decl ~ctxt:(deriver_context loc) declarations false
     | "equal" ->
@@ -105,10 +89,15 @@ let () =
          "Sample.plain";
          "Sample.poly_of_sexp";
          "Sample.primitive";
-         "Sample.sexp_of_named";
-         "Sample.sexp_of_poly";
-         "Sample.sexp_of_t";
        ]);
+  Verdict.p_none
+    "derived and hand-written sexp_of converters are excluded from the census by policy"
+    [
+      "Sample.sexp_of_t";
+      "Sample.sexp_of_named";
+      "Sample.sexp_of_poly";
+      "Sample.sexp_of_handwritten";
+    ] ~f:(fun key -> List.mem (export_keys fixture_exports) key ~equal:String.equal);
   Verdict.p "nested lets and nested-module derived values are not exports"
     (not
        (List.exists fixture_exports ~f:(fun (export : Scan.export) ->
@@ -122,8 +111,6 @@ let () =
     (List.mem (export_keys fixture_exports) "Sample.__poly_of_sexp__" ~equal:String.equal);
   let expansion_cases =
     [
-      ("sexp_of", "type t = Root\n");
-      ("sexp_of", "type named = Named\n");
       ("of_sexp", "type t = Root\n");
       ("of_sexp", "type named = Named\n");
       ("of_sexp", "type poly = [ `One | `Two ]\n");
@@ -189,19 +176,19 @@ let () =
            let d = [%of_sexp: Sample.named]\n" );
       ]
   in
-  Verdict.p "equal, compare, sexp_of, and of_sexp extensions reference derived values"
+  Verdict.p "equal, compare, and of_sexp extensions reference derived values"
     (referenced extensions "equal_named"
     && referenced extensions "compare"
-    && referenced extensions "sexp_of_named"
     && referenced extensions "named_of_sexp");
+  Verdict.p_none "a sexp_of extension references nothing" extensions
+    ~f:(fun (reference : Scan.reference) -> String.is_prefix reference.value ~prefix:"sexp_of_");
   Verdict.p_none "an extension does not credit a different derivation from the same type"
     [ "compare_named" ] ~f:(referenced extensions);
   let derived =
     refs [ ("derived.ml", "type t = Sample.named [@@deriving sexp, compare, equal]\n") ]
   in
   Verdict.p "a deriving references converters of its component types"
-    (referenced derived "sexp_of_named"
-    && referenced derived "named_of_sexp"
+    (referenced derived "named_of_sexp"
     && referenced derived "compare_named"
     && referenced derived "equal_named");
   let inherited =
@@ -232,33 +219,19 @@ let () =
            type b = (Sample.named[@compare.ignore]) [@@deriving compare]\n\
            type c = (Sample.named[@equal.ignore]) [@@deriving equal]\n\
            type d = (Sample.named[@sexp.ignore]) [@@deriving sexp]\n\
-           let a = [%sexp_of: (Sample.named[@sexp.opaque]) list]\n\
-           let b = [%sexp_of: Sample.named sexp_opaque]\n" );
+           let a = [%of_sexp: (Sample.named[@sexp.opaque]) list]\n\
+           let b = [%of_sexp: Sample.named sexp_opaque]\n" );
       ]
   in
   Verdict.p_none "opaque and ignored types do not credit unused derived values"
-    [ "sexp_of_named"; "named_of_sexp"; "compare_named"; "equal_named" ]
+    [ "named_of_sexp"; "compare_named"; "equal_named" ]
     ~f:(referenced ignored);
   let deriving_attribute =
     refs [ ("attribute.ml", "open Sample\ntype t = T [@@deriving equal]\n") ]
   in
   Verdict.p_none "a deriving attribute is not an ordinary opened value reference" [ "equal" ]
     ~f:(referenced deriving_attribute);
-  let gadt_index =
-    refs [ ("gadt.ml", "type _ witness = Witness : Sample.named witness [@@deriving sexp_of]\n") ]
-  in
-  Verdict.p_none "a GADT result index is not a derived converter dependency" [ "sexp_of_named" ]
-    ~f:(referenced gadt_index);
-  let gadt_rec_flag, gadt_declaration =
-    single_type_declaration "type _ witness = Witness : Sample.named witness\n"
-  in
-  let gadt_expansion =
-    Ppx_sexp_conv_expander.Sexp_of.str_type_decl ~loc:gadt_declaration.ptype_loc ~path:"Fixture"
-      (gadt_rec_flag, [ gadt_declaration ])
-  in
-  Verdict.p "the ppx_sexp_conv GADT expansion does not convert its result index"
-    (not (List.mem (expression_paths gadt_expansion) "Sample.sexp_of_named" ~equal:String.equal));
-  let functor_application = refs [ ("functor.ml", "let f = [%sexp_of: F(X).t]\n") ] in
+  let functor_application = refs [ ("functor.ml", "let f = [%of_sexp: F(X).t]\n") ] in
   Verdict.p "a functor-application type path is accepted without guessed credit"
     (List.is_empty functor_application);
   let included = refs [ ("included.ml", "include Sample\n") ] in

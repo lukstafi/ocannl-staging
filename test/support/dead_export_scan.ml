@@ -10,11 +10,16 @@
     over-approximated to the whole source, and an [include M] counts as a reference to every value
     because it re-exports the whole interface. Both choices can hide a dead export through a false
     positive, but cannot falsely reject an ordinary use. Values generated for top-level types by
-    [sexp_of], [of_sexp], [sexp], [compare], and [equal] derivings are included (a standalone
-    [of_sexp] deriving as much as the [of_sexp] half of [sexp]); their expression extensions count
-    as references without needing to spell the generated value. Values introduced by other PPX
-    expansions or by an [include] inside the defining module remain outside this source-level
-    census. *)
+    [of_sexp], [compare], and [equal] derivings are included (a standalone [of_sexp] deriving as
+    much as the [of_sexp] half of [sexp]); their expression extensions count as references without
+    needing to spell the generated value. The [sexp_of] converters -- derived or hand-written,
+    recognized by the [sexp_of_] name prefix -- are excluded by policy: they are the entry point for
+    debugging and observability, and consumed as often through [ppx_minidebug]'s typed log
+    annotations, which expand to converter calls this source-level census cannot see, as through
+    spelled references. A [sexp_of] with no caller costs nothing and cannot drift from its type,
+    while removing it to satisfy a ratchet only takes the converter away from the next debugging
+    session. Values introduced by other PPX expansions or by an [include] inside the defining module
+    remain outside this source-level census. *)
 
 open Base
 open Ppxlib.Parsetree
@@ -96,13 +101,13 @@ let of_sexp_names declaration =
 let derived_names ~derivers declaration =
   let type_name = declaration.ptype_name.txt in
   List.concat_map derivers ~f:(function
-    | "sexp_of" -> [ "sexp_of_" ^ type_name ]
-    | "of_sexp" -> of_sexp_names declaration
-    | "sexp" -> ("sexp_of_" ^ type_name) :: of_sexp_names declaration
+    | "of_sexp" | "sexp" -> of_sexp_names declaration
     | "compare" -> [ comparison_name "compare" type_name ]
     | "equal" -> [ comparison_name "equal" type_name ]
     | _ -> [])
   |> List.dedup_and_sort ~compare:String.compare
+
+let is_sexp_of_converter value = String.is_prefix value ~prefix:"sexp_of_"
 
 let exports_of_source ~source contents =
   match module_name_of_source source with
@@ -114,7 +119,10 @@ let exports_of_source ~source contents =
         | Pstr_value (_, bindings) ->
             List.fold bindings ~init:acc ~f:(fun acc binding ->
                 List.fold (pattern_names binding.pvb_pat) ~init:acc ~f:(fun acc value ->
-                    { module_name; value; source; line = binding.pvb_loc.loc_start.pos_lnum } :: acc))
+                    if is_sexp_of_converter value then acc
+                    else
+                      { module_name; value; source; line = binding.pvb_loc.loc_start.pos_lnum }
+                      :: acc))
         | Pstr_primitive description ->
             {
               module_name;
@@ -161,20 +169,18 @@ let module_expr_name module_expr =
 let extension_deriver = function
   | "equal" -> Some "equal"
   | "compare" -> Some "compare"
-  | "sexp_of" -> Some "sexp_of"
   | "of_sexp" -> Some "of_sexp"
   | _ -> None
 
 let derived_name_for_extension deriver type_name =
   match deriver with
   | "equal" | "compare" -> comparison_name deriver type_name
-  | "sexp_of" -> "sexp_of_" ^ type_name
   | "of_sexp" -> type_name ^ "_of_sexp"
   | _ -> assert false
 
 let reference_derivers = function
-  | "sexp" -> [ "sexp_of"; "of_sexp" ]
-  | ("sexp_of" | "of_sexp" | "compare" | "equal") as deriver -> [ deriver ]
+  | "sexp" | "of_sexp" -> [ "of_sexp" ]
+  | ("compare" | "equal") as deriver -> [ deriver ]
   | _ -> []
 
 let has_attribute name attributes =
@@ -191,7 +197,7 @@ let opaque_sexp_wrapper core_type =
 
 let core_type_ignored ~deriver core_type =
   match deriver with
-  | "sexp_of" | "of_sexp" ->
+  | "of_sexp" ->
       has_attribute "sexp.opaque" core_type.ptyp_attributes
       || has_attribute "sexp.ignore" core_type.ptyp_attributes
       || opaque_sexp_wrapper core_type
@@ -201,7 +207,7 @@ let core_type_ignored ~deriver core_type =
 
 let label_ignored ~deriver label =
   match deriver with
-  | "sexp_of" | "of_sexp" -> has_attribute "sexp.ignore" label.pld_attributes
+  | "of_sexp" -> has_attribute "sexp.ignore" label.pld_attributes
   | "compare" -> has_attribute "compare.ignore" label.pld_attributes
   | "equal" -> has_attribute "equal.ignore" label.pld_attributes
   | _ -> false
