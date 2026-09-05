@@ -56,6 +56,10 @@
 #  23. a zombie retains its recorded identity while remaining non-live.
 #  24. a setsid descendant cannot escape into the next repeat build context.
 #  25. repeat isolation flags precede `dune exec`'s argument separator.
+#  26. an option written AFTER the dune arguments is refused, having run
+#      nothing -- the misplacement dune would otherwise digest as a red run.
+#  27. the same option in its documented place is consumed, not forwarded.
+#  28. past dune's own `--` the same word is a program argument, untouched.
 
 set -u
 
@@ -1221,6 +1225,90 @@ if [ "$wait_rc" = 124 ] \
 else
   report 1 "repeat: wait default covers every per-iteration cap" \
     "exit $wait_rc; sleeps $(tr '\n' ',' <"$TMP/repeat-wait-sleeps"); output: ${wait_out:-<nothing>}"
+fi
+
+# ---------------------------------------------------------------------------
+# Legs 26-28: this script's own options are refused on the wrong side of dune
+# ---------------------------------------------------------------------------
+# `run build @alias --cap 900` used to forward `--cap 900` to dune, which exits
+# 1 on the unknown option having built nothing; the digest then reads `FAIL
+# (exit 1)` with no matching error lines -- a verdict indistinguishable from a
+# failing test, and a session acting on it debugs code that never ran. So the
+# refusal is asserted together with the CALLS file being empty: "runs nothing"
+# is the half that makes the exit code trustworthy.
+argv_probe() { # tag subcommand [argv...] -- drives the tool against the fixture dune
+  local tag=$1 runs=$TMP/argv-runs-$1
+  shift
+  mkdir -p "$runs"
+  : >"$TMP/$tag.counter"
+  : >"$TMP/$tag.calls"
+  REPEAT_TEST_ROOT=$repeat_root \
+  REPEAT_TEST_MODE=stable \
+  REPEAT_TEST_COUNTER=$TMP/$tag.counter \
+  REPEAT_TEST_CALLS=$TMP/$tag.calls \
+  REPEAT_TEST_WAIT_PREFIX= \
+  REPEAT_TEST_WAIT_AT= \
+  REPEAT_TEST_ORPHAN_PID= \
+  REPEAT_TEST_ORPHAN_REAPED= \
+  REPEAT_TEST_DIFF_WAIT_PREFIX= \
+  REPEAT_TEST_REAL_DIFF="$(command -v diff)" \
+  OCANNL_TOOL_TEST_RUNS=$runs \
+  PATH=$repeat_bin:$PATH \
+    "$repeat_root/tools/test-run.sh" "$@" >"$TMP/$tag.out" 2>"$TMP/$tag.err"
+  argv_rc=$?
+  argv_err=$(cat "$TMP/$tag.err")
+  argv_calls=$(cat "$TMP/$tag.calls")
+}
+argv_rc= argv_err= argv_calls=
+
+# Every subcommand that takes options, and both spellings of a value option:
+# the guard sits on one code path, but a future refactor that splits it must
+# not be able to leave one entry point forwarding.
+misplaced_label="an option after the dune arguments is refused before dune runs"
+misplaced_detail=
+for probe in "run:run build @cheap --cap 900" \
+             "start:start build @cheap --cap=900" \
+             "repeat:repeat 2 build @cheap --alone"; do
+  argv_probe "misplaced-${probe%%:*}" ${probe#*:}
+  # Exit 2 is the usage code; the message must name the option AND the order,
+  # or the reader is left where the unknown-option error left them.
+  case $argv_rc in
+    2) ;;
+    *) misplaced_detail="${probe#*:}: exit $argv_rc (want 2): $argv_err" ; break ;;
+  esac
+  case $argv_err in
+    *"belongs before the dune arguments"*"tools/test-run.sh"*) ;;
+    *) misplaced_detail="${probe#*:}: unhelpful refusal: $argv_err" ; break ;;
+  esac
+  if [ -n "$argv_calls" ]; then
+    misplaced_detail="${probe#*:}: dune was invoked anyway: $argv_calls"
+    break
+  fi
+done
+if [ -z "$misplaced_detail" ]; then
+  report 0 "$misplaced_label"
+else
+  report 1 "$misplaced_label" "$misplaced_detail"
+fi
+
+# The control for the leg above: the refusal must be about PLACEMENT, not about
+# the word. A guard that also rejected the documented form would pass leg 26.
+argv_probe cap-placed run --cap 900 build @cheap
+if [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ]; then
+  report 0 "a correctly placed --cap is consumed and never reaches dune"
+else
+  report 1 "a correctly placed --cap is consumed and never reaches dune" \
+    "exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err"
+fi
+
+# Past dune's own separator the word is an executable's argument -- the caller's
+# business, and the one place `--cap` after the target can be meant.
+argv_probe cap-after-sep run exec ./prog.exe -- --cap 900
+if [ "$argv_rc" = 0 ] && [ "$argv_calls" = "exec ./prog.exe -- --cap 900" ]; then
+  report 0 "an option past dune's -- reaches the program untouched"
+else
+  report 1 "an option past dune's -- reaches the program untouched" \
+    "exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err"
 fi
 
 echo

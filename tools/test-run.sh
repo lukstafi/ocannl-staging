@@ -43,8 +43,13 @@
 # 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
 # never reaches those on its own). `status` exits 0 finished, 3 still running
 # (or verdict publication in flight), 1 died without a verdict. Usage and lock
-# refusals exit 2 -- every one of them, including an option placed before the
-# subcommand (`--cap 5400 run ...`, which is NOT accepted; options go after).
+# refusals exit 2 -- every one of them, including EITHER misplacement of this
+# script's own options: before the subcommand (`--cap 5400 run ...`) and after
+# the dune arguments (`run build @alias --cap 900`). Options go in between:
+# `run --cap 5400 build @alias`. The second refusal is why the scan below
+# exists -- unguarded, `--cap` reaches dune as an unknown option, and dune's
+# exit 1 having run nothing is digested here as `FAIL (exit 1)` with no error
+# lines, which reads exactly like a failing test.
 # But a launcher that swallows the status -- e.g. an agent harness's background
 # mode reporting its own wrapper's 0 -- turns that refusal into a false green,
 # so read the message, not only the code: a usage error runs no tests at all.
@@ -84,6 +89,29 @@ normalize_cap() {
   [ ${#cap} -le 9 ] || die "--cap too large (max 9 digits)"
   # Leading zeroes are accepted as decimal rather than reaching bash as octal.
   cap=$(( 10#$cap ))
+}
+
+reject_misplaced_options() {
+  # dune has no `--cap` and no `--alone`, so either word among the arguments
+  # FORWARDED to dune is this script's options written on the wrong side of the
+  # target -- never something a caller could mean. Left to reach dune it exits 1
+  # with `dune: unknown option`, having built nothing, and that status is
+  # digested as an ordinary red run: a session then debugs code that never ran.
+  # The scan stops at dune's own `--`, past which the words belong to an
+  # executable (`run exec foo.exe -- --cap 900` passes its cap to foo.exe).
+  for arg do
+    case $arg in
+      --) return 0 ;;
+      --cap | --cap=* | --alone | --alone=*)
+        case $sub in
+          repeat) form='repeat [--cap N] [--alone] N [DUNE ARGS...]' ;;
+          *) form="$sub [--cap N] [DUNE ARGS...]" ;;
+        esac
+        die "$arg belongs before the dune arguments, not after them:
+  tools/test-run.sh $form
+  dune has no such option, so this would have exited 1 having run nothing." ;;
+    esac
+  done
 }
 
 select_dune() {
@@ -768,6 +796,7 @@ case $sub in
     [ ${#repeats} -le 6 ] || die "repeat count too large (max 6 digits)"
     repeats=$(( 10#$repeats ))
     [ "$repeats" -ge 2 ] || die "repeat count must be at least 2"
+    reject_misplaced_options "$@"
     [ $# -gt 0 ] || set -- runtest
     select_dune
     take_lock
@@ -1068,6 +1097,7 @@ case $sub in
       esac
     done
     normalize_cap
+    reject_misplaced_options "$@"
     [ $# -gt 0 ] || set -- runtest
     # Toolchain checks gate only launches: status/wait/stop/list remain usable
     # from a shell whose opam environment is no longer active.
