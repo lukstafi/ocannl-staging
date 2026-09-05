@@ -42,7 +42,12 @@
    and ten helpers carried the empty-population hole until a manual read found them. The second
    reader below follows local bindings from a Verdict boolean back to [for_all], [for_all2_exn],
    [is_empty], or a negated [exists], and requires the helper to make non-emptiness part of its
-   passing result. *)
+   passing result.
+
+   Every synthetic control below earned its place by a mutation run -- the scanner mechanism it pins
+   disabled, this alias re-run, exactly that control failing. The manifest of those runs, one row
+   per mechanism with the control labels and the retained `tools/test-run.sh` run ids, is
+   `test/operations/verdict_ratchet_controls.md`; renaming or adding a control updates both. *)
 
 open Base
 open Stdio
@@ -1915,7 +1920,8 @@ let exempt_quantified_helpers =
    repository today. The first four are negative controls: the rule must return an offender for
    each, which is the same list the corpus loop below turns into a [Verdict.fail]. The rest are the
    nearest accepted forms, so widening the ratchet until ordinary boolean helpers need exemptions
-   also fails here rather than growing a noisy central list. *)
+   also fails here rather than growing a noisy central list. Which scanner mechanism each label
+   guards, and the mutation run that proved it, is the table in verdict_ratchet_controls.md. *)
 let quantified_helper_controls =
   [
     ( "refuses an unguarded for_all2_exn helper behind a local Verdict alias",
@@ -2687,6 +2693,82 @@ let run_quantified_helper_controls () =
           (String.concat ~sep:", " found);
       (label, ok))
 
+(* The manifest's pin. [verdict_ratchet_controls.md] is prose, and prose drifts: a control renamed
+   here and not there leaves a row nobody can find, and a row whose phrase names nothing leaves an
+   inventory that reads complete. So the two are held equal from where the labels already are, in
+   both directions -- every control label printed under "Synthetic helper-rule controls:", the
+   run_*_control families included, appears in the manifest, and every phrase the manifest sets in
+   backticks with a space in it (its convention for naming a control; a phrase starting with [dune]
+   is a command) is such a label. The manifest is handed over by the rule's [(deps ...)], which is
+   what makes a change to it re-run this. *)
+let manifest_file = "verdict_ratchet_controls.md"
+
+let manifest_control_phrases text =
+  let rec collect acc from =
+    match String.index_from text from '`' with
+    | None -> acc
+    | Some start -> (
+        match String.index_from text (start + 1) '`' with
+        | None -> acc
+        | Some stop ->
+            let span = String.sub text ~pos:(start + 1) ~len:(stop - start - 1) in
+            let names_a_control =
+              String.contains span ' '
+              && (not (String.contains span '\n'))
+              && not (String.is_prefix span ~prefix:"dune")
+            in
+            collect (if names_a_control then span :: acc else acc) (stop + 1))
+  in
+  List.rev (collect [] 0)
+
+let manifest_row_label = "every synthetic control has a row in the mutation-run manifest"
+let manifest_phrase_label = "every control phrase in the mutation-run manifest names a live control"
+let manifest_distinct_label = "synthetic control labels are pairwise distinct"
+let manifest_once_label = "every control phrase appears once in the mutation-run manifest"
+
+(* [controls] is every control result printed under "Synthetic helper-rule controls:" before these
+   two -- the quantified list AND the run_*_control families, since the manifest promises them all
+   -- so a case added to any family without a row fails here, not only one added to the list. *)
+let run_manifest_controls ~manifest ~controls =
+  let labels =
+    List.map controls ~f:fst
+    @ [ manifest_row_label; manifest_phrase_label; manifest_distinct_label; manifest_once_label ]
+  in
+  (* Two controls under one label are one row here and one line in the golden: the second identity
+     is gone before either inventory check runs, so the label set is held duplicate-free first. *)
+  let duplicate = List.find_a_dup labels ~compare:String.compare in
+  Option.iter duplicate ~f:(fun label ->
+      eprintf "two synthetic controls share the label %S -- give each its own\n" label);
+  let phrases =
+    match manifest with
+    | Some text -> manifest_control_phrases text
+    | None ->
+        eprintf "%s is not among the arguments -- the rule's deps no longer hand it over\n"
+          manifest_file;
+        []
+  in
+  (* And the manifest names each control once: a label repeated in a second row is a mapping that
+     has become ambiguous, which the two set-based checks below would read as covered. *)
+  let repeated = List.find_a_dup phrases ~compare:String.compare in
+  Option.iter repeated ~f:(fun phrase ->
+      eprintf "%s names the control %S in two places -- keep one row per control\n" manifest_file
+        phrase);
+  let label_set = Set.of_list (module String) labels in
+  let phrase_set = Set.of_list (module String) phrases in
+  List.iter labels ~f:(fun label ->
+      if not (Set.mem phrase_set label) then
+        eprintf "synthetic control without a row in %s: %S\n" manifest_file label);
+  List.iter phrases ~f:(fun phrase ->
+      if not (Set.mem label_set phrase) then
+        eprintf "phrase in %s names no synthetic control: %S\n" manifest_file phrase);
+  [
+    (manifest_row_label, (not (List.is_empty labels)) && List.for_all labels ~f:(Set.mem phrase_set));
+    ( manifest_phrase_label,
+      (not (List.is_empty phrases)) && List.for_all phrases ~f:(Set.mem label_set) );
+    (manifest_distinct_label, Option.is_none duplicate);
+    (manifest_once_label, Option.is_none repeated);
+  ]
+
 let quantified_failure source claim =
   let key = quantified_exemption_key ~source claim in
   Printf.sprintf
@@ -2918,11 +3000,20 @@ let () =
   let data_used = ref (Set.empty (module String)) in
   let literals = ref 0 and applied = ref 0 and offenders = ref 0 in
   let quantified_offenders = ref 0 in
+  let manifest =
+    List.find_map arguments ~f:(fun (relative, path) ->
+        if String.is_suffix relative ~suffix:("/" ^ manifest_file) then
+          Some (Stdio.In_channel.read_all path)
+        else None)
+  in
   let control_results =
     run_quantified_helper_controls ()
     @ [ run_refusal_control (); run_stale_quantified_control () ]
     @ run_shadowed_quantified_controls ()
     @ run_colliding_site_controls ()
+  in
+  let control_results =
+    control_results @ run_manifest_controls ~manifest ~controls:control_results
   in
   let per_directory = Hashtbl.create (module String) in
   printf

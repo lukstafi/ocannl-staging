@@ -2519,6 +2519,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  verdict_ratchet_controls.md
   (glob_files_rec ../../test/*.ml)
   (glob_files_rec ../../arrayjit/test/*.ml))
  (action
