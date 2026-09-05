@@ -2,11 +2,7 @@ open Base
 module BPlot = PrintBox_ext_plot
 module B = PrintBox
 
-let _get_local_debug_runtime = Utils.get_local_debug_runtime
-
 type box = B.t
-
-let sexp_of_box _ = String.sexp_of_t "<opaque>"
 
 type dag =
   [ `Empty
@@ -21,7 +17,6 @@ type dag =
   | `Tree of dag * dag list
   | `Embed_subtree_ID of string
   | `Subtree_with_ID of string * dag ]
-[@@deriving sexp_of]
 
 let rec boxify (depth : int) (b : dag) : dag =
   match b with
@@ -95,7 +90,6 @@ type table_row_spec =
       result_label : string;
       result : Sexp.t;
     }
-[@@deriving sexp_of]
 
 let nolines = String.substr_replace_all ~pattern:"\n" ~with_:";"
 
