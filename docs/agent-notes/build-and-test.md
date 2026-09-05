@@ -540,8 +540,10 @@ that they earn a lookup rather than always-loaded space.
   identity token does not rescue the check either: a zombie leader still prints its recorded
   `lstart`. Answered with the signal alone, `stop` could announce `orphaned process group N ignored
   TERM; escalated to KILL` for a group holding nothing but corpses — the one report someone consults
-  when working out why a worktree lock will not clear (gh-ocannl-742). `group_alive` is the same
-  ladder `scripts/setup-ocaml-env.sh` carries for the identical misreading: `/proc` where there is
+  when working out why a worktree lock will not clear (gh-ocannl-742). `group_alive` is ONE shared
+  definition, `scripts/process-group.sh`, sourced by both `tools/test-run.sh` and
+  `scripts/setup-ocaml-env.sh` for the identical misreading (staging#621 replaced the two
+  synchronized copies): `/proc` where there is
   one (fork-free, through the shell's `read`), `ps -A -o pgid=,stat=` on the BSDs and macOS,
   degrading to the bare signal only where neither answers; the signal probe stays FIRST as a
   necessary condition, which makes the predicate a strict narrowing of the `kill -0` it replaced —
@@ -558,12 +560,24 @@ that they earn a lookup rather than always-loaded space.
   is a property of the kernel, so a local pass proves less than it looks: Linux (and every container
   on it) counts the zombie and says alive, while Darwin's `killpg` already answers `ESRCH` once a
   group holds only corpses, and under a PID 1 that does not reap the zombie is PERMANENT, so a retry
-  loop around the signal was never the fix. `tools/test-test-run.sh` is the hand-run harness (the
-  sibling of `scripts/test-setup-ocaml-env.sh`, and on no dune alias for the same reason — it
-  spawns, STOPs and kills processes): it extracts `group_alive` from the working-tree script and
+  loop around the signal was never the fix. That is why the two harnesses run where the fact
+  reproduces: `tools/test-test-run.sh` and its sibling `scripts/test-setup-ocaml-env.sh` are on no
+  dune alias (they spawn, STOP and kill processes, and the `bounded` legs sit out watchdog
+  timeouts) but since staging#621 (gh-ocannl-795) the Ubuntu 5.5 `main` CI leg runs BOTH in one
+  isolated step before `setup-ocaml`, summing their exits so a red first harness does not suppress
+  the second's diagnostics. Both share one contract for a leg the host cannot decide:
+  `SKIP LABEL REASON` on stdout, a footer that always prints the skip count
+  (`all legs passed (N skipped)`), and exit 0 when no leg FAILED — so "all legs passed" over a run
+  that decided fewer legs is never the reading, and a macOS run of the sibling is green with its
+  zombie-only bare-signal comparison skipped rather than hard-failed as vacuous, which is what
+  lets one step run both on any runner. `tools/test-test-run.sh` sources
+  `group_alive` from the working-tree helper, pins that exactly one production definition exists
+  across the helper and its two callers (with a synthetic duplicate as the negative control), and
   builds a group holding nothing but a zombie, asserting both the claim and, by shadowing `kill` so
   the signal probe is forced to answer alive, the portable control that the state reader alone
-  rejects that group on a kernel like the one where this was reproduced. It reads states and groups
+  rejects that group: on Ubuntu the real group shows bare `kill -0` alive and the reader rejects
+  it, on Darwin the forced-signal control is the only zombie evidence, so read the skip count
+  before treating a local green as coverage. It reads states and groups
   through its OWN `/proc`-then-`ps` readers, probed against a known-live process before use: a Git
   Bash/MSYS `ps` takes no `-o`, and a leg that cannot tell "not a zombie yet" from "gone" must SKIP
   rather than pass or fail — an unreadable state made both zombie assertions fail there and let the
@@ -992,7 +1006,9 @@ that they earn a lookup rather than always-loaded space.
   after a merge, so a new worktree can start dozens of commits stale (79 on 2026-08-22) and a
   full suite run then tests old code. Read the checklist before the first build.
   That section has a hand-runnable harness, `scripts/test-setup-ocaml-env.sh` — run it after
-  editing the section; it is on no dune alias, since its `bounded` legs sit out watchdog timeouts.
+  editing the section; it is on no dune alias, since its `bounded` legs sit out watchdog timeouts,
+  and CI runs it only in the pre-toolchain Ubuntu step alongside `tools/test-test-run.sh`
+  (the `group_alive` bullet above has the SKIP contract the two share).
   It copies the WORKING-TREE hook into throwaway clones under a `mktemp -d` (never touching this
   repository's refs or config) and covers the watchdog (TERM at the bound, KILL 5s later, the
   process GROUP, rc preservation, no orphans), the counting wording and its two recovery commands,
@@ -1007,8 +1023,9 @@ that they earn a lookup rather than always-loaded space.
   counts a ZOMBIE as present — git's ssh child is one, reparented when git exits and not yet
   reaped — so a fetch that had already failed in milliseconds read as still running and sat out the
   whole 30s bound, on every session start with an unreachable ssh remote. Emptiness is therefore
-  not a signal question: `group_alive` reads process STATES, from `/proc` where there is one and
-  from `ps -A -o pgid=,stat=` otherwise, and only a non-zombie member counts as work. Where the
+  not a signal question: `group_alive` (the shared `scripts/process-group.sh`) reads process
+  STATES, from `/proc` where there is one and from `ps -A -o pgid=,stat=` otherwise, and only a
+  non-zombie member counts as work. Where the
   reaper is a PID 1 that does not reap — the ordinary container case — the zombie is PERMANENT, so
   the first attempt at this, a short retry loop around the same `kill -0`, would not have helped;
   that is the shape to keep in mind before reaching for a timing fix here again.
