@@ -565,12 +565,14 @@ that they earn a lookup rather than always-loaded space.
   dune alias (they spawn, STOP and kill processes, and the `bounded` legs sit out watchdog
   timeouts) but since staging#621 (gh-ocannl-795) the Ubuntu 5.5 `main` CI leg runs BOTH in one
   isolated step before `setup-ocaml`, summing their exits so a red first harness does not suppress
-  the second's diagnostics. Both share one contract for a leg the host cannot decide:
+  the second's diagnostics. The step is now the home of any hand-run harness that has a reason not
+  to be a dune test — `tools/test-ci-times.sh` joined it for a different one (its subject invokes
+  `python3` under that exact name) — and they share one contract for a leg the host cannot decide:
   `SKIP LABEL REASON` on stdout, a footer that always prints the skip count
   (`all legs passed (N skipped)`), and exit 0 when no leg FAILED — so "all legs passed" over a run
   that decided fewer legs is never the reading, and a macOS run of the sibling is green with its
   zombie-only bare-signal comparison skipped rather than hard-failed as vacuous, which is what
-  lets one step run both on any runner. `tools/test-test-run.sh` sources
+  lets one step run them all on any runner. `tools/test-test-run.sh` sources
   `group_alive` from the working-tree helper, pins that exactly one production definition exists
   across the helper and its two callers (with a synthetic duplicate as the negative control), and
   builds a group holding nothing but a zombie, asserting both the claim and, by shadowing `kill` so
@@ -1497,6 +1499,21 @@ that they earn a lookup rather than always-loaded space.
   here. Filter by `--event schedule` for the extended (Windows, 5.3 floor) matrix, whose jobs are
   the ones with the widest spread. `tools/ci-times.sh` answers the neighbouring question for a
   SINGLE run: where its minutes went, step by step.
+- **A job GitHub never ran still carries timestamps, and they run BACKWARDS.** A skipped job's
+  `completed_at` precedes its `started_at` — by one second in the case measured (gh-ocannl-901 on
+  staging#611), which the plain subtraction rendered as `-1m59s`, since Python's `divmod(-1, 60)`
+  floors to `(-1, 59)`. So a reader saw a two-minute job that never started. Both readers of these
+  pairs now treat a negative interval as no measurement rather than a small one: `ci-durations.sh`
+  skips the job and counts it on stderr, `ci-times.sh` prints `(no time)`. That label also covers a
+  completed job with an absent endpoint; a job that is merely still `queued` or `in_progress` keeps
+  its status as the label, since there its duration is missing only YET. `tools/test-ci-times.sh`
+  is the hermetic harness — a fake `gh` serving one recorded `runs/<id>/jobs` payload that mixes
+  measurable, absent and reversed pairs, with mutation twins that restore each dropped guard and
+  must be rejected for printing `-1m59s` and `(completed)` respectively. Like its siblings it is on
+  no dune alias and rides the Ubuntu shell-harness CI step (the `group_alive` bullet above has the
+  SKIP contract they share), here because the subject invokes `python3` under that exact name,
+  which is not what every platform `dune runtest` covers calls it — so a host without one skips
+  every leg rather than deciding none of them quietly.
 - The per-PR suite does not run the training integrations. `mlp_names`, `mlp_bn_names`,
   `circles_conv`, `fsm_transformer` and `transformer_names` sit on the `train` alias — a third
   tier beside `runtest` and `slow`, for runs that are toy-sized by intent but serialized on the

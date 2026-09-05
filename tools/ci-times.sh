@@ -7,7 +7,12 @@
 #
 # Jobs and steps appear in the order GitHub lists them.  Pure `gh api` +
 # python3; no OCANNL build involved.  A job's conclusion is appended when it
-# is anything other than success (failure, cancelled, skipped...).
+# is anything other than success (failure, cancelled, skipped...), and a job
+# with no wall-clock duration to report says `(no time)` rather than a number
+# (see the `secs` comment below).
+#
+# tools/test-ci-times.sh is the hermetic harness for the reporting below; it
+# runs this exact file against a recorded `gh` fixture.
 #
 # Usage: tools/ci-times.sh [RUN_ID]
 #   tools/ci-times.sh              # latest completed ci.yml run on the current repo
@@ -44,15 +49,35 @@ from datetime import datetime
 threshold = int(sys.argv[1])
 
 def secs(start, end):
+    # None means 'this pair is not an interval', which covers two shapes.  A
+    # missing endpoint is the obvious one.  The other is a pair that runs
+    # BACKWARDS: a job GitHub never ran carries placeholder timestamps whose
+    # completed_at precedes its started_at, and the plain subtraction reports
+    # that as a duration -- '-1m59s' against a skipped job, seen while
+    # measuring gh-ocannl-901 on staging#611.  Negative wall clock is not a
+    # measurement, so it is unavailable rather than small.
     if not start or not end:
         return None
     fmt = '%Y-%m-%dT%H:%M:%SZ'
-    return (datetime.strptime(end, fmt) - datetime.strptime(start, fmt)).total_seconds()
+    d = (datetime.strptime(end, fmt) - datetime.strptime(start, fmt)).total_seconds()
+    return d if d >= 0 else None
 
 def human(s):
     s = int(round(s))
     m, s = divmod(s, 60)
     return f'{m}m{s:02d}s' if m else f'{s}s'
+
+def label_for(job, total):
+    if total is not None:
+        return human(total)
+    status = job.get('status')
+    # A queued or running job has no duration YET, and saying which is useful.
+    # A completed one with no usable interval has none at all -- it was
+    # skipped, or GitHub served no times -- and '(completed)' would read as an
+    # answer to the question the column asks.
+    if status and status != 'completed':
+        return '(' + str(status) + ')'
+    return '(no time)'
 
 for line in sys.stdin:
     line = line.strip()
@@ -60,7 +85,7 @@ for line in sys.stdin:
         continue
     job = json.loads(line)
     total = secs(job.get('started_at'), job.get('completed_at'))
-    label = human(total) if total is not None else '(' + str(job.get('status')) + ')'
+    label = label_for(job, total)
     tail = '' if job.get('conclusion') in (None, 'success') else '  [' + job['conclusion'] + ']'
     print(f'{label:>8}  {job[\"name\"]}{tail}')
     for step in job.get('steps') or []:
