@@ -256,9 +256,9 @@ type skip_aggregation = [ `Backend | `Environment | `Outside_sweep ]
     unsupported backend coverage. Scope describes this observation, not the claim identity: if any
     declared-box log marks a claim [Environment], a [Backend] skip carrying the same executable and
     claim key on another box is also evidence that box did not execute it. Pass
-    [~aggregation:`Outside_sweep] only when a separate checked
-    matrix owns execution of the claim (for example the compiler-trace CI leg); the record remains
-    validated and human-visible but neither sweep dimension treats its absence as evidence.
+    [~aggregation:`Outside_sweep] only when a separate checked matrix owns execution of the claim
+    (for example the compiler-trace CI leg); the record remains validated and human-visible but
+    neither sweep dimension treats its absence as evidence.
 
     Use it in place of a bare [p name true]: that line is byte-identical to a verified run's, so
     neither the transcript nor a reviewer can tell the claim was never evaluated — which is how a

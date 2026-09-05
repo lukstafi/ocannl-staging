@@ -258,13 +258,13 @@ val cache_key :
     asking about queued timing, and the times it stores are readings of a different quantity, which
     a replay would copy into the reading process's report under its own label. CUDA/HIP [queued]
     keys carry policy generation 2 (gh-ocannl-892), invalidating winners measured under the old
-    depth-200/short-batch regime without invalidating the unchanged cc/Metal regimes. [objective] is for
-    the caller that resolved a mode explicitly rather than from configuration ({!Autotune.tune}'s
-    [?timing]); everyone else wants the default. The backend-supplied components arrive as the whole
-    [limits] record rather than one optional argument each, so a component added there reaches every
-    call site instead of defaulting to absent at the ones that were not updated (gh-ocannl-572).
-    Callers time kernels on a concrete device, so include anything else that distinguishes
-    performance environments in [backend] (e.g. a device id) if needed. *)
+    depth-200/short-batch regime without invalidating the unchanged cc/Metal regimes. [objective] is
+    for the caller that resolved a mode explicitly rather than from configuration
+    ({!Autotune.tune}'s [?timing]); everyone else wants the default. The backend-supplied components
+    arrive as the whole [limits] record rather than one optional argument each, so a component added
+    there reaches every call site instead of defaulting to absent at the ones that were not updated
+    (gh-ocannl-572). Callers time kernels on a concrete device, so include anything else that
+    distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
 
 val cache_regime_version : int
 (** Version of the filename-key regime recorded once per cache directory (gh-ocannl-835). Bump it

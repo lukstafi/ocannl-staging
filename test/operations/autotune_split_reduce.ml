@@ -426,15 +426,14 @@ let () =
        [autotune_timing_modes]. Keep this stateful gradient arm about split-reduce reachability:
        under the queued objective each candidate is launched thousands of times, and the shape it
        launches is a Grid loop of extent 6 nested under a serial loop of 128 -- so on Apple
-       platforms, where [cc_parallel_grid] probes to [dispatch], one launch is 128
-       [dispatch_apply] fork/joins and the search as a whole is millions of them. At that rate
-       libdispatch's own allocator traps ("BUG IN CLIENT OF LIBMALLOC: memory corruption of free
-       block", inside [_dispatch_calloc_typed] under [dispatch_apply]), and it does so with no
-       OCANNL code in the process at all:
-       [benchmarks/runners/ocannl/dispatch_apply_stress.c] reproduces the identical signature from a
-       plain C loop (gh-ocannl-870). So this pin is not a workaround for a defect of the tuner's or
-       of split-reduce's -- it keeps a platform trap out of a test about split-reduce
-       reachability. *)
+       platforms, where [cc_parallel_grid] probes to [dispatch], one launch is 128 [dispatch_apply]
+       fork/joins and the search as a whole is millions of them. At that rate libdispatch's own
+       allocator traps ("BUG IN CLIENT OF LIBMALLOC: memory corruption of free block", inside
+       [_dispatch_calloc_typed] under [dispatch_apply]), and it does so with no OCANNL code in the
+       process at all: [benchmarks/runners/ocannl/dispatch_apply_stress.c] reproduces the identical
+       signature from a plain C loop (gh-ocannl-870). So this pin is not a workaround for a defect
+       of the tuner's or of split-reduce's -- it keeps a platform trap out of a test about
+       split-reduce reachability. *)
     Autotune.tune ~timing:Autotune.Isolated ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
       ~report:(fun r -> report := Some r)
       ctx

@@ -1130,8 +1130,8 @@ val set_test_bindings : Context.routine -> unit
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
 val queue_depth_cap_for_backend : string -> int
-(** Queue-memory bound selected by canonical backend name: 2048 for CUDA/HIP, and the historical
-    200 for cc/Metal. Exposed with the neighboring pure calibration seams so the backend scoping of
+(** Queue-memory bound selected by canonical backend name: 2048 for CUDA/HIP, and the historical 200
+    for cc/Metal. Exposed with the neighboring pure calibration seams so the backend scoping of
     gh-ocannl-892 is pinned without running a full search. *)
 
 val queued_batch_depth : timing_result -> int
@@ -1219,21 +1219,21 @@ val time_routine :
     confirmed at a 25% deeper depth (clamped to and measured at the cap) and retained only when the
     pair's inferred fixed component is below the target. A confirmation over 2x its supported base
     is retried once before an unresolved pair selects the cap. An unresolved single/probe pair
-    retries at double depth, and the next affine fit uses the two batch observations so an inflated single
-    window cannot force the cap. If the bounded loop first reaches the target on its last probe, the
-    interpolated target depth is still sampled and checked against the measured overshoot. A
-    non-monotone confirmation scales from the deeper measured batch, never the earlier suspect
-    crossing. When a clean pair's fixed component already fills the target, its marginal slope
-    selects a depth carrying ~10 ms of launch work instead of accepting a shallow stalled window or
-    jumping to the cap. After four noisy but resolved underestimates, calibration keeps the latest
-    affine projection rather than jumping to a 20--30 ms cap batch that would blunt the 2x
-    contention threshold. A CUDA/HIP routine slower than the target is confirmed by a depth-2 probe,
-    stays at depth 1, and is measured identically in both modes. The calibration always yields a
-    depth; the result of the timed loop reports when most of ITS samples were stalled, and the tuner
-    refuses such a candidate measurement rather than ranking and caching it (gh-ocannl-888). Since the
-    budget is per-launch rather than batch wall, queued timing can spend up to [max 64 repeats]
-    batches on a fast candidate; [max_timing_runs] bounds the top-up beyond the caller's requested
-    floor.
+    retries at double depth, and the next affine fit uses the two batch observations so an inflated
+    single window cannot force the cap. If the bounded loop first reaches the target on its last
+    probe, the interpolated target depth is still sampled and checked against the measured
+    overshoot. A non-monotone confirmation scales from the deeper measured batch, never the earlier
+    suspect crossing. When a clean pair's fixed component already fills the target, its marginal
+    slope selects a depth carrying ~10 ms of launch work instead of accepting a shallow stalled
+    window or jumping to the cap. After four noisy but resolved underestimates, calibration keeps
+    the latest affine projection rather than jumping to a 20--30 ms cap batch that would blunt the
+    2x contention threshold. A CUDA/HIP routine slower than the target is confirmed by a depth-2
+    probe, stays at depth 1, and is measured identically in both modes. The calibration always
+    yields a depth; the result of the timed loop reports when most of ITS samples were stalled, and
+    the tuner refuses such a candidate measurement rather than ranking and caching it
+    (gh-ocannl-888). Since the budget is per-launch rather than batch wall, queued timing can spend
+    up to [max 64 repeats] batches on a fast candidate; [max_timing_runs] bounds the top-up beyond
+    the caller's requested floor.
 
     With [~tag_failures:true] the pre-dispatch validation, the launches and the synchronization are
     wrapped in their {!Ir.Schedule_outcome} phases, which is what lets a caller's
@@ -1243,8 +1243,8 @@ val time_routine :
     afterwards. [Queued] raises how many such dispatches happen. For [repeats <= 64], the maxima are
     65 under [Isolated] and, under [Queued], 278593 on CUDA/HIP or 12865 on cc/Metal. The CUDA/HIP
     bound includes warmup, 64 single-launch calibration runs, at most seven twelve-sample
-    calibration probes and 64 timed batches at the cap; cc/Metal have no batch probes. In general the queued
-    bounds are [65 + 2048 * (84 + max 64 repeats)] on CUDA/HIP and
+    calibration probes and 64 timed batches at the cap; cc/Metal have no batch probes. In general
+    the queued bounds are [65 + 2048 * (84 + max 64 repeats)] on CUDA/HIP and
     [65 + 200 * max 64 repeats] on cc/Metal. Thus a routine whose values grow per run reaches larger
     ones. That is a fact about the scratch buffers, not about the measurement: the cap bounds each
     in-memory queue while the ~25 ms budget accumulates per-launch samples, and a candidate's time

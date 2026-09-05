@@ -170,8 +170,8 @@ let () =
   let arm_b_staged = arm_b.Autotune.candidates_timed >= 2 in
   let arm_b_short_of_injection = (not arm_b_staged) && arm_b.Autotune.timings_contended > 0 in
   (* The numbers behind every waiver below, so a sighting in a sweep log is self-diagnosing without
-     a re-run (gh-ocannl-894): device-produced times never belong in the golden, and the claims
-     that follow are what actually decide the run. *)
+     a re-run (gh-ocannl-894): device-produced times never belong in the golden, and the claims that
+     follow are what actually decide the run. *)
   Stdio.eprintf
     "run 1 (not part of the golden): arm A timed %d refused %d best_ms %.6f, arm B timed %d \
      refused %d best_ms %.6f\n\
