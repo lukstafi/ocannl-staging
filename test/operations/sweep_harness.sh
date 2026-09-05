@@ -44,7 +44,7 @@ trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # trap's `$BASH_COMMAND` is the body, which would name no pattern at all.
 absent() {
   if grep -q "$@"; then
-    printf 'sweep_harness: unexpected match for %s\n' "$1" >&2
+    printf 'sweep_harness: unexpected match for %s\n' "$*" >&2
     return 1
   fi
 }
@@ -64,6 +64,7 @@ aggregate=$2
 verdict_probe=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 rendered_metal_options=$4
 rendered_hip_options=$5
+rendered_nvrtc_options=$6
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-sweep-test.XXXXXX")
 holder_pid=
 wait_prefix=
@@ -685,11 +686,20 @@ holder_pid=
 # compile fails, and `compile_metal_source` appends to a Metal failure -- as
 # opposed to the pure policy vectors the context block prints. `fingerprint` is
 # backend-blind, so the local metal unit pins all three lines' extraction;
-# producing them is separately covered on their hardware boxes. The HIP and
-# Metal vectors come from their production renderers through the OCaml driver,
-# so this fixture cannot drift from either source of truth (gh-ocannl-881).
+# producing them is separately covered on their hardware boxes. All three
+# vectors come from their production renderers through the OCaml driver, so
+# this fixture cannot drift from any source of truth (gh-ocannl-881,
+# gh-ocannl-849); the nvrtc one carries the driver's sentinel include and
+# architecture slots, which is what makes its line unmistakable below.
+case $rendered_nvrtc_options in
+  *sentinel*) ;;
+  *)
+    printf 'sweep_harness: nvrtc vector lost its sentinel: %s\n' "$rendered_nvrtc_options" >&2
+    false
+    ;;
+esac
 rtc_failure='Fatal error: exception nvrtc_compile_program k.cu: nvrtc: error: no
-nvrtc options: -I/usr/local/cuda/include --use_fast_math'
+nvrtc options: '"$rendered_nvrtc_options"
 rtc_failure=$rtc_failure$'\nhiprtc options: '"$rendered_hip_options"
 rtc_failure=$rtc_failure$'\nmetal options: '"$rendered_metal_options"
 SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$rtc_failure \
@@ -713,8 +723,18 @@ grep -q '^=== rtc-context (metal) ===$' "${metal_log%.log}.fingerprint"
 # an ordinary line of the exception message: it begins neither at an error site
 # nor at `Error`/`Fatal error`/`Exception`, so before its own selector existed it
 # stopped at the log and never reached the file callers diff.
-grep -q '^nvrtc options: -I/usr/local/cuda/include --use_fast_math$' \
-  "${metal_log%.log}.fingerprint"
+grep -Fxq "nvrtc options: $rendered_nvrtc_options" "${metal_log%.log}.fingerprint"
+# Negative control for that extraction: the vector is required WHOLE, as one
+# line. A selector that stopped at the first space, or a fingerprint that held
+# the line under another prefix, would still satisfy a substring match; both
+# the truncated vector and a deliberately altered one must fail the whole-line
+# check the positive assertion relies on.
+truncated_nvrtc_options=${rendered_nvrtc_options% *}
+[ "$truncated_nvrtc_options" != "$rendered_nvrtc_options" ]
+absent -Fx "nvrtc options: $truncated_nvrtc_options" "${metal_log%.log}.fingerprint"
+altered_nvrtc_options=${rendered_nvrtc_options/sentinel/altered}
+[ "$altered_nvrtc_options" != "$rendered_nvrtc_options" ]
+absent -Fx "nvrtc options: $altered_nvrtc_options" "${metal_log%.log}.fingerprint"
 grep -Fxq "hiprtc options: $rendered_hip_options" "${metal_log%.log}.fingerprint"
 grep -q '^metal options: language-version=3.1 math-mode=safe math-functions=fast$' \
   "${metal_log%.log}.fingerprint"
