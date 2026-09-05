@@ -26,8 +26,9 @@ Conventions:
 - A control listed here is **maintained**, and the ratchet checks it on every run: a backticked
   phrase containing a space in this file names a control (the one exception is a phrase starting
   with `dune`, a command), every such phrase must be a control label the ratchet prints under
-  "Synthetic helper-rule controls:" in its golden, and every label printed there, the
-  `run_*_control` families included, must appear in this file. Renaming a control on one side only fails the run
+  "Synthetic helper-rule controls:" in its golden, every label printed there, the
+  `run_*_control` families included, must appear in this file, and each exactly once: a control
+  belongs to one row, and a second row citing it names its mechanism only in prose. Renaming a control on one side only fails the run
   with the offending names on stderr. When a scanner change makes a mutation no longer meaningful,
   replace the row rather than deleting it.
 
@@ -207,7 +208,9 @@ label they print is listed so the inventory the ratchet checks is complete.
   either direction is checked). Labels: `every synthetic control has a row in the mutation-run manifest`;
   `every control phrase in the mutation-run manifest names a live control`;
   `synthetic control labels are pairwise distinct` (mutation: a duplicated label in
-  `quantified_helper_controls`, `20260905T010417Z-49456`). Its inventory mutation runs
+  `quantified_helper_controls`, `20260905T010417Z-49456`);
+  `every control phrase appears once in the mutation-run manifest` (mutation: one label pasted
+  into a second row here, `20260905T011116Z-11226`). Its inventory mutation runs
   misspelled one phrase here and saw both claims report `false` with the missing label and the
   stale phrase named on stderr: a quantified-list row (`value` to `result` in a round-5 row,
   `20260905T004841Z-76830`) and a family label (`20260905T005706Z-70118`).

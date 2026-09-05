@@ -2719,11 +2719,12 @@ let manifest_control_phrases text =
             in
             collect (if names_a_control then span :: acc else acc) (stop + 1))
   in
-  collect [] 0 |> List.dedup_and_sort ~compare:String.compare
+  List.rev (collect [] 0)
 
 let manifest_row_label = "every synthetic control has a row in the mutation-run manifest"
 let manifest_phrase_label = "every control phrase in the mutation-run manifest names a live control"
 let manifest_distinct_label = "synthetic control labels are pairwise distinct"
+let manifest_once_label = "every control phrase appears once in the mutation-run manifest"
 
 (* [controls] is every control result printed under "Synthetic helper-rule controls:" before these
    two -- the quantified list AND the run_*_control families, since the manifest promises them all
@@ -2731,7 +2732,7 @@ let manifest_distinct_label = "synthetic control labels are pairwise distinct"
 let run_manifest_controls ~manifest ~controls =
   let labels =
     List.map controls ~f:fst
-    @ [ manifest_row_label; manifest_phrase_label; manifest_distinct_label ]
+    @ [ manifest_row_label; manifest_phrase_label; manifest_distinct_label; manifest_once_label ]
   in
   (* Two controls under one label are one row here and one line in the golden: the second identity
      is gone before either inventory check runs, so the label set is held duplicate-free first. *)
@@ -2746,6 +2747,12 @@ let run_manifest_controls ~manifest ~controls =
           manifest_file;
         []
   in
+  (* And the manifest names each control once: a label repeated in a second row is a mapping that
+     has become ambiguous, which the two set-based checks below would read as covered. *)
+  let repeated = List.find_a_dup phrases ~compare:String.compare in
+  Option.iter repeated ~f:(fun phrase ->
+      eprintf "%s names the control %S in two places -- keep one row per control\n" manifest_file
+        phrase);
   let label_set = Set.of_list (module String) labels in
   let phrase_set = Set.of_list (module String) phrases in
   List.iter labels ~f:(fun label ->
@@ -2759,6 +2766,7 @@ let run_manifest_controls ~manifest ~controls =
     ( manifest_phrase_label,
       (not (List.is_empty phrases)) && List.for_all phrases ~f:(Set.mem label_set) );
     (manifest_distinct_label, Option.is_none duplicate);
+    (manifest_once_label, Option.is_none repeated);
   ]
 
 let quantified_failure source claim =
