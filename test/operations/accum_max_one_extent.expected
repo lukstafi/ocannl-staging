@@ -10,5 +10,6 @@ the refusal names Accum_op, the absent iterator and the element-zero write: true
 the user-facing compile path refuses it too: true
 the same extent left unbound still lowers, retaining maximum-shape semantics: true
 that lowering is what the bound path emitted: it contains no guard for static indices to fill: true
+the harness refuses every ~launch that does not value the parameter exactly once: true
 the refused program would have returned its operand where the empty sum is 0.0: true
 so the refusal guards a wrong VALUE in a concrete output cell, not a beyond-extent margin: true

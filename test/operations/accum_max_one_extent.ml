@@ -32,6 +32,9 @@ let rec find_accum = function
 
 let rejection f = match f () with () -> None | exception Utils.User_error msg -> Some msg
 
+(* Harness misuse, which [Ll_test] reports as [Invalid_argument] rather than as a user error. *)
+let misuse f = match f () with () -> None | exception Invalid_argument msg -> Some msg
+
 let says rejection substring =
   Option.value_map rejection ~default:false ~f:(String.is_substring ~substring)
 
@@ -128,16 +131,34 @@ let () =
       ~materialized:[ one.x.Tensor.value; one.y.Tensor.value ]
       ~name:"accum_max_one_preboundary" legacy
   in
-  let ctx1, routine1 =
-    Context.compile ~name:"accum_max_one_preboundary" ~prelowered:optimized
-      ~lowered_transform:(fun x -> [ x ])
-      (Context.auto ()) Asgns.empty_comp one.bindings
+  (* The extent is bound to zero explicitly. This program has no guard to read it -- that is the
+     defect -- so the harness, not the program, is what keeps the value from defaulting: a launch
+     parameter left unnamed would run at the backend's [ref 0] whether or not a test meant zero,
+     which in a case ABOUT what an extent-0 launch computes is exactly the reading that must not be
+     reachable by accident. Both refusals are checked before anything is compiled. *)
+  let refused launch =
+    Option.is_some
+      (misuse (fun () ->
+           ignore
+             (Ll_test.execute ~bindings:one.bindings ~launch ~name:"accum_max_one_misuse" optimized
+                ~seed:[] ~read:[]
+               : float array list)))
   in
-  Idx.find_exn routine1.Context.bindings one.extent := 0;
-  let ctx1 = Context.set_values ctx1 one.x.Tensor.value [| 37. |] in
-  let ctx1 = Context.set_values ctx1 one.y.Tensor.value (Ll_test.blank 1) in
-  let ctx1 = Context.run ctx1 routine1 in
-  let got = Context.get_values ctx1 one.y.Tensor.value in
+  p_all ~min:3 "the harness refuses every ~launch that does not value the parameter exactly once"
+    [
+      ("left unset", []);
+      ("valued twice", [ (one.extent, 0); (one.extent, 1) ]);
+      ("naming a symbol the bindings do not bind", [ (one.extent, 0); (two.extent, 0) ]);
+    ]
+    ~f:(fun (_, launch) -> refused launch);
+  let got =
+    List.hd_exn
+      (Ll_test.execute ~bindings:one.bindings
+         ~launch:[ (one.extent, 0) ]
+         ~name:"accum_max_one_preboundary" optimized
+         ~seed:[ (one.x.Tensor.value, [| 37. |]); (one.y.Tensor.value, Ll_test.blank 1) ]
+         ~read:[ one.y.Tensor.value ])
+  in
   p "the refused program would have returned its operand where the empty sum is 0.0"
     (Array.equal Float.equal got [| 37. |]);
   p "so the refusal guards a wrong VALUE in a concrete output cell, not a beyond-extent margin"
