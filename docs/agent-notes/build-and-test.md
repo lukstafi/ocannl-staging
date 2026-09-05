@@ -1409,9 +1409,15 @@ that they earn a lookup rather than always-loaded space.
   credit because an unrelated generated target may never be built. Commands under absolute
   `chdir` destinations are likewise refused before path normalization can turn a host path into an
   apparent workspace identity.
-- GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
-  runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
-  read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- GitHub CI exercises exactly ONE OCANNL backend. `test/config/ocannl_config` pins `backend=cc`,
+  and no runner has a CUDA or HIP device, so a green `ci` run says nothing about the Metal, CUDA or
+  HIP *backends*. Do not read a green PR check as cross-backend validation; it is a CPU-backend and
+  portability check. The macOS runners are not deviceless, though, and reading this bullet as "no
+  Metal at all" is what cost a review round: `MTLCreateSystemDefaultDevice` returns an `Apple
+  Paravirtual device` there, and `@bin-smoke`'s `metal_queue_probe` run uses it — library compile,
+  three command-buffer submission shapes and SharedEvent signal/wait, about 50 ms on every macOS
+  `main` leg (gh-ocannl-905). That is a canary for the Metal BINDINGS; OCANNL's Metal backend, its
+  codegen and its scheduling are still reached by no CI leg.
 - A red on merged master is presumptively CLAIMED work. `ci.yml`'s `notify-triage-routine` job
   fires the "ocannl-staging CI-red triage" Claude Code cloud routine on any non-PR master red —
   push and scheduled sweeps alike (a logged no-op until the `ROUTINE_FIRE_URL`/`ROUTINE_FIRE_TOKEN`
