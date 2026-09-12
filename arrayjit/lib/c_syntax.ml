@@ -3036,6 +3036,14 @@ module C_syntax (B : C_syntax_config) = struct
     else if Tn.Placements.is_materialized_force (placements ()) tn 959 then `Device
     else `Thread
 
+  (* Keep the virtual query first: both force predicates may settle an undecided placement, and a
+     virtual node is not a local array even though [thread_storage] would classify its lack of a
+     materialized buffer as [`Thread]. *)
+  let is_local tn =
+    let plc = placements () in
+    (not (Tn.Placements.is_virtual_force plc tn 431))
+    && not (Tn.Placements.is_materialized_force plc tn 432)
+
   let current_deferred_lanes : Indexing.symbol list ref = ref []
 
   let refuse_unseparated_thread_write ~site ~(deferred : Indexing.symbol list) =
@@ -3389,11 +3397,6 @@ module C_syntax (B : C_syntax_config) = struct
      Returns [Some (privatized, ptr_aliased)] when the loop can render in parallel. *)
   let parallel_grid_safe ~sym ~grid_range ~(global_counts : int Hashtbl.M(Int).t)
       (body : Low_level.t) : (Tn.t list * Tn.t list) option =
-    let plc = placements () in
-    let is_local tn =
-      (not (Tn.Placements.is_virtual_force plc tn 431))
-      && not (Tn.Placements.is_materialized_force plc tn 432)
-    in
     let mentions_comp = Indexing.axis_index_mentions_symbol sym in
     let loop_ident = Indexing.symbol_ident sym in
     let locals : grid_local_info Hashtbl.M(Int).t = Hashtbl.create (module Int) in
@@ -3566,11 +3569,6 @@ module C_syntax (B : C_syntax_config) = struct
       || B.parallel_grid_chunks <= 1 || Utils.debug_log_from_routines ()
     then empty
     else
-      let plc = placements () in
-      let is_local tn =
-        (not (Tn.Placements.is_virtual_force plc tn 431))
-        && not (Tn.Placements.is_materialized_force plc tn 432)
-      in
       (* Whole-kernel access counts per local, so [parallel_grid_safe] can tell when a local's
          accesses all sit inside one loop's body (the privatization rule). Same traversal, so the
          counts are comparable by construction. *)
@@ -3642,10 +3640,8 @@ module C_syntax (B : C_syntax_config) = struct
         | Some node ->
             let plc = placements () in
             node.Low_level.zero_initialized_by_code
-            && (not
-                  (Tn.Placements.is_virtual_force plc tn 337
-                  || Tn.Placements.is_materialized_force plc tn 338))
-            && not (Set.mem !current_workgroup_shared tn)
+            && (not (Tn.Placements.is_virtual_force plc tn 337))
+            && Poly.equal (thread_storage tn) `Thread
         | None -> false)
 
   (* Tensor node ids whose [Zero_out] has already been encountered during the current [pp_ll]
@@ -4647,9 +4643,7 @@ module C_syntax (B : C_syntax_config) = struct
                   in
                   let eligible tn idcs =
                     contiguous idcs && lane_aligned tn idcs
-                    && Tn.Placements.is_materialized_force (placements ()) tn 463
-                    (* Stack and workgroup-shared arrays are only element-aligned. *)
-                    && (not (Set.mem !current_workgroup_shared tn))
+                    && Poly.equal (thread_storage tn) `Device
                     && (not (is_swizzled tn))
                     && not (is_pipelined tn)
                   in
