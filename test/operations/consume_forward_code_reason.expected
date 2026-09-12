@@ -1,18 +1,17 @@
-second consume: names the earlier consumption: true
-second consume: does not blame a parameter: true
-second consume: names the tensor: true
+second consume: returns the same comp: true
 parameter: says it is a parameter: true
 parameter: does not claim a prior consumption: true
 subterm: says the code is embedded in a consumer: true
 subterm: does not claim a prior consumption: true
-second backprop consume: names the earlier consumption: true
-second backprop consume: names the backprop code: true
-after a %cd embedding: names the consumption: true
-after a %cd embedding: does not blame a consumer: true
+second backprop consume: returns the same comp: true
+backprop subterm: says the code is embedded in a consumer: true
+after a %cd embedding: returns the tensor's comp: true
 discarded backprop: says it was discarded: true
 discarded backprop: names forward_once: true
 discarded backprop: does not blame a consumer: true
-discard after consume: still reports the consumption: true
-discard after consume: does not claim a discard: true
+discard after consume: preserves replay: true
 consumption inside with_unchanged_roots is undone: true
 and the root can then be consumed once: true
+first handout still rejects a conflicting root: true
+failed first handout leaves the root intact: true
+non-differentiable backprop remains rejected: true
