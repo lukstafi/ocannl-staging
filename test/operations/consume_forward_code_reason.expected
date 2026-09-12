@@ -15,3 +15,10 @@ and the root can then be consumed once: true
 first handout still rejects a conflicting root: true
 failed first handout leaves the root intact: true
 non-differentiable backprop remains rejected: true
+parameter from a taken initializer still rejects forward: true
+parameterization preserves the initializer forward handout: true
+parameterization preserves the initializer backprop handout: true
+new parameter owns its fresh backprop root: true
+first parameter backprop handout removes its root: true
+parameter backprop can then replay its fresh comp: true
+parameter backprop embedded after parameterization remains rejected: true

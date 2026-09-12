@@ -91,3 +91,34 @@ let () =
   ignore (Tensor.consume_forward_code sibling : Ir.Assignments.comp);
   let msg = rejection ~name:"non-differentiable" (fun () -> Tensor.consume_backprop_code sibling) in
   p "non-differentiable backprop remains rejected" (has msg ~substring:"not differentiable")
+
+let () =
+  let v = Tensor.term_init [| -1.; 3. |] ~grad_spec:Require_grad () in
+  let init_tensor = TDSL.O.relu v in
+  let forward = Tensor.consume_forward_code init_tensor in
+  let backprop = Tensor.consume_backprop_code init_tensor in
+  let reuse ?label:_ ?top_down_prec:_ ?batch_dims:_ ?batch_axes:_ ?input_dims:_ ?output_dims:_
+      ?input_axes:_ ?output_axes:_ ?deduced:_ () =
+    init_tensor
+  in
+  let parameter = Tensor.param ~t:reuse "taken_initializer_param" () in
+  let msg =
+    rejection ~name:"taken initializer parameter" (fun () -> Tensor.consume_forward_code parameter)
+  in
+  p "parameter from a taken initializer still rejects forward" (has msg ~substring:"is a parameter");
+  p "parameterization preserves the initializer forward handout"
+    (phys_equal forward (Tensor.consume_forward_code init_tensor));
+  p "parameterization preserves the initializer backprop handout"
+    (phys_equal backprop (Tensor.consume_backprop_code init_tensor));
+  p "new parameter owns its fresh backprop root" (Tensor.is_bprop_root parameter);
+  let parameter_backprop = Tensor.consume_backprop_code parameter in
+  p "first parameter backprop handout removes its root" (not (Tensor.is_bprop_root parameter));
+  p "parameter backprop can then replay its fresh comp"
+    (phys_equal parameter_backprop (Tensor.consume_backprop_code parameter));
+  let parameter = Tensor.param ~t:reuse "embedded_initializer_param" () in
+  let _consumer = TDSL.O.relu parameter in
+  let msg =
+    rejection ~name:"embedded parameter backprop" (fun () -> Tensor.consume_backprop_code parameter)
+  in
+  p "parameter backprop embedded after parameterization remains rejected"
+    (has msg ~substring:"embedded in a tensor")

@@ -38,8 +38,8 @@ type diff = { grad : (Tn.t[@sexp.opaque]); zero_grads : Asgns.comp; backprop : A
    -- the [%cd] embedding path -- or [consume_backprop_code]) and when it is discarded
    ([discard_backprop_code], the [Train.forward_once] path); repeated handout is allowed only for
    [Taken], so every non-embedding removal records its kind here. The cell is mutable and shared by
-   every [{ t with ... }] copy, so the marker follows the tensor rather than accumulating in
-   session-global storage. *)
+   record copies that preserve code ownership; [param] starts a fresh cell when it changes
+   ownership. Markers stay on tensors rather than accumulating in session-global storage. *)
 type handout = Not_handed_out | Taken | Discarded [@@deriving sexp_of, equal]
 type consumption = { mutable fwd : handout; mutable bprop : handout } [@@deriving sexp_of]
 
@@ -928,6 +928,10 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
       ?top_down_prec:(Some true) ?batch_dims:(Some []) ?batch_axes:None ?input_dims ?output_dims
       ?input_axes ?output_axes ?deduced ()
   in
+  (* Parameterization changes code ownership (and replaces the gradient program). Its handout state
+     must not alias an initializer returned by a custom [t], which may already be Taken. Keep that
+     original initializer replayable while the parameter starts with fresh ownership. *)
+  let t = { t with consumption = { fwd = Not_handed_out; bprop = Not_handed_out } } in
   let t = if require_grad then force_param_diff t else strip_param_diff t in
   let v = t.value in
   (* Parameters live on device and are materialized; CPU access (init, inspection) is on-demand via
