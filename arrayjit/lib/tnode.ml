@@ -455,7 +455,7 @@ let update_infer_prec ?only_if tn delayed_prec =
 let get_specified_prec tn =
   match tn.delayed_prec_unsafe with Specified prec -> Some prec | _ -> None
 
-(** {2 Value-bounds lifecycle} (see {!bounds_state}) *)
+(** {2 Value-bounds lifecycle (see {!bounds_state})} *)
 
 (** Joins [iv] into the node's candidate bounds. Post-settlement, instead validates that [iv] fits
     the settled interval and raises {!Utils.User_error} otherwise -- a wider write after a reader

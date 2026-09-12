@@ -1975,16 +1975,17 @@ let program_public_name stanza ~index =
     [runner_stanzas] pairs each candidate runner with the SUBDIRECTORY it was found in, and defaults
     to [stanzas] in [subdir]. A caller descending into a [(subdir …)] passes the whole file, since a
     top-level rule may run a nested executable — and it has to pass each rule's own subdirectory
-    along with it, because the path a rule writes is relative to where the rule lives. Resolving both
-    sides to a directory-qualified path is what tells `(subdir a (rule … probe.exe))` from
+    along with it, because the path a rule writes is relative to where the rule lives. Resolving
+    both sides to a directory-qualified path is what tells `(subdir a (rule … probe.exe))` from
     `(subdir b (rule … probe.exe))`: comparing the written path against an unqualified `probe.exe`
     made each a runner of the other's program, so an unrun executable in [a] could inherit [b]'s
     declaration (Codex P2, round 3 of PR #484). It is also what keeps `../support/probe.exe` a
     different program from the local one, which is why the path is matched AS WRITTEN and not by
     basename (Codex P2, round 2 of PR #457).
 
-    A public name is not a path and is compared as written: `%{bin:pkg.probe}` names the same program
-    from anywhere, which is what `classify_command` records as {!Runs_public} (gh-ocannl-783). *)
+    A public name is not a path and is compared as written: [%{bin:pkg.probe}] names the same
+    program from anywhere, which is what `classify_command` records as {!Runs_public}
+    (gh-ocannl-783). *)
 let program_runners ?(subdir = "") ?runner_stanzas stanzas stanza =
   let runner_stanzas =
     match runner_stanzas with
