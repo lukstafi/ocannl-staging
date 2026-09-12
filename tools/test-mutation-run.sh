@@ -83,6 +83,35 @@ printf 'PASS missing, ambiguous, overlapping, malformed and unchanged anchors re
 printf 'ANCHOR' > module.ml
 cp module.ml "$fixture/pristine"
 printf 'ANCHOR@@@MUTATED' > patch
+# Hard links share the mutated inode; refuse without touching either path.
+ln module.ml peer.ml
+run_case 2
+cmp peer.ml "$fixture/pristine"
+rm peer.ml
+printf 'PASS multiply linked module refuses without mutating either path\n'
+# Fail the write-open in a copied runner, even when tests run as root.
+perl - tools/mutation-run.sh > tools/mutation-open-failure.sh <<'PERL'
+use strict;
+use warnings;
+local $/;
+open my $f, '<', $ARGV[0] or die $!;
+my $s = <$f>;
+my $anchor = q{open my $f, '>:raw', $module};
+my $at = index($s, $anchor);
+die "missing write-open anchor" if $at < 0;
+substr($s, $at, length($anchor), q{open my $f, '>:raw', "$module/not-a-directory"});
+print $s;
+PERL
+inode_before=$(perl -e 'print((stat($ARGV[0]))[1])' module.ml)
+set +e
+bash tools/mutation-open-failure.sh module.ml patch @probe > "$fixture/result" 2>&1
+actual=$?
+set -e
+[ "$actual" = 2 ]
+[ "$(perl -e 'print((stat($ARGV[0]))[1])' module.ml)" = "$inode_before" ]
+cmp module.ml "$fixture/pristine"
+if grep -q '^restored:' "$fixture/result"; then echo 'failed open replaced source'; exit 1; fi
+printf 'PASS failed write-open leaves the original inode and bytes untouched\n'
 # Hold the fork child before resetting inherited handlers, deterministically.
 perl - tools/mutation-run.sh > tools/mutation-fork-window.sh <<'PERL'
 use strict;

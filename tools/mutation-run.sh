@@ -25,6 +25,7 @@ my ($module, $patch, $alias) = @ARGV;
 my $root = abs_path(dirname($script) . '/..');
 $alias =~ /^\@[^\s]+$/ or refuse('expected one @alias');
 -f $module && !-l $module or refuse('module must be a regular, non-symlink file');
+(stat($module))[3] == 1 or refuse('module must have exactly one hard link');
 $module = abs_path($module);
 index($module, "$root/") == 0 or refuse('module must be inside this worktree');
 sub bytes {
@@ -67,9 +68,9 @@ my $error;
 eval {
     chdir $root or refuse("chdir: $!");
     refuse('cancelled before mutation') if $cancel;
-    # Mark before opening: even a short write must restore the complete backup.
-    $changed = 1;
     open my $f, '>:raw', $module or refuse("write module: $!");
+    # A successful truncating open needs restoration, even if the write fails.
+    $changed = 1;
     print {$f} $mutated or refuse("write module: $!");
     close $f or refuse("close module: $!");
     refuse('cancelled before launch') if $cancel;
