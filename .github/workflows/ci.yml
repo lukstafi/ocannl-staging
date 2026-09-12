@@ -494,11 +494,12 @@ jobs:
         ocaml-compiler: 5.5.x
         allow-prerelease-opam: false
         opam-pin: false
-        opam-depext: false
     - name: Install formatting dependencies
       run: |
-        ocamlformat_version=$(sed -n 's/^version=//p' .ocamlformat)
+        ocamlformat_versions=$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' .ocamlformat)
+        ocamlformat_version=$(printf '%s\n' "$ocamlformat_versions" | sed -n '1p')
         test -n "$ocamlformat_version"
+        test "$ocamlformat_versions" = "$ocamlformat_version"
         opam install dune "ocamlformat=$ocamlformat_version"
     - name: Check formatting and documentation comments
       run: tools/fmt-check.sh
