@@ -196,8 +196,9 @@ files.
   has no `long long` at all: its 64-bit signed scalar is `long` (`%ld`), and `os_log` checks the
   format string against the argument types at shader-compile time, so a merely-wide-enough
   conversion is a compile error there rather than silent UB. A backend spelling the loop index as
-  its own type overrides both together. The array-offset conversions on the value-log lines are
-  still `%u` against the same index-typed arguments — gh-ocannl-953.
+  its own type overrides both together. Every array offset in a value-log line goes through the
+  same seam, including nested `debug_float` accessors and vector-store offsets (gh-ocannl-953), so
+  a wide routine never pairs a 64-bit offset argument with a narrow conversion.
 
 ## Choosing a backend-query seam
 
