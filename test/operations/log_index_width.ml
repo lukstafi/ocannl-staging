@@ -8,9 +8,8 @@ open Nn_blocks.DSL_modules
    mismatch, so the goldens pin the emitted line at both widths -- the narrow one to keep the
    ordinary spelling honest, the wide one because that is the spelling that was wrong.
 
-   The wide golden also shows the same mismatch still standing one line below, on the array-offset
-   conversions of the value-log statement ([d[%u]] against an [int64_t] argument). That is
-   gh-ocannl-953, deliberately out of scope here; the golden records it, it does not bless it. *)
+   The value-log statement's array offsets have the same loop-index type, so its conversion and
+   argument casts are pinned at both widths too (gh-ocannl-953). *)
 let () =
   Tensor.unsafe_reinitialize ();
   let ctx = Context.auto () in
