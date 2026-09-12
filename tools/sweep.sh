@@ -792,10 +792,18 @@ dune_sites() { # log
     # give. Dune elides the middle of a long excerpt, so nothing identifying is
     # always quoted; the location stands in when none was.
     awk '
-      function flush() {
+      function clear_names( i) {
+        for (i in names) delete names[i]
+        names_count = 0
+      }
+      function flush( i) {
         if (loc == "") return
-        if (name != "") print prefix ", " name; else print loc
-        loc = ""; name = ""; want = ""; opened = 0
+        if (name != "") print prefix ", " name
+        else if (names_count > 0) {
+          for (i = 1; i <= names_count; i++) print prefix ", names " names[i]
+        } else print loc
+        loc = ""; name = ""; want = ""; opened = 0; names_done = 0
+        clear_names()
       }
       /^File "[^"]+", lines? [0-9]+/ {
         flush()
@@ -815,7 +823,7 @@ dune_sites() { # log
         # then never named its stanza.
         if ($0 ~ /^\.\.\.+$/) { want = ""; opened = 0; next }
         if ($0 !~ /^[0-9 ]*[0-9] \|/) { flush(); next }
-        if (name != "") next
+        if (name != "" || names_done) next
         text = $0
         sub(/^[0-9 ]*[0-9] \| ?/, "", text)
         # Tokenized rather than matched as one regex, because the identifier is
@@ -833,8 +841,18 @@ dune_sites() { # log
           if (tok[i] ~ /^;/) break
           # An opening paren abandons a pending keyword: the field held a
           # nested form, as `(alias (name slow))` does, and the name is inside.
-          if (tok[i] == "(") { opened = 1; want = ""; continue }
-          if (tok[i] == ")") { opened = 0; want = ""; continue }
+          if (tok[i] == "(") {
+            opened = 1
+            if (want != "names") want = ""
+            continue
+          }
+          if (tok[i] == ")") {
+            if (want == "names" && names_count > 0) names_done = 1
+            opened = 0; want = ""
+            if (names_done) break
+            continue
+          }
+          if (want == "names") { names[++names_count] = tok[i]; continue }
           if (want != "") { name = want " " tok[i]; break }
           if (opened && tok[i] ~ /^(alias|name|names|target|targets)$/) want = tok[i]
           opened = 0
@@ -876,23 +894,52 @@ fingerprint() {
   grep -h '^serial rerun: ' "$1" 2>/dev/null
 }
 
-# The stanza aliases behind a log's dune-file sites, one per line, each prefixed
-# `alias ` or `unmapped `. A `(test (name X))` stanza reruns as
+# The rerun targets behind a log's dune-file and inline-expectation sites, one
+# per line, each prefixed `alias `, `inline ` or `unmapped `. A `(test (name
+# X))` stanza reruns as
 # `@<dir>/runtest-X`, the per-test alias dune generates from 3.20 (the
-# project's floor); an explicit rule as `@<dir>/<its alias>`. A site that names
-# no stanza -- an unnamed span, a bare `target`, an inline expectation located
-# in a source file -- has no alias to hand dune and is reported unmapped rather
-# than approximated by its directory's `runtest`, which at `-j 1` is the whole
-# suite again.
+# project's floor); an explicit rule as `@<dir>/<its alias>`. An inline
+# expectation is proved by its source-to-`.corrected` diff and tagged with its
+# directory's broad `runtest` alias: serial_rerun uses that fallback only when
+# one or two such sites were unmapped, so a small environment-red unit still
+# gets a serial retry without turning a wider red into a serial directory
+# suite. Other source locations, unnamed spans and bare targets stay unmapped.
 rerun_aliases() { # log
-  dune_sites "$1" | sort -u | awk '
-    /^File "[^"]*dune", (alias|name|names) [A-Za-z0-9_.-]+$/ {
+  dune_sites "$1" | sort -u | awk -v log_file="$1" '
+    BEGIN {
+      while ((getline raw < log_file) > 0) {
+        if (raw ~ /^diff --git a\// && raw ~ /\.ml b\/_build\/default\// &&
+            raw ~ /\.ml\.corrected$/) {
+          split(raw, parts, /[ \t]+/)
+          source = parts[3]
+          corrected = parts[4]
+          sub(/^a\//, "", source)
+          if (corrected == "b/_build/default/" source ".corrected") inline[source] = 1
+        }
+      }
+      close(log_file)
+    }
+    /^File "[^"]*dune", (alias|name|names) "?[A-Za-z0-9_.-]+"?$/ {
       dir = $2
       sub(/^"/, "", dir)
       sub(/dune",$/, "", dir)
       if (dir ~ /^([A-Za-z0-9_.-]+\/)*$/) {
-        if ($3 == "alias") print "alias @" dir $4
-        else print "alias @" dir "runtest-" $4
+        value = $4
+        sub(/^"/, "", value)
+        sub(/"$/, "", value)
+        if ($3 == "alias") print "alias @" dir value
+        else print "alias @" dir "runtest-" value
+        next
+      }
+    }
+    /^File "([A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.ml", lines? [0-9]+(-[0-9]+)?$/ {
+      path = $2
+      sub(/^"/, "", path)
+      sub(/",$/, "", path)
+      dir = path
+      sub("[^/]+$", "", dir)
+      if (inline[path]) {
+        print "inline @" dir "runtest\t" $0
         next
       }
     }
@@ -926,14 +973,31 @@ serial_rerun_cmd() { # backend wt alias...
 # folded into `all clean`.
 serial_rerun() { # backend host wt log label [path_prefix]
   local backend=$1 host=$2 wt=$3 log=$4 label=$5 path_prefix=${6:-}
-  local line cmd started rc a aliases=() unmapped=() red=() unjudged=()
+  local line cmd started rc a entry site stanza_count inline_count fallback_suffix=s
+  local aliases=() fallback_aliases=() inline_entries=() inline_sites=()
+  local unmapped=() red=() unjudged=()
   environment_red "$log" || return 0
   while IFS= read -r line; do
     case $line in
       "alias "*) aliases+=("${line#alias }") ;;
+      "inline "*)
+        entry=${line#inline }
+        inline_entries+=("${entry%%$'\t'*}")
+        inline_sites+=("${entry#*$'\t'}")
+        ;;
       "unmapped "*) unmapped+=("${line#unmapped }") ;;
     esac
   done < <(rerun_aliases "$log")
+  stanza_count=${#aliases[@]}
+  inline_count=${#inline_sites[@]}
+  if [ "$inline_count" -gt 0 ] && [ "$inline_count" -le 2 ]; then
+    for a in "${inline_entries[@]}"; do
+      contains "$a" "${fallback_aliases[@]:-}" || fallback_aliases+=("$a")
+    done
+    aliases+=("${fallback_aliases[@]}")
+  elif [ "$inline_count" -gt 2 ]; then
+    for site in "${inline_sites[@]}"; do unmapped+=("$site"); done
+  fi
   started=$(date +%s)
   if [ ${#aliases[@]} -gt 0 ]; then
     cmd=$(serial_rerun_cmd "$backend" "$wt" "${aliases[@]}")
@@ -971,6 +1035,12 @@ serial_rerun() { # backend host wt log label [path_prefix]
       printf ' %s' "${unjudged[@]}"
       printf '\n'
     fi
+    if [ ${#fallback_aliases[@]} -gt 0 ]; then
+      printf 'serial rerun: directory fallback (%s inline site%s):' \
+        "$inline_count" "$([ "$inline_count" -eq 1 ] || printf s)"
+      printf ' %s' "${fallback_aliases[@]}"
+      printf '\n'
+    fi
     if [ ${#aliases[@]} -eq 0 ]; then
       printf 'serial rerun: nothing to rerun -- no site names a stanza\n'
     fi
@@ -980,7 +1050,8 @@ serial_rerun() { # backend host wt log label [path_prefix]
       printf '\n'
     fi
   } >>"$log"
-  echo "  $label: environment-red, ${#aliases[@]} stanzas rerun at -j 1 ($(( $(date +%s) - started ))s)"
+  [ ${#fallback_aliases[@]} -eq 1 ] && fallback_suffix=
+  echo "  $label: environment-red, $stanza_count stanzas and ${#fallback_aliases[@]} directory fallback$fallback_suffix rerun at -j 1 ($(( $(date +%s) - started ))s)"
   grep -h '^serial rerun: ' "$log" | sed "s|^|  $label: |"
   return 0
 }

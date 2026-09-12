@@ -27,7 +27,8 @@ on_error() {
     repeated_backend_pass mixed_scope_fail mixed_scope_cleared historical_matrix \
     local_identity_error unsafe_identity_error only_typo_error matrix_error state_first state_same \
     state_other_ref state_green state_unjudged state_regression state_after_fix state_moved \
-    capped capped_target serial_red serial_clean serial_control; do
+    capped capped_target remote_opt_in serial_red serial_clean serial_two_inline \
+    serial_many_inline serial_control; do
     [ -n "${!name:-}" ] || continue
     printf -- '--- %s ---\n%s\n' "$name" "${!name}" >&2
   done
@@ -59,7 +60,7 @@ absent() {
 unset SWEEP_TEST_CALLS SWEEP_TEST_WAIT_PREFIX SWEEP_TEST_OPAM_RC \
   SWEEP_TEST_OPAM_OUT SWEEP_TEST_OPAM_OUT_CC SWEEP_TEST_OPAM_OUT_MULTIDEV_CC \
   SWEEP_TEST_OPAM_OUT_METAL SWEEP_TEST_LOCAL_BOX SWEEP_TEST_JOBS \
-  SWEEP_TEST_OPAM_SERIAL_RED SWEEP_TEST_OPAM_OUT_SERIAL
+  SWEEP_TEST_OPAM_SERIAL_RED SWEEP_TEST_OPAM_OUT_SERIAL SWEEP_TEST_SSH_CALLS
 
 sweep=$1
 aggregate=$2
@@ -85,6 +86,7 @@ main=$tmp/main
 state=$tmp/state
 fake_bin=$tmp/bin
 calls=$tmp/opam.calls
+ssh_calls=$tmp/ssh.calls
 mkdir -p "$state/logs" "$fake_bin"
 
 git init -q --bare "$origin"
@@ -160,12 +162,29 @@ exit "${SWEEP_TEST_OPAM_RC:-0}"
 EOF
 chmod +x "$fake_bin/opam"
 
+# The harness never reaches a real sweep box. The default below selects only
+# cc, while tests that mean to exercise remote selection opt in explicitly and
+# hit this recorder. A failed ssh is an ordinary unreachable remote to the
+# sweep, so the assertions on this file are the part that makes accidental
+# contact fail the harness.
+cat >"$fake_bin/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$SWEEP_TEST_SSH_CALLS"
+exit 1
+EOF
+chmod +x "$fake_bin/ssh"
+
 # Exercise the exact previous schema: old evidence is retained, but marked
 # unknown rather than being upgraded retroactively to executed coverage.
 printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n' >"$state/history.tsv"
 printf '20260820T000000Z\tlocal\tcc\tdeadbee\tpass\t1\t<all>\t0\t-\n' >>"$state/history.tsv"
 
 run_sweep_args() {
+  local arg has_only=0 args=("$@")
+  for arg in "${args[@]}"; do
+    [ "$arg" = --only ] && has_only=1
+  done
+  [ "$has_only" -eq 1 ] || args=(--only cc "${args[@]}")
   # The nested sweep's environment, constructed in full rather than added to.
   # `-u` is the load-bearing half: `tools/sweep.sh` runs a unit's tests as
   # `OCANNL_BACKEND=<backend> opam exec -- dune build ...`, so when the sweep
@@ -193,11 +212,12 @@ run_sweep_args() {
     "SWEEP_TEST_OPAM_OUT_METAL=${SWEEP_TEST_OPAM_OUT_METAL:-}" \
     "SWEEP_TEST_OPAM_SERIAL_RED=${SWEEP_TEST_OPAM_SERIAL_RED:-}" \
     "SWEEP_TEST_OPAM_OUT_SERIAL=${SWEEP_TEST_OPAM_OUT_SERIAL:-}" \
+    "SWEEP_TEST_SSH_CALLS=$ssh_calls" \
     "OCANNL_TOOL_SWEEP_LOCAL_BOX=${SWEEP_TEST_LOCAL_BOX-m4-max}" \
     "OCANNL_TOOL_SWEEP_JOBS=${SWEEP_TEST_JOBS:-}" \
     "OCANNL_TOOL_SWEEP_REPO=$main" \
     "OCANNL_TOOL_SWEEP_STATE=$state" \
-    "$sweep" "$@"
+    "$sweep" "${args[@]}"
 }
 
 run_sweep_backend() {
@@ -928,16 +948,29 @@ capped_target=$(SWEEP_TEST_JOBS=2 run_sweep_args --target state-probe)
 [ "$(tail -1 "$calls")" = 'exec -- dune runtest -j 2 state-probe' ]
 absent '@check' <<<"$(tail -2 "$calls" | sed -n '1p')"
 
+# Every unqualified --target fixture above is scoped to cc by run_sweep_args;
+# the recorder must still be empty after state-probe, pre-diff-probe and the
+# capped target. Without that default these cases walk cuda and hip, coupling
+# the harness to whether the real lab aliases happen to be awake.
+[ ! -s "$ssh_calls" ]
+# Explicit remote selection remains possible and reaches only the fake ssh.
+# This is the opposing control for the default rather than a blanket removal
+# of the remote units from nested sweeps.
+remote_opt_in=$(run_sweep_args --only cuda --target state-probe)
+grep -q 'rog-nv/cuda: skip (unreachable)' <<<"$remote_opt_in"
+grep -q 'rog-nv-wsl' "$ssh_calls"
+absent 'minix-amd-wsl' "$ssh_calls"
+
 # An environment-red unit -- a red whose log carries a runtime-refusal signature
 # from sweep.sh's ENVIRONMENT_REFUSALS table -- reruns its failing stanzas one at
 # a time at `-j 1` and records which stayed red (gh-ocannl-945). The fixture is
 # the 2026-09-05 minix/hip shape: one stanza refused at hip_init, one that
-# crashed after (no signature of its own, still a red stanza), and an inline
-# expectation located in a source file, which names no stanza and must be
-# reported unmapped rather than approximated by a directory-wide alias. The
-# fake opam holds the first stanza red on its own and clears the second. One
-# unit (`--only cc`): every local unit would rerun the same fixture, and the
-# remote ones would reach for ssh.
+# crashed after (no signature of its own, still a red stanza), a multi-name
+# tests stanza, and an inline expectation located in a source file. Every name
+# in the tests stanza gets its own generated alias; the one inline site gets a
+# bounded directory fallback. The fake opam holds the first stanza red on its
+# own and clears the others. One unit (`--only cc`): every local unit would
+# rerun the same fixture, and the remote ones would reach for ssh.
 environment_failure='File "test/dune", line 2, characters 7-28:
 2 |  (alias runtest-serial-probe)
 Fatal error: exception hip_init:
@@ -947,8 +980,14 @@ File "test/dune", lines 5-8, characters 0-0:
 6 |  (alias runtest-pre-diff-probe)
 ......
 Command got signal SEGV.
+File "test/dune", lines 9-12, characters 0-0:
+9 | (tests
+10 |  (names "serial-alpha"
+11 |   serial-beta))
+12 |  (libraries fixture))
 File "test/inline_expect.ml", line 1, characters 0-0:
-Error: inline expectation differs'
+Error: inline expectation differs
+diff --git a/test/inline_expect.ml b/_build/default/test/inline_expect.ml.corrected'
 serial_red=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$environment_failure \
   SWEEP_TEST_OPAM_SERIAL_RED='@test/runtest-serial-probe' \
   SWEEP_TEST_OPAM_OUT_SERIAL='File "test/dune", line 2, characters 7-28:
@@ -956,19 +995,25 @@ serial_red=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$environment_failure \
 Error: the claim itself' run_sweep_backend cc --target serial-probe)
 grep -q 'm4-max/cc: fail ' <<<"$serial_red"
 # One dune call per stanza, so each has its own verdict; sorted, after the unit.
-[ "$(tail -3 "$calls" | sed -n '1p')" = 'exec -- dune runtest serial-probe' ]
-[ "$(tail -3 "$calls" | sed -n '2p')" = 'exec -- dune build -j 1 @test/runtest-pre-diff-probe' ]
-[ "$(tail -3 "$calls" | sed -n '3p')" = 'exec -- dune build -j 1 @test/runtest-serial-probe' ]
+[ "$(tail -6 "$calls" | sed -n '1p')" = 'exec -- dune runtest serial-probe' ]
+[ "$(tail -6 "$calls" | sed -n '2p')" = 'exec -- dune build -j 1 @test/runtest-pre-diff-probe' ]
+[ "$(tail -6 "$calls" | sed -n '3p')" = 'exec -- dune build -j 1 @test/runtest-serial-probe' ]
+[ "$(tail -6 "$calls" | sed -n '4p')" = 'exec -- dune build -j 1 @test/runtest-serial-alpha' ]
+[ "$(tail -6 "$calls" | sed -n '5p')" = 'exec -- dune build -j 1 @test/runtest-serial-beta' ]
+[ "$(tail -6 "$calls" | sed -n '6p')" = 'exec -- dune build -j 1 @test/runtest' ]
 # The verdict reaches all three channels: the summary, the log, the fingerprint.
-grep -q 'm4-max/cc: environment-red, 2 stanzas rerun at -j 1' <<<"$serial_red"
+grep -q 'm4-max/cc: environment-red, 4 stanzas and 1 directory fallback rerun at -j 1' \
+  <<<"$serial_red"
 grep -q 'm4-max/cc: serial rerun: still red: @test/runtest-serial-probe$' <<<"$serial_red"
 serial_log=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
 grep -q '^serial rerun: still red: @test/runtest-serial-probe$' "$serial_log"
-grep -q '^serial rerun: unmapped: \[File "test/inline_expect.ml", line 1\]$' "$serial_log"
+grep -q '^serial rerun: directory fallback (1 inline site): @test/runtest$' "$serial_log"
+absent '^serial rerun: unmapped:' "$serial_log"
 absent '^serial rerun: all clean' "$serial_log"
 grep -q '^Error: the claim itself$' "$serial_log"
 grep -q '^serial rerun: still red: @test/runtest-serial-probe$' "${serial_log%.log}.fingerprint"
-grep -q '^serial rerun: unmapped: ' "${serial_log%.log}.fingerprint"
+grep -q '^serial rerun: directory fallback (1 inline site): @test/runtest$' \
+  "${serial_log%.log}.fingerprint"
 # The rerun's verdict must not replace the unit's: the row still says fail.
 [ "$(awk -F '\t' '$3 == "cc" { print $5 }' "$state/history.tsv" | tail -1)" = fail ]
 
@@ -981,6 +1026,49 @@ grep -q 'm4-max/cc: fingerprint moved since the previous failure at ' <<<"$seria
 serial_clean_log=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
 grep -q '^serial rerun: all clean$' "${serial_clean_log%.log}.fingerprint"
 absent 'still red' "${serial_clean_log%.log}.fingerprint"
+
+# Two inline sites are still a bounded fallback. They share one directory, so
+# the directory alias runs once; the site count is the cap, not the number of
+# distinct aliases it happens to produce.
+two_inline_failure='Fatal error: exception hip_init:
+HIP_ERROR_INVALID_DEVICE
+File "test/inline_one.ml", line 1, characters 0-0:
+Error: first inline expectation differs
+diff --git a/test/inline_one.ml b/_build/default/test/inline_one.ml.corrected
+File "test/inline_two.ml", line 1, characters 0-0:
+Error: second inline expectation differs
+diff --git a/test/inline_two.ml b/_build/default/test/inline_two.ml.corrected'
+serial_two_inline=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$two_inline_failure \
+  run_sweep_backend cc --target two-inline-probe)
+[ "$(tail -2 "$calls" | sed -n '1p')" = 'exec -- dune runtest two-inline-probe' ]
+[ "$(tail -2 "$calls" | sed -n '2p')" = 'exec -- dune build -j 1 @test/runtest' ]
+grep -q 'm4-max/cc: environment-red, 0 stanzas and 1 directory fallback rerun at -j 1' \
+  <<<"$serial_two_inline"
+two_inline_log=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
+grep -q '^serial rerun: directory fallback (2 inline sites): @test/runtest$' \
+  "$two_inline_log"
+absent '^serial rerun: unmapped:' "$two_inline_log"
+
+# Three inline sites cross the bound: report each one and do not turn the retry
+# into a directory-wide serial suite. This is the opposing control for the two
+# cases above, and catches either an off-by-one cap or a cap accidentally
+# applied to deduplicated directory aliases.
+three_inline_failure="$two_inline_failure
+File \"test/inline_three.ml\", line 1, characters 0-0:
+Error: third inline expectation differs
+diff --git a/test/inline_three.ml b/_build/default/test/inline_three.ml.corrected
+File \"test/compile_error.ml\", line 1, characters 0-0:
+Error: this source site has no expectation correction"
+serial_many_inline=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$three_inline_failure \
+  run_sweep_backend cc --target three-inline-probe)
+[ "$(tail -1 "$calls")" = 'exec -- dune runtest three-inline-probe' ]
+grep -q 'm4-max/cc: environment-red, 0 stanzas and 0 directory fallbacks rerun at -j 1' \
+  <<<"$serial_many_inline"
+many_inline_log=$(awk -F '\t' '$3 == "cc" { print $9 }' "$state/history.tsv" | tail -1)
+grep -q '^serial rerun: nothing to rerun -- no site names a stanza$' "$many_inline_log"
+grep -q '^serial rerun: unmapped: \[File "test/compile_error.ml", line 1\] \[File "test/inline_one.ml", line 1\] \[File "test/inline_three.ml", line 1\] \[File "test/inline_two.ml", line 1\]$' \
+  "$many_inline_log"
+absent '^serial rerun: directory fallback' "$many_inline_log"
 
 # Negative control: a red whose failures are the tests' own gets no second run.
 serial_control=$(SWEEP_TEST_OPAM_RC=1 SWEEP_TEST_OPAM_OUT=$state_failure \

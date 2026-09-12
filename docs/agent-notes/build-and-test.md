@@ -1791,13 +1791,15 @@ that they earn a lookup rather than always-loaded space.
   `sweep.sh` gates the rerun, this one records what the name has been seen with. The verdict is written as `serial
   rerun:` lines in the log AND the fingerprint (outside the fingerprint's 60-entry bound, so a
   wide red cannot drop it), and quoted in the sweep's summary: `still red: <aliases>` names the
-  stanzas red on their own — read those first, they are the test-logic failures the noise was
-  hiding; `all clean` says every red stanza passed alone; `unjudged (exit N): <aliases>` are the
-  ones the cap cut short, never folded into `all clean`; `unmapped: [<site>]...` lists sites
-  that name no stanza (an unnamed span, a bare `target` rule, an inline expectation located in
-  a source file), which the rerun does not approximate by a directory-wide alias — under `-j 1`
-  that is the whole suite again. The row's outcome stays `fail`; the rerun never changes a
-  verdict, it explains one. Why this exists: the same day's wide run hid a genuine hip-only
+  stanzas red on their own — including one generated alias per member of a `(tests (names …))`
+  stanza — read those first, they are the test-logic failures the noise was hiding; `all clean`
+  says every red target passed alone; `unjudged (exit N): <aliases>` are the ones the cap cut
+  short, never folded into `all clean`. One or two inline-expectation sites use a capped
+  `@<dir>/runtest` fallback and name it on a `directory fallback` line; three or more remain on
+  `unmapped: [<site>]...`, as do unnamed spans and bare `target` rules. The bound keeps a wide red
+  from becoming a full serial directory suite while giving a small inline red the same retry.
+  The row's outcome stays `fail`; the rerun never changes a verdict, it explains one. Why this
+  exists: the same day's wide run hid a genuine hip-only
   regression under the bridge noise (`autotune_fission_sketch`, whose staging#639 MMA-count
   claims assumed every GPU backend seeds a tensorized sketch for an f32 site — HIP's rocWMMA
   advertises no f32 triple, so the counters are zero there by design; now gated through the
