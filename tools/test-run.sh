@@ -28,6 +28,8 @@
 #   tools/test-run.sh wait   [RUN|last] [--timeout N]  # bounded; exits with the run's status
 #   tools/test-run.sh stop   [RUN|last]                # TERM the run's process group
 #   tools/test-run.sh list                             # recent runs and their states
+#   tools/test-run.sh idle                             # 0 idle, 3 locked, 2 unreadable
+#                                                     # snapshot, not a reservation
 #
 # `repeat` runs each iteration through dune in a freshly cleaned, cache-disabled
 # build context, keeps its separate stdout/stderr and exit status, and compares
@@ -1421,6 +1423,33 @@ case $sub in
     echo "  check:   tools/test-run.sh status last    # from this worktree; never blocks"
     echo "  gate:    tools/test-run.sh wait last      # bounded; exits with dune's status"
     ;;
+  idle)
+    [ $# -eq 0 ] || die "idle takes no arguments"
+    # Use the same flock as run/start/repeat, including inherited holders after
+    # a launcher or supervisor dies. This snapshot does not reserve the tree.
+    perl -e '
+      use Fcntl ":flock";
+      use Errno qw(EWOULDBLOCK EAGAIN);
+      my @handles;
+      for my $path (@ARGV) {
+        next unless -e $path;
+        # Read/write access matches the existing lock on MSYS too, but this
+        # probe never writes, creates, truncates, or unlinks a lock file.
+        open my $fh, "+<", $path or exit 2;
+        flock($fh, LOCK_EX | LOCK_NB)
+          or exit(($! == EWOULDBLOCK || $! == EAGAIN) ? 3 : 2);
+        push @handles, $fh;
+      }
+      exit 0;
+    ' "$LOCK" "$PWD/.test-run.lock"
+    idle_rc=$?
+    case $idle_rc in
+      0) ;;
+      3) echo "test-run: worktree lock is held: $LOCK" >&2 ;;
+      *) echo "test-run: cannot inspect worktree lock: $LOCK" >&2; idle_rc=2 ;;
+    esac
+    exit "$idle_rc"
+    ;;
   status)
     resolve_run "${1:-last}"
     # One-shot and honest -- no sleeping in `status`. Ordered by LIVENESS,
@@ -1758,5 +1787,5 @@ case $sub in
     done
     [ "$found" = 1 ] || echo "no recorded runs in $RUNS"
     ;;
-  *) die "unknown subcommand: $sub (run|start|repeat|status|wait|stop|list)" ;;
+  *) die "unknown subcommand: $sub (run|start|repeat|status|wait|stop|list|idle)" ;;
 esac

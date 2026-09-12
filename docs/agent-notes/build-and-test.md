@@ -951,6 +951,22 @@ that they earn a lookup rather than always-loaded space.
   exact same-line shape the check must distinguish. Direct quantifiers reaching a claim through a
   wrapper or a native call use the claimed ARGUMENT offset, so one intentional exemption cannot
   silently cover another call through the same wrapper or another claimed slot in the same call.
+- Mutation manifest rows use `tools/mutation-run.sh <module> <patch-file> <@alias>`
+  (gh-ocannl-969), in an otherwise idle, isolated worktree. The patch is literal bytes
+  `OLD@@@NEW`, with exactly one delimiter, a nonempty OLD occurring exactly once (overlapping
+  occurrences count), and no implicit newline trimming; NEW can be empty. The runner invokes
+  `tools/test-run.sh`, prints its actual verdict and run id, and extracts every complete
+  `FAIL: ...: false` line from that run's full log, preserving order and duplicates. Exit status
+  remains test-run's, so a killed mutant normally exits 1; a build failure with no false claims
+  is not evidence for a manifest row. A passing mutation still exits 0 and needs investigation.
+  INT, TERM and HUP cancel and reap the run before restoring; restoration is confirmed by `cmp`
+  against the backup, including CRLF and a missing final newline. `tools/test-run.sh idle`
+  probes its existing worktree flock (0 idle, 3 held, 2 unreadable); this is a point-in-time
+  snapshot, not a reservation. A busy preflight refuses before mutation. If a killed launcher
+  or supervisor leaves a lock holder alive, restoration is deferred: inspect/stop the worktree
+  runs before recovering the source manually. Refusal exits 2; deferred or failed restoration exits 3 and retains the printed recovery copy; after SIGKILL, use that copy
+  manually. It is temporary storage, without a power-loss or reboot recovery guarantee. `tools/test-mutation-run.sh` drives the shipping
+  runner and test-run supervisor in isolated fixtures; Ubuntu's shell-harness CI runs it.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves
   `pass_fail`'s lazy failure detail while adding the structural empty, floor-shortfall, or
