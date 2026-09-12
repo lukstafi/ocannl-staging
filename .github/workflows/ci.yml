@@ -197,10 +197,10 @@ jobs:
     # test-ci-times.sh spawns nothing, but its subject shells out to `python3`
     # under that exact name, which is not what a python3 is called on every
     # platform `dune runtest` runs on -- so it rides the same POSIX leg rather
-    # than a dune alias. All three share the SKIP contract, so a leg this
-    # runner cannot decide is a counted skip rather than a red step. Run every
-    # one even when one fails, so one regression cannot mask the others'
-    # diagnostics.
+    # than a dune alias. These platform-sensitive harnesses share the SKIP
+    # contract. The mutation harness also exercises the real supervisor in
+    # isolated fixtures. Run every harness even when one fails, so one
+    # regression cannot mask the others' diagnostics.
     - name: Test shell harnesses (Ubuntu)
       if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main'
       run: |

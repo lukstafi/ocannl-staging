@@ -960,8 +960,11 @@ that they earn a lookup rather than always-loaded space.
   remains test-run's, so a killed mutant normally exits 1; a build failure with no false claims
   is not evidence for a manifest row. A passing mutation still exits 0 and needs investigation.
   INT, TERM and HUP cancel and reap the run before restoring; restoration is confirmed by `cmp`
-  against the backup, including CRLF and a missing final newline. Refusal exits 2, failed
-  restoration exits 3 and retains the printed recovery copy; after SIGKILL, use that copy
+  against the backup, including CRLF and a missing final newline. `tools/test-run.sh idle`
+  probes its existing worktree flock (0 idle, 3 held, 2 unreadable); this is a point-in-time
+  snapshot, not a reservation. A busy preflight refuses before mutation. If a killed launcher
+  or supervisor leaves a lock holder alive, restoration is deferred: inspect/stop the worktree
+  runs before recovering the source manually. Refusal exits 2; deferred or failed restoration exits 3 and retains the printed recovery copy; after SIGKILL, use that copy
   manually. It is temporary storage, without a power-loss or reboot recovery guarantee. `tools/test-mutation-run.sh` drives the shipping
   runner and test-run supervisor in isolated fixtures; Ubuntu's shell-harness CI runs it.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):

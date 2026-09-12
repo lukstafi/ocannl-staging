@@ -236,3 +236,102 @@ cmp "$backup" "$fixture/pristine"
 rmdir module.ml
 cp "$fixture/pristine" module.ml
 printf 'PASS failed restoration rename retains recovery copy and exits 3\n'
+# A killed launcher/supervisor can leave a live Dune holder of the same flock.
+# Check the actual ownership signal, retain the mutant, then recover explicitly.
+for victim in launcher supervisor; do
+  rm -f "$fixture/ready"
+  export PROBE_MODE=sleep
+  perl - "$victim" "$fixture" <<'PERL'
+use strict;
+use warnings;
+my ($victim, $dir) = @ARGV;
+my $pid = fork();
+die $! unless defined $pid;
+if (!$pid) {
+    open STDOUT, '>', "$dir/result" or die $!;
+    open STDERR, '>&', \*STDOUT or die $!;
+    exec 'tools/mutation-run.sh', 'module.ml', 'patch', '@probe';
+    die $!;
+}
+my $ready = 0;
+for (1..200) { if (-e "$dir/ready") { $ready = 1; last } select undef, undef, undef, .05; }
+die "survivor fixture never became ready\n" unless $ready;
+my @owners = glob "$dir/runs/owner-*";
+@owners == 1 or die "ambiguous fixture owner\n";
+sub read_one { open my $f, '<', $_[0] or die $!; my $v = <$f>; chomp $v; $v }
+my $run = read_one($owners[0]);
+my $supervisor = read_one("$run/pid");
+my $target = $supervisor;
+if ($victim eq 'launcher') {
+    $target = qx{ps -o ppid= -p $supervisor};
+    $target =~ s/\s+//g;
+}
+$target =~ /^\d+$/ && $target > 1 or die "invalid victim\n";
+kill('KILL', $target) == 1 or die "kill victim: $!";
+local $SIG{ALRM} = sub { kill 'KILL', $pid; die "survivor fixture timed out\n" };
+alarm 15;
+waitpid($pid, 0);
+my $got = $? >> 8;
+alarm 0;
+open my $id, '>', "$dir/survivor-run" or die $!;
+print {$id} "$run\n";
+close $id;
+die "expected deferred restoration, got $got\n" unless $got == 3;
+PERL
+  set +e
+  tools/test-run.sh idle > "$fixture/idle" 2>&1
+  actual=$?
+  set -e
+  [ "$actual" = 3 ]
+  grep -q MUTATED module.ml
+  backup=$(sed -n 's/^recovery: //p' "$fixture/result")
+  cmp "$backup" "$fixture/pristine"
+  if grep -q '^restored:' "$fixture/result"; then echo 'restored under surviving Dune'; exit 1; fi
+  # A competing mutation is refused without changing the live mutant.
+  cp module.ml "$fixture/mutant"
+  printf 'MUTATED@@@SECOND' > second.patch
+  set +e
+  tools/mutation-run.sh module.ml second.patch @probe > "$fixture/busy" 2>&1
+  actual=$?
+  set -e
+  [ "$actual" = 2 ]
+  cmp module.ml "$fixture/mutant"
+  run=$(cat "$fixture/survivor-run")
+  tools/test-run.sh stop "$run" > "$fixture/stop" 2>&1
+  # The supervisor stop is asynchronous; wait for its completion when present.
+  set +e
+  tools/test-run.sh wait "$run" --timeout 10 > "$fixture/wait" 2>&1
+  set -e
+  tools/test-run.sh idle
+  cp "$backup" module.ml
+  cmp module.ml "$fixture/pristine"
+done
+printf 'PASS independently killed launcher/supervisor retain source until survivor is stopped\n'
+# Pin the remaining public idle status and ensure it never replaces a bad lock.
+set -- "$fixture"/runs/lock-*
+[ "$#" = 1 ]
+lock=$1
+mv "$lock" "$lock.saved"
+mkdir "$lock"
+set +e
+tools/test-run.sh idle > "$fixture/idle" 2>&1
+actual=$?
+set -e
+[ "$actual" = 2 ]
+[ -d "$lock" ]
+rmdir "$lock"
+mv "$lock.saved" "$lock"
+tools/test-run.sh idle
+printf 'PASS idle returns 0/3/2 without creating or replacing lock state\n'
+perl -e '
+  use Fcntl ":flock";
+  open my $lock, ">", ".test-run.lock" or die $!;
+  flock($lock, LOCK_EX | LOCK_NB) or die $!;
+  system "bash", "tools/test-run.sh", "idle";
+  exit(($? >> 8) == 3 ? 0 : 1);
+' > "$fixture/legacy" 2>&1
+[ -f .test-run.lock ]
+tools/test-run.sh idle
+[ -f .test-run.lock ]
+rm .test-run.lock
+printf 'PASS idle observes the legacy lock without removing it\n'

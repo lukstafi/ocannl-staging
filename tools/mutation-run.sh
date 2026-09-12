@@ -4,7 +4,9 @@
 # Patch bytes are OLD@@@NEW (exactly one delimiter; no newline is stripped).
 # OLD must occur exactly once, including overlapping occurrences. NEW may be empty.
 # Use an otherwise idle, isolated worktree; do not edit the module during the run.
-# Exit: test-run's status, 2 for refusal, 3 for failed restoration; signals 128+N.
+# Exit: test-run's status, 2 for refusal, 3 for deferred/failed restoration; signals 128+N.
+# A surviving test-run lock prevents automatic restoration; stop the surviving
+# workers before manually recovering from the retained copy.
 # INT/TERM/HUP cancel and reap test-run before restoration. SIGKILL cannot be
 # trapped: its printed recovery copy may be used manually. This temporary copy
 # is not durable storage and offers no power-loss/reboot recovery guarantee.
@@ -45,6 +47,8 @@ index($original, $old, $at + 1) < 0 or refuse('ambiguous anchor');
 $old ne $new or refuse('mutation does not change the module');
 my $mutated = $original;
 substr($mutated, $at, length($old), $new);
+system('bash', "$root/tools/test-run.sh", 'idle') == 0
+    or refuse('worktree is busy or its test-run lock is unreadable; nothing mutated');
 my $scratch = tempdir('ocannl-mutation-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
 my $backup = "$scratch/original";
 copy($module, $backup) or refuse("backup: $!");
@@ -102,6 +106,13 @@ eval {
 # in the same directory, then independently compare against the recovery copy.
 $SIG{$_} = 'IGNORE' for qw(INT TERM HUP);
 if ($changed) {
+    # A dead launcher is not proof that its supervisor/Dune descendants ended.
+    # Their inherited worktree flock is the existing harness ownership signal.
+    if (system('bash', "$root/tools/test-run.sh", 'idle') != 0) {
+        print STDERR "mutation-run: RESTORATION DEFERRED; worktree lock held or unreadable.\n",
+            "Source may still be mutated; inspect/stop worktree runs before manual recovery from $backup\n";
+        exit 3;
+    }
     my $restored = eval {
     my ($restore_fh, $restore) = tempfile('.mutation-restore-XXXXXXXX', DIR => dirname($module), UNLINK => 0);
     close $restore_fh;
