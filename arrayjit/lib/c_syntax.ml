@@ -5610,11 +5610,12 @@ module C_syntax (B : C_syntax_config) = struct
               let debug_val_str = doc_to_string debug_val_doc in
               let pp_args_docs =
                 List.map debug_args_docs ~f:(function
-                  | `Accessor idx -> pp_array_offset idx
+                  | `Accessor arg_doc -> arg_doc
                   | `Value v_doc -> B.styled_log_arg v_doc)
               in
+              let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
               let log_args_for_printf =
-                offset_doc
+                offset_arg_doc
                 :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
                 :: B.styled_log_arg new_var :: pp_args_docs
               in
@@ -5624,8 +5625,8 @@ module C_syntax (B : C_syntax_config) = struct
                 in
                 let comment_base_msg = "# " ^ debug ^ "\n" in
                 let value_base_msg =
-                  Printf.sprintf "%s[%%u]{=%s} = %s = %s\n" (get_ident tn) B.float_log_style
-                    B.float_log_style debug_val_str
+                  Printf.sprintf "%s[%s]{=%s} = %s = %s\n" (get_ident tn) offset_spec
+                    B.float_log_style B.float_log_style debug_val_str
                 in
                 let comment_log =
                   B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
@@ -5690,11 +5691,12 @@ module C_syntax (B : C_syntax_config) = struct
           let debug_val_str = doc_to_string debug_val_doc in
           let pp_args_docs =
             List.map debug_args_docs ~f:(function
-              | `Accessor idx -> pp_array_offset idx
+              | `Accessor arg_doc -> arg_doc
               | `Value v_doc -> B.styled_log_arg v_doc)
           in
+          let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
           let log_args_for_printf =
-            offset_doc
+            offset_arg_doc
             :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
             :: B.styled_log_arg new_var :: pp_args_docs
           in
@@ -5702,7 +5704,7 @@ module C_syntax (B : C_syntax_config) = struct
             let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
             let comment_base_msg = "# " ^ debug ^ "\n" in
             let value_base_msg =
-              Printf.sprintf "%s[%%u]{=%s} = %s = %s\n" (get_ident tn) B.float_log_style
+              Printf.sprintf "%s[%s]{=%s} = %s = %s\n" (get_ident tn) offset_spec B.float_log_style
                 B.float_log_style debug_val_str
             in
             let comment_log =
@@ -5812,13 +5814,14 @@ module C_syntax (B : C_syntax_config) = struct
                   | Fixed_idx _ -> base_offset
                   | _ -> base_offset ^^ string (" + " ^ Int.to_string i)
                 in
+                let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
                 let value_base_msg =
-                  Printf.sprintf "%s[%%u]{=%s} = vec_result.v[%d] = %s\n" (get_ident tn)
+                  Printf.sprintf "%s[%s]{=%s} = vec_result.v[%d] = %s\n" (get_ident tn) offset_spec
                     B.float_log_style i B.float_log_style
                 in
                 let log_args =
                   [
-                    offset_doc;
+                    offset_arg_doc;
                     B.styled_log_arg (ident_doc ^^ brackets offset_doc);
                     B.styled_log_arg (string ("vec_result.v[" ^ Int.to_string i ^ "]"));
                   ]
@@ -5888,7 +5891,7 @@ module C_syntax (B : C_syntax_config) = struct
           let debug_val_str = doc_to_string debug_val_doc in
           let pp_args_docs =
             List.map debug_args_docs ~f:(function
-              | `Accessor idx -> pp_array_offset idx
+              | `Accessor arg_doc -> arg_doc
               | `Value v_doc -> B.styled_log_arg v_doc)
           in
           let log_doc =
@@ -6653,8 +6656,7 @@ module C_syntax (B : C_syntax_config) = struct
         (defs, expr)
 
   and debug_float ?guard (prec : Ops.prec) (value : Low_level.scalar_t) :
-      PPrint.document
-      * [ `Accessor of Indexing.axis_index array * int array | `Value of PPrint.document ] list =
+      PPrint.document * [ `Accessor of PPrint.document | `Value of PPrint.document ] list =
     (* Returns (value expression doc, list of arguments for printf).
 
        [guard] (task-9658aac9): when [Some cond_c] (a real C boolean expression), any array
@@ -6686,30 +6688,33 @@ module C_syntax (B : C_syntax_config) = struct
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
+        let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
         let access_doc =
           string prefix ^^ string "merge_buffer" ^^ brackets offset_doc ^^ string postfix
         in
         let expr_doc =
           string prefix ^^ string "merge_buffer"
-          ^^ brackets (string "%u")
+          ^^ brackets (string offset_spec)
           ^^ string postfix
           ^^ braces (string ("=" ^ B.float_log_style))
         in
-        (expr_doc, [ `Accessor (idcs, dims); `Value (guarded_value access_doc) ])
+        (expr_doc, [ `Accessor offset_arg_doc; `Value (guarded_value access_doc) ])
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims) in
+        let log_offset_doc = pp_array_offset (idcs, dims) in
+        let offset_spec, offset_arg_doc = B.log_index_arg log_offset_doc in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         let expr_doc =
           string prefix ^^ ident_doc
-          ^^ brackets (string "%u")
+          ^^ brackets (string offset_spec)
           ^^ string postfix
           ^^ braces (string ("=" ^ B.float_log_style))
         in
-        (expr_doc, [ `Accessor (idcs, dims); `Value (guarded_value access_doc) ])
+        (expr_doc, [ `Accessor offset_arg_doc; `Value (guarded_value access_doc) ])
     | Get_dynamic { tn; dyn_value = iv, iprec; _ } ->
         (* gh-343: do NOT dereference the table in debug logs. A [Where]'s [debug_float] collects
            all three branch values as printf arguments evaluated unconditionally, so returning the

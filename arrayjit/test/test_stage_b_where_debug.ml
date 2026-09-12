@@ -107,7 +107,7 @@ let () =
      [Get_local] init fallback is logged directly (not an array dereference, so not -- and need not
      be -- guarded). *)
   p "Stage B debug log preserves the annotated Where branch displays"
-    (String.is_substring c ~substring:"producer[%u]{=%g}"
+    (String.is_substring c ~substring:"producer[%d]{=%g}"
     && String.is_substring c ~substring:"init_local{=%g}")
 
 (* === Case 2: symmetric guarding -- array reads in BOTH branches === *)

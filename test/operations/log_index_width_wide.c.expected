@@ -66,13 +66,13 @@
     {
       float new_set_v = (p[i4] + q[i4]);
       if (log_file_name && log_file) fprintf(log_file, "# d[i4] := (p[i4] + q[i4]);\n");
-      if (log_file_name && log_file) fprintf(log_file, "d[%u]{=%de-3} = %de-3 = (p[%u]{=%de-3} + q[%u]{=%de-3})\n",
-          i4,
+      if (log_file_name && log_file) fprintf(log_file, "d[%lld]{=%de-3} = %de-3 = (p[%lld]{=%de-3} + q[%lld]{=%de-3})\n",
+          (long long)i4,
           (int)(d[i4] * 1000.0),
           (int)(new_set_v * 1000.0),
-          i4,
+          (long long)i4,
           (int)(p[i4] * 1000.0),
-          i4,
+          (long long)i4,
           (int)(q[i4] * 1000.0));
       fflush(log_file);
       d[i4] = new_set_v;

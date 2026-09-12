@@ -111,7 +111,7 @@ arrayjit/test/test_stage_b_where_debug.ml [renders generated text in memory]
     "? condrd3["
     "? producer["
     "init_local{=%g}"
-    "producer[%u]{=%g}"
+    "producer[%d]{=%g}"
 arrayjit/test/test_vectorized_codegen.ml [renders generated text in memory]
 arrayjit/test/test_zero_out_codegen.ml [renders generated text in memory]
 test/operations/accum_width.ml

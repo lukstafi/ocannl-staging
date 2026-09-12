@@ -66,7 +66,7 @@
     {
       float new_set_v = (p[i4] + q[i4]);
       if (log_file_name && log_file) fprintf(log_file, "# d[i4] := (p[i4] + q[i4]);\n");
-      if (log_file_name && log_file) fprintf(log_file, "d[%u]{=%de-3} = %de-3 = (p[%u]{=%de-3} + q[%u]{=%de-3})\n",
+      if (log_file_name && log_file) fprintf(log_file, "d[%d]{=%de-3} = %de-3 = (p[%d]{=%de-3} + q[%d]{=%de-3})\n",
           i4,
           (int)(d[i4] * 1000.0),
           (int)(new_set_v * 1000.0),
