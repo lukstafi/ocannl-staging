@@ -95,7 +95,7 @@ val take_forward_code : t -> comp
     forward root ({!is_fwd_root}): removes it from the forward roots, marks its forward code as
     taken, and returns the code. This is the handout every path that embeds a tensor's forward code
     goes through -- {!consume_forward_code} and the [%cd] operands' embedding alike -- so that a
-    later {!consume_forward_code} on the same tensor reports the prior consumption. *)
+    later {!consume_forward_code} on the same tensor returns the same comp. *)
 
 val discard_backprop_code : t -> unit
 (** Drops [t] from the backprop roots without handing its code out, and marks it so: the
@@ -250,7 +250,8 @@ val param : ?require_grad:bool -> t:op_fun -> string -> ?more_label:string list 
     [more_label] if any, other parameters are forwarded to [t]. This function returns [t]'s result
     with the field {!field:params} replaced by a singleton set containing that result, and it also
     updates the memory modes. If [require_grad] is true, any gradient structure inherited from the
-    initialization expression is replaced by a fresh gradient for the final parameter value only. *)
+    initialization expression is replaced by a fresh gradient for the final parameter value only.
+    The result has fresh consumption state, independent of any prior handouts of [t]’s result. *)
 
 val param_postprocess : (t -> t) ref
 (** Post-processing hook applied by {!param} to each fully-constructed parameter before it is
@@ -265,16 +266,21 @@ val term_init : ?grad_spec:grad_spec -> float array -> op_fun
     tensors with inferred shapes). *)
 
 val consume_forward_code : t -> comp
-(** A forward root is a tensor that is not (currently) used to compute another tensor.
-    [consume_forward_code t] ensures [t] is a forward root, removes it from forward roots, and
-    checks that there are no other forward roots for tensors with children. *)
+(** A forward root is a tensor that is not (currently) used to compute another tensor. On the first
+    handout, checks that non-embedded reads are not owned by other live roots, then removes [t] from
+    the forward roots and returns its comp. Subsequent calls return the same comp, including after
+    {!take_forward_code} (the [%cd] embedding path), without checking or modifying roots constructed
+    since the first handout. This is equivalent to retaining the original comp; the caller still
+    owns execution order and the availability of non-embedded inputs. Parameters and subtensors
+    embedded in a tensor consumer remain rejected. *)
 
 val consume_backprop_code : t -> comp
-(** A backprop root is a tensor with a gradient that is not (currently) receiving gradients from
-    another tensor. I.e. it is not currently used to compute a tensor with a gradient.
-    [consume_backprop_code t] ensures [t] is a backprop root, removes it from backprop roots, and
-    checks that there are no other backprop roots for tensors with children. It returns the backprop
-    code -- note this does not include the zero_grads code. *)
+(** A backprop root is a differentiable tensor not currently receiving gradients from another
+    tensor. Checks non-embedded reads against other live backprop roots on the first handout and
+    removes [t] from the backprop roots. Subsequent calls return the same comp without checking or
+    modifying newer roots, as for {!consume_forward_code}. Non-differentiable tensors, embedded
+    subtensors and discarded backprop remain rejected. The returned code does not include
+    [zero_grads] or seeding the output gradient; callers must still arrange those for each run. *)
 
 val iter_embedded : f:(tn -> unit) -> t -> unit
 (** [iter_embedded t] iterates over all descendant nodes that are embedded, i.e. are members of

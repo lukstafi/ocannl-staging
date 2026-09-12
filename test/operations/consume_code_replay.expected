@@ -1,0 +1,12 @@
+first handout computes squares: true
+first handout computes gradients: true
+new consumer starts as a forward root: true
+new consumer starts as a backprop root: true
+forward replay keeps comp identity with a newer root: true
+backprop replay keeps comp identity with a newer root: true
+recompiled forward reads changed inputs: true
+recompiled backprop resets and recomputes gradients: true
+replay leaves the newer forward root intact: true
+replay leaves the newer backprop root intact: true
+new consumer executes after replay: true
+new consumer and replayed fragment compose gradients: true

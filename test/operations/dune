@@ -5217,3 +5217,15 @@
  (deps ocannl_config ll_test_ratchet.exe)
  (action
   (run %{test} %{dep:ll_test_ratchet.exe})))
+
+(test
+ (name consume_code_replay)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules consume_code_replay)
+ (libraries base ocannl arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

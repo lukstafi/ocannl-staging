@@ -1,11 +1,4 @@
-(* The rejection [Tensor.consume_forward_code] raises for a non-root used to hint only at "maybe
-   you're trying to forward a param?", which misled in the common test-authoring case: one tensor
-   [Train.forward]ed twice (e.g. compiled under different [?lowered_transform]s, as
-   [tile_mma_geometry.ml] does across four compiles) -- its forward code was consumed by the first
-   call, so it is no longer a root, and nothing about it is a parameter. A tensor leaves the root
-   map by three distinct routes, and the tensor now carries a consumption marker so the message
-   names the route that applies. Each leg pins its sentence's discriminating words, never the old
-   hint. *)
+(* Repeated handout preserves comp identity; other non-root routes retain their diagnostics. *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -29,11 +22,8 @@ let () =
   (* Leg 1: the forward code was consumed already. *)
   let x = leaf "cfr_x1" in
   let y = NTDSL.O.relu x in
-  ignore (Tensor.consume_forward_code y : Ir.Assignments.comp);
-  let msg = rejection ~name:"twice" (fun () -> Tensor.consume_forward_code y) in
-  p "second consume: names the earlier consumption" (has msg ~substring:"already consumed");
-  p "second consume: does not blame a parameter" (not (has msg ~substring:"is a parameter"));
-  p "second consume: names the tensor" (has msg ~substring:(Ir.Tnode.debug_name y.Tensor.value));
+  let first = Tensor.consume_forward_code y in
+  p "second consume: returns the same comp" (phys_equal first (Tensor.consume_forward_code y));
   (* Leg 2: a parameter never owns forward code. *)
   let w = TDSL.param ~value:0.5 "cfr_w" () in
   let msg = rejection ~name:"param" (fun () -> Tensor.consume_forward_code w) in
@@ -48,19 +38,19 @@ let () =
   (* Leg 4: the backprop side records consumption the same way. *)
   let v = Tensor.term_init [| 1.; 2. |] ~label:[ "cfr_v4" ] ~grad_spec:Require_grad () in
   let l = TDSL.O.relu v in
-  ignore (Tensor.consume_backprop_code l : Ir.Assignments.comp);
-  let msg = rejection ~name:"bprop twice" (fun () -> Tensor.consume_backprop_code l) in
-  p "second backprop consume: names the earlier consumption" (has msg ~substring:"already consumed");
-  p "second backprop consume: names the backprop code" (has msg ~substring:"backprop code");
-  (* Leg 5: a [%cd] block that reads a tensor embeds its forward code through the same handout, so
-     the rejection names the consumption rather than a consumer that does not exist. *)
+  let first = Tensor.consume_backprop_code l in
+  p "second backprop consume: returns the same comp"
+    (phys_equal first (Tensor.consume_backprop_code l));
+  let msg = rejection ~name:"backprop subterm" (fun () -> Tensor.consume_backprop_code v) in
+  p "backprop subterm: says the code is embedded in a consumer"
+    (has msg ~substring:"embedded in a tensor");
+  (* A [%cd] embedding uses the same handout marker. *)
   let x = leaf "cfr_x6" in
   let y = NTDSL.O.relu x in
   let acc = leaf "cfr_acc6" in
   let _embedding : Ir.Assignments.comp = [%cd acc =+ y] in
-  let msg = rejection ~name:"cd" (fun () -> Tensor.consume_forward_code y) in
-  p "after a %cd embedding: names the consumption" (has msg ~substring:"already consumed");
-  p "after a %cd embedding: does not blame a consumer" (not (has msg ~substring:"consume that"));
+  p "after a %cd embedding: returns the tensor's comp"
+    (phys_equal y.Tensor.forward (Tensor.consume_forward_code y));
   (* Leg 6: [Train.forward_once] drops a differentiable tensor's backprop root through
      [discard_backprop_code] (called directly here: this test links no backend), and the rejection
      names the discard rather than a consumer. *)
@@ -71,15 +61,12 @@ let () =
   p "discarded backprop: says it was discarded" (has msg ~substring:"was discarded");
   p "discarded backprop: names forward_once" (has msg ~substring:"forward_once");
   p "discarded backprop: does not blame a consumer" (not (has msg ~substring:"consume that"));
-  (* A discard after the backprop code was already handed out drops nothing, and must not overwrite
-     the handout: the rejection keeps reporting the consumption. *)
+  (* A discard after handout drops nothing and must preserve replay. *)
   let v = Tensor.term_init [| 1.; 2. |] ~label:[ "cfr_v8" ] ~grad_spec:Require_grad () in
   let l = TDSL.O.relu v in
-  ignore (Tensor.consume_backprop_code l : Ir.Assignments.comp);
+  let first = Tensor.consume_backprop_code l in
   Tensor.discard_backprop_code l;
-  let msg = rejection ~name:"taken then discarded" (fun () -> Tensor.consume_backprop_code l) in
-  p "discard after consume: still reports the consumption" (has msg ~substring:"already consumed");
-  p "discard after consume: does not claim a discard" (not (has msg ~substring:"was discarded"));
+  p "discard after consume: preserves replay" (phys_equal first (Tensor.consume_backprop_code l));
   (* [with_unchanged_roots] restores the consumed marks with the roots: an [ignore]d [%cd] block's
      consumption must not later be reported as a prior consumption. *)
   let x = leaf "cfr_x5" in
@@ -89,3 +76,49 @@ let () =
   p "consumption inside with_unchanged_roots is undone" (Tensor.is_fwd_root y);
   ignore (Tensor.consume_forward_code y : Ir.Assignments.comp);
   p "and the root can then be consumed once" (not (Tensor.is_fwd_root y))
+
+let () =
+  let x = leaf "conflict_leaf" in
+  let shared = NTDSL.O.relu x in
+  let owner = NTDSL.O.relu shared in
+  let sibling = NTDSL.O.relu shared in
+  let msg =
+    rejection ~name:"first handout conflict" (fun () -> Tensor.consume_forward_code sibling)
+  in
+  p "first handout still rejects a conflicting root" (has msg ~substring:"conflicting roots");
+  p "failed first handout leaves the root intact" (Tensor.is_fwd_root sibling);
+  ignore (Tensor.consume_forward_code owner : Ir.Assignments.comp);
+  ignore (Tensor.consume_forward_code sibling : Ir.Assignments.comp);
+  let msg = rejection ~name:"non-differentiable" (fun () -> Tensor.consume_backprop_code sibling) in
+  p "non-differentiable backprop remains rejected" (has msg ~substring:"not differentiable")
+
+let () =
+  let v = Tensor.term_init [| -1.; 3. |] ~grad_spec:Require_grad () in
+  let init_tensor = TDSL.O.relu v in
+  let forward = Tensor.consume_forward_code init_tensor in
+  let backprop = Tensor.consume_backprop_code init_tensor in
+  let reuse ?label:_ ?top_down_prec:_ ?batch_dims:_ ?batch_axes:_ ?input_dims:_ ?output_dims:_
+      ?input_axes:_ ?output_axes:_ ?deduced:_ () =
+    init_tensor
+  in
+  let parameter = Tensor.param ~t:reuse "taken_initializer_param" () in
+  let msg =
+    rejection ~name:"taken initializer parameter" (fun () -> Tensor.consume_forward_code parameter)
+  in
+  p "parameter from a taken initializer still rejects forward" (has msg ~substring:"is a parameter");
+  p "parameterization preserves the initializer forward handout"
+    (phys_equal forward (Tensor.consume_forward_code init_tensor));
+  p "parameterization preserves the initializer backprop handout"
+    (phys_equal backprop (Tensor.consume_backprop_code init_tensor));
+  p "new parameter owns its fresh backprop root" (Tensor.is_bprop_root parameter);
+  let parameter_backprop = Tensor.consume_backprop_code parameter in
+  p "first parameter backprop handout removes its root" (not (Tensor.is_bprop_root parameter));
+  p "parameter backprop can then replay its fresh comp"
+    (phys_equal parameter_backprop (Tensor.consume_backprop_code parameter));
+  let parameter = Tensor.param ~t:reuse "embedded_initializer_param" () in
+  let _consumer = TDSL.O.relu parameter in
+  let msg =
+    rejection ~name:"embedded parameter backprop" (fun () -> Tensor.consume_backprop_code parameter)
+  in
+  p "parameter backprop embedded after parameterization remains rejected"
+    (has msg ~substring:"embedded in a tensor")
