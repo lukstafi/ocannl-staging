@@ -206,6 +206,7 @@ jobs:
       run: |
         failures=0
         tools/test-test-run.sh || failures=$((failures + 1))
+        tools/test-mutation-run.sh || failures=$((failures + 1))
         scripts/test-setup-ocaml-env.sh || failures=$((failures + 1))
         tools/test-ci-times.sh || failures=$((failures + 1))
         exit $((failures > 0 ? 1 : 0))
