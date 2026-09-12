@@ -1,23 +1,24 @@
-(** Pinning tests for the transitive-glb reading and dimension-closing counterexample of Remark
-    6.3 in docs/blog/ocannl-formal-core.md.
+(** Pinning tests for the transitive-glb reading and dimension-closing counterexample of Remark 6.3
+    in docs/blog/ocannl-formal-core.md.
 
-    Phi = {3 <= alpha, alpha <= beta, 5 <= beta}, both variables terminal (leaves). Satisfiable:
-    the solutions are exactly beta = 1_(bcast_if_1), alpha in {3, 1_(bcast_if_1)}.
+    Phi is [3 <= alpha, alpha <= beta, 5 <= beta], with both variables terminal (leaves).
+    Satisfiable: the solutions are exactly beta = 1_(bcast_if_1), alpha in [3, 1_(bcast_if_1)].
 
     Naive sequential closing is order-sensitive: committing alpha first re-emits 3 <= beta, the
-    conflicting ground bounds {5, 3} on beta demote to the broadcast top (DI-cap), and closing
-    finds the genuine solution alpha = 3, beta = top. Committing beta |-> 5 first squeezes alpha
-    into the empty interval 3 <= alpha <= 5 (atoms form an antichain below the top), failing a
-    satisfiable store.
+    conflicting ground bounds [5, 3] on beta demote to the broadcast top (DI-cap), and closing finds
+    the genuine solution alpha = 3, beta = top. Committing beta |-> 5 first squeezes alpha into the
+    empty interval 3 <= alpha <= 5 (atoms form an antichain below the top), failing a satisfiable
+    store.
 
     This test drives the same constraint set through the solver with both emission orders of the
     terminals (and of the inequalities), pinning that beta closes to its transitive glb, not just
     the explicit cap 5.
 
     It also pins two nearby cases:
-    - {3 <= alpha, beta <= alpha}: beta is not guessed to top before alpha closes; it is pinned to
-      3 during re-solving.
-    - {3 <= alpha, 5 <= beta, gamma <= alpha, gamma <= beta}: the store is satisfiable by raising a
+
+    - [3 <= alpha, beta <= alpha]: beta is not guessed to top before alpha closes; it is pinned to 3
+      during re-solving.
+    - [3 <= alpha, 5 <= beta, gamma <= alpha, gamma <= beta]: the store is satisfiable by raising a
       terminal to top, but deterministic downward leaf closing commits alpha = 3 and beta = 5, then
       fails when gamma is pinned below incompatible atoms. *)
 

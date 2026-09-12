@@ -686,15 +686,19 @@ that they earn a lookup rather than always-loaded space.
   without it, leg 2 would pass if `git commit` merely picked up the working tree, and the guard
   would be untested. Measured: legs 2, 5 and 6 all fail against the pre-guard script.
 - Formatting is a gate on the PR path, and its mechanics are worth knowing before the first red.
-  `ci.yml`'s `fmt` job is separate from the build matrix on purpose: `ocaml/setup-ocaml` plus its
-  `lint-fmt` action, which installs the ocamlformat release `.ocamlformat` pins and runs
-  `dune build @fmt` in a switch WITHOUT the project's dependencies (`@fmt` compiles nothing), so it
-  answers in a few minutes while the twenty-minute build is still queued. The same pin is what
+  `ci.yml`'s `fmt` job is separate from the build matrix on purpose: `ocaml/setup-ocaml` plus an
+  explicit install of the ocamlformat release `.ocamlformat` pins, followed by `tools/fmt-check.sh`,
+  which runs `dune build @fmt` in a switch WITHOUT the project's dependencies (`@fmt` compiles
+  nothing), so it answers in a few minutes while the twenty-minute build is still queued. The same pin is what
   `dune-project`'s `(ocamlformat (and (= …) :with-dev-setup))` installs locally through
   `opam install . --deps-only --with-dev-setup` — a plain `--deps-only` never installs a
   `with-dev-setup` dependency, which is why a fresh switch has no ocamlformat until asked, and
   `scripts/setup-ocaml-env.sh` reports both that and a version drifted from the pin at session
-  start. Two files a formatter cannot handle are refused at the site rather than discovered in CI:
+  start. The wrapper also fails on ocamlformat's softer `Invalid documentation comment` warnings,
+  which otherwise leave `@fmt` green and bury a real formatting diff in their output; a nonzero dune
+  status still wins unchanged. `tools/test-fmt-check.sh` pins the clean, warning, and formatter-error
+  outcomes separately. Two files a formatter cannot handle are refused at the site rather than
+  discovered in CI:
   a misplaced doc comment (ocamlformat declines the whole file) is a compile error under the root
   `dune`'s `-w +50`, and a ppx-expectation golden is in `.ocamlformat-ignore`, which
   `ocamlformat_ignore_scan` keeps in correspondence with `test/ppx/*_expected.ml`. The one

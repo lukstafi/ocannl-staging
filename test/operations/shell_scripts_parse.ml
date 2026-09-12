@@ -146,7 +146,7 @@ module Shebang = struct
 
       A direct `#!/bin/bash` names a FILE, and the kernel execs that file; resolving `bash` on PATH
       instead can run a different build entirely -- on macOS `/bin/bash` is 3.2 while a Homebrew
-      `bash` 5 sits earlier on PATH, and 5 accepts `declare -A` and `${v^^}` that 3.2 rejects. That
+      `bash` 5 sits earlier on PATH, and 5 accepts `declare -A` and [${v^^}] that 3.2 rejects. That
       skew is on this repository's own macOS CI leg. A shebang going through `env` is a PATH lookup
       by definition, so a name is the faithful reading there. *)
   and launch =
@@ -493,8 +493,8 @@ let available =
     Only within the POSIX family, and bash is not a member of it in either direction. Checking a
     dash script with bash is what the review objected to (bash accepts what dash rejects, so the
     check passes vacuously); checking a BASH script with dash is worse in the other direction --
-    dash rejects arrays, `[[`, and process substitution, so every bashism becomes a reported syntax
-    error in a script that is perfectly valid. bash's absence is therefore a failure, not a
+    dash rejects arrays, [\[\[], and process substitution, so every bashism becomes a reported
+    syntax error in a script that is perfectly valid. bash's absence is therefore a failure, not a
     substitution, and so is ksh's and zsh's. The narrow remaining case -- `sh` where the host has
     only `dash`, or the reverse -- is a genuine equivalence, and it is still announced. *)
 let stand_ins shell =

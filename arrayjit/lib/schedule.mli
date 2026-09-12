@@ -21,14 +21,14 @@ type optop =
       outer_index : Indexing.symbol;  (** Fresh symbol for the outer loop; see {!split}. *)
       inner_index : Indexing.symbol;  (** Fresh symbol for the inner loop; see {!split}. *)
     }
-      (** [For_loop i in [0, N)] becomes [i_o in [0, ceil(N/factor)) { i_i in [0, factor) }] with
-          [i := factor*i_o + i_i] substituted throughout the body (index vectors and
-          [Embed_index]), and — when [factor] does not divide [N] — the body wrapped in an
+      (** [For_loop i in \[0, N)] becomes [i_o in \[0, ceil(N/factor)) { i_i in \[0, factor) }] with
+          [i := factor*i_o + i_i] substituted throughout the body (index vectors and [Embed_index]),
+          and — when [factor] does not divide [N] — the body wrapped in an
           [If (factor*i_o + i_i < N)] remainder guard (construct-then-fold: {!apply}'s trailing
           simplify erases it whenever the loop extents prove it). The split loop must start at 0,
-          which lowering guarantees. Splitting a serial loop preserves iteration order; retyping
-          the results to hardware axes carries the iteration-independence obligation exactly as
-          for [Low_level.validate_parallel]. *)
+          which lowering guarantees. Splitting a serial loop preserves iteration order; retyping the
+          results to hardware axes carries the iteration-independence obligation exactly as for
+          [Low_level.validate_parallel]. *)
   | Swap of { outer : Indexing.symbol; inner : Indexing.symbol }
       (** Interchange two perfectly nested loops (the outer loop's body must be exactly the inner
           loop; fails loudly otherwise). Reorders iterations — legal for the associative-commutative
@@ -56,37 +56,36 @@ type optop =
     }
       (** Index-set splitting (gh-ocannl-508): replace the [Serial] loop
           [For_loop axis in [from_, to_]] by consecutive segment loops
-          [s_0 in [from_, b_1) ; s_1 in [b_1, b_2) ; ... ; s_m in [b_m, to_]], each binding a fresh
-          symbol substituted for [axis] in a copy of the body (scalar-local scope ids refreshed per
-          copy, as for materializing [Unroll]). Segment ranges stay absolute — no index arithmetic
-          changes, iteration order is preserved exactly — and each segment's narrowed range lets
-          {!apply}'s trailing simplify interval-fold the guards it decides (statement [If]s and
-          scalar [Where] range guards alike). This is the segmented-rendering replacement for
-          in-loop range guards: an inlined concatenation's per-component guards (partition the
-          consumer at the component boundaries, e.g. from {!partition_breakpoints}) and [Split]'s
-          construct-then-fold remainder guard (partition at the last tile-multiple first, then
-          [Split] the dividing main segment — clean main nest plus epilogue) both specialize into
-          guard-free segment nests, and the fresh symbols make each segment individually
-          addressable by subsequent ops (per-segment scheduling). *)
+          [s_0 in \[from_, b_1) ; s_1 in \[b_1, b_2) ; ... ; s_m in [b_m, to_]], each binding a
+          fresh symbol substituted for [axis] in a copy of the body (scalar-local scope ids
+          refreshed per copy, as for materializing [Unroll]). Segment ranges stay absolute — no
+          index arithmetic changes, iteration order is preserved exactly — and each segment's
+          narrowed range lets {!apply}'s trailing simplify interval-fold the guards it decides
+          (statement [If]s and scalar [Where] range guards alike). This is the segmented-rendering
+          replacement for in-loop range guards: an inlined concatenation's per-component guards
+          (partition the consumer at the component boundaries, e.g. from {!partition_breakpoints})
+          and [Split]'s construct-then-fold remainder guard (partition at the last tile-multiple
+          first, then [Split] the dividing main segment — clean main nest plus epilogue) both
+          specialize into guard-free segment nests, and the fresh symbols make each segment
+          individually addressable by subsequent ops (per-segment scheduling). *)
   | Pad of {
       axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
       to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
     }
-      (** Pad-to-tile (gh-ocannl-485, PADTO): extend the [Serial] loop
-          [For_loop axis in [0, N)] to [[0, M)] where [M] is the least multiple of [to_multiple_of]
-          with [M >= N], and guard every effectful leaf statement of the body with [If (axis < N)]
-          (leaf statements, not the whole body, so barriers inserted by a later shared {!Stage} stay
-          under uniform control flow). The pad iterations are no-ops, so the op is unconditionally
-          semantics-preserving ([op_legality]: [Op_legal]); when [to_multiple_of] already divides
-          the extent it is the identity. Purpose: downstream [Split]s by factors of [M] divide
-          cleanly (no remainder guard), {!Stage} tiles minted over the padded tile loops zero-fill
-          their fringe (see {!constructor-Stage}), and {!constructor-Tensorize} recognizes the
-          guards as pad masks — moving row/column masks to the accumulator transfers and
-          discharging reduction masks against zero-filled staged operands — so tensorized paths
-          cover arbitrary extents. A SCALAR pipeline keeps the leaf guards instead, and
-          {!constructor-Privatize} classifies them rather than rejecting them (gh-ocannl-730), which
-          is what lets the register-blocktiled GPU family pad too. The surviving guards are exactly
-          the flip points
+      (** Pad-to-tile (gh-ocannl-485, PADTO): extend the [Serial] loop [For_loop axis in \[0, N)] to
+          [\[0, M)] where [M] is the least multiple of [to_multiple_of] with [M >= N], and guard
+          every effectful leaf statement of the body with [If (axis < N)] (leaf statements, not the
+          whole body, so barriers inserted by a later shared {!Stage} stay under uniform control
+          flow). The pad iterations are no-ops, so the op is unconditionally semantics-preserving
+          ([op_legality]: [Op_legal]); when [to_multiple_of] already divides the extent it is the
+          identity. Purpose: downstream [Split]s by factors of [M] divide cleanly (no remainder
+          guard), {!Stage} tiles minted over the padded tile loops zero-fill their fringe (see
+          {!constructor-Stage}), and {!constructor-Tensorize} recognizes the guards as pad masks —
+          moving row/column masks to the accumulator transfers and discharging reduction masks
+          against zero-filled staged operands — so tensorized paths cover arbitrary extents. A
+          SCALAR pipeline keeps the leaf guards instead, and {!constructor-Privatize} classifies
+          them rather than rejecting them (gh-ocannl-730), which is what lets the
+          register-blocktiled GPU family pad too. The surviving guards are exactly the flip points
           {!partition_breakpoints} detects: a later {!constructor-Partition} of an enclosing block
           loop at the last fully valid block specializes them away in the interior segments. *)
   | Stage of {
@@ -346,23 +345,23 @@ type optop =
               {!split_reduce}. *)
     }
       (** Deterministic two-pass split reduction (gh-ocannl-484): parallel reductions without
-          atomics. The [Serial] loop [axis in [0, N)] — carrying the single accumulation of
+          atomics. The [Serial] loop [axis in \[0, N)] — carrying the single accumulation of
           [target] in its subtree — becomes
-          [block in [0, num_blocks) { inner in [0, ceil(N/num_blocks)) }] with
-          [axis := ceil(N/num_blocks)*block + inner] substituted and a construct-then-fold
-          remainder guard as for {!constructor-Split}; the accumulation is redirected into a fresh
-          scratch node [partials] of dims [num_blocks x target-dims] (tile namespace, placed
-          [On_device], registered in the traced store) at the original cell prefixed by [block];
-          and a synthesized combine statement, inserted right after the enclosing top-level
-          statement, folds the partials into [target] in a {e fixed balanced-tree order} over
+          [block in \[0, num_blocks) { inner in \[0, ceil(N/num_blocks)) }] with
+          [axis := ceil(N/num_blocks)*block + inner] substituted and a construct-then-fold remainder
+          guard as for {!constructor-Split}; the accumulation is redirected into a fresh scratch
+          node [partials] of dims [num_blocks x target-dims] (tile namespace, placed [On_device],
+          registered in the traced store) at the original cell prefixed by [block]; and a
+          synthesized combine statement, inserted right after the enclosing top-level statement,
+          folds the partials into [target] in a {e fixed balanced-tree order} over
           [combine_indices]-bound loops: [target[c..] := target[c..] ⊕ tree(partials[0..B-1][c..])].
           The block loop is freely annotatable afterwards ([Retype]/the default presets): its index
           pins the partials row, so parallelizing it is race-free by construction, and the
           [partials] producer/consumer pair is exactly the materialized cross-nest edge kernel
           fission cuts at — under [fission_scheduled]/[maybe_default_schedules] the two passes (and
-          the scatter form's zeroing) compile as separate kernels with the event chain supplying
-          the grid-wide synchronization the combine needs. Never annotate the block loop to a
-          hardware axis while compiling both passes into one kernel.
+          the scatter form's zeroing) compile as separate kernels with the event chain supplying the
+          grid-wide synchronization the combine needs. Never annotate the block loop to a hardware
+          axis while compiling both passes into one kernel.
 
           Recognized accumulation forms (the [axis] subtree must contain no other access of
           [target], and the rest of the statement must not touch [target] — its combined value
@@ -372,17 +371,17 @@ type optop =
             [⊕ ∈ {Add, Max, Min, Mul}] (FMA counts as [Add]), [idcs] free of [axis]. Every loop
             enclosing [axis] within the statement must pin exactly one component of [idcs]
             (injectively: at most one symbol per component), so distinct enclosing iterations use
-            distinct partial cells and the combine re-iterates exactly the written cells. Each
-            block initializes its partial cell to the accumulation identity in-nest (no separate
-            zeroing pass).
-          - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic]
-            add-accumulation of its own row (the [Get_dynamic] rmw form built by
-            [rewrite_one_hot_reductions]), possibly under guards. The scatter is redirected to
-            [partials] with the block index prepended (dynamic axis shifted by one): within a block
-            colliding rows stay serial, across blocks rows land in disjoint partials slices — the
-            block loop parallelizes what the scatter alone cannot. Rows are data-dependent, so
-            [partials] is zeroed by a preceding whole-node [Zero_out] statement (its own fission
-            segment) and the combine covers all of [target].
+            distinct partial cells and the combine re-iterates exactly the written cells. Each block
+            initializes its partial cell to the accumulation identity in-nest (no separate zeroing
+            pass).
+          - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic] add-accumulation
+            of its own row (the [Get_dynamic] rmw form built by [rewrite_one_hot_reductions]),
+            possibly under guards. The scatter is redirected to [partials] with the block index
+            prepended (dynamic axis shifted by one): within a block colliding rows stay serial,
+            across blocks rows land in disjoint partials slices — the block loop parallelizes what
+            the scatter alone cannot. Rows are data-dependent, so [partials] is zeroed by a
+            preceding whole-node [Zero_out] statement (its own fission segment) and the combine
+            covers all of [target].
 
           Within each chunk the original serial order and rounding are preserved; across chunks the
           reduction is reassociated (the same license as {!constructor-Swap} of accumulations). The

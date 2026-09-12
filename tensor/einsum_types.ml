@@ -30,12 +30,13 @@ type axis_spec =
           shape inference. *)
 [@@deriving compare, sexp]
 
-(** An index pointing to any of a shape's axes, including the kind of the axis ([Batch, Input,
-    Output]) and the position (which is counted from the end to facilitate broadcasting).
+(** An index pointing to any of a shape's axes, including the kind of the axis
+    ([Batch, Input, Output]) and the position (which is counted from the end to facilitate
+    broadcasting).
 
     Note the following inconsistency due to differing conventions in function notation and matrix
     notation: for label specifications and einsum notation, we write "batch|inputs->outputs", but
-    when we convert a shape to an [Ndarray] index we do it in the order [[batch; outputs; inputs].
+    when we convert a shape to an [Ndarray] index we do it in the order [[batch; outputs; inputs]].
 *)
 module AxisKey = struct
   module T = struct

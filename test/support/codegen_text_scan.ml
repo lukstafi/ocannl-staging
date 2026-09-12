@@ -31,12 +31,13 @@
     low-level IR dump. Markers are grouped into families (c, cuda, hip, metal, ll, routine-log) so
     that the inventory says which substrate a member needs re-running on, and each is a string that
     only emitted text spells -- [for (int32_t ], [*restrict ], [(float)(], [__global__],
-    [threadgroup float], [] := ], [/* end */].
+    [threadgroup float], [[] := ], [/* end */].
 
     A marker only counts on a line that is not a {!Verdict} claim. Claim labels are prose ABOUT a
-    kernel and routinely quote its vocabulary -- ["padded GPU intrinsics fire against the threadgroup
-    fragment: true"] is a verdict, not Metal source -- and a golden made of such lines moves when
-    the claim is reworded, never when codegen changes.
+    kernel and routinely quote its vocabulary --
+    ["padded GPU intrinsics fire against the threadgroup fragment: true"] is a verdict, not Metal
+    source -- and a golden made of such lines moves when the claim is reworded, never when codegen
+    changes.
 
     {1 How a source site is recognised}
 

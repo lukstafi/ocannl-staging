@@ -273,7 +273,7 @@ val sketch_seed_params :
     Exposed for tests. *)
 
 module Family_decision : sig
-  (** {1 What a commitment on the matmul family tree is} (gh-ocannl-591)
+  (** {1 What a commitment on the matmul family tree is (gh-ocannl-591)}
 
       The family tree's levels commit to values of {!t}, not to display strings. A consumer that
       reads a decision back off a path — the certain-traffic floor {!sketch_path_traffic_floor}, the

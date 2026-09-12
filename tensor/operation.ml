@@ -908,7 +908,7 @@ let uniform1 ?grad_spec () =
           ~label:[ "range_over_offsets" ] ())
        ())
 
-(** A centered uniform distribution over [[-scale/2, scale/2)] built from the packed {!uniform}.
+(** A centered uniform distribution over [\[-scale/2, scale/2)] built from the packed {!uniform}.
     With the default [scale = 0.5] this is the default parameter initialization (see
     {!Make_DSL.default_param_init}). *)
 let centered_uniform_param_init ?(scale = 0.5) () ?label ?top_down_prec ?batch_dims ?batch_axes
