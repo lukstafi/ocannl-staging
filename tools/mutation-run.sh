@@ -5,8 +5,9 @@
 # OLD must occur exactly once, including overlapping occurrences. NEW may be empty.
 # Use an otherwise idle, isolated worktree; do not edit the module during the run.
 # Exit: test-run's status, 2 for refusal, 3 for failed restoration; signals 128+N.
-# INT/TERM/HUP cancel and reap test-run before restoration. SIGKILL/power loss
-# cannot be trapped: the printed recovery copy is retained until cmp succeeds.
+# INT/TERM/HUP cancel and reap test-run before restoration. SIGKILL cannot be
+# trapped: its printed recovery copy may be used manually. This temporary copy
+# is not durable storage and offers no power-loss/reboot recovery guarantee.
 exec perl - "$0" "$@" <<'PERL'
 use strict;
 use warnings;
@@ -51,13 +52,18 @@ chmod($mode, $backup) or refuse("backup permissions: $!");
 $| = 1;
 print "recovery: $backup\n";
 my ($child, $cancel, $changed) = (0, 0, 0);
+my $owner = $$;
 for my $pair ([INT => 2], [TERM => 15], [HUP => 1]) {
     my ($name, $number) = @$pair;
-    $SIG{$name} = sub { $cancel ||= 128 + $number; kill 'TERM', $child if $child; };
+    $SIG{$name} = sub {
+        # A child can receive the forwarded signal before installing defaults.
+        exit(128 + $number) if $$ != $owner;
+        $cancel ||= 128 + $number;
+        kill 'TERM', $child if $child;
+    };
 }
 my $code = 2;
 my $error;
-my $report = "";
 eval {
     chdir $root or refuse("chdir: $!");
     refuse('cancelled before mutation') if $cancel;
@@ -89,21 +95,6 @@ eval {
         $child = 0;
         last;
     }
-    my $transcript = bytes("$scratch/transcript");
-    $report = $transcript;
-    # Use this invocation's digest, never the mutable 'last' pointer or its
-    # abbreviated log tail (which can repeat or omit false claims).
-    if ($transcript =~ /^log: +(.+\/log)\r?$/m) {
-        my $log = $1;
-        $log =~ s/\r$//;
-        $report .= 'run: ' . basename(dirname($log)) . "\nfalse claims:\n";
-        my @claims = bytes($log) =~ /^(FAIL: .*: false)\r?$/mg;
-        $report .= "$_\n" for @claims;
-        $report .= "(none)\n" unless @claims;
-    } else {
-        $report .= "run: unavailable (test-run produced no digest)\n";
-        $code = 2 unless $code;
-    }
     1;
 } or $error = $@;
 # No interrupt may cut the restoration in half. Publish a complete replacement
@@ -120,11 +111,44 @@ if ($changed) {
         print STDERR "mutation-run: RESTORATION FAILED; recover from $backup ($!)\n";
         exit 3;
     }
-    $report .= "restored: byte-identical (cmp)\n";
 }
 unlink $backup;
-# Publish only after restoration, so a closed output pipe cannot strand a mutant.
-print $report;
+# All potentially large reporting is after restoration. Stream both files and
+# print each claim immediately rather than accumulating the log or claim list.
+$SIG{$_} = 'DEFAULT' for qw(INT TERM HUP);
+my $reported = eval {
+    my $log;
+    if (-f "$scratch/transcript") {
+        open my $transcript, '<:raw', "$scratch/transcript" or refuse("read transcript: $!");
+        while (my $line = <$transcript>) {
+            print $line;
+            $log = $1 if !defined($log) && $line =~ /^log: +(.+\/log)\r?\n?$/;
+        }
+        close $transcript or refuse("close transcript: $!");
+    }
+    # Read the digest from THIS invocation, never 'last' or its truncated tail.
+    if (defined $log) {
+        print 'run: ', basename(dirname($log)), "\nfalse claims:\n";
+        open my $claims, '<:raw', $log or refuse("read $log: $!");
+        my $found = 0;
+        while (my $line = <$claims>) {
+            if ($line =~ /^(FAIL: .*: false)\r?\n?$/) {
+                print "$1\n";
+                $found = 1;
+            }
+        }
+        close $claims or refuse("close $log: $!");
+        print "(none)\n" unless $found;
+    } else {
+        print "run: unavailable (test-run produced no digest)\n";
+        $code = 2 unless $code;
+    }
+    1;
+};
+$error ||= $@ unless $reported;
+unlink "$scratch/transcript" if -f "$scratch/transcript";
+rmdir $scratch or warn "mutation-run: cannot remove scratch directory $scratch: $!\n";
+print "restored: byte-identical (cmp)\n" if $changed;
 print STDERR $error if $error;
 exit($cancel || ($error ? 2 : $code));
 PERL

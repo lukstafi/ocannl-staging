@@ -961,8 +961,8 @@ that they earn a lookup rather than always-loaded space.
   is not evidence for a manifest row. A passing mutation still exits 0 and needs investigation.
   INT, TERM and HUP cancel and reap the run before restoring; restoration is confirmed by `cmp`
   against the backup, including CRLF and a missing final newline. Refusal exits 2, failed
-  restoration exits 3 and retains the printed recovery copy; SIGKILL and power loss cannot be
-  trapped, so recover from that copy manually. `tools/test-mutation-run.sh` drives the shipping
+  restoration exits 3 and retains the printed recovery copy; after SIGKILL, use that copy
+  manually. It is temporary storage, without a power-loss or reboot recovery guarantee. `tools/test-mutation-run.sh` drives the shipping
   runner and test-run supervisor in isolated fixtures; Ubuntu's shell-harness CI runs it.
 - The guarded pairwise claim has the same two label dialects as the scalar claim (gh-ocannl-816):
   `pf_all2` formats a computed label before taking the two arrays, and `pass_fail_all2` preserves

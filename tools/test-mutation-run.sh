@@ -44,6 +44,10 @@ run_case() {
   set -e
   if [ "$actual" != "$expected" ]; then cat "$fixture/result"; echo "wrong exit: $actual != $expected"; exit 1; fi
   cmp module.ml "$fixture/pristine"
+  recovery=$(sed -n 's/^recovery: //p' "$fixture/result")
+  if [ -n "$recovery" ] && [ -d "$(dirname "$recovery")" ]; then
+    echo 'scratch directory survived a restored run'; exit 1
+  fi
   perl -e 'exit((stat($ARGV[0]))[2] & 07777 ^ 0640 ? 1 : 0)' module.ml
 }
 export PROBE_MODE=fail
@@ -79,8 +83,33 @@ printf 'PASS missing, ambiguous, overlapping, malformed and unchanged anchors re
 printf 'ANCHOR' > module.ml
 cp module.ml "$fixture/pristine"
 printf 'ANCHOR@@@MUTATED' > patch
+# Hold the fork child before resetting inherited handlers, deterministically.
+perl - tools/mutation-run.sh > tools/mutation-fork-window.sh <<'PERL'
+use strict;
+use warnings;
+local $/;
+open my $f, '<', $ARGV[0] or die $!;
+my $s = <$f>;
+my $anchor = 'if (!$child) {';
+my $delay = <<'DELAY';
+if (!$child) {
+    open my $ready, '>', "$ENV{PROBE_HOME}/ready" or exit 126;
+    close $ready;
+    sleep 60;
+DELAY
+my $at = index($s, $anchor);
+die "missing child anchor" if $at < 0;
+substr($s, $at, length($anchor), $delay);
+print $s;
+PERL
+chmod +x tools/mutation-fork-window.sh
 # Drive signals from Perl so an asynchronous shell does not inherit ignored INT.
-for signal in INT TERM HUP; do
+for signal_case in normal:INT normal:TERM normal:HUP fork:INT fork:TERM fork:HUP; do
+  signal=${signal_case#*:}
+  case $signal_case in
+    normal:*) export PROBE_RUNNER=tools/mutation-run.sh ;;
+    fork:*) export PROBE_RUNNER=tools/mutation-fork-window.sh ;;
+  esac
   rm -f "$fixture/ready"
   export PROBE_MODE=sleep
   perl - "$signal" "$fixture" <<'PERL'
@@ -93,7 +122,7 @@ die $! unless defined $pid;
 if (!$pid) {
     open STDOUT, '>', "$dir/result" or die $!;
     open STDERR, '>&', \*STDOUT or die $!;
-    exec 'tools/mutation-run.sh', 'module.ml', 'patch', '@probe';
+    exec $ENV{PROBE_RUNNER}, 'module.ml', 'patch', '@probe';
     die $!;
 }
 my $ready = 0;
@@ -109,7 +138,7 @@ PERL
   cmp module.ml "$fixture/pristine"
   grep -q '^restored: byte-identical (cmp)$' "$fixture/result"
 done
-printf 'PASS INT TERM HUP cancel and restore after test-run reaping\n'
+printf 'PASS INT TERM HUP cancel in the fork window and during test-run, then restore\n'
 export PROBE_MODE=sleep OCANNL_TOOL_TEST_CAP=1
 run_case 142
 unset OCANNL_TOOL_TEST_CAP
