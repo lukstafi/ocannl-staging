@@ -136,6 +136,16 @@ printf 'PASS multiline anchor and empty replacement use literal bytes\n'
 printf 'ANCHOR' > module.ml
 cp module.ml "$fixture/pristine"
 printf 'ANCHOR@@@MUTATED' > patch
+# Fault-inject exec failure into a scratch copy: only the parent restores.
+sed "s/exec('bash',/exec('\/no-such-mutation-run-shell',/" tools/mutation-run.sh > tools/mutation-no-shell.sh
+set +e
+bash tools/mutation-no-shell.sh module.ml patch @probe > "$fixture/result" 2>&1
+actual=$?
+set -e
+[ "$actual" = 127 ]
+cmp module.ml "$fixture/pristine"
+grep -q '^restored: byte-identical (cmp)$' "$fixture/result"
+printf 'PASS failed child exec cannot unwind into parent restoration\n'
 # A failing independent comparison must never print a restoration confirmation.
 cat > "$fixture/bin/cmp" <<'CMP'
 #!/usr/bin/env bash

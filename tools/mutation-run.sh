@@ -71,11 +71,14 @@ eval {
     defined $child or refuse("fork: $!");
     if (!$child) {
         $SIG{$_} = 'DEFAULT' for qw(INT TERM HUP);
-        open STDIN, '<', '/dev/null' or die $!;
-        open STDOUT, '>', "$scratch/transcript" or die $!;
-        open STDERR, '>&', \*STDOUT or die $!;
-        exec 'bash', 'tools/test-run.sh', 'run', 'build', '-j', '4', $alias;
-        die "exec test-run: $!";
+        # A fork child must never unwind into the parent's restoration block.
+        open STDIN, '<', '/dev/null' or exit 126;
+        open STDOUT, '>', "$scratch/transcript" or exit 126;
+        open STDERR, '>&', \*STDOUT or exit 126;
+        exec('bash', 'tools/test-run.sh', 'run', 'build', '-j', '4', $alias) or do {
+            print STDERR "exec test-run: $!\n";
+            exit 127;
+        };
     }
     kill 'TERM', $child if $cancel;
     while (1) {
