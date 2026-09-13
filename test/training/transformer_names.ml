@@ -176,7 +176,10 @@ let () =
      timing runs cannot perturb the real training state (a step timed on all-zero data inputs
      poisons parameters with inf/NaN through log 0). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
+  let tune_start = Unix.gettimeofday () in
+  eprintf "933 witness: tune start %.6f\n%!" tune_start;
   let ctx, sgd_step = Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx train_comp bindings in
+  eprintf "933 witness: tune wall %.6f seconds\n%!" (Unix.gettimeofday () -. tune_start);
 
   (* Compile inference routine *)
   Set.iter

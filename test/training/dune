@@ -425,7 +425,7 @@
 (executable
  (name transformer_names)
  (modules transformer_names)
- (libraries ocannl dataprep arrayjit.verdict training_golden)
+ (libraries ocannl dataprep arrayjit.verdict training_golden unix)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
