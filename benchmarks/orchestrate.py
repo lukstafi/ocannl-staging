@@ -447,6 +447,27 @@ def _group_observation(proc, allow_zombie_gone=False):
     return proc.observe(allow_zombie_gone=allow_zombie_gone)
 
 
+def _group_observation_after_exit(proc, settle_tries=3, settle_interval=0.05):
+    """Observe right after the leader exits, tolerating a brief accounting lag.
+
+    The POSIX census short-circuits to GONE via `os.killpg` raising `ProcessLookupError` as soon
+    as the leader is reaped with no other pgid member left -- a cheap, race-free check. Windows has
+    no equivalent fast path: a `JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.ActiveProcesses` read taken
+    the instant `communicate()` returns can transiently see a helper (e.g. a console-host process
+    still winding down) that is not actually a leftover. Unlike the kill path, which already polls
+    with a grace period before concluding survivors (`cell_group.terminate`), this read had none --
+    so an ordinary exit could be misreported as `killed=True` (ahrefs/ocannl#974). Give it the same
+    short settle window instead of concluding SURVIVORS from a single immediate read.
+    """
+    observation = _group_observation(proc)
+    for _ in range(settle_tries):
+        if observation is not cell_group.SURVIVORS:
+            break
+        time.sleep(settle_interval)
+        observation = _group_observation(proc)
+    return observation
+
+
 def _remaining_note(observation):
     if observation is cell_group.SURVIVORS:
         return "A MEMBER SURVIVED SIGKILL"
@@ -553,7 +574,7 @@ def _run_supporting(cmd, cwd, env, capture_output, check, timeout):
                     "survivors before re-running anything on this box"
                 )
         raise
-    initial = _group_observation(proc)
+    initial = _group_observation_after_exit(proc)
     if initial is not cell_group.GONE:
         # Same reason as a cell's leftover sweep: `communicate` returned because the LEADER
         # exited, and a build's compiler worker or a probe's framework helper can outlive it
@@ -652,7 +673,7 @@ def _run_cell(label, cmd, env, cwd, timeout, on_incomplete):
     stdout = stdout or ""
     leftovers = ""
     stuck = cell_group.GONE
-    initial = _group_observation(proc)
+    initial = _group_observation_after_exit(proc)
     if not timed_out and initial is not cell_group.GONE:
         # The cell is done and something it spawned is not. `communicate` returned because the
         # LEADER exited and the pipe closed, which says nothing about a worker that redirected
