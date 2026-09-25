@@ -66,6 +66,16 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   asm volatile("cp.async.wait_all;" : : : "memory");
 }|},
       [] );
+    (* The coordinate table of the wmma converted [d] boundary (gh-ocannl-925,
+       [Cuda_backend.wmma_d_boundary_lines]): entry [16 * row + col] holds that number, so a 16x16
+       float accumulator fragment [load_matrix_sync]ed from it names, per lane and element, the
+       matrix coordinate the fragment type keeps there. 32-byte alignment is [load_matrix_sync]'s
+       pointer requirement. *)
+    ( "ocannl_wmma_rc16",
+      "__device__ __align__(32) float ocannl_wmma_rc16[256] = {"
+      ^ String.concat ", " (List.init 256 (Printf.sprintf "%d.f"))
+      ^ "};",
+      [] );
     ("int32x4_t", {|typedef struct { int v[4]; } int32x4_t;|}, []);
     ("int64x2_t", {|typedef struct { long long v[2]; } int64x2_t;|}, []);
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);

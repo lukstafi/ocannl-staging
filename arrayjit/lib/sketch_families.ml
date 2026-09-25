@@ -212,11 +212,12 @@ let mma_format_triples ~a_prec ~b_prec ~d_prec =
 
 (* gh-ocannl-680/836: under [Numerics.Fp16_wide] an f16-storage destination may tensorize only in an
    emission scope where the backend's uniform-f16 arm accumulates f32. CUDA sm_80+ supports the
-   per-statement inline-PTX m16n8k16 scope but not the persistent-fragment scope; HIP's converted
-   rocWMMA d boundary supports both since gh-ocannl-789, and Metal's converted [thread_elements()]
-   boundary supports both since gh-ocannl-837. Consulting the scope list here keeps a staged outer-k
-   split from acquiring an extra f16 boundary merely because the same intrinsic is wide over its
-   inner tile.
+   per-statement inline-PTX m16n8k16 scope and, since gh-ocannl-925, the persistent-fragment scope
+   through wmma f32 fragments and a table-addressed converted d boundary; HIP's converted rocWMMA d
+   boundary supports both since gh-ocannl-789, and Metal's converted [thread_elements()] boundary
+   supports both since gh-ocannl-837. Consulting the scope list here keeps a staged outer-k split
+   from acquiring an extra f16 boundary merely because the same intrinsic is wide over its inner
+   tile.
 
    gh-ocannl-838: [Numerics.Bf16_wide] asks the same question of a bf16-storage destination, against
    [mma_bf16_wide_acc_scopes] — HIP's converted rocWMMA boundary serves both scopes, CUDA's

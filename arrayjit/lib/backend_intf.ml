@@ -97,14 +97,15 @@ type mma_capability = {
           with f16 operands — holds the accumulator in f32 and converts once at that scope's [d]
           boundary, as {!Numerics.Fp16_wide} requires (gh-ocannl-680, gh-ocannl-836).
 
-          CUDA sm_80+ advertises only {!Mma_per_statement}: its inline-PTX [mma.sync.m16n8k16] arm
-          is wide, but [nvcuda::wmma] has no uniform-f16 wide fragment arm, so staged seeds that
-          would require {!Mma_fragment_scope} are withheld. HIP advertises both scopes since
-          gh-ocannl-789 (rocWMMA's [(f16, f16, f32)] fragments and converted boundary), and Metal
-          advertises both since gh-ocannl-837 (mixed-type [simdgroup_multiply_accumulate] plus a
-          [thread_elements()] boundary copy). Withholding only the unsupported scope preserves legal
-          tensorized schedules without letting an outer [k] split introduce extra f16 narrowing
-          boundaries. *)
+          CUDA sm_80+ advertises both: {!Mma_per_statement} through its inline-PTX
+          [mma.sync.m16n8k16] arm, and {!Mma_fragment_scope} since gh-ocannl-925 through
+          [nvcuda::wmma] [float] accumulator fragments whose f16 [d] crosses a converted boundary
+          addressed by a coordinate table (wmma's element order is unspecified, so no fragment-to-
+          fragment copy). HIP advertises both scopes since gh-ocannl-789 (rocWMMA's
+          [(f16, f16, f32)] fragments and converted boundary), and Metal advertises both since
+          gh-ocannl-837 (mixed-type [simdgroup_multiply_accumulate] plus a [thread_elements()]
+          boundary copy). Withholding only the unsupported scope preserves legal tensorized
+          schedules without letting an outer [k] split introduce extra f16 narrowing boundaries. *)
   mma_bf16_wide_acc_scopes : mma_emission_scope list;
       (** The bf16 twin of {!mma_f16_wide_acc_scopes}: the emission scopes in which the backend's
           uniform-bf16 arm holds the accumulator in f32 and converts once at that scope's [d]

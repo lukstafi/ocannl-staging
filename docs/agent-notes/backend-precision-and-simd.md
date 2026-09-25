@@ -540,18 +540,17 @@ files.
   old-style `false` now REQUESTS strict wide) gives f16 accumulators f32 residency on every
   backend, `narrow_compute_f32=false` included: each backend's `accum_prec` widens `Half`, and the
   mma story is per-EMISSION-SCOPE all-or-nothing (gh-ocannl-545, gh-ocannl-836), through the
-  `Numerics.fp16_accum_wide` policy predicate and the backend capability's scope list. CUDA sm_80+
-  stays tensorized only in the per-statement scope:
-  the uniform-f16 combination routes to the f32-accumulate inline-PTX m16n8k16 arm (the bf16
-  uniform arm's body parameterized by `mma16_spellings` — the PTX fragment layouts are shared by
-  .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its f16-accumulate
-  wmma combo is gated off. Its persistent-fragment scope has no corresponding wide arm —
-  `wmma_combo` cannot load/store an f16 destination through an f32 accumulator fragment — so
-  `mma_f16_wide_acc_scopes = [Mma_per_statement]` preserves only candidates whose emitted
-  accumulator has no enclosing reduction loop with extent greater than one. That includes the
-  unstaged rank-2 forms and a staged matmul whose padded k-block count is one; a multi-axis matmul's
-  inherited contraction loops, a multi-block staged matmul, and a multi-window convolution require
-  `Mma_fragment_scope`. A detected convolution with only extent-one kernel-window loops likewise
+  `Numerics.fp16_accum_wide` policy predicate and the backend capability's scope list. On CUDA
+  sm_80+ the per-statement uniform-f16 statement routes to the f32-accumulate inline-PTX m16n8k16
+  arm (the bf16 uniform arm's body parameterized by `mma16_spellings` — the PTX fragment layouts
+  are shared by .f16/.bf16; marker `(mma-f16)`, arch floor 80 in `gpu_arch_options`), and its
+  f16-accumulate wmma combo is gated off. The persistent-fragment scope is wmma's `__half` x
+  `__half` -> `float` fragments behind a converted `d` boundary since gh-ocannl-925 (the
+  `wmma-f16-wide` combo, `wc_d_cvt`; see the coordinate-table bullet below); before it the list
+  was `[Mma_per_statement]`, which kept only candidates whose emitted accumulator has no enclosing
+  reduction loop with extent greater than one. That includes the unstaged rank-2 forms and a staged
+  matmul whose padded k-block count is one; a multi-axis matmul's inherited contraction loops, a
+  multi-block staged matmul, and a multi-window convolution require `Mma_fragment_scope`. A detected convolution with only extent-one kernel-window loops likewise
   resolves per-statement, though today's affine-fingerprint detector does not recognize a fully
   degenerate 1x1 convolution after lowering erases those loops. Before gh-ocannl-836 the scope-blind
   boolean admitted both scopes: a
@@ -566,7 +565,8 @@ files.
   scope from the actual outer reduction extents rather than from whether operands happen to be
   staged. Placement enablement applies the same resolver to its unstaged eligibility gate, so a
   device with no applicable wide scope cannot spend its placement budget unlocking an empty
-  family. Thus CUDA alone trades multi-statement legs under the wide policy. `auto`
+  family. Since gh-ocannl-925 no tensor-core backend trades multi-statement f16 legs under the wide
+  policy (CUDA below sm_80 advertises no wide scope at all). `auto`
   deliberately RETAINS LATITUDE to later resolve wide on hardware where wide f16 accumulate is
   free (datacenter NVIDIA runs f32-accumulate f16 mma at full rate; GeForce halves it) — do not
   write code or tests assuming `auto ≡ narrow` as a contract; `accum_width.ml`'s default-policy
@@ -581,7 +581,22 @@ files.
   profile pins `fp16_arithmetic=auto` (the default, so the profile still changes no math); the
   performance profile keeps `true`. The CUDA `(mma-f16)` per-statement arm and the scope-boundary
   discriminator were executed on sm_120 by gh-ocannl-836; HIP's two-scope arm was closed by
-  gh-ocannl-789.
+  gh-ocannl-789, CUDA's by gh-ocannl-925 (sm_120: the staged k=144 leg reads 2056, and 2048 with the
+  wmma arm disabled).
+- **A wmma fragment's element order is not a contract, so a converted `d` boundary reads it from
+  the fragment type itself** (gh-ocannl-925, `Cuda_backend.wmma_d_boundary_lines`). HIP and Metal
+  convert by copying `x[i]` between an f32 and an f16 fragment, which assumes the two types place
+  element `i` at the same coordinate; for `nvcuda::wmma` the programming guide calls the mapping
+  unspecified and subject to change, so a copy that validates on one GPU proves nothing about the
+  next. Instead each lane `load_matrix_sync`s the builtin table `ocannl_wmma_rc16` (entry
+  `16*row+col` holds that number) into a fragment of the accumulator's own type, then moves each
+  element to or from `d[row][col]` with a scalar conversion. That relies only on `load_matrix_sync`'s
+  contract and on the position being fixed per type and lane, which `mma_sync` needs anyway. The
+  f32 `d` does not need the trick: it loads the float fragment directly. Pair the value claim with a
+  structure claim (no `load_matrix_sync(__mma_fragment_`, no `store_matrix_sync(__mma_dp`, no
+  `mma.sync.aligned`), because a per-`k_o` PTX rendering also computes in f32 within each block.
+  The bf16 twin (`mma_bf16_wide_acc_scopes`' fragment scope, over wmma's bf16 -> f32 fragments) is
+  the same boundary with `__bfloat162float`/`__float2bfloat16` and has not been written.
 - **bf16 residency is the ternary `bf16_arithmetic` policy's question** (gh-ocannl-838), the same
   shape as `fp16_arithmetic`: `Numerics.bf16_mode`, `Numerics.bf16_accum_wide`, and a per-format
   capability list `mma_bf16_wide_acc_scopes` read by the same seeding gate

@@ -606,11 +606,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           (** Convert loaded a/b fragment elements with [__float_to_tf32]: tf32 fragments load raw
               f32 bits, the explicit conversion performs the mantissa truncation (per the CUDA
               programming guide; the intrinsic requires already-converted inputs). *)
+      wc_d_cvt : (string * string) option;
+          (** The [(widen, narrow)] conversions of a destination whose storage type is not the
+              accumulator fragment's — the wide-f16 arm, gh-ocannl-925. [None]: [d] loads and stores
+              through [load_matrix_sync]/[store_matrix_sync] directly. [Some]: it crosses the
+              fragment boundary element by element, see [wmma_d_boundary_lines]. *)
     }
 
     let wmma_combo ~a_prec ~b_prec ~d_prec =
-      let mk ?(tile = (16, 16, 16)) ?(marker = "") ?(cvt_tf32 = false) ab_typ acc_typ ab_ld d_ld cc
-          =
+      let mk ?(tile = (16, 16, 16)) ?(marker = "") ?(cvt_tf32 = false) ?d_cvt ab_typ acc_typ ab_ld
+          d_ld cc =
         let wc_tm, wc_tn, wc_tk = tile in
         Some
           {
@@ -624,6 +629,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             wc_min_cc = cc;
             wc_marker = marker;
             wc_cvt_tf32 = cvt_tf32;
+            wc_d_cvt = d_cvt;
           }
       in
       match (a_prec, b_prec, d_prec) with
@@ -634,6 +640,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          width-uniform either way. *)
       | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ when not (Numerics.fp16_accum_wide ()) ->
           mk "__half" "__half" 8 8 70
+      (* gh-ocannl-925: the wide uniform-f16 combination — the f16 x f16 -> f32 fragments above over
+         an f16 STORAGE destination, converted once at the [d] boundary by [wmma_d_boundary_lines].
+         That boundary is element-wise, so [d] has no wmma stride constraint. Only the fragment
+         scope renders it: a per-statement statement takes the inline-PTX m16n8k16 arm, whose
+         conditions this arm's imply (see [mma_syntax]). sm_80+ like that arm, the floor the
+         capability's [mma_f16_wide_acc_scopes] is verified at. *)
+      | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+          mk ~marker:"-f16-wide" ~d_cvt:("__half2float", "__float2half") "__half" "float" 8 1 80
       | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
           mk ~marker:"-bf16" "__nv_bfloat16" "float" 8 4 80
       | Ops.Single_prec _, Ops.Single_prec _, Ops.Single_prec _
@@ -644,6 +658,49 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           mk ~tile:(16, 16, 8) ~marker:"-tf32" ~cvt_tf32:true "nvcuda::wmma::precision::tf32"
             "float" 4 4 80
       | _ -> None
+
+    (* The converted [d] boundary of a wmma accumulator-fragment array whose element type is not the
+       destination's storage type (gh-ocannl-925, [wc_d_cvt]): [`Load] fills [frag][__mi][__ni] from
+       the [mt] x [nt] 16x16 tiles of [__mma_dp] widened, [`Store] writes them back narrowed.
+
+       NOT the HIP/Metal element copy through a same-shaped fragment of the destination type. That
+       copy assumes the [float] and [__half] accumulator fragments place element [x[i]] at the same
+       matrix coordinate, and for [nvcuda::wmma] nothing says so: the CUDA programming guide calls
+       the mapping of matrix elements to fragment storage unspecified and subject to change across
+       architectures, and the PTX ISA leaves the [wmma] fragment layouts opaque too. An element copy
+       that happens to validate on one device is evidence about that device's compiler only. So the
+       coordinates are read from the ACCUMULATOR FRAGMENT TYPE ITSELF: each lane [load_matrix_sync]s
+       the row-major table [ocannl_wmma_rc16] (entry [16 * row + col] holds that very number, exact
+       in f32) into a fragment of exactly [frag]'s type, after which [x[i]] of that fragment names
+       the (row, col) that [x[i]] of every fragment of that type holds. What this relies on is only
+       [load_matrix_sync]'s documented contract (element (row, col) of the described matrix lands at
+       the fragment position representing (row, col)) plus the fact that the position is a property
+       of the type and lane, not of the data or of the call — which [mma_sync] itself requires,
+       being one instruction sequence however its operands were loaded. If an element were held by
+       several lanes, [`Store] would have each write the same value to the same cell. The table
+       costs one extra cached fragment load per boundary, twice per fragment scope. *)
+    let wmma_d_boundary_lines ~dir ~acc_frag ~frag ~widen ~narrow ~ldd ~mt ~nt =
+      let cell =
+        Printf.sprintf "__mma_dp[(__mi * 16 + (__rc >> 4)) * %d + __ni * 16 + (__rc & 15)]" ldd
+      in
+      let elt = Printf.sprintf "%s[__mi][__ni].x[__t]" frag in
+      [
+        "{ /* wmma converted d boundary: coordinates from ocannl_wmma_rc16 */";
+        Printf.sprintf "  %s __mma_rc;" acc_frag;
+        "  nvcuda::wmma::load_matrix_sync(__mma_rc, ocannl_wmma_rc16, 16, \
+         nvcuda::wmma::mem_row_major);";
+        Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+        Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+        "      for (int __t = 0; __t < __mma_rc.num_elements; ++__t) {";
+        "        const int __rc = (int)__mma_rc.x[__t];";
+        (match dir with
+        | `Load -> Printf.sprintf "        %s = %s(%s);" elt widen cell
+        | `Store -> Printf.sprintf "        %s = %s(%s);" cell narrow elt);
+        "      }";
+        "    }";
+        "  }";
+        "}";
+      ]
 
     (* Tensorize-mma T3: cooperative tile-MMA emission for [Low_level.Tile_mma]. Two renderings:
 
@@ -1138,6 +1195,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   wc_min_cc = min_cc;
                   wc_marker = marker;
                   wc_cvt_tf32 = cvt_tf32;
+                  wc_d_cvt = d_cvt;
                 } -> (
                 let open PPrint in
                 let mt = m / wc_tm and nt = n / wc_tn and kt = k / wc_tk in
@@ -1250,7 +1308,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                                 n k marker)
                           ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
                           ^^ hardline ^^ rbrace))
-                | _ when ab_ok && ldd % d_ld_mult = 0 && loadable d_space ->
+                (* A converted destination (gh-ocannl-925) renders only against the fragment array
+                   above. Self-contained, it would be the per-statement wide-f16 form, which the
+                   inline-PTX m16n8k16 arm owns — and accepts whenever this arm's own conditions
+                   hold — so this rendering declines rather than add an unreached one. *)
+                | _ when ab_ok && Option.is_none d_cvt && ldd % d_ld_mult = 0 && loadable d_space ->
                     let body_lines =
                       [
                         barrier;
@@ -1339,6 +1401,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 wc_ab_ld_mult = ab_ld_mult;
                 wc_d_ld_mult = d_ld_mult;
                 wc_min_cc = min_cc;
+                wc_d_cvt = d_cvt;
                 _;
               }
             when m % wc_tm = 0
@@ -1359,34 +1422,39 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               (* Bracketing barriers: sibling statements (the zeroing of [d], cooperative staging)
                  execute lane-partitioned, so the fragment loads must observe the other lanes'
                  writes, and later statements the stores. *)
+              (* The [d] boundary: the fragment array's own loads and stores, or — for a
+                 destination whose storage type is not the accumulator's (gh-ocannl-925) — the
+                 element-wise conversion through the layout-independent coordinate table. *)
+              let boundary dir =
+                match d_cvt with
+                | Some (widen, narrow) ->
+                    wmma_d_boundary_lines ~dir ~acc_frag ~frag:fragment ~widen ~narrow ~ldd ~mt ~nt
+                | None ->
+                    [
+                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      (match dir with
+                      | `Load ->
+                          Printf.sprintf
+                            "    nvcuda::wmma::load_matrix_sync(%s[__mi][__ni], __mma_dp + __mi * \
+                             %d * %d + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
+                            fragment wc_tm ldd wc_tn ldd
+                      | `Store ->
+                          Printf.sprintf
+                            "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni \
+                             * %d, %s[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
+                            wc_tm ldd wc_tn fragment ldd);
+                      "  }";
+                      "}";
+                    ]
+              in
               let lines_before =
-                [
-                  barrier;
-                  Printf.sprintf "%s %s[%d][%d];" acc_frag fragment mt nt;
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    nvcuda::wmma::load_matrix_sync(%s[__mi][__ni], __mma_dp + __mi * %d * %d \
-                     + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
-                    fragment wc_tm ldd wc_tn ldd;
-                  "  }";
-                  "}";
-                  "/* wmma fragment reduction body begins */";
-                ]
+                [ barrier; Printf.sprintf "%s %s[%d][%d];" acc_frag fragment mt nt ]
+                @ boundary `Load
+                @ [ "/* wmma fragment reduction body begins */" ]
               in
               let lines_after =
-                [
-                  "/* wmma fragment reduction body ends */";
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
-                     %s[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
-                    wc_tm ldd wc_tn fragment ldd;
-                  "  }";
-                  "}";
-                  barrier;
-                ]
+                ("/* wmma fragment reduction body ends */" :: boundary `Store) @ [ barrier ]
               in
               let d_decl =
                 string (Printf.sprintf "%s *__mma_dp = " (typ_of_prec d_prec)) ^^ d_ptr ^^ semi
@@ -1850,18 +1918,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                        through the f32-accumulate inline-PTX m16n8k16 arm (sm_80+, sharing the bf16
                        form's body). The advertised (16, 16, 16) tile stays valid for it — its
                        divisibility constraints (m%16, n%8, k%16) are implied — merely conservative
-                       about n. The scope list contains only [Mma_per_statement]: CUDA's wmma
-                       combination table has no uniform-f16 wide fragment arm, so a staged outer-k
-                       split must not inherit this inner tile's capability (gh-ocannl-836). Below
-                       sm_80 the arm cannot render and the list is empty, withholding every
-                       uniform-f16 candidate under the wide policy instead of timing scalar
-                       fallbacks under a tensorized label (gh-ocannl-545). *)
+                       about n. The fragment scope renders through wmma instead: f16 x f16 -> f32
+                       accumulator fragments resident across the outer k, converting the f16 [d]
+                       once at each end through [wmma_d_boundary_lines] (gh-ocannl-925; before it,
+                       the list held only [Mma_per_statement] and staged seeds were withheld,
+                       gh-ocannl-836). Below sm_80 the arm cannot render and the list is empty,
+                       withholding every uniform-f16 candidate under the wide policy instead of
+                       timing scalar fallbacks under a tensorized label (gh-ocannl-545). *)
                     mma_f16_wide_acc_scopes =
-                      (if cc >= 80 then [ Backend_intf.Mma_per_statement ] else []);
+                      (if cc >= 80 then
+                         [ Backend_intf.Mma_per_statement; Backend_intf.Mma_fragment_scope ]
+                       else []);
                     (* gh-ocannl-838: the uniform-bf16 key is the same inline-PTX arm, f32 in
                        hardware whatever the policy, so [Numerics.Bf16_wide] changes no rendering
-                       here — but, exactly as for f16, a staged outer-k split would store bf16 at
-                       every block boundary, so the fragment scope is absent. *)
+                       here — but a staged outer-k split would store bf16 at every block boundary,
+                       so the fragment scope is absent: wmma's bf16 x bf16 -> f32 fragments could
+                       carry it behind the same converted boundary as the f16 arm, but that arm is
+                       not written yet. *)
                     mma_bf16_wide_acc_scopes =
                       (if cc >= 80 then [ Backend_intf.Mma_per_statement ] else []);
                     (* Swizzled staged tiles (gh-ocannl-481 item 3, D3): only the inline-PTX arms
