@@ -97,8 +97,9 @@
 #  48. hip on a small SDMA pool (minix's recorded topology) and on a larger one
 #      (tuf's) is capped at that box's per-slot width, announced and recorded;
 #      cuda on a native NVIDIA boot is capped at its own, and so is a CPU
-#      backend on the fleet's rog-nv-linux (a faked FLEET_SLOT_STATE naming
-#      it; gh-ocannl-1065), with the `execution slot --cpu` note.
+#      backend on the fleet's rog-nv-linux (named by a faked FLEET_LOCAL_BOX,
+#      or by the hostname through FLEET_HOSTNAME_MAP; gh-ocannl-1065), with
+#      the `execution slot --cpu` note.
 #  49. negative controls: no KFD topology, a GPU node that reports no pool, a
 #      CPU backend on each AMD hazard, on an NVIDIA box that is not the
 #      fleet's rog and on a WSL boot of rog, and each GPU backend on the other
@@ -108,7 +109,8 @@
 #  51. with OCANNL_BACKEND unset on a native AMD hazard, the run is not capped
 #      and the caller is told the backend's width; on the fleet's native rog,
 #      where every backend it runs meets one width, that width is injected
-#      (unless an AMD GPU sits beside it); on another NVIDIA box it is advised.
+#      (beside an AMD GPU only where hip's width is the same); on another
+#      NVIDIA box it is advised.
 #  52. the native widths derive from one place: each hip cap is its measured
 #      budget over its slot count, and the numbers are the measured ones.
 
@@ -2316,14 +2318,15 @@ kfd_cpu_node "$kfd_nopool/0"; kfd_node "$kfd_nopool/1" 80 0 6
 rm -rf "$kfd_absent"
 nv_present=$TMP/fake-nvidiactl
 nv_absent=$TMP/fake-nvidiactl-absent
-# The fleet's slot-lock state (lukstafi/ludics-lite's FLEET_SLOT_STATE): one
-# that records rog-nv-linux's slots, and one that does not -- an NVIDIA box
-# that is not the fleet's rog. Every native probe pins one of them, so the
-# harness never reads the real one on the box it runs on.
-fleet_rog=$TMP/fake-fleet-rog
-fleet_none=$TMP/fake-fleet-none
-mkdir -p "$fleet_rog/rog-nv-linux" "$fleet_none/mac-studio"
+# The fleet's name for this box (lukstafi/ludics-lite's FLEET_LOCAL_BOX): rog,
+# or another fleet box -- an NVIDIA machine that is not the fleet's rog. Every
+# native probe pins one, so the harness never reads the name of the box it
+# runs on; an empty one leaves FLEET_LOCAL_BOX unset, for the hostname legs,
+# which pin FLEET_HOSTNAME_MAP (native_map) instead.
+fleet_rog=rog-nv-linux
+fleet_none=mac-studio
 native_fleet=$fleet_none
+native_map=
 : >"$nv_present"
 rm -f "$nv_absent"
 if [ ! -f "$kfd_small/1/properties" ] || [ -e "$kfd_absent" ] ||
@@ -2347,10 +2350,11 @@ native_probe() { # tag dxg kfd nvidia backend subcommand [argv...]
   local tag=$1 dxg=$2 kfd=$3 nv=$4 backend=$5
   shift 5
   export OCANNL_TOOL_DXG_DEVICE=$dxg OCANNL_TOOL_KFD_TOPOLOGY=$kfd OCANNL_TOOL_NVIDIA_DEVICE=$nv
-  export FLEET_SLOT_STATE=$native_fleet
+  if [ -n "$native_fleet" ]; then export FLEET_LOCAL_BOX=$native_fleet; else unset FLEET_LOCAL_BOX; fi
+  if [ -n "$native_map" ]; then export FLEET_HOSTNAME_MAP=$native_map; else unset FLEET_HOSTNAME_MAP; fi
   if [ -n "$backend" ]; then export OCANNL_BACKEND=$backend; else unset OCANNL_BACKEND; fi
   argv_probe "$tag" "$@"
-  unset OCANNL_TOOL_DXG_DEVICE OCANNL_TOOL_KFD_TOPOLOGY OCANNL_TOOL_NVIDIA_DEVICE OCANNL_BACKEND FLEET_SLOT_STATE
+  unset OCANNL_TOOL_DXG_DEVICE OCANNL_TOOL_KFD_TOPOLOGY OCANNL_TOOL_NVIDIA_DEVICE OCANNL_BACKEND FLEET_LOCAL_BOX FLEET_HOSTNAME_MAP
 }
 
 # Leg 48: the injection on each native hazard, in the four places the dxg leg
@@ -2378,6 +2382,17 @@ for probe in "sdma:$kfd_small:$nv_absent:hip:4:SDMA" \
   { [ -n "$argv_dir" ] && grep -q -- "-j $want" "$argv_dir/cmd"; } ||
     { native_detail="$tag: the recorded command does not carry the cap: $(cat "$argv_dir/cmd" 2>/dev/null)"; break; }
 done
+# The hostname path of the fleet's identity rule: with FLEET_LOCAL_BOX unset, a
+# map whose glob matches any host names it rog, and one matching none does not.
+native_fleet=
+for probe in "*=rog-nv-linux:build -j 8 @cheap" "no-such-host-*=rog-nv-linux:build @cheap"; do
+  [ -z "$native_detail" ] || break
+  native_map=${probe%%:*}
+  native_probe native-hostname "$dxg_absent" "$kfd_absent" "$nv_present" cc run build @cheap
+  [ "$argv_rc" = 0 ] && [ "$argv_calls" = "${probe#*:}" ] ||
+    native_detail="hostname map '$native_map': exit $argv_rc; calls: ${argv_calls:-<none>} (want ${probe#*:})"
+done
+native_map=
 native_fleet=$fleet_none
 if [ -z "$native_detail" ]; then
   report 0 "native: hip on a small or a larger SDMA pool, and cuda and cc on a native NVIDIA boot, are capped, announced and recorded"
@@ -2464,7 +2479,7 @@ native_detail=
 for probe in "sdma:$kfd_small:$nv_absent:$fleet_none:if it is hip, pass -j 4 yourself" \
              "wide-sdma:$kfd_large:$nv_absent:$fleet_none:if it is hip, pass -j 8 yourself" \
              "nvidia:$kfd_absent:$nv_present:$fleet_none:if it is cuda, pass -j 8 yourself" \
-             "nvidia-beside-amd:$kfd_small:$nv_present:$fleet_rog:if it is cuda, pass -j 8 yourself"; do
+             "nvidia-beside-small-amd:$kfd_small:$nv_present:$fleet_rog:if it is cuda, pass -j 8 yourself"; do
   IFS=: read -r tag kfd nv native_fleet want <<<"$probe"
   native_probe "native-unset-$tag" "$dxg_absent" "$kfd" "$nv" "" run build @cheap
   if [ "$argv_rc" != 0 ] || [ "$argv_calls" != "build @cheap" ]; then
@@ -2481,6 +2496,13 @@ for probe in "sdma:$kfd_small:$nv_absent:$fleet_none:if it is hip, pass -j 4 you
   fi
 done
 native_fleet=$fleet_rog
+# Beside an AMD GPU whose hip width is the same 8 (tuf's wider pool), every
+# backend still meets one width, so the cap is injected there too.
+if [ -z "$native_detail" ]; then
+  native_probe native-unset-nvidia-beside-wide-amd "$dxg_absent" "$kfd_large" "$nv_present" "" run build @cheap
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build -j 8 @cheap" ]; } ||
+    native_detail="nvidia beside a wide pool: exit $argv_rc; calls: ${argv_calls:-<none>} (want build -j 8 @cheap)"
+fi
 if [ -z "$native_detail" ]; then
   native_probe native-unset-nvidia "$dxg_absent" "$kfd_absent" "$nv_present" "" run build @cheap
   { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build -j 8 @cheap" ]; } ||

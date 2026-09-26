@@ -187,20 +187,33 @@ box_jobs_native_nvidia_host() { # 0 iff this is a native NVIDIA boot
   [ -e "$(box_jobs_nvidia_device)" ]
 }
 
-# Third, whether this is the fleet's rog-nv-linux: the directory that
-# lukstafi/ludics-lite's `fleet-worker.sh execution slot` keeps rog's slot
-# locks in, resolved as the fleet resolves it (FLEET_SLOT_STATE, a leading
-# literal `$HOME` expanded, defaulting to ~/.local/state/fleet-execution-slots)
-# and named by the fleet's canonical box name. It exists once a batch has taken
-# a slot there, so it is present exactly where the fleet's four slots run.
-box_jobs_fleet_rog_dir() {
-  local state=${FLEET_SLOT_STATE:-'$HOME/.local/state/fleet-execution-slots'}
-  case $state in '$HOME'/*) state="$HOME/${state#\$HOME/}" ;; esac
-  printf '%s/rog-nv-linux' "$state"
+# Third, whether this is the fleet's rog-nv-linux, by the fleet's own
+# identity rule (lukstafi/ludics-lite's fleet-worker.sh `detect_local_box`):
+# FLEET_LOCAL_BOX when it is set, otherwise the lowercased short hostname
+# against FLEET_HOSTNAME_MAP's `<glob>=<box>` pairs, first match wins. Where
+# that map is unset only its rog entries are restated here -- the one answer
+# this file asks for is whether the box is rog-nv-linux. It is the machine's
+# name, not the slot state the fleet keeps, which a box has before its first
+# slot and keeps across a cleanup.
+box_jobs_fleet_box() { # prints this host's fleet name, or nothing
+  local host pair
+  local -a pairs=()
+  if [ -n "${FLEET_LOCAL_BOX+x}" ]; then
+    printf '%s' "$FLEET_LOCAL_BOX"
+    return 0
+  fi
+  host=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  [ -n "$host" ] || return 0
+  read -r -d '' -a pairs <<<"${FLEET_HOSTNAME_MAP:-rog-nv*=rog-nv-linux rog=rog-nv-linux}" || :
+  for pair in "${pairs[@]}"; do
+    # shellcheck disable=SC2254  # the map's keys are globs by design
+    case $host in ${pair%%=*}) printf '%s' "${pair#*=}"; return 0 ;; esac
+  done
+  return 0
 }
 
 box_jobs_fleet_rog_host() { # 0 iff this is the fleet's rog-nv-linux, natively booted
-  box_jobs_native_nvidia_host && [ -d "$(box_jobs_fleet_rog_dir)" ]
+  box_jobs_native_nvidia_host && [ "$(box_jobs_fleet_box)" = rog-nv-linux ]
 }
 
 # How many correctness batches the fleet runs at once on each native GPU box
@@ -261,7 +274,7 @@ BOX_JOBS_WIDE_SDMA_SLOT_CAP=$((BOX_JOBS_WIDE_SDMA_BUDGET / BOX_JOBS_WIDE_SDMA_SL
 # uncapped four cc batches would run 96 jobs on 24 cores. `-j 8` keeps the
 # four slots at the 32 jobs the two-and-two rungs ran, whatever the mix.
 # Unlike the GPU caps this is not a device hazard but the fleet's slot
-# policy, so it is keyed on the fleet's own record of rog's slots
+# policy, so it is keyed on the fleet's own name for the box
 # (box_jobs_fleet_rog_host below), never on the NVIDIA device alone: an
 # unrelated NVIDIA workstation keeps its CPU batches at full width.
 # shellcheck disable=SC2034  # read by tools/test-run.sh, which sources this file
@@ -320,15 +333,17 @@ box_jobs_local_cap() { # <backend>; prints the cap, or nothing
 # one -- so that a caller who cannot read the backend (OCANNL_BACKEND unset)
 # still gets it, because then it is not a guess. Only the fleet's native
 # rog-nv-linux qualifies: it runs cuda and the CPU backends and caps both at
-# -j 8 -- unless an AMD GPU beside it would give hip a width of its own.
+# -j 8 -- and should an AMD GPU sit beside it, only while hip's width there
+# is the same one.
 # Elsewhere a CPU batch is uncapped while a GPU one is not, so the width
 # depends on the backend and is only advised.
 box_jobs_local_uniform_cap() { # prints that cap, or nothing
-  local gpu cpu
+  local gpu cpu hip
   box_jobs_fleet_rog_host || return 0
-  [ -z "$(box_jobs_local_hazard hip)" ] || return 0
   gpu=$(box_jobs_local_cap cuda)
   cpu=$(box_jobs_local_cap cc)
-  [ -n "$gpu" ] && [ "$gpu" = "$cpu" ] && printf '%s' "$gpu"
-  return 0
+  hip=$(box_jobs_local_cap hip)
+  [ -n "$gpu" ] && [ "$gpu" = "$cpu" ] || return 0
+  [ -z "$hip" ] || [ "$hip" = "$gpu" ] || return 0
+  printf '%s' "$gpu"
 }

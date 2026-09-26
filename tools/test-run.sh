@@ -239,9 +239,8 @@ hazard_found() { # <hazard> <backend>
     nvidia) printf 'This is a native NVIDIA boot
   (%s) and OCANNL_BACKEND=%s holds its GPU' "$(box_jobs_nvidia_device)" "$2" ;;
     nvidia-cpu) printf 'This is the fleet'"'"'s rog-nv-linux, natively booted
-  (%s; its slot locks are %s), and OCANNL_BACKEND=%s shares its correctness
-  slots with the batches that hold the GPU' "$(box_jobs_nvidia_device)" \
-      "$(box_jobs_fleet_rog_dir)" "$2" ;;
+  (%s), and OCANNL_BACKEND=%s shares its correctness slots with the batches
+  that hold the GPU' "$(box_jobs_nvidia_device)" "$2" ;;
   esac
 }
 hazard_why() { # <hazard>
@@ -308,8 +307,7 @@ plan_width_cap() { # dune argv
     if [ -n "$cap" ]; then
       width_cap=$cap
       width_announce="capping dune at -j $cap. This is the fleet's rog-nv-linux, natively
-  booted ($(box_jobs_nvidia_device); its slot locks are $(box_jobs_fleet_rog_dir)),
-  where cuda and the CPU backends alike run at -j $cap
+  booted ($(box_jobs_nvidia_device)), where cuda and the CPU backends alike run at -j $cap
   (tools/box-jobs.sh; gh-ocannl-1033, gh-ocannl-1065). OCANNL_BACKEND is unset
   here, so this run's backend comes from ocannl_config or the stanza and cannot
   be read from a launcher, but whichever it is, this is its width. A batch that

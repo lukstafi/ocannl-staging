@@ -2250,9 +2250,10 @@ that they earn a lookup rather than always-loaded space.
   rog's `BOX_JOBS_NATIVE_CUDA_TOKENS` with its `FLEET_BOX_GPU_TOKENS`. On rog a CPU batch is
   capped too, at `BOX_JOBS_NATIVE_CPU_CAP` (`-j 8`, the only width cc ran at in those rungs;
   gh-ocannl-1065): four uncapped cc batches would run 96 jobs on 24 cores. That cap is fleet
-  policy, not a device hazard, so it is keyed on the fleet's slot-lock directory for rog
-  (`$FLEET_SLOT_STATE/rog-nv-linux`, default under `~/.local/state/fleet-execution-slots`) beside
-  `/dev/nvidiactl`, never on the device alone: any other NVIDIA machine, and every other box, keeps
+  policy, not a device hazard, so it is keyed on the fleet's own name for the box —
+  `FLEET_LOCAL_BOX`, else the hostname through `FLEET_HOSTNAME_MAP` (default: `rog-nv*`, `rog`),
+  the rule fleet-worker.sh's `detect_local_box` applies — beside `/dev/nvidiactl`, never on the
+  device alone: any other NVIDIA machine, and every other box, keeps
   CPU batches uncapped. An explicit `-j` still wins, and only says the cap exists, and an unset
   `OCANNL_BACKEND` is reported with the width to pass rather than guessed, as for dxg — except
   on the fleet's native rog, where cuda and the CPU backends share one width, so the unread backend
@@ -2264,7 +2265,8 @@ that they earn a lookup rather than always-loaded space.
   `ocamlopt` processes, per `_build/trace.csexp`, cache on or off), so such batches are
   compile-inclusive; and without `dune clean`, `--force` does not re-run the tests at all.
   `tools/test-test-run.sh` fakes the topology (`OCANNL_TOOL_KFD_TOPOLOGY`), the device
-  (`OCANNL_TOOL_NVIDIA_DEVICE`) and the fleet's state (`FLEET_SLOT_STATE`) as it fakes the bridge.
+  (`OCANNL_TOOL_NVIDIA_DEVICE`) and the fleet's name for the box (`FLEET_LOCAL_BOX`,
+  `FLEET_HOSTNAME_MAP`) as it fakes the bridge.
 - **Runtime-refusal signature table.** These are the exception names `tools/sweep.sh`'s
   `ENVIRONMENT_REFUSALS` treats as the environment refusing a run rather than a test judging it;
   dune prints an uncaught binding error as `Fatal error: exception <name>:` with the status on
