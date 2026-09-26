@@ -2216,6 +2216,18 @@
  (modules optional_arg_scan_cases)
  (libraries base test_utils arrayjit.verdict))
 
+; gh-ocannl-1004: what Test_utils.Slot_kind says a dune argv reaches -- the half of the fleet slot's
+; --cpu/--gpu decision that reads the backend markers -- on a fixture tree built to separate the
+; cases: per-test and aggregate aliases, @ and @@, runtest directories, path targets.
+
+(test
+ ; ocannl-backend: none -- links no backend: it reads embedded dune-file text through Slot_kind.
+ (name slot_kind_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules slot_kind_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
 ; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
 ; it rather than on whatever the repository's dune files happen to say today.
 

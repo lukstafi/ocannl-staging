@@ -152,44 +152,12 @@ let rec takes_training_lock = function
   | Sexp.List l -> List.exists l ~f:takes_training_lock
   | Sexp.Atom _ -> false
 
-(* The aliases a stanza's actions attach to: a rule's own `(alias …)` field -- not an `(alias …)`
-   inside its `deps`, which is a dependency on another alias and is read by {!alias_deps} -- and
-   `runtest` for a `(test)`/`(tests)` stanza, dune's shorthand for a runtest action that names no
-   alias of its own. Asked per alias rather than per directory (Codex P1 round 3): a `(test)` stanza
-   contributes to `runtest` alone, so a directory whose gate is a test stanza is ungated for `@slow`
-   -- which is a separately documented entry point, and which `dune build @slow` reaches without
-   building a single `(test)`. A gate on one alias must not vouch for another. *)
-let aliases_of stanza =
-  match stanza with
-  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> [ "runtest" ]
-  | Sexp.List (Sexp.Atom "rule" :: fields) ->
-      (* Both spellings: `(alias A)` and dune's plural `(aliases A B)`, which is how a rule sits on
-         `runtest` and on its own per-test alias at once (gh-ocannl-726). Reading only the singular
-         would take those rules for attaching to nothing, and a rule attached to nothing is a rule
-         no gate has to reach. *)
-      List.concat_map fields ~f:(function
-        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> [ n ]
-        | Sexp.List (Sexp.Atom "aliases" :: args) ->
-            List.filter_map args ~f:(function Sexp.Atom n -> Some n | _ -> None)
-        | _ -> [])
-  | _ -> []
-
-(* The aliases a stanza's `deps` field names, which dune builds before it: before a rule's action
-   runs, or whenever the alias an `(alias (name A) (deps …))` stanza defines is built. *)
-let alias_deps stanza =
-  match Scan.field stanza "deps" with
-  | None -> []
-  | Some args ->
-      List.filter_map args ~f:(function
-        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> Some n
-        | _ -> None)
-
-(* The alias an `(alias (name A) …)` stanza defines: since dune 2.0 it carries no action of its own
-   and only aggregates what its `deps` name. *)
-let alias_stanza_name = function
-  | Sexp.List (Sexp.Atom "alias" :: _) as stanza -> (
-      match Scan.names_of stanza with [ n ] -> Some n | _ -> None)
-  | _ -> None
+(* The alias vocabulary -- what a stanza attaches to, what its `deps` build, what an `(alias …)`
+   stanza defines -- lives in the shared scanner, which tools/fleet-slot-run.sh's reachability
+   question (Test_utils.Slot_kind) reads too: two readers of one dune grammar must not drift. *)
+let aliases_of = Scan.aliases_of
+let alias_deps = Scan.alias_deps
+let alias_stanza_name = Scan.alias_stanza_name
 
 (* A gate is a stanza with an action that depends on the state of the world. *)
 let is_gate stanza = depends_on_universe stanza && not (List.is_empty (aliases_of stanza))
@@ -218,20 +186,7 @@ let gated_aliases stanzas =
   in
   close (Set.empty (module String))
 
-(* The aliases building `@<alias>` reaches, through the same two routes -- what a suite
-   aggregates. *)
-let aliases_reached_from stanzas alias =
-  let rec close reached =
-    let next =
-      List.fold stanzas ~init:reached ~f:(fun reached stanza ->
-          let attached = aliases_of stanza @ Option.to_list (alias_stanza_name stanza) in
-          if List.exists attached ~f:(Set.mem reached) then
-            List.fold (alias_deps stanza) ~init:reached ~f:Set.add
-          else reached)
-    in
-    if Set.equal next reached then reached else close next
-  in
-  close (Set.singleton (module String) alias)
+let aliases_reached_from = Scan.aliases_reached_from
 
 (* The suite a per-test alias belongs to, by the naming convention: `<suite>-<name>` is one test and
    `<suite>` the suite, an `(alias (name <suite>) (deps …))` stanza listing its members -- so a

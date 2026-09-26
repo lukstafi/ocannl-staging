@@ -46,6 +46,7 @@
   scan_argv
   scan_floors
   dune_stanza_scan
+  slot_kind
   verdict_scan
   verdict_provenance
   generated
