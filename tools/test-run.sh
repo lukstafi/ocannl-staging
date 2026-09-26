@@ -64,8 +64,10 @@
 # when dune itself stayed green); stderr-only drift is reported distinctly but
 # is not red. Any red dune iteration keeps a nonzero dune status.
 #
-# Exit codes: `run` and `wait` exit with dune's status, with ONE substitution:
-# an invocation dune's own CLI refused -- an unknown option or subcommand, a
+# Exit codes: `run` and `wait` exit with dune's status, with TWO substitutions.
+# A run the fleet's run-time slot refused (see plan_slot below) exits 75 under
+# the verdict `SLOT REFUSED`: nothing ran, and the fleet's own line says why.
+# And an invocation dune's own CLI refused -- an unknown option or subcommand, a
 # missing or malformed operand -- exits 2, this script's usage code, under the
 # verdict `INVOCATION REFUSED`. dune prints `dune: <complaint>` then `Usage:
 # dune ...`, exits 1 and runs nothing, and that 1 is not a test result: read as
@@ -276,9 +278,9 @@ hazard_why() { # <hazard>
     nvidia-cpu) printf 'The fleet runs %s correctness slots on
   this box, %s of them GPU tokens (lukstafi/ludics-lite#391), and CPU batches
   there were only ever measured at -j %s; uncapped, %s of them would each run
-  as many jobs as the box has cores (gh-ocannl-1065). A batch that holds no GPU
-  takes its slot as `fleet-worker.sh execution slot --cpu`, or it waits on a
-  GPU token it does not need. The cap lives in tools/box-jobs.sh; the evidence
+  as many jobs as the box has cores (gh-ocannl-1065). This run takes its fleet
+  slot itself, as `execution slot --cpu` when every test configuration resolves
+  a CPU backend (gh-ocannl-1004). The cap lives in tools/box-jobs.sh; the evidence
   is in the native-boot bullets of docs/agent-notes/build-and-test.md.' \
       "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_TOKENS" \
       "$BOX_JOBS_NATIVE_CPU_CAP" "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" ;;
@@ -310,10 +312,10 @@ plan_width_cap() { # dune argv
   booted ($(box_jobs_nvidia_device)), where cuda and the CPU backends alike run at -j $cap
   (tools/box-jobs.sh; gh-ocannl-1033, gh-ocannl-1065). OCANNL_BACKEND is unset
   here, so this run's backend comes from ocannl_config or the stanza and cannot
-  be read from a launcher, but whichever it is, this is its width. A batch that
-  holds no GPU takes its fleet slot as \`fleet-worker.sh execution slot --cpu\`,
-  or it waits on a GPU token it does not need. Pass an explicit -j to run at a
-  width of your own."
+  be read from a launcher, but whichever it is, this is its width. This run takes
+  its fleet slot itself, as \`execution slot --cpu\` when every test configuration
+  resolves a CPU backend (gh-ocannl-1004). Pass an explicit -j to run at a width
+  of your own."
       return 0
     fi
     for b in cuda hip; do
@@ -339,6 +341,69 @@ plan_width_cap() { # dune argv
   width_cap=$cap
   width_announce="capping dune at -j $cap. $(hazard_found "$hazard" "$backend"). $(hazard_why "$hazard") Pass an
   explicit -j to run at a width of your own."
+}
+
+# The fleet's run-time correctness slot (gh-ocannl-1004). On a fleet box --
+# one whose deployed `fleet-worker.sh execution slot --probe` names it (the
+# lukstafi/ludics-lite issue-wave skill) -- a `run`/`start` takes one of the
+# box's correctness slots itself, through tools/fleet-slot-run.sh, which
+# resolves whether the batch holds a GPU (declaring `--cpu` only when every
+# test configuration resolves a CPU backend) and execs dune under the slot.
+# No brief has to name the wrapper and no worker can forget it, or forget
+# `--cpu` and hold a GPU token for a cc batch. A worker that still wraps the
+# runner is harmless: the fleet's nested-slot rule runs this batch inside the
+# wrapper's slot.
+#
+# The probe is also the capability check: a fleet-worker.sh from before the
+# nested-slot rule has no `--probe` and is not used, so a worker's wrapper
+# around this script can never cost two slots. Anything else the probe says --
+# a machine outside the fleet, no skill deployed -- runs dune directly, as
+# before, and silently. OCANNL_TOOL_FLEET_WORKER names another fleet-worker.sh
+# (the harness's fake), and `none` turns the slot off. `repeat` never takes it:
+# an isolation tool runs as given, like its width (wrap it yourself on a
+# fleet box). The slot's wait comes out of the run's cap: it is the smaller of
+# the cap and OCANNL_TOOL_SLOT_WAIT (600s), after which the slot refuses and
+# the run reports SLOT REFUSED (exit 75), never a test verdict.
+slot_fw=          # the fleet-worker.sh to take the slot through, empty for none
+slot_wait=
+slot_announce=
+fleet_worker_path() { # prints the fleet-worker.sh to use, or nothing
+  local c
+  case ${OCANNL_TOOL_FLEET_WORKER-} in
+    none) return 0 ;;
+    '')
+      for c in "$HOME/.claude/skills/issue-wave/scripts/fleet-worker.sh" \
+               "$HOME/.codex/skills/issue-wave/scripts/fleet-worker.sh"; do
+        [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+      done
+      ;;
+    *) printf '%s' "$OCANNL_TOOL_FLEET_WORKER" ;;
+  esac
+  return 0
+}
+plan_slot() {
+  local fw probe tag box slots tokens
+  slot_fw= slot_wait= slot_announce=
+  fw=$(fleet_worker_path)
+  [ -n "$fw" ] || return 0
+  # One line, `EXECUTION SLOT PROBE <box> <slots> <tokens>`: no lock, no
+  # registry read, so it costs nothing on a box outside the fleet.
+  probe=$("$fw" execution slot --probe 2>/dev/null) || return 0
+  read -r tag _ _ box slots tokens _ <<<"$probe"
+  [ "$tag" = EXECUTION ] && [ -n "$tokens" ] || return 0
+  slot_fw=$fw
+  slot_wait=${OCANNL_TOOL_SLOT_WAIT:-600}
+  case $slot_wait in '' | *[!0-9]*) slot_wait=600 ;; esac
+  [ "$cap" -eq 0 ] || [ "$slot_wait" -le "$cap" ] || slot_wait=$cap
+  if [ "$tokens" -lt "$slots" ]; then
+    tokens="--cpu if every test configuration resolves a CPU backend, else one of its $tokens
+  GPU tokens (the kind is decided and logged at launch; tools/fleet-slot-run.sh)"
+  else
+    tokens="any slot may hold the GPU here, and the kind is still declared and logged at launch
+  (tools/fleet-slot-run.sh)"
+  fi
+  slot_announce="taking one of $box's $slots fleet correctness slots for this run (gh-ocannl-1004),
+  waiting up to ${slot_wait}s: $tokens."
 }
 
 width_said=       # stderr is said once, whichever call gets there first
@@ -1263,6 +1328,18 @@ dune_refusal() { # FILE
 # diffed across commits and so normalizes a dune location to its stanza.
 # Sets `digest_rc`, the status `run` and `wait` exit with: the recorded status,
 # except 2 for a refused invocation (see the header's exit-code contract).
+# A run that took the fleet's slot (it has a `slot` record) and never got
+# one: fleet-worker.sh refused (exit 1: no slot or GPU token before the
+# deadline, a measurement holding the box, a spec it could not read) or could
+# not read the anchor's registry (exit 4), and says so in a line of its own --
+# while a run it admitted logs the slot it holds before dune starts. A refusal
+# line with no admission is the slot's verdict, not the suite's.
+slot_refusal() { # <run dir>; 0 iff the slot was refused and dune never ran
+  [ -f "$1/slot" ] || return 1
+  grep -Eq '^EXECUTION SLOT (REFUSED|UNREACHABLE) ' "$1/log" 2>/dev/null || return 1
+  ! grep -Eq '^EXECUTION SLOT [^ ]+: (slot [0-9]+ of [0-9]+.* held for|inside slot [0-9]+ of [0-9]+)' "$1/log"
+}
+
 digest_rc=
 digest() {
   local dir=$1 rc verdict fp complaint= refusal_src
@@ -1281,8 +1358,11 @@ digest() {
   # any other code still reports that code's verdict.
   case $rc in
     0) verdict=pass ;;
-    1)
-      if complaint=$(dune_refusal "$refusal_src"); then
+    1 | 4)
+      if slot_refusal "$dir"; then
+        verdict="SLOT REFUSED (the fleet's run-time slot was not taken; nothing ran)"
+        digest_rc=75
+      elif [ "$rc" = 1 ] && complaint=$(dune_refusal "$refusal_src"); then
         verdict="INVOCATION REFUSED (dune rejected the arguments; nothing ran)"
         digest_rc=2
       else
@@ -1768,6 +1848,8 @@ case $sub in
     # Toolchain checks gate only launches: status/wait/stop/list remain usable
     # from a shell whose opam environment is no longer active.
     select_dune
+    plan_slot
+    [ -z "$slot_announce" ] || printf 'test-run: %s\n' "$slot_announce" >&2
     # Cancellation is armed BEFORE the lock is taken, for BOTH modes: from
     # here on the launcher holds state a signal must not abandon halfway (the
     # lock, then a published run). For `run` the signal is forwarded to the
@@ -1807,8 +1889,15 @@ case $sub in
     # closed terminal, harness cancellation, a plain kill -- can lose the
     # verdict; `run` differs from `start` only in staying attached to wait
     # and digest.
+    if [ -n "$slot_fw" ]; then
+      printf 'test-run: %s\n' "$slot_announce" >>"$run_dir/log"
+      printf '%s\n' "$slot_fw" >"$run_dir/slot" 2>/dev/null || :
+      set -- /bin/bash tools/fleet-slot-run.sh "$slot_fw" "$slot_wait" "$DUNE" "$@"
+    else
+      set -- "$DUNE" "$@"
+    fi
     OCANNL_TOOL_TESTRUN_BG=1 OCANNL_TOOL_TESTRUN_RD=$run_dir OCANNL_TOOL_TESTRUN_OWN=$run_dir \
-      perl -e "$supervisor_perl" -- "$cap" "$DUNE" "$@" </dev/null >>"$run_dir/log" 2>&1 &
+      perl -e "$supervisor_perl" -- "$cap" "$@" </dev/null >>"$run_dir/log" 2>&1 &
     sup=$!
     # The launcher's own fd 9 copy served its purpose the moment the
     # supervisor inherited the lock's description: close it, so an attached

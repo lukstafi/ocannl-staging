@@ -2258,15 +2258,31 @@ that they earn a lookup rather than always-loaded space.
   `OCANNL_BACKEND` is reported with the width to pass rather than guessed, as for dxg — except
   on the fleet's native rog, where cuda and the CPU backends share one width, so the unread backend
   cannot change it and it is injected. A batch there that holds no GPU must take its fleet slot
-  as `fleet-worker.sh execution slot --cpu`: the slot is fail-closed, so an undeclared cc batch
-  waits on one of the two GPU tokens and rog runs at two batches, not four; test-run.sh's
-  announcement says so, and gh-ocannl-1004 would take the slot, declared, in the runner itself. Measuring a slot count: the
+  as `execution slot --cpu`: the slot is fail-closed, so an undeclared cc batch waits on one of
+  the two GPU tokens and rog runs at two batches, not four — which `tools/test-run.sh` now does
+  itself (next bullet). Measuring a slot count: the
   dune shared cache restored nothing on these boxes (a `dune clean` + `--force` batch ran ~396
   `ocamlopt` processes, per `_build/trace.csexp`, cache on or off), so such batches are
   compile-inclusive; and without `dune clean`, `--force` does not re-run the tests at all.
   `tools/test-test-run.sh` fakes the topology (`OCANNL_TOOL_KFD_TOPOLOGY`), the device
   (`OCANNL_TOOL_NVIDIA_DEVICE`) and the fleet's name for the box (`FLEET_LOCAL_BOX`,
   `FLEET_HOSTNAME_MAP`) as it fakes the bridge.
+- **`tools/test-run.sh run`/`start` takes the fleet's run-time correctness slot itself**
+  (gh-ocannl-1004), through `tools/fleet-slot-run.sh`, on any box whose deployed
+  `fleet-worker.sh execution slot --probe` answers (lukstafi/ludics-lite's issue-wave skill; the
+  probe also proves that version runs a nested slot inside an enclosing one, so a worker's own
+  `execution slot` wrapper around the runner costs one slot, not two). The kind is resolved, not
+  read off `OCANNL_BACKEND`, because an ordinary cc batch leaves it unset: `ocannl_read_config`
+  (`test/config`, the same Utils resolution a test run makes) is built and asked from each
+  directory whose `ocannl_config` sets a backend — `test/config` (copied by every `test/*`
+  directory and `bin/`) and `arrayjit/test` — and `--cpu` is declared only when every answer is
+  a CPU backend or none. Anything else, including a build or read that fails, is `--gpu`, the
+  slot's own fail-closed default. `tools/test-test-run.sh` leg 57 fails a new tracked
+  `ocannl_config` naming a backend outside those directories. The slot's wait (600 s,
+  `OCANNL_TOOL_SLOT_WAIT`, never past `--cap`) comes out of the cap; a refused or unreachable slot
+  is the verdict `SLOT REFUSED`, exit 75, never a test verdict. `repeat` takes no slot (wrap it
+  yourself), `OCANNL_TOOL_FLEET_WORKER=none` turns it off, and a box outside the fleet runs as
+  before, silently.
 - **Runtime-refusal signature table.** These are the exception names `tools/sweep.sh`'s
   `ENVIRONMENT_REFUSALS` treats as the environment refusing a run rather than a test judging it;
   dune prints an uncaught binding error as `Fatal error: exception <name>:` with the status on

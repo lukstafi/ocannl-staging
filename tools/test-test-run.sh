@@ -113,11 +113,27 @@
 #      NVIDIA box it is advised.
 #  52. the native widths derive from one place: each hip cap is its measured
 #      budget over its slot count, and the numbers are the measured ones.
+#  53-58 sit at the end: the fleet's run-time slot, taken by the runner
+#      (gh-ocannl-1004), against a fake fleet-worker.sh and a fake
+#      ocannl_read_config.
+#  53. the kind: --cpu only when every test configuration resolves a CPU
+#      backend; a GPU, unknown or unreadable one is --gpu; the cap bounds the wait.
+#  54. a refused or unreachable slot is SLOT REFUSED, exit 75, and dune never runs.
+#  55. a red suite under a held slot is still FAIL.
+#  56. no probe, OCANNL_TOOL_FLEET_WORKER=none, and repeat all run dune directly.
+#  57. every tracked ocannl_config naming a backend is one the kind is read from.
+#  58. the reader fleet-slot-run.sh builds is test/config's, and answers --read=backend.
 
 set -u
 
 . "$(cd "$(dirname "$0")/../scripts" && pwd)/harness-support.sh"
 harness_args "$@"
+
+# Hermetic against the fleet (gh-ocannl-1004): on a fleet box the shipping
+# script takes a real run-time slot through the deployed fleet-worker.sh, and
+# the fixture runs below must neither hold nor wait for one. The slot legs
+# name their fake fleet-worker.sh explicitly.
+export OCANNL_TOOL_FLEET_WORKER=none
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/test-run.sh"
@@ -811,7 +827,13 @@ stage_sourced() { # <fixture root>
     mkdir -p "$dest/$(dirname "$rel")" || exit 2
     cp "$HERE/../$rel" "$dest/$rel" || { echo "cannot stage $rel into $dest" >&2; exit 2; }
     staged=$((staged + 1))
-  done < <(sed -n 's/^\. \([A-Za-z0-9_./-]*\)$/\1/p' "$SRC")
+  done < <(sed -n 's/^\. \([A-Za-z0-9_./-]*\)$/\1/p' "$SRC"
+           # and the helper the supervisor runs instead of dune under a slot
+           sed -n 's|.*/bin/bash \(tools/[A-Za-z0-9_.-]*\.sh\) .*|\1|p' "$SRC"
+           # and what that helper sources in turn
+           for h in $(sed -n 's|.*/bin/bash \(tools/[A-Za-z0-9_.-]*\.sh\) .*|\1|p' "$SRC"); do
+             sed -n 's/^\. \([A-Za-z0-9_./-]*\)\( ||.*\)\{0,1\}$/\1/p' "$HERE/../$h"
+           done)
   [ "$staged" -ge 2 ] ||
     { echo "only $staged sourced file(s) found in $SRC; the scan is broken" >&2; exit 2; }
 }
@@ -3020,5 +3042,187 @@ if diff -r "$TMP/lifecycle-before" "$life_root" >"$TMP/lifecycle-tree.diff"; the
   report 0 'lifecycle: every launch and recovery leaves the source tree byte-identical'
 else report 1 'lifecycle: every launch and recovery leaves the source tree byte-identical' "$(cat "$TMP/lifecycle-tree.diff")"; fi
 lifecycle_cleanup
+
+# ---------------------------------------------------------------------------
+# Legs 53-58: the fleet's run-time slot, taken by the runner (gh-ocannl-1004)
+# ---------------------------------------------------------------------------
+# A fake fleet-worker.sh stands in for lukstafi/ludics-lite's: it answers the
+# probe (or, in `noprobe` mode, refuses it as a version without nested slots
+# would), records the slot call, and then refuses, cannot reach its registry,
+# or holds the slot and execs the command as the real one does. A fake
+# ocannl_read_config answers each test configuration's backend from the
+# directory it is run in, so the kind decision is driven without a build.
+slot_fake=$TMP/fake-fleet-worker.sh
+cat >"$slot_fake" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_FW_CALLS"
+if [ "$1 $2 $3" = "execution slot --probe" ]; then
+  [ "${FAKE_FW_MODE:-}" = noprobe ] && { echo "fleet-worker.sh: execution slot [--wait <seconds>] ..." >&2; exit 2; }
+  echo "EXECUTION SLOT PROBE fakebox 4 2"
+  exit 0
+fi
+shift 2
+while [ "$1" != -- ]; do shift; done
+shift
+case ${FAKE_FW_MODE:-} in
+  refuse) echo "EXECUTION SLOT REFUSED fakebox: all 2 GPU tokens (slots 1-2 of 4) busy after 0s; a batch that holds no GPU declares --cpu"; exit 1 ;;
+  unreachable) echo "EXECUTION SLOT UNREACHABLE anchor: registry unread, no slot taken"; exit 4 ;;
+esac
+echo "EXECUTION SLOT fakebox: slot 1 of 4, GPU token 1 of 2 held for: $*" >&2
+exec "$@"
+FAKE
+slot_reader=$TMP/fake-read-config.sh
+cat >"$slot_reader" <<'FAKE'
+#!/usr/bin/env bash
+case $PWD in
+  */test/config) v=$FAKE_BACKEND_TEST ;;
+  */arrayjit/test) v=$FAKE_BACKEND_ARRAYJIT ;;
+  *) exit 3 ;;
+esac
+[ "$v" = fail ] && exit 1
+[ "$v" = unset ] && v=
+printf '%s\n' "$v"
+FAKE
+chmod +x "$slot_fake" "$slot_reader"
+mkdir -p "$repeat_root/test/config" "$repeat_root/arrayjit/test"
+slot_probe() { # tag mode test-backend arrayjit-backend subcommand [argv...]
+  local tag=$1 mode=$2 bt=$3 ba=$4
+  shift 4
+  : >"$TMP/$tag.fw"
+  FAKE_FW_CALLS=$TMP/$tag.fw FAKE_FW_MODE=$mode FAKE_BACKEND_TEST=$bt FAKE_BACKEND_ARRAYJIT=$ba \
+  OCANNL_TOOL_FLEET_WORKER=$slot_fake OCANNL_TOOL_READ_CONFIG=$slot_reader \
+    argv_probe "$tag" "$@"
+  slot_calls=$(grep -v -- '--probe' "$TMP/$tag.fw")
+}
+slot_calls=
+
+# Leg 53: the kind. --cpu only when every test configuration resolves a CPU
+# backend (an unset one is the default, cc); a GPU backend anywhere, or an
+# unreadable one, is --gpu -- the slot's fail-closed default. The fake's
+# recorded call is the argv the runner handed the real slot, so it pins the
+# wait (the cap bounds it) and that dune's own argv passes through intact.
+slot_detail=
+for probe in "cpu:cc:sync_cc:--cpu" "cpu-default:unset:cc:--cpu" "multidev:multidev_cc:cc:--cpu" \
+             "gpu-test:cuda:cc:--gpu" "gpu-arrayjit:cc:hip:--gpu" "unknown:cc:metal:--gpu" \
+             "unreadable:cc:fail:--gpu"; do
+  IFS=: read -r tag bt ba want <<<"$probe"
+  slot_probe "slot-$tag" hold "$bt" "$ba" run build @cheap
+  [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ] ||
+    { slot_detail="$tag: exit $argv_rc; dune calls: ${argv_calls:-<none>}"; break; }
+  [ "$slot_calls" = "execution slot --wait 600 $want -- dune build @cheap" ] ||
+    { slot_detail="$tag: slot call: ${slot_calls:-<none>} (want $want)"; break; }
+  grep -q "fleet correctness slots" <<<"$argv_err" ||
+    { slot_detail="$tag: the slot was not announced: $argv_err"; break; }
+  { [ -n "$argv_dir" ] && grep -q -- "fleet slot: .*$want" "$argv_dir/log" &&
+      grep -q "^EXECUTION SLOT fakebox: slot 1 of 4" "$argv_dir/log"; } ||
+    { slot_detail="$tag: the log does not record the decision and the slot: $(cat "$argv_dir/log" 2>/dev/null)"; break; }
+done
+if [ -z "$slot_detail" ]; then
+  slot_probe slot-capped hold cc cc run --cap 90 build @cheap
+  [ "$slot_calls" = "execution slot --wait 90 --cpu -- dune build @cheap" ] ||
+    slot_detail="capped: the slot's wait is not bounded by the cap: ${slot_calls:-<none>}"
+fi
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: a fleet box's run takes its slot, --cpu only when every test configuration resolves a CPU backend"
+else
+  report 1 "slot: a fleet box's run takes its slot, --cpu only when every test configuration resolves a CPU backend" "$slot_detail"
+fi
+
+# Leg 54: a refused or unreachable slot is its own verdict, never a test one:
+# exit 75, dune never invoked, and the fleet's own line quoted in the log.
+slot_detail=
+for mode in refuse unreachable; do
+  slot_probe "slot-$mode" "$mode" cc cc run build @cheap
+  [ "$argv_rc" = 75 ] || { slot_detail="$mode: exit $argv_rc (want 75): $argv_out"; break; }
+  [ -z "$argv_calls" ] || { slot_detail="$mode: dune ran: $argv_calls"; break; }
+  case $argv_out in
+    *"verdict: SLOT REFUSED"*) ;;
+    *) slot_detail="$mode: verdict: $argv_out"; break ;;
+  esac
+done
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: a refused or unreachable slot reports SLOT REFUSED (exit 75), and dune never runs"
+else
+  report 1 "slot: a refused or unreachable slot reports SLOT REFUSED (exit 75), and dune never runs" "$slot_detail"
+fi
+
+# Leg 55: a red suite under a slot is still FAIL -- the slot's admission line
+# is what tells the two apart, not the status.
+argv_mode=red slot_probe slot-red hold cc cc run build @cheap
+case "$argv_rc:$argv_out" in
+  1:*"verdict: FAIL"*) report 0 "slot: a red suite under a held slot is still FAIL" ;;
+  *) report 1 "slot: a red suite under a held slot is still FAIL" "exit $argv_rc: $argv_out" ;;
+esac
+
+# Leg 56: no slot where the fleet cannot give one safely -- a fleet-worker.sh
+# without the probe (a version from before nested slots, around which a
+# worker's own wrapper would cost two slots), the slot turned off, and repeat
+# -- each runs dune directly and says nothing about a slot.
+slot_detail=
+slot_probe slot-noprobe noprobe cc cc run build @cheap
+{ [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ] && [ -z "$slot_calls" ] &&
+    ! grep -qi 'slot' <<<"$argv_err"; } ||
+  slot_detail="noprobe: exit $argv_rc; slot calls: ${slot_calls:-<none>}; stderr: $argv_err"
+if [ -z "$slot_detail" ]; then
+  : >"$TMP/slot-off.fw"
+  FAKE_FW_CALLS=$TMP/slot-off.fw OCANNL_TOOL_FLEET_WORKER=none argv_probe slot-off run build @cheap
+  { [ "$argv_rc" = 0 ] && [ ! -s "$TMP/slot-off.fw" ]; } ||
+    slot_detail="none: exit $argv_rc; fleet-worker called: $(cat "$TMP/slot-off.fw")"
+fi
+if [ -z "$slot_detail" ]; then
+  slot_probe slot-repeat hold cc cc repeat 2 build @cheap
+  { [ "$argv_rc" = 0 ] && [ -z "$slot_calls" ]; } ||
+    slot_detail="repeat: exit $argv_rc; slot calls: ${slot_calls:-<none>}"
+fi
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: no probe, the slot turned off, and repeat all run dune directly"
+else
+  report 1 "slot: no probe, the slot turned off, and repeat all run dune directly" "$slot_detail"
+fi
+
+# Leg 57: the configurations the kind is read from are the ones that set a
+# backend. Every tracked `ocannl_config` naming one must sit in one of
+# fleet-slot-run.sh's SLOT_CONFIG_DIRS (the test directories copy theirs from
+# test/config), so a new directory with a backend of its own fails here until
+# the runner reads it too.
+slot_detail=
+slot_dirs=$(sed -n 's/^SLOT_CONFIG_DIRS="\(.*\)"$/\1/p' "$HERE/fleet-slot-run.sh")
+[ -n "$slot_dirs" ] || slot_detail="SLOT_CONFIG_DIRS not found in fleet-slot-run.sh"
+if [ -z "$slot_detail" ] && git -C "$HERE/.." rev-parse --git-dir >/dev/null 2>&1; then
+  while IFS= read -r cfg; do
+    grep -Eq '^[[:space:]]*backend[[:space:]]*=' "$HERE/../$cfg" || continue
+    d=$(dirname "$cfg")
+    case " $slot_dirs " in *" $d "*) continue ;; esac
+    slot_detail="$cfg names a backend but $d is not in SLOT_CONFIG_DIRS ($slot_dirs)"
+    break
+  done < <(git -C "$HERE/.." ls-files -- '*ocannl_config' 'ocannl_config')
+else
+  [ -n "$slot_detail" ] || { skip "slot: the backend-bearing configurations are the ones the kind is read from" "not a git checkout"; slot_detail=skipped; }
+fi
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: the backend-bearing configurations are the ones the kind is read from"
+elif [ "$slot_detail" != skipped ]; then
+  report 1 "slot: the backend-bearing configurations are the ones the kind is read from" "$slot_detail"
+fi
+
+# Leg 58: the reader the kind comes from is the one test/config builds. The
+# legs above drive a fake, so a renamed executable or a dropped `--read=backend`
+# would pass them while every real batch fell back to --gpu -- slower, and
+# silent. Pinned against the stanza and the reader's own source instead.
+slot_detail=
+slot_target=$(sed -n 's|.*"\$dune" build \./\(test/config/[A-Za-z0-9_]*\)\.exe.*|\1|p' "$HERE/fleet-slot-run.sh")
+slot_run=$(sed -n 's|^ *reader=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
+if [ -z "$slot_target" ] || [ "$slot_target" != "$slot_run" ]; then
+  slot_detail="fleet-slot-run.sh builds '${slot_target:-?}' but runs '${slot_run:-?}'"
+elif ! grep -q "^ (name $(basename "$slot_target"))$" "$HERE/../test/config/dune"; then
+  slot_detail="test/config/dune has no executable named $(basename "$slot_target")"
+elif ! grep -q '| Some "backend" ->' "$HERE/../$slot_target.ml"; then
+  slot_detail="$slot_target.ml does not answer --read=backend"
+fi
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: the backend reader fleet-slot-run.sh builds is test/config's, and it answers --read=backend"
+else
+  report 1 "slot: the backend reader fleet-slot-run.sh builds is test/config's, and it answers --read=backend" "$slot_detail"
+fi
 
 finish
