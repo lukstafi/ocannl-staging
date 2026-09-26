@@ -362,8 +362,8 @@ plan_width_cap() { # dune argv
 # (the harness's fake), and `none` turns the slot off. `repeat` never takes it:
 # an isolation tool runs as given, like its width (wrap it yourself on a
 # fleet box). The slot's wait comes out of the run's cap: it is the smaller of
-# the cap and OCANNL_TOOL_SLOT_WAIT (600s), after which the slot refuses and
-# the run reports SLOT REFUSED (exit 75), never a test verdict.
+# half the cap and OCANNL_TOOL_SLOT_WAIT (600s), after which the slot refuses
+# and the run reports SLOT REFUSED (exit 75), never a test verdict.
 slot_fw=          # the fleet-worker.sh to take the slot through, empty for none
 slot_wait=
 slot_announce=
@@ -394,7 +394,11 @@ plan_slot() {
   [ -n "$slot_fw" ] || return 0
   slot_wait=${OCANNL_TOOL_SLOT_WAIT:-600}
   case $slot_wait in '' | *[!0-9]*) slot_wait=600 ;; esac
-  [ "$cap" -eq 0 ] || [ "$slot_wait" -le "$cap" ] || slot_wait=$cap
+  # At most half the cap: the cap's alarm is already running while the
+  # helper builds its readers and the slot waits, and a busy slot must be
+  # able to refuse -- and be reported SLOT REFUSED -- before the alarm reports
+  # the run as a TIMEOUT instead (Codex review round 3 on PR #803).
+  [ "$cap" -eq 0 ] || [ "$slot_wait" -le $((cap / 2)) ] || slot_wait=$((cap / 2))
   if [ "$tokens" -lt "$slots" ]; then
     tokens="--cpu if every test configuration resolves a CPU backend, else one of its $tokens
   GPU tokens (the kind is decided and logged at launch; tools/fleet-slot-run.sh)"

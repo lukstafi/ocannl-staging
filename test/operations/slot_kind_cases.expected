@@ -34,6 +34,26 @@ build -j 8 @a/runtest-t_cfg              cpu
 build -j 8 @a/runtest-t_cfg reaches no GPU stanza: true
 build --profile release @c/runtest       cpu
 build --profile release @c/runtest reaches no GPU stanza: true
+build --alias-rec runtest                gpu: it reaches t_cuda in a, which names cuda
+build --alias-rec runtest reaches a GPU stanza: true
+build --alias-rec=runtest-t_cfg          cpu
+build --alias-rec=runtest-t_cfg reaches no GPU stanza: true
+build --alias a/runtest-t_cuda           gpu: it reaches t_cuda in a, which names cuda
+build --alias a/runtest-t_cuda reaches a GPU stanza: true
+build --alias c/runtest                  cpu
+build --alias c/runtest reaches no GPU stanza: true
+build --root /elsewhere @c/runtest       gpu: it carries --root, an option this does not model (it could change what is built)
+build --root /elsewhere @c/runtest reaches a GPU stanza: true
+build --workspace=other @c/runtest       gpu: it carries --workspace=other, an option this does not model (it could change what is built)
+build --workspace=other @c/runtest reaches a GPU stanza: true
+build --frobnicate @c/runtest            gpu: it carries --frobnicate, an option this does not model (it could change what is built)
+build --frobnicate @c/runtest reaches a GPU stanza: true
+build -j8 --force --profile=release @c/runtest cpu
+build -j8 --force --profile=release @c/runtest reaches no GPU stanza: true
+runtest -j 4 c                           cpu
+runtest -j 4 c reaches no GPU stanza: true
+runtest --root /elsewhere c              gpu: it carries --root, an option this does not model (it could change what is built)
+runtest --root /elsewhere c reaches a GPU stanza: true
 build                                    gpu: it reaches t_cuda in a, which names cuda
 build reaches a GPU stanza: true
 build ./a/t_cfg.exe                      gpu: it reaches t_cuda in a, which names cuda

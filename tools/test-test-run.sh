@@ -3163,9 +3163,10 @@ if [ -z "$slot_detail" ]; then
     slot_detail="a command-line CPU backend: slot call: ${slot_calls:-<none>} (want --cpu)"
 fi
 if [ -z "$slot_detail" ]; then
+  # At most half the cap, so a refusal returns before the cap's alarm.
   slot_probe slot-capped hold cc cc run --cap 90 build @cheap
-  [ "$slot_calls" = "execution slot --wait 90 --cpu -- dune build @cheap" ] ||
-    slot_detail="capped: the slot's wait is not bounded by the cap: ${slot_calls:-<none>}"
+  [ "$slot_calls" = "execution slot --wait 45 --cpu -- dune build @cheap" ] ||
+    slot_detail="capped: the slot's wait is not half the cap: ${slot_calls:-<none>}"
 fi
 if [ -z "$slot_detail" ]; then
   report 0 "slot: a fleet box's run takes its slot, --cpu only when every test configuration resolves a CPU backend"

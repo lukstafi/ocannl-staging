@@ -97,6 +97,18 @@ let cases =
     (* Options with values are not targets, and a `-j` the runner injected changes nothing. *)
     ("build -j 8 @a/runtest-t_cfg", `Cpu);
     ("build --profile release @c/runtest", `Cpu);
+    (* An alias named through an option is the target it names; an option that could change what is
+       built, or one this does not know, is a GPU answer (Codex review round 3 on PR #803). *)
+    ("build --alias-rec runtest", `Gpu);
+    ("build --alias-rec=runtest-t_cfg", `Cpu);
+    ("build --alias a/runtest-t_cuda", `Gpu);
+    ("build --alias c/runtest", `Cpu);
+    ("build --root /elsewhere @c/runtest", `Gpu);
+    ("build --workspace=other @c/runtest", `Gpu);
+    ("build --frobnicate @c/runtest", `Gpu);
+    ("build -j8 --force --profile=release @c/runtest", `Cpu);
+    ("runtest -j 4 c", `Cpu);
+    ("runtest --root /elsewhere c", `Gpu);
     (* No target is the default alias everywhere; a path target reaches its directory. *)
     ("build", `Gpu);
     ("build ./a/t_cfg.exe", `Gpu);

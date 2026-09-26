@@ -2275,8 +2275,9 @@ that they earn a lookup rather than always-loaded space.
   questions. First, can the run reach a stanza that NAMES a GPU backend (`; ocannl-backend: cuda`
   and friends, which hold that backend whatever the configuration says): `ocannl_slot_kind`
   (`test/config`, over `Test_utils.Slot_kind`, reading the markers `env_var_deps` enforces and
-  the aliases the argv reaches, their `deps` closure and dune's per-test `runtest-<name>`
-  included) answers, so `runtest test/operations` is a GPU batch while
+  the aliases the argv reaches, their `deps` closure, dune's per-test `runtest-<name>` and
+  `--alias`/`--alias-rec` included; dune's options are read closed, so `--root`, `--workspace` or
+  any option it does not list as harmless is a GPU answer) answers, so `runtest test/operations` is a GPU batch while
   `@test/operations/runtest-<cpu test>` and `@test/operations/scans` are not; a Metal marker
   counts even on Linux, where its stanza compiles the stub. Second, for the stanzas that read the
   configuration: the kind is resolved, not read off `OCANNL_BACKEND`, because an ordinary cc batch
@@ -2290,7 +2291,8 @@ that they earn a lookup rather than always-loaded space.
   as is anything else — a build or read that fails included — the slot's own fail-closed
   default. `tools/test-test-run.sh` leg 57 fails a new tracked
   `ocannl_config` naming a backend outside those directories. The slot's wait (600 s,
-  `OCANNL_TOOL_SLOT_WAIT`, never past `--cap`) comes out of the cap; a refused or unreachable slot
+  `OCANNL_TOOL_SLOT_WAIT`, at most half of `--cap`, so a refusal returns before the cap's alarm)
+  comes out of the cap; a refused or unreachable slot
   is the verdict `SLOT REFUSED`, exit 75, never a test verdict. `repeat` takes no slot (wrap it
   yourself), `OCANNL_TOOL_FLEET_WORKER=none` turns it off, and a box outside the fleet runs as
   before, silently.
