@@ -410,7 +410,8 @@ def check_fixture_name(name):
     (`CON.safetensors`, which names no file on Windows) must not be recordable from bytes that
     already exist either. Checked wherever a name is about to be committed to: recording
     (`one_path_per_name`) and generation (`gen_fixtures.fixture_path`, BEFORE any fixture is
-    built, since building overwrites the bytes the published numbers rest on).
+    built, since building overwrites the bytes the published numbers rest on) -- and on every row
+    `read_digests` parses, so the file cannot hold a name its own writer would refuse.
     """
     if not is_portable_name(name):
         raise ValueError(
@@ -487,10 +488,13 @@ def _read_document(path, legacy_origin=None):
         even among the files being recorded.
         """
         # Reader inputs are held to the same identity rules as writer inputs: `check_origin`
-        # guards every CLI, but a checked-in or hand-merged row bypasses them, and a recorded
-        # `minix,rocm` would flow through `status` into a `fixture_origin` field byte-identical
-        # to two agreeing boxes'.
+        # guards every CLI and `check_fixture_name` every recording, but a checked-in or
+        # hand-merged row bypasses them. A recorded `minix,rocm` would flow through `status` into
+        # a `fixture_origin` field byte-identical to two agreeing boxes'; a recorded
+        # `CON.safetensors` would parse here and be refused only by the next `record`, which
+        # rewrites the whole file -- the reader and the writer disagreeing about what it may say.
         try:
+            check_fixture_name(name)
             check_origin(origin)
         except ValueError as e:
             raise ValueError(f"{path}:{lineno}: {e}") from None

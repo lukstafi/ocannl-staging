@@ -1434,6 +1434,20 @@ class FixtureDigestTest(unittest.TestCase):
         self.assertIn("minix,rocm", str(refused.exception))
         self.assertIn(str(digests), str(refused.exception))
 
+    def test_a_name_read_from_the_file_is_held_to_the_same_identity_rules(self):
+        # The name-side twin of the origin check above: check_fixture_name guards every
+        # recording, but a checked-in or hand-merged `CON.safetensors` row (no file on Windows)
+        # would parse fine and be refused only by the next record(), which rewrites the whole
+        # file. Refused at the one insertion point, line named.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  17  CON.safetensors  minix\n")
+
+        with self.assertRaises(ValueError) as refused:
+            fixture_digest.read_digests(digests)
+
+        self.assertIn("CON.safetensors", str(refused.exception))
+        self.assertIn(str(digests), str(refused.exception))
+
     def test_check_mode_refuses_an_origin_it_would_ignore(self):
         # --check reports against EVERY recorded origin; accepting --origin and doing nothing
         # with it would let `--check --origin "$BOX"` read as having verified that box's bytes.
