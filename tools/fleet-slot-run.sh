@@ -90,8 +90,13 @@ resolve_kind() { # dune argv
     "$dune" build ./test/config/ocannl_read_config.exe ./test/config/ocannl_slot_kind.exe >&2 ||
       { echo "test-run: fleet slot: the backend readers did not build, so the kind is unread: --gpu" >&2
         echo gpu; return 0; }
-    reader=$PWD/_build/default/test/config/ocannl_read_config.exe
-    reach=$PWD/_build/default/test/config/ocannl_slot_kind.exe
+    # Where dune just put them: DUNE_BUILD_DIR moves the build tree (as
+    # tools/ci-compiler-test.sh does), and a copy left under _build/default
+    # would be missing -- or stale (Codex review round 4 on PR #803).
+    local build_dir=${DUNE_BUILD_DIR:-_build}
+    case $build_dir in /*) ;; *) build_dir=$PWD/$build_dir ;; esac
+    reader=$build_dir/default/test/config/ocannl_read_config.exe
+    reach=$build_dir/default/test/config/ocannl_slot_kind.exe
   fi
   b=$("$reach" "$@" 2>/dev/null)
   case $b in

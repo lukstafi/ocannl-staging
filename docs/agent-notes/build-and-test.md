@@ -2275,9 +2275,10 @@ that they earn a lookup rather than always-loaded space.
   questions. First, can the run reach a stanza that NAMES a GPU backend (`; ocannl-backend: cuda`
   and friends, which hold that backend whatever the configuration says): `ocannl_slot_kind`
   (`test/config`, over `Test_utils.Slot_kind`, reading the markers `env_var_deps` enforces and
-  the aliases the argv reaches, their `deps` closure, dune's per-test `runtest-<name>` and
-  `--alias`/`--alias-rec` included; dune's options are read closed, so `--root`, `--workspace` or
-  any option it does not list as harmless is a GPU answer) answers, so `runtest test/operations` is a GPU batch while
+  the aliases the argv reaches, their `deps` closure and dune's per-test `runtest-<name>`
+  included, read from a closed set of argv shapes: `runtest` with plain relative directories, `build` with
+  `@`/`@@` alias targets, options from a harmless list; any other word -- `.`, `./x`, `--`, a path
+  target, `--root`, an alias-naming or unknown option -- is a GPU answer) answers, so `runtest test/operations` is a GPU batch while
   `@test/operations/runtest-<cpu test>` and `@test/operations/scans` are not; a Metal marker
   counts even on Linux, where its stanza compiles the stub. Second, for the stanzas that read the
   configuration: the kind is resolved, not read off `OCANNL_BACKEND`, because an ordinary cc batch

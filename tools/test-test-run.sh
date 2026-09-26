@@ -3282,9 +3282,13 @@ fi
 # Pinned against the stanzas and the readers' own sources instead.
 slot_detail=
 slot_built=$(sed -n 's|.*"\$dune" build \(\./test/config/[A-Za-z0-9_.]* \./test/config/[A-Za-z0-9_.]*\) .*|\1|p' "$HERE/fleet-slot-run.sh")
-slot_reader_exe=$(sed -n 's|^ *reader=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
-slot_reach_exe=$(sed -n 's|^ *reach=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
-if [ -z "$slot_reader_exe" ] || [ -z "$slot_reach_exe" ]; then
+slot_reader_exe=$(sed -n 's|^ *reader=\$build_dir/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
+slot_reach_exe=$(sed -n 's|^ *reach=\$build_dir/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
+# ...and from the build tree dune was pointed at, not a fixed _build.
+grep -q '^ *local build_dir=\${DUNE_BUILD_DIR:-_build}$' "$HERE/fleet-slot-run.sh" ||
+  slot_detail="fleet-slot-run.sh does not run the readers from DUNE_BUILD_DIR's tree"
+if [ -n "$slot_detail" ]; then :
+elif [ -z "$slot_reader_exe" ] || [ -z "$slot_reach_exe" ]; then
   slot_detail="fleet-slot-run.sh names no reader (${slot_reader_exe:-?}) or reachability tool (${slot_reach_exe:-?})"
 else
   for exe in "$slot_reader_exe" "$slot_reach_exe"; do

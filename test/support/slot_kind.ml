@@ -11,16 +11,19 @@
     executable and carries neither the variable nor a marker (gh-ocannl-659) -- so the stanzas a run
     can reach, and their markers, are the whole answer.
 
-    What a run reaches is read from the argv the way dune reads it, conservatively:
-    - [@dir/alias] builds [alias] in [dir] and every directory below it, [@@dir/alias] in [dir]
-      alone; an alias reaches what its stanzas attach to it, closed under the [(alias …)] its [deps]
-      name ({!Dune_stanza_scan.aliases_reached_from}), plus the [runtest-<name>] dune generates for
-      a [(test)]/[(tests)] stanza and an inline-test library;
-    - [runtest]/[test] with directories runs [@runtest] under each, and with none under the root;
-    - [build] with no target builds the default alias everywhere, and a path target is taken as
-      reaching anything in its directory -- neither is worth modelling finely, and both are answered
-      on the side that costs only a wait;
-    - any other subcommand runs no test and reaches nothing. [exec] is refused before this is asked
+    What a run reaches is read from a CLOSED set of argv shapes, the ones the runner is used with;
+    any other word is unmodelled and answered as a GPU. (Codex review rounds 3-4 on PR #803 found a
+    new corner of dune's CLI each round, so this stopped trying to model the CLI.)
+    - [build] with alias targets only: [@dir/alias] builds [alias] in [dir] and every directory
+      below it, [@@dir/alias] in [dir] alone, [dir] plain (no [.], [..], leading or trailing [/]).
+      An alias reaches what its stanzas attach to it, closed under the [(alias …)] its [deps] name
+      ({!Dune_stanza_scan.aliases_reached_from}), plus the [runtest-<name>] dune generates for a
+      [(test)]/[(tests)] stanza and an inline-test library. No target at all is the default alias
+      everywhere, taken as reaching every stanza.
+    - [runtest]/[test] with plain directories runs [@runtest] under each, and with none under the
+      root.
+    - Options only from the listed harmless ones, and no [--].
+    - Any other subcommand runs no test and reaches nothing. [exec] is refused before this is asked
       (its program may pick any backend), and so is a command-line backend flag.
 
     A dune file this cannot read is itself a GPU answer, for the same reason. *)
@@ -74,19 +77,7 @@ let stanzas_of ~dir content =
         gpu = gpu_of_marker (Scan.backend_rule_of marked);
       })
 
-type target =
-  | Alias of { dir : string; alias : string; recursive : bool }
-  | Directory of string  (** anything built in this directory, non-recursively *)
-
-let strip_dot_slash p =
-  let p = Option.value (String.chop_prefix p ~prefix:"./") ~default:p in
-  Option.value (String.chop_suffix p ~suffix:"/") ~default:p
-
-let alias_target ~recursive spec =
-  let spec = strip_dot_slash spec in
-  match String.rsplit2 spec ~on:'/' with
-  | Some (dir, alias) -> Alias { dir = strip_dot_slash dir; alias; recursive }
-  | None -> Alias { dir = ""; alias = spec; recursive }
+type target = Alias of { dir : string; alias : string; recursive : bool }
 
 (* dune's options, read closed rather than open (Codex review round 3 on PR #803): an option this
    does not model could change WHAT is built -- [--alias-rec runtest] names an alias as the next
@@ -146,17 +137,14 @@ let harmless_valued =
     "--config-file";
   ]
 
-(* Options whose value is an alias target, as [@<alias>] and [@@<alias>] are. *)
-let alias_valued = [ ("--alias", false); ("--alias-rec", true); ("--default-target", true) ]
-
 type word = Target of string | Unmodelled of string
 
-(** The argv's words, past its subcommand and up to dune's own [--]: targets (an alias option's
-    value spelled back as the [@]/[@@] target it names), and the first option this does not model.
-*)
+(** The argv's words past its subcommand: targets, and the first word this does not model. Dune's
+    own [--] is one of those (past it, dune still reads targets), as is any option not listed above
+    -- the alias-naming ones included, which the runner is never handed. *)
 let rec words acc = function
-  | [] | "--" :: _ -> List.rev acc
-  | opt :: rest when String.is_prefix opt ~prefix:"-" -> (
+  | [] -> List.rev acc
+  | opt :: rest when String.is_prefix opt ~prefix:"-" ->
       let name, inline =
         match String.lsplit2 opt ~on:'=' with
         | Some (n, v) when String.is_prefix n ~prefix:"--" -> (n, Some v)
@@ -171,65 +159,67 @@ let rec words acc = function
         then (String.prefix name 2, Some (String.drop_prefix name 2))
         else (name, inline)
       in
-      let take_value k =
+      if List.mem harmless_flags name ~equal:String.equal && Option.is_none inline then
+        words acc rest
+      else if List.mem harmless_valued name ~equal:String.equal then
         match (inline, rest) with
-        | Some v, _ -> k v rest
-        | None, v :: rest' -> k v rest'
+        | Some _, _ -> words acc rest
+        | None, _ :: rest' -> words acc rest'
         | None, [] -> List.rev (Unmodelled opt :: acc)
-      in
-      match List.Assoc.find alias_valued name ~equal:String.equal with
-      | Some recursive ->
-          take_value (fun v rest ->
-              words (Target ((if recursive then "@" else "@@") ^ v) :: acc) rest)
-      | None ->
-          if List.mem harmless_flags name ~equal:String.equal && Option.is_none inline then
-            words acc rest
-          else if List.mem harmless_valued name ~equal:String.equal then
-            take_value (fun _ rest -> words acc rest)
-          else List.rev (Unmodelled opt :: acc))
+      else List.rev (Unmodelled opt :: acc)
   | word :: rest -> words (Target word :: acc) rest
 
-let target_of w =
-  match String.chop_prefix w ~prefix:"@@" with
-  | Some spec -> alias_target ~recursive:false spec
-  | None -> (
-      match String.chop_prefix w ~prefix:"@" with
-      | Some spec -> alias_target ~recursive:true spec
-      | None ->
-          let w = strip_dot_slash w in
-          let w =
-            match String.chop_prefix w ~prefix:"_build/default/" with
-            | Some rest -> rest
-            | None -> w
-          in
-          Directory (match String.rsplit2 w ~on:'/' with Some (d, _) -> d | None -> ""))
+(* A directory in the one spelling this reads: relative, its components plain names -- no `.`, `..`
+   or empty one, so no leading `/`, `./` or trailing `/`. The repository root is spelled by giving
+   no directory at all. Any other spelling is unmodelled rather than normalised (Codex review round
+   4 on PR #803): normalising is exactly where a spelling dune reads one way gets read another. *)
+let plain_dir d =
+  (not (String.is_empty d))
+  && List.for_all (String.split d ~on:'/') ~f:(fun c ->
+      (not (String.is_empty c)) && (not (String.equal c ".")) && not (String.equal c ".."))
 
-(** The targets a dune argv builds: [Ok None] for a subcommand that runs no test, [Error opt] for
-    one carrying an option this does not model. *)
+(* An alias target in the spellings this reads: [@alias], [@@alias], [@dir/alias], [@@dir/alias],
+   with [dir] plain. A path target, and anything else, is unmodelled. *)
+let target_of w =
+  let alias_in ~recursive spec =
+    match String.rsplit2 spec ~on:'/' with
+    | None when plain_dir spec -> Some (Alias { dir = ""; alias = spec; recursive })
+    | Some (dir, alias) when plain_dir dir && plain_dir alias ->
+        Some (Alias { dir; alias; recursive })
+    | _ -> None
+  in
+  match String.chop_prefix w ~prefix:"@@" with
+  | Some spec -> alias_in ~recursive:false spec
+  | None -> Option.bind (String.chop_prefix w ~prefix:"@") ~f:(alias_in ~recursive:true)
+
+(** The targets a dune argv builds: [Ok None] for a subcommand that runs no test, [Error word] for
+    one carrying a word this does not model. *)
 let targets argv =
-  let split rest =
+  let split ~target rest =
     let ws = words [] rest in
     match List.find_map ws ~f:(function Unmodelled o -> Some o | Target _ -> None) with
     | Some o -> Error o
-    | None -> Ok (List.filter_map ws ~f:(function Target t -> Some t | Unmodelled _ -> None))
+    | None ->
+        List.fold_result ws ~init:[] ~f:(fun acc -> function
+          | Target w -> ( match target w with Some t -> Ok (t :: acc) | None -> Error w)
+          | Unmodelled o -> Error o)
+        |> Result.map ~f:List.rev
   in
   match argv with
   | ("runtest" | "test") :: rest ->
-      Result.map (split rest) ~f:(fun ws ->
+      Result.map
+        (split rest ~target:(fun w ->
+             if plain_dir w then Some (Alias { dir = w; alias = "runtest"; recursive = true })
+             else None))
+        ~f:(fun ts ->
           Some
-            (match ws with
-            | [] -> [ Alias { dir = ""; alias = "runtest"; recursive = true } ]
-            | ws ->
-                (* A directory is `@<dir>/runtest`; an alias target is what it says. *)
-                List.map ws ~f:(fun w ->
-                    if String.is_prefix w ~prefix:"@" then target_of w
-                    else Alias { dir = strip_dot_slash w; alias = "runtest"; recursive = true })))
+            (if List.is_empty ts then [ Alias { dir = ""; alias = "runtest"; recursive = true } ]
+             else ts))
   | "build" :: rest ->
-      Result.map (split rest) ~f:(fun ws ->
+      Result.map (split rest ~target:target_of) ~f:(fun ts ->
           Some
-            (match ws with
-            | [] -> [ Alias { dir = ""; alias = "default"; recursive = true } ]
-            | ws -> List.map ws ~f:target_of))
+            (if List.is_empty ts then [ Alias { dir = ""; alias = "default"; recursive = true } ]
+             else ts))
   | _ -> Ok None
 
 let in_scope ~recursive ~root dir =
@@ -254,10 +244,6 @@ let reached_gpu stanzas target =
   List.find_map by_dir ~f:(fun group ->
       let dir = (List.hd_exn group).dir in
       match target with
-      | Directory d when String.equal d dir ->
-          gpu_in group
-            (Set.of_list (module String) (List.concat_map group ~f:(fun s -> s.attached)))
-      | Directory _ -> None
       | Alias { dir = root; alias; recursive } ->
           if not (in_scope ~recursive ~root dir) then None
           else
@@ -280,7 +266,7 @@ let verdict ~dune_files argv =
       Ok
         (Some
            (Printf.sprintf
-              "it carries %s, an option this does not model (it could change what is built)" opt))
+              "it carries `%s`, which this does not model (it could change what is built)" opt))
   | Ok None -> Ok None
   | Ok (Some targets) -> (
       let read =

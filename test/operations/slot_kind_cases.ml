@@ -94,25 +94,32 @@ let cases =
     ("runtest", `Gpu);
     ("build @runtest", `Gpu);
     ("build @@runtest", `Cpu);
-    (* Options with values are not targets, and a `-j` the runner injected changes nothing. *)
-    ("build -j 8 @a/runtest-t_cfg", `Cpu);
-    ("build --profile release @c/runtest", `Cpu);
-    (* An alias named through an option is the target it names; an option that could change what is
-       built, or one this does not know, is a GPU answer (Codex review round 3 on PR #803). *)
-    ("build --alias-rec runtest", `Gpu);
-    ("build --alias-rec=runtest-t_cfg", `Cpu);
-    ("build --alias a/runtest-t_cuda", `Gpu);
-    ("build --alias c/runtest", `Cpu);
+    (* Only a closed set of argv shapes is read; anything else is unmodelled and answered as a GPU
+       (Codex review rounds 3-4 on PR #803): other spellings of a directory, words past `--`,
+       alias-naming options, path targets, options that change the tree, and unknown ones. *)
+    ("runtest .", `Gpu);
+    ("runtest ./c", `Gpu);
+    ("runtest c/", `Gpu);
+    ("runtest c/../a", `Gpu);
+    ("runtest /c", `Gpu);
+    ("build @./c/runtest", `Gpu);
+    ("build @c/runtest -- @a/runtest-t_cuda", `Gpu);
+    ("build --default-target=@runtest", `Gpu);
+    ("build --alias-rec runtest-t_cfg", `Gpu);
+    ("build --alias c/runtest", `Gpu);
     ("build --root /elsewhere @c/runtest", `Gpu);
     ("build --workspace=other @c/runtest", `Gpu);
     ("build --frobnicate @c/runtest", `Gpu);
-    ("build -j8 --force --profile=release @c/runtest", `Cpu);
-    ("runtest -j 4 c", `Cpu);
     ("runtest --root /elsewhere c", `Gpu);
-    (* No target is the default alias everywhere; a path target reaches its directory. *)
-    ("build", `Gpu);
     ("build ./a/t_cfg.exe", `Gpu);
-    ("build _build/default/c/t_only.exe", `Cpu);
+    ("build _build/default/c/t_only.exe", `Gpu);
+    (* ...while the listed harmless options, in each spelling, change nothing. *)
+    ("build -j 8 @a/runtest-t_cfg", `Cpu);
+    ("build -j8 --force --profile=release @c/runtest", `Cpu);
+    ("build --display short @c/runtest", `Cpu);
+    ("runtest -j 4 c", `Cpu);
+    (* No target is the default alias everywhere. *)
+    ("build", `Gpu);
     (* A subcommand that runs no test reaches nothing. *)
     ("promote", `Cpu);
     ("clean", `Cpu);
