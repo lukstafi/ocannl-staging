@@ -63,7 +63,7 @@ opam install hipjit   # for AMD HIP backend
 
 **Windows shells**: use **Git Bash** (MSYS), never a Cygwin bash, and source `tools/opam-env.sh` before building (`opam env` emits cygwin-style paths that break linking). Route dune through `tools/dune-quiet.sh`, which filters the benign binutils link warnings while preserving dune's exit status (gh-ocannl-662; the agent note tells the two bashes apart).
 
-**Windows verification placement**: hosted Windows CI runs on its schedule, not per PR, and a merge never waits on that scheduled sweep (a dispatched run is another matter: it gates the head). When a change needs Windows signal that matters (it fixes a Windows failure, or changes behavior only Windows exercises: line endings, float formatting in goldens, the mingw toolchain), first ask the user to boot `rog-nv-win` or `minix-amd-win` into Windows, naming the box, commit and check (under a wave coordinator, hand the request to it). With no answer in 30 minutes, tell the user through the same channel that CI is taking the check, and only then dispatch `ci.yml` with `windows_only: true` and the full `expected_sha`, citing the run — never while the request is open. An issue centered on Windows waits for a box rather than iterating through dispatches. Why, and how to run on a booted box: the build-and-test note.
+**Windows verification placement**: hosted Windows CI runs on schedule, not per PR; a merge never waits on that sweep (a dispatched run does gate the head). When a change needs Windows signal that matters (it fixes a Windows failure, or changes behavior only Windows exercises: line endings, float formatting in goldens, the mingw toolchain), first reboot rog yourself: `wake-lab.sh boot-windows` under your own exclusive `measurement` reservation, then always `boot-linux`; exit 3 (`NEEDS A PERSON`) goes to the user at once. Failing that, ask the user to boot `rog-nv-win` or `minix-amd-win`, naming the box, commit and check (a wave coordinator takes both steps). With no answer in 30 minutes, tell the user through the same channel that CI is taking the check, and only then dispatch `ci.yml` with `windows_only: true` and the full `expected_sha`, citing the run — never while the request is open. An issue centered on Windows waits for a box rather than iterating through dispatches. Why, the reboot mechanics and running on a booted box: the build-and-test note.
 
 **Format before the first push** (gh-ocannl-938): CI's `fmt` job runs `tools/fmt-check.sh` (`@fmt` + invalid odoc); a fmt-fix push costs a CI round AND a review round. Order: `dune fmt`, tests, promote (reformatting shifts `~here` goldens' `file:line`), last, `tools/fmt-check.sh`. New ppx-expectation files (`test/ppx/*_expected.ml`) stay unformatted — list them in `.ocamlformat-ignore` (`ocamlformat_ignore_scan` enforces it).
 
@@ -87,9 +87,7 @@ workarounds, debug recipes, design history) not derivable from the code alone.
    - Operations in `Operation`, `TDSL`, `NTDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
    - Operations in `TDSL.O` (opened for `%op`), `NTDSL.O` (opened for `%cd`) hide this so that shapes have to be inferred
 
-3. **Backend Architecture**: Unified interface supporting CPU (multicore), CUDA, HIP, and Metal backends
-
-4. **Memory Management**: Tensor node memory modes are `Virtual` (inlined computations), `Local`, and `On_device`.
+3. **Memory Management**: Tensor node memory modes are `Virtual` (inlined computations), `Local`, and `On_device`.
    CPU-side reads and writes are explicit, context-mediated operations
    (`Context.to_host`/`from_host`, `get_values`/`set_values`).
 
@@ -173,8 +171,8 @@ or golden format.
 - **A new post-lowering module still needs registering** in that test's `codegen_stage_modules` list (a new backend, or anything reading configuration after lowering), so a `Code_borne` misclassification of its keys is noticed
 
 **Configuration Methods** (in order of precedence):
-1. Command-line flags: `--ocannl_<option>=<value>` (e.g., `--ocannl_backend=cuda`)
-2. Environment variables: `OCANNL_<OPTION>=<value>` (e.g., `OCANNL_BACKEND=cuda`)
+1. Command-line flags: `--ocannl_<option>=<value>`
+2. Environment variables: `OCANNL_<OPTION>=<value>`
 3. Config file: `ocannl_config` in current or ancestor directories
 
 **Config profiles** (gh-ocannl-559): `profile=reproducible|performance|approximate` applies a preset bundle (embedded in `arrayjit/lib/utils.ml`) just below the explicit keys of the source that picked it: explicit keys beat a profile of equal immediacy, and a CLI-picked profile beats a config file. A new numerics-changing gate lands in the `approximate` payload (gh-ocannl-719), pinned at its default in `reproducible`, and in the schedule cache's identity in the PR that adds its key — which digest, and the checks that pin the payloads: the backend-precision note.

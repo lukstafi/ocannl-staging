@@ -1931,10 +1931,32 @@ that they earn a lookup rather than always-loaded space.
   on the OCaml floor the opam files claim (`>= 5.3.0`, against 5.5 everywhere else).
   PR, push and ordinary `workflow_dispatch` runs use the Linux/macOS matrix.
   When a change needs Windows signal, AGENTS.md's *Windows verification placement* says where it
-  comes from: a box the user boots into Windows first, this dispatch as the fallback. The order is
-  latency: `rog-nv-win` and `minix-amd-win` normally boot Ubuntu, and one rebooted into Windows
-  answers in minutes where hosted Windows CI takes one to three hours. A wave coordinator batches
-  the boot requests and picks the box with less queued work. The fallback waits until the request
+  comes from: rog rebooted into Windows by the agent itself first, then a box the user boots, this
+  dispatch last. The order is latency: `rog-nv-win` and `minix-amd-win` normally boot Ubuntu, and
+  one rebooted into Windows answers in minutes where hosted Windows CI takes one to three hours;
+  the unattended reboot also spends none of the user's attention (gh-ocannl-1042). A wave
+  coordinator batches the reboots and the boot requests and picks the box with less queued work.
+  The unattended reboot is `wake-lab.sh boot-windows --as=<request_id> rog` (ludics-lite#353):
+  a one-boot UEFI `BootNext` into Windows Boot Manager — BootOrder stays Ubuntu-first and GRUB is
+  never written — then a wait of up to 15 minutes until native Git Bash answers. Its live witness
+  on rog (2026-09-24) reached Git Bash about 50 s after the reboot, with nobody at the keyboard
+  and no BitLocker prompt. `<request_id>` names your own active `measurement` reservation on the
+  box (`fleet-worker.sh execution reserve`, `.request.kind == "measurement"`,
+  `execution_host: rog-nv-linux`): the script refuses without one, refuses while any OTHER
+  reservation names the box, while its lab lane or hold lock is held, or while a logind sleep-block
+  inhibitor shows a run in progress, since a reboot kills everything on the box — including the
+  desktop session's open apps. Verdicts: exit 0, Git Bash answers — run the check as below;
+  exit 1, refused, or the box is back in a known OS (the firmware ignored `BootNext`, or Windows
+  restarted) — fall through to asking the user; exit 3, `NEEDS A PERSON`, nothing answers or the
+  old OS never went down within the deadline — tell the user at once (only someone at the box can
+  tell a Windows update from a BitLocker prompt or a hang; the script never retries) and fall
+  through to the next step. Afterwards ALWAYS run `wake-lab.sh boot-linux --as=<request_id> rog`
+  (a no-op when the box is already in Ubuntu; from Windows it is a plain `shutdown /r` into
+  BootOrder's first entry), then conclude the reservation: rog's steady state is native Ubuntu,
+  which the daily sweep's CUDA leg and every Linux worker there expect. Only rog qualifies today:
+  minix needs its own `/etc/sudoers.d/50-fleet-boot` grant (the two `efibootmgr` forms and
+  `systemctl reboot`, as on rog; text in ludics-lite's README) before the verbs work there, and
+  tuf has no wired NIC, so the script refuses it. The fallback waits until the request
   is withdrawn -- the user told, through the same channel, that CI is taking the check, so a late
   reboot is not wasted -- because a dispatched run's checks gate the head, and cancelling one when
   the box turns up leaves a no-verdict the merge refuses. On a booted
