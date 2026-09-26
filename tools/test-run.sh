@@ -171,14 +171,17 @@ reject_misplaced_options() {
 # batches at once on each native GPU box (lukstafi/ludics-lite#316 and ludics-lite#344),
 # measured at a width per batch: minix's small SDMA queue pool is device-wide,
 # so hip batches at dune's default can drain it between them, and tuf's and
-# rog-nv's slots were measured at -j 8, not at their 16 and 24 cores. A slot count that
-# holds only while every caller remembers the width is a hazard, not a limit,
-# so the native widths are injected the same way. tools/box-jobs.sh decides
+# rog-nv's slots were measured at -j 8, not at their 16 and 24 cores. rog-nv's
+# four slots admit only two batches to its GPU (the fleet's GPU tokens), so the
+# other two are CPU batches', and those were only ever measured at -j 8 too
+# (gh-ocannl-1065). A slot count that holds only while every caller remembers
+# the width is a hazard, not a limit, so the native widths are injected the
+# same way. tools/box-jobs.sh decides
 # which hazard, if any, this box and backend meet (box_jobs_local_hazard) and
 # owns every number.
 #
 # So a `run`/`start` that expressed NO width at all, on such a box, with a GPU
-# backend selected, gets the cap injected and is told so -- loudly, because the
+# backend selected (or on rog-nv, any backend), gets the cap injected and is told so -- loudly, because the
 # alternative reading of what follows is a backend regression. The "runs dune as
 # given" contract is untouched wherever the caller named a width: an explicit
 # `-j`/`--jobs` (in any of dune's spellings, and any abbreviation of the long
@@ -192,7 +195,11 @@ reject_misplaced_options() {
 # that cannot read a value says so instead: where a hazard is present and
 # OCANNL_BACKEND is unset, the run is not capped and the caller is told what to
 # pass if the suite is in fact a GPU one. (The test directories' own configs
-# pin a CPU backend, so a GPU suite names OCANNL_BACKEND in practice.)
+# pin a CPU backend, so a GPU suite names OCANNL_BACKEND in practice.) The one
+# exception is a box where every backend it can run meets the same cap
+# (box_jobs_local_uniform_cap: a native NVIDIA boot), where the unread backend
+# cannot change the answer, so the cap is injected -- which is what reaches
+# the CPU batches there, whose backend is the config's.
 explicit_jobs() { # dune argv; 0 iff it names a width before dune's own `--`
   for arg do
     case $arg in
@@ -215,6 +222,7 @@ hazard_name() { # <hazard>; a noun phrase for the host, and the issue behind its
     sdma) printf 'small-SDMA-pool host (gh-ocannl-1033)' ;;
     wide-sdma) printf 'native AMD GPU host (lukstafi/ludics-lite#344)' ;;
     nvidia) printf 'native NVIDIA host (gh-ocannl-1033)' ;;
+    nvidia-cpu) printf 'native NVIDIA host (gh-ocannl-1065)' ;;
   esac
 }
 hazard_found() { # <hazard> <backend>
@@ -230,6 +238,9 @@ hazard_found() { # <hazard> <backend>
       "$(box_jobs_sdma_pool)" "$(box_jobs_kfd_topology)" "$2" ;;
     nvidia) printf 'This is a native NVIDIA boot
   (%s) and OCANNL_BACKEND=%s holds its GPU' "$(box_jobs_nvidia_device)" "$2" ;;
+    nvidia-cpu) printf 'This is a native NVIDIA boot
+  (%s), and OCANNL_BACKEND=%s shares its correctness slots with the
+  batches that hold the GPU' "$(box_jobs_nvidia_device)" "$2" ;;
   esac
 }
 hazard_why() { # <hazard>
@@ -254,12 +265,23 @@ hazard_why() { # <hazard>
   tools/box-jobs.sh; the evidence is in the native-boot bullets of
   docs/agent-notes/build-and-test.md.' \
       "$BOX_JOBS_WIDE_SDMA_SLOTS" "$BOX_JOBS_WIDE_SDMA_SLOT_CAP" "$BOX_JOBS_WIDE_SDMA_BUDGET" ;;
-    nvidia) printf 'The fleet'"'"'s %s correctness slots
-  on this box were measured at -j %s each, and three or four such batches at
-  once hit a CUDA_ERROR_OUT_OF_MEMORY (lukstafi/ludics-lite#316 and ludics-lite#344); two
+    nvidia) printf 'The fleet runs %s GPU tokens of
+  %s correctness slots on this box (lukstafi/ludics-lite#391): the %s cuda
+  batches the tokens admit were measured at -j %s each, and three or four such
+  batches at once hit a CUDA_ERROR_OUT_OF_MEMORY (lukstafi/ludics-lite#316 and ludics-lite#344); two
   batches at dune'"'"'s default width were never measured (gh-ocannl-1033). The
   cap lives in tools/box-jobs.sh; the evidence is in the native-boot bullets of
-  docs/agent-notes/build-and-test.md.' "$BOX_JOBS_NATIVE_CUDA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_CAP" ;;
+  docs/agent-notes/build-and-test.md.' "$BOX_JOBS_NATIVE_CUDA_TOKENS" \
+      "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_TOKENS" "$BOX_JOBS_NATIVE_CUDA_CAP" ;;
+    nvidia-cpu) printf 'The fleet runs %s correctness slots on
+  this box, %s of them GPU tokens (lukstafi/ludics-lite#391), and CPU batches
+  there were only ever measured at -j %s; uncapped, %s of them would each run
+  as many jobs as the box has cores (gh-ocannl-1065). A batch that holds no GPU
+  takes its slot as `fleet-worker.sh execution slot --cpu`, or it waits on a
+  GPU token it does not need. The cap lives in tools/box-jobs.sh; the evidence
+  is in the native-boot bullets of docs/agent-notes/build-and-test.md.' \
+      "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_TOKENS" \
+      "$BOX_JOBS_NATIVE_CPU_CAP" "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" ;;
   esac
 }
 
@@ -279,6 +301,19 @@ plan_width_cap() { # dune argv
   OCANNL_BACKEND is unset here, so this run's backend comes from ocannl_config
   or the stanza and cannot be read from a launcher: if it is cuda or hip, pass
   -j $BOX_JOBS_DXG_CAP yourself, or the suite can come back red like a backend regression."
+      return 0
+    fi
+    cap=$(box_jobs_local_uniform_cap)
+    if [ -n "$cap" ]; then
+      width_cap=$cap
+      width_announce="capping dune at -j $cap. This is a native NVIDIA boot
+  ($(box_jobs_nvidia_device)), where cuda and the CPU backends alike run at -j $cap
+  (tools/box-jobs.sh; gh-ocannl-1033, gh-ocannl-1065). OCANNL_BACKEND is unset
+  here, so this run's backend comes from ocannl_config or the stanza and cannot
+  be read from a launcher, but whichever it is, this is its width. A batch that
+  holds no GPU takes its fleet slot as \`fleet-worker.sh execution slot --cpu\`,
+  or it waits on a GPU token it does not need. Pass an explicit -j to run at a
+  width of your own."
       return 0
     fi
     for b in cuda hip; do

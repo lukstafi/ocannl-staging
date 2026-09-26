@@ -2240,14 +2240,23 @@ that they earn a lookup rather than always-loaded space.
   (tuf-amd-linux's gfx1102 reports 2 engines x 6). Each is the width the box's correctness slots
   were measured at, all of them at once (lukstafi/ludics-lite#316 and lukstafi/ludics-lite#344): minix runs four slots
   (four `-j 4` hip batches, and two `-j 8` and one `-j 16` unit, were green; only dune's default
-  32 has drained the pool), tuf three (three `-j 8` hip batches green), rog two (three or more
-  concurrent cuda batches hit `CUDA_ERROR_OUT_OF_MEMORY` in `fused_classifier` in 2 of 6 rungs, at
-  10.0-10.2 GiB of 12 in use). So each hip width is a measured budget over the box's slot count
-  (`BOX_JOBS_SDMA_BUDGET / BOX_JOBS_SDMA_SLOTS`, `BOX_JOBS_WIDE_SDMA_BUDGET /
+  32 has drained the pool), tuf three (three `-j 8` hip batches green), rog four, only two of
+  them GPU tokens (three or more concurrent cuda batches hit `CUDA_ERROR_OUT_OF_MEMORY` in
+  `fused_classifier` in 2 of 6 rungs, at 10.0-10.2 GiB of 12 in use; two cuda beside two cc ran
+  green, lukstafi/ludics-lite#391). So each hip width is a measured budget over the box's slot
+  count (`BOX_JOBS_SDMA_BUDGET / BOX_JOBS_SDMA_SLOTS`, `BOX_JOBS_WIDE_SDMA_BUDGET /
   BOX_JOBS_WIDE_SDMA_SLOTS`), and the cuda one is `BOX_JOBS_NATIVE_CUDA_CAP`; the slot counts
-  must agree with the fleet's `FLEET_BOX_CORRECTNESS_SLOTS` default in lukstafi/ludics-lite. An
-  explicit `-j` still wins, and only says the cap exists, and an unset `OCANNL_BACKEND` is
-  reported with the width to pass rather than guessed, as for dxg. Measuring a slot count: the
+  must agree with the fleet's `FLEET_BOX_CORRECTNESS_SLOTS` default in lukstafi/ludics-lite, and
+  rog's `BOX_JOBS_NATIVE_CUDA_TOKENS` with its `FLEET_BOX_GPU_TOKENS`. On rog a CPU batch is
+  capped too, at `BOX_JOBS_NATIVE_CPU_CAP` (`-j 8`, the only width cc ran at in those rungs;
+  gh-ocannl-1065): four uncapped cc batches would run 96 jobs on 24 cores. Elsewhere a CPU batch
+  is uncapped. An explicit `-j` still wins, and only says the cap exists, and an unset
+  `OCANNL_BACKEND` is reported with the width to pass rather than guessed, as for dxg — except
+  on a native NVIDIA boot, where cuda and the CPU backends share one width, so the unread backend
+  cannot change it and it is injected. A batch there that holds no GPU must take its fleet slot
+  as `fleet-worker.sh execution slot --cpu`: the slot is fail-closed, so an undeclared cc batch
+  waits on one of the two GPU tokens and rog runs at two batches, not four; test-run.sh's
+  announcement says so, and gh-ocannl-1004 would take the slot, declared, in the runner itself. Measuring a slot count: the
   dune shared cache restored nothing on these boxes (a `dune clean` + `--force` batch ran ~396
   `ocamlopt` processes, per `_build/trace.csexp`, cache on or off), so such batches are
   compile-inclusive; and without `dune clean`, `--force` does not re-run the tests at all.

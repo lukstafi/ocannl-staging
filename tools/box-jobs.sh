@@ -54,9 +54,15 @@ BOX_JOBS_SDMA_CAP=8
 # use (2026-09-24). It had started at a placeholder -j 2 until measured.
 
 # The backends that hold the device, i.e. the ones the bridge carries. A CPU
-# backend on the same box runs at full width.
+# backend on the same box runs at full width, except on rog-nv-linux (below).
 box_jobs_gpu_backend() { # <backend>; 0 iff it holds a GPU
   case ${1:-} in cuda | hip) return 0 ;; *) return 1 ;; esac
+}
+
+# The CPU backends, their deprecated aliases included; any other name (a typo,
+# or metal) is neither, and meets no hazard.
+box_jobs_cpu_backend() { # <backend>; 0 iff it runs on the CPU
+  case ${1:-} in cc | multidev_cc | sync_cc | multicore_cc) return 0 ;; *) return 1 ;; esac
 }
 
 # How the sweep reached a box, from the ssh destination it used: `dxg` for a
@@ -182,14 +188,15 @@ box_jobs_native_nvidia_host() { # 0 iff this is a native NVIDIA boot
 }
 
 # How many correctness batches the fleet runs at once on each native GPU box
-# (`execution slot` slots, lukstafi/ludics-lite's FLEET_BOX_CORRECTNESS_SLOTS),
-# and the width each batch takes so that all of them at once stay within what
-# was measured. Restated here rather than read from the fleet, because a run
+# (`execution slot` slots, lukstafi/ludics-lite's FLEET_BOX_CORRECTNESS_SLOTS,
+# and how many of them may hold the GPU, its FLEET_BOX_GPU_TOKENS), and the
+# width each batch takes so that all of them at once stay within what was
+# measured. Restated here rather than read from the fleet, because a run
 # launched outside `execution slot` -- by hand, or by a worker that skipped
 # the slot -- must get the same width, and the width must be the same number
-# the slot count was measured at. Every width below is a hip or cuda batch's;
-# a CPU batch is never capped. Measured by lukstafi/ludics-lite#316
-# (2026-09-23) and #344 (2026-09-24), each box under an exclusive reservation,
+# the slot count was measured at. Every width below is a hip or cuda batch's,
+# except rog-nv-linux's CPU width; a CPU batch elsewhere is never capped.
+# Measured by lukstafi/ludics-lite#316 (2026-09-23) and #344 (2026-09-24), each box under an exclusive reservation,
 # with 1-4 concurrent targeted batches of 26 backend-exercising stanzas; every
 # batch compiled the tree (dune's trace showed ~396 ocamlopt runs even in a
 # batch meant to restore them from the cache), so these are compile-inclusive.
@@ -217,28 +224,46 @@ BOX_JOBS_WIDE_SDMA_BUDGET=24
 BOX_JOBS_WIDE_SDMA_SLOTS=3
 BOX_JOBS_WIDE_SDMA_SLOT_CAP=$((BOX_JOBS_WIDE_SDMA_BUDGET / BOX_JOBS_WIDE_SDMA_SLOTS))
 
-# rog-nv-linux (RTX 5070 Ti Laptop, 12 GiB, 24 cores): two slots of -j 8. Two
-# concurrent `-j 8` cuda batches (14 GPU-holding processes) were green in every
-# rung, beside one or two cc batches too. Three or more concurrent cuda
-# batches failed 2 of 6 rungs, both times `fused_classifier` dying on
+# rog-nv-linux (RTX 5070 Ti Laptop, 12 GiB, 24 cores): four slots, two of them
+# GPU tokens, every batch at -j 8. The bound there is the GPU's memory, not the
+# box. Two concurrent `-j 8` cuda batches (14 GPU-holding processes) were green
+# in every rung, beside one or two cc batches too. Three or more concurrent
+# cuda batches failed 2 of 6 rungs, both times `fused_classifier` dying on
 # `cu_launch_kernel: CUDA_ERROR_OUT_OF_MEMORY` with an empty kernel window:
 # three `-j 8` in #316, four `-j 6` in #344, with device memory peaking at
-# 10.0-10.2 GiB. So the count is two cuda batches; what could raise it is a
-# count per GPU kind (cc batches cost the cuda ones nothing), which the fleet's
-# slots do not express. One batch alone was green at every width
-# (gh-ocannl-1029), and `-j 8` was its fastest.
+# 10.0-10.2 GiB. So two batches may hold the GPU, and the fleet expresses that
+# as GPU tokens (lukstafi/ludics-lite#391, FLEET_BOX_GPU_TOKENS=rog-nv-linux=2):
+# four slots, of which a batch holding the GPU may take only the first two,
+# and a batch declared `execution slot --cpu` takes any. The #391 witness ran
+# two cuda and two cc batches at once, green, peaking at 6038 of 12227 MiB. One
+# cuda batch alone was green at every width (gh-ocannl-1029), and `-j 8` was
+# its fastest.
+#
+# A CPU batch is capped here too, unlike on the other boxes, because rog is
+# the one box whose slot count grew past what it was measured at with CPU
+# batches in it: #344 and the #391 witness only ever ran cc at `-j 8`, and
+# uncapped four cc batches would run 96 jobs on 24 cores. `-j 8` keeps the
+# four slots at the 32 jobs the two-and-two rungs ran, whatever the mix.
 # shellcheck disable=SC2034  # read by tools/test-run.sh, which sources this file
-BOX_JOBS_NATIVE_CUDA_SLOTS=2
+BOX_JOBS_NATIVE_NVIDIA_SLOTS=4
+# shellcheck disable=SC2034  # read by tools/test-run.sh, which sources this file
+BOX_JOBS_NATIVE_CUDA_TOKENS=2
 BOX_JOBS_NATIVE_CUDA_CAP=8
+BOX_JOBS_NATIVE_CPU_CAP=8
 
 # The local view, for a run on THIS box: which hazard, if any, a batch of the
 # selected backend meets here -- `dxg` (the bridge), `sdma` (a small copy-engine
 # pool: minix's slots, hip only), `wide-sdma` (a larger one: tuf's slots, hip
-# only) or `nvidia` (a native CUDA box's slots, cuda only). The
-# bridge comes first: a WSL boot keeps its own cap whatever else it reports.
+# only), `nvidia` (a native CUDA box's GPU tokens, cuda only) or `nvidia-cpu`
+# (the same box's slots, for a CPU backend). The bridge comes first: a WSL boot
+# keeps its own cap whatever else it reports, and a CPU batch there none.
 # The backend is read from the ENVIRONMENT only -- see the caller
 # (tools/test-run.sh) for why a config file is not consulted.
-box_jobs_local_hazard() { # <backend>; prints dxg, sdma, wide-sdma, nvidia, or nothing
+box_jobs_local_hazard() { # <backend>; prints dxg, sdma, wide-sdma, nvidia, nvidia-cpu, or nothing
+  if box_jobs_cpu_backend "${1:-}"; then
+    box_jobs_dxg_host || ! box_jobs_native_nvidia_host || printf 'nvidia-cpu'
+    return 0
+  fi
   box_jobs_gpu_backend "${1:-}" || return 0
   if box_jobs_dxg_host; then
     printf 'dxg'
@@ -262,10 +287,28 @@ box_jobs_hazard_cap() { # <hazard>; prints its cap, or nothing
     sdma) printf '%s' "$BOX_JOBS_SDMA_SLOT_CAP" ;;
     wide-sdma) printf '%s' "$BOX_JOBS_WIDE_SDMA_SLOT_CAP" ;;
     nvidia) printf '%s' "$BOX_JOBS_NATIVE_CUDA_CAP" ;;
+    nvidia-cpu) printf '%s' "$BOX_JOBS_NATIVE_CPU_CAP" ;;
     *) ;;
   esac
 }
 
 box_jobs_local_cap() { # <backend>; prints the cap, or nothing
   box_jobs_hazard_cap "$(box_jobs_local_hazard "${1:-}")"
+}
+
+# The width every backend this box can run meets, where they all meet the same
+# one -- so that a caller who cannot read the backend (OCANNL_BACKEND unset)
+# still gets it, because then it is not a guess. Only a native NVIDIA boot
+# qualifies: it runs cuda and the CPU backends, and rog-nv-linux caps both at
+# -j 8 -- unless an AMD GPU beside it would give hip a width of its own.
+# Elsewhere a CPU batch is uncapped while a GPU one is not, so the width
+# depends on the backend and is only advised.
+box_jobs_local_uniform_cap() { # prints that cap, or nothing
+  local gpu cpu
+  box_jobs_native_nvidia_host || return 0
+  [ -z "$(box_jobs_local_hazard hip)" ] || return 0
+  gpu=$(box_jobs_local_cap cuda)
+  cpu=$(box_jobs_local_cap cc)
+  [ -n "$gpu" ] && [ "$gpu" = "$cpu" ] && printf '%s' "$gpu"
+  return 0
 }
