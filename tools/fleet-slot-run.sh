@@ -18,7 +18,13 @@
 # (lukstafi/ludics-lite, FLEET_SLOT_HELD) runs this batch inside the wrapper's
 # slot rather than taking a second one.
 #
-# The kind is RESOLVED, not guessed, and fails closed. OCANNL_BACKEND is only
+# The kind is RESOLVED, not guessed, and fails closed. First, a stanza that
+# NAMES its backend (`; ocannl-backend: cuda -- …`, which env_var_deps
+# enforces on every stanza that does not read the configuration) holds that
+# backend whatever the configuration says, so a run that can reach one naming
+# cuda, hip or metal is --gpu (test/config's ocannl_slot_kind reads the markers
+# and what the argv reaches; Test_utils.Slot_kind says how). Then, for the
+# stanzas that do read it: OCANNL_BACKEND is only
 # one of the places a backend comes from: an ordinary cc batch leaves it unset
 # and gets cc from the config its stanzas copy. So the backend is read the way
 # a test run reads it, by `ocannl_read_config` (test/config/, built from the
@@ -68,19 +74,31 @@ argv_picks_backend() { # dune argv
   return 1
 }
 
-# Prints `cpu` or `gpu`, and on stderr what it was decided from.
-resolve_kind() {
-  local reader d b seen=
-  if [ -n "${OCANNL_TOOL_READ_CONFIG:-}" ]; then
-    reader=$OCANNL_TOOL_READ_CONFIG
+# Prints `cpu` or `gpu`, and on stderr what it was decided from. Two questions,
+# both of which must answer CPU: can the run reach a stanza that NAMES a GPU
+# backend (ocannl_slot_kind, reading the `; ocannl-backend:` markers
+# env_var_deps enforces -- no configuration value shows those), and do the
+# configurations the other stanzas read resolve a CPU backend
+# (ocannl_read_config).
+resolve_kind() { # dune argv
+  local reader reach d b seen=
+  if [ -n "${OCANNL_TOOL_READ_CONFIG:-}" ] && [ -n "${OCANNL_TOOL_SLOT_KIND:-}" ]; then
+    reader=$OCANNL_TOOL_READ_CONFIG reach=$OCANNL_TOOL_SLOT_KIND
   else
     # Built under the worktree lock the supervisor holds, before the slot:
-    # a few seconds warm, and its libraries are the batch's own anyway.
-    "$dune" build ./test/config/ocannl_read_config.exe >&2 ||
-      { echo "test-run: fleet slot: ocannl_read_config did not build, so the backend is unread: --gpu" >&2
+    # a few seconds warm, and their libraries are the batch's own anyway.
+    "$dune" build ./test/config/ocannl_read_config.exe ./test/config/ocannl_slot_kind.exe >&2 ||
+      { echo "test-run: fleet slot: the backend readers did not build, so the kind is unread: --gpu" >&2
         echo gpu; return 0; }
     reader=$PWD/_build/default/test/config/ocannl_read_config.exe
+    reach=$PWD/_build/default/test/config/ocannl_slot_kind.exe
   fi
+  b=$("$reach" "$@" 2>/dev/null)
+  case $b in
+    cpu) ;;
+    gpu:*) echo "test-run: fleet slot: ${b#gpu: }: --gpu" >&2; echo gpu; return 0 ;;
+    *) echo "test-run: fleet slot: ocannl_slot_kind answered '${b:-nothing}': --gpu" >&2; echo gpu; return 0 ;;
+  esac
   for d in $SLOT_CONFIG_DIRS; do
     if ! b=$(cd "$d" && "$reader" --read=backend --output=stdout 2>/dev/null); then
       echo "test-run: fleet slot: the backend for $d is unreadable: --gpu" >&2
@@ -99,6 +117,6 @@ resolve_kind() {
 if argv_picks_backend "$@"; then
   kind=gpu
 else
-  kind=$(resolve_kind)
+  kind=$(resolve_kind "$@")
 fi
 exec "$fw" execution slot --wait "$wait" "--$kind" -- "$dune" "$@"

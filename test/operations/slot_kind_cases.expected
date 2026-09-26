@@ -1,0 +1,48 @@
+build @a/runtest-t_cfg                   cpu
+build @a/runtest-t_cfg reaches no GPU stanza: true
+build @a/runtest-t_cc                    cpu
+build @a/runtest-t_cc reaches no GPU stanza: true
+build @a/runtest-t_cuda                  gpu: it reaches t_cuda in a, which names cuda
+build @a/runtest-t_cuda reaches a GPU stanza: true
+build @a/scans                           cpu
+build @a/scans reaches no GPU stanza: true
+build @a/gpuagg                          gpu: it reaches t_cuda in a, which names cuda
+build @a/gpuagg reaches a GPU stanza: true
+build @@c/runtest                        cpu
+build @@c/runtest reaches no GPU stanza: true
+build @c/runtest                         cpu
+build @c/runtest reaches no GPU stanza: true
+build @@a/runtest                        gpu: it reaches t_cuda in a, which names cuda
+build @@a/runtest reaches a GPU stanza: true
+runtest a/sub                            gpu: it reaches t_hip in a/sub, which names hip
+runtest a/sub reaches a GPU stanza: true
+runtest a                                gpu: it reaches t_cuda in a, which names cuda
+runtest a reaches a GPU stanza: true
+runtest c                                cpu
+runtest c reaches no GPU stanza: true
+build @b/runtest                         gpu: it reaches the rule on runtest-m in b, which names metal
+build @b/runtest reaches a GPU stanza: true
+build @b/runtest-m                       gpu: it reaches the rule on runtest-m in b, which names metal
+build @b/runtest-m reaches a GPU stanza: true
+runtest                                  gpu: it reaches t_cuda in a, which names cuda
+runtest reaches a GPU stanza: true
+build @runtest                           gpu: it reaches t_cuda in a, which names cuda
+build @runtest reaches a GPU stanza: true
+build @@runtest                          cpu
+build @@runtest reaches no GPU stanza: true
+build -j 8 @a/runtest-t_cfg              cpu
+build -j 8 @a/runtest-t_cfg reaches no GPU stanza: true
+build --profile release @c/runtest       cpu
+build --profile release @c/runtest reaches no GPU stanza: true
+build                                    gpu: it reaches t_cuda in a, which names cuda
+build reaches a GPU stanza: true
+build ./a/t_cfg.exe                      gpu: it reaches t_cuda in a, which names cuda
+build ./a/t_cfg.exe reaches a GPU stanza: true
+build _build/default/c/t_only.exe        cpu
+build _build/default/c/t_only.exe reaches no GPU stanza: true
+promote                                  cpu
+promote reaches no GPU stanza: true
+clean                                    cpu
+clean reaches no GPU stanza: true
+runtest d (malformed marker)             error: the dune file in d is unreadable here ((Failure "a backend marker the env_var_deps contract refuses"))
+a malformed marker makes the tree unreadable, never CPU: true

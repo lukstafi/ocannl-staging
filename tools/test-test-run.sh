@@ -117,14 +117,16 @@
 #      (gh-ocannl-1004), against a fake fleet-worker.sh and a fake
 #      ocannl_read_config.
 #  53. the kind: --cpu only when every test configuration resolves a CPU
-#      backend; a GPU, empty, unknown or unreadable one, `exec`, or a command-line
-#      GPU backend is --gpu; the cap bounds the wait.
+#      backend and the run reaches no stanza naming a GPU backend; a GPU,
+#      empty, unknown or unreadable one, `exec`, a command-line GPU backend, or
+#      a reachable GPU stanza is --gpu; the cap bounds the wait.
 #  54. a refused or unreachable slot is SLOT REFUSED, exit 75, and dune never runs.
 #  55. a red suite under a held slot is still FAIL; `start` prints the caller's argv.
 #  56. no probe, OCANNL_TOOL_FLEET_WORKER=none, and repeat all run dune directly;
 #      a stale first skill tree does not hide a second that answers the probe.
 #  57. every tracked ocannl_config naming a backend is one the kind is read from.
-#  58. the reader fleet-slot-run.sh builds is test/config's, and answers --read=backend.
+#  58. the readers fleet-slot-run.sh builds are test/config's: ocannl_read_config
+#      answers --read=backend, ocannl_slot_kind asks Test_utils.Slot_kind.
 
 set -u
 
@@ -3085,14 +3087,22 @@ esac
 [ "$v" = unset ] && v=
 printf '%s\n' "$v"
 FAKE
-chmod +x "$slot_fake" "$slot_reader"
+slot_reach=$TMP/fake-slot-kind.sh
+cat >"$slot_reach" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_REACH_CALLS"
+printf '%s\n' "${FAKE_REACH:-cpu}"
+FAKE
+chmod +x "$slot_fake" "$slot_reader" "$slot_reach"
 mkdir -p "$repeat_root/test/config" "$repeat_root/arrayjit/test"
 slot_probe() { # tag mode test-backend arrayjit-backend subcommand [argv...]
   local tag=$1 mode=$2 bt=$3 ba=$4
   shift 4
   : >"$TMP/$tag.fw"
+  : >"$TMP/$tag.reach"
   FAKE_FW_CALLS=$TMP/$tag.fw FAKE_FW_MODE=$mode FAKE_BACKEND_TEST=$bt FAKE_BACKEND_ARRAYJIT=$ba \
-  OCANNL_TOOL_FLEET_WORKER=$slot_fake OCANNL_TOOL_READ_CONFIG=$slot_reader \
+  FAKE_REACH_CALLS=$TMP/$tag.reach \
+  OCANNL_TOOL_FLEET_WORKER=$slot_fake OCANNL_TOOL_READ_CONFIG=$slot_reader OCANNL_TOOL_SLOT_KIND=$slot_reach \
     argv_probe "$tag" "$@"
   slot_calls=$(grep -v -- '--probe' "$TMP/$tag.fw")
 }
@@ -3129,6 +3139,24 @@ for probe in "exec:exec ./prog.exe" "flag-gpu:exec ./prog.exe -- --ocannl_backen
   [ "$slot_calls" = "execution slot --wait 600 --gpu -- dune $argv" ] ||
     slot_detail="argv $tag: slot call: ${slot_calls:-<none>} (want --gpu)"
 done
+# A run that reaches a stanza naming a GPU backend is --gpu however the
+# configurations resolve, and the reachability question is asked with the
+# caller's own dune argv (the width, if injected, included).
+if [ -z "$slot_detail" ]; then
+  FAKE_REACH="gpu: it reaches test_cuda_pool_offset in test/operations, which names cuda" \
+    slot_probe slot-reach-gpu hold cc cc run build @cheap
+  [ "$slot_calls" = "execution slot --wait 600 --gpu -- dune build @cheap" ] ||
+    slot_detail="reach: slot call: ${slot_calls:-<none>} (want --gpu)"
+  [ -n "$slot_detail" ] || [ "$(cat "$TMP/slot-reach-gpu.reach")" = "build @cheap" ] ||
+    slot_detail="reach: asked about: $(cat "$TMP/slot-reach-gpu.reach") (want build @cheap)"
+  [ -n "$slot_detail" ] || grep -q "fleet slot: it reaches test_cuda_pool_offset" "$argv_dir/log" ||
+    slot_detail="reach: the log does not say why: $(cat "$argv_dir/log")"
+fi
+if [ -z "$slot_detail" ]; then
+  FAKE_REACH="garbled" slot_probe slot-reach-garbled hold cc cc run build @cheap
+  [ "$slot_calls" = "execution slot --wait 600 --gpu -- dune build @cheap" ] ||
+    slot_detail="an unreadable reachability answer: slot call: ${slot_calls:-<none>} (want --gpu)"
+fi
 if [ -z "$slot_detail" ]; then
   slot_probe slot-argv-cpu-flag hold cc cc run build @cheap --ocannl_backend=cc
   [ "$slot_calls" = "execution slot --wait 600 --cpu -- dune build @cheap --ocannl_backend=cc" ] ||
@@ -3205,6 +3233,7 @@ if [ -z "$slot_detail" ]; then
   chmod +x "$slot_home/.claude/skills/issue-wave/scripts/fleet-worker.sh" "$slot_home/.codex/skills/issue-wave/scripts/fleet-worker.sh"
   : >"$TMP/slot-second.fw"
   HOME=$slot_home FAKE_FW_CALLS=$TMP/slot-second.fw FAKE_FW_MODE=hold FAKE_BACKEND_TEST=cc FAKE_BACKEND_ARRAYJIT=cc \
+  FAKE_REACH_CALLS=$TMP/slot-second.reach OCANNL_TOOL_SLOT_KIND=$slot_reach \
   OCANNL_TOOL_FLEET_WORKER= OCANNL_TOOL_READ_CONFIG=$slot_reader argv_probe slot-second run build @cheap
   grep -q -- "execution slot --wait 600 --cpu -- dune build @cheap" "$TMP/slot-second.fw" ||
     slot_detail="second candidate: its slot was not taken: $(cat "$TMP/slot-second.fw")"
@@ -3245,24 +3274,35 @@ elif [ "$slot_detail" != skipped ]; then
   report 1 "slot: the backend-bearing configurations are the ones the kind is read from" "$slot_detail"
 fi
 
-# Leg 58: the reader the kind comes from is the one test/config builds. The
-# legs above drive a fake, so a renamed executable or a dropped `--read=backend`
-# would pass them while every real batch fell back to --gpu -- slower, and
-# silent. Pinned against the stanza and the reader's own source instead.
+# Leg 58: the two readers the kind comes from are the ones test/config builds.
+# The legs above drive fakes, so a renamed executable, a dropped
+# `--read=backend`, or a reachability tool no longer asking Slot_kind would
+# pass them while every real batch fell back to --gpu -- slower, and silent.
+# Pinned against the stanzas and the readers' own sources instead.
 slot_detail=
-slot_target=$(sed -n 's|.*"\$dune" build \./\(test/config/[A-Za-z0-9_]*\)\.exe.*|\1|p' "$HERE/fleet-slot-run.sh")
-slot_run=$(sed -n 's|^ *reader=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
-if [ -z "$slot_target" ] || [ "$slot_target" != "$slot_run" ]; then
-  slot_detail="fleet-slot-run.sh builds '${slot_target:-?}' but runs '${slot_run:-?}'"
-elif ! grep -q "^ (name $(basename "$slot_target"))$" "$HERE/../test/config/dune"; then
-  slot_detail="test/config/dune has no executable named $(basename "$slot_target")"
-elif ! grep -q '| Some "backend" ->' "$HERE/../$slot_target.ml"; then
-  slot_detail="$slot_target.ml does not answer --read=backend"
-fi
-if [ -z "$slot_detail" ]; then
-  report 0 "slot: the backend reader fleet-slot-run.sh builds is test/config's, and it answers --read=backend"
+slot_built=$(sed -n 's|.*"\$dune" build \(\./test/config/[A-Za-z0-9_.]* \./test/config/[A-Za-z0-9_.]*\) .*|\1|p' "$HERE/fleet-slot-run.sh")
+slot_reader_exe=$(sed -n 's|^ *reader=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
+slot_reach_exe=$(sed -n 's|^ *reach=\$PWD/_build/default/\(test/config/[A-Za-z0-9_]*\)\.exe$|\1|p' "$HERE/fleet-slot-run.sh")
+if [ -z "$slot_reader_exe" ] || [ -z "$slot_reach_exe" ]; then
+  slot_detail="fleet-slot-run.sh names no reader (${slot_reader_exe:-?}) or reachability tool (${slot_reach_exe:-?})"
 else
-  report 1 "slot: the backend reader fleet-slot-run.sh builds is test/config's, and it answers --read=backend" "$slot_detail"
+  for exe in "$slot_reader_exe" "$slot_reach_exe"; do
+    case " $slot_built " in
+      *" ./$exe.exe "*) ;;
+      *) slot_detail="fleet-slot-run.sh runs $exe but builds only: ${slot_built:-nothing}"; break ;;
+    esac
+    grep -q "^ (name $(basename "$exe"))$" "$HERE/../test/config/dune" ||
+      { slot_detail="test/config/dune has no executable named $(basename "$exe")"; break; }
+  done
+fi
+[ -n "$slot_detail" ] || grep -q '| Some "backend" ->' "$HERE/../$slot_reader_exe.ml" ||
+  slot_detail="$slot_reader_exe.ml does not answer --read=backend"
+[ -n "$slot_detail" ] || grep -q 'Test_utils.Slot_kind.verdict' "$HERE/../$slot_reach_exe.ml" ||
+  slot_detail="$slot_reach_exe.ml does not ask Test_utils.Slot_kind"
+if [ -z "$slot_detail" ]; then
+  report 0 "slot: the readers fleet-slot-run.sh builds are test/config's, answering --read=backend and Slot_kind"
+else
+  report 1 "slot: the readers fleet-slot-run.sh builds are test/config's, answering --read=backend and Slot_kind" "$slot_detail"
 fi
 
 finish

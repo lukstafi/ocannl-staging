@@ -2271,8 +2271,16 @@ that they earn a lookup rather than always-loaded space.
   (gh-ocannl-1004), through `tools/fleet-slot-run.sh`, on any box whose deployed
   `fleet-worker.sh execution slot --probe` answers (lukstafi/ludics-lite's issue-wave skill; the
   probe also proves that version runs a nested slot inside an enclosing one, so a worker's own
-  `execution slot` wrapper around the runner costs one slot, not two). The kind is resolved, not
-  read off `OCANNL_BACKEND`, because an ordinary cc batch leaves it unset: `ocannl_read_config`
+  `execution slot` wrapper around the runner costs one slot, not two). The kind asks two
+  questions. First, can the run reach a stanza that NAMES a GPU backend (`; ocannl-backend: cuda`
+  and friends, which hold that backend whatever the configuration says): `ocannl_slot_kind`
+  (`test/config`, over `Test_utils.Slot_kind`, reading the markers `env_var_deps` enforces and
+  the aliases the argv reaches, their `deps` closure and dune's per-test `runtest-<name>`
+  included) answers, so `runtest test/operations` is a GPU batch while
+  `@test/operations/runtest-<cpu test>` and `@test/operations/scans` are not; a Metal marker
+  counts even on Linux, where its stanza compiles the stub. Second, for the stanzas that read the
+  configuration: the kind is resolved, not read off `OCANNL_BACKEND`, because an ordinary cc batch
+  leaves it unset: `ocannl_read_config`
   (`test/config`, the same Utils resolution a test run makes) is built and asked from each
   directory whose `ocannl_config` sets a backend — `test/config` (copied by every `test/*`
   directory and `bin/`) and `arrayjit/test` — and `--cpu` is declared only when every answer is
