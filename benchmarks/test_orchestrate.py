@@ -1387,7 +1387,7 @@ class FixtureDigestTest(unittest.TestCase):
         # The same identifiers key sweep log paths. A slash creates an unintended subdirectory;
         # backslash and colon are not portable to the Windows measurement boxes.
         fx = self.fixture("lenet.safetensors")
-        for origin in ("rog/nv", r"rog\nv", "rog:nv", ".hidden"):
+        for origin in ("rog/nv", r"rog\nv", "rog:nv", ".hidden", "nul"):
             digests = self.dir / f"{origin.encode().hex()}.txt"
             with self.subTest(origin=origin):
                 with self.assertRaises(ValueError):
@@ -1400,6 +1400,18 @@ class FixtureDigestTest(unittest.TestCase):
         # line every later read refuses -- and recording rewrites the whole file, so one such
         # recording breaks the checked-in record. Refused before the file is touched.
         fx = self.fixture("a b.safetensors", b"whatever bytes")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        with self.assertRaises(ValueError):
+            fixture_digest.record(digests, [fx], "rog-nv")
+
+        self.assertFalse(digests.exists(), "refused before the file is touched")
+
+    def test_a_fixture_name_gen_fixtures_would_refuse_is_refused(self):
+        # Recording existing bytes must not accept a name generation refuses: CON.safetensors is
+        # whitespace-free, but on the Windows measurement boxes it names the console device, not
+        # a file. Refused before the file is touched.
+        fx = self.fixture("CON.safetensors", b"whatever bytes")
         digests = self.dir / fixture_digest.DIGEST_FILE
 
         with self.assertRaises(ValueError):
@@ -1462,6 +1474,8 @@ class FixtureDigestTest(unittest.TestCase):
         for name in entries:
             self.assertTrue(name.endswith(".safetensors"), name)
             self.assertIn(name[: -len(".safetensors")], specs, name)
+            # Re-recording the checked-in fixtures must stay possible under the name rule.
+            fixture_digest.check_fixture_name(name)
 
     def test_the_checked_in_file_attributes_every_entry(self):
         # The whole point of gh-ocannl-759: no entry may be anonymous, because the published
@@ -2176,20 +2190,59 @@ class FixtureDigestTest(unittest.TestCase):
         self.assertEqual((self.dir / "fixtures" / fixture_digest.DIGEST_FILE).read_bytes(),
                          digests_before)
 
+    #: Every spelling that reaches outside a directory, or names no file in it, on either
+    #: platform.
+    NON_PORTABLE_NAMES = ("", ".", "..", "../x", "a/b", "/abs", "a\\b", "..\\x", "C:x", "a b",
+                          "-x", "a\x00b", "a,b", "CON", "nul", "Com1", "LPT9.x", "aux.tar", None)
+
+    def workload_names(self):
+        names = [json.loads(spec.read_text())["name"]
+                 for spec in (HERE / "workloads").glob("*.json")]
+        self.assertTrue(names, "no workload specs found next to the test")
+        return names
+
     def test_fixture_path_takes_portable_names_only(self):
         # The check build() itself makes before writing, so a direct build() caller is covered
-        # too: every spelling that reaches outside out_dir, or names no file in it, on either
-        # platform -- and the negative control, the names the workloads really use.
+        # too: every non-portable spelling -- and the negative control, the names the workloads
+        # really use, and a device name that is only a prefix.
         gen_fixtures = self.gen_fixtures_module()
         out = self.dir / "smoke"
-        for spec in (HERE / "workloads").glob("*.json"):
-            name = json.loads(spec.read_text())["name"]
+        for name in self.workload_names():
             self.assertEqual(gen_fixtures.fixture_path(out, name), out / f"{name}.safetensors")
         self.assertEqual(gen_fixtures.fixture_path(out, "CONSOLE"), out / "CONSOLE.safetensors")
-        for name in ("", ".", "..", "../x", "a/b", "/abs", "a\\b", "..\\x", "C:x", "a b",
-                     "-x", "a\x00b", "CON", "nul", "Com1", "LPT9.x", "aux.tar", None):
+        for name in self.NON_PORTABLE_NAMES:
             with self.subTest(name=name), self.assertRaises(ValueError):
                 gen_fixtures.fixture_path(out, name)
+
+    def test_generating_recording_and_origins_share_one_name_rule(self):
+        # A name gen_fixtures refuses to generate must not be recordable from bytes that already
+        # exist (`--record` of a hand-copied CON.safetensors), and an origin is held to the same
+        # rule because it keys file names too. So the three checks agree with the one predicate
+        # on every probe, accepted or refused -- derived from the predicate, not restated per check.
+        gen_fixtures = self.gen_fixtures_module()
+        out = self.dir / "smoke"
+
+        def accepts(check, arg):
+            try:
+                check(arg)
+            except ValueError:
+                return False
+            return True
+
+        probes = [*self.workload_names(), "CONSOLE", *self.NON_PORTABLE_NAMES]
+        for name in probes:
+            portable = fixture_digest.is_portable_name(name)
+            with self.subTest(name=name):
+                self.assertEqual(accepts(lambda n: gen_fixtures.fixture_path(out, n), name),
+                                 portable)
+                self.assertEqual(accepts(fixture_digest.check_origin, name), portable)
+                if isinstance(name, str):
+                    self.assertEqual(
+                        accepts(fixture_digest.check_fixture_name, f"{name}.safetensors"),
+                        portable,
+                    )
+        self.assertTrue(any(map(fixture_digest.is_portable_name, probes)), "no accepted probe")
+        self.assertFalse(all(map(fixture_digest.is_portable_name, probes)), "no refused probe")
 
     def test_generated_fixtures_are_named_after_their_spec(self):
         # What the recorded-name check above relies on: gen_fixtures.py writes

@@ -339,18 +339,46 @@ def cli_command():
         return str(here)
 
 
+#: Windows device names, reserved whatever extension follows them (`CON.safetensors` is CON).
+WINDOWS_DEVICES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"{dev}{i}" for dev in ("COM", "LPT") for i in range(1, 10))}
+)
+
+#: What `is_portable_name` accepts, in the words every refusal built on it uses.
+PORTABLE_NAME_RULE = (
+    "an ASCII letter or digit, then only ASCII letters, digits, dot, underscore or hyphen, "
+    "and no Windows device name (CON, NUL, COM1, ...) before the first dot"
+)
+
+
+def is_portable_name(name):
+    """The ONE portable-name rule, for every identifier this tooling puts into a file name.
+
+    Fixture names become `fixtures/<name>` and origins key cross-box sweep log filenames, on the
+    Unix and the Windows measurement hosts alike, and both are written unescaped into the
+    whitespace-split digest file. An allowlisted alphabet rather than a denylist of what a path
+    parser would mind: it excludes every separator, drive, `..` and whitespace at once, and the
+    comma that joins agreeing origins in reports. A Windows device stem is refused too, because
+    `CON.safetensors` names no file on Windows at all -- whatever extension follows it.
+    """
+    return (
+        isinstance(name, str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is not None
+        and name.split(".")[0].upper() not in WINDOWS_DEVICES
+    )
+
+
 def check_origin(origin):
-    """Origins are portable filename-safe identifiers.
+    """Origins are portable names (`is_portable_name`).
 
     Whitespace is structural in DIGESTS, commas join agreeing origins in reports, and the same IDs
     key cross-box sweep log filenames. Restricting the alphabet keeps one origin unambiguous in all
     three places and portable across the Windows and Unix measurement hosts.
     """
-    if not origin or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", origin) is None:
+    if not is_portable_name(origin):
         raise ValueError(
-            "origin must start with an ASCII letter or digit and contain only ASCII letters, "
-            "digits, dot, underscore, or hyphen; it is used in filenames and comma-joined report "
-            f"fields, got {origin!r}"
+            f"origin must be {PORTABLE_NAME_RULE}; it is used in filenames and comma-joined "
+            f"report fields, got {origin!r}"
         )
     return origin
 
@@ -372,19 +400,22 @@ def check_measurement_boxes(boxes):
 
 
 def check_fixture_name(name):
-    """Fixture names are single whitespace-free words, for the same reason origins are.
+    """Fixture file names are portable names (`is_portable_name`), as origins are.
 
-    `write_digests` emits them unescaped into the whitespace-split format, so a name containing
-    whitespace records fine and breaks every later read of the whole rewritten file. Checked
-    wherever a name is about to be committed to: recording (`one_path_per_name`) and generation
-    (`gen_fixtures.py`, BEFORE any fixture is built, since building overwrites the bytes the
-    published numbers rest on).
+    Checked on the whole file name (`lenet.safetensors`): the suffix adds only allowlisted
+    characters after the first dot, so this accepts exactly the file names whose stem
+    `gen_fixtures.fixture_path` accepts. `write_digests` emits them unescaped into the
+    whitespace-split format, so a name containing whitespace records fine and breaks every later
+    read of the whole rewritten file; and a name `gen_fixtures.py` would refuse to generate
+    (`CON.safetensors`, which names no file on Windows) must not be recordable from bytes that
+    already exist either. Checked wherever a name is about to be committed to: recording
+    (`one_path_per_name`) and generation (`gen_fixtures.fixture_path`, BEFORE any fixture is
+    built, since building overwrites the bytes the published numbers rest on).
     """
-    if not name or name.split() != [name]:
+    if not is_portable_name(name):
         raise ValueError(
-            f"{name!r} cannot be recorded: the digest file is whitespace-split, so this name "
-            "would write a line every later read refuses, breaking the whole rewritten file; "
-            "use a single whitespace-free word"
+            f"{name!r} cannot be recorded: a fixture file name must be {PORTABLE_NAME_RULE}; "
+            "the digest file is whitespace-split and the name is a file on every measuring host"
         )
     return name
 
@@ -575,8 +606,8 @@ def one_path_per_name(fixtures):
     happened, with the other box's bytes gone from the file. Repeating one path is not ambiguous,
     so it is kept.
 
-    Names must also survive the whitespace-split format they are written into: `write_digests`
-    emits them unescaped, so a name containing whitespace would produce a line every later
+    Names must also be portable (`check_fixture_name`): `write_digests` emits them unescaped into
+    the whitespace-split format, so a name containing whitespace would produce a line every later
     `read_digests` refuses -- and since recording rewrites the whole file, one such recording
     leaves the checked-in record unreadable. Refused here, before the file is touched (the
     origin-side twin of this check is `check_origin`).
