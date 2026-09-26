@@ -2249,10 +2249,13 @@ that they earn a lookup rather than always-loaded space.
   must agree with the fleet's `FLEET_BOX_CORRECTNESS_SLOTS` default in lukstafi/ludics-lite, and
   rog's `BOX_JOBS_NATIVE_CUDA_TOKENS` with its `FLEET_BOX_GPU_TOKENS`. On rog a CPU batch is
   capped too, at `BOX_JOBS_NATIVE_CPU_CAP` (`-j 8`, the only width cc ran at in those rungs;
-  gh-ocannl-1065): four uncapped cc batches would run 96 jobs on 24 cores. Elsewhere a CPU batch
-  is uncapped. An explicit `-j` still wins, and only says the cap exists, and an unset
+  gh-ocannl-1065): four uncapped cc batches would run 96 jobs on 24 cores. That cap is fleet
+  policy, not a device hazard, so it is keyed on the fleet's slot-lock directory for rog
+  (`$FLEET_SLOT_STATE/rog-nv-linux`, default under `~/.local/state/fleet-execution-slots`) beside
+  `/dev/nvidiactl`, never on the device alone: any other NVIDIA machine, and every other box, keeps
+  CPU batches uncapped. An explicit `-j` still wins, and only says the cap exists, and an unset
   `OCANNL_BACKEND` is reported with the width to pass rather than guessed, as for dxg — except
-  on a native NVIDIA boot, where cuda and the CPU backends share one width, so the unread backend
+  on the fleet's native rog, where cuda and the CPU backends share one width, so the unread backend
   cannot change it and it is injected. A batch there that holds no GPU must take its fleet slot
   as `fleet-worker.sh execution slot --cpu`: the slot is fail-closed, so an undeclared cc batch
   waits on one of the two GPU tokens and rog runs at two batches, not four; test-run.sh's
@@ -2260,8 +2263,8 @@ that they earn a lookup rather than always-loaded space.
   dune shared cache restored nothing on these boxes (a `dune clean` + `--force` batch ran ~396
   `ocamlopt` processes, per `_build/trace.csexp`, cache on or off), so such batches are
   compile-inclusive; and without `dune clean`, `--force` does not re-run the tests at all.
-  `tools/test-test-run.sh` fakes the topology (`OCANNL_TOOL_KFD_TOPOLOGY`) and the device
-  (`OCANNL_TOOL_NVIDIA_DEVICE`) as it fakes the bridge.
+  `tools/test-test-run.sh` fakes the topology (`OCANNL_TOOL_KFD_TOPOLOGY`), the device
+  (`OCANNL_TOOL_NVIDIA_DEVICE`) and the fleet's state (`FLEET_SLOT_STATE`) as it fakes the bridge.
 - **Runtime-refusal signature table.** These are the exception names `tools/sweep.sh`'s
   `ENVIRONMENT_REFUSALS` treats as the environment refusing a run rather than a test judging it;
   dune prints an uncaught binding error as `Fatal error: exception <name>:` with the status on

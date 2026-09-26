@@ -197,7 +197,7 @@ reject_misplaced_options() {
 # pass if the suite is in fact a GPU one. (The test directories' own configs
 # pin a CPU backend, so a GPU suite names OCANNL_BACKEND in practice.) The one
 # exception is a box where every backend it can run meets the same cap
-# (box_jobs_local_uniform_cap: a native NVIDIA boot), where the unread backend
+# (box_jobs_local_uniform_cap: the fleet's native rog-nv-linux), where the unread backend
 # cannot change the answer, so the cap is injected -- which is what reaches
 # the CPU batches there, whose backend is the config's.
 explicit_jobs() { # dune argv; 0 iff it names a width before dune's own `--`
@@ -222,7 +222,7 @@ hazard_name() { # <hazard>; a noun phrase for the host, and the issue behind its
     sdma) printf 'small-SDMA-pool host (gh-ocannl-1033)' ;;
     wide-sdma) printf 'native AMD GPU host (lukstafi/ludics-lite#344)' ;;
     nvidia) printf 'native NVIDIA host (gh-ocannl-1033)' ;;
-    nvidia-cpu) printf 'native NVIDIA host (gh-ocannl-1065)' ;;
+    nvidia-cpu) printf 'the fleet'"'"'s rog-nv-linux (gh-ocannl-1065)' ;;
   esac
 }
 hazard_found() { # <hazard> <backend>
@@ -238,9 +238,10 @@ hazard_found() { # <hazard> <backend>
       "$(box_jobs_sdma_pool)" "$(box_jobs_kfd_topology)" "$2" ;;
     nvidia) printf 'This is a native NVIDIA boot
   (%s) and OCANNL_BACKEND=%s holds its GPU' "$(box_jobs_nvidia_device)" "$2" ;;
-    nvidia-cpu) printf 'This is a native NVIDIA boot
-  (%s), and OCANNL_BACKEND=%s shares its correctness slots with the
-  batches that hold the GPU' "$(box_jobs_nvidia_device)" "$2" ;;
+    nvidia-cpu) printf 'This is the fleet'"'"'s rog-nv-linux, natively booted
+  (%s; its slot locks are %s), and OCANNL_BACKEND=%s shares its correctness
+  slots with the batches that hold the GPU' "$(box_jobs_nvidia_device)" \
+      "$(box_jobs_fleet_rog_dir)" "$2" ;;
   esac
 }
 hazard_why() { # <hazard>
@@ -306,8 +307,9 @@ plan_width_cap() { # dune argv
     cap=$(box_jobs_local_uniform_cap)
     if [ -n "$cap" ]; then
       width_cap=$cap
-      width_announce="capping dune at -j $cap. This is a native NVIDIA boot
-  ($(box_jobs_nvidia_device)), where cuda and the CPU backends alike run at -j $cap
+      width_announce="capping dune at -j $cap. This is the fleet's rog-nv-linux, natively
+  booted ($(box_jobs_nvidia_device); its slot locks are $(box_jobs_fleet_rog_dir)),
+  where cuda and the CPU backends alike run at -j $cap
   (tools/box-jobs.sh; gh-ocannl-1033, gh-ocannl-1065). OCANNL_BACKEND is unset
   here, so this run's backend comes from ocannl_config or the stanza and cannot
   be read from a launcher, but whichever it is, this is its width. A batch that

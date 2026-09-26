@@ -187,6 +187,22 @@ box_jobs_native_nvidia_host() { # 0 iff this is a native NVIDIA boot
   [ -e "$(box_jobs_nvidia_device)" ]
 }
 
+# Third, whether this is the fleet's rog-nv-linux: the directory that
+# lukstafi/ludics-lite's `fleet-worker.sh execution slot` keeps rog's slot
+# locks in, resolved as the fleet resolves it (FLEET_SLOT_STATE, a leading
+# literal `$HOME` expanded, defaulting to ~/.local/state/fleet-execution-slots)
+# and named by the fleet's canonical box name. It exists once a batch has taken
+# a slot there, so it is present exactly where the fleet's four slots run.
+box_jobs_fleet_rog_dir() {
+  local state=${FLEET_SLOT_STATE:-'$HOME/.local/state/fleet-execution-slots'}
+  case $state in '$HOME'/*) state="$HOME/${state#\$HOME/}" ;; esac
+  printf '%s/rog-nv-linux' "$state"
+}
+
+box_jobs_fleet_rog_host() { # 0 iff this is the fleet's rog-nv-linux, natively booted
+  box_jobs_native_nvidia_host && [ -d "$(box_jobs_fleet_rog_dir)" ]
+}
+
 # How many correctness batches the fleet runs at once on each native GPU box
 # (`execution slot` slots, lukstafi/ludics-lite's FLEET_BOX_CORRECTNESS_SLOTS,
 # and how many of them may hold the GPU, its FLEET_BOX_GPU_TOKENS), and the
@@ -244,6 +260,10 @@ BOX_JOBS_WIDE_SDMA_SLOT_CAP=$((BOX_JOBS_WIDE_SDMA_BUDGET / BOX_JOBS_WIDE_SDMA_SL
 # batches in it: #344 and the #391 witness only ever ran cc at `-j 8`, and
 # uncapped four cc batches would run 96 jobs on 24 cores. `-j 8` keeps the
 # four slots at the 32 jobs the two-and-two rungs ran, whatever the mix.
+# Unlike the GPU caps this is not a device hazard but the fleet's slot
+# policy, so it is keyed on the fleet's own record of rog's slots
+# (box_jobs_fleet_rog_host below), never on the NVIDIA device alone: an
+# unrelated NVIDIA workstation keeps its CPU batches at full width.
 # shellcheck disable=SC2034  # read by tools/test-run.sh, which sources this file
 BOX_JOBS_NATIVE_NVIDIA_SLOTS=4
 # shellcheck disable=SC2034  # read by tools/test-run.sh, which sources this file
@@ -255,13 +275,13 @@ BOX_JOBS_NATIVE_CPU_CAP=8
 # selected backend meets here -- `dxg` (the bridge), `sdma` (a small copy-engine
 # pool: minix's slots, hip only), `wide-sdma` (a larger one: tuf's slots, hip
 # only), `nvidia` (a native CUDA box's GPU tokens, cuda only) or `nvidia-cpu`
-# (the same box's slots, for a CPU backend). The bridge comes first: a WSL boot
+# (rog-nv-linux's slots, for a CPU backend, where the fleet runs them). The bridge comes first: a WSL boot
 # keeps its own cap whatever else it reports, and a CPU batch there none.
 # The backend is read from the ENVIRONMENT only -- see the caller
 # (tools/test-run.sh) for why a config file is not consulted.
 box_jobs_local_hazard() { # <backend>; prints dxg, sdma, wide-sdma, nvidia, nvidia-cpu, or nothing
   if box_jobs_cpu_backend "${1:-}"; then
-    box_jobs_dxg_host || ! box_jobs_native_nvidia_host || printf 'nvidia-cpu'
+    box_jobs_dxg_host || ! box_jobs_fleet_rog_host || printf 'nvidia-cpu'
     return 0
   fi
   box_jobs_gpu_backend "${1:-}" || return 0
@@ -298,14 +318,14 @@ box_jobs_local_cap() { # <backend>; prints the cap, or nothing
 
 # The width every backend this box can run meets, where they all meet the same
 # one -- so that a caller who cannot read the backend (OCANNL_BACKEND unset)
-# still gets it, because then it is not a guess. Only a native NVIDIA boot
-# qualifies: it runs cuda and the CPU backends, and rog-nv-linux caps both at
+# still gets it, because then it is not a guess. Only the fleet's native
+# rog-nv-linux qualifies: it runs cuda and the CPU backends and caps both at
 # -j 8 -- unless an AMD GPU beside it would give hip a width of its own.
 # Elsewhere a CPU batch is uncapped while a GPU one is not, so the width
 # depends on the backend and is only advised.
 box_jobs_local_uniform_cap() { # prints that cap, or nothing
   local gpu cpu
-  box_jobs_native_nvidia_host || return 0
+  box_jobs_fleet_rog_host || return 0
   [ -z "$(box_jobs_local_hazard hip)" ] || return 0
   gpu=$(box_jobs_local_cap cuda)
   cpu=$(box_jobs_local_cap cc)
