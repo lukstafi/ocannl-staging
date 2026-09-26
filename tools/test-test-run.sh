@@ -96,14 +96,21 @@
 #      device.
 #  48. hip on a small SDMA pool (minix's recorded topology) and on a larger one
 #      (tuf's) is capped at that box's per-slot width, announced and recorded;
-#      cuda on a native NVIDIA boot is capped at its own.
+#      cuda on a native NVIDIA boot is capped at its own, and so is a CPU
+#      backend on the fleet's rog-nv-linux (named by a faked FLEET_LOCAL_BOX,
+#      or by the hostname through FLEET_HOSTNAME_MAP; gh-ocannl-1065), with
+#      the `execution slot --cpu` note.
 #  49. negative controls: no KFD topology, a GPU node that reports no pool, a
-#      CPU backend on each native hazard, and each backend on the other one's
-#      hazard -- no cap, no word.
+#      CPU backend on each AMD hazard, on an NVIDIA box that is not the
+#      fleet's rog and on a WSL boot of rog, and each GPU backend on the other
+#      one's hazard -- no cap, no word.
 #  50. a width the caller named is honored on every native hazard, and a dxg
 #      boot that also reports a small pool keeps its dxg cap.
-#  51. with OCANNL_BACKEND unset on a native hazard, the run is not capped and
-#      the caller is told the backend's width.
+#  51. with OCANNL_BACKEND unset on a native AMD hazard, the run is not capped
+#      and the caller is told the backend's width; on the fleet's native rog,
+#      where every backend it runs meets one width, that width is injected
+#      (beside an AMD GPU only where hip's width is the same); on another
+#      NVIDIA box it is advised.
 #  52. the native widths derive from one place: each hip cap is its measured
 #      budget over its slot count, and the numbers are the measured ones.
 
@@ -2311,6 +2318,15 @@ kfd_cpu_node "$kfd_nopool/0"; kfd_node "$kfd_nopool/1" 80 0 6
 rm -rf "$kfd_absent"
 nv_present=$TMP/fake-nvidiactl
 nv_absent=$TMP/fake-nvidiactl-absent
+# The fleet's name for this box (lukstafi/ludics-lite's FLEET_LOCAL_BOX): rog,
+# or another fleet box -- an NVIDIA machine that is not the fleet's rog. Every
+# native probe pins one, so the harness never reads the name of the box it
+# runs on; an empty one leaves FLEET_LOCAL_BOX unset, for the hostname legs,
+# which pin FLEET_HOSTNAME_MAP (native_map) instead.
+fleet_rog=rog-nv-linux
+fleet_none=mac-studio
+native_fleet=$fleet_none
+native_map=
 : >"$nv_present"
 rm -f "$nv_absent"
 if [ ! -f "$kfd_small/1/properties" ] || [ -e "$kfd_absent" ] ||
@@ -2334,18 +2350,24 @@ native_probe() { # tag dxg kfd nvidia backend subcommand [argv...]
   local tag=$1 dxg=$2 kfd=$3 nv=$4 backend=$5
   shift 5
   export OCANNL_TOOL_DXG_DEVICE=$dxg OCANNL_TOOL_KFD_TOPOLOGY=$kfd OCANNL_TOOL_NVIDIA_DEVICE=$nv
+  if [ -n "$native_fleet" ]; then export FLEET_LOCAL_BOX=$native_fleet; else unset FLEET_LOCAL_BOX; fi
+  if [ -n "$native_map" ]; then export FLEET_HOSTNAME_MAP=$native_map; else unset FLEET_HOSTNAME_MAP; fi
   if [ -n "$backend" ]; then export OCANNL_BACKEND=$backend; else unset OCANNL_BACKEND; fi
   argv_probe "$tag" "$@"
-  unset OCANNL_TOOL_DXG_DEVICE OCANNL_TOOL_KFD_TOPOLOGY OCANNL_TOOL_NVIDIA_DEVICE OCANNL_BACKEND
+  unset OCANNL_TOOL_DXG_DEVICE OCANNL_TOOL_KFD_TOPOLOGY OCANNL_TOOL_NVIDIA_DEVICE OCANNL_BACKEND FLEET_LOCAL_BOX FLEET_HOSTNAME_MAP
 }
 
 # Leg 48: the injection on each native hazard, in the four places the dxg leg
 # pins it -- argv, the recorded command, stderr (with its source and the note)
-# and the run's log -- plus what the announcement says the hazard was.
+# and the run's log -- plus what the announcement says the hazard was. The
+# fleet's state records rog's slots here, which the CPU rows need.
 native_detail=
+native_fleet=$fleet_rog
 for probe in "sdma:$kfd_small:$nv_absent:hip:4:SDMA" \
              "wide-sdma:$kfd_large:$nv_absent:hip:8:AMD GPU reports 12 allocatable SDMA" \
-             "nvidia:$kfd_absent:$nv_present:cuda:8:native NVIDIA boot"; do
+"nvidia:$kfd_absent:$nv_present:cuda:8:native NVIDIA boot" \
+             "nvidia-cc:$kfd_absent:$nv_present:cc:8:rog-nv-linux, natively booted" \
+             "nvidia-multidev:$kfd_absent:$nv_present:multidev_cc:8:execution slot --cpu"; do
   IFS=: read -r tag kfd nv backend want what <<<"$probe"
   native_probe "native-$tag" "$dxg_absent" "$kfd" "$nv" "$backend" run build @cheap
   [ "$argv_rc" = 0 ] || { native_detail="$tag: exit $argv_rc"; break; }
@@ -2360,10 +2382,22 @@ for probe in "sdma:$kfd_small:$nv_absent:hip:4:SDMA" \
   { [ -n "$argv_dir" ] && grep -q -- "-j $want" "$argv_dir/cmd"; } ||
     { native_detail="$tag: the recorded command does not carry the cap: $(cat "$argv_dir/cmd" 2>/dev/null)"; break; }
 done
+# The hostname path of the fleet's identity rule: with FLEET_LOCAL_BOX unset, a
+# map whose glob matches any host names it rog, and one matching none does not.
+native_fleet=
+for probe in "*=rog-nv-linux:build -j 8 @cheap" "no-such-host-*=rog-nv-linux:build @cheap"; do
+  [ -z "$native_detail" ] || break
+  native_map=${probe%%:*}
+  native_probe native-hostname "$dxg_absent" "$kfd_absent" "$nv_present" cc run build @cheap
+  [ "$argv_rc" = 0 ] && [ "$argv_calls" = "${probe#*:}" ] ||
+    native_detail="hostname map '$native_map': exit $argv_rc; calls: ${argv_calls:-<none>} (want ${probe#*:})"
+done
+native_map=
+native_fleet=$fleet_none
 if [ -z "$native_detail" ]; then
-  report 0 "native: hip on a small or a larger SDMA pool and cuda on a native NVIDIA boot are capped, announced and recorded"
+  report 0 "native: hip on a small or a larger SDMA pool, and cuda and cc on a native NVIDIA boot, are capped, announced and recorded"
 else
-  report 1 "native: hip on a small or a larger SDMA pool and cuda on a native NVIDIA boot are capped, announced and recorded" "$native_detail"
+  report 1 "native: hip on a small or a larger SDMA pool, and cuda and cc on a native NVIDIA boot, are capped, announced and recorded" "$native_detail"
 fi
 
 # Leg 49: the negative controls. Each denies one half of a condition leg 48
@@ -2375,7 +2409,7 @@ for probe in "cpu-on-wide-sdma:$kfd_large:$nv_absent:cc" \
              "no-kfd:$kfd_absent:$nv_absent:hip" \
              "no-pool:$kfd_nopool:$nv_absent:hip" \
              "cpu-on-sdma:$kfd_small:$nv_absent:cc" \
-             "cpu-on-nvidia:$kfd_absent:$nv_present:multidev_cc" \
+             "cpu-on-unfleeted-nvidia:$kfd_absent:$nv_present:cc" \
              "cuda-on-sdma:$kfd_small:$nv_absent:cuda" \
              "hip-on-nvidia:$kfd_absent:$nv_present:hip" \
              "cuda-off-nvidia:$kfd_absent:$nv_absent:cuda"; do
@@ -2386,6 +2420,17 @@ for probe in "cpu-on-wide-sdma:$kfd_large:$nv_absent:cc" \
     native_detail="$tag: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: ${argv_err:-<none>}"; break
   fi
 done
+# A WSL boot of the fleet's rog: the bridge carries only the GPU, so a CPU
+# batch there is not the native slots' and meets no cap.
+if [ -z "$native_detail" ]; then
+  native_fleet=$fleet_rog
+  native_probe native-cpu-on-nvidia-dxg "$dxg_present" "$kfd_absent" "$nv_present" cc run build @cheap
+  native_fleet=$fleet_none
+  if [ "$argv_rc" != 0 ] || [ "$argv_calls" != "build @cheap" ] ||
+     grep -qi 'cap\|sdma\|nvidia\|dxg' <<<"$argv_err"; then
+    native_detail="cpu-on-nvidia-dxg: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: ${argv_err:-<none>}"
+  fi
+fi
 if [ -z "$native_detail" ]; then
   report 0 "native: no cap and no announcement off the measured hazards, or for the other backend"
 else
@@ -2398,9 +2443,12 @@ fi
 native_detail=
 for probe in "sdma:$kfd_small:$nv_absent:hip:small-SDMA-pool host" \
              "wide-sdma:$kfd_large:$nv_absent:hip:native AMD GPU host" \
-             "nvidia:$kfd_absent:$nv_present:cuda:native NVIDIA host"; do
+             "nvidia:$kfd_absent:$nv_present:cuda:native NVIDIA host" \
+             "nvidia-cpu:$kfd_absent:$nv_present:cc:rog-nv-linux"; do
   IFS=: read -r tag kfd nv backend what <<<"$probe"
+  native_fleet=$fleet_rog
   native_probe "native-explicit-$tag" "$dxg_absent" "$kfd" "$nv" "$backend" run build -j 16 @cheap
+  native_fleet=$fleet_none
   if [ "$argv_rc" != 0 ] || [ "$argv_calls" != "build -j 16 @cheap" ]; then
     native_detail="$tag: exit $argv_rc; calls: ${argv_calls:-<none>} (want build -j 16 @cheap)"; break
   fi
@@ -2422,13 +2470,17 @@ else
 fi
 
 # Leg 51: an unreadable backend on a native hazard is reported with the width
-# for the backend that meets it, never guessed and never capped; and a caller
-# who named a width is told nothing.
+# for the backend that meets it, never guessed and never capped; on the
+# fleet's native rog, where cuda and the CPU backends meet the same width, the
+# unread backend cannot change it, so it is injected (gh-ocannl-1065) -- but
+# not on an NVIDIA box that is not the fleet's rog, nor beside an AMD GPU,
+# whose hip would meet another; and a caller who named a width is told nothing.
 native_detail=
-for probe in "sdma:$kfd_small:$nv_absent:if it is hip, pass -j 4 yourself" \
-             "wide-sdma:$kfd_large:$nv_absent:if it is hip, pass -j 8 yourself" \
-             "nvidia:$kfd_absent:$nv_present:if it is cuda, pass -j 8 yourself"; do
-  IFS=: read -r tag kfd nv want <<<"$probe"
+for probe in "sdma:$kfd_small:$nv_absent:$fleet_none:if it is hip, pass -j 4 yourself" \
+             "wide-sdma:$kfd_large:$nv_absent:$fleet_none:if it is hip, pass -j 8 yourself" \
+             "nvidia:$kfd_absent:$nv_present:$fleet_none:if it is cuda, pass -j 8 yourself" \
+             "nvidia-beside-small-amd:$kfd_small:$nv_present:$fleet_rog:if it is cuda, pass -j 8 yourself"; do
+  IFS=: read -r tag kfd nv native_fleet want <<<"$probe"
   native_probe "native-unset-$tag" "$dxg_absent" "$kfd" "$nv" "" run build @cheap
   if [ "$argv_rc" != 0 ] || [ "$argv_calls" != "build @cheap" ]; then
     native_detail="$tag: exit $argv_rc; calls: ${argv_calls:-<none>}"; break
@@ -2443,6 +2495,32 @@ for probe in "sdma:$kfd_small:$nv_absent:if it is hip, pass -j 4 yourself" \
     native_detail="$tag with a width named: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: ${argv_err:-<none>}"; break
   fi
 done
+native_fleet=$fleet_rog
+# Beside an AMD GPU whose hip width is the same 8 (tuf's wider pool), every
+# backend still meets one width, so the cap is injected there too.
+if [ -z "$native_detail" ]; then
+  native_probe native-unset-nvidia-beside-wide-amd "$dxg_absent" "$kfd_large" "$nv_present" "" run build @cheap
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build -j 8 @cheap" ]; } ||
+    native_detail="nvidia beside a wide pool: exit $argv_rc; calls: ${argv_calls:-<none>} (want build -j 8 @cheap)"
+fi
+if [ -z "$native_detail" ]; then
+  native_probe native-unset-nvidia "$dxg_absent" "$kfd_absent" "$nv_present" "" run build @cheap
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build -j 8 @cheap" ]; } ||
+    native_detail="nvidia: exit $argv_rc; calls: ${argv_calls:-<none>} (want build -j 8 @cheap)"
+  [ -n "$native_detail" ] || case $argv_err in
+    *"capping dune at -j 8"*"OCANNL_BACKEND is unset"*"whichever it is"*"execution slot --cpu"*) ;;
+    *) native_detail="nvidia: the announcement is not the uniform one: ${argv_err:-<nothing>}" ;;
+  esac
+  { [ -n "$native_detail" ] || { [ -n "$argv_dir" ] && grep -q -- "-j 8" "$argv_dir/cmd"; }; } ||
+    native_detail="nvidia: the recorded command does not carry the cap: $(cat "$argv_dir/cmd" 2>/dev/null)"
+fi
+if [ -z "$native_detail" ]; then
+  native_probe native-unset-explicit-nvidia "$dxg_absent" "$kfd_absent" "$nv_present" "" run build -j 16 @cheap
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build -j 16 @cheap" ] &&
+    ! grep -qi 'cap\|sdma\|nvidia' <<<"$argv_err"; } ||
+    native_detail="nvidia with a width named: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: ${argv_err:-<none>}"
+fi
+native_fleet=$fleet_none
 if [ -z "$native_detail" ]; then
   native_probe native-unset-none "$dxg_absent" "$kfd_absent" "$nv_absent" "" run build @cheap
   { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ] &&
@@ -2450,25 +2528,26 @@ if [ -z "$native_detail" ]; then
     native_detail="no hazard: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: ${argv_err:-<none>}"
 fi
 if [ -z "$native_detail" ]; then
-  report 0 "native: an unreadable backend is reported with its width, never guessed, and never capped"
+  report 0 "native: an unreadable backend is reported with its width, never guessed, and capped only where every backend meets one width"
 else
-  report 1 "native: an unreadable backend is reported with its width, never guessed, and never capped" "$native_detail"
+  report 1 "native: an unreadable backend is reported with its width, never guessed, and capped only where every backend meets one width" "$native_detail"
 fi
 
 # Leg 52: one place for the numbers. A hip cap is not a literal of its own
 # but its measured budget over its box's slot count, so a change to either
 # moves it; and the values are the measured ones (lukstafi/ludics-lite#316,
-# #344), pinned here so an edit to box-jobs.sh has to say what it measured.
+# #344, #391), pinned here so an edit to box-jobs.sh has to say what it measured.
 native_consts=$(
   . "$JOBS_SRC"
-  printf '%s/%s/%s/%s/%s/%s/%s/%s/%s/%s' "$BOX_JOBS_SDMA_CAP" \
+  printf '%s/%s/%s/%s/%s/%s/%s/%s/%s/%s/%s/%s' "$BOX_JOBS_SDMA_CAP" \
     "$BOX_JOBS_SDMA_BUDGET" "$BOX_JOBS_SDMA_SLOTS" "$BOX_JOBS_SDMA_SLOT_CAP" \
     "$BOX_JOBS_WIDE_SDMA_BUDGET" "$BOX_JOBS_WIDE_SDMA_SLOTS" "$BOX_JOBS_WIDE_SDMA_SLOT_CAP" \
-    "$BOX_JOBS_NATIVE_CUDA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_CAP" "$BOX_JOBS_SDMA_MEASURED_POOL"
+    "$BOX_JOBS_NATIVE_NVIDIA_SLOTS" "$BOX_JOBS_NATIVE_CUDA_TOKENS" "$BOX_JOBS_NATIVE_CUDA_CAP" \
+    "$BOX_JOBS_NATIVE_CPU_CAP" "$BOX_JOBS_SDMA_MEASURED_POOL"
 )
 native_detail=
-[ "$native_consts" = "8/16/4/4/24/3/8/2/8/6" ] ||
-  native_detail="box-jobs.sh's native numbers are $native_consts (want 8/16/4/4/24/3/8/2/8/6)"
+[ "$native_consts" = "8/16/4/4/24/3/8/4/2/8/8/6" ] ||
+  native_detail="box-jobs.sh's native numbers are $native_consts (want 8/16/4/4/24/3/8/4/2/8/8/6)"
 [ -n "$native_detail" ] ||
   grep -q '^BOX_JOBS_SDMA_SLOT_CAP=\$((BOX_JOBS_SDMA_BUDGET / BOX_JOBS_SDMA_SLOTS))$' "$JOBS_SRC" ||
   native_detail="BOX_JOBS_SDMA_SLOT_CAP is not derived from the SDMA budget and the slot count"
