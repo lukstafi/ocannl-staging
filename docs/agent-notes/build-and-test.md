@@ -2276,8 +2276,11 @@ that they earn a lookup rather than always-loaded space.
   (`test/config`, the same Utils resolution a test run makes) is built and asked from each
   directory whose `ocannl_config` sets a backend — `test/config` (copied by every `test/*`
   directory and `bin/`) and `arrayjit/test` — and `--cpu` is declared only when every answer is
-  a CPU backend or none. Anything else, including a build or read that fails, is `--gpu`, the
-  slot's own fail-closed default. `tools/test-test-run.sh` leg 57 fails a new tracked
+  a CPU backend. No backend at all is not cc (`Context.auto` then tries metal, cuda and hip
+  first), and a dune argv can pick one the configs do not show (`exec`, whose program may choose
+  its own; a command-line `--ocannl_backend`, which outranks the files), so those are `--gpu`,
+  as is anything else — a build or read that fails included — the slot's own fail-closed
+  default. `tools/test-test-run.sh` leg 57 fails a new tracked
   `ocannl_config` naming a backend outside those directories. The slot's wait (600 s,
   `OCANNL_TOOL_SLOT_WAIT`, never past `--cap`) comes out of the cap; a refused or unreachable slot
   is the verdict `SLOT REFUSED`, exit 75, never a test verdict. `repeat` takes no slot (wrap it

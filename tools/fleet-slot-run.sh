@@ -25,9 +25,13 @@
 # same Utils resolution: config file, environment, command line), from each
 # directory whose `ocannl_config` a test can read -- test/config (copied by
 # every test/* directory and by bin/) and arrayjit/test (its own). `--cpu` is
-# declared only when every answer names a CPU backend, or none (the default,
-# cc). A GPU backend, an unrecognized name, a build or read that fails: `--gpu`,
-# the slot's own default. A misreading therefore costs only a wait for a GPU
+# declared only when every answer names a CPU backend. No backend at all is
+# NOT cc: `Context.auto` then tries metal, cuda and hip first. A GPU backend,
+# an unrecognized or empty name, a build or read that fails: `--gpu`, the
+# slot's own default. So is a dune argv that can pick a backend the configs do
+# not show: `exec`, whose program may choose its own, or a command-line
+# `--ocannl_backend` naming anything but a CPU backend (the command line
+# outranks the files). A misreading therefore costs only a wait for a GPU
 # token, never a GPU batch outside the tokens.
 
 set -u
@@ -42,6 +46,27 @@ shift 3
 # The directories whose `ocannl_config` a test run can read, relative to the
 # repository root: the shared test configuration, and arrayjit's own.
 SLOT_CONFIG_DIRS="test/config arrayjit/test"
+
+# 0 iff the dune argv can select a backend the configurations do not show;
+# says which on stderr.
+argv_picks_backend() { # dune argv
+  local a v
+  if [ "${1:-}" = exec ]; then
+    echo "test-run: fleet slot: dune exec runs a program that may pick its own backend: --gpu" >&2
+    return 0
+  fi
+  for a; do
+    case $a in
+      --ocannl[_-]backend=*) v=${a#*=} ;;
+      *ocannl[_-]backend*) v= ;;
+      *) continue ;;
+    esac
+    box_jobs_cpu_backend "$v" && continue
+    echo "test-run: fleet slot: the command line names a backend (${a}): --gpu" >&2
+    return 0
+  done
+  return 1
+}
 
 # Prints `cpu` or `gpu`, and on stderr what it was decided from.
 resolve_kind() {
@@ -62,16 +87,18 @@ resolve_kind() {
       echo gpu
       return 0
     fi
-    case $b in
-      '') b='(default cc)' ;;
-      *) box_jobs_cpu_backend "$b" ||
-           { echo "test-run: fleet slot: $d resolves backend=$b: --gpu" >&2; echo gpu; return 0; } ;;
-    esac
+    box_jobs_cpu_backend "$b" ||
+      { echo "test-run: fleet slot: $d resolves backend=${b:-<none>, so Context.auto tries GPUs first}: --gpu" >&2
+        echo gpu; return 0; }
     seen="${seen:+$seen, }$d: $b"
   done
   echo "test-run: fleet slot: every test configuration resolves a CPU backend ($seen): --cpu" >&2
   echo cpu
 }
 
-kind=$(resolve_kind)
+if argv_picks_backend "$@"; then
+  kind=gpu
+else
+  kind=$(resolve_kind)
+fi
 exec "$fw" execution slot --wait "$wait" "--$kind" -- "$dune" "$@"

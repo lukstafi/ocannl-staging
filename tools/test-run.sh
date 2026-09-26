@@ -367,31 +367,31 @@ plan_width_cap() { # dune argv
 slot_fw=          # the fleet-worker.sh to take the slot through, empty for none
 slot_wait=
 slot_announce=
-fleet_worker_path() { # prints the fleet-worker.sh to use, or nothing
-  local c
+fleet_worker_candidates() { # prints the fleet-worker.sh candidates, one per line
   case ${OCANNL_TOOL_FLEET_WORKER-} in
-    none) return 0 ;;
+    none) ;;
     '')
-      for c in "$HOME/.claude/skills/issue-wave/scripts/fleet-worker.sh" \
-               "$HOME/.codex/skills/issue-wave/scripts/fleet-worker.sh"; do
-        [ -x "$c" ] && { printf '%s' "$c"; return 0; }
-      done
+      printf '%s\n' "$HOME/.claude/skills/issue-wave/scripts/fleet-worker.sh" \
+        "$HOME/.codex/skills/issue-wave/scripts/fleet-worker.sh"
       ;;
-    *) printf '%s' "$OCANNL_TOOL_FLEET_WORKER" ;;
+    *) printf '%s\n' "$OCANNL_TOOL_FLEET_WORKER" ;;
   esac
-  return 0
 }
 plan_slot() {
-  local fw probe tag box slots tokens
+  local fw probe tag box= slots tokens
   slot_fw= slot_wait= slot_announce=
-  fw=$(fleet_worker_path)
-  [ -n "$fw" ] || return 0
-  # One line, `EXECUTION SLOT PROBE <box> <slots> <tokens>`: no lock, no
-  # registry read, so it costs nothing on a box outside the fleet.
-  probe=$("$fw" execution slot --probe 2>/dev/null) || return 0
-  read -r tag _ _ box slots tokens _ <<<"$probe"
-  [ "$tag" = EXECUTION ] && [ -n "$tokens" ] || return 0
-  slot_fw=$fw
+  # Each candidate in turn until one answers the probe: the two skill trees
+  # are deployed independently, and one of them may predate the probe while
+  # the other has it. The answer is one line, `EXECUTION SLOT PROBE <box>
+  # <slots> <tokens>`: no lock, no registry read, so it costs nothing on a box
+  # outside the fleet.
+  while IFS= read -r fw; do
+    [ -x "$fw" ] || continue
+    probe=$("$fw" execution slot --probe 2>/dev/null) || continue
+    read -r tag _ _ box slots tokens _ <<<"$probe"
+    [ "$tag" = EXECUTION ] && [ -n "$tokens" ] && { slot_fw=$fw; break; }
+  done < <(fleet_worker_candidates)
+  [ -n "$slot_fw" ] || return 0
   slot_wait=${OCANNL_TOOL_SLOT_WAIT:-600}
   case $slot_wait in '' | *[!0-9]*) slot_wait=600 ;; esac
   [ "$cap" -eq 0 ] || [ "$slot_wait" -le "$cap" ] || slot_wait=$cap
@@ -1889,15 +1889,16 @@ case $sub in
     # closed terminal, harness cancellation, a plain kill -- can lose the
     # verdict; `run` differs from `start` only in staying attached to wait
     # and digest.
+    # What the supervisor runs, in an array of its own: "$@" stays the
+    # caller's dune argv, which `start` prints back.
+    sup_cmd=("$DUNE" "$@")
     if [ -n "$slot_fw" ]; then
       printf 'test-run: %s\n' "$slot_announce" >>"$run_dir/log"
       printf '%s\n' "$slot_fw" >"$run_dir/slot" 2>/dev/null || :
-      set -- /bin/bash tools/fleet-slot-run.sh "$slot_fw" "$slot_wait" "$DUNE" "$@"
-    else
-      set -- "$DUNE" "$@"
+      sup_cmd=(/bin/bash tools/fleet-slot-run.sh "$slot_fw" "$slot_wait" "$DUNE" "$@")
     fi
     OCANNL_TOOL_TESTRUN_BG=1 OCANNL_TOOL_TESTRUN_RD=$run_dir OCANNL_TOOL_TESTRUN_OWN=$run_dir \
-      perl -e "$supervisor_perl" -- "$cap" "$@" </dev/null >>"$run_dir/log" 2>&1 &
+      perl -e "$supervisor_perl" -- "$cap" "${sup_cmd[@]}" </dev/null >>"$run_dir/log" 2>&1 &
     sup=$!
     # The launcher's own fd 9 copy served its purpose the moment the
     # supervisor inherited the lock's description: close it, so an attached

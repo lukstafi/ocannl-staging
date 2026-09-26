@@ -117,10 +117,12 @@
 #      (gh-ocannl-1004), against a fake fleet-worker.sh and a fake
 #      ocannl_read_config.
 #  53. the kind: --cpu only when every test configuration resolves a CPU
-#      backend; a GPU, unknown or unreadable one is --gpu; the cap bounds the wait.
+#      backend; a GPU, empty, unknown or unreadable one, `exec`, or a command-line
+#      GPU backend is --gpu; the cap bounds the wait.
 #  54. a refused or unreachable slot is SLOT REFUSED, exit 75, and dune never runs.
-#  55. a red suite under a held slot is still FAIL.
-#  56. no probe, OCANNL_TOOL_FLEET_WORKER=none, and repeat all run dune directly.
+#  55. a red suite under a held slot is still FAIL; `start` prints the caller's argv.
+#  56. no probe, OCANNL_TOOL_FLEET_WORKER=none, and repeat all run dune directly;
+#      a stale first skill tree does not hide a second that answers the probe.
 #  57. every tracked ocannl_config naming a backend is one the kind is read from.
 #  58. the reader fleet-slot-run.sh builds is test/config's, and answers --read=backend.
 
@@ -3097,12 +3099,13 @@ slot_probe() { # tag mode test-backend arrayjit-backend subcommand [argv...]
 slot_calls=
 
 # Leg 53: the kind. --cpu only when every test configuration resolves a CPU
-# backend (an unset one is the default, cc); a GPU backend anywhere, or an
-# unreadable one, is --gpu -- the slot's fail-closed default. The fake's
+# backend; a GPU backend anywhere, none (Context.auto tries GPUs first), or an
+# unreadable one is --gpu -- the slot's fail-closed default -- and so is a dune
+# argv that can pick a backend the configurations do not show. The fake's
 # recorded call is the argv the runner handed the real slot, so it pins the
 # wait (the cap bounds it) and that dune's own argv passes through intact.
 slot_detail=
-for probe in "cpu:cc:sync_cc:--cpu" "cpu-default:unset:cc:--cpu" "multidev:multidev_cc:cc:--cpu" \
+for probe in "cpu:cc:sync_cc:--cpu" "unset:unset:cc:--gpu" "multidev:multidev_cc:cc:--cpu" \
              "gpu-test:cuda:cc:--gpu" "gpu-arrayjit:cc:hip:--gpu" "unknown:cc:metal:--gpu" \
              "unreadable:cc:fail:--gpu"; do
   IFS=: read -r tag bt ba want <<<"$probe"
@@ -3117,6 +3120,20 @@ for probe in "cpu:cc:sync_cc:--cpu" "cpu-default:unset:cc:--cpu" "multidev:multi
       grep -q "^EXECUTION SLOT fakebox: slot 1 of 4" "$argv_dir/log"; } ||
     { slot_detail="$tag: the log does not record the decision and the slot: $(cat "$argv_dir/log" 2>/dev/null)"; break; }
 done
+for probe in "exec:exec ./prog.exe" "flag-gpu:exec ./prog.exe -- --ocannl_backend=cuda" \
+             "flag-build:build @cheap --ocannl-backend=hip"; do
+  [ -z "$slot_detail" ] || break
+  IFS=: read -r tag argv <<<"$probe"
+  # shellcheck disable=SC2086  # the argv is word-split on purpose
+  slot_probe "slot-argv-$tag" hold cc cc run $argv
+  [ "$slot_calls" = "execution slot --wait 600 --gpu -- dune $argv" ] ||
+    slot_detail="argv $tag: slot call: ${slot_calls:-<none>} (want --gpu)"
+done
+if [ -z "$slot_detail" ]; then
+  slot_probe slot-argv-cpu-flag hold cc cc run build @cheap --ocannl_backend=cc
+  [ "$slot_calls" = "execution slot --wait 600 --cpu -- dune build @cheap --ocannl_backend=cc" ] ||
+    slot_detail="a command-line CPU backend: slot call: ${slot_calls:-<none>} (want --cpu)"
+fi
 if [ -z "$slot_detail" ]; then
   slot_probe slot-capped hold cc cc run --cap 90 build @cheap
   [ "$slot_calls" = "execution slot --wait 90 --cpu -- dune build @cheap" ] ||
@@ -3146,6 +3163,15 @@ else
   report 1 "slot: a refused or unreachable slot reports SLOT REFUSED (exit 75), and dune never runs" "$slot_detail"
 fi
 
+# Leg 55a: `start` prints the caller's dune command, not the supervisor's.
+slot_probe slot-start hold cc cc start build @cheap
+case $argv_out in
+  *"fleet-slot-run.sh"*) report 1 "slot: start prints the caller's command" "$argv_out" ;;
+  *"command: dune build @cheap"*) report 0 "slot: start prints the caller's command" ;;
+  *) report 1 "slot: start prints the caller's command" "${argv_out:-<nothing>}" ;;
+esac
+OCANNL_TOOL_TEST_RUNS=$TMP/argv-runs-slot-start "$repeat_root/tools/test-run.sh" wait last >/dev/null 2>&1
+
 # Leg 55: a red suite under a slot is still FAIL -- the slot's admission line
 # is what tells the two apart, not the status.
 argv_mode=red slot_probe slot-red hold cc cc run build @cheap
@@ -3168,6 +3194,20 @@ if [ -z "$slot_detail" ]; then
   FAKE_FW_CALLS=$TMP/slot-off.fw OCANNL_TOOL_FLEET_WORKER=none argv_probe slot-off run build @cheap
   { [ "$argv_rc" = 0 ] && [ ! -s "$TMP/slot-off.fw" ]; } ||
     slot_detail="none: exit $argv_rc; fleet-worker called: $(cat "$TMP/slot-off.fw")"
+fi
+# Two skill trees, the first without the probe: the second one answers, and
+# its slot is taken -- a stale first candidate must not turn the slot off.
+if [ -z "$slot_detail" ]; then
+  slot_home=$TMP/slot-home
+  mkdir -p "$slot_home/.claude/skills/issue-wave/scripts" "$slot_home/.codex/skills/issue-wave/scripts"
+  printf '#!/usr/bin/env bash\necho "usage" >&2; exit 2\n' >"$slot_home/.claude/skills/issue-wave/scripts/fleet-worker.sh"
+  cp "$slot_fake" "$slot_home/.codex/skills/issue-wave/scripts/fleet-worker.sh"
+  chmod +x "$slot_home/.claude/skills/issue-wave/scripts/fleet-worker.sh" "$slot_home/.codex/skills/issue-wave/scripts/fleet-worker.sh"
+  : >"$TMP/slot-second.fw"
+  HOME=$slot_home FAKE_FW_CALLS=$TMP/slot-second.fw FAKE_FW_MODE=hold FAKE_BACKEND_TEST=cc FAKE_BACKEND_ARRAYJIT=cc \
+  OCANNL_TOOL_FLEET_WORKER= OCANNL_TOOL_READ_CONFIG=$slot_reader argv_probe slot-second run build @cheap
+  grep -q -- "execution slot --wait 600 --cpu -- dune build @cheap" "$TMP/slot-second.fw" ||
+    slot_detail="second candidate: its slot was not taken: $(cat "$TMP/slot-second.fw")"
 fi
 if [ -z "$slot_detail" ]; then
   slot_probe slot-repeat hold cc cc repeat 2 build @cheap
