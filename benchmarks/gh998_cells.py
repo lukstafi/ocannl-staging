@@ -7,6 +7,8 @@ dry --out DIR --backends metal,cc: arms-on/off self-test twice per backend (disc
 The self-test uses the same compilation, execution and emission path with a short protocol.
 run --out DIR --backends metal,cc: four reverse-paired rounds of all, none and each family off.
 summarize --out DIR: print the per-workload envelopes against arms-on and the Torch oracle.
+bisect --out DIR --backends cuda --workloads gpt2_mini_train --rounds 1:
+    correctness only, all/none plus each family alone and each family disabled; discard timings.
 --workloads selects a comma-separated subset (use the same selection for prepare/dry/run).
 --rounds selects the repeat count for run (default 4, even); summarize reads the recorded matrix.
 Each pair contributes the geometric mean of its two off/on p50 ratios; the table
@@ -17,7 +19,8 @@ The preflight records the host and CPU; cc measurements on different CPUs are se
 Each cell uses the suite's unchanged f32 protocol, untuned default schedule and fixed compiler
 math settings. A family's removal may expose another simplifier arm or be undone by backend
 compilation; ratios measure its marginal end-to-end effect under those settings, not a strict
-IEEE promise. A null/non-finite loss or incomplete trajectory refuses an envelope. Full stdout,
+IEEE promise. Non-finite losses are recorded as failed parity with no finite envelope;
+an empty or incomplete trajectory still refuses the cell. Full stdout,
 stderr, flags and emitted sources are retained per cell. No builds/searches/setup run in `run`.
 """
 import argparse
@@ -42,6 +45,7 @@ FAMILIES = ['contract', 'constants', 'sub', 'mul_div', 'pow', 'identities']
 WORKLOADS = ['lenet', 'gpt2_mini', 'gpt2_mini_train']
 TREATMENTS = {'all': 'all', 'all-control': 'all', 'none': 'none', **{
     'no-' + arm: ','.join(a for a in FAMILIES if a != arm) for arm in FAMILIES}}
+SELECTORS = {**TREATMENTS, **{'only-' + arm: arm for arm in FAMILIES}}
 
 
 CELL_TIMEOUT_S = 1800
@@ -151,8 +155,8 @@ def cell(out, name, argv, env):
     return row
 
 
-def ocannl(out, backend, workload, treatment, repeat, dry=False):
-    name = f'{"dry-" if dry else ""}{backend}-{workload}-{treatment}-{repeat}'
+def ocannl(out, backend, workload, treatment, repeat, dry=False, cell_prefix=''):
+    name = f'{"dry-" if dry else cell_prefix}{backend}-{workload}-{treatment}-{repeat}'
     env = clean_env()
     env.update(BENCH_TUNE='0', BENCH_MATERIALIZE='0', BENCH_DOMINANT_KERNEL='0')
     if not dry:
@@ -170,7 +174,7 @@ def ocannl(out, backend, workload, treatment, repeat, dry=False):
             '--ocannl_output_debug_files_in_build_directory=true',
             '--ocannl_clean_up_build_files_on_startup=false',
             f'--ocannl_build_files_prefix={prefix}',
-            f'--ocannl_simplify_fp_algebra={TREATMENTS[treatment]}']
+            f'--ocannl_simplify_fp_algebra={SELECTORS[treatment]}']
     if dry:
         argv[0] = str(ROOT / '_build/default/benchmarks/runners/ocannl/bench_mlp.exe')
         argv.append('--self-test')
@@ -180,17 +184,21 @@ def ocannl(out, backend, workload, treatment, repeat, dry=False):
         if artifacts.exists():
             shutil.move(str(artifacts), str(out / name / 'artifacts'))
     (out / name / 'sources.json').write_text(json.dumps(source_manifest(out / name), indent=2) + '\n')
-    verify_control(out, backend, workload, repeat, dry=dry)
+    verify_control(out, backend, workload, repeat, dry=dry, cell_prefix=cell_prefix)
     expected_workload = 'selftest-tiny' if dry else workload
     if row['backend'] != backend or row['workload'] != expected_workload or row['searched']:
         raise RuntimeError(f'{name}: wrong backend/workload or a searching process')
-    if row.get('simplify_fp_algebra') != dict(value=TREATMENTS[treatment], source='commandline'):
+    if row.get('simplify_fp_algebra') != dict(value=SELECTORS[treatment], source='commandline'):
         raise RuntimeError(f'{name}: result does not confirm the selected float algebra')
     if dry:
         envelope(row['losses'], row['losses'])
     else:
         oracle = result(out / f'torch-{workload}' / 'stdout')['losses']
-        envelope(row['losses'], oracle)
+        report = parity_report(row['losses'], oracle)
+        (out / name / 'parity.json').write_text(json.dumps(report, indent=2) + '\n')
+        if report['status'] != 'finite':
+            print(f'{name}: parity FAILED (non-finite indices {report["nonfinite_got"]}); '
+                  'trajectory retained, no finite envelope', flush=True)
     return row
 
 
@@ -204,8 +212,8 @@ def source_manifest(base):
     return sources
 
 
-def verify_control(out, backend, workload, repeat, dry=False):
-    stem = ('dry-' if dry else '') + f'{backend}-{workload}-'
+def verify_control(out, backend, workload, repeat, dry=False, cell_prefix=''):
+    stem = ('dry-' if dry else cell_prefix) + f'{backend}-{workload}-'
     paths = [out / f'{stem}{t}-{repeat}' / 'sources.json' for t in ['all', 'all-control']]
     if all(p.exists() for p in paths):
         if json.loads(paths[0].read_text()) != json.loads(paths[1].read_text()):
@@ -220,6 +228,49 @@ def envelope(got, ref):
     return (max(abs(a-b) for a, b in zip(got, ref)),
             max(abs(a-b)/max(abs(b), 1e-12) for a, b in zip(got, ref)),
             sum(a != b for a, b in zip(got, ref)))
+
+
+def parity_report(got, ref):
+    if len(got) != len(ref) or not got:
+        raise RuntimeError('empty or incomplete parity trajectory')
+    def nonfinite(xs):
+        return [i for i, v in enumerate(xs)
+                if not isinstance(v, (float, int)) or not math.isfinite(v)]
+    bad_got, bad_ref = nonfinite(got), nonfinite(ref)
+    if bad_got or bad_ref:
+        return dict(status='non-finite', nonfinite_got=bad_got, nonfinite_ref=bad_ref,
+                    max_abs=None, max_rel=None, changed=None)
+    absolute, relative, changed = envelope(got, ref)
+    return dict(status='finite', nonfinite_got=[], nonfinite_ref=[],
+                max_abs=absolute, max_rel=relative, changed=changed)
+
+
+def format_parity(reports):
+    failures = [(i, r['nonfinite_got'], r['nonfinite_ref'])
+                for i, r in enumerate(reports) if r['status'] != 'finite']
+    if failures:
+        return f'FAILED non-finite (round, got/ref indices: {failures}); no finite envelope'
+    return f'{max(r["max_abs"] for r in reports):.3g} / {max(r["max_rel"] for r in reports):.3g}'
+
+
+def bisect(out, backends, workloads):
+    # Use the unchanged fixture protocol to reproduce the failure. Native timing fields
+    # remain in raw results for provenance but this correctness phase never summarizes them.
+    if backends != ['cuda'] or workloads != ['gpt2_mini_train']:
+        raise RuntimeError('bisect requires cuda and gpt2_mini_train')
+    if (out / 'bisect.json').exists():
+        raise RuntimeError('bisect evidence already exists')
+    rows = {}
+    oracle = result(out / 'torch-gpt2_mini_train' / 'stdout')['losses']
+    for treatment in SELECTORS:
+        row = ocannl(out, 'cuda', 'gpt2_mini_train', treatment, 0, cell_prefix='bisect-')
+        rows[treatment] = dict(selector=SELECTORS[treatment], losses=row['losses'],
+                               vs_on=parity_report(row['losses'], rows['all']['losses']
+                                                   if treatment != 'all' else row['losses']),
+                               vs_torch=parity_report(row['losses'], oracle))
+        # Checkpoint each completed cell; a later infrastructure failure preserves the bisect.
+        (out / 'bisect.json').write_text(json.dumps(rows, indent=2) + '\n')
+    print(json.dumps(rows, indent=2), flush=True)
 
 
 def summarize(out):
@@ -260,24 +311,27 @@ def summarize(out):
                     on = json.loads((out / f'{backend}-{workload}-all-{repeat}' / 'result.json').read_text())
                     sources_equal &= source_manifest(out / f'{backend}-{workload}-{treatment}-{repeat}') == source_manifest(out / f'{backend}-{workload}-all-{repeat}')
                     ratios.append(row['step_ms']['p50'] / on['step_ms']['p50'])
-                    vs_on.append(envelope(row['losses'], on['losses']))
-                    vs_torch.append(envelope(row['losses'], oracle))
+                    vs_on.append(parity_report(row['losses'], on['losses']))
+                    vs_torch.append(parity_report(row['losses'], oracle))
                 paired = [math.sqrt(a * b) for a, b in zip(ratios[::2], ratios[1::2])]
+                changed = (max(v['changed'] for v in vs_on)
+                           if all(v['status'] == 'finite' for v in vs_on) else 'non-finite')
                 print(f'| {backend} | {workload} | {treatment} | {sources_equal} | {statistics.median(paired):.4f} ({min(paired):.4f}–{max(paired):.4f}) | '
-                      f'{max(v[0] for v in vs_on):.3g} / {max(v[1] for v in vs_on):.3g} | '
-                      f'{max(v[2] for v in vs_on)} | {max(v[0] for v in vs_torch):.3g} / {max(v[1] for v in vs_torch):.3g} |')
+                      f'{format_parity(vs_on)} | {changed} | {format_parity(vs_torch)} |')
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('phase', choices=['prepare', 'dry', 'run', 'summarize'])
+    ap.add_argument('phase', choices=['prepare', 'dry', 'run', 'summarize', 'bisect'])
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--backends', default='metal,cc')
     ap.add_argument('--workloads', default=','.join(WORKLOADS))
     ap.add_argument('--rounds', type=int, default=4)
     ap.add_argument('--deadline-seconds', type=int, default=7200)
     args = ap.parse_args()
-    if args.rounds < 2 or args.rounds % 2:
+    if args.phase == 'bisect' and args.rounds != 1:
+        ap.error('correctness bisect requires exactly one round; timings are discarded')
+    if args.phase != 'bisect' and (args.rounds < 2 or args.rounds % 2):
         ap.error('rounds must be even and at least 2')
     if args.deadline_seconds <= 0:
         ap.error('deadline must be positive')
@@ -315,6 +369,11 @@ def main():
                 for repeat in range(2):
                     ocannl(out, backend, 'selftest', treatment, repeat, dry=True)
         (out / 'dry-ok.json').write_text(json.dumps(backends) + '\n')
+        return
+    if args.phase == 'bisect':
+        if not set(backends) <= set(json.loads((out / 'dry-ok.json').read_text())):
+            raise RuntimeError('backend has not passed dry run')
+        bisect(out, backends, workloads)
         return
     if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT, text=True).strip():
         raise RuntimeError('timing requires a clean tree')
